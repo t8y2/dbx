@@ -8,9 +8,10 @@ import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import type { QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { clearDataGridStructuredFilterStates } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridSortBuilderMemoryCache } from "@/composables/useDataGridSortBuilder";
 
 const backendMocks = vi.hoisted(() => ({
-  buildTableSelectSql: vi.fn(async ({ tableName, whereInput }: { tableName: string; whereInput?: string }) => `SELECT * FROM ${tableName}${whereInput ? ` WHERE ${whereInput}` : ""}`),
+  buildTableSelectSql: vi.fn(async ({ tableName, whereInput, orderBy }: { tableName: string; whereInput?: string; orderBy?: string }) => `SELECT * FROM ${tableName}${whereInput ? ` WHERE ${whereInput}` : ""}${orderBy ? ` ORDER BY ${orderBy}` : ""}`),
   loadEditorSettings: vi.fn().mockResolvedValue({}),
   saveEditorSettings: vi.fn().mockResolvedValue(undefined),
   buildDataGridContextFilterCondition: vi.fn(async ({ columnName, value }: { columnName: string; value: unknown }) => `\`${columnName}\` = ${String(value)}`),
@@ -99,7 +100,40 @@ function applyButton(host: HTMLElement, view: DataGridFilterEditorView): HTMLBut
   return button;
 }
 
-function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
+function sortApplyButton(host: HTMLElement, view: DataGridFilterEditorView): HTMLButtonElement {
+  const panel = host.querySelector(sortPanelSelector(view));
+  const button = [...(panel?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((candidate) => candidate.textContent?.trim() === "Apply Sort");
+  if (!button) throw new Error("Sort editor apply button not found");
+  return button;
+}
+
+async function selectSortColumn(workbench: Element, columnName: string) {
+  const trigger = workbench.querySelector<HTMLElement>('[data-slot="select-trigger"]');
+  if (!trigger) throw new Error("Sort column select trigger not found");
+  trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+  await settle();
+
+  const search = document.querySelector<HTMLInputElement>("[data-sort-column-search] input");
+  if (!search) throw new Error("Sort column search input not found");
+  search.value = columnName;
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await settle();
+}
+
+function mountGrid(
+  view: DataGridFilterEditorView,
+  keepExpanded: boolean,
+  options: {
+    dataGridOrderByVisible?: boolean;
+    initialOrderByInput?: string;
+    sortColumn?: string;
+    sortColumnIndex?: number;
+    sortDirection?: "asc" | "desc";
+    sortMode?: "database" | "local";
+  } = {},
+) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -107,6 +141,7 @@ function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
     dataGridRenderMode: "canvas",
     dataGridFilterEditorView: view,
     dataGridKeepFilterEditorExpanded: keepExpanded,
+    dataGridOrderByVisible: options.dataGridOrderByVisible ?? true,
   });
   const result = markRaw<QueryResult>({
     columns: ["id"],
@@ -115,6 +150,7 @@ function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
     execution_time_ms: 0,
   });
   const onExecuteSql = vi.fn().mockResolvedValue(undefined);
+  const onSort = vi.fn();
   const host = document.createElement("div");
   document.body.append(host);
   const Root = defineComponent({
@@ -129,12 +165,18 @@ function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
                 result,
                 databaseType: "mysql",
                 context: "table-data",
+                initialOrderByInput: options.initialOrderByInput,
+                sortColumn: options.sortColumn,
+                sortColumnIndex: options.sortColumnIndex,
+                sortDirection: options.sortDirection,
+                sortMode: options.sortMode,
                 tableMeta: {
                   tableName: "items",
                   columns: [{ name: "id", data_type: "int" }],
                   primaryKeys: ["id"],
                 },
                 onExecuteSql,
+                onSort,
               }),
           },
         );
@@ -145,7 +187,7 @@ function mountGrid(view: DataGridFilterEditorView, keepExpanded: boolean) {
   app.use(i18n);
   app.mount(host);
   mountedApps.push({ app, host });
-  return { host, onExecuteSql };
+  return { host, onExecuteSql, onSort };
 }
 
 async function settle() {
@@ -181,6 +223,7 @@ afterEach(() => {
     host.remove();
   }
   document.querySelectorAll("[data-dbx-context-menu]").forEach((menu) => menu.remove());
+  clearDataGridSortBuilderMemoryCache();
   clearDataGridStructuredFilterStates();
 });
 
@@ -236,6 +279,73 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     await settle();
     expect(host.querySelector(sortPanelSelector(view))).toBeNull();
     expect(host.querySelector(panelSelector(view))).not.toBeNull();
+  });
+
+  it("closes and removes the sort workbench when dataGridOrderByVisible is toggled off", async () => {
+    const { host } = mountGrid(view, false);
+    await settle();
+
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
+    const toggle = sortToggle(host);
+    toggle.click();
+    await settle();
+    expect(host.querySelector(sortPanelSelector(view))).not.toBeNull();
+    expect(sortToggle(host).getAttribute("aria-expanded")).toBe("true");
+
+    useSettingsStore().updateEditorSettings({ dataGridOrderByVisible: false });
+    await settle();
+
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
+    // Column-header sorting remains available when the toolbar editor is hidden.
+    expect(toggle.isConnected).toBe(false);
+  });
+
+  it("deactivates active structured sort and re-queries without ORDER BY when dataGridOrderByVisible is toggled off", async () => {
+    const { host, onExecuteSql, onSort } = mountGrid(view, false);
+    await settle();
+
+    sortToggle(host).click();
+    await settle();
+    const workbench = host.querySelector(sortPanelSelector(view));
+    if (!workbench) throw new Error("Sort workbench not found");
+    await selectSortColumn(workbench, "id");
+
+    sortApplyButton(host, view).click();
+    await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledTimes(1));
+    expect(onExecuteSql.mock.calls[0][0]).toContain("ORDER BY `id` ASC");
+
+    useSettingsStore().updateEditorSettings({ dataGridOrderByVisible: false });
+    await settle();
+
+    await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledTimes(2));
+    expect(onExecuteSql.mock.calls[1][0]).not.toContain("ORDER BY");
+    expect(host.querySelector(sortPanelSelector(view))).toBeNull();
+
+    // Subsequent column sort when ORDER BY is hidden does not stack with previous structured sort
+    const sortBtn = host.querySelector<HTMLButtonElement>('button[title="Sort"]');
+    if (sortBtn) {
+      sortBtn.click();
+      await settle();
+      const ascItem = [...document.querySelectorAll<HTMLButtonElement>("button")].find((btn) => btn.textContent?.includes("Sort Database Ascending"));
+      ascItem?.click();
+      await settle();
+      expect(onSort).toHaveBeenCalledWith("id", 0, "asc", undefined, "database", "`id` ASC");
+    }
+  });
+
+  it("clears restored column and manual sorts when mounted with ORDER BY hidden", async () => {
+    const { onExecuteSql, onSort } = mountGrid(view, false, {
+      dataGridOrderByVisible: false,
+      initialOrderByInput: "`id` ASC",
+      sortColumn: "id",
+      sortColumnIndex: 0,
+      sortDirection: "asc",
+      sortMode: "database",
+    });
+    await settle();
+
+    expect(onSort).toHaveBeenCalledWith("id", 0, null, undefined, "database", "");
+    expect(onExecuteSql).not.toHaveBeenCalled();
   });
 });
 

@@ -41,7 +41,7 @@ export const damengDumpEn = {
     toolNotFound: "Dameng client tools (dexp/dimp) were not found in the configured bin directory.",
     connectionRequired: "Native dexp/dimp dump is only available for Dameng connections.",
     passwordMissing: "The connection has no stored password; reconnect and enter the password first.",
-    useridInvalid: "The connection's username or password contains /, {'@'} or a space, which the dexp/dimp USERID argument cannot encode; the task was not started.",
+    useridInvalid: "The connection's username or password contains a character the dexp/dimp USERID argument cannot encode; the task was not started.",
   },
 };
 
@@ -88,7 +88,7 @@ export const damengDumpZhCN = {
     toolNotFound: "在配置的 bin 目录中未找到达梦客户端工具（dexp/dimp）。",
     connectionRequired: "原生 dexp/dimp 导出仅支持达梦连接。",
     passwordMissing: "该连接没有保存密码，请先重新连接并输入密码。",
-    useridInvalid: "连接的用户名或密码包含 /、{'@'} 或空格，无法编码进 dexp/dimp 的 USERID 参数；任务未启动。",
+    useridInvalid: "连接的用户名或密码包含无法编码进 dexp/dimp USERID 参数的字符；任务未启动。",
   },
 };
 

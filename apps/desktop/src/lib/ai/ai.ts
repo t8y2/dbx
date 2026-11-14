@@ -14,6 +14,7 @@ import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 
@@ -1165,7 +1166,8 @@ async function loadCandidateSchemas(tab: AiContextTarget, connection: Connection
   if (!databaseOverride && schema) return [schema];
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
     const schemas = await api.listSchemas(tab.connectionId, scope);
-    return prioritizeSchemas(schemas);
+    // The public synonym and scheduler scopes are navigation groups, not table owners.
+    return prioritizeSchemas(connection.db_type === "xugu" ? schemas.filter((name) => !isXuguSyntheticScope(name)) : schemas);
   }
   return [scope];
 }

@@ -6,6 +6,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
+import SidebarActivationSettings from "@/components/editor/SidebarActivationSettings.vue";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import {
@@ -797,6 +798,7 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editShowConnectionGroupPath = ref(settingsStore.editorSettings.showConnectionGroupPath);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editQualifyColumnCompletions = ref(settingsStore.editorSettings.qualifyColumnCompletions);
 const editBatchColumnSelectionIncludeComments = ref(settingsStore.editorSettings.batchColumnSelectionIncludeComments);
 const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
 const tableCompletionSchemaQualificationDescription = computed(() => {
@@ -892,6 +894,8 @@ const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEnt
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
 const editDataGridToolbarLayout = ref<DataGridToolbarLayout>(settingsStore.editorSettings.dataGridToolbarLayout);
 const editDataGridKeepFilterEditorExpanded = ref(settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
+const editDataGridOrderByVisible = ref(settingsStore.editorSettings.dataGridOrderByVisible);
+const editDataGridWhereRatio = ref(settingsStore.editorSettings.dataGridWhereRatio);
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDefaultAutoKeepResults = ref(settingsStore.editorSettings.defaultAutoKeepResults);
@@ -1018,6 +1022,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const modifierDoubleTapRecorder = createModifierDoubleTapShortcutController();
 watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync" });
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
+const editSidebarColumnDoubleClickAction = ref(settingsStore.editorSettings.sidebarColumnDoubleClickAction);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
@@ -1027,6 +1032,8 @@ const editSidebarSearchOpenedDatabasesOnly = ref(settingsStore.editorSettings.si
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editSidebarPinDefaultDatabase = ref(settingsStore.editorSettings.sidebarPinDefaultDatabase);
 const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
+const editSidebarAutoExpandOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation);
+const editSidebarTableClickNavigation = ref(settingsStore.editorSettings.sidebarTableClickNavigation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editAutoReloadRestoredDataTabsOnOpen = ref(settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
@@ -1346,6 +1353,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     showConnectionGroupPath: editShowConnectionGroupPath.value,
     autoAliasTables: editAutoAliasTables.value,
+    qualifyColumnCompletions: editQualifyColumnCompletions.value,
     batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments.value,
     tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
@@ -1402,6 +1410,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
     dataGridToolbarLayout: editDataGridToolbarLayout.value,
     dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded.value,
+    dataGridOrderByVisible: editDataGridOrderByVisible.value,
+    dataGridWhereRatio: editDataGridWhereRatio.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     defaultAutoKeepResults: editDefaultAutoKeepResults.value,
     pinResultTabOnClick: editPinResultTabOnClick.value,
@@ -1433,6 +1443,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
+    sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
@@ -1440,6 +1451,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase.value,
     sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
+    sidebarAutoExpandOnDatabaseActivation: editSidebarAutoExpandOnDatabaseActivation.value,
+    sidebarTableClickNavigation: editSidebarTableClickNavigation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
@@ -2061,6 +2074,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editShowConnectionGroupPath.value = settingsStore.editorSettings.showConnectionGroupPath;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editQualifyColumnCompletions.value = settingsStore.editorSettings.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = settingsStore.editorSettings.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
@@ -2118,6 +2132,8 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
   editDataGridToolbarLayout.value = settingsStore.editorSettings.dataGridToolbarLayout;
   editDataGridKeepFilterEditorExpanded.value = settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
+  editDataGridOrderByVisible.value = settingsStore.editorSettings.dataGridOrderByVisible;
+  editDataGridWhereRatio.value = settingsStore.editorSettings.dataGridWhereRatio;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editDefaultAutoKeepResults.value = settingsStore.editorSettings.defaultAutoKeepResults;
   editPinResultTabOnClick.value = settingsStore.editorSettings.pinResultTabOnClick;
@@ -2150,6 +2166,7 @@ function syncEditorSettingsDraftFromStore() {
   editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+  editSidebarColumnDoubleClickAction.value = settingsStore.editorSettings.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
@@ -2157,6 +2174,8 @@ function syncEditorSettingsDraftFromStore() {
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editSidebarPinDefaultDatabase.value = settingsStore.editorSettings.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
+  editSidebarAutoExpandOnDatabaseActivation.value = settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation;
+  editSidebarTableClickNavigation.value = settingsStore.editorSettings.sidebarTableClickNavigation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen;
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
@@ -2252,6 +2271,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showInsertValueHints: editShowInsertValueHints,
   showConnectionGroupPath: editShowConnectionGroupPath,
   autoAliasTables: editAutoAliasTables,
+  qualifyColumnCompletions: editQualifyColumnCompletions,
   batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments,
   tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
@@ -2304,6 +2324,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridFilterEditorView: editDataGridFilterEditorView,
   dataGridToolbarLayout: editDataGridToolbarLayout,
   dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded,
+  dataGridOrderByVisible: editDataGridOrderByVisible,
+  dataGridWhereRatio: editDataGridWhereRatio,
   dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight,
   defaultAutoKeepResults: editDefaultAutoKeepResults,
   pinResultTabOnClick: editPinResultTabOnClick,
@@ -2333,6 +2355,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   shortcuts: editShortcuts,
   sqlFormatter: editSqlFormatter,
   sidebarActivation: editSidebarActivation,
+  sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction,
   sidebarObjectDisplay: editSidebarObjectDisplay,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
@@ -2340,6 +2363,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode,
   sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase,
   sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation,
+  sidebarAutoExpandOnDatabaseActivation: editSidebarAutoExpandOnDatabaseActivation,
+  sidebarTableClickNavigation: editSidebarTableClickNavigation,
   openTabsRestoreMode: editOpenTabsRestoreMode,
   autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen,
   disconnectTabHandlingMode: editDisconnectTabHandlingMode,
@@ -2883,6 +2908,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
     editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
     editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
@@ -2949,6 +2975,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
   } else if (tab === "navigation") {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+    editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
@@ -2956,6 +2983,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
     editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
+    editSidebarAutoExpandOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation;
+    editSidebarTableClickNavigation.value = DEFAULT_EDITOR_SETTINGS.sidebarTableClickNavigation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -3007,6 +3036,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
     editDataGridToolbarLayout.value = DEFAULT_EDITOR_SETTINGS.dataGridToolbarLayout;
     editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
+    editDataGridOrderByVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible;
+    editDataGridWhereRatio.value = DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
     editPinResultTabOnClick.value = DEFAULT_EDITOR_SETTINGS.pinResultTabOnClick;
@@ -3098,6 +3129,7 @@ function resetAllDefaults() {
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
@@ -3152,6 +3184,8 @@ function resetAllDefaults() {
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
   editDataGridToolbarLayout.value = DEFAULT_EDITOR_SETTINGS.dataGridToolbarLayout;
   editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
+  editDataGridOrderByVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible;
+  editDataGridWhereRatio.value = DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
   editPinResultTabOnClick.value = DEFAULT_EDITOR_SETTINGS.pinResultTabOnClick;
@@ -3184,6 +3218,7 @@ function resetAllDefaults() {
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+  editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
@@ -3191,6 +3226,8 @@ function resetAllDefaults() {
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
+  editSidebarAutoExpandOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation;
+  editSidebarTableClickNavigation.value = DEFAULT_EDITOR_SETTINGS.sidebarTableClickNavigation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -3822,6 +3859,10 @@ function setTabGroupRows(value: TabGroupRowMode) {
 
 function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
+}
+
+function setSidebarColumnDoubleClickAction(value: "structure" | "query") {
+  editSidebarColumnDoubleClickAction.value = value;
 }
 
 // Custom AI skill root (read-only SKILL.md discovery; desktop-only, prd 09-21-public-skill-loader).
@@ -8227,7 +8268,7 @@ onUnmounted(() => {
               <Input
                 data-settings-global-search
                 v-model="settingsSearchQuery"
-                type="text"
+                type="search"
                 autocomplete="off"
                 role="combobox"
                 :aria-label="t('settings.searchSettings')"
@@ -8705,6 +8746,14 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="editor-auto-alias-tables" v-model="editAutoAliasTables" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-qualify-column-completions">{{ t("settings.qualifyColumnCompletions") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.qualifyColumnCompletionsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-qualify-column-completions" v-model="editQualifyColumnCompletions" class="mt-0.5" />
                 </div>
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
@@ -9721,31 +9770,7 @@ onUnmounted(() => {
             </section>
 
             <section v-else-if="activeSettingsTab === 'navigation'" data-settings-search-id="navigation" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('navigation')]">
-              <div class="space-y-2">
-                <Label>{{ t("settings.sidebarActivation") }}</Label>
-                <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('single')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">
-                        {{ t("settings.sidebarActivationSingle") }}
-                      </div>
-                      <div class="text-xs text-muted-foreground">
-                        {{ t("settings.sidebarActivationSingleDescription") }}
-                      </div>
-                    </div>
-                  </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('double')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">
-                        {{ t("settings.sidebarActivationDouble") }}
-                      </div>
-                      <div class="text-xs text-muted-foreground">
-                        {{ t("settings.sidebarActivationDoubleDescription") }}
-                      </div>
-                    </div>
-                  </Button>
-                </div>
-              </div>
+              <SidebarActivationSettings :activation="editSidebarActivation" :column-action="editSidebarColumnDoubleClickAction" @update:activation="setSidebarActivation" @update:column-action="setSidebarColumnDoubleClickAction" />
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>
@@ -9754,6 +9779,24 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-browse-objects-on-database-activation" v-model="editSidebarBrowseObjectsOnDatabaseActivation" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-auto-expand-on-database-activation">{{ t("settings.sidebarAutoExpandOnDatabaseActivation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarAutoExpandOnDatabaseActivation')">
+                    {{ t("settings.sidebarAutoExpandOnDatabaseActivationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-auto-expand-on-database-activation" v-model="editSidebarAutoExpandOnDatabaseActivation" :disabled="!editSidebarBrowseObjectsOnDatabaseActivation" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-table-click-navigation">{{ t("settings.sidebarTableClickNavigation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarTableClickNavigation')">
+                    {{ t("settings.sidebarTableClickNavigationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-table-click-navigation" v-model="editSidebarTableClickNavigation" />
               </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
@@ -10467,6 +10510,41 @@ onUnmounted(() => {
                     </div>
                     <Switch id="data-grid-keep-filter-editor-expanded" v-model="editDataGridKeepFilterEditorExpanded" />
                   </div>
+                  <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="data-grid-order-by-visible">{{ t("settings.dataGridOrderByVisible") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.dataGridOrderByVisibleDescription") }}</p>
+                    </div>
+                    <Switch id="data-grid-order-by-visible" v-model="editDataGridOrderByVisible" />
+                  </div>
+                  <div v-if="editDataGridOrderByVisible" class="settings-item space-y-2 rounded-md border bg-background px-3 py-2">
+                    <div class="flex items-center justify-between">
+                      <div class="space-y-1">
+                        <Label for="data-grid-where-ratio">{{ t("settings.dataGridWhereRatio") }}</Label>
+                        <p class="text-xs text-muted-foreground">{{ t("settings.dataGridWhereRatioDescription") }}</p>
+                      </div>
+                      <span class="text-xs text-muted-foreground tabular-nums shrink-0 font-medium"> WHERE {{ Math.round(editDataGridWhereRatio * 100) }}% : ORDER BY {{ Math.round((1 - editDataGridWhereRatio) * 100) }}% </span>
+                    </div>
+                    <input id="data-grid-where-ratio" type="range" min="20" max="85" step="1" :value="Math.round(editDataGridWhereRatio * 100)" @input="editDataGridWhereRatio = Number(($event.target as HTMLInputElement).value) / 100" class="w-full accent-primary cursor-pointer" />
+                    <div class="relative flex items-center justify-between text-xs text-muted-foreground select-none pt-0.5">
+                      <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 border-b border-dashed border-muted-foreground/25 pointer-events-none" />
+                      <button type="button" class="relative z-10 bg-background pr-1.5 hover:text-primary hover:underline cursor-pointer transition-colors" :class="Math.round(editDataGridWhereRatio * 100) === 20 ? 'text-primary font-medium' : ''" @click="editDataGridWhereRatio = 0.2">
+                        20% : 80%
+                      </button>
+                      <button
+                        type="button"
+                        class="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 z-10 bg-background px-1.5 hover:text-primary hover:underline cursor-pointer transition-colors whitespace-nowrap"
+                        style="left: 46.15%"
+                        :class="Math.round(editDataGridWhereRatio * 100) === 50 ? 'text-primary font-medium' : ''"
+                        @click="editDataGridWhereRatio = 0.5"
+                      >
+                        50% : 50%
+                      </button>
+                      <button type="button" class="relative z-10 bg-background pl-1.5 hover:text-primary hover:underline cursor-pointer transition-colors" :class="Math.round(editDataGridWhereRatio * 100) === 85 ? 'text-primary font-medium' : ''" @click="editDataGridWhereRatio = 0.85">
+                        85% : 15%
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div v-if="dataGridFilterViewPreviewExpanded" class="pointer-events-none select-none overflow-hidden border-t bg-background" data-data-grid-filter-view-preview>
@@ -10476,11 +10554,11 @@ onUnmounted(() => {
                         <Filter class="h-3 w-3" />
                       </span>
                     </div>
-                    <div class="flex min-w-0 flex-1 items-center gap-1.5 border-r px-2">
+                    <div class="flex min-w-0 items-center gap-1.5 px-2" :class="editDataGridOrderByVisible ? 'border-r' : 'flex-1'" :style="editDataGridOrderByVisible ? { flex: `0 0 ${editDataGridWhereRatio * 100}%` } : undefined">
                       <span class="shrink-0 text-muted-foreground">WHERE</span>
                       <code class="truncate text-foreground">status = 'ACTIVE'</code>
                     </div>
-                    <div class="flex min-w-0 flex-1 items-center gap-1.5 px-2">
+                    <div v-if="editDataGridOrderByVisible" class="flex min-w-0 flex-1 items-center gap-1.5 px-2">
                       <span class="shrink-0 text-muted-foreground">ORDER BY</span>
                       <code class="truncate text-foreground">id</code>
                     </div>
@@ -14603,6 +14681,14 @@ LIMIT 100;</pre>
 </template>
 
 <style>
+/* The settings search is a search field, so WebKit draws its own cancel
+   button and decoration glyph; the dialog already renders its own search icon
+   and clear button, so hide the native ones to avoid doubling them. */
+[data-settings-global-search]::-webkit-search-cancel-button,
+[data-settings-global-search]::-webkit-search-decoration {
+  display: none;
+}
+
 @media (min-width: 1024px) {
   .settings-layout {
     flex-direction: row !important;

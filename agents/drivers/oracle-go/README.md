@@ -35,6 +35,24 @@ To restore the Java agent:
 rm ~/.dbx/agents/drivers/oracle/agent
 ```
 
+## Session date language
+
+The thin agent normalizes every physical session to `NLS_LANGUAGE='AMERICAN'`, then
+sets `NLS_DATE_LANGUAGE` so localized date literals (for example PL/SQL
+Developer's `'05-11月-26 09.35.34.665000 上午'`) parse. The language comes from
+`NLS_LANG` when it is set — any name from `V$NLS_VALID_VALUES` for
+`NLS_LANGUAGE`, so `DUTCH_NETHERLANDS.AL32UTF8` or
+`BRAZILIAN PORTUGUESE_BRAZIL.AL32UTF8` work — otherwise from the client OS
+locale (the Windows user locale; `LC_ALL`/`LC_TIME`/`LANG` elsewhere). A
+language the server rejects is logged and retried with the OS-locale value.
+Set `NLS_LANG` (for example `AMERICAN_AMERICA.AL32UTF8`) to pin English month
+names on a localized machine.
+
+The date language also selects the month names `TO_CHAR` returns, so query
+results follow the client locale just as they do in PL/SQL Developer and
+DataGrip. A macOS app launched from Finder inherits no `LANG`; set `NLS_LANG`
+there if the system locale should drive the session.
+
 ## OCI (thick driver) variant
 
 The `oracle-oci` driver shipped for Windows x64 is this same agent compiled with

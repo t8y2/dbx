@@ -369,6 +369,7 @@ export const prepareOracleTriggerSql = forward("prepareOracleTriggerSql");
 export const fingerprintOracleRoutineObjectSource = forward("fingerprintOracleRoutineObjectSource");
 export const buildExecutableObjectSourceSql = forward("buildExecutableObjectSourceSql");
 export const buildEditableObjectSource = forward("buildEditableObjectSource");
+export const buildOracleObjectExportSql = forward("buildOracleObjectExportSql");
 export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRenameObjectSourceStatements");
 export const rewriteOracleRoutineReferences = forward("rewriteOracleRoutineReferences");
 export const rewriteOracleTableReferences = forward("rewriteOracleTableReferences");
@@ -1279,3 +1280,6 @@ export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");
 export const mqttDeleteMessage = forward("mqttDeleteMessage");
+
+export const migrationPrepareCredentialReset = forward("migrationPrepareCredentialReset");
+export const migrationResetCredentials = forward("migrationResetCredentials");

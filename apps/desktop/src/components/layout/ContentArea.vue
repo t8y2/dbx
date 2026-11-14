@@ -221,6 +221,7 @@ import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolb
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
+import { formatQueryDuration } from "@/lib/format/duration";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
@@ -808,6 +809,10 @@ const resultRunFallbackLabel = (sequence: number) => t(resultTabNamingMode.value
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
+const activeResultColumnWidthKey = computed(() => {
+  const revision = props.activeTab.resultColumnWidthRevision;
+  return revision ? `${activeResultGridInstanceKey.value}:${revision}` : activeResultGridInstanceKey.value;
+});
 const hasNeo4jNodes = computed(() => activeEffectiveDatabaseType.value === "neo4j" && !!props.activeTab.result?.neo4j_node_cells?.length);
 const neo4jNodeTable = useNeo4jNodeTableResult(
   computed(() => props.activeTab.result),
@@ -2001,14 +2006,16 @@ function dispatchBeforeResultTabSwitch() {
 }
 
 /**
- * 点击结果标签：切换显示的同时切换固定状态（issue #9975、#13306）。
+ * 点击结果标签：切换显示的同时固定该结果（issue #9975、#13306、#14599）。
  * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
- * 点击已固定的结果则直接取消固定，无需再打开右键菜单。
+ * 再次点击当前已固定的结果会取消固定，无需再打开右键菜单；
+ * 从其他结果标签切换过来时只切换显示，不会取消已有的固定。
  */
 async function selectResultRunFromTab(runId: string) {
+  const wasActive = runId === props.activeTab.activeResultRunId;
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, wasActive)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {
@@ -2140,6 +2147,11 @@ function cancelQueryEditorExecutionViewport(requestId: number) {
 
 function foldAll(): boolean {
   return queryEditorRef.value?.foldAll?.() ?? false;
+}
+
+function toggleLineComment(): boolean {
+  if (!sourceSectionActive.value) return false;
+  return queryEditorRef.value?.toggleLineComment?.() ?? false;
 }
 
 function unfoldAll(): boolean {
@@ -2301,6 +2313,7 @@ defineExpose({
   focusErrorPosition,
   locateActiveResultError,
   foldAll,
+  toggleLineComment,
   unfoldAll,
 });
 </script>
@@ -3112,7 +3125,7 @@ defineExpose({
                         </span>
                       </div>
                       <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
-                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? formatQueryDuration(item.executionTimeMs) : "—" }}</div>
                     </div>
                   </DynamicScrollerItem>
                 </DynamicScroller>
@@ -3134,6 +3147,7 @@ defineExpose({
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
+                :column-width-result-key="activeResultColumnWidthKey"
                 :pending-state-key="activeResultGridInstanceKey"
                 :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"

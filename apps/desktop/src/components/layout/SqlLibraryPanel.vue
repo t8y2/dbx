@@ -132,6 +132,10 @@ function getConnectionLabel(connectionId: string) {
   return conn?.name || t("sqlLibrary.deletedConnection");
 }
 
+function connectionIconColor(connectionId: string) {
+  return connectionStore.getConfig(connectionId)?.color || undefined;
+}
+
 function folderPath(folder: SavedSqlFolder) {
   const folderById = new Map(savedSqlStore.allFolders.map((item) => [item.id, item]));
   const parts: string[] = [];
@@ -1743,7 +1747,7 @@ defineExpose({
               >
                 <div v-if="showDropBefore(row.folder.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                 <div v-if="showDropAfter(row.folder.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
+                <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" :style="{ color: connectionIconColor(row.folder.connectionId) }" />
                 <template v-if="isRenamingFolder(row.folder.id)">
                   <input
                     :ref="setRenameInputRef"
@@ -1795,7 +1799,7 @@ defineExpose({
                 >
                   <div v-if="showDropBefore(row.file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(row.file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" :style="{ color: connectionIconColor(row.file.connectionId) }" />
                   <span v-if="isFileDirty(row.file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
                   <template v-if="isRenamingFile(row.file.id)">
                     <input

@@ -1339,9 +1339,26 @@ func openConfiguredSessionDB(params connectParams, timeout time.Duration) (*sql.
 	if err != nil {
 		return nil, err
 	}
+	if !usesOCIProfile(params) {
+		// oracleNLSConnector initializes every physical thin connection, so
+		// the one that answered the ping already carries the session settings.
+		return db, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, err := db.ExecContext(ctx, "ALTER SESSION SET NLS_LANGUAGE='AMERICAN'"); err != nil {
+	// OCI connects through godror directly; pin one connection so both ALTERs
+	// land on the same session.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("pin Oracle session for NLS setup: %w", err)
+	}
+	defer conn.Close()
+	dateLanguage, fallbackDateLanguage := sessionNLSDateLanguages()
+	if err := applyOracleSessionNLS(func(query string) error {
+		_, err := conn.ExecContext(ctx, query)
+		return err
+	}, dateLanguage, fallbackDateLanguage); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -2355,6 +2372,7 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		return nil, err
 	}
 	s.closeRows(rows)
+	s.enrichObjectComments(result, schema, useSessionUser)
 	if constraints.Exact {
 		s.enrichExactTriggerObjects(result, schema)
 	}
@@ -6520,6 +6538,11 @@ func isOraclePlSQLBlock(sqlText string) bool {
 
 func isQuerySQL(sqlText string) bool {
 	executable := trimLeadingSQLComments(sqlText)
+	// Only unwrap the prefix for classification so the driver's SQL keeps
+	// its grouping and comments, including inside nested parentheses.
+	for strings.HasPrefix(executable, "(") {
+		executable = trimLeadingSQLComments(executable[1:])
+	}
 	return startsWithSQLKeyword(executable, "select") || startsWithSQLKeyword(executable, "with")
 }
 

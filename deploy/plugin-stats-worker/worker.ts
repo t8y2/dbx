@@ -35,9 +35,11 @@
 //
 // Storage:
 // - Workers Analytics Engine (binding PLUGIN_STATS) — one datapoint per event.
-//   AE only retains three months, so a daily cron aggregates the trailing
-//   window into the `plugin_stats_archive` KV namespace, which holds the
-//   permanent totals. KV is fine here: ~1 write per active key per day.
+//   AE only retains three months, so cron aggregates the trailing window into
+//   the `plugin_stats_archive` KV namespace, which holds the permanent totals
+//   as ONE document (see ARCHIVE_KEY). A pass therefore writes a constant
+//   number of distinct keys, which keeps it inside the free plan's
+//   1,000-different-keys/day cap no matter how many plugins exist.
 
 type AnalyticsEngineBinding = {
   writeDataPoint(event: { blobs?: string[]; doubles?: number[]; indexes?: string[] }): void;
@@ -290,133 +292,152 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
     .sort((a, b) => `${a.kind}:${a.plugin}:${a.version}`.localeCompare(`${b.kind}:${b.plugin}:${b.version}`));
 }
 
-// Aggregates events in (last-success, now] into permanent KV totals, chunked
-// and resumable. The pre-2026-10 unchunked loop died mid-run once the window
-// grew past the Workers per-invocation subrequest ceiling (1000 paid / 50
-// free; every versioned total costs a get+put pair). A single failed run then
-// left the watermark behind, the next window grew larger, and the aggregation
-// stalled permanently (2026-09-28 → 2026-10-20). Now every trigger processes
-// at most `chunk` keys, persists a cursor in `agg:state`, and the next cron
-// (daily start + */10 continue) resumes until the pass completes; only then
-// are the summary written and the watermark advanced. `agg:tuning` carries
-// the chunk size across passes — it halves on failure and creeps up on
-// progress, so the worker adapts to whatever subrequest/KV limits the
-// account has. A crash mid-chunk can double-count that chunk's additive
-// totals; acceptable for decorative stats (same stance as v1).
-type AggPhase = "counts" | "pluginTotals" | "uniques";
-type AggState = { windowFrom: string; windowTo: string; phase: AggPhase; offset: number; chunk: number };
+// ---------------------------------------------------------------------------
+// Permanent archive: ONE KV value holds every cumulative counter.
+//
+// The previous model stored one key per counter (`total:kind:plugin:version`,
+// `uniqd:kind:plugin:day`). Every aggregation pass then wrote one *different*
+// key per counter it touched. On the free plan the cap is "writes to different
+// keys: 1,000/day", so a catch-up window touching a few hundred counters ate
+// the day's allowance; after that every retry failed mid-pass, the resumable
+// cursor could not advance, the window kept growing, and the next day blew the
+// cap earlier still. Now a pass reads one value, mutates it in memory and
+// writes it back, so the number of distinct keys it touches (archive, summary,
+// lock) is constant and independent of the plugin count. The remaining ceiling
+// is value size / JSON CPU cost, not the key count (see README).
+export const ARCHIVE_KEY = "archive:v2";
+const ARCHIVE_VERSION = 2;
+const ARCHIVE_EPOCH = "1970-01-01 00:00:00";
 
-const AGG_STATE_KEY = "agg:state";
+export type ArchiveDoc = {
+  v: number;
+  /** SQL timestamp of the last completed window; "" until the first pass. */
+  lastSuccess: string;
+  /** "kind:plugin:version" -> cumulative events. */
+  total: Record<string, number>;
+  /** "kind:plugin:day" -> distinct identities seen that day. */
+  uniqd: Record<string, number>;
+};
+
+/** `{kind: {plugin: count}}`, exactly what the website reads. */
+export type Summary = Record<string, Record<string, number>>;
+
 const AGG_LOCK_KEY = "agg:lock";
-const AGG_TUNING_KEY = "agg:tuning";
-const AGG_MIN_CHUNK = 8; // keeps get+put pairs + AE fetches under the free plan's 50 subrequests
-const AGG_MAX_CHUNK = 400; // 400×2 + fetches + state writes stays under the paid plan's 1000
 const AGG_LOCK_TTL_SECONDS = 300;
 
-async function readChunkSize(env: Env): Promise<number> {
-  const chunk = Number.parseInt((await env.PLUGIN_ARCHIVE.get(AGG_TUNING_KEY)) ?? "", 10);
-  return Number.isFinite(chunk) && chunk >= AGG_MIN_CHUNK && chunk <= AGG_MAX_CHUNK ? chunk : AGG_MAX_CHUNK;
+export function emptyArchive(): ArchiveDoc {
+  return { v: ARCHIVE_VERSION, lastSuccess: "", total: {}, uniqd: {} };
 }
 
-async function runAggregation(env: Env, fromOverride?: string): Promise<
+/** Parse a stored archive; an unknown schema throws instead of resetting data. */
+export function parseArchive(raw: string): ArchiveDoc {
+  const parsed = JSON.parse(raw) as Partial<ArchiveDoc> | null;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("archive: stored value is not an object");
+  if (parsed.v !== ARCHIVE_VERSION) throw new Error(`archive: unsupported version ${String(parsed.v)}`);
+  const total = parsed.total ?? {};
+  const uniqd = parsed.uniqd ?? {};
+  if (typeof total !== "object" || Array.isArray(total) || typeof uniqd !== "object" || Array.isArray(uniqd)) {
+    throw new Error("archive: malformed counters");
+  }
+  return {
+    v: ARCHIVE_VERSION,
+    lastSuccess: typeof parsed.lastSuccess === "string" ? parsed.lastSuccess : "",
+    total: total as Record<string, number>,
+    uniqd: uniqd as Record<string, number>,
+  };
+}
+
+/** Fold one window into the archive. Event counters add; per-day uniques overwrite. */
+export function applyWindow(doc: ArchiveDoc, counts: WindowCount[], uniques: DailyUnique[]): void {
+  for (const count of counts) {
+    const key = `${count.kind}:${count.plugin}:${count.version}`;
+    doc.total[key] = (doc.total[key] ?? 0) + count.events;
+  }
+  for (const unique of uniques) {
+    // Overwrite, not add: reruns converge to the full-day value and
+    // multi-version releases cannot inflate the downloader count.
+    doc.uniqd[`${unique.kind}:${unique.plugin}:${unique.day}`] = unique.uniq;
+  }
+}
+
+/** Fold the same window into the public summary (`inst` feeds the website cards). */
+export function applySummary(summary: Summary, counts: WindowCount[]): void {
+  for (const count of counts) {
+    const byKind = (summary[count.kind] ??= {});
+    byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
+  }
+}
+
+async function readArchive(env: Env): Promise<ArchiveDoc | null> {
+  const raw = await env.PLUGIN_ARCHIVE.get(ARCHIVE_KEY);
+  return raw === null ? null : parseArchive(raw);
+}
+
+async function readSummary(env: Env): Promise<Summary> {
+  const raw = await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY);
+  if (raw === null) return {};
+  try {
+    return JSON.parse(raw) as Summary;
+  } catch (error) {
+    // A corrupted summary must not block the archive; it is rebuilt from the
+    // `inst` deltas of later passes (display numbers are decorative).
+    console.error("plugin-stats summary parse failed", error);
+    return {};
+  }
+}
+
+export type AggregationResult =
   | { skipped: "locked" }
-  | { completed: true; from: string; to: string; activeKeys: number; uniqueDays: number; writes: number }
-  | { completed: false; phase: AggPhase; offset: number; of: number; writes: number }
-> {
-  // Best-effort mutex: cron triggers may overlap and additive totals race.
+  | { skipped: "unmigrated"; hint: string }
+  | { skipped: "empty-window"; from: string; to: string }
+  | { completed: true; from: string; to: string; counters: number; uniqueDays: number };
+
+// One pass: read the archive, fold in everything Analytics Engine and edge
+// analytics have for (lastSuccess, now], write it back. No cursor and no
+// chunking — the write count is constant, so an arbitrarily large backlog
+// cannot run out of subrequests.
+async function runAggregation(env: Env, fromOverride?: string): Promise<AggregationResult> {
+  // Best-effort mutex: overlapping crons would otherwise read-modify-write the
+  // same archive and lose one side of the update.
   if (await env.PLUGIN_ARCHIVE.get(AGG_LOCK_KEY)) return { skipped: "locked" };
   await env.PLUGIN_ARCHIVE.put(AGG_LOCK_KEY, "1", { expirationTtl: AGG_LOCK_TTL_SECONDS });
   try {
-    let state: AggState | null = null;
-    const rawState = await env.PLUGIN_ARCHIVE.get(AGG_STATE_KEY);
-    if (rawState) {
-      try {
-        state = JSON.parse(rawState) as AggState;
-      } catch {
-        state = null; // corrupted cursor: start over rather than stay stuck
-      }
+    const archive = await readArchive(env);
+    if (!archive) {
+      // Never start from an empty archive: that would look like a successful
+      // pass and silently reset the counters. The one-shot migration writes
+      // ARCHIVE_KEY before this Worker handles traffic.
+      return { skipped: "unmigrated", hint: "run deploy/plugin-stats-worker/migrate-archive.mjs --apply" };
     }
-    if (!state) {
-      // `x-archive-from: reset` re-aggregates from the epoch (backfill after
-      // a fix); totals are additive, so only use it when the archived window
-      // is known-empty.
-      const fromOverrideTs = fromOverride?.trim().toLowerCase() === "reset" ? "1970-01-01 00:00:00" : fromOverride?.trim();
-      const windowFrom = fromOverrideTs ?? (await env.PLUGIN_ARCHIVE.get(ARCHIVE_META_KEY)) ?? "1970-01-01 00:00:00";
-      state = { windowFrom, windowTo: sqlTimestamp(new Date()), phase: "counts", offset: 0, chunk: await readChunkSize(env) };
-    }
-    const from = new Date(`${state.windowFrom.replace(" ", "T")}Z`);
-    const to = new Date(`${state.windowTo.replace(" ", "T")}Z`);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw new Error(`Corrupted aggregation state: ${JSON.stringify(state)}`);
 
-    // Re-fetched every chunk (3 subrequests: AE counts, AE uniques, edge analytics) so the persisted cursor stays a
-    // few bytes and AE remains the single source of truth for the window.
+    const trimmed = fromOverride?.trim().toLowerCase();
+    const override = trimmed === "reset" ? ARCHIVE_EPOCH : trimmed || undefined;
+    const windowFrom = override ?? (archive.lastSuccess || ARCHIVE_EPOCH);
+    const from = new Date(`${windowFrom.replace(" ", "T")}Z`);
+    const to = new Date();
+    if (Number.isNaN(from.getTime())) throw new Error(`archive: corrupted lastSuccess ${JSON.stringify(archive.lastSuccess)}`);
+    if (from >= to) return { skipped: "empty-window", from: windowFrom, to: sqlTimestamp(to) };
+
     const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
-    const pluginTotals = new Map<string, number>();
-    for (const count of counts) {
-      pluginTotals.set(`${count.kind}:${count.plugin}`, (pluginTotals.get(`${count.kind}:${count.plugin}`) ?? 0) + count.events);
-    }
-    const pluginTotalEntries = [...pluginTotals.entries()];
 
-    let writes = 0;
-    if (state.phase === "counts") {
-      for (const count of counts.slice(state.offset, state.offset + state.chunk)) {
-        const totalKey = `total:${count.kind}:${count.plugin}:${count.version}`;
-        const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(totalKey)) ?? "0", 10) || 0;
-        await env.PLUGIN_ARCHIVE.put(totalKey, String(current + count.events));
-        writes += 2;
-      }
-      state.offset += Math.min(state.chunk, Math.max(0, counts.length - state.offset));
-      if (state.offset >= counts.length) state = { ...state, phase: "pluginTotals", offset: 0 };
-    } else if (state.phase === "pluginTotals") {
-      for (const [pair, delta] of pluginTotalEntries.slice(state.offset, state.offset + state.chunk)) {
-        const [kind, plugin] = pair.split(":");
-        const pluginKey = `total:${kind}:${plugin}`;
-        const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(pluginKey)) ?? "0", 10) || 0;
-        await env.PLUGIN_ARCHIVE.put(pluginKey, String(current + delta));
-        writes += 2;
-      }
-      state.offset += Math.min(state.chunk, Math.max(0, pluginTotalEntries.length - state.offset));
-      if (state.offset >= pluginTotalEntries.length) state = { ...state, phase: "uniques", offset: 0 };
-    } else {
-      // Daily uniques overwrite (not add): reruns converge to the full-day
-      // value, and multi-version releases cannot inflate the downloader count.
-      for (const unique of uniques.slice(state.offset, state.offset + state.chunk)) {
-        await env.PLUGIN_ARCHIVE.put(`uniqd:${unique.kind}:${unique.plugin}:${unique.day}`, String(unique.uniq));
-        writes += 1;
-      }
-      state.offset += Math.min(state.chunk, Math.max(0, uniques.length - state.offset));
-      if (state.offset >= uniques.length) {
-        const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
-        for (const count of counts) {
-          const byKind = (summary[count.kind] ??= {});
-          byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
-        }
-        await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
-        await env.PLUGIN_ARCHIVE.put(ARCHIVE_META_KEY, state.windowTo);
-        await env.PLUGIN_ARCHIVE.delete(AGG_STATE_KEY);
-        await env.PLUGIN_ARCHIVE.put(AGG_TUNING_KEY, String(Math.min(AGG_MAX_CHUNK, Math.ceil(state.chunk * 1.25))));
-        return { completed: true, from: state.windowFrom, to: state.windowTo, activeKeys: counts.length, uniqueDays: uniques.length, writes };
-      }
-    }
+    // Summary first, watermark last. A crash in between re-adds the window on
+    // the next pass (double-counted display numbers) instead of undercounting
+    // it; the archive itself only advances together with its watermark.
+    const summary = await readSummary(env);
+    applySummary(summary, counts);
+    await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
 
-    state.chunk = Math.min(AGG_MAX_CHUNK, state.chunk + 1);
-    await env.PLUGIN_ARCHIVE.put(AGG_STATE_KEY, JSON.stringify(state));
-    const of = state.phase === "counts" ? counts.length : state.phase === "pluginTotals" ? pluginTotalEntries.length : uniques.length;
-    return { completed: false, phase: state.phase, offset: state.offset, of, writes };
-  } catch (error) {
-    // Halve the persisted chunk so the next trigger retries smaller; the
-    // cursor itself stays put (idempotent enough for decorative counters).
-    try {
-      const rawState = await env.PLUGIN_ARCHIVE.get(AGG_STATE_KEY);
-      if (rawState) {
-        const st = JSON.parse(rawState) as AggState;
-        st.chunk = Math.max(AGG_MIN_CHUNK, Math.floor(st.chunk / 2));
-        await env.PLUGIN_ARCHIVE.put(AGG_STATE_KEY, JSON.stringify(st));
-      }
-    } catch {
-      // best-effort tuning write; the error below is the real signal
-    }
-    throw error;
+    applyWindow(archive, counts, uniques);
+    archive.lastSuccess = sqlTimestamp(to);
+    await env.PLUGIN_ARCHIVE.put(ARCHIVE_KEY, JSON.stringify(archive));
+
+    return {
+      completed: true,
+      from: windowFrom,
+      to: archive.lastSuccess,
+      counters: counts.length,
+      uniqueDays: uniques.length,
+    };
   } finally {
     await env.PLUGIN_ARCHIVE.delete(AGG_LOCK_KEY);
   }

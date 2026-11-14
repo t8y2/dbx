@@ -37,6 +37,8 @@ import { collectSidebarRemoteSearchResults, mergeSidebarRemoteSearchResults, typ
 import {
   isCancelSearchShortcut,
   isCopySidebarSelectionShortcut,
+  isCreateSidebarTableShortcut,
+  isCreateSidebarDatabaseShortcut,
   isDisconnectSidebarConnectionShortcut,
   isEditSidebarConnectionShortcut,
   isEditSidebarTableStructureShortcut,
@@ -709,8 +711,10 @@ function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
   if (!deferredSearchQuery.value) return nodes;
   const matcher = createSidebarLabelMatcher(deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
   const matchingScopes = globalTableSearchScopes.value.map((scope) => ({ ...scope, entries: scope.entries.filter((entry) => !!matcher(entry.name) || ((regexMode.value || searchMatchMode.value !== "exact") && !!matcher(entry.comment || ""))) })).filter((scope) => scope.entries.length > 0);
-  return mergeSidebarRegexIndexScopes(nodes, matchingScopes);
+  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable);
 }
+
+watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
 
 function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusRestore?: TableSearchFocusRestore) {
   if (isTreeSearchFiltering.value) {
@@ -1607,6 +1611,10 @@ provide(sidebarTreeContextKey, {
   // collapse while a projection is about to start, and the deferred query
   // keeps the currently rendered projection alive while clearing settles.
   isSearchProjectionActive: () => isTreeSearchFiltering.value || !!deferredSearchQuery.value,
+  retainSearchDetailTable: (node) => {
+    if (deferredSearchQuery.value) store.retainSidebarSearchDetailTable(node);
+  },
+  findSearchDetailNode: store.findSidebarSearchDetailNode,
   removeVerifiedTriggerNode: removeVerifiedRemoteTriggerNode,
   getTreeLoadSearchOptions: () => {
     if (!deferredSearchQuery.value) return undefined;
@@ -2389,6 +2397,7 @@ function openSidebarData(node: TreeNode, requireSelection: boolean, openMode: "d
   runSidebarDataOpenImmediately(
     {
       connectionKey: target.connectionId || target.id,
+      targetKey: target.id,
       // Explicit new-tab opens are intentional independent work; ordinary
       // navigation keeps latest-request-wins behavior.
       supersede: openMode !== "new-tab",
@@ -2839,6 +2848,24 @@ function onWindowKeydown(event: KeyboardEvent) {
       }
       return;
     }
+    if (!event.repeat && !event.isComposing && !event.getModifierState("AltGraph") && sidebarShortcutTargetAllowsAppShortcut(event.target) && isCreateSidebarTableShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      const selectedNodeId = store.selectedTreeNodeId;
+      const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : undefined;
+      if (node && store.selectedTreeNodeIds.length === 1 && sidebarTreeRuntimeHostRef.value?.createTableForSelection?.(node)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (!event.repeat && sidebarShortcutTargetAllowsAppShortcut(event.target) && isCreateSidebarDatabaseShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      const selectedNodeId = store.selectedTreeNodeId;
+      const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : undefined;
+      if (node && store.selectedTreeNodeIds.length === 1 && sidebarTreeRuntimeHostRef.value?.createDatabaseForSelection?.(node)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isRefreshDataShortcut(event, settingsStore.editorSettings.shortcuts)) {
       if (requestSelectedSidebarRefresh()) {
         event.preventDefault();
@@ -2992,6 +3019,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   store.sidebarSearchQuery = "";
+  store.clearSidebarSearchDetailTables();
   sidebarLayoutMonitor.dispose();
   sidebarTreeRuntime.dispose();
   sidebarActionGeneration += 1;

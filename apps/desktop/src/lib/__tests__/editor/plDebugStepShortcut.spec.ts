@@ -223,8 +223,9 @@ describe("outside the debugger the three keys keep their existing meaning", () =
   it("keeps Mod+P owned by quickOpen as well, so the fall-through still opens it", () => {
     for (const platform of ["Win32", "MacIntel"]) {
       const event = modKeyEvent("p", platform);
-      // 跨作用域共享 Mod+P：调试作用域的 stepOver + global 作用域的 quickOpen。
-      expect(actionOwners(event, platform).sort()).toEqual(["quickOpen", "stepOver"]);
+      // Windows 的 Ctrl+P 也注册了编辑器补全导航，快速打开仍优先。
+      const owners = platform === "Win32" ? ["previousCompletion", "quickOpen", "stepOver"] : ["quickOpen", "stepOver"];
+      expect(actionOwners(event, platform).sort()).toEqual(owners);
       expect(matchesShortcut(event, DEFAULT_SHORTCUT_SETTINGS.quickOpen, platform)).toBe(true);
     }
     // 非 mac 的宿主环境下 isQuickOpenShortcut（无 platform 参数）也必须认下 Ctrl+P。

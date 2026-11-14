@@ -287,7 +287,8 @@ describe("MySQL table charset and collation columns", () => {
     expect(getCachedObjectBrowserRows(mysqlScope)?.find((row) => row.name === "v_orders")).not.toHaveProperty("collation");
     expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
     expect(host.querySelector('[data-object-column-resize="characterSet"]')).not.toBeNull();
-    expect(host.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
+    // The final visible column has no resize separator.
+    expect(host.querySelector('[data-object-column-resize="collation"]')).toBeNull();
   });
 
   it("sorts tables by charset in both directions while keeping missing values last", async () => {
@@ -320,7 +321,7 @@ describe("MySQL table charset and collation columns", () => {
     const restored = await mountBrowser(ref("pgdemo"), "all");
     await vi.waitFor(() => expect(restored.textContent).toContain("utf8mb4_0900_ai_ci"));
     expect(restored.querySelector('[data-object-column-resize="characterSet"]')).toBeNull();
-    expect(restored.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
+    expect(restored.textContent).toContain("structureEditor.collation");
     expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
   });
 
@@ -346,5 +347,179 @@ describe("MySQL table charset and collation columns", () => {
     await vi.waitFor(() => expect(host.textContent).toContain("a_utf8"));
     expect(host.textContent).not.toContain("structureEditor.characterSet");
     expect(host.textContent).not.toContain("structureEditor.collation");
+  });
+});
+
+describe("MySQL table auto-increment column (#13830)", () => {
+  const BIGINT_UNSIGNED_MAX = "18446744073709551615";
+
+  beforeEach(() => {
+    connection.db_type = "mysql";
+    localStorage.clear();
+    mocks.listSchemas.mockResolvedValue(["pgdemo"]);
+    mocks.listObjects.mockResolvedValue([
+      { name: "a_small", object_type: "TABLE", schema: "pgdemo", comment: "Small counter" },
+      { name: "m_mid", object_type: "TABLE", schema: "pgdemo", comment: "Mid counter" },
+      { name: "z_big", object_type: "TABLE", schema: "pgdemo", comment: "Big counter" },
+      { name: "v_orders", object_type: "VIEW", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "a_small", schema: "pgdemo", auto_increment: "9" },
+      { name: "m_mid", schema: "pgdemo", auto_increment: "100" },
+      { name: "z_big", schema: "pgdemo", auto_increment: BIGINT_UNSIGNED_MAX },
+      { name: "v_orders", schema: "pgdemo", auto_increment: "5" },
+    ]);
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function displayedNames(host: HTMLElement) {
+    return Array.from(host.querySelectorAll(".object-browser-scroller .grid")).map((row) => /a_small|m_mid|z_big|v_orders/.exec(row.textContent ?? "")?.[0]);
+  }
+
+  it("shows each table's next AUTO_INCREMENT value from the shared statistics read", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    // Grouped like the row counts, and exact past 2^53 (BIGINT UNSIGNED).
+    await vi.waitFor(() => expect(host.textContent).toContain(new Intl.NumberFormat().format(BigInt(BIGINT_UNSIGNED_MAX))));
+    expect(host.textContent).toContain("grid.tableInfoAutoIncrement");
+    expect(host.textContent).toContain(new Intl.NumberFormat().format(100));
+    expect(getCachedObjectBrowserRows(mysqlScope)).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a_small", autoIncrement: "9" }), expect.objectContaining({ name: "z_big", autoIncrement: BIGINT_UNSIGNED_MAX })]));
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-object-column-resize="autoIncrement"]')).not.toBeNull();
+  });
+
+  it("sorts tables by the numeric value in both directions, not as text", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain(new Intl.NumberFormat().format(100)));
+    const sort = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "grid.tableInfoAutoIncrement")!;
+    expect(sort).toBeDefined();
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["z_big", "m_mid", "a_small", "v_orders"]));
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["a_small", "m_mid", "z_big", "v_orders"]));
+  });
+
+  it("refreshes a cached scaffold that has collation metadata but no auto-increment yet", async () => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_small", name: "a_small", displayName: "a_small", schema: "pgdemo", type: "TABLE", comment: "Small counter", characterSet: "utf8mb4", collation: "utf8mb4_bin" }], { cachedAt: Date.now() });
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.find((row) => row.name === "a_small")?.autoIncrement).toBe("9"));
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("a_small");
+  });
+
+  it("keeps the column out of other database browsers", async () => {
+    connection.db_type = "postgres";
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(host.textContent).toContain("a_small"));
+    expect(host.textContent).not.toContain("grid.tableInfoAutoIncrement");
+  });
+});
+
+describe("ObjectBrowser common columns and timestamps (#14944)", () => {
+  const createdAt = "2026-11-01 08:00:00";
+  const updatedAt = "2026-11-14 09:30:00";
+  const commonColumnLabels = ["objects.name", "objects.type", "objects.rows", "objects.comment", "objects.size", "objects.updatedAt", "objects.createdAt"];
+  const mysqlColumnLabels = ["grid.tableInfoAutoIncrement", "structureEditor.characterSet", "structureEditor.collation"];
+
+  beforeEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function columnLabels(host: HTMLElement) {
+    return Array.from(host.querySelectorAll(".object-browser-table > div:first-child .grid > div > button")).map((button) => button.textContent?.trim());
+  }
+
+  function cacheTable(target = scope, timestamps: Partial<ObjectBrowserRow> = { created_at: createdAt, updated_at: updatedAt }) {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(target), [{ ...cachedRows[0]!, schema: target.schema, comment: "Order history", collation: "utf8mb4_bin", characterSet: "utf8mb4", autoIncrement: "12", ...timestamps }], { cachedAt: Date.now() });
+  }
+
+  it.each(["postgres", "mysql"] as const)("prioritizes common fields over engine-specific columns for %s", async (databaseType) => {
+    connection.db_type = databaseType;
+    cacheTable(databaseType === "mysql" ? mysqlScope : scope);
+    const host = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("Order history"));
+    expect(columnLabels(host)).toEqual([...commonColumnLabels, ...(databaseType === "mysql" ? mysqlColumnLabels : [])]);
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+    expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
+  });
+
+  it("preserves saved column order and visibility, and resets to the new defaults", async () => {
+    const storageKey = `dbx-object-browser-columns:v1:${connection.id}:pgdemo:public`;
+    localStorage.setItem(`${storageKey}:order`, JSON.stringify(["comment", "name", "type", "estimatedRows", "totalBytes", "updated_at", "created_at"]));
+    localStorage.setItem(storageKey, JSON.stringify({ totalBytes: false }));
+    cacheTable();
+    const host = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(columnLabels(host)[0]).toBe("objects.comment"));
+    expect(columnLabels(host)).toEqual(["objects.comment", "objects.name", "objects.type", "objects.rows", "objects.updatedAt", "objects.createdAt"]);
+
+    host.querySelector<HTMLButtonElement>('[aria-label="objects.configureColumns"]')!.click();
+    let reset: HTMLButtonElement | undefined;
+    await vi.waitFor(() => {
+      reset = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "grid.resetColumnOrder");
+      expect(reset).toBeDefined();
+    });
+    reset!.click();
+    await vi.waitFor(() => expect(columnLabels(host)).toEqual(commonColumnLabels.filter((label) => label !== "objects.size")));
+    expect(localStorage.getItem(`${storageKey}:order`)).toBeNull();
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ totalBytes: false });
+  });
+
+  it.each(["postgres", "mysql", "dameng"] as const)("merges statistics timestamps into the %s list and cached rows", async (databaseType) => {
+    connection.db_type = databaseType;
+    const target = databaseType === "mysql" ? mysqlScope : { ...scope, ...(databaseType === "dameng" ? { exactIdentity: true, oracleTriggerContract: 1 as const } : {}) };
+    mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE", schema: target.schema, comment: "Order history" }]);
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: target.schema, created_at: createdAt, updated_at: updatedAt }]);
+    const host = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(target)?.[0]).toMatchObject({ created_at: createdAt, updated_at: updatedAt }));
+    expect(columnLabels(host)).toContain("objects.updatedAt");
+    expect(columnLabels(host)).toContain("objects.createdAt");
+    expect(host.textContent).toContain(updatedAt);
+    expect(host.textContent).toContain(createdAt);
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps timestamps from the object list when statistics do not provide them", async () => {
+    mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE", created_at: createdAt, updated_at: updatedAt }]);
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: "public", created_at: null, updated_at: null }]);
+    const host = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(scope)?.[0]?.estimatedRows).toBeNull());
+    expect(getCachedObjectBrowserRows(scope)?.[0]).toMatchObject({ created_at: createdAt, updated_at: updatedAt });
+    expect(columnLabels(host)).toContain("objects.updatedAt");
+  });
+
+  it.each([null, undefined])("leaves unavailable timestamp columns hidden when statistics return %s", async (timestamp) => {
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: "public", created_at: timestamp, updated_at: timestamp }]);
+    const host = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(scope)?.[0]?.estimatedRows).toBeNull());
+    expect(columnLabels(host)).not.toContain("objects.updatedAt");
+    expect(columnLabels(host)).not.toContain("objects.createdAt");
+  });
+
+  it("backfills timestamps missing from a fresh MySQL cache without repeatedly reading unknown values", async () => {
+    connection.db_type = "mysql";
+    cacheTable(mysqlScope, { created_at: undefined, updated_at: undefined });
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: "pgdemo", collation: "utf8mb4_bin", auto_increment: "12", created_at: createdAt, updated_at: null }]);
+    const host = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.[0]).toMatchObject({ created_at: createdAt, updated_at: null }));
+    expect(columnLabels(host)).toContain("objects.createdAt");
+    expect(columnLabels(host)).not.toContain("objects.updatedAt");
+    const mounted = mountedApps.pop()!;
+    mounted.app.unmount();
+    mounted.host.remove();
+
+    const restored = await mountBrowser(ref("public"), "all");
+    await vi.waitFor(() => expect(restored.textContent).toContain("Order history"));
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(mocks.listObjects).not.toHaveBeenCalled();
   });
 });

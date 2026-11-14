@@ -57,10 +57,13 @@ export function sqlServerUseDatabaseFromStatement(statement: string): string | u
 /**
  * 方言里 `USE <db>` 会把会话切到另一个库，DBX 的标签库名应当跟着走（#9941）。
  *
- * 只列出已经确认过这一语义的方言：MySQL 及其 wire-protocol 家族。SQL Server 由
+ * 只列出已经确认过这一语义的方言：MySQL 及其 wire-protocol 家族，以及
+ * ClickHouse——它的 HTTP 接口无会话，服务端 `USE` 不影响后续请求，但每个请求
+ * 都带 `database=` 参数，所以「USE 成功后切换标签库」正是让后续查询落到
+ * 目标库的唯一途径（#14798）。SQL Server 由
  * `sqlServerUseDatabaseFromStatement` 单独处理（它还接受 `[db]` 括号标识符）。
  */
-const USE_DATABASE_SWITCH_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "gbase"]);
+const USE_DATABASE_SWITCH_DIALECTS: ReadonlySet<DatabaseType> = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "gbase", "clickhouse"]);
 
 export function switchesDatabaseWithUseStatement(databaseType: DatabaseType | null | undefined): boolean {
   return !!databaseType && USE_DATABASE_SWITCH_DIALECTS.has(databaseType);

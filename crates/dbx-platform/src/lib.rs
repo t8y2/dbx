@@ -1,3 +1,4 @@
+pub mod fs_retry;
 pub mod path_utils;
 pub mod process;
 pub mod proxy;

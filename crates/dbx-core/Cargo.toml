@@ -94,7 +94,9 @@ arc-swap = "1"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+# Win32_Security_Cryptography: CryptProtectData/CryptUnprotectData (DPAPI) for
+# the Windows credential-store key recovery mirror (see secret_codec.rs).
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 dbx-core = { path = ".", default-features = false, features = ["test-support"] }

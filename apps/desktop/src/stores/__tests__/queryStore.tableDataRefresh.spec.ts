@@ -5,21 +5,25 @@ import { clearDataGridStructuredFilterStates, loadDataGridStructuredFilterState,
 import { clearDataGridSortBuilderMemoryCache, useDataGridSortBuilder } from "@/composables/useDataGridSortBuilder";
 import { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
+import type { TableColumnsLoadResult } from "@/lib/metadata/tableMetadataCache";
+import { analyzeEditableQueryEditability } from "@/lib/sql/sqlAnalysis";
 
 const mocks = vi.hoisted(() => ({
+  analyzeEditableQueryEditability: vi.fn(),
   buildTableSelectSql: vi.fn(),
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
   executeMulti: vi.fn(),
   getConnectionConfig: vi.fn(),
   saveOpenTabsState: vi.fn(),
+  loadTableColumns: vi.fn(),
   loadTableMetadata: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
   metadataGeneration: 0,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
-  analyzeEditableQueryEditability: vi.fn().mockResolvedValue({ editable: false, reason: "complex-query" }),
+  analyzeEditableQueryEditability: mocks.analyzeEditableQueryEditability,
   buildTableSelectSql: mocks.buildTableSelectSql,
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
@@ -41,6 +45,7 @@ vi.mock("@/lib/metadata/tableMetadataCache", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/metadata/tableMetadataCache")>();
   return {
     ...actual,
+    loadTableColumns: mocks.loadTableColumns,
     loadTableMetadata: mocks.loadTableMetadata,
   };
 });
@@ -70,6 +75,7 @@ describe("queryStore table data refresh", () => {
     resetRowIdLocatorStateForTests();
     setActivePinia(createPinia());
     mocks.metadataGeneration = 0;
+    mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
     mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ useAgentResultSession: false });
     mocks.getConnectionConfig.mockReturnValue({
       id: "pg-1",
@@ -398,6 +404,33 @@ describe("queryStore table data refresh", () => {
 
     expect(metadata?.queryAnalysis?.selectStar).toBe(false);
     expect(metadata?.querySourceColumns).toEqual(["name"]);
+  });
+
+  it("waits for an active query result's table metadata before batch INSERT mapping", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const sourceStatement = "SELECT name AS label FROM users";
+    tab.results = [{ columns: ["label"], rows: [["Ada"]], sourceStatement }];
+    const columns = [{ name: "name", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null }];
+    const tableMetadata = { columns, tableName: "users", tableType: "TABLE", cachedAt: Date.now() };
+    let resolveColumns!: (metadata: TableColumnsLoadResult) => void;
+    mocks.loadTableColumns.mockReturnValueOnce(new Promise<TableColumnsLoadResult>((resolve) => (resolveColumns = resolve)));
+    mocks.loadTableMetadata.mockResolvedValueOnce({ metadata: { ...tableMetadata, indexes: [], primaryKeys: [] }, cacheStatus: "miss", ageMs: 0 });
+    mocks.analyzeEditableQueryEditability.mockResolvedValueOnce(analyzeEditableQueryEditability(sourceStatement));
+
+    store.setActiveResultIndex(tabId, 0);
+    await vi.waitFor(() => expect(mocks.loadTableColumns).toHaveBeenCalled());
+    expect(tab.tableMeta).toBeUndefined();
+    const batchMetadata = store.resolveResultMetadataForBatch(tabId, tab.result!);
+    resolveColumns({ ...tableMetadata, cacheStatus: "miss", ageMs: 0 });
+
+    await expect(batchMetadata).resolves.toMatchObject({
+      tableMeta: { database: "app", tableName: "users", primaryKeys: [] },
+      querySourceColumns: ["name"],
+    });
   });
 
   it("uses JDBC ResultSet offset pagination for Caché data tabs", async () => {

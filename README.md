@@ -82,28 +82,6 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="docs/public/sponsors/rainyun-card.png" alt="RainYun" width="175" />
-      </a>
-    </td>
-    <td>
-      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
-        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Jalapeño Cloud is an AI infrastructure and token compute platform, with an exclusive DBX entry offering free credits and top-up bonuses.
-      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">Visit Jalapeño Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
         <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
       </a>
@@ -115,13 +93,24 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <img src="docs/public/sponsors/rainyun-card.png" alt="RainYun" width="175" />
+      </a>
+    </td>
+    <td>
+      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://dbx.hualong.online/" target="_blank">
         <img src="docs/public/sponsors/hualong-card.png" alt="HuaLongAI" width="175" />
       </a>
     </td>
     <td>
       HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.
-      <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">Visit HuaLongAI</a>
+      <a href="https://dbx.hualong.online/" target="_blank">Visit HuaLongAI</a>
     </td>
   </tr>
   <tr>
@@ -178,17 +167,6 @@
     <td>
       TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.
       <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">Visit TrustAsia</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
     </td>
   </tr>
   <tr>

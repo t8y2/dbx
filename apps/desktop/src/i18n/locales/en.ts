@@ -12506,6 +12506,9 @@ export default {
   },
   mqTopics: {
     title: "Topics",
+    autoLoadKafkaTopics: "Load topics automatically",
+    loadTopics: "Load topics",
+    kafkaTopicsNotLoaded: "Click Load topics to fetch the list.",
     searchPlaceholder: "Search topics",
     includeNonPersistent: "Include non-persistent topics",
     refresh: "Refresh",

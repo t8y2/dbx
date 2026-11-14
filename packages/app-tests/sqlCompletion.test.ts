@@ -1950,7 +1950,10 @@ test("scopes database-qualified table column suggestions to the matching databas
 
   assert.deepEqual(
     items.map((item) => [item.label, item.type, item.detail]),
-    [["status", "column", "orders  [varchar]"]],
+    [
+      ["status", "column", "orders  [varchar]"],
+      ["status = ''", "snippet", "orders  [varchar]"],
+    ],
   );
 });
 

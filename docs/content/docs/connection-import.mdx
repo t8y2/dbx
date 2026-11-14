@@ -5,17 +5,29 @@ description: Import connections and groups from Navicat, DBeaver, DataGrip, Redi
 
 DBX can import connections from other database tools, saving you from manually re-creating dozens of connections when switching tools.
 
+## Import From Installed Apps
+
+In the desktop app, click **Import Connections** on the welcome page, or choose **Import / Export → From installed apps** in the sidebar. DBX automatically locates and reads saved configurations, then lists individual connections grouped by DBeaver, DataGrip, Navicat, and Redis Desktop Manager.
+
+Select connection checkboxes and click **Import selected**. You can select connections from several apps at once. No file or configuration-source selection is required. Nothing is imported until you confirm. **Scan again** refreshes the connection list and clears your selection.
+
+Discovery includes standard DBeaver workspaces, JetBrains configuration folders, `~/DataGripProjects`, and common Redis Desktop Manager settings folders. On Linux, Navicat discovery reads `~/.config/navicat/Common/connections.json` and NCX files saved inside Navicat configuration folders. Navicat running under Wine is discovered from `user.reg` in `~/.wine`, other `~/.wine*` prefixes, `WINEPREFIX`, and standard Bottles and PlayOnLinux prefixes. Only Navicat server entries are included in the connection list. On native Windows and macOS, use a Navicat export file.
+
+For Navicat under Wine, DBX recovers supported saved database passwords, SSH passwords, and SSH key passphrases locally using the Navicat credential in the same Wine prefix. Passwords are accepted only after AES-GCM authentication succeeds. Missing or unreadable credentials leave the password empty. The list indicates when a saved password is available. Selecting a Wine connection that already matches an existing DBX connection fills missing passwords without creating a duplicate or overwriting an existing password.
+
+To add a file manually, choose its app in **Add connections from a file**, then click **Add file…**. Connections from the file appear in the same checkbox list as automatically discovered connections. You can select and import them together. Manual files remain in the list when you scan again. Encrypted DBX backups open the existing passphrase and connection-selection flow.
+
 ## Supported Formats
 
 | Source  | Format                         | What's Imported                                      |
 | ------- | ------------------------------ | ---------------------------------------------------- |
-| Navicat | `.ncx` export files            | Host, port, username, database type, connection name |
+| Navicat | `.ncx` / XML exports and Linux `connections.json` | Host, port, username, database type, connection name |
 | DBeaver | Connection configuration files | Host, port, username, database type, connection name |
 | DataGrip | Project or global files such as `dataSources.xml` | JDBC URL, driver, connection name, groups, and readable credentials |
 | RedisDesktopManager | JSON export | Redis connections, nested groups, authentication, TLS, and SSH settings |
 | Another Redis Desktop Manager | `.ano` export | Redis connections, groups, ACL, SSH/TLS, Sentinel, and Cluster settings |
 
-<Callout type="info">Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools cannot be decrypted — you will need to re-enter passwords after import.</Callout>
+<Callout type="info">Imported connections preserve the original connection name and type. DBX imports supported saved credentials when available. Passwords protected by unsupported encryption or unavailable credential stores must be re-entered.</Callout>
 
 ## Import Navicat Connections
 
@@ -134,7 +146,7 @@ Imported connections appear in the sidebar alongside manually created ones. You 
 
 | Setting                      | Reason                                                              |
 | ---------------------------- | ------------------------------------------------------------------- |
-| Encrypted passwords          | Each tool uses proprietary encryption; passwords must be re-entered |
+| Unsupported encrypted passwords | Unavailable keys or unsupported formats require password re-entry |
 | SSH tunnel keys              | Key file paths may differ between machines; re-select the key file  |
 | Custom driver configurations | Driver paths and versions are tool-specific                         |
 | Proxy settings               | Re-configure in the connection's Proxy tab                          |

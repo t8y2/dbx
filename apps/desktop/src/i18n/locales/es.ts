@@ -1,3 +1,4 @@
+import { installedImportEs as installedImport } from "./installedImportMessages";
 import { tableColumnPasteEs as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuEs as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogEs as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -67,6 +68,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  installedImport,
   oracleTrigger: {
     errorPositionUnavailable: "Código fuente abierto. No se pudo verificar la ubicación del error; consulte la línea y la columna indicadas.",
     reconcileStructure: "Reconciliar cambios aplicados",

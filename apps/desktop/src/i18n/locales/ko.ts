@@ -1,3 +1,4 @@
+import { installedImportKo as installedImport } from "./installedImportMessages";
 import { tableColumnPasteKo as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuKo as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogKo as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  installedImport,
   oracleTrigger: {
     errorPositionUnavailable: "소스를 열었습니다. 오류 위치를 확인할 수 없으므로 표시된 행과 열을 확인하세요.",
     reconcileStructure: "적용된 변경 사항 대조",

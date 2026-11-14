@@ -12673,7 +12673,7 @@ sleep 30
     }
 
     #[test]
-    fn non_agent_metadata_role_preserves_existing_pool_keys() {
+    fn mysql_client_session_metadata_role_is_isolated_from_workload() {
         let config = mysql_config(Some("analytics"));
 
         let workload = super::pool_key_for_session_role(
@@ -12689,8 +12689,40 @@ sleep 30
             crate::agent_connection::AgentSessionRole::Metadata,
         );
 
-        assert_eq!(metadata, workload);
-        assert_eq!(metadata, "conn:analytics:session:task_1");
+        assert_eq!(workload, "conn:session:task_1");
+        assert_eq!(metadata, "conn:analytics:session:task_1:role:metadata");
+        assert_ne!(metadata, workload);
+
+        let base_metadata = super::pool_key_for_session_role(
+            Some(&config),
+            "conn:analytics".to_string(),
+            None,
+            crate::agent_connection::AgentSessionRole::Metadata,
+        );
+        assert_eq!(base_metadata, "conn:analytics");
+    }
+
+    #[test]
+    fn non_mysql_non_agent_metadata_role_preserves_existing_pool_keys() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::SqlServer] {
+            let mut config = mysql_config(Some("analytics"));
+            config.db_type = db_type;
+            let workload = super::pool_key_for_session_role(
+                Some(&config),
+                "conn:analytics".to_string(),
+                Some("task:1"),
+                crate::agent_connection::AgentSessionRole::Workload,
+            );
+            let metadata = super::pool_key_for_session_role(
+                Some(&config),
+                "conn:analytics".to_string(),
+                Some("task:1"),
+                crate::agent_connection::AgentSessionRole::Metadata,
+            );
+
+            assert_eq!(metadata, workload);
+            assert_eq!(metadata, "conn:analytics:session:task_1");
+        }
     }
 
     #[test]

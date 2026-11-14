@@ -1,0 +1,27 @@
+[
+  {
+    "dialect": "postgres",
+    "name": "pg_create_table",
+    "reason": "DataGrip's error-node layout splits generated/identity and function tokens in this IF NOT EXISTS example. DBX preserves the valid column definitions instead."
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_returning",
+    "reason": "DataGrip separates INSERT INTO and leaves RETURNING on the FROM line in this CTE example. DBX keeps the conventional INSERT INTO and RETURNING sections."
+  },
+  {
+    "dialect": "mysql",
+    "name": "mysql_create_table",
+    "reason": "DataGrip's error-node layout splits the parameterized type and drops normal row separation for this IF NOT EXISTS example. DBX preserves valid, readable DDL."
+  },
+  {
+    "dialect": "sqlite",
+    "name": "sqlite_create_table",
+    "reason": "DataGrip's error-node layout places every modifier on a separate line for this IF NOT EXISTS example. DBX keeps complete column definitions on one row each."
+  },
+  {
+    "dialect": "sqlite",
+    "name": "sqlite_upsert",
+    "reason": "DataGrip keeps ON CONFLICT on the VALUES line and omits the space after the SET equals sign in this example. DBX emits conventional ON CONFLICT and SET spacing."
+  }
+]

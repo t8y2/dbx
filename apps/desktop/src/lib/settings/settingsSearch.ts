@@ -272,7 +272,14 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     route: { formatterMode: "form" },
     keywordKeys: ["settings.sqlFormatterIndentStyleStandard", "settings.sqlFormatterIndentStyleTabularLeft", "settings.sqlFormatterIndentStyleTabularRight"],
   },
-  { id: "formatter-layout-style", category: "formatter", titleKey: "settings.sqlFormatterLayoutStyle", targetId: "formatter", route: { formatterMode: "form" }, keywordKeys: ["settings.sqlFormatterLayoutStyleClassic", "settings.sqlFormatterLayoutStyleDbx"] },
+  {
+    id: "formatter-layout-style",
+    category: "formatter",
+    titleKey: "settings.sqlFormatterLayoutStyle",
+    targetId: "formatter",
+    route: { formatterMode: "form" },
+    keywordKeys: ["settings.sqlFormatterLayoutStyleClassic", "settings.sqlFormatterLayoutStyleDbx", "settings.sqlFormatterLayoutStyleDataGrip"],
+  },
   {
     id: "formatter-logical-operator-newline",
     category: "formatter",

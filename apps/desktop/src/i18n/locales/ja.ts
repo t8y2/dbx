@@ -8736,6 +8736,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "表形式右寄せ",
     sqlFormatterLayoutStyle: "レイアウトスタイル",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "クラシック",
     sqlFormatterLogicalOperatorNewline: "論理演算子の改行",
     sqlFormatterLogicalBefore: "演算子の前",

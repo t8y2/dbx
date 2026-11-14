@@ -80,6 +80,7 @@ import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/
 
 import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible, locateCursorForGutterExecution } from "@/lib/editor/queryEditorExecutionViewport";
 import { mapQueryEditorFormatSelection } from "@/lib/editor/queryEditorFormatSelection";
+import { mapDataGripSelectionUsingWorker } from "@/lib/sql/sqlFormatterWorker";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
@@ -1924,6 +1925,7 @@ async function formatCurrentSql() {
   const source = originalState.sliceDoc(from, to);
   if (!source.trim()) return;
   const formatDialect = props.formatDialect ?? props.dialect ?? "generic";
+  const formatterOwner = `query-editor-format:${props.tabId ?? "current"}`;
 
   try {
     let formatted: string;
@@ -1957,9 +1959,15 @@ async function formatCurrentSql() {
           // contract for format-on-save, which must never fail), which turned
           // this command into a silent no-op. A thrown error reaches the
           // `formatError` toast below.
-          formatted = await formatSqlText(source, formatDialect, settingsStore.editorSettings.sqlFormatter, (diagnostic) => {
-            formatDiagnostic = diagnostic;
-          });
+          formatted = await formatSqlText(
+            source,
+            formatDialect,
+            settingsStore.editorSettings.sqlFormatter,
+            (diagnostic) => {
+              formatDiagnostic = diagnostic;
+            },
+            formatterOwner,
+          );
         }
       }
     }
@@ -1971,7 +1979,14 @@ async function formatCurrentSql() {
     // The semantic mapper's contract is SQL-only. Mongo shell, Elasticsearch,
     // JSON, and XML keep the replacement selection behavior used before the
     // SQL caret-preservation fix.
-    const replacementSelection = formattedAsSql ? mapQueryEditorFormatSelection(source, formatted, { anchor: selection.anchor - from, head: selection.head - from }, formatDialect) : formatsSelection ? { anchor: 0, head: formatted.length } : { anchor: formatted.length, head: formatted.length };
+    const replacementSelection = formattedAsSql
+      ? settingsStore.editorSettings.sqlFormatter.layoutStyle === "datagrip"
+        ? await mapDataGripSelectionUsingWorker(source, formatted, { anchor: selection.anchor - from, head: selection.head - from }, formatDialect, formatterOwner)
+        : mapQueryEditorFormatSelection(source, formatted, { anchor: selection.anchor - from, head: selection.head - from }, formatDialect)
+      : formatsSelection
+        ? { anchor: 0, head: formatted.length }
+        : { anchor: formatted.length, head: formatted.length };
+    if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) return;
     currentView.dispatch({
       changes: { from, to, insert: formatted },
       selection: { anchor: from + replacementSelection.anchor, head: from + replacementSelection.head },

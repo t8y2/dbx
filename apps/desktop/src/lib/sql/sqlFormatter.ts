@@ -1,6 +1,7 @@
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlFormatterOptions, type SqlFormatterIndentStyle, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
+import { formatDataGripSqlUsingWorker } from "@/lib/sql/sqlFormatterWorker";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
 import { indentRoutineBlocks } from "@/lib/sql/routineBlockLayout";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
@@ -454,7 +455,7 @@ function protectBlockCommentLineEndings(sql: string, dialect: SqlFormatDialect):
 
 export type SqlFormatterDiagnostic = "custom-rules-fallback";
 
-export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS, onDiagnostic?: (diagnostic: SqlFormatterDiagnostic) => void): Promise<string> {
+export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "generic", settings: Partial<SqlFormatterSettings> = DEFAULT_SQL_FORMATTER_SETTINGS, onDiagnostic?: (diagnostic: SqlFormatterDiagnostic) => void, requestOwner?: string): Promise<string> {
   if (!sql.trim()) return sql;
   if (sql.length > MAX_SQL_FORMAT_CHARS) {
     throw new Error("SQL is too large to format safely.");
@@ -466,6 +467,10 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
 
   const normalizedSettings = normalizeSqlFormatterSettings(settings);
   if (dialect === "cypher") return formatCypherText(sql, normalizedSettings);
+  if (normalizedSettings.layoutStyle === "datagrip") {
+    if (dialect !== "postgres" && dialect !== "mysql" && dialect !== "sqlite") throw new Error(`DataGrip formatting does not support the ${dialect} dialect.`);
+    return formatDataGripSqlUsingWorker(sql, dialect, normalizedSettings, requestOwner);
+  }
 
   const sqlFormatter = await import("sql-formatter");
   const { format, formatDialect } = sqlFormatter;
@@ -944,6 +949,7 @@ function applySqlFormatterLayout(sql: string, settings: SqlFormatterSettings, di
 function isSqlFormatterParseError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.message.startsWith("Parse error: Unexpected ")) return true;
+  if ((error as Error & { parseError?: unknown }).parseError === true) return true;
   if (!error.message.startsWith("Parse error at token:")) return false;
   const candidate = error as Error & { offset?: unknown; token?: unknown };
   return typeof candidate.offset === "number" && candidate.token !== undefined;

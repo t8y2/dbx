@@ -10671,6 +10671,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "จัดตารางชิดขวา",
     sqlFormatterLayoutStyle: "รูปแบบ Layout",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "คลาสสิก",
     sqlFormatterLogicalOperatorNewline: "ขึ้นบรรทัดใหม่ของตัวดำเนินการตรรกะ",
     sqlFormatterLogicalBefore: "ก่อนตัวดำเนินการ",

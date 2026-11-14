@@ -8843,6 +8843,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "표 오른쪽 정렬",
     sqlFormatterLayoutStyle: "레이아웃 스타일",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "클래식",
     sqlFormatterLogicalOperatorNewline: "논리 연산자 줄바꿈",
     sqlFormatterLogicalBefore: "연산자 앞",

@@ -8939,6 +8939,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "Tabular derecha",
     sqlFormatterLayoutStyle: "Estilo de diseño",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "Clásico",
     sqlFormatterLogicalOperatorNewline: "Salto de línea en operador lógico",
     sqlFormatterLogicalBefore: "Antes del operador",

@@ -81,4 +81,10 @@ pub struct TableDataSelectSqlOptions {
     pub inject_default_time_series_where: bool,
     #[serde(default)]
     pub include_row_id: bool,
+    /// Select exactly `columns` instead of the engine's default projection
+    /// (`SELECT *` for most engines). Opt-in for SQL the user reads or copies,
+    /// for example after hiding columns in the data grid; table loading keeps
+    /// the default projection.
+    #[serde(default)]
+    pub project_columns: bool,
 }

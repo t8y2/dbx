@@ -1560,6 +1560,11 @@ fn should_discard_agent_pool_after_error(err: &str) -> bool {
 }
 
 pub fn pool_error_action(db_type: Option<DatabaseType>, err: &str) -> PoolErrorAction {
+    // The guard already refused the statement before using a replacement
+    // session. Do not replay it or remove a newer valid pool generation.
+    if err.contains("MYSQL_CLIENT_SESSION_LOST") {
+        return PoolErrorAction::Keep;
+    }
     if db_type.is_some_and(|db_type| database_capabilities::is_agent_type(&db_type)) {
         return if should_discard_agent_pool_after_error(err) {
             // Agent user operations are never replayed from an error hint because
@@ -1859,6 +1864,36 @@ fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeou
     crate::db::oceanbase_mysql::query_timeout_sql(config, timeout_secs)
 }
 
+// Keep do_execute_typed's future shallow, as with MySQL transaction settlement.
+fn apply_mysql_client_session_context<'a>(
+    state: &'a AppState,
+    pool_key: &'a str,
+    pool: &'a db::mysql::MySqlPool,
+    conn: &'a mut mysql_async::Conn,
+    database: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        if !pool.is_client_session_pool() {
+            return Ok(());
+        }
+        let is_logical_session = {
+            let configs = state.configs.read().await;
+            crate::connection::config_for_pool_key(pool_key, &configs).is_some_and(|config| {
+                config.db_type == DatabaseType::Mysql
+                    && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+                    && pool_key.starts_with(&format!("{}:session:", config.id))
+                    && !pool_key.ends_with(":role:metadata")
+            })
+        };
+        if is_logical_session && state.mysql_client_session_database_change(pool_key, pool, conn.id(), database).await?
+        {
+            db::mysql::select_session_database(conn, database).await?;
+            state.record_mysql_client_session_database(pool_key, pool, database).await;
+        }
+        Ok(())
+    })
+}
+
 async fn apply_oceanbase_mysql_session_timeout(
     state: &AppState,
     pool_key: &str,
@@ -1984,6 +2019,7 @@ async fn do_execute_typed(
                 Err(err) => return Err(err.into()),
             };
             let connection_id = conn.id();
+            apply_mysql_client_session_context(state, pool_key, &p, &mut conn, database.unwrap_or_default()).await?;
             if let Some(ref execution_id) = options.execution_id {
                 let kill_opts = conn.opts().clone();
                 // The interrupt runs after the user asked to cancel; give the
@@ -2070,6 +2106,7 @@ async fn do_execute_typed(
                         );
                         let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
                         state.remove_pool_by_key(pool_key).await;
+                        return Err(format!("MYSQL_CLIENT_SESSION_LOST: The MySQL session state could not be verified. The transaction outcome may be unknown: {error}").into());
                     }
                 }
             }
@@ -4723,9 +4760,8 @@ fn decide_mysql_auto_commit_transaction(
     explicit_start_in_batch: bool,
     status: Option<db::mysql::MySqlSessionStatus>,
 ) -> MysqlAutoCommitDecision {
-    // A session or batch that turned auto-commit off opens its transactions
-    // implicitly, so the server status is the only signal for those.
-    let explicit_transaction = explicit_start_in_batch || status.is_some_and(|status| !status.autocommit);
+    // IN_TRANS also reports an explicit transaction while autocommit is on.
+    // Do not require a textual opener in the current batch to preserve it.
     let transaction_open = match status {
         Some(status) => status.in_transaction,
         // No usable status packet (the last statement ended with an ERR packet
@@ -4735,13 +4771,14 @@ fn decide_mysql_auto_commit_transaction(
     if !transaction_open {
         return MysqlAutoCommitDecision { preserve: false, rollback: MysqlAutoCommitRollback::None };
     }
-    if already_preserved || (allow_preserve && explicit_transaction) {
+    if already_preserved || allow_preserve {
         return MysqlAutoCommitDecision { preserve: true, rollback: MysqlAutoCommitRollback::None };
     }
-    // Distinguish who opened it: only a batch with its own `BEGIN` /
-    // `START TRANSACTION` is a user transaction; `autocommit = 0` opens
-    // transactions implicitly for every statement.
-    let rollback = if explicit_start_in_batch {
+    // An open transaction with autocommit on is explicit, including one
+    // started by a procedure or executable comment. With autocommit off,
+    // ordinary statements can open transactions implicitly instead.
+    let rollback = if explicit_start_in_batch || status.is_some_and(|status| status.in_transaction && status.autocommit)
+    {
         MysqlAutoCommitRollback::Explicit
     } else if status.is_some_and(|status| !status.autocommit) {
         MysqlAutoCommitRollback::SessionAutocommit
@@ -4813,10 +4850,14 @@ async fn settle_mysql_auto_commit_transaction(
 ) -> Result<MysqlAutoCommitTransaction, String> {
     let already_preserved = state.has_preserved_explicit_transaction(pool_key).await;
     let mut status = db::mysql::session_status_from_last_ok(conn);
-    if status.is_none() && (allow_preserve || already_preserved) {
+    if (!status_is_final || status.is_none()) && (allow_preserve || already_preserved) {
         // Only pay for the extra round trip when the answer can change the
         // outcome: without the opt-in the historical cleanup runs regardless.
-        status = db::mysql::ping_session_status_on_conn(conn).await.ok();
+        status = Some(
+            db::mysql::ping_session_status_on_conn(conn)
+                .await
+                .map_err(|error| format!("Unable to verify MySQL transaction state: {error:?}"))?,
+        );
     }
     let decision =
         decide_mysql_auto_commit_transaction(allow_preserve, already_preserved, explicit_start_in_batch, status);
@@ -4882,6 +4923,7 @@ async fn execute_multi_mysql(
         }
     };
     let checkout_ms = checkout_started_at.elapsed().as_millis();
+    apply_mysql_client_session_context(state, pool_key, pool, &mut conn, database).await?;
     apply_oceanbase_mysql_session_timeout(state, pool_key, &mut conn, options.timeout_secs).await?;
     let catalog_started_at = std::time::Instant::now();
     wait_for_result_opt(
@@ -4993,7 +5035,7 @@ async fn execute_multi_mysql(
                 log::warn!("[query][mysql-batch] trace_id={} open_txn_rollback_failed error={}", trace_id, error);
                 let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
                 state.remove_pool_by_key(pool_key).await;
-                return Ok(results);
+                return Err(format!("MYSQL_CLIENT_SESSION_LOST: The MySQL session state could not be verified. The transaction outcome may be unknown: {error}"));
             }
         }
     }
@@ -14781,12 +14823,15 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn mysql_auto_commit_rolls_back_a_leftover_transaction_without_reporting_it() {
-        // No opener in the batch and auto-commit still on: this is a leftover
-        // transaction (cancelled or aborted batch), not a user transaction.
+    fn mysql_auto_commit_preserves_a_server_reported_transaction_with_autocommit_on() {
+        // A procedure or executable comment can start a real transaction even
+        // when no top-level opener was classified. IN_TRANS is authoritative.
         let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, true)));
-        assert!(!decision.preserve);
+        assert!(decision.preserve);
         assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
+        let default = decide_mysql_auto_commit_transaction(false, false, false, Some(mysql_status(true, true)));
+        assert!(!default.preserve);
+        assert_eq!(default.rollback, MysqlAutoCommitRollback::Explicit);
     }
 
     #[test]

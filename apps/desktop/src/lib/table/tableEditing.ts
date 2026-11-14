@@ -1,9 +1,24 @@
-import type { ColumnInfo, DatabaseType, IndexInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, IndexInfo } from "@/types/database";
 import { getDatabaseCapability } from "@/lib/database/databaseCapabilities";
 
 export const DBX_ROWID_COLUMN = "__DBX_ROWID";
 export const DBX_NEO4J_ELEMENT_ID_COLUMN = "__DBX_ELEMENT_ID";
 export const DBX_TDENGINE_TBNAME_COLUMN = "tbname";
+
+/**
+ * PostgreSQL-family engines whose storage rejects the tableoid/ctid/xmin
+ * tuple locator on at least some tables: Greenplum and Apache Cloudberry AO
+ * tables (`ERROR: virtual tuple table slot does not have system attributes`,
+ * `Invalid attnum: -3`, #14745) and Hologres (#12647, rejects `tableoid`
+ * outright). Detected from the connection's `SELECT version()` product
+ * string; before that probe lands the connection degrades on first
+ * rejection and is remembered per session.
+ */
+export function postgresTupleLocatorUnsupportedEngine(connection: Pick<ConnectionConfig, "db_type" | "database_info"> | undefined): boolean {
+  if (connection?.db_type !== "postgres") return false;
+  const version = `${connection.database_info?.productName ?? ""} ${connection.database_info?.productVersion ?? ""}`.toLowerCase();
+  return version.includes("greenplum") || version.includes("cloudberry") || version.includes("hologres");
+}
 
 export function isViewTableType(tableType?: string): boolean {
   return tableType?.toUpperCase().includes("VIEW") === true;

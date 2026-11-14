@@ -351,6 +351,9 @@ func (server *Server) initialize(params json.RawMessage) (any, *PluginError) {
 	}
 	for _, version := range request.Host.ProtocolVersions {
 		if version == ProtocolVersion {
+			// A nil capabilities slice would encode as JSON `null`, and the
+			// host rejects `null` where it expects a sequence (#14972), so
+			// the whole plugin initialization fails. Normalize to [] here.
 			capabilities := server.metadata.Capabilities
 			if capabilities == nil {
 				capabilities = []string{}

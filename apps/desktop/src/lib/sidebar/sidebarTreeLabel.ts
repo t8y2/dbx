@@ -14,6 +14,7 @@ export function sidebarTreeDisplayLabel(node: TreeNode, t: SidebarTreeTranslate,
   }
   if (node.type === "load-more") return node.loadMore?.objectType === "INDEX" ? `${t("tree.indexes")} · ${t(node.label)}` : t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
+  if (node.type === "postgres-aggregate-functions") return t(node.label);
   // Use the canonical key for persisted trees created before this label was
   // internationalized; those nodes may still contain the old Chinese text.
   if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");

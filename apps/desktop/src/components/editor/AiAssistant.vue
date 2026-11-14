@@ -177,7 +177,7 @@ import { isAiConfigModelCandidate, isCliProvider } from "@/lib/ai/aiConfigCandid
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
 import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
-import { supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
+import { resolveAiRuntimeStrategy, supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
 import {
   acquireDesktopAiRunSlot,
   activeDesktopAiRuns,
@@ -299,7 +299,8 @@ const { openTableTarget } = useNavigationTargets({
 const { toast } = useToast();
 const { isDark } = useTheme();
 const supportsCliProviders = isTauriRuntime();
-const backgroundAiRunsEnabled = supportsBackgroundAiRuns();
+const aiRuntimeStrategy = resolveAiRuntimeStrategy();
+const backgroundAiRunsEnabled = supportsBackgroundAiRuns(aiRuntimeStrategy);
 
 type AiMessageMention =
   | {
@@ -685,7 +686,9 @@ const aiContextTarget = computed<AiContextTarget>(() => aiContextTargetFor(conve
 function restoreInitialConversation() {
   if (!assistantViewMounted || initialConversationRestored || !initialConversationStateLoaded || !settings.isAiConfigLoaded) return;
   initialConversationRestored = true;
-  if (settings.restoreLastConversation && conversations.value[0]) {
+  // A new detached editor starts its own chat instead of implicitly adopting
+  // a conversation that may still be running in the main window.
+  if (aiRuntimeStrategy !== "desktop-cancel-on-close" && settings.restoreLastConversation && conversations.value[0]) {
     selectConversation(conversations.value[0]);
   }
 }
@@ -6698,7 +6701,14 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction });
+async function prepareForWindowClose() {
+  if (backgroundAiRunsEnabled) return;
+  flushAssistantDeltas();
+  if (isGenerating.value) abandonInFlightRequest();
+  await persistConversation();
+}
+
+defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction, prepareForWindowClose });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;

@@ -1,7 +1,7 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
-use sqlparser::ast::{Expr, Function, Select, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::ast::{Expr, Function, Query, Select, SetExpr, Statement, TableFactor, Visit, Visitor};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 use std::collections::{HashMap, HashSet};
@@ -365,7 +365,20 @@ fn sql_database_scope_is_disallowed(
         .map(|database| normalize_database_name(database))
         .filter(|database| !database.is_empty())
         .collect::<HashSet<_>>();
-    let assessment = referenced_databases(sql, db_type, active_database, true, static_postgres_query);
+    let mysql_cte_qualifiers = static_mysql_cte_qualifiers(sql, db_type);
+    if mysql_cte_qualifiers
+        .as_ref()
+        .is_some_and(|qualifiers| qualifiers.iter().any(|qualifier| !allowed_databases.contains(qualifier)))
+    {
+        return true;
+    }
+    let assessment = referenced_databases(
+        sql,
+        db_type,
+        active_database,
+        true,
+        static_postgres_query || mysql_cte_qualifiers.is_some(),
+    );
     assessment.uncertain || assessment.databases.into_iter().any(|database| !allowed.contains(&database))
 }
 
@@ -517,17 +530,9 @@ fn collect_qualified_target_databases(
 /// Unsupported statements, call syntax and FROM factors keep the existing scan.
 fn has_static_postgres_query_structure(sql: &str) -> bool {
     let dialect = PostgreSqlDialect {};
-    let Ok(tokens) = Tokenizer::new(&dialect, sql).with_unescape(false).tokenize() else {
+    let Some(tokens) = tokenize_scope_query(&dialect, sql) else {
         return false;
     };
-    // Bound AST traversal and drop on worker stacks; larger queries keep the
-    // original scan even when parsing itself would not exceed its depth limit.
-    if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS {
-        return false;
-    }
-    if bracket_nesting_exceeds(&tokens, MAX_SCOPE_QUERY_NESTING_DEPTH) {
-        return false;
-    }
     // Ordinary backslash strings depend on standard_conforming_strings, which
     // is not available here. E strings and dollar quotes have explicit semantics.
     if tokens.iter().any(|token| {
@@ -539,6 +544,86 @@ fn has_static_postgres_query_structure(sql: &str) -> bool {
         return false;
     };
     !statements.is_empty() && matches!(statements.visit(&mut StaticPostgresQuery), ControlFlow::Continue(()))
+}
+
+fn tokenize_scope_query(dialect: &dyn Dialect, sql: &str) -> Option<Vec<Token>> {
+    let tokens = Tokenizer::new(dialect, sql).with_unescape(false).tokenize().ok()?;
+    // Bound AST traversal and drop on worker stacks before parsing.
+    if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS
+        || bracket_nesting_exceeds(&tokens, MAX_SCOPE_QUERY_NESTING_DEPTH)
+    {
+        return None;
+    }
+    Some(tokens)
+}
+
+/// The legacy FROM scan can cross a CTE's closing parenthesis and mistake a
+/// comma in the outer projection for another table. For a proven static CTE,
+/// collect the tables directly, including comma joins inside any query block.
+fn static_mysql_cte_qualifiers(sql: &str, db_type: &DatabaseType) -> Option<HashSet<String>> {
+    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris)
+        || first_keyword(sql).as_deref() != Some("with")
+        || sql.contains(['\\', '"', '#', '$'])
+        || sql.contains("/*")
+        || sql.contains("--")
+        || crate::query_execution_sql::is_write_sql_for_database(sql, *db_type)
+    {
+        return None;
+    }
+    // Quotes, escapes and comments above can depend on engine or session modes.
+    // Those inputs keep the existing conservative scan.
+    let dialect = MySqlDialect {};
+    let statements = Parser::new(&dialect).with_tokens(tokenize_scope_query(&dialect, sql)?).parse_statements().ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    query.with.as_ref()?;
+    let mut scope = StaticMysqlCteScope::default();
+    match statements.visit(&mut scope) {
+        ControlFlow::Continue(()) => Some(scope.qualifiers),
+        ControlFlow::Break(()) => None,
+    }
+}
+
+#[derive(Default)]
+struct StaticMysqlCteScope {
+    qualifiers: HashSet<String>,
+}
+
+impl Visitor for StaticMysqlCteScope {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        match query.body.as_ref() {
+            SetExpr::Select(select) if select.into.is_none() && query.locks.is_empty() => ControlFlow::Continue(()),
+            _ => ControlFlow::Break(()),
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Function(_) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, table: &TableFactor) -> ControlFlow<Self::Break> {
+        match table {
+            TableFactor::Table { name, args: None, .. } => match name.0.as_slice() {
+                [table] if table.as_ident().is_some() => {}
+                [database, table] if table.as_ident().is_some() => {
+                    let Some(database) = database.as_ident() else { return ControlFlow::Break(()) };
+                    // MySQL database names may be case-sensitive. Require an exact
+                    // allowlist match for qualifiers found by this proof.
+                    self.qualifiers.insert(database.value.clone());
+                }
+                _ => return ControlFlow::Break(()),
+            },
+            TableFactor::Derived { .. } | TableFactor::NestedJoin { .. } => {}
+            _ => return ControlFlow::Break(()),
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 /// Whether bracket nesting goes deeper than `limit`.

@@ -4193,7 +4193,7 @@ async fn completion_assistant_search_inner(
         let rows = postgres_query_cached(
             client,
             postgres_completion_tables_sql(),
-            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)],
+            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64), &request.global_search],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -4380,7 +4380,9 @@ fn postgres_completion_tables_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
      WHERE ($1::text IS NOT NULL AND n.nspname = $1 \
-            OR $1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)) \
+            OR $1::text IS NULL AND (pg_catalog.pg_table_is_visible(c.oid) \
+                OR $5::bool AND left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' \
+                   AND pg_catalog.has_schema_privilege(n.oid, 'USAGE'))) \
        AND c.relkind::text = ANY($3::text[]) \
        AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
      ORDER BY c.relname LIMIT $4"
@@ -8448,7 +8450,7 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -8502,7 +8504,7 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                ORDER BY sequence_dep.objid \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -10127,9 +10129,15 @@ pub async fn execute_query_on_client_unnamed(
 // relation: a FOREIGN KEY stores the referenced table's unique index in
 // `conindid`, so matching on `conindid` alone marked that standalone index as
 // constraint-backed and dropped it from generated DDL (#10484).
-// The qualified name is joined with `pg_catalog.textcat` rather than `||`:
-// openGauss B mode without `pipes_as_concat` reads `||` as logical OR, and
-// indexes have no information_schema fallback to recover from it (#13873).
+// The qualified name is built with `concat()` rather than `||`: openGauss B
+// mode without `pipes_as_concat` reads `||` as logical OR, and indexes have no
+// information_schema fallback to recover from it (#13873). `concat` is also the
+// spelling every target kernel shares: CockroachDB's `pg_catalog` has no
+// `textcat`, so the earlier `pg_catalog.textcat(...)` form failed every index
+// listing there with `unknown function: pg_catalog.textcat()` (42883).
+// The calls stay nested two-argument instead of variadic `concat(a, b, c)`:
+// an Oracle-compatible GaussDB A mode can expose the two-argument Oracle
+// CONCAT, so the flat form would break exactly there.
 //
 // `AND k.attnum >= 0` skips system attributes (negative `indkey` entries such as
 // `tableoid`) that openGauss / GaussDB can carry in `pg_index.indkey`: because the
@@ -10159,7 +10167,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
              LEFT JOIN pg_opclass oc ON oc.oid = k.class_oid \
              LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace \
-             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND k.attnum >= 0 \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisvalid, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
@@ -10220,7 +10228,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -15244,16 +15252,15 @@ mod tests {
         // openGauss B (MySQL) mode without `pipes_as_concat` reads `||` as logical OR, so
         // `quote_ident($1) || '.' || quote_ident($2)` became a boolean and the regclass
         // lookup failed with `relation "0" does not exist` (#13873).
+        // `concat()` is the spelling every target kernel has: CockroachDB's `pg_catalog`
+        // carries no `textcat`, which broke index listings with
+        // `unknown function: pg_catalog.textcat()` (42883).
         for sql in
             [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL]
         {
-            assert!(
-                sql.contains(
-                    "pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass"
-                ),
-                "{sql}"
-            );
+            assert!(sql.contains("concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass"), "{sql}");
             assert!(!sql.contains("quote_ident($1) || '.' || quote_ident($2)"), "{sql}");
+            assert!(!sql.contains("textcat"), "{sql}");
         }
     }
 

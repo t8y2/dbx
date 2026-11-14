@@ -3256,6 +3256,36 @@ where
     }
 }
 
+// Catalog visibility alone does not grant access to a schema (#14272).
+// Use the same effective privileges during worker discovery and snapshot
+// discovery, including ownership, role membership, and grants to PUBLIC.
+const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
+     WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+     AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+     AND n.nspname NOT LIKE 'pg_temp_%' \
+     AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') ORDER BY n.nspname";
+
+pub(crate) async fn list_database_backup_schemas_core(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let db_type = state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .map(|config| config.db_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+    if !matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
+        return Ok(vec![database.to_string()]);
+    }
+    let result =
+        crate::query::execute_sql_statement(state, connection_id, database, POSTGRES_BACKUP_SCHEMAS_SQL, None, None)
+            .await?;
+    Ok(result.rows.into_iter().filter_map(|row| row.into_iter().next()?.as_str().map(str::to_string)).collect())
+}
+
 pub async fn begin_database_backup_snapshot_core(
     state: &crate::connection::AppState,
     connection_id: &str,
@@ -3322,10 +3352,6 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     };
 
     let schemas_result = if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
-        const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
-             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
-             AND n.nspname NOT LIKE 'pg_toast_temp_%' \
-             AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname";
         let operation = crate::query::execute_in_manual_transaction(
             state,
             &session_id,
@@ -3434,6 +3460,24 @@ fn record_export_error<W: Write>(
     } else {
         lenient_errors.record(message.clone());
         writeln!(file, "-- ERROR {message}").map_err(|error| format!("Failed to write file: {error}"))
+    }
+}
+
+fn postgres_view_comments_or_definition<W: Write>(
+    result: Result<String, String>,
+    definition: String,
+    view: &str,
+    file: &mut W,
+    fail_on_error: bool,
+    errors: &mut LenientExportErrors,
+) -> Result<String, String> {
+    match result {
+        Ok(ddl) => Ok(ddl),
+        Err(error) if error == EXPORT_CANCELLED_ERROR => Err(error),
+        Err(error) => {
+            record_export_error(file, fail_on_error, format!("reading comments for view {view}: {error}"), errors)?;
+            Ok(definition)
+        }
     }
 }
 
@@ -6159,6 +6203,34 @@ async fn export_database_sql_core_inner_with_phases(
                         &request.schema,
                         request.drop_table_if_exists,
                     );
+                    let source = if db_type == DatabaseType::Postgres && !source.is_empty() {
+                        let result = await_export_operation(
+                            &request.export_id,
+                            Box::pin(crate::schema::enrich_postgres_view_ddl_with_comments(
+                                state,
+                                &request.connection_id,
+                                &request.database,
+                                &request.schema,
+                                view_name,
+                                &source,
+                                None,
+                            )),
+                        )
+                        .await;
+                        postgres_view_comments_or_definition(
+                            result,
+                            source,
+                            view_name,
+                            &mut file,
+                            request.fail_on_error,
+                            &mut lenient_errors,
+                        )?
+                    } else {
+                        source
+                    };
+                    if is_export_cancelled(&request.export_id).await {
+                        return Err("Export cancelled".to_string());
+                    }
                     if !source.is_empty() {
                         if let Some(phases) = phases.as_deref_mut() {
                             phases.push_view(&request.schema, view_info, &source)?;
@@ -6602,6 +6674,46 @@ mod tests {
             .expect("cancellation task should not panic");
         assert_eq!(result, Err(EXPORT_CANCELLED_ERROR.to_string()));
         clear_export_cancelled(&export_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_pending_comment_query_cancel_is_never_a_lenient_error() {
+        for strict in [true, false] {
+            let export_id = format!("cancel-view-comments-{}", uuid::Uuid::new_v4());
+            let task_export_id = export_id.clone();
+            let (started, pending) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let result = await_export_operation(
+                    &task_export_id,
+                    Box::pin(async move {
+                        started.send(()).unwrap();
+                        std::future::pending::<Result<String, String>>().await
+                    }),
+                )
+                .await;
+                let mut file = Vec::new();
+                let mut errors = LenientExportErrors::default();
+                let result = super::postgres_view_comments_or_definition(
+                    result,
+                    "CREATE VIEW v AS SELECT 1;".into(),
+                    "v",
+                    &mut file,
+                    strict,
+                    &mut errors,
+                );
+                (result, file, errors.count)
+            });
+            pending.await.unwrap();
+            set_export_cancelled(&export_id).await;
+            let (result, file, errors) = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("pending comment query must cancel promptly")
+                .unwrap();
+            clear_export_cancelled(&export_id).await;
+            assert_eq!(result, Err(EXPORT_CANCELLED_ERROR.to_string()));
+            assert!(file.is_empty(), "cancellation must not write an ERROR marker or definition");
+            assert_eq!(errors, 0, "cancellation is not an incomplete metadata export");
+        }
     }
 
     #[tokio::test]
@@ -10812,6 +10924,8 @@ mod tests {
         let views = vec![
             "CREATE VIEW z.base AS SELECT id, body FROM z.items;".to_string(),
             "CREATE VIEW a.report AS SELECT id, body FROM z.base WHERE body <> ';';".to_string(),
+            "COMMENT ON VIEW a.report IS E' 中文; O''Reilly \\n \\\\path ';".to_string(),
+            "COMMENT ON COLUMN a.report.body IS E' \\t\\n ';".to_string(),
         ];
         let tail = vec![
             "CREATE FUNCTION a.answer() RETURNS integer AS $body$\nBEGIN\n  PERFORM 1;\n  RETURN 42;\nEND\n$body$ LANGUAGE plpgsql;".to_string(),

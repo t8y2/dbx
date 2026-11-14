@@ -50,6 +50,17 @@ export function displayAppVersion(buildVersion: string): string {
   return build.split(/[-+]/, 1)[0];
 }
 
+/** Whether this exact build was already recognised as promoted to stable. */
+export function isPromotedBuild(buildVersion: string): boolean {
+  const build = normalizeBuildVersion(buildVersion);
+  return Boolean(build) && build === promotedBuild.value;
+}
+
+/** Whether the version still carries a prerelease suffix (`-beta.…`). */
+export function isPrereleaseBuild(buildVersion: string): boolean {
+  return normalizeBuildVersion(buildVersion).includes("-");
+}
+
 // Re-report the remembered build once at startup: the backend may have lost it
 // (fresh data directory, cleared app state) while localStorage still has it.
 if (promotedBuild.value) publishPromotedBuild();

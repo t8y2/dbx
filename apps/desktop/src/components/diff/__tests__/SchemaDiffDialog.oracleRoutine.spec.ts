@@ -530,6 +530,35 @@ it("loads independent DDL from each mapped comparison side without mutating comp
   expect(session.result?.diffs[0].targetDdl).toBe(targetDdl);
 });
 
+it("loads a SQL Server table's deferred DDL fresh when it is selected and reports a failed side", async () => {
+  calls.compare.mockResolvedValue({ diffs: [{ type: "modified", name: "T", ddl: "", targetDdl: "", columns: [] }], functionDiffs: [], syncSql: "", renameCandidates: [] });
+  calls.loadDdl.mockImplementation(async (request: any) => {
+    if (request.connectionId === "target") throw new Error("target ddl unavailable");
+    return { ddl: "CREATE TABLE [Source].[T] ([SOURCE_ONLY_COL] int);" };
+  });
+  await mountComparison("sqlserver", "sqlserver", undefined, true);
+  expect(calls.loadDdl).not.toHaveBeenCalled();
+  [...document.querySelectorAll<HTMLElement>('div[class*="grid-cols-"][class*="cursor-pointer"]')].find((row) => row.textContent?.includes("T"))!.click();
+  await vi.waitFor(() => expect(calls.loadDdl).toHaveBeenCalledTimes(2));
+  await flush();
+  expect(calls.loadDdl.mock.calls).toEqual(
+    expect.arrayContaining([
+      [expect.objectContaining({ connectionId: "source", database: "tenant", schema: "Source", tableName: "T" }), { force: true }],
+      [expect.objectContaining({ connectionId: "target", database: "tenant", schema: "Target", tableName: "T" }), { force: true }],
+    ]),
+  );
+  expect(document.body.textContent).toContain("SOURCE_ONLY_COL");
+  expect(document.body.textContent).toContain("target ddl unavailable");
+});
+
+it("does not reload DDL for a SQL Server table that already has it", async () => {
+  calls.compare.mockResolvedValue({ diffs: [{ type: "modified", name: "T", ddl: "CREATE TABLE s", targetDdl: "CREATE TABLE t", columns: [] }], functionDiffs: [], syncSql: "", renameCandidates: [] });
+  await mountComparison("sqlserver", "sqlserver", undefined, true);
+  [...document.querySelectorAll<HTMLElement>('div[class*="grid-cols-"][class*="cursor-pointer"]')].find((row) => row.textContent?.includes("T"))!.click();
+  await flush();
+  expect(calls.loadDdl).not.toHaveBeenCalled();
+});
+
 it("drops a late independent comparison preview after switching the option off (#13224)", async () => {
   const ddl = 'CREATE TABLE "Source"."T" ("ORIGINAL_ID" NUMBER);';
   calls.compare.mockResolvedValue({ diffs: [{ type: "added", name: "T", ddl }], functionDiffs: [], syncSql: ddl, renameCandidates: [] });
@@ -851,4 +880,25 @@ it("opens a cross-product package in the actual review and requires explicit tar
   expect(calls.prepare.mock.calls.at(-1)![0].drafts[0].sql).toContain('PACKAGE "Target"."P"');
   expect(button("diff.deployToServer").disabled).toBe(false);
   expect(calls.execute).not.toHaveBeenCalled();
+});
+
+/**
+ * #14877: the deploy review is the last screen before "deploy to server", and it
+ * used to carry only the target side, so the user could not confirm which two
+ * databases the script would touch. Both endpoints now stay visible on the result
+ * and deploy steps.
+ */
+it("keeps both comparison endpoints visible from the result step onward", async () => {
+  await mountComparison("oracle", "oracle", ["FUNCTION"]);
+
+  const bar = document.querySelector<HTMLElement>("[data-schema-diff-endpoints]");
+  expect(bar).not.toBeNull();
+  // Connection names ("source"/"target") and database ("tenant") from the mocked store.
+  expect(bar!.textContent).toContain("diff.sourceObject");
+  expect(bar!.textContent).toContain("diff.targetObject");
+  expect(bar!.textContent).toContain("tenant");
+  // Both sides rendered in source → target order.
+  const text = bar!.textContent ?? "";
+  expect(text.indexOf("diff.sourceObject")).toBeLessThan(text.indexOf("diff.targetObject"));
+  expect(text).toContain("→");
 });

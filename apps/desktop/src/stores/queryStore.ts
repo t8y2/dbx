@@ -55,7 +55,8 @@ import {
   type EditableQuerySource,
 } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, planOpenTabSqlSpill, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
+import { writeOpenTabSqlRecovery } from "@/lib/app/openTabsRecovery";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -89,7 +90,7 @@ import { extractGraphCells, graphResultRows, mergeGraphResults } from "@/lib/gra
 import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
-import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -1062,10 +1063,24 @@ let contentRevealSeq = 0;
 /** Monotonic id for data-grid column reveal requests; lets repeated clicks on the same column re-trigger grid scroll and highlight. */
 let gridRevealColumnSeq = 0;
 
-function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
+async function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
   if (isDetachedWindow()) return Promise.resolve();
+  const { savedTabs, spills } = planOpenTabSqlSpill(tabs);
+  if (spills.length > 0) {
+    // Oversized SQL bodies must not be inlined into the session snapshot, or the
+    // next launch has to re-parse megabytes before the workspace can appear.
+    // Spill each body to a recovery file and record where it went.
+    await Promise.all(
+      spills.map(async (spill) => {
+        const path = await writeOpenTabSqlRecovery(spill.tabId, spill.sql);
+        if (!path) return;
+        const saved = savedTabs.find((candidate) => candidate.id === spill.tabId);
+        if (saved) saved.sqlRecoveryPath = path;
+      }),
+    );
+  }
   const payload: OpenTabsStatePayload = {
-    tabs: serializeOpenTabs(tabs),
+    tabs: savedTabs,
     activeTabId,
     ...(workspace && tabs.length > 0
       ? {
@@ -2871,6 +2886,21 @@ export const useQueryStore = defineStore("query", () => {
     else setTimeout(maintain, 0);
   }
 
+  // A tab whose saved SQL exceeded MAX_PERSISTED_TAB_SQL_CHARS only carries a
+  // preview after restore. Tell the user once per launch where the full body is
+  // so the truncation is never silent.
+  function notifyTruncatedRestoredTabs(restoredTabs: QueryTab[]) {
+    const truncated = restoredTabs.filter((tab) => tab.sqlTruncated);
+    if (truncated.length === 0) return;
+    const paths = [...new Set(truncated.map((tab) => tab.sqlRecoveryPath).filter((path): path is string => !!path))];
+    const detail = paths.length > 0 ? paths.join("\n") : t("tabs.sqlTruncatedNoPath");
+    try {
+      useToast().toast(t("tabs.sqlTruncatedOnRestore", { count: truncated.length, detail }), 15000);
+    } catch (error) {
+      console.warn("[DBX][open-tabs:restore:truncated]", truncated.length, paths, error);
+    }
+  }
+
   async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
     if (isDetachedWindow()) return;
     if (isOpenTabsLoaded.value) return;
@@ -2878,6 +2908,7 @@ export const useQueryStore = defineStore("query", () => {
     if (saved?.tabs && Array.isArray(saved.tabs)) {
       const restored = restoreSavedTabsFromPayload(saved, options);
       applyRestoredOpenTabs(restored);
+      notifyTruncatedRestoredTabs(restored.tabs);
       if (safeLocalStorageGet(UPDATE_RESTORE_KEY) !== "1" && useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so stale saved payloads should not
         // reappear if the user later changes the setting.
@@ -2896,6 +2927,7 @@ export const useQueryStore = defineStore("query", () => {
     if (legacy.rawTabs || legacy.rawActiveTabId) {
       const restored = restoreLegacySavedTabs(options);
       applyRestoredOpenTabs(restored);
+      notifyTruncatedRestoredTabs(restored.tabs);
       if (safeLocalStorageGet(UPDATE_RESTORE_KEY) !== "1" && useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so keeping the legacy startup payload
         // would resurrect old tabs if the user later changes the setting.
@@ -5703,6 +5735,15 @@ export const useQueryStore = defineStore("query", () => {
     if (newTab.mode === "data") void refreshDataTab(newId);
   }
 
+  function reopenClosedTabEntry(entry: ClosedTabHistoryEntry): string | null {
+    assertUpdateAllowsInteraction();
+    const index = closedTabsHistory.value.indexOf(entry);
+    if (index < 0) return null;
+    closedTabsHistory.value.splice(index, 1);
+    closedTabsHistory.value.push(entry);
+    return reopenClosedTab();
+  }
+
   function reopenClosedTab(): string | null {
     assertUpdateAllowsInteraction();
     const entry = closedTabsHistory.value.pop();
@@ -5940,7 +5981,7 @@ export const useQueryStore = defineStore("query", () => {
 
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId) && !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(tab.connectionId));
       const buildRefreshSql = (includeRowId: boolean) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,
@@ -6347,6 +6388,27 @@ export const useQueryStore = defineStore("query", () => {
     tab.txnStatus = undefined;
     tab.txnAutoRolledBack = false;
     if (tab.txnPossiblyDirty !== undefined) tab.txnPossiblyDirty = false;
+  }
+
+  /** Backend session was removed and rolled back after idle expiry: clear the
+   *  sticky dirty state together with the session. A session proven read-only
+   *  reports no lost work, so it gets no auto-rollback notice (#9831). */
+  function markManualTransactionIdleExpired(tab: QueryTab) {
+    const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
+    clearTxnPossiblyDirty(tab);
+    tab.txnSessionId = undefined;
+    tab.txnAutoRolledBack = rollbackNoticeRequired;
+  }
+
+  /** An export observed the backend's idle-expiry error for the transaction it
+   *  was reading through. Drop the dead session from its source tab so a retry
+   *  stops sending the stale id. Returns false when no open tab owns it. */
+  function noteExpiredManualTransaction(txnSessionId: string, error: unknown): boolean {
+    const tab = tabs.value.find((item) => item.txnSessionId === txnSessionId);
+    if (!tab) return false;
+    if (isSqlServerTransactionTab(tab)) reportSqlServerTransactionError(tab, error);
+    else markManualTransactionIdleExpired(tab);
+    return true;
   }
 
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean; resetAutoCommitDbType?: string }) {
@@ -6834,9 +6896,12 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
     if (tab.isExplaining) void cancelTabExplain(id);
-    rollbackTabTransaction(tab);
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    const preserveMysqlSession = tab.mode === "query" && tab.autoCommit !== false && connection?.db_type === "mysql" && effectiveDatabaseTypeForConnection(connection) === "mysql";
+    if (preserveMysqlSession) invalidateManualTransactionTarget(tab);
+    else rollbackTabTransaction(tab);
     void closeResultSession(tab);
-    void closeClientConnectionSession(tab);
+    if (!preserveMysqlSession) void closeClientConnectionSession(tab);
     tab.database = database;
     tab.schema = undefined;
     tab.schemaQualifiesSql = undefined;
@@ -7767,9 +7832,7 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const serverVersion = conn?.database_info?.productVersion?.toLowerCase() ?? "";
-      const isGreenplum = serverVersion.includes("greenplum") || serverVersion.includes("cloudberry");
-      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !isGreenplum && !rowIdLocatorUnsupported(tab.connectionId);
+      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId);
       const syntheticRowId = postgresCtidRowId || ((databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType));
       // Base tables without a natural identifier use the same physical row locator
       // as table-data tabs (Oracle, OceanBase Oracle, Xugu, and PostgreSQL). Confirm
@@ -9889,9 +9952,10 @@ export const useQueryStore = defineStore("query", () => {
           console.warn("[DBX] Failed to resolve SAP HANA CURRENT_SCHEMA", error);
         }
       }
-      if (tab.autoCommit !== false) applyAutoCommitTransactionReport(tab, results);
       const current = findExecutionTab(id);
       if (current?.executionId === executionId && manualTransactionTargetEpoch(current) === executionTargetEpoch) {
+        if (current.autoCommit !== false) applyAutoCommitTransactionReport(current, results);
+        if (results.some((result) => result.execution_error === true && result.rows.some((row) => row.some((cell) => typeof cell === "string" && cell.includes("MYSQL_CLIENT_SESSION_LOST"))))) clearAutoCommitOpenTransaction(current);
         if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
         if (successfulOracleSchemaChanges > 0) {
           current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulOracleSchemaChanges;
@@ -9907,12 +9971,13 @@ export const useQueryStore = defineStore("query", () => {
           current.schema = undefined;
         }
         if (mysqlUseDatabase && !usesExternalExecutionTarget && current.database !== mysqlUseDatabase) {
-          // 切库后旧库的池（池按「连接 + 库」分桶）不再被这个标签复用，旧会话却已经在
-          // server 端停在新库上；不关掉它，用户切回旧库时会被重新用上，出现「标签写着 A、
-          // 实际在 B」的错配。标签上挂着的显式事务在切库后同样不可达，一并收掉（与 SQL
-          // Server 分支一致）。
-          rollbackTabTransaction(current);
-          void closeClientConnectionSession(current);
+          // Native MySQL workload sessions follow the tab, not its selected
+          // database. USE only updates the namespace; closing here loses user
+          // variables, temporary tables and an explicitly preserved transaction.
+          if (conn?.db_type !== "mysql" || effectiveDbType !== "mysql") {
+            rollbackTabTransaction(current);
+            void closeClientConnectionSession(current);
+          }
           current.database = mysqlUseDatabase;
           current.schema = undefined;
         }
@@ -10001,10 +10066,7 @@ export const useQueryStore = defineStore("query", () => {
         current.resultCountSql = countSql;
         current.resultSessionId = current.result?.session_id ?? undefined;
         current.resultClientSessionId = current.resultSessionId ? executionClientSessionId : undefined;
-        // A refreshed page keeps reporting its totals as loading: the stale-total
-        // pass just below only checks the preserved value, and the COUNT that
-        // replaces it is started further down.
-        const preserveTotalRowCountPending = options?.preserveTotalRowCountDuringExecution === true && typeof current.resultTotalRowCount === "number";
+        const hasPreservedTotalRowCount = options?.preserveTotalRowCountDuringExecution === true && typeof current.resultTotalRowCount === "number";
         if (!options?.preserveTotalRowCountDuringExecution) {
           current.resultTotalRowCount = undefined;
         }
@@ -10022,7 +10084,7 @@ export const useQueryStore = defineStore("query", () => {
         const exactIncompletePageTotal = paginationPageResult ? exactTotalFromIncompletePage(paginationPageResult, pageLimit, pageOffset, useAgentResultSession) : undefined;
         const totalKnownFromIncompletePage = typeof exactIncompletePageTotal === "number";
         let totalRowCountResolved = false;
-        if (paginationPageResult?.page_has_more === false && typeof exactIncompletePageTotal === "number") {
+        if (typeof exactIncompletePageTotal === "number" && (paginationPageResult?.page_has_more === false || shouldAppendResult)) {
           current.resultTotalRowCount = exactIncompletePageTotal;
           current.resultTotalRowCountLoading = false;
           totalRowCountResolved = true;
@@ -10048,8 +10110,7 @@ export const useQueryStore = defineStore("query", () => {
         // page. A page that proves nothing about the total must not mark it
         // resolved either: the background COUNT below still owns it, so the list
         // keeps reporting the previous total as loading.
-        if (!totalRowCountResolved && preserveTotalRowCountPending) {
-          current.resultTotalRowCountLoading = !totalKnownFromIncompletePage;
+        if (!totalRowCountResolved && hasPreservedTotalRowCount) {
           totalRowCountResolved = totalKnownFromIncompletePage;
         }
         const dataCountTarget =
@@ -10079,9 +10140,9 @@ export const useQueryStore = defineStore("query", () => {
           !totalRowCountResolved &&
           settingsStore.editorSettings.autoCalculateTotalRows &&
           ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
-        // A refreshed page whose total is being recounted keeps the spinner on even
-        // though auto-count is served by the same background COUNT below.
-        current.resultTotalRowCountLoading = canAutoCalculateTotalRows || (preserveTotalRowCountPending && typeof current.resultTotalRowCount === "number");
+        // Appending rows preserves the known total without scheduling a new COUNT.
+        const recountingPreservedTotal = !options?.appendResult && !resultLimitReached && !totalRowCountResolved && hasPreservedTotalRowCount && typeof current.resultTotalRowCount === "number";
+        current.resultTotalRowCountLoading = canAutoCalculateTotalRows || recountingPreservedTotal;
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the
@@ -10147,6 +10208,7 @@ export const useQueryStore = defineStore("query", () => {
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
+      if (String(e?.message ?? e).includes("MYSQL_CLIENT_SESSION_LOST")) clearAutoCommitOpenTransaction(tab);
       // Handle manual transaction auto-rollback (idle timeout only for the banner;
       // other statement failures still clear the session without the 5-minute notice).
       if (tab.autoCommit === false && isSqlServerTransactionTab(tab)) {
@@ -10155,13 +10217,7 @@ export const useQueryStore = defineStore("query", () => {
         const errMsg: string = e?.message ?? String(e);
         const idleTimeout = isManualTransactionSessionExpired(e) || errMsg.includes("已自动回滚");
         if (idleTimeout) {
-          // Backend session was removed and rolled back after idle expiry: clear
-          // the sticky dirty state together with the session. Same rule as the
-          // restart path: a session proven read-only reports no lost work.
-          const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
-          clearTxnPossiblyDirty(tab);
-          tab.txnSessionId = undefined;
-          tab.txnAutoRolledBack = rollbackNoticeRequired;
+          markManualTransactionIdleExpired(tab);
         } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
           // Statement failure that disposed the manual session: the `rolled back`
           // message fragment is a frontend cleanup compatibility contract.
@@ -10879,7 +10935,7 @@ export const useQueryStore = defineStore("query", () => {
               identifierQuote: source.identifierQuote,
               serverVersion: source.serverVersion,
               includeDatabaseName: settings.generateSqlIncludeDatabaseName,
-              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported,
+              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported && !postgresTupleLocatorUnsupportedEngine(connection),
               timeoutSecs: queryTimeoutSecsForConnection(connection, settings.globalQueryTimeoutSecs),
             },
             requests,
@@ -11923,6 +11979,18 @@ export const useQueryStore = defineStore("query", () => {
         throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
     }
 
+    const startExport = async (onProgress: (progress: api.TableExportProgress) => void) => {
+      try {
+        return await (isTauriRuntime() ? api.startQueryResultExport(request, onProgress, true) : api.startQueryResultExport(request, onProgress));
+      } catch (error) {
+        if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+          noteExpiredManualTransaction(request.txnSessionId, error);
+          throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
+        }
+        throw error;
+      }
+    };
+
     const tracker = useExportTracker();
     if (!isTauriRuntime()) await connStore.ensureConnected(request.connectionId);
     const task = tracker.addTask("Query Result", format, filePath, request.exportId);
@@ -11945,14 +12013,10 @@ export const useQueryStore = defineStore("query", () => {
             return "settled";
           }
           invoked = true;
-          const result = await api.startQueryResultExport(
-            request,
-            (progress) => {
-              terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
-              tracker.updateTableExportTask(request.exportId, progress);
-            },
-            true,
-          );
+          const result = await startExport((progress) => {
+            terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
+            tracker.updateTableExportTask(request.exportId, progress);
+          });
           terminal ||= result.status === "Done" || result.status === "Error" || result.status === "Cancelled";
           tracker.updateTableExportTask(request.exportId, result);
           return terminal ? "settled" : "unknown";
@@ -11975,7 +12039,7 @@ export const useQueryStore = defineStore("query", () => {
 
     void (async () => {
       try {
-        await api.startQueryResultExport(request, (progress) => tracker.updateTableExportTask(request.exportId, progress));
+        await startExport((progress) => tracker.updateTableExportTask(request.exportId, progress));
       } catch (error: any) {
         const task = tracker.tasks.value.find((item) => item.exportId === request.exportId);
         if (task) {
@@ -12065,6 +12129,7 @@ export const useQueryStore = defineStore("query", () => {
     duplicateTab,
     closedTabsHistory,
     canReopenClosedTab,
+    reopenClosedTabEntry,
     reopenClosedTab,
     clearClosedTabsHistory,
     closeConnectionTabs,
@@ -12204,6 +12269,7 @@ export const useQueryStore = defineStore("query", () => {
     countTabResultRows,
     buildQueryResultExportRequest,
     captureQueryResultExportRequest,
+    noteExpiredManualTransaction,
     exportQuerySqlDirect,
     applyQueryMetadataPatch,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),

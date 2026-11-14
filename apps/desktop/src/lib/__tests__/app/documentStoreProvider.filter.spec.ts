@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDocumentFilterCondition, documentFieldPathTreeFromDocuments, documentFilterModeOptions, documentFilterModeOptionsFor, documentFilterValueTypeOptions } from "@/lib/app/documentStoreProvider";
+import { buildDocumentFilterCondition, documentFieldPathTreeFromDocuments, documentFilterModeOptions, documentFilterModeOptionsFor, documentFilterValueTypeOptions, mongoFilterDateSamplesByPathFromDocuments } from "@/lib/app/documentStoreProvider";
 
 describe("document store structured filters", () => {
   it("offers and builds inclusive comparison filters", () => {
@@ -17,6 +17,20 @@ describe("document store structured filters", () => {
     expect(buildDocumentFilterCondition({ ...rule, rawValue: "507f1f77bcf86cd799439011" }, { kind: "mongodb", sampleValue: { $oid: "507f191e810c19729de860ea" } })).toEqual({
       _id: { $oid: "507f1f77bcf86cd799439011" },
     });
+  });
+
+  it("finds MongoDB date samples in scalar, array, and nested fields", () => {
+    const dateSamples = mongoFilterDateSamplesByPathFromDocuments([
+      {
+        createdAt: { $date: "2026-01-01T00:00:00Z" },
+        eventDates: [{ $date: "2026-01-02T00:00:00Z" }, { $date: { $numberLong: "1767312000000" } }],
+        history: [{ at: { $date: "2026-01-03T00:00:00Z" } }],
+        mixedDates: [{ $date: "2026-01-04T00:00:00Z" }, "plain text"],
+      },
+    ]);
+
+    expect([...dateSamples.keys()]).toEqual(["createdAt", "eventDates", "history.at"]);
+    expect(dateSamples.get("eventDates")).toEqual([{ $date: "2026-01-02T00:00:00Z" }, { $date: { $numberLong: "1767312000000" } }]);
   });
 
   it("lets MongoDB filters override the inferred value type", () => {

@@ -2253,6 +2253,9 @@ export default withEnglishFallback({
       revealRaw: "顯示原始文字",
       apply: "套用",
     },
+    sshTotpSecret: "TOTP 金鑰",
+    sshTotpSecretPlaceholder: "Base32 金鑰，例如 JBSWY3DPEHPK3PXP",
+    sshTotpSecretHint: "選填。填寫後 DBX 會自行計算 6 位數動態密碼，無需每次手動輸入。MCP 連線需要兩步驟驗證的堡壘機時必須填寫。",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",

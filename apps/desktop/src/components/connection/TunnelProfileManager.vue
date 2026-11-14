@@ -337,6 +337,13 @@ async function testSelected() {
           <Label class="text-xs">{{ t("connection.sshPassword") }}</Label>
           <PasswordInput v-model="selectedSsh.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" />
         </div>
+        <div v-if="!selectedSsh.auth_method || selectedSsh.auth_method === 'password' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-start gap-4">
+          <Label class="text-xs">{{ t("connection.sshTotpSecret") }}</Label>
+          <div class="col-span-3 space-y-1">
+            <PasswordInput v-model="selectedSsh.totp_secret" :placeholder="t('connection.sshTotpSecretPlaceholder')" />
+            <p class="text-xs text-muted-foreground">{{ t("connection.sshTotpSecretHint") }}</p>
+          </div>
+        </div>
         <div v-if="selectedSsh.auth_method === 'key' || selectedSsh.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
           <Label class="text-xs">{{ t("connection.sshKeyPath") }}</Label>
           <div class="col-span-3 flex items-center gap-1">

@@ -436,6 +436,13 @@ impl TransportLayerConfig {
             TransportLayerConfig::Ssh(layer) => {
                 layer.password = String::new();
                 layer.key_passphrase = String::new();
+                // Like the passphrase above: a TOTP secret is a long-lived
+                // bearer credential, so it is stored in the secret store rather
+                // than the plaintext config JSON. Scrubbing leaves `None`, the
+                // value the read path treats as "fetch it from the store".
+                if layer.totp_secret.is_some() {
+                    layer.totp_secret = None;
+                }
             }
             TransportLayerConfig::Proxy(layer) => {
                 layer.password = String::new();
@@ -544,6 +551,20 @@ pub struct SshTunnelConfig {
     /// kept from the referencing layer.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_id: String,
+    /// Base32 TOTP secret (RFC 6238) used to answer a keyboard-interactive MFA
+    /// challenge without a prompt UI, so headless hosts such as `dbx-mcp` can
+    /// reach bastions that require a second factor.
+    ///
+    /// Deliberately **not** `skip_serializing_if`: the three states carry
+    /// different meanings, and collapsing them would make a saved secret
+    /// impossible to delete.
+    ///
+    /// - `None` (serialized as `null`, or absent in older payloads): untouched —
+    ///   the stored secret, if any, is left as-is.
+    /// - `Some("")`: the user cleared the field — the stored secret is deleted.
+    /// - `Some(value)`: the stored secret is replaced with `value`.
+    #[serde(default)]
+    pub totp_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

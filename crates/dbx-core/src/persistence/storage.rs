@@ -3609,6 +3609,10 @@ fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerCo
     format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
+fn transport_layer_ssh_totp_secret_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_totp_secret", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
     format!("{}{}.proxy_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
@@ -3623,6 +3627,13 @@ fn scrub_transport_layer_secrets(config: &mut ConnectionConfig) {
             TransportLayerConfig::Ssh(ssh) => {
                 ssh.password.clear();
                 ssh.key_passphrase.clear();
+                // Same class of secret as the passphrase: it lives in the
+                // secret store, not in the plaintext config JSON. Scrubbing
+                // leaves `None`, which is what the read path treats as
+                // "load it back from the store".
+                if ssh.totp_secret.is_some() {
+                    ssh.totp_secret = None;
+                }
             }
             TransportLayerConfig::Proxy(proxy) => {
                 proxy.password.clear();
@@ -7214,6 +7225,18 @@ fn persist_connection_in_tx(
                     &transport_layer_ssh_key_passphrase_key(index, layer),
                     &ssh.key_passphrase,
                 )?;
+                // Three-state, matching `persist_transport_layer_secrets`:
+                // absent leaves the stored secret untouched so a payload that
+                // never carried it cannot erase it.
+                if let Some(secret) = ssh.totp_secret.as_deref() {
+                    persist_secret_in_tx(
+                        tx,
+                        codec,
+                        &config.id,
+                        &transport_layer_ssh_totp_secret_key(index, layer),
+                        secret,
+                    )?;
+                }
             }
             TransportLayerConfig::Proxy(proxy) => {
                 persist_secret_in_tx(
@@ -8180,6 +8203,14 @@ impl Storage {
                                 TransportLayerConfig::Proxy(_) | TransportLayerConfig::HttpTunnel(_) => None,
                             })
                             .unwrap_or_default();
+                        // The stored TOTP secret has to come back here too: this is
+                        // the path headless hosts take on every query, and a config
+                        // read straight from storage never carries the value.
+                        if ssh.totp_secret.as_deref().is_none_or(str::is_empty) {
+                            ssh.totp_secret = self
+                                .get_secret(&id, &transport_layer_ssh_totp_secret_key(index, &layer_for_key))
+                                .await?;
+                        }
                     }
                     TransportLayerConfig::Proxy(proxy) => {
                         proxy.password = self
@@ -12508,6 +12539,7 @@ mod tests {
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
+            totp_secret: None,
             profile_id: String::new(),
         })
     }

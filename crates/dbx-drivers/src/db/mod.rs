@@ -42,6 +42,7 @@ pub use dbx_driver_sqlserver as sqlserver;
 pub use dbx_driver_support::ssh_host_key;
 pub use dbx_platform::ssh_prompt;
 pub mod ssh_proxy_command;
+pub mod ssh_totp;
 pub mod ssh_tunnel;
 pub use dbx_driver_mysql::starrocks;
 pub use dbx_driver_mysql::tidb;

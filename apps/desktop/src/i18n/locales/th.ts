@@ -2425,6 +2425,9 @@ export default withEnglishFallback({
       revealRaw: "แสดงข้อความดิบ",
       apply: "นำไปใช้",
     },
+    sshTotpSecret: "คีย์ TOTP",
+    sshTotpSecretPlaceholder: "คีย์ Base32 เช่น JBSWY3DPEHPK3PXP",
+    sshTotpSecretHint: "ไม่บังคับ เมื่อกรอกแล้ว DBX จะคำนวณรหัส OTP 6 หลักให้เอง โดยไม่ต้องป้อนด้วยตนเองทุกครั้ง จำเป็นต้องกรอกเมื่อเชื่อมต่อ MCP ผ่าน堡垒机ที่ต้องใช้การยืนยันตัวตนแบบสองขั้นตอน",
   },
   editor: {
     duckdbDraining: "Query DuckDB ก่อนหน้ายังหยุดไม่เสร็จ โปรดลองอีกครั้งในไม่ช้า",

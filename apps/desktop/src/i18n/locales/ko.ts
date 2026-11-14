@@ -2200,6 +2200,9 @@ export default withEnglishFallback({
       revealRaw: "원본 텍스트 표시",
       apply: "적용",
     },
+    sshTotpSecret: "TOTP 키",
+    sshTotpSecretPlaceholder: "Base32 키, 예: JBSWY3DPEHPK3PXP",
+    sshTotpSecretHint: "선택 사항입니다. 입력하면 DBX가 6자리 동적 비밀번호를 자동으로 계산하므로 매번 수동으로 입력할 필요가 없습니다. MCP 연결에 2단계 인증이 필요한 배스천 호스트를 사용하는 경우 반드시 입력해야 합니다.",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

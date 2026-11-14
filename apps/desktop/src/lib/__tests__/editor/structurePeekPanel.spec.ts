@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, clampStructurePeekRect, resizeStructurePeekRect, structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
+import { STRUCTURE_PEEK_BASE_Z_INDEX, STRUCTURE_PEEK_MAX_Z_INDEX, STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, clampStructurePeekRect, nextStructurePeekZIndex, resizeStructurePeekRect, structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
 
 describe("structurePeekPanel", () => {
   it("builds a stable case-insensitive identity including catalog", () => {
@@ -41,5 +41,22 @@ describe("structurePeekPanel", () => {
     expect(grown.height).toBe(340);
     expect(grown.left).toBe(100);
     expect(grown.top).toBe(60);
+  });
+
+  it("keeps peek panels in a layer band strictly below modal dialogs", () => {
+    // Dialog layers start at 50 (BASE_DIALOG_Z_INDEX in useDialogLayerOrder).
+    expect(STRUCTURE_PEEK_MAX_Z_INDEX).toBeLessThan(50);
+    expect(STRUCTURE_PEEK_BASE_Z_INDEX).toBeLessThan(STRUCTURE_PEEK_MAX_Z_INDEX);
+    expect(nextStructurePeekZIndex(STRUCTURE_PEEK_BASE_Z_INDEX)).toBe(STRUCTURE_PEEK_BASE_Z_INDEX + 1);
+  });
+
+  it("never lets repeated activations climb into the dialog band", () => {
+    let zIndex = STRUCTURE_PEEK_BASE_Z_INDEX;
+    for (let index = 0; index < 20; index += 1) {
+      zIndex = nextStructurePeekZIndex(zIndex);
+      expect(zIndex).toBeGreaterThan(STRUCTURE_PEEK_BASE_Z_INDEX);
+      expect(zIndex).toBeLessThanOrEqual(STRUCTURE_PEEK_MAX_Z_INDEX);
+      expect(zIndex).toBeLessThan(50);
+    }
   });
 });

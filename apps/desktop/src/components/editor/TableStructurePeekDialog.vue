@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatMetadataColumnTypeLabel } from "@/lib/dataGrid/dataGridColumnType";
-import { STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, centeredStructurePeekRect, clampStructurePeekRect, defaultStructurePeekSize, resizeStructurePeekRect, type StructurePeekResizeEdge } from "@/lib/editor/structurePeekPanel";
+import { STRUCTURE_PEEK_BASE_Z_INDEX, STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, centeredStructurePeekRect, clampStructurePeekRect, defaultStructurePeekSize, resizeStructurePeekRect, type StructurePeekResizeEdge } from "@/lib/editor/structurePeekPanel";
 import { shouldPreserveEditorFocusOnPeekPointerDown } from "@/lib/editor/focusedQueryEditorView";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { filterObjectBrowserTableColumns, sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
@@ -82,7 +82,7 @@ const panelStyle = computed(() => {
     top: `${panelTop.value}px`,
     width: `${panelWidth.value}px`,
     height: `${panelHeight.value}px`,
-    zIndex: String(props.zIndex ?? 50),
+    zIndex: String(props.zIndex ?? STRUCTURE_PEEK_BASE_Z_INDEX + 1),
   };
   if (interacting.value) style.transition = "none";
   return style;

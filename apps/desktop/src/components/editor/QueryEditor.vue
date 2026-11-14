@@ -57,7 +57,7 @@ import type { ColumnInfo } from "@/types/database";
 import { createColumnReferencePayload, tableReferenceInsertText } from "@/lib/editor/queryEditorTableDrop";
 import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
-import { structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
+import { STRUCTURE_PEEK_BASE_Z_INDEX, nextStructurePeekZIndex, structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
 import { createQueryEditorNativeSelectionGuard, parkEditorNativeSelection, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import QueryEditorContextMenu, { type QueryEditorContextMenuState, type QueryEditorContextMenuActions } from "./QueryEditorContextMenu.vue";
@@ -366,13 +366,13 @@ interface StructurePeekPanelState {
 
 const structurePeekPanels = ref<StructurePeekPanelState[]>([]);
 let structurePeekRequestSeq = 0;
-let structurePeekZIndexSeq = 50;
+let structurePeekZIndexSeq = STRUCTURE_PEEK_BASE_Z_INDEX;
 let structurePeekCascadeSeq = 0;
 
 function bringStructurePeekToFront(panelId: string) {
   const panel = structurePeekPanels.value.find((item) => item.id === panelId);
   if (!panel) return;
-  structurePeekZIndexSeq += 1;
+  structurePeekZIndexSeq = nextStructurePeekZIndex(structurePeekZIndexSeq);
   panel.zIndex = structurePeekZIndexSeq;
 }
 
@@ -427,7 +427,7 @@ async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
     return;
   }
 
-  structurePeekZIndexSeq += 1;
+  structurePeekZIndexSeq = nextStructurePeekZIndex(structurePeekZIndexSeq);
   const requestId = ++structurePeekRequestSeq;
   const cascadeIndex = structurePeekCascadeSeq++;
   const panel: StructurePeekPanelState = {

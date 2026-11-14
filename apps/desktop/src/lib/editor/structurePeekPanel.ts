@@ -9,6 +9,23 @@ export const STRUCTURE_PEEK_MIN_WIDTH = 360;
 export const STRUCTURE_PEEK_MIN_HEIGHT = 240;
 export const STRUCTURE_PEEK_CASCADE = 24;
 
+/**
+ * Peek panels are modeless windows, so they must stay below modal dialogs.
+ * Dialog layers start at 50 (BASE_DIALOG_Z_INDEX in useDialogLayerOrder), and
+ * allocating peek panels from the same band used to tie a panel with an open
+ * dialog: the dialog's overlay painted behind the panel while its modal
+ * pointer-event guard still blocked the panel, so the panel looked on top but
+ * could not be clicked or closed.
+ */
+export const STRUCTURE_PEEK_BASE_Z_INDEX = 40;
+export const STRUCTURE_PEEK_MAX_Z_INDEX = 49;
+
+/** Next z-index for a peek panel, kept inside a band strictly below dialogs. */
+export function nextStructurePeekZIndex(previous: number): number {
+  const base = Number.isFinite(previous) ? Math.max(STRUCTURE_PEEK_BASE_Z_INDEX, Math.floor(previous)) : STRUCTURE_PEEK_BASE_Z_INDEX;
+  return Math.min(base + 1, STRUCTURE_PEEK_MAX_Z_INDEX);
+}
+
 export function defaultStructurePeekSize(viewportWidth: number, viewportHeight: number): { width: number; height: number } {
   const maxWidth = Math.max(STRUCTURE_PEEK_MIN_WIDTH, viewportWidth - STRUCTURE_PEEK_MARGIN * 2);
   const maxHeight = Math.max(STRUCTURE_PEEK_MIN_HEIGHT, viewportHeight - STRUCTURE_PEEK_MARGIN * 2);

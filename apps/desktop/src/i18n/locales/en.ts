@@ -4558,6 +4558,9 @@ export default {
     deselectGroup: "Deselect group",
   },
   databaseSearch: {
+    chooseObjects: "Choose tables or views",
+    selectedObjects: "{count} objects selected",
+    resetObjectScope: "Reset object selection",
     title: "Search Database",
     open: "Search Database",
     keyword: "Keyword",

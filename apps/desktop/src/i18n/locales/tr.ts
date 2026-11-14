@@ -3182,6 +3182,9 @@ export default withEnglishFallback({
     deselectGroup: "Grup seçimini kaldır",
   },
   databaseSearch: {
+    chooseObjects: "Tabloları veya görünümleri seç",
+    selectedObjects: "{count} nesne seçildi",
+    resetObjectScope: "Nesne seçimini temizle",
     title: "Veritabanında Ara",
     open: "Veritabanında Ara",
     keyword: "Anahtar sözcük",

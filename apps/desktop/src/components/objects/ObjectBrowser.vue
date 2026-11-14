@@ -526,7 +526,14 @@ const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && show
 const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 // Only the native MySQL statistics read returns AUTO_INCREMENT (same query and gate as the collation).
 const showMysqlAutoIncrementColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
-const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
+const isTiDb = computed(() => {
+  const connection = props.connection;
+  return effectiveDatabaseType.value === "mysql" && [connection.driver_profile, connection.database_info?.productName, connection.database_info?.productVersion].some((value) => /\btidb\b/i.test(value ?? ""));
+});
+const objectRowsLabel = computed(() => {
+  if (isVictoriaMetrics.value) return t("objects.series");
+  return t(isTiDb.value ? "grid.tableInfoEstimatedRows" : "objects.rows");
+});
 
 function toggleTableDdlWordWrap() {
   settingsStore.updateEditorSettings({
@@ -7078,9 +7085,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
-                      <span v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
-                        formatObjectBrowserCount(item.estimatedRows)
-                      }}</span>
+                      <span
+                        v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0"
+                        class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary"
+                        :title="isTiDb ? t('objects.statisticsHint') : undefined"
+                      >
+                        {{ formatObjectBrowserCount(item.estimatedRows) }}
+                      </span>
                       <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
                         formatObjectBrowserBytes(item.totalBytes)
                       }}</span>

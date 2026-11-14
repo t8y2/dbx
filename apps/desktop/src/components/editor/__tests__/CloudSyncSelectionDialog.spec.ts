@@ -110,6 +110,34 @@ describe.each([
   });
 });
 
+it("uses the saved default when restoring encrypted secrets", async () => {
+  const confirmed: SyncSelection[] = [];
+  const encryptedCatalog: SyncSnapshotCatalog = {
+    ...catalog,
+    hasEncryptedSecrets: true,
+    connectionSecrets: ["connection-1"],
+  };
+
+  root = document.createElement("div");
+  document.body.append(root);
+  app = createApp(CloudSyncSelectionDialog, {
+    open: true,
+    mode: "restore",
+    catalog: encryptedCatalog,
+    defaultIncludeSecrets: false,
+    onConfirm: (selection: SyncSelection) => confirmed.push(selection),
+  });
+  app.mount(root);
+  await nextTick();
+
+  const confirmButton = Array.from(root.querySelectorAll("button")).find((button) => button.textContent?.trim() === "settings.syncSelectionRestoreAction");
+  confirmButton?.click();
+  await nextTick();
+
+  expect(confirmed).toHaveLength(1);
+  expect(confirmed[0]).toMatchObject({ includeSecrets: false, connectionSecrets: [] });
+});
+
 describe.each(["restore", "upload"] as const)("CloudSyncSelectionDialog %s category checkboxes", (mode) => {
   it.each(["connections", "tunnelProfiles"] as const)("disables the %s parent checkbox when the category is empty", async (category) => {
     root = document.createElement("div");

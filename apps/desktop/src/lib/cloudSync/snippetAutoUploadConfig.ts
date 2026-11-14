@@ -49,7 +49,7 @@ function snippetScope(provider: SnippetProvider, instanceUrl?: string): string {
   return `${provider}-${encodeURIComponent(scope)}`;
 }
 
-function preferenceKey(kind: "enabled" | "interval", provider: SnippetProvider, instanceUrl?: string): string {
+function preferenceKey(kind: "enabled" | "interval" | "include-secrets" | "restore-secrets", provider: SnippetProvider, instanceUrl?: string): string {
   return `dbx-snippet-auto-upload-${kind}-${snippetScope(provider, instanceUrl)}`;
 }
 
@@ -117,4 +117,16 @@ export function writeSnippetLastSuccessfulUpload(provider: SnippetProvider, inst
   if (!snippetId.trim()) return;
   safeLocalStorageSet(snippetLastUploadKey(provider, instanceUrl, snippetId), uploadedAt);
   if (typeof window !== "undefined") window.dispatchEvent(new Event(SNIPPET_LAST_UPLOAD_CHANGED_EVENT));
+}
+
+export function readSnippetSyncSecretPreferences(provider: SnippetProvider, instanceUrl?: string) {
+  return {
+    includeSecrets: safeLocalStorageGet(preferenceKey("include-secrets", provider, instanceUrl)) === "true",
+    restoreSecrets: safeLocalStorageGet(preferenceKey("restore-secrets", provider, instanceUrl)) === "true",
+  };
+}
+
+export function writeSnippetSyncSecretPreferences(provider: SnippetProvider, instanceUrl: string | undefined, values: { includeSecrets: boolean; restoreSecrets: boolean }) {
+  safeLocalStorageSet(preferenceKey("include-secrets", provider, instanceUrl), String(values.includeSecrets));
+  safeLocalStorageSet(preferenceKey("restore-secrets", provider, instanceUrl), String(values.restoreSecrets));
 }

@@ -500,6 +500,7 @@ mod tests {
                         target: json!("Bobby"),
                     }],
                 }],
+                ignored_only_count: 0,
             },
             sync_statements: vec![
                 "INSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES (1, 'Ada');".to_string(),

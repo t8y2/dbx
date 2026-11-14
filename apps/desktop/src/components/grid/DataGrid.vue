@@ -390,7 +390,7 @@ import { uiTuning } from "@/lib/app/uiTuning";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
-import { bulkEditInputToSqlValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
+import { bulkEditInputToSqlValue, dataGridDirectCellEditValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
 import type { CellPosition } from "@/lib/dataGrid/gridSelection";
 import type { GridSnapshotSource } from "@/lib/gridSnapshot/gridSnapshot";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
@@ -1212,6 +1212,7 @@ const conditionalBulkEditConfirmOpen = ref(false);
 const conditionalBulkEditStatement = ref("");
 let conditionalBulkEditMatchCountRequestId = 0;
 const inlineBulkEditActive = ref(false);
+const cellEditUsesSelectionStyle = ref(false);
 const copyColumnNamesDialogOpen = ref(false);
 const copyColumnNamesDialogColumns = ref<string[]>([]);
 const insertRowsDialogOpen = ref(false);
@@ -2673,6 +2674,12 @@ const columnAligns = computed<("left" | "right")[]>(() => {
   return visibleColumnTypes.value.map((type) => (isNumericColumnType(type) ? "right" : "left"));
 });
 
+function cellEditTextAlign(): "left" | "right" {
+  const actualCol = editingCell.value?.col;
+  if (actualCol === undefined) return "left";
+  return columnAligns.value[visibleColumnIndexes.value.indexOf(actualCol)] ?? "left";
+}
+
 function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
   const value = item.data[actualColIdx];
   const isGridNull = value === null || (usesMongoDocumentGridValues.value && value === MONGO_DOCUMENT_GRID_NULL);
@@ -3992,6 +3999,7 @@ const rowPreparationProgress = shallowRef<DataGridRowPreparationProgress | null>
 let rowPreparationController: AbortController | null = null;
 let gridClipboardLifecycle = 0;
 let gridClipboardActive = true;
+let gridOwnsKeyboardAfterSelection = false;
 /**
  * Automatic background counts keep rows interactive. A manual footer count only covers the grid when it is
  * part of a navigation flow; counting total rows on demand must not look like a table refresh.
@@ -5163,6 +5171,7 @@ async function startCellEdit(rowId: number, columnIndex: number, expanded: boole
   startEdit(rowId, columnIndex, initialValue === undefined);
   const started = editingCell.value?.rowId === rowId && editingCell.value.col === columnIndex;
   if (!started) return false;
+  cellEditUsesSelectionStyle.value = initialValue !== undefined;
   editValue.value = initialValue ?? (item ? inlineCellEditorText(item.data[columnIndex] ?? null, columnIndex) : editValue.value);
   return true;
 }
@@ -6145,30 +6154,42 @@ const displayRowIndexByIdLookup = computed(() => {
   return lookup;
 });
 
+function inlineBulkEditPreviewItem(item: RowItem): RowItem {
+  if (!inlineBulkEditActive.value) return item;
+  let data: CellValue[] | undefined;
+  for (let visibleCol = 0; visibleCol < visibleColumnIndexes.value.length; visibleCol++) {
+    const actualCol = visibleColumnIndexes.value[visibleCol]!;
+    if (!cellIsSelected(item.displayIndex, visibleCol) || !canEditCellItem(item, actualCol)) continue;
+    data ??= [...item.data];
+    data[actualCol] = editValue.value;
+  }
+  return data ? { ...item, data } : item;
+}
+
 function rowItemFromDisplayRef(ref: DisplayRowRef): RowItem {
   void largeValueResolutionVersion.value;
   if (ref.isNew) {
-    return {
+    return inlineBulkEditPreviewItem({
       ...ref,
       data: newRows.value[ref.newIndex] ?? cleanDirtyColumns.value.map(() => null),
       isDirtyCol: cleanDirtyColumns.value,
-    };
+    });
   }
   if (!("sourceIndex" in ref)) {
     ensureQuickEntryDraftRow();
-    return {
+    return inlineBulkEditPreviewItem({
       ...ref,
       data: quickEntryDraftRow.value,
       isDirtyCol: cleanDirtyColumns.value,
-    };
+    });
   }
   const row = props.result.rows[ref.sourceIndex] ?? [];
   const dirty = dirtyRows.value.get(ref.sourceIndex);
-  return {
+  return inlineBulkEditPreviewItem({
     ...ref,
     data: rowDataWithChanges(row, ref.sourceIndex),
     isDirtyCol: dirtyColumnsForRow(dirty, props.result.columns.length),
-  };
+  });
 }
 
 function displayItemAt(rowIndex: number): RowItem | undefined {
@@ -6585,6 +6606,10 @@ watch(
 );
 const isErrorResult = computed(() => isQueryExecutionErrorResult(props.result) && props.result.rows.length > 0);
 const errorMessage = computed(() => (isErrorResult.value ? String(props.result.rows[0]?.[0] ?? "") : ""));
+function onUserCellSelection() {
+  gridOwnsKeyboardAfterSelection = true;
+  invalidateContextMenuTarget();
+}
 // --- Selection composable ---
 const selection = useDataGridSelection({
   columns: visibleColumns,
@@ -6596,7 +6621,7 @@ const selection = useDataGridSelection({
   getScrollElement: dataGridSelectionScroller,
   cellFromClientPoint: dataGridCellFromClientPoint,
   rowFromClientPoint: dataGridRowFromClientPoint,
-  onUserCellSelection: invalidateContextMenuTarget,
+  onUserCellSelection,
   // Canvas schedules its draw before the document-level mousemove handler runs,
   // so its row state must be current before that frame is painted.
   shouldUpdateDraggedRowsImmediately: () => useCanvasGridRows.value,
@@ -11258,6 +11283,7 @@ function beginInlineBulkEdit(initialValue: string): boolean {
   const target = editableSelectionCells()[0];
   if (!target || selectedCellCount.value <= 1) return false;
   const actualCol = actualColumnIndex(target.visibleCol);
+  editValue.value = initialValue;
   inlineBulkEditActive.value = true;
   void startCellEdit(target.item.id, actualCol, false, initialValue).then((started) => {
     if (!started) inlineBulkEditActive.value = false;
@@ -11700,13 +11726,13 @@ function navigateSelectedCell(direction: DataGridNavigationDirection, extend = f
   return applyCellNavigation(nextPosition, extend, block, previousPageRowIndex);
 }
 
-function editSelectedCell(): boolean {
+function editSelectedCell(initialValue?: string): boolean {
   const position = currentSelectedCellPosition();
   if (!position || editingCell.value) return false;
   const item = displayItemAt(position.rowIndex);
   const actualColIndex = actualColumnIndex(position.colIndex);
   if (!item || !canEditCellItem(item, actualColIndex)) return false;
-  void startCellEdit(item.id, actualColIndex, false);
+  void startCellEdit(item.id, actualColIndex, false, initialValue);
   return true;
 }
 
@@ -12112,6 +12138,12 @@ async function onGridKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  const directCellEditValue = dataGridDirectCellEditValue(event);
+  if (directCellEditValue !== undefined && editSelectedCell(directCellEditValue)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if ((isEditCellShortcut(event, settingsStore.editorSettings.shortcuts) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "Enter")) && editSelectedCell()) {
     event.preventDefault();
     return;
@@ -12142,6 +12174,54 @@ async function onGridKeydown(event: KeyboardEvent) {
     pasteClipboardIntoSelection().catch((e) => toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000));
     return;
   }
+}
+
+function releaseGridKeyboardOwnershipOnOutsideMouseDown(event: MouseEvent) {
+  const root = gridRef.value;
+  if (!root || !(event.target instanceof Node) || !root.contains(event.target)) gridOwnsKeyboardAfterSelection = false;
+}
+
+function forwardSelectedGridKeyboardInput(event: KeyboardEvent) {
+  const root = gridRef.value;
+  if (!gridOwnsKeyboardAfterSelection || event.defaultPrevented || !dataGridIsActive || !root || !currentSelectedCellPosition()) return;
+  if (event.target instanceof Node && root.contains(event.target)) return;
+  if (dataGridDirectCellEditValue(event) === undefined) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  root.focus({ preventScroll: true });
+  const forwarded = new KeyboardEvent("keydown", {
+    key: event.key,
+    code: event.code,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    altKey: event.altKey,
+    shiftKey: event.shiftKey,
+    repeat: event.repeat,
+    isComposing: event.isComposing,
+    bubbles: true,
+    cancelable: true,
+  });
+  root.dispatchEvent(forwarded);
+}
+
+function preventDuplicateSqlTextInput(event: InputEvent) {
+  const root = gridRef.value;
+  if (!gridOwnsKeyboardAfterSelection || event.inputType !== "insertText" || !root || !currentSelectedCellPosition()) return;
+  if (event.target instanceof Node && root.contains(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("mousedown", releaseGridKeyboardOwnershipOnOutsideMouseDown, true);
+  document.addEventListener("keydown", forwardSelectedGridKeyboardInput, true);
+  document.addEventListener("beforeinput", preventDuplicateSqlTextInput, true);
+  dataGridRuntimeScope.addCleanup(() => {
+    gridOwnsKeyboardAfterSelection = false;
+    document.removeEventListener("mousedown", releaseGridKeyboardOwnershipOnOutsideMouseDown, true);
+    document.removeEventListener("keydown", forwardSelectedGridKeyboardInput, true);
+    document.removeEventListener("beforeinput", preventDuplicateSqlTextInput, true);
+  });
 }
 
 function detailClipboardText(detail: DataGridCellDetail): string {
@@ -13424,12 +13504,16 @@ watch(editingCell, (cell) => {
   if (cell) nextTick(observeCellEditResizeBounds);
   else {
     inlineBulkEditActive.value = false;
+    cellEditUsesSelectionStyle.value = false;
     resetCellEditTextareaScrollOnResize = false;
     expandedCellEditor.value = null;
     disconnectCellEditResizeObserver();
   }
 });
-watch(editValue, scheduleActiveCellEditTextareaResize);
+watch(editValue, () => {
+  scheduleActiveCellEditTextareaResize();
+  if (inlineBulkEditActive.value) scheduleCanvasDraw();
+});
 
 function onRowContext(rowId: number, rowIndex: number) {
   batchAppendPasteRowId.value = null;
@@ -15514,13 +15598,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     ref="gridRef"
     data-grid-root
     data-grid-active="true"
+    :data-cell-edit-selection-style="cellEditUsesSelectionStyle || undefined"
     class="relative h-full flex flex-col overflow-hidden outline-none"
     :class="{
       'data-grid--editing-cell': !!editingCell,
       'data-grid--dark': isDark,
       'data-grid--has-save-error': !!saveError,
     }"
-    :style="gridStyle"
+    :style="[gridStyle, { '--data-grid-cell-edit-text-align': cellEditTextAlign() }]"
     tabindex="0"
     @keydown="onGridKeydown"
     @paste="onGridPaste"
@@ -18523,6 +18608,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 .cell-edit-input {
   font-family: inherit;
   font-size: var(--dbx-table-font-size, 13px);
+  text-align: var(--data-grid-cell-edit-text-align, left);
+}
+
+[data-grid-root][data-cell-edit-selection-style] .cell-edit-input {
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  caret-color: transparent;
 }
 
 .cell-edit-input--expanded {

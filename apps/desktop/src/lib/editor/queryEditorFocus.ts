@@ -25,6 +25,10 @@ function focusPreservedElement(): boolean {
   return true;
 }
 
+export function shouldFocusQueryEditorOnMount(active: Element | null = typeof document !== "undefined" ? document.activeElement : null): boolean {
+  return !(active instanceof Element && active.closest("[data-grid-root]"));
+}
+
 /**
  * Focus the editor if it exists and does not already have focus, while
  * respecting a surrounding control that currently owns a focus handoff.

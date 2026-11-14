@@ -128,7 +128,7 @@ import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatch
 
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { createSqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
-import { focusEditorView } from "@/lib/editor/queryEditorFocus";
+import { focusEditorView, shouldFocusQueryEditorOnMount } from "@/lib/editor/queryEditorFocus";
 import { createSqlUnknownObjectHighlights, refreshSqlUnknownObjectHighlights } from "@/lib/editor/codemirrorSqlUnknownObjectHighlights";
 import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentMode, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import { startsQueryEditorRectangularSelection } from "@/lib/editor/queryEditorPointerSelection";
@@ -2613,7 +2613,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           // Query tabs opt in; shared editor instances must preserve the surrounding UI focus.
           nextTick(() => {
             requestAnimationFrame(() => {
-              focusEditorView(view.value);
+              if (shouldFocusQueryEditorOnMount()) focusEditorView(view.value);
             });
           });
         }

@@ -3058,6 +3058,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "列ヘッダーをドラッグして並べ替え",
     invertColumnVisibility: "反転",
     resetColumnOrder: "順序をリセット",
+    confirmColumnOrderTitle: "列の順序を保存しますか？",
+    confirmColumnOrderDescription: "新しい順序はこのテーブルのデータ表示に保存されます。",
     showAllColumns: "すべて表示",
     showSelectedColumns: "選択項目を表示",
     showSelectedColumnsHint: "現在の検索に一致するフィールドのみを表示します。",

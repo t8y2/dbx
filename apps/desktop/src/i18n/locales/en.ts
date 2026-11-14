@@ -3575,6 +3575,8 @@ export default {
     dragColumnToReorder: "Drag column header to reorder",
     invertColumnVisibility: "Invert",
     resetColumnOrder: "Reset order",
+    confirmColumnOrderTitle: "Save column order?",
+    confirmColumnOrderDescription: "The new order will be saved for this table’s data view.",
     showAllColumns: "Show all",
     showSelectedColumns: "Show selected",
     showSelectedColumnsHint: "Show only fields matching the current search.",

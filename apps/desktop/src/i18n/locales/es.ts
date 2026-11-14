@@ -3158,6 +3158,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Arrastra el encabezado para reordenar",
     invertColumnVisibility: "Invertir",
     resetColumnOrder: "Restablecer orden",
+    confirmColumnOrderTitle: "¿Guardar el orden de las columnas?",
+    confirmColumnOrderDescription: "El nuevo orden se guardará en la vista de datos de esta tabla.",
     showAllColumns: "Mostrar todo",
     showSelectedColumns: "Mostrar seleccionadas",
     showSelectedColumnsHint: "Mostrar solo los campos que coinciden con la búsqueda actual.",

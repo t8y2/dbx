@@ -3055,6 +3055,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Arraste o cabeçalho para reordenar",
     invertColumnVisibility: "Inverter",
     resetColumnOrder: "Redefinir ordem",
+    confirmColumnOrderTitle: "Salvar a ordem das colunas?",
+    confirmColumnOrderDescription: "A nova ordem será salva na visualização de dados desta tabela.",
     showAllColumns: "Mostrar todas",
     showSelectedColumns: "Mostrar selecionadas",
     showSelectedColumnsHint: "Mostrar apenas os campos correspondentes à pesquisa atual.",

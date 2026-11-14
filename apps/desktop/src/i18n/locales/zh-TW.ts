@@ -3027,6 +3027,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "拖曳欄位標題調整順序",
     invertColumnVisibility: "反選",
     resetColumnOrder: "重設順序",
+    confirmColumnOrderTitle: "儲存欄位順序？",
+    confirmColumnOrderDescription: "新順序將儲存至此資料表的資料檢視。",
     showAllColumns: "顯示全部",
     showSelectedColumns: "顯示選中",
     showSelectedColumnsHint: "僅顯示目前搜尋符合的欄位。",

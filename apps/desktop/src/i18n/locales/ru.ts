@@ -3268,6 +3268,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "Перетащите заголовок столбца для изменения порядка",
     invertColumnVisibility: "Инвертировать",
     resetColumnOrder: "Сбросить порядок",
+    confirmColumnOrderTitle: "Сохранить порядок столбцов?",
+    confirmColumnOrderDescription: "Новый порядок будет сохранён для представления данных этой таблицы.",
     showAllColumns: "Показать все",
     showSelectedColumns: "Показать выбранные",
     showSelectedColumnsHint: "Показывать только поля, соответствующие текущему поиску.",

@@ -6687,6 +6687,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "按一下「開始傳輸」先檢閱傳輸計畫，確認後才會寫入資料。",
     log: {
       title: "執行日誌",
       tableStarted: "開始傳輸資料表 {table}（{index}/{total}）",

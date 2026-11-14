@@ -7579,6 +7579,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "Selecione Iniciar transferência para revisar o plano e confirmar antes de gravar dados.",
     log: {
       title: "Registro de execução",
       tableStarted: "Transferindo tabela {table} ({index}/{total})",

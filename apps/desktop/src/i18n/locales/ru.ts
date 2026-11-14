@@ -9044,6 +9044,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "Нажмите «Начать перенос», чтобы проверить план и подтвердить перенос перед записью данных.",
     log: {
       title: "Журнал выполнения",
       tableStarted: "Передача таблицы {table} ({index}/{total})",

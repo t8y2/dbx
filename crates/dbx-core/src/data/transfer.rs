@@ -27,6 +27,7 @@ mod ddl_plan;
 pub(crate) mod mysql_xugu;
 pub(crate) mod oracle_table_contract;
 mod overwrite_clear;
+pub(crate) mod postgres_xugu;
 mod structure_plan;
 pub(crate) mod xugu_objects;
 
@@ -1229,17 +1230,21 @@ pub fn validate_transfer_database_pair(
         return Ok(());
     }
     let mysql_to_xugu = mysql_xugu::is_pair(source_db_type, target_db_type);
-    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) && !mysql_to_xugu {
-        return Err("虚谷数据传输当前仅支持虚谷到虚谷，以及 MySQL 到虚谷的表传输".to_string());
+    let postgres_to_xugu = postgres_xugu::is_pair(source_db_type, target_db_type);
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        && !mysql_to_xugu
+        && !postgres_to_xugu
+    {
+        return Err("虚谷数据传输当前仅支持虚谷到虚谷，以及 MySQL、PostgreSQL 到虚谷的表传输".to_string());
     }
-    if mysql_to_xugu
+    if (mysql_to_xugu || postgres_to_xugu)
         && request.objects.as_ref().is_some_and(|objects| {
             objects
                 .iter()
                 .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty())
         })
     {
-        return Err("MySQL 到虚谷当前仅支持表结构和表数据".into());
+        return Err("MySQL、PostgreSQL 到虚谷当前仅支持表结构和表数据".into());
     }
     if request.objects.as_ref().is_some_and(|objects| {
         objects.iter().any(|selection| !xugu_objects::supported_kinds().contains(&selection.object_type))
@@ -11549,6 +11554,9 @@ pub async fn preview_transfer_ownership(
     if mysql_xugu::is_pair(source_db_type, target_db_type) {
         mysql_xugu::preflight(state, request, source_pool_key, target_pool_key).await?;
     }
+    if postgres_xugu::is_pair(source_db_type, target_db_type) {
+        postgres_xugu::preflight(state, request, source_pool_key, target_pool_key).await?;
+    }
     let (missing_owners, target_owner) =
         if request.create_table && is_postgres_compat_transfer(source_db_type, target_db_type) {
             let has_prokind = postgres_transfer_catalog_capabilities(state, source_pool_key).await?.has_prokind;
@@ -13323,8 +13331,11 @@ where
     }
     ensure_target_column_names_unique(request, table, &columns)?;
     let mysql_to_xugu = mysql_xugu::is_pair(source_db_type, target_db_type);
+    let postgres_to_xugu = postgres_xugu::is_pair(source_db_type, target_db_type);
     let mysql_xugu_types = if mysql_to_xugu {
         Some(columns.iter().map(mysql_xugu::column_type).collect::<Result<Vec<_>, _>>()?)
+    } else if postgres_to_xugu {
+        Some(columns.iter().map(postgres_xugu::column_type).collect::<Result<Vec<_>, _>>()?)
     } else {
         None
     };
@@ -13525,6 +13536,7 @@ where
     // target metadata it stays false — SQL Server then rejects the explicit
     // identity values with 544.
     let needs_target_columns = mysql_to_xugu
+        || postgres_to_xugu
         || default_rows_only
         || target_table_preexisting
         || (request.mode == TransferMode::Upsert && !transfer_upsert_falls_back_to_append(target_db_type))
@@ -13558,6 +13570,16 @@ where
         )
         .await?;
     }
+    if postgres_to_xugu {
+        postgres_xugu::enrich_target(
+            state,
+            target_pool_key,
+            &request.target_schema,
+            &target_table,
+            &mut target_columns,
+        )
+        .await?;
+    }
 
     // Empty-column INSERTs are safe only when the target also computes every
     // value. Reject incompatible data-only targets before an overwrite truncates
@@ -13566,6 +13588,9 @@ where
         || xugu_rowversion_only_transfer(&target_columns, target_db_type, target_db_type);
     if mysql_to_xugu {
         mysql_xugu::validate_target(&writable_columns, &target_columns)?;
+    }
+    if postgres_to_xugu {
+        postgres_xugu::validate_target(&writable_columns, &target_columns)?;
     }
     if default_rows_only && !target_default_rows_only {
         return Err(format!(
@@ -13912,6 +13937,11 @@ where
                 (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else if let Some(pager) = ctid_pager.as_ref() {
                 let sql = pager.page_sql(&col_names, table, &request.source_schema, batch_size);
+                let sql = if postgres_to_xugu {
+                    postgres_xugu::project_page(&sql, &writable_columns, &primary_key_columns)?
+                } else {
+                    sql
+                };
                 (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, false)
             } else {
                 let sql = if let Some(filter) = table_filter.as_ref() {
@@ -13961,6 +13991,8 @@ where
                 };
                 let (sql, mysql_spatial_markers) = if mysql_to_xugu {
                     (mysql_xugu::project_page(&sql, &writable_columns)?, false)
+                } else if postgres_to_xugu {
+                    (postgres_xugu::project_page(&sql, &writable_columns, &primary_key_columns)?, false)
                 } else {
                     mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type)
                 };
@@ -14000,6 +14032,9 @@ where
                 Some(pager) => Some(pager.advance(&mut result.rows, batch_size)?),
                 None => None,
             };
+            if postgres_to_xugu {
+                postgres_xugu::validate_rows(&writable_columns, &result.rows)?;
+            }
 
             if let Some(indexes) = keyset_indexes.as_deref() {
                 match advance_keyset_cursor(&mut keyset_cursor, &result.rows, indexes, table)? {
@@ -14022,7 +14057,7 @@ where
                     row.clear();
                 }
             }
-            let write_statements = if mysql_to_xugu {
+            let write_statements = if mysql_to_xugu || postgres_to_xugu {
                 mysql_xugu::write_batches(
                     &write_col_names,
                     &col_types,
@@ -14123,7 +14158,7 @@ where
             &target_table,
             &request.target_schema,
             &write_col_names,
-            target_table_preexisting || mysql_to_xugu,
+            target_table_preexisting || mysql_to_xugu || postgres_to_xugu,
         )
         .await?;
     }
@@ -14546,6 +14581,11 @@ where
         let mut table_request = request.clone();
         table_request.tables = vec![table.to_string()];
         mysql_xugu::preflight(&state, &table_request, source_pool_key, target_pool_key).await?;
+    }
+    if postgres_xugu::is_pair(source_db_type, target_db_type) {
+        let mut table_request = request.clone();
+        table_request.tables = vec![table.to_string()];
+        postgres_xugu::preflight(&state, &table_request, source_pool_key, target_pool_key).await?;
     }
     let request = request.clone();
     let table = table.to_string();

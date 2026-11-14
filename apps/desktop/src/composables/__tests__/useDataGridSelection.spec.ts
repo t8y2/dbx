@@ -7,6 +7,7 @@ function createSelection(options?: {
   cellFromClientPoint?: (clientX: number, clientY: number) => { rowIndex: number; colIndex: number } | null;
   rowFromClientPoint?: (clientX: number, clientY: number) => number | null;
   onUserCellSelection?: () => void;
+  onDraggedCellSelectionChange?: () => void;
   shouldUpdateDraggedRowsImmediately?: () => boolean;
   onDraggedRowSelectionChange?: () => void;
   displayItemCount?: number;
@@ -39,6 +40,7 @@ function createSelection(options?: {
     cellFromClientPoint: options?.cellFromClientPoint,
     rowFromClientPoint: options?.rowFromClientPoint,
     onUserCellSelection: options?.onUserCellSelection,
+    onDraggedCellSelectionChange: options?.onDraggedCellSelectionChange,
     shouldUpdateDraggedRowsImmediately: options?.shouldUpdateDraggedRowsImmediately,
     onDraggedRowSelectionChange: options?.onDraggedRowSelectionChange,
   });
@@ -274,7 +276,136 @@ describe("useDataGridSelection", () => {
 
       expect(onUserCellSelection).toHaveBeenCalledTimes(3);
     } finally {
+      selection.finishCellSelection();
       Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+    }
+  });
+
+  it("adds a non-contiguous rectangular range with Ctrl drag and restores the base selection when shrinking", () => {
+    const pointerDocument = installPointerDocument();
+    let pointerCell = { rowIndex: 3, colIndex: 2 };
+    const onDraggedCellSelectionChange = vi.fn();
+    const selection = createSelection({
+      cellFromClientPoint: () => pointerCell,
+      onDraggedCellSelectionChange,
+    });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.extendCellSelectionTo(1, 0);
+      selection.handleDataCellMousedown(2, 1, 3, { button: 0, buttons: 1, clientX: 10, clientY: 10, ctrlKey: true, preventDefault() {} } as MouseEvent);
+      onDraggedCellSelectionChange.mockClear();
+
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+
+      expect(selection.selectedRange.value).toBeNull();
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "1:0", "2:1", "2:2", "3:1", "3:2"]));
+      expect(selection.cellIsSelected(1, 1)).toBe(false);
+      expect(onDraggedCellSelectionChange).toHaveBeenCalledTimes(1);
+
+      pointerCell = { rowIndex: 2, colIndex: 1 };
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 18, clientY: 18 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "1:0", "2:1"]));
+      expect(selection.cellIsSelected(3, 2)).toBe(false);
+      expect(onDraggedCellSelectionChange).toHaveBeenCalledTimes(2);
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it.each(["ctrlKey", "metaKey"] as const)("builds a sparse clipboard matrix after adding B2:C2 to A1 with %s drag", (modifier) => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 1, colIndex: 2 }) });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.handleDataCellMousedown(1, 1, 2, { button: 0, buttons: 1, clientX: 10, clientY: 10, [modifier]: true, preventDefault() {} } as unknown as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "1:1", "1:2"]));
+      expect(selection.selectedCellMatrix.value).toBeNull();
+      expect(selection.selectedCellClipboardMatrix.value).toEqual({
+        rowIndexes: [0, 1],
+        columnIndexes: [0, 1, 2],
+        columns: ["id", "name", "email"],
+        rows: [
+          [1, "", ""],
+          ["", "name-2", "user-2@example.com"],
+        ],
+        selectedMask: [
+          [true, false, false],
+          [false, true, true],
+        ],
+      });
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("removes a rectangular range when a Ctrl drag starts on a selected cell", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 2, colIndex: 2 }) });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.extendCellSelectionTo(2, 2);
+      selection.handleDataCellMousedown(1, 1, 2, { button: 0, buttons: 1, clientX: 10, clientY: 10, ctrlKey: true, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "0:1", "0:2", "1:0", "2:0"]));
+      expect(selection.selectedCellCount.value).toBe(5);
+      expect(selection.selectionFocus.value).toBeNull();
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("keeps a Ctrl drag active after its removal rectangle temporarily empties the selection", () => {
+    const pointerDocument = installPointerDocument();
+    let pointerCell = { rowIndex: 1, colIndex: 1 };
+    const selection = createSelection({ cellFromClientPoint: () => pointerCell });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.extendCellSelectionTo(1, 1);
+      selection.handleDataCellMousedown(0, 0, 1, { button: 0, buttons: 1, clientX: 10, clientY: 10, metaKey: true, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set());
+      expect(selection.selectionAnchor.value).toBeNull();
+      expect(selection.isSelectingCells.value).toBe(true);
+
+      pointerCell = { rowIndex: 0, colIndex: 0 };
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 18, clientY: 18 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:1", "1:0", "1:1"]));
+      expect(selection.isSelectingCells.value).toBe(true);
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("keeps Ctrl cell selection as a single-cell toggle below the drag threshold", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 3, colIndex: 2 }) });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.handleDataCellMousedown(2, 1, 3, { button: 0, buttons: 1, clientX: 100, clientY: 100, ctrlKey: true, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 111, clientY: 100 } as MouseEvent);
+      pointerDocument.dispatch("mouseup", { buttons: 0, clientX: 111, clientY: 100 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "2:1"]));
+      expect(selection.cellIsSelected(3, 2)).toBe(false);
+      expect(selection.isSelectingCells.value).toBe(false);
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
     }
   });
 
@@ -670,6 +801,34 @@ describe("useDataGridSelection", () => {
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
       globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
       Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+    }
+  });
+
+  it("scrolls and extends a sparse Ctrl selection while dragging near an edge", () => {
+    const pointerDocument = installPointerDocument();
+    const scroller = { scrollLeft: 0, scrollTop: 0 } as HTMLElement;
+    scroller.getBoundingClientRect = () => ({ left: 0, top: 0, right: 300, bottom: 200, width: 300, height: 200, x: 0, y: 0, toJSON: () => ({}) });
+    const onDraggedCellSelectionChange = vi.fn();
+    const selection = createSelection({
+      getScrollElement: () => scroller,
+      cellFromClientPoint: () => ({ rowIndex: scroller.scrollTop > 0 ? 3 : 0, colIndex: 2 }),
+      onDraggedCellSelectionChange,
+    });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.handleDataCellMousedown(1, 1, 2, { button: 0, buttons: 1, clientX: 100, clientY: 100, ctrlKey: true, preventDefault() {} } as MouseEvent);
+      onDraggedCellSelectionChange.mockClear();
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 295, clientY: 195 } as MouseEvent);
+      pointerDocument.animationFrames.shift()?.(0);
+
+      expect(scroller.scrollLeft).toBeGreaterThan(0);
+      expect(scroller.scrollTop).toBeGreaterThan(0);
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "1:1", "1:2", "2:1", "2:2", "3:1", "3:2"]));
+      expect(onDraggedCellSelectionChange).toHaveBeenCalledTimes(2);
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
     }
   });
 

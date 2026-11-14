@@ -50,6 +50,16 @@ function mouseEvent(options: Partial<MouseEvent> = {}): MouseEvent {
   } as MouseEvent;
 }
 
+function installSelectionDocument() {
+  const originalDocument = globalThis.document;
+  const fakeDocument = {
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as Document;
+  Object.defineProperty(globalThis, "document", { configurable: true, value: fakeDocument });
+  return () => Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+}
+
 function createSelectionWithDraftRow() {
   return useDataGridSelection({
     columns: computed(() => ["id", "name"]),
@@ -133,42 +143,60 @@ test("column selection excludes the quick entry draft row from selected data", (
 });
 
 test("discrete draft cell selection is excluded from selected cell count", () => {
+  const restoreDocument = installSelectionDocument();
   const selection = createSelectionWithDraftRow();
 
-  selection.selectSingleCell(1, 0);
-  selection.handleDataCellMousedown(1, 1, Number.MIN_SAFE_INTEGER, mouseEvent({ ctrlKey: true }));
+  try {
+    selection.selectSingleCell(1, 0);
+    selection.handleDataCellMousedown(1, 1, Number.MIN_SAFE_INTEGER, mouseEvent({ ctrlKey: true }));
 
-  assert.deepEqual(selection.selectedCells.value, {
-    columns: [],
-    rows: [],
-  });
-  assert.equal(selection.selectedCellCount.value, 0);
-  assert.equal(selection.hasCellSelection.value, false);
+    assert.deepEqual(selection.selectedCells.value, {
+      columns: [],
+      rows: [],
+    });
+    assert.equal(selection.selectedCellCount.value, 0);
+    assert.equal(selection.hasCellSelection.value, false);
+  } finally {
+    selection.finishCellSelection();
+    restoreDocument();
+  }
 });
 
 test("mixed discrete cell selection counts only real data cells", () => {
+  const restoreDocument = installSelectionDocument();
   const selection = createSelectionWithDraftRow();
 
-  selection.selectSingleCell(0, 0);
-  selection.handleDataCellMousedown(1, 1, Number.MIN_SAFE_INTEGER, mouseEvent({ ctrlKey: true }));
+  try {
+    selection.selectSingleCell(0, 0);
+    selection.handleDataCellMousedown(1, 1, Number.MIN_SAFE_INTEGER, mouseEvent({ ctrlKey: true }));
 
-  assert.deepEqual(selection.selectedCells.value, {
-    columns: ["id"],
-    rows: [[1]],
-  });
-  assert.equal(selection.selectedCellCount.value, 1);
+    assert.deepEqual(selection.selectedCells.value, {
+      columns: ["id"],
+      rows: [[1]],
+    });
+    assert.equal(selection.selectedCellCount.value, 1);
+  } finally {
+    selection.finishCellSelection();
+    restoreDocument();
+  }
 });
 
 test("ctrl clicking cells toggles only the clicked cells", () => {
+  const restoreDocument = installSelectionDocument();
   const selection = createSelection();
 
-  selection.selectSingleCell(0, 0);
-  selection.handleDataCellMousedown(2, 2, 2, mouseEvent({ ctrlKey: true }));
+  try {
+    selection.selectSingleCell(0, 0);
+    selection.handleDataCellMousedown(2, 2, 2, mouseEvent({ ctrlKey: true }));
 
-  assert.equal(selection.cellIsSelected(0, 0), true);
-  assert.equal(selection.cellIsSelected(2, 2), true);
-  assert.equal(selection.cellIsSelected(1, 1), false);
-  assert.equal(selection.selectedCellCount.value, 2);
+    assert.equal(selection.cellIsSelected(0, 0), true);
+    assert.equal(selection.cellIsSelected(2, 2), true);
+    assert.equal(selection.cellIsSelected(1, 1), false);
+    assert.equal(selection.selectedCellCount.value, 2);
+  } finally {
+    selection.finishCellSelection();
+    restoreDocument();
+  }
 });
 
 test("shift clicking cells keeps range selection", () => {

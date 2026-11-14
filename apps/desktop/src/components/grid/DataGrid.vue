@@ -6597,6 +6597,7 @@ const selection = useDataGridSelection({
   cellFromClientPoint: dataGridCellFromClientPoint,
   rowFromClientPoint: dataGridRowFromClientPoint,
   onUserCellSelection: invalidateContextMenuTarget,
+  onDraggedCellSelectionChange: scheduleCanvasDraw,
   // Canvas schedules its draw before the document-level mousemove handler runs,
   // so its row state must be current before that frame is painted.
   shouldUpdateDraggedRowsImmediately: () => useCanvasGridRows.value,
@@ -6612,6 +6613,7 @@ const {
   selectedCells,
   selectedCellKeys,
   selectedCellMatrix,
+  selectedCellClipboardMatrix,
   selectedCellCount,
   hasCellSelection,
   clearCellSelection,
@@ -9960,6 +9962,7 @@ const {
   hasColumnSelection,
   selectedCells,
   selectedCellMatrix,
+  selectedCellClipboardMatrix,
   selectedRange,
   contextCell: exportContextCell,
   contextSelectionIsSynthetic,

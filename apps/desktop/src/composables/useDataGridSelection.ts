@@ -1,5 +1,17 @@
 import { ref, computed, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
-import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, type CellPosition, type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import {
+  allCellsSelectionRange,
+  extractColumnsSelection,
+  extractSelection,
+  isCellInSelection,
+  normalizeSelectionRange,
+  normalizeSelectedColumnIndexes,
+  type CellPosition,
+  type CellSelectionClipboardMatrix,
+  type CellSelectionMatrix,
+  type CellSelectionRange,
+  type SelectionData,
+} from "@/lib/dataGrid/gridSelection";
 import type { DataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 
 type CellValue = string | number | boolean | null;
@@ -27,6 +39,7 @@ export interface UseDataGridSelectionOptions {
   cellFromClientPoint?: (clientX: number, clientY: number) => CellPosition | null;
   rowFromClientPoint?: (clientX: number, clientY: number) => number | null;
   onUserCellSelection?: () => void;
+  onDraggedCellSelectionChange?: () => void;
   shouldUpdateDraggedRowsImmediately?: () => boolean;
   onDraggedRowSelectionChange?: () => void;
   runtimeScope?: DataGridRuntimeScope;
@@ -47,6 +60,7 @@ const AUTO_SCROLL_MAX_SPEED = 28;
 // of gesture as the group tab bar's horizontal tab-drag threshold, though that one is
 // tuned higher to also absorb touchscreen tap jitter, which doesn't apply here.
 const GRID_SELECTION_DRAG_THRESHOLD_PX = 12;
+type CellSelectionOperation = "replace" | "add" | "remove";
 type RowSelectionOperation = "replace" | "add" | "remove";
 
 export function useDataGridSelection(options: UseDataGridSelectionOptions) {
@@ -63,6 +77,10 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   let selectionDragConfirmed = false;
   let selectionAutoScrollFrame = 0;
   let selectionInterruptionListenersAttached = false;
+  let cellSelectionOperation: CellSelectionOperation = "replace";
+  let cellSelectionBaseKeys = new Set<string>();
+  let cellSelectionDragAnchor: CellPosition | null = null;
+  let cellSelectionDragFocus: CellPosition | null = null;
   let rowSelectionRangeAnchorIndex = -1;
   let rowSelectionFocusIndex = -1;
   let rowSelectionBaseIds = new Set<number>();
@@ -158,6 +176,32 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
       Array.from({ length: range.endRow - range.startRow + 1 }, (_, index) => range.startRow + index),
       Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index),
     );
+  });
+
+  const selectedCellClipboardMatrix = computed<CellSelectionClipboardMatrix | null>(() => {
+    const matrix = selectedCellMatrix.value;
+    if (matrix) {
+      return {
+        ...matrix,
+        selectedMask: matrix.rows.map((row) => row.map(() => true)),
+      };
+    }
+
+    if (selectedCellKeys.value.size === 0) return null;
+    const positions = [...selectedCellKeys.value].map(parseCellKey).filter((position): position is CellPosition => !!position && position.rowIndex < displayItems.value.length && position.colIndex < columns.value.length && !displayItems.value[position.rowIndex]?.isDraft);
+    const rowIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.rowIndex));
+    const columnIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.colIndex));
+    if (rowIndexes.length === 0 || columnIndexes.length === 0) return null;
+
+    const selectedKeys = new Set(positions.map((position) => cellKey(position.rowIndex, position.colIndex)));
+    const selectedMask = rowIndexes.map((rowIndex) => columnIndexes.map((columnIndex) => selectedKeys.has(cellKey(rowIndex, columnIndex))));
+    return {
+      rowIndexes,
+      columnIndexes,
+      columns: columnIndexes.map((index) => columns.value[index]),
+      rows: rowIndexes.map((rowIndex, rowOffset) => columnIndexes.map((columnIndex, columnOffset) => (selectedMask[rowOffset]?.[columnOffset] ? (displayItems.value[rowIndex]?.data[columnIndex] ?? null) : ""))),
+      selectedMask,
+    };
   });
 
   // 选区计数/是否有选区不走 selectedCells 物化：框选拖拽时每帧都会读这些值
@@ -342,29 +386,6 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectionFocus.value = { rowIndex, colIndex };
   }
 
-  function toggleCellSelection(rowIndex: number, colIndex: number) {
-    const key = cellKey(rowIndex, colIndex);
-    const next = selectedCellKeys.value.size > 0 ? new Set(selectedCellKeys.value) : selectedRangeToCellKeys(selectedRange.value);
-    if (next.has(key)) {
-      next.delete(key);
-    } else {
-      next.add(key);
-    }
-    selectedCellKeys.value = next;
-    selectedColumnIndexes.value = new Set();
-    if (next.size > 0) {
-      selectionAnchor.value = { rowIndex, colIndex };
-      selectionFocus.value = null;
-    } else {
-      selectionAnchor.value = null;
-      selectionFocus.value = null;
-    }
-    isSelectingCells.value = false;
-    isSelectingAll.value = false;
-    lastClickedColumnIndex.value = colIndex;
-    if (showTranspose.value) transposeRowIndex.value = rowIndex;
-  }
-
   function handleRowClick(rowIndex: number, rowId: number, event: MouseEvent) {
     const isMeta = event.metaKey || event.ctrlKey;
     const isShift = event.shiftKey;
@@ -530,6 +551,10 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function finishCellSelection() {
     isSelectingCells.value = false;
+    cellSelectionOperation = "replace";
+    cellSelectionBaseKeys = new Set();
+    cellSelectionDragAnchor = null;
+    cellSelectionDragFocus = null;
     document.removeEventListener("mouseup", finishCellSelection);
     document.removeEventListener("mousemove", handleSelectionPointerMove);
     stopSelectionAutoScroll();
@@ -608,14 +633,29 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     gridRef.value?.focus({ preventScroll: true });
   }
 
-  function beginCellSelection(rowIndex: number, colIndex: number, event: MouseEvent) {
+  function beginCellSelection(rowIndex: number, colIndex: number, event: MouseEvent, options?: { preserveExisting?: boolean }) {
     if (event.button !== 0) return;
     if (editingCell.value) return;
     finishSelection();
     event.preventDefault();
     focusGridWithoutScrolling();
-    clearCellSelection();
-    selectSingleCell(rowIndex, colIndex);
+    const start = { rowIndex, colIndex };
+    cellSelectionDragAnchor = start;
+    cellSelectionDragFocus = start;
+    if (options?.preserveExisting) {
+      cellSelectionBaseKeys = selectedCellKeys.value.size > 0 ? new Set(selectedCellKeys.value) : selectedRangeToCellKeys(selectedRange.value);
+      cellSelectionOperation = cellSelectionBaseKeys.has(cellKey(rowIndex, colIndex)) ? "remove" : "add";
+      selectedColumnIndexes.value = new Set();
+      isSelectingAll.value = false;
+      applySparseCellDrag(start);
+    } else {
+      cellSelectionOperation = "replace";
+      cellSelectionBaseKeys = new Set();
+      clearCellSelection();
+      selectSingleCell(rowIndex, colIndex);
+      cellSelectionDragAnchor = start;
+      cellSelectionDragFocus = start;
+    }
     isSelectingCells.value = true;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
@@ -645,10 +685,35 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   }
 
   function extendCellSelection(rowIndex: number, colIndex: number) {
-    if (!isSelectingCells.value || !selectionAnchor.value) return;
-    const current = selectionFocus.value;
-    if (current?.rowIndex === rowIndex && current?.colIndex === colIndex) return;
-    selectionFocus.value = { rowIndex, colIndex };
+    if (!isSelectingCells.value || !cellSelectionDragAnchor) return;
+    if (cellSelectionDragFocus?.rowIndex === rowIndex && cellSelectionDragFocus?.colIndex === colIndex) return;
+    const focus = { rowIndex, colIndex };
+    if (cellSelectionOperation !== "replace") {
+      applySparseCellDrag(focus);
+      return;
+    }
+    cellSelectionDragFocus = focus;
+    selectionFocus.value = focus;
+  }
+
+  function applySparseCellDrag(focus: CellPosition) {
+    if (!cellSelectionDragAnchor || cellSelectionOperation === "replace") return;
+    const range = normalizeSelectionRange(cellSelectionDragAnchor, focus);
+    // Rebuild from the gesture-start snapshot so shrinking or reversing the drag
+    // restores cells that are no longer inside the active rectangle.
+    const next = new Set(cellSelectionBaseKeys);
+    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+      for (let colIndex = range.startCol; colIndex <= range.endCol; colIndex++) {
+        const key = cellKey(rowIndex, colIndex);
+        if (cellSelectionOperation === "remove") next.delete(key);
+        else next.add(key);
+      }
+    }
+    selectedCellKeys.value = next;
+    cellSelectionDragFocus = focus;
+    selectionAnchor.value = next.size > 0 ? focus : null;
+    selectionFocus.value = null;
+    options.onDraggedCellSelectionChange?.();
   }
 
   function handleDataCellMousedown(rowIndex: number, colIndex: number, _rowId: number, event: MouseEvent) {
@@ -660,10 +725,8 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     const isShift = event.shiftKey;
 
     if (isMeta) {
-      event.preventDefault();
-      focusGridWithoutScrolling();
       clearRowSelection();
-      toggleCellSelection(rowIndex, colIndex);
+      beginCellSelection(rowIndex, colIndex, event, { preserveExisting: true });
       return;
     }
 
@@ -724,6 +787,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectedRange,
     selectedCells,
     selectedCellMatrix,
+    selectedCellClipboardMatrix,
     selectedCellCount,
     hasCellSelection,
     isSelectingAll,

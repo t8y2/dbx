@@ -110,19 +110,20 @@ func (s *server) startDatapump(request datapumpStartRequest) datapumpStartResult
 	if reason, field := request.validate(); reason != "" {
 		return datapumpStartResult{OperationID: request.OperationID, State: "failed", Reason: reason, Context: map[string]string{"field": field}}
 	}
-	if s.datapump != nil { // 已有任务：看是不是同一个操作 / 是否已终态
-		if s.datapump.request.OperationID == request.OperationID {
-			s.datapump.mu.Lock()
-			defer s.datapump.mu.Unlock()
-			return datapumpStartResult{OperationID: request.OperationID, JobName: s.datapump.jobName, State: s.datapump.state, Reason: s.datapump.reason, VendorCode: s.datapump.vendorCode}
+	// 幂等：同一 operationId 重试返回当前状态。
+	if existing, ok := s.datapumps[request.OperationID]; ok {
+		existing.mu.Lock()
+		defer existing.mu.Unlock()
+		return datapumpStartResult{OperationID: request.OperationID, JobName: existing.jobName, State: existing.state, Reason: existing.reason, VendorCode: existing.vendorCode}
+	}
+	// 惰性清理：移除已终态的 entry（避免 map 无限增长）。
+	for id, e := range s.datapumps {
+		e.mu.Lock()
+		terminal := e.terminalLocked()
+		e.mu.Unlock()
+		if terminal {
+			delete(s.datapumps, id)
 		}
-		s.datapump.mu.Lock()
-		terminal := s.datapump.terminalLocked()
-		s.datapump.mu.Unlock()
-		if !terminal {
-			return datapumpStartResult{OperationID: request.OperationID, State: "failed", Reason: "datapump_busy"}
-		}
-		s.closeDatapump() // 上一个已终态：先清场再开新的
 	}
 	db, err := s.requireDB()
 	if err != nil {
@@ -177,7 +178,7 @@ func (s *server) startDatapump(request datapumpStartRequest) datapumpStartResult
 	}
 	pollCtx, cancel := context.WithCancel(context.Background())
 	entry.pollCancel = cancel
-	s.datapump = entry
+	s.datapumps[request.OperationID] = entry
 	// go 关键字：把 poll 丢进一个新 goroutine 跑（≈ 提交线程任务但不等），
 	// 当前函数立刻往下走并返回。
 	go entry.poll(pollCtx, usesOCIProfile(s.params))
@@ -431,8 +432,8 @@ func (e *datapumpEntry) discardConnection() {
 
 // datapumpStatusResultFor 是 status RPC 的实现：续租 + 返回快照。
 func (s *server) datapumpStatusResultFor(operationID string) datapumpStatusResult {
-	entry := s.datapump
-	if entry == nil || entry.request.OperationID != operationID {
+	entry, ok := s.datapumps[operationID]
+	if !ok {
 		return datapumpStatusResult{OperationID: operationID, State: "failed", Reason: "datapump_session_unavailable"}
 	}
 	entry.mu.Lock()
@@ -445,8 +446,8 @@ func (s *server) datapumpStatusResultFor(operationID string) datapumpStatusResul
 
 // stopDatapump 是 stop RPC 的实现：只翻标志位 + 等轮询循环干完活。
 func (s *server) stopDatapump(operationID string) datapumpStatusResult {
-	entry := s.datapump
-	if entry == nil || entry.request.OperationID != operationID {
+	entry, ok := s.datapumps[operationID]
+	if !ok {
 		return datapumpStatusResult{OperationID: operationID, State: "failed", Reason: "datapump_session_unavailable"}
 	}
 	entry.mu.Lock()
@@ -472,28 +473,26 @@ var datapumpStopWait = 10 * time.Second
 
 // closeDatapump 是会话关闭路径：停掉在途任务 → 等轮询退出（超时强杀）→ 清掉 entry。
 func (s *server) closeDatapump() {
-	entry := s.datapump
-	if entry == nil {
-		return
-	}
-	entry.mu.Lock()
-	stopped := entry.terminalLocked()
-	if !stopped {
-		entry.stopRequested = true
-	}
-	entry.mu.Unlock()
-	if !stopped {
-		select {
-		case <-entry.done:
-		case <-time.After(datapumpStopWait): // 软等超时 → 取消 ctx 掐断阻塞中的 GET_STATUS
-			if entry.pollCancel != nil {
-				entry.pollCancel()
-			}
+	for _, entry := range s.datapumps {
+		entry.mu.Lock()
+		stopped := entry.terminalLocked()
+		if !stopped {
+			entry.stopRequested = true
+		}
+		entry.mu.Unlock()
+		if !stopped {
 			select {
 			case <-entry.done:
-			case <-time.After(2 * time.Second):
+			case <-time.After(datapumpStopWait): // 软等超时 → 取消 ctx 掐断阻塞中的 GET_STATUS
+				if entry.pollCancel != nil {
+					entry.pollCancel()
+				}
+				select {
+				case <-entry.done:
+				case <-time.After(2 * time.Second):
+				}
 			}
 		}
 	}
-	s.datapump = nil
+	s.datapumps = make(map[string]*datapumpEntry)
 }

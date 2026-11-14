@@ -349,9 +349,10 @@ func TestDatapumpExportLifecycle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// status RPC 必须把租约期限往后推.
-	s.datapump.mu.Lock()
-	leaseAfter := s.datapump.leaseDeadline
-	s.datapump.mu.Unlock()
+	leaseEntry := s.datapumps["op-1"]
+	leaseEntry.mu.Lock()
+	leaseAfter := leaseEntry.leaseDeadline
+	leaseEntry.mu.Unlock()
 	if time.Until(leaseAfter) < datapumpLeaseDuration-time.Second {
 		t.Error("status RPC must renew the lease")
 	}
@@ -421,9 +422,10 @@ func TestDatapumpLeaseExpiryStopsJob(t *testing.T) {
 	// 不发 status RPC：租约必须过期且循环必须自动停止任务.
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		s.datapump.mu.Lock()
-		state := s.datapump.state
-		s.datapump.mu.Unlock()
+		leaseEntry := s.datapumps["op-1"]
+		leaseEntry.mu.Lock()
+		state := leaseEntry.state
+		leaseEntry.mu.Unlock()
 		if state == "lease_expired" {
 			break
 		}
@@ -437,7 +439,7 @@ func TestDatapumpLeaseExpiryStopsJob(t *testing.T) {
 	}
 }
 
-func TestDatapumpStartIdempotencyAndBusy(t *testing.T) {
+func TestDatapumpStartIdempotencyAndConcurrent(t *testing.T) {
 	s, d := datapumpTestServer(t)
 	datapumpFastPoll(t)
 
@@ -452,9 +454,10 @@ func TestDatapumpStartIdempotencyAndBusy(t *testing.T) {
 	if strings.Count(d.eventString(), "open") != 1 {
 		t.Errorf("retry must not open a second job, events: %s", d.eventString())
 	}
+	// 多任务：第二个不同 operationId 的任务应该成功启动，不再报 busy。
 	other := s.startDatapump(datapumpValidRequest("op-2"))
-	if other.State != "failed" || other.Reason != "datapump_busy" {
-		t.Errorf("second concurrent job must be rejected: %+v", other)
+	if other.State != "running" {
+		t.Errorf("second concurrent job must succeed (multi-task): %+v", other)
 	}
 }
 

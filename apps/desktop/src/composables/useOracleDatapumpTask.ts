@@ -3,9 +3,8 @@ import * as api from "@/lib/backend/api";
 import type { OracleDatapumpKind, OracleDatapumpProgress, OracleDatapumpRequest } from "@/lib/backend/oracleDatapumpTypes";
 import { uuid } from "@/lib/common/utils";
 
-// 数据泵任务状态（模块级单例）：与对话框组件生命周期解耦。
-// 对话框可以随意重置/重开，正在运行的任务进度不丢失；
-// 悬浮药丸和对话框都从这里读取。
+// 数据泵任务状态（模块级单例）：支持多任务并发。
+// 对话框可以随意重置/重开；每个运行中的任务独立持有进度。
 
 export interface OracleDatapumpTaskState {
   taskId: string;
@@ -19,14 +18,16 @@ export interface OracleDatapumpTaskState {
   error: string | null;
 }
 
-const task = ref<OracleDatapumpTaskState | null>(null);
+const tasks = ref<OracleDatapumpTaskState[]>([]);
+// 对话框当前应显示哪个任务（药丸点击设置；新配置设为 null = 新任务）。
+const activeTaskId = ref<string | null>(null);
+// 对话框当前应显示的页面。
 const viewMode = ref<"configure" | "result">("configure");
 
 export function useOracleDatapumpTask() {
   function begin(request: Omit<OracleDatapumpRequest, "taskId">): void {
-    if (task.value?.running) return; // 同一时间只允许一个（后端也是单任务）
     const taskId = uuid();
-    task.value = {
+    const task: OracleDatapumpTaskState = {
       taskId,
       connectionId: request.connectionId,
       database: request.database,
@@ -37,35 +38,72 @@ export function useOracleDatapumpTask() {
       running: true,
       error: null,
     };
+    tasks.value.push(task);
+    activeTaskId.value = taskId;
     void api
       .startOracleDatapump({ ...request, taskId }, (value) => {
-        if (task.value?.taskId === taskId) task.value.progress = value;
+        const t = tasks.value.find((t) => t.taskId === taskId);
+        if (t) t.progress = value;
       })
       .then((progress) => {
-        if (task.value?.taskId !== taskId) return;
-        task.value.progress = progress;
-        task.value.running = false;
+        const t = tasks.value.find((t) => t.taskId === taskId);
+        if (!t) return;
+        t.progress = progress;
+        t.running = false;
+        // 顺利收尾 6 秒后从列表移除；出错保留等人看。
+        if (progress.status === "Done" || progress.status === "Cancelled") {
+          setTimeout(() => {
+            tasks.value = tasks.value.filter((t) => t.taskId !== taskId);
+          }, 6000);
+        }
       })
       .catch((cause) => {
-        if (task.value?.taskId !== taskId) return;
-        task.value.running = false;
-        task.value.error = String(cause instanceof Error ? cause.message : cause);
+        const t = tasks.value.find((t) => t.taskId === taskId);
+        if (!t) return;
+        t.running = false;
+        t.error = String(cause instanceof Error ? cause.message : cause);
       });
   }
 
-  async function cancel(): Promise<void> {
-    if (task.value) await api.cancelOracleDatapump(task.value.taskId);
+  async function cancel(taskId: string): Promise<void> {
+    await api.cancelOracleDatapump(taskId);
   }
 
-  function dismiss(): void {
-    task.value = null;
+  function dismiss(taskId: string): void {
+    tasks.value = tasks.value.filter((t) => t.taskId !== taskId);
+    if (activeTaskId.value === taskId) activeTaskId.value = null;
   }
 
-  function openResult() {
-    viewMode.value = "result";
+  function focusTask(taskId: string | null): void {
+    activeTaskId.value = taskId;
+    viewMode.value = taskId ? "result" : "configure";
   }
-  function openConfigure() {
+
+  function reset(): void {
+    tasks.value = [];
+    activeTaskId.value = null;
     viewMode.value = "configure";
   }
-  return { task, viewMode, begin, cancel, dismiss, openResult, openConfigure };
+
+  function openResult(): void {
+    viewMode.value = "result";
+  }
+
+  function openConfigure(): void {
+    viewMode.value = "configure";
+    activeTaskId.value = null;
+  }
+
+  return {
+    tasks,
+    activeTaskId,
+    viewMode,
+    begin,
+    cancel,
+    dismiss,
+    reset,
+    focusTask,
+    openResult,
+    openConfigure,
+  };
 }

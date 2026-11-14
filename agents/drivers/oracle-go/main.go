@@ -653,7 +653,7 @@ type server struct {
 	manualConn             *sql.Conn
 	manualTx               *sql.Tx
 	legacyJob              *legacyJobSession
-	datapump               *datapumpEntry
+	datapumps              map[string]*datapumpEntry
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -1087,6 +1087,7 @@ func newServer() *server {
 		sessions:          map[string]*querySession{},
 		tableReadSessions: map[string]*querySession{},
 		activeRows:        map[*sql.Rows]context.CancelFunc{},
+		datapumps:         map[string]*datapumpEntry{},
 	}
 }
 

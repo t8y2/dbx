@@ -48,10 +48,13 @@ const tableExistsAction = ref("SKIP");
 const compression = ref("NONE");
 
 const dpTask = useOracleDatapumpTask();
-const running = computed(() => dpTask.task.value?.running ?? false);
-const progress = computed(() => dpTask.task.value?.progress ?? null);
+// 多任务：对话框绑定 activeTask（药丸点击设置）；anyRunning 控制 X 按钮隐藏。
+const activeTask = computed(() => dpTask.tasks.value.find((t) => t.taskId === dpTask.activeTaskId.value) ?? null);
+const anyRunning = computed(() => dpTask.tasks.value.some((t) => t.running));
+const running = computed(() => activeTask.value?.running ?? false);
+const progress = computed(() => activeTask.value?.progress ?? null);
 const localError = ref("");
-const error = computed(() => dpTask.task.value?.error || localError.value);
+const error = computed(() => activeTask.value?.error || localError.value);
 const step = computed(() => dpTask.viewMode.value);
 const cancelling = ref(false);
 const confirming = ref(false);
@@ -82,7 +85,7 @@ function defaultDumpfile() {
 function resetConfigure() {
   generation += 1;
   minimized.value = false;
-  if (dpTask.task.value?.running) {
+  if (anyRunning.value && activeTask.value) {
     dpTask.openResult();
     return;
   }
@@ -275,7 +278,7 @@ async function start() {
 async function cancel() {
   cancelling.value = true;
   try {
-    await dpTask.cancel();
+    if (activeTask.value) await dpTask.cancel(activeTask.value.taskId);
   } catch (cause) {
     cancelling.value = false;
     localError.value = String(cause instanceof Error ? cause.message : cause);
@@ -326,7 +329,7 @@ const elapsedSeconds = computed(() => (progress.value?.elapsedMs != null ? `${(p
         <Button variant="ghost" size="icon-sm" :aria-label="t('oracleDatapump.minimize')" :title="t('oracleDatapump.minimize')" @click="minimize">
           <Minimize2 class="h-4 w-4" />
         </Button>
-        <Button v-if="!running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="close"> <X class="h-4 w-4" /> </Button
+        <Button v-if="!anyRunning" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="close"> <X class="h-4 w-4" /> </Button
       ></DialogHeader>
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-3 text-sm">
         <div class="border-b pb-2 font-medium break-all">{{ connection?.name }} / {{ props.database }}</div>
@@ -479,21 +482,32 @@ const elapsedSeconds = computed(() => (progress.value?.elapsedMs != null ? `${(p
   </Dialog>
 
   <Teleport to="body">
-    <div v-if="minimized" class="fixed bottom-4 right-4 z-[100] flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-lg" :title="running ? t('oracleDatapump.backgroundWarning') : undefined">
-      <Loader2 v-if="running" class="h-4 w-4 shrink-0 animate-spin text-primary" />
-      <CheckCircle2 v-else-if="dpTask.task.value?.progress?.status === 'Done'" class="h-4 w-4 shrink-0 text-emerald-600" />
-      <AlertTriangle v-else class="h-4 w-4 shrink-0 text-destructive" />
-      <span class="min-w-0 truncate text-xs"
-        >{{ t(exporting ? "oracleDatapump.exportTitle" : "oracleDatapump.importTitle") }} ·
-        {{ running ? (progress?.percent != null ? Math.round(progress.percent) + "%" : "…") : dpTask.task.value?.error || dpTask.task.value?.progress?.status === "Error" ? t("oracleDatapump.failed") : t("oracleDatapump.done") }}</span
-      >
-      <span v-if="dumpfile" class="max-w-44 truncate font-mono text-xs text-muted-foreground" :title="dumpfile">{{ dumpfile }}</span>
-      <Button variant="ghost" size="icon-sm" :aria-label="t('oracleDatapump.restore')" :title="t('oracleDatapump.restore')" @click="minimized = false">
-        <Maximize2 class="h-4 w-4" />
-      </Button>
-      <Button v-if="!running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="close">
-        <X class="h-4 w-4" />
-      </Button>
+    <div v-if="minimized && dpTask.tasks.value.length > 0" class="fixed bottom-4 right-4 z-[100] flex max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <div v-for="task in dpTask.tasks.value" :key="task.taskId" class="flex items-center gap-2 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-lg" :title="task.running ? t('oracleDatapump.backgroundWarning') : undefined">
+        <Loader2 v-if="task.running" class="h-4 w-4 shrink-0 animate-spin text-primary" />
+        <CheckCircle2 v-else-if="task.progress?.status === 'Done'" class="h-4 w-4 shrink-0 text-emerald-600" />
+        <AlertTriangle v-else class="h-4 w-4 shrink-0 text-destructive" />
+        <span class="min-w-0 truncate text-xs">
+          {{ t(task.kind === "export" ? "oracleDatapump.exportTitle" : "oracleDatapump.importTitle") }} ·
+          {{ task.running ? (task.progress?.percent != null ? Math.round(task.progress.percent) + "%" : "…") : task.error || task.progress?.status === "Error" ? t("oracleDatapump.failed") : t("oracleDatapump.done") }}
+        </span>
+        <span class="max-w-44 truncate font-mono text-xs text-muted-foreground" :title="task.dumpfile">{{ task.dumpfile }}</span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          :aria-label="t('oracleDatapump.restore')"
+          :title="t('oracleDatapump.restore')"
+          @click="
+            dpTask.focusTask(task.taskId);
+            minimized = false;
+          "
+        >
+          <Maximize2 class="h-4 w-4" />
+        </Button>
+        <Button v-if="!task.running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="dpTask.dismiss(task.taskId)">
+          <X class="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   </Teleport>
 </template>

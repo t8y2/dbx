@@ -64,7 +64,7 @@ describe("OracleDatapumpDialog", () => {
     mocks.api.cancelOracleDatapump.mockResolvedValue(undefined);
     mocks.api.createOracleDatapumpDirectory.mockResolvedValue(undefined);
     mocks.api.dropOracleDatapumpDirectory.mockResolvedValue(undefined);
-    useOracleDatapumpTask().dismiss();
+    useOracleDatapumpTask().reset();
     mocks.guard.mockImplementation(async ({ execute }: { execute: () => Promise<boolean> }) => execute());
     mocks.readOnly.mockReturnValue(false);
   });

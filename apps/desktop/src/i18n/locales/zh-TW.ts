@@ -6661,6 +6661,7 @@ export default withEnglishFallback({
     preview: "SQL 預覽",
     execute: "執行",
     clearValues: "清空參數值",
+    clearHistory: "清空歷史",
     useRawForAll: "全部使用原始 SQL",
     ignore: "忽略",
     kind: {

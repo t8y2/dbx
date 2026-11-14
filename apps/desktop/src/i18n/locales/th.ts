@@ -9339,6 +9339,7 @@ export default withEnglishFallback({
     preview: "ตัวอย่าง SQL",
     execute: "เรียกใช้",
     clearValues: "ล้าง Values",
+    clearHistory: "ล้างประวัติ",
     useRawForAll: "ใช้ SQL ดิบทั้งหมด",
     ignore: "ละเว้น",
     kind: {

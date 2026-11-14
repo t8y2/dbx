@@ -7583,6 +7583,7 @@ export default withEnglishFallback({
     preview: "SQL 미리보기",
     execute: "실행",
     clearValues: "값 지우기",
+    clearHistory: "기록 지우기",
     useRawForAll: "모두 원시 SQL로 설정",
     ignore: "무시",
     kind: {

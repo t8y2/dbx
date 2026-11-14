@@ -21,6 +21,7 @@ import { useI18n } from "vue-i18n";
 import { launchPlDebug, openPlDebugRecovery } from "@/components/debug/plDebugLaunch";
 import { supportsPlDebugRoutine } from "@/lib/database/databaseFeatureSupport";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { exportOracleObjectDdl, supportsOracleObjectExport } from "@/lib/export/oracleObjectExport";
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import { isConnectionTimeoutErrorMessage } from "@/lib/sql/queryError";
 import {
@@ -3317,6 +3318,31 @@ async function openDatabaseObjectDependencies() {
   }
 }
 
+async function openPostgresRowLevelSecurity(node: TreeNode) {
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node) || (node.type === "schema" && !node.schema)) return;
+  // An escape string keeps schema names containing backslashes safe with either
+  // setting of standard_conforming_strings.
+  const schemaFilter = node.type === "schema" && node.schema ? `\n  AND n.nspname = E'${node.schema.replaceAll("\\", "\\\\").replaceAll("'", "''")}'` : "";
+  const sql = `SELECT n.nspname AS schema_name, c.relname AS table_name,
+       c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced,
+       p.policyname AS policy_name, p.permissive, p.roles, p.cmd AS command,
+       p.qual AS using_expression, p.with_check AS check_expression
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_policies AS p ON p.schemaname = n.nspname AND p.tablename = c.relname
+WHERE (c.relrowsecurity OR c.relforcerowsecurity OR p.policyname IS NOT NULL)${schemaFilter}
+ORDER BY n.nspname, c.relname, p.policyname;`;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const title = `${t("contextMenu.viewPostgresRowLevelSecurity")} - ${node.label}`;
+    const tabId = queryStore.createTab(node.connectionId, node.database, title, "query", node.schema, sql, node.catalog, { forceNew: true });
+    await queryStore.executeTabSql(tabId, sql);
+  } catch (error) {
+    toast(t("contextMenu.tableOperationFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 async function compileXuguObject() {
   const node = activeNode.value;
   if (currentDatabaseType() !== "xugu" || !node.connectionId || !node.database) return;
@@ -3819,6 +3845,8 @@ async function dropSqlForTreeNode(node: TreeNode, options?: { cascade?: boolean 
       tableName: node.label,
       cascade: options?.cascade && supportsDropTableCascade(databaseTypeForNode(node)),
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
+      // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
+      foreignTable: node.tableType?.toUpperCase() === "FOREIGN TABLE",
     });
   }
   const objectOptions = dropObjectSqlOptionsForNode(node);
@@ -7831,6 +7859,9 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canOpenObjectBrowser.value) {
       items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
+    if (currentDatabaseType() === "postgres" && hasTreeNodeDatabaseContext(node)) {
+      items.push({ sidebarActionId: "contextMenu.viewPostgresRowLevelSecurity", label: t("contextMenu.viewPostgresRowLevelSecurity"), action: () => openPostgresRowLevelSecurity(node), icon: ShieldCheck });
+    }
     if (canCreateOracleTriggerAt(node)) items.push({ sidebarActionId: "contextMenu.createTrigger", label: t("contextMenu.createTrigger"), action: createOracleTrigger, icon: Plus });
     if (supportsConnectionQueryActions(currentDatabaseType())) {
       items.push({ sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
@@ -8263,6 +8294,23 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
 function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items, deleteMenuLabel, deleteMenuAction, truncateMenuLabel, truncateMenuAction, emptyMenuLabel, emptyMenuAction, batchAutoIncrementCount, autoIncrementMenuLabel, autoIncrementMenuAction } = context;
+  const sourceTarget = objectSourceTargetForTreeNode(node);
+  const { connectionId, database, catalog } = node;
+  const isPackageMember = (node.type === "procedure" || node.type === "function") && node.parentType === "package" && !!node.parentName;
+  if (connectionId && database && sourceTarget && !isPackageMember && supportsOracleObjectExport(databaseTypeForNode(node), sourceTarget.objectType)) {
+    items.push({
+      label: t("contextMenu.exportObjectDdl"),
+      icon: FileCode,
+      action: async () => {
+        try {
+          const saved = await exportOracleObjectDdl({ ...sourceTarget, connectionId, database, catalog, schema: sourceTarget.schema || database });
+          if (saved === "saved") toast(t("grid.exported"));
+        } catch (error) {
+          toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+        }
+      },
+    });
+  }
   // 虚拟分组移动入口：对所有可分组行类型统一注入（含 procedure/function/trigger/
   // sequence/event/synonym/job/package/type 等专属分支——它们各自 return true，
   // 若只在 table/view/mv 分支注入，这些行将没有任何分组入口）。表行保持原行为
@@ -8583,7 +8631,6 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   // 8. Procedure / Function / Package
   if (node.type === "procedure" || node.type === "function") {
-    const isPackageMember = node.parentType === "package" && !!node.parentName;
     if (node.connectionId && node.database && supportsPlDebugRoutine(currentDatabaseType())) {
       const target = {
         connectionId: node.connectionId,
@@ -8660,7 +8707,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "sequence" || (node.type === "synonym" && currentDatabaseType() === "oceanbase-oracle")) {
+  if (node.type === "sequence" || (node.type === "synonym" && supportsOracleObjectExport(databaseTypeForNode(node), "SYNONYM"))) {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (currentDatabaseType() === "oceanbase-oracle") {
       items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });

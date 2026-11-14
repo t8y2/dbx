@@ -1261,6 +1261,9 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
         _ if options.database_type == Some(DatabaseType::Teradata) => {
             format!("SELECT TOP {limit} {select_list}{from_clause}")
         }
+        // Totality arm: the guard above already handled Teradata (`TeradataTop` is
+        // mapped only from Teradata), so this shape can never be selected at runtime.
+        TablePaginationStrategy::TeradataTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),

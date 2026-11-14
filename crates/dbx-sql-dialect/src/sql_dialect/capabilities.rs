@@ -6,6 +6,7 @@ pub enum TablePaginationStrategy {
     FetchFirst,
     Db2FetchFirst,
     SqlServerTop,
+    TeradataTop,
     IrisTop,
     InformixFirst,
     FirebirdRows,
@@ -153,6 +154,10 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,
+        // Teradata's ANSI dialect has no LIMIT: it takes either `TOP n` or
+        // `SAMPLE n` (quality-dependent). TOP with an ORDER BY keeps a stable
+        // prefix, matching the previous SQL Server behaviour.
+        Some(DatabaseType::Teradata) => TablePaginationStrategy::TeradataTop,
         Some(DatabaseType::Informix | DatabaseType::Gbase8s) => TablePaginationStrategy::InformixFirst,
         Some(DatabaseType::Firebird) => TablePaginationStrategy::FirebirdRows,
         Some(DatabaseType::OceanbaseOracle) => TablePaginationStrategy::Rownum,

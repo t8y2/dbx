@@ -55,7 +55,8 @@ import {
   type EditableQuerySource,
 } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, planOpenTabSqlSpill, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
+import { writeOpenTabSqlRecovery } from "@/lib/app/openTabsRecovery";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -1062,10 +1063,24 @@ let contentRevealSeq = 0;
 /** Monotonic id for data-grid column reveal requests; lets repeated clicks on the same column re-trigger grid scroll and highlight. */
 let gridRevealColumnSeq = 0;
 
-function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
+async function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
   if (isDetachedWindow()) return Promise.resolve();
+  const { savedTabs, spills } = planOpenTabSqlSpill(tabs);
+  if (spills.length > 0) {
+    // Oversized SQL bodies must not be inlined into the session snapshot, or the
+    // next launch has to re-parse megabytes before the workspace can appear.
+    // Spill each body to a recovery file and record where it went.
+    await Promise.all(
+      spills.map(async (spill) => {
+        const path = await writeOpenTabSqlRecovery(spill.tabId, spill.sql);
+        if (!path) return;
+        const saved = savedTabs.find((candidate) => candidate.id === spill.tabId);
+        if (saved) saved.sqlRecoveryPath = path;
+      }),
+    );
+  }
   const payload: OpenTabsStatePayload = {
-    tabs: serializeOpenTabs(tabs),
+    tabs: savedTabs,
     activeTabId,
     ...(workspace && tabs.length > 0
       ? {
@@ -2871,6 +2886,21 @@ export const useQueryStore = defineStore("query", () => {
     else setTimeout(maintain, 0);
   }
 
+  // A tab whose saved SQL exceeded MAX_PERSISTED_TAB_SQL_CHARS only carries a
+  // preview after restore. Tell the user once per launch where the full body is
+  // so the truncation is never silent.
+  function notifyTruncatedRestoredTabs(restoredTabs: QueryTab[]) {
+    const truncated = restoredTabs.filter((tab) => tab.sqlTruncated);
+    if (truncated.length === 0) return;
+    const paths = [...new Set(truncated.map((tab) => tab.sqlRecoveryPath).filter((path): path is string => !!path))];
+    const detail = paths.length > 0 ? paths.join("\n") : t("tabs.sqlTruncatedNoPath");
+    try {
+      useToast().toast(t("tabs.sqlTruncatedOnRestore", { count: truncated.length, detail }), 15000);
+    } catch (error) {
+      console.warn("[DBX][open-tabs:restore:truncated]", truncated.length, paths, error);
+    }
+  }
+
   async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
     if (isDetachedWindow()) return;
     if (isOpenTabsLoaded.value) return;
@@ -2878,6 +2908,7 @@ export const useQueryStore = defineStore("query", () => {
     if (saved?.tabs && Array.isArray(saved.tabs)) {
       const restored = restoreSavedTabsFromPayload(saved, options);
       applyRestoredOpenTabs(restored);
+      notifyTruncatedRestoredTabs(restored.tabs);
       if (safeLocalStorageGet(UPDATE_RESTORE_KEY) !== "1" && useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so stale saved payloads should not
         // reappear if the user later changes the setting.
@@ -2896,6 +2927,7 @@ export const useQueryStore = defineStore("query", () => {
     if (legacy.rawTabs || legacy.rawActiveTabId) {
       const restored = restoreLegacySavedTabs(options);
       applyRestoredOpenTabs(restored);
+      notifyTruncatedRestoredTabs(restored.tabs);
       if (safeLocalStorageGet(UPDATE_RESTORE_KEY) !== "1" && useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so keeping the legacy startup payload
         // would resurrect old tabs if the user later changes the setting.
@@ -6864,9 +6896,12 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
     if (tab.isExplaining) void cancelTabExplain(id);
-    rollbackTabTransaction(tab);
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    const preserveMysqlSession = tab.mode === "query" && tab.autoCommit !== false && connection?.db_type === "mysql" && effectiveDatabaseTypeForConnection(connection) === "mysql";
+    if (preserveMysqlSession) invalidateManualTransactionTarget(tab);
+    else rollbackTabTransaction(tab);
     void closeResultSession(tab);
-    void closeClientConnectionSession(tab);
+    if (!preserveMysqlSession) void closeClientConnectionSession(tab);
     tab.database = database;
     tab.schema = undefined;
     tab.schemaQualifiesSql = undefined;
@@ -9917,9 +9952,10 @@ export const useQueryStore = defineStore("query", () => {
           console.warn("[DBX] Failed to resolve SAP HANA CURRENT_SCHEMA", error);
         }
       }
-      if (tab.autoCommit !== false) applyAutoCommitTransactionReport(tab, results);
       const current = findExecutionTab(id);
       if (current?.executionId === executionId && manualTransactionTargetEpoch(current) === executionTargetEpoch) {
+        if (current.autoCommit !== false) applyAutoCommitTransactionReport(current, results);
+        if (results.some((result) => result.execution_error === true && result.rows.some((row) => row.some((cell) => typeof cell === "string" && cell.includes("MYSQL_CLIENT_SESSION_LOST"))))) clearAutoCommitOpenTransaction(current);
         if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
         if (successfulOracleSchemaChanges > 0) {
           current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulOracleSchemaChanges;
@@ -9935,12 +9971,13 @@ export const useQueryStore = defineStore("query", () => {
           current.schema = undefined;
         }
         if (mysqlUseDatabase && !usesExternalExecutionTarget && current.database !== mysqlUseDatabase) {
-          // 切库后旧库的池（池按「连接 + 库」分桶）不再被这个标签复用，旧会话却已经在
-          // server 端停在新库上；不关掉它，用户切回旧库时会被重新用上，出现「标签写着 A、
-          // 实际在 B」的错配。标签上挂着的显式事务在切库后同样不可达，一并收掉（与 SQL
-          // Server 分支一致）。
-          rollbackTabTransaction(current);
-          void closeClientConnectionSession(current);
+          // Native MySQL workload sessions follow the tab, not its selected
+          // database. USE only updates the namespace; closing here loses user
+          // variables, temporary tables and an explicitly preserved transaction.
+          if (conn?.db_type !== "mysql" || effectiveDbType !== "mysql") {
+            rollbackTabTransaction(current);
+            void closeClientConnectionSession(current);
+          }
           current.database = mysqlUseDatabase;
           current.schema = undefined;
         }
@@ -10171,6 +10208,7 @@ export const useQueryStore = defineStore("query", () => {
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
+      if (String(e?.message ?? e).includes("MYSQL_CLIENT_SESSION_LOST")) clearAutoCommitOpenTransaction(tab);
       // Handle manual transaction auto-rollback (idle timeout only for the banner;
       // other statement failures still clear the session without the 5-minute notice).
       if (tab.autoCommit === false && isSqlServerTransactionTab(tab)) {

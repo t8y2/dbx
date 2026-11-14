@@ -518,6 +518,7 @@ const columnHeaderLabels = computed(() => ({
   regularIndex: t("grid.columnRegularIndex"),
   formatterActive: t("grid.columnFormatterActive"),
   highlightActive: t("grid.highlightActive"),
+  filterActive: t("grid.filterActive"),
   sort: t("grid.sort"),
   columnActions: t("grid.columnActions"),
 }));
@@ -1606,6 +1607,17 @@ const isPersistentFilterView = computed(() => filterEditorView.value === "condit
 // do not use it as a lock: the toolbar toggle must always be able to close them.
 filterBuilderOpen.value = isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
+// Column names with an active structured rule (#14969): the header funnel must
+// track exactly the same completeness rule as the toolbar count badge.
+const structuredFilteredColumnNames = computed(() => {
+  const names = new Set<string>();
+  for (const rule of structuredFilterRules.value) {
+    if (!rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)) {
+      names.add(rule.columnName);
+    }
+  }
+  return names;
+});
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
   keyDataType?: string;
@@ -6377,6 +6389,10 @@ function columnHasHighlight(colIdx: number): boolean {
   return hasColumnHighlight(columnHighlightRules.value, colIdx);
 }
 
+function columnHasStructuredFilter(column: string): boolean {
+  return structuredFilteredColumnNames.value.has(column);
+}
+
 function cellIsDuplicateHighlight(displayRow: number, col: number): boolean {
   if (isScrolling.value) return false;
   return duplicateHighlightKeys.value.has(dataGridSearchMatchKey(displayRow, col));
@@ -9812,12 +9828,25 @@ function sqlWithDisplayDatabaseName(sql: string): string {
   });
 }
 
+// Columns the copied table SQL should select once some columns are hidden
+// through the column-visibility menu, in display order. Undefined when nothing is
+// hidden, or when a visible column cannot be mapped back to a table column (the
+// SQL then stays `SELECT *`, as before).
+function visibleSelectColumns(): string[] | undefined {
+  if (props.context !== "table-data" || hiddenColumnCount.value === 0 || visibleColumnIndexes.value.length === 0) return undefined;
+  const sourceColumns = props.sourceColumns?.length === props.result.columns.length ? props.sourceColumns : undefined;
+  const names = visibleColumnIndexes.value.map((index) => (sourceColumns ? sourceColumns[index] : props.result.columns[index]));
+  if (!names.every((name): name is string => !!name)) return undefined;
+  return new Set(names.map((name) => name.toLocaleLowerCase())).size === names.length ? names : undefined;
+}
+
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
   const executionSql = (props.result.sqlPage?.sql || props.pageSql || props.result.sourceStatement || props.sql)?.trim() ?? "";
   const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
   const hasPreviewProjection = executionSql.includes("__DBX_LARGE_VALUE_BYTES_");
-  const shouldRebuildSql = hasPreviewProjection || includeDatabaseName;
+  const projectedColumns = visibleSelectColumns();
+  const shouldRebuildSql = hasPreviewProjection || includeDatabaseName || !!projectedColumns;
   if (props.context !== "table-data" || !shouldRebuildSql) {
     userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
     return;
@@ -9853,6 +9882,7 @@ async function syncUserFacingSql() {
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
+      ...(projectedColumns ? { columns: projectedColumns, projectColumns: true } : {}),
       injectDefaultTimeSeriesWhere: true,
       whereInput: conditions.whereInput,
       orderBy: conditions.orderBy,
@@ -9866,7 +9896,22 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.pageSql, props.result, props.result.sqlPage, props.result.sourceStatement, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [
+    props.sql,
+    props.pageSql,
+    props.result,
+    props.result.sqlPage,
+    props.result.sourceStatement,
+    props.context,
+    props.tableMeta,
+    props.pageLimit,
+    props.pageOffset,
+    props.executedPageLimit,
+    props.executedPageOffset,
+    settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    visibleColumnIndexes.value,
+    hiddenColumnCount.value,
+  ],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -16325,6 +16370,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :formatter-label="columnHeaderLabels.formatterActive"
                     :highlight-active="columnHasHighlight(col.actualColIdx)"
                     :highlight-label="columnHeaderLabels.highlightActive"
+                    :filter-active="columnHasStructuredFilter(col.name)"
+                    :filter-label="columnHeaderLabels.filterActive"
                     @pointerdown="startColumnHeaderDrag(col.visibleColIdx, $event)"
                     @click-capture="onHeaderClickCapture"
                     @click="onHeaderClick(col.visibleColIdx, $event)"

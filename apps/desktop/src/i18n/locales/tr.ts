@@ -8434,6 +8434,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "SQL'i Kaydet",
     shortcutAcceptCompletion: "Tamamlamayı kabul et",
     shortcutTriggerCompletion: "Tamamlamayı tetikle",
+    shortcutPreviousCompletion: "Önceki tamamlama önerisi",
+    shortcutNextCompletion: "Sonraki tamamlama önerisi",
     shortcutFormatSql: "SQL'i Biçimlendir",
     shortcutExpandSelectStar: "* ifadesini sütunlara genişlet",
     shortcutToggleLineComment: "Satır yorumunu aç/kapat",

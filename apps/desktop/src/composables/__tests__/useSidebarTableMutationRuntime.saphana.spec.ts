@@ -37,7 +37,7 @@ const actions: Array<{ action: ConfirmAction; builder: typeof mocks.buildDropTab
   { action: "confirmTruncateTable", builder: mocks.buildTruncateTableSql, sql: 'TRUNCATE TABLE "APP"."ORDERS";' },
 ];
 
-function tableNode(database: string | null | undefined): TreeNode {
+function tableNode(database: string | null | undefined, overrides: Partial<TreeNode> = {}): TreeNode {
   return {
     id: "hana-1::APP:ORDERS",
     label: "ORDERS",
@@ -46,11 +46,12 @@ function tableNode(database: string | null | undefined): TreeNode {
     database,
     schema: "APP",
     isExpanded: false,
+    ...overrides,
   } as TreeNode;
 }
 
-function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana", historyStore?: any) {
-  const node = tableNode(database);
+function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana", historyStore?: any, nodeOverrides: Partial<TreeNode> = {}) {
+  const node = tableNode(database, nodeOverrides);
   const activeNode = shallowRef(node);
   const connectionStore = {
     ensureConnected: mocks.ensureConnected,
@@ -129,6 +130,18 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     await feature.confirmDropTable();
 
     expect(mocks.buildDropTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "informix", schema: undefined, tableName: "ORDERS" }));
+  });
+
+  /**
+   * #14717: PostgreSQL rejects `DROP TABLE` on a foreign table ("is not a table"),
+   * so the drop statement has to follow the relation kind the sidebar reported.
+   */
+  it("asks for a foreign-table drop when the node is a foreign table", async () => {
+    const { feature } = runtime("", { db_type: "postgres" }, "postgres", undefined, { tableType: "FOREIGN TABLE" });
+
+    await feature.confirmDropTable();
+
+    expect(mocks.buildDropTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "postgres", tableName: "ORDERS", foreignTable: true }));
   });
 
   it.each(["confirmEmptyTable", "confirmTruncateTable"] as const)("refreshes data tabs after %s", async (action) => {

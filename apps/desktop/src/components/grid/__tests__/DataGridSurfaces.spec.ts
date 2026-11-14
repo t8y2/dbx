@@ -1587,6 +1587,88 @@ describe("DataGridQueryControls", () => {
     expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
+  it("summarizes complete structured rules per field and drops one from its × (#14969)", async () => {
+    const removeRule = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["order_no", "status"],
+      conditionColumns: ["order_no", "status"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: true,
+      filterButtonCount: 2,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [
+        { id: "r1", columnName: "order_no", mode: "equals", rawValue: "1001", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "status", mode: "between", rawValue: "1", rawEndValue: "9", conjunction: "AND" },
+        // An incomplete rule (no value yet) must not show up in the summary.
+        { id: "r3", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" },
+        // A disabled rule is not part of the active filter either.
+        { id: "r4", columnName: "order_no", mode: "equals", rawValue: "x", rawEndValue: "", conjunction: "AND", disabled: true },
+      ],
+      filteredColumns: ["order_no", "status"],
+      modeOptions: [
+        { value: "equals", labelKey: "grid.filterBuilderEquals" },
+        { value: "between", labelKey: "grid.filterBuilderBetween" },
+      ],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onRemoveRule: removeRule,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.structuredFiltersActive");
+    expect(hostText(mounted.root)).toContain("order_no");
+    expect(hostText(mounted.root)).toContain("grid.filterBuilderEquals");
+    expect(hostText(mounted.root)).toContain("1001");
+    // Range conditions summarize both bounds.
+    expect(hostText(mounted.root)).toContain("1 ~ 9");
+
+    // Each field row's × removes exactly that rule.
+    const fieldRows = findAll(mounted.root, (node) => node.type === "div" && String(node.props.class ?? "").includes("border-sky-500/10"));
+    expect(fieldRows).toHaveLength(2);
+    const dropButton = findOne(fieldRows[0], (node) => node.type === "button");
+    dispatch(dropButton, "click");
+    expect(removeRule).toHaveBeenCalledExactlyOnceWith("r1");
+  });
+
+  it("omits the structured summary block when no rule is active (#14969)", () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "grid.filterBuilderEquals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    expect(hostText(mounted.root)).not.toContain("grid.structuredFiltersActive");
+  });
+
   it("forwards database value suggestions in the quick filter popover", () => {
     const openValueSuggestions = vi.fn();
     const closeValueSuggestions = vi.fn();

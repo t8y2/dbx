@@ -14,6 +14,7 @@ import type { MqTab } from "@/lib/mq/mqConsoleDefaults";
 import { isAllVhostsNamespace, resolveMqRowNamespace } from "@/lib/mq/mqConsoleDefaults";
 import { formatMqRateCompact, rabbitMqArgumentsSummary, rabbitMqFeatureBadges, rabbitMqQueueType, type RabbitMqFeatureBadge } from "@/lib/mq/rabbitmqQueueFeatures";
 import { formatError } from "@/lib/backend/errorUtils";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { DEFAULT_ROCKETMQ_TOPIC_TYPE_FILTERS, isProtectedRocketMqTopic, isRocketMqBusinessMessageType, matchesRocketMqTypeFilters, resolveRocketMqMessageType, ROCKETMQ_CREATABLE_TOPIC_MESSAGE_TYPES, ROCKETMQ_TOPIC_MESSAGE_TYPES } from "@/lib/mq/rocketmqTopicTypes";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -107,6 +108,9 @@ const messageTypeFilters = ref<Record<RocketMqTopicMessageType, boolean>>({
 const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
 const isKafkaCluster = computed(() => props.mqSystemKind === "kafka");
 const isRabbitMqCluster = computed(() => props.mqSystemKind === "rabbitmq");
+const kafkaTopicLoadKey = computed(() => `dbx-kafka-auto-load-topics:${props.connectionId}`);
+const kafkaAutoLoadTopics = ref(true);
+const kafkaTopicsRequested = ref(false);
 // RabbitMQ "all vhosts" mode: rows carry their own vhost in `namespace`.
 const showNamespaceColumn = computed(() => isRabbitMqCluster.value && isAllVhostsNamespace(props.namespace));
 // RabbitMQ splits the topics tab into Queues (topics table) and Exchanges views.
@@ -263,6 +267,7 @@ async function loadTopics() {
     rabbitMqHasMore.value = false;
     return;
   }
+  if (isKafkaCluster.value) kafkaTopicsRequested.value = true;
   const loadSequence = ++topicLoadSequence;
   loading.value = true;
   error.value = undefined;
@@ -296,8 +301,9 @@ async function loadTopics() {
       rabbitMqTotalCount.value = result.totalCount;
       rabbitMqHasMore.value = result.hasMore;
     } else {
-      topics.value = await mqListTopics(props.connectionId, ns, opts);
+      const result = await mqListTopics(props.connectionId, ns, opts);
       if (loadSequence !== topicLoadSequence) return;
+      topics.value = result;
       rabbitMqTotalCount.value = topics.value.length;
       rabbitMqHasMore.value = false;
     }
@@ -307,6 +313,12 @@ async function loadTopics() {
   } finally {
     if (loadSequence === topicLoadSequence) loading.value = false;
   }
+}
+
+function setKafkaAutoLoadTopics(enabled: boolean) {
+  kafkaAutoLoadTopics.value = enabled;
+  safeLocalStorageSet(kafkaTopicLoadKey.value, String(enabled));
+  if (enabled && !kafkaTopicsRequested.value && !loading.value) void loadTopics();
 }
 
 function changeRabbitMqPage(page: number) {
@@ -549,12 +561,20 @@ function normalizePartitionInput() {
 }
 
 watch(
-  () => [props.tenant, props.namespace],
+  [() => props.connectionId, () => props.tenant, () => props.namespace, () => props.mqSystemKind],
   () => {
     if (topicSearchTimer) clearTimeout(topicSearchTimer);
     rabbitMqPage.value = 1;
     selectedTopic.value = undefined;
-    loadTopics();
+    if (isKafkaCluster.value) {
+      topicLoadSequence += 1;
+      topics.value = [];
+      loading.value = false;
+      error.value = undefined;
+      kafkaTopicsRequested.value = false;
+      kafkaAutoLoadTopics.value = safeLocalStorageGet(kafkaTopicLoadKey.value) !== "false";
+    }
+    if (!isKafkaCluster.value || kafkaAutoLoadTopics.value) void loadTopics();
     if (isRocketMqCluster.value) void loadClusterInfo();
   },
   { immediate: true },
@@ -618,10 +638,14 @@ onBeforeUnmount(() => {
             <input v-model="includeNonPersistent" type="checkbox" />
             {{ t("mqTopics.includeNonPersistent") }}
           </label>
+          <label v-if="isKafkaCluster" class="checkbox-label">
+            <input type="checkbox" :checked="kafkaAutoLoadTopics" @change="setKafkaAutoLoadTopics(($event.target as HTMLInputElement).checked)" />
+            {{ t("mqTopics.autoLoadKafkaTopics") }}
+          </label>
         </div>
         <div class="toolbar-actions">
           <button @click="loadTopics" :disabled="loading || !tenant || !namespace" class="btn-secondary">
-            {{ loading ? t("mqTopics.refreshing") : t("mqTopics.refresh") }}
+            {{ loading ? t("mqTopics.refreshing") : isKafkaCluster && !kafkaTopicsRequested ? t("mqTopics.loadTopics") : t("mqTopics.refresh") }}
           </button>
           <button @click="openCreateDialog" :disabled="loading || readOnly || supportsCreateTopic === false || !tenant || !namespace || showNamespaceColumn" :title="showNamespaceColumn ? t('mqAdmin.selectNamespaceToCreate') : undefined" class="btn-primary">+ {{ t("mqTopics.createTopic") }}</button>
         </div>
@@ -639,6 +663,8 @@ onBeforeUnmount(() => {
       <div v-else-if="error" class="panel-error">{{ error }}</div>
 
       <div v-else-if="loading && !topics.length" class="panel-loading">{{ t("mqTopics.loading") }}</div>
+
+      <div v-else-if="isKafkaCluster && !kafkaTopicsRequested" class="panel-placeholder">{{ t("mqTopics.kafkaTopicsNotLoaded") }}</div>
 
       <div v-else-if="!topics.length" class="panel-placeholder">{{ isRabbitMqCluster && topicSearch.trim() ? t("mqTopics.noMatches") : t("mqTopics.noTopics") }}</div>
 

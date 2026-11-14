@@ -760,6 +760,14 @@ pub async fn analyze_sql_references(
 }
 
 #[tauri::command]
+pub async fn analyze_sql_syntax(
+    sql: String,
+    dialect: Option<String>,
+) -> Vec<dbx_core::sql_syntax::SqlSyntaxDiagnostic> {
+    dbx_core::sql_syntax::analyze_sql_syntax(&sql, dialect.as_deref())
+}
+
+#[tauri::command]
 pub fn find_statement_at_cursor(
     sql: String,
     cursor_pos: usize,

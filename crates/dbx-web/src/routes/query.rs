@@ -1067,6 +1067,12 @@ pub async fn analyze_sql_references(
     dbx_core::sql_analysis::analyze_sql_references(&req.sql, req.dialect.as_deref()).map(Json).map_err(AppError::from)
 }
 
+pub async fn analyze_sql_syntax(
+    Json(req): Json<AnalyzeSqlReferencesRequest>,
+) -> Json<Vec<dbx_core::sql_syntax::SqlSyntaxDiagnostic>> {
+    Json(dbx_core::sql_syntax::analyze_sql_syntax(&req.sql, req.dialect.as_deref()))
+}
+
 pub async fn find_statement_at_cursor(Json(req): Json<FindStatementAtCursorRequest>) -> Json<String> {
     Json(
         req.database_type

@@ -124,6 +124,7 @@ import type {
   OwnerInfo,
   QueryResult,
   SqlReferenceAnalysis,
+  SqlSyntaxDiagnostic,
   DatabaseType,
   InstalledPlugin,
   JdbcDriverInfo,
@@ -2007,6 +2008,10 @@ export async function cancelConditionalUpdate(executionId: string, options?: { c
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
   return post("/api/query/analyze-sql-references", { sql, dialect });
+}
+
+export async function analyzeSqlSyntax(sql: string, dialect?: string): Promise<SqlSyntaxDiagnostic[]> {
+  return post("/api/query/analyze-sql-syntax", { sql, dialect });
 }
 
 export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType): Promise<string> {

@@ -897,6 +897,7 @@ async fn serve() -> Result<(), String> {
         .route("/query/execute-in-transaction", post(routes::query::execute_in_transaction))
         .route("/query/execute-script-2pc", post(routes::query::execute_script_with_2pc))
         .route("/query/analyze-sql-references", post(routes::query::analyze_sql_references))
+        .route("/query/analyze-sql-syntax", post(routes::query::analyze_sql_syntax))
         .route("/query/find-statement-at-cursor", post(routes::query::find_statement_at_cursor))
         .route("/query/prepare-pagination-plan", post(routes::query::prepare_query_pagination_execution_plan))
         .route("/query/build-sorted-sql", post(routes::query::build_sorted_query_sql))

@@ -11179,6 +11179,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "保存 SQL",
     shortcutAcceptCompletion: "接受补全",
     shortcutTriggerCompletion: "触发补全",
+    shortcutPreviousCompletion: "上一条补全项",
+    shortcutNextCompletion: "下一条补全项",
     shortcutFormatSql: "格式化 SQL",
     shortcutExpandSelectStar: "将 * 展开为字段",
     shortcutToggleLineComment: "切换行注释",

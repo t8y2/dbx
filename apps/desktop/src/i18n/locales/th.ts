@@ -11702,6 +11702,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "บันทึก SQL",
     shortcutAcceptCompletion: "ยอมรับการเติม",
     shortcutTriggerCompletion: "เรียกการเติม",
+    shortcutPreviousCompletion: "คำแนะนำการเติมก่อนหน้า",
+    shortcutNextCompletion: "คำแนะนำการเติมถัดไป",
     shortcutFormatSql: "จัดรูปแบบ SQL",
     shortcutExpandSelectStar: "ขยาย * เป็นคอลัมน์",
     shortcutToggleLineComment: "สลับคอมเมนต์บรรทัด",

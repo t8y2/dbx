@@ -11219,6 +11219,8 @@ export default {
     shortcutSaveSql: "Save SQL",
     shortcutAcceptCompletion: "Accept completion",
     shortcutTriggerCompletion: "Trigger completion",
+    shortcutPreviousCompletion: "Previous completion item",
+    shortcutNextCompletion: "Next completion item",
     shortcutFormatSql: "Format SQL",
     shortcutExpandSelectStar: "Expand * to columns",
     shortcutToggleLineComment: "Toggle line comment",

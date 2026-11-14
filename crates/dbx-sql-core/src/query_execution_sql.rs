@@ -46,7 +46,8 @@ pub struct ExplainSqlBuildResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EstimatedPlanFormat {
-    /// A JSON document returned as a single cell (PostgreSQL, MySQL, OceanBase Oracle).
+    /// A JSON value: a native document for PostgreSQL/MySQL/OceanBase Oracle,
+    /// or structured plan rows for SQLite.
     Json,
     /// A `ShowPlanXML` document returned as text (SQL Server `SET SHOWPLAN_XML`).
     Xml,
@@ -83,6 +84,7 @@ enum EstimatedPlanSqlGeneration {
     Postgres,
     Mysql,
     Plain,
+    SqliteQueryPlan,
     Xugu,
     Oracle,
     Db2,
@@ -108,6 +110,12 @@ impl EstimatedPlanStrategy {
 
     pub const fn format(self) -> EstimatedPlanFormat {
         self.format
+    }
+
+    /// SQLite's EXPLAIN QUERY PLAN returns a typed table of plan nodes rather
+    /// than one document cell; preserve those columns as structured JSON rows.
+    pub const fn returns_structured_rows(self) -> bool {
+        matches!(self.sql_generation, EstimatedPlanSqlGeneration::SqliteQueryPlan)
     }
 }
 
@@ -180,6 +188,7 @@ fn build_explain_sql_with_strategy(
         }
         EstimatedPlanSqlGeneration::Postgres => format!("EXPLAIN (FORMAT JSON) {source}"),
         EstimatedPlanSqlGeneration::Plain => format!("EXPLAIN {source}"),
+        EstimatedPlanSqlGeneration::SqliteQueryPlan => format!("EXPLAIN QUERY PLAN {source}"),
         EstimatedPlanSqlGeneration::Xugu => format!("EXPLAIN VERBOSE {source}"),
         EstimatedPlanSqlGeneration::Oracle | EstimatedPlanSqlGeneration::Db2 => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
@@ -224,11 +233,14 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<EstimatedPlanStrategy> {
     use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
     use EstimatedPlanFormat::{Json, Text, Xml};
-    use EstimatedPlanSqlGeneration::{Db2, Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
+    use EstimatedPlanSqlGeneration::{Db2, Mysql, Oracle, Plain, Postgres, SqlServer, SqliteQueryPlan, Xugu};
 
     let strategy = match database_type? {
         DatabaseType::Db2 => EstimatedPlanStrategy { sql_generation: Db2, acquisition: DriverNative, format: Json },
         DatabaseType::Mysql => EstimatedPlanStrategy { sql_generation: Mysql, acquisition: GeneratedSql, format: Json },
+        DatabaseType::Sqlite => {
+            EstimatedPlanStrategy { sql_generation: SqliteQueryPlan, acquisition: GeneratedSql, format: Json }
+        }
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
         DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
         DatabaseType::Postgres => {
@@ -1993,6 +2005,32 @@ mod tests {
     }
 
     #[test]
+    fn builds_sqlite_eqp_and_rejects_unsafe_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            format: None,
+            analyze: Some(true),
+            sql: "SELECT id FROM example".to_string(),
+        });
+        assert!(result.ok);
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN QUERY PLAN SELECT id FROM example"));
+        let strategy = estimated_plan_strategy(Some(DatabaseType::Sqlite)).unwrap();
+        assert_eq!(strategy.format(), EstimatedPlanFormat::Json);
+        assert_eq!(strategy.acquisition(), EstimatedPlanAcquisition::GeneratedSql);
+        assert!(strategy.returns_structured_rows());
+
+        for sql in ["DELETE FROM example", "SELECT 1; DROP TABLE example"] {
+            let rejected = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Sqlite),
+                format: None,
+                analyze: None,
+                sql: sql.to_string(),
+            });
+            assert!(!rejected.ok, "{sql} must fail closed");
+        }
+    }
+
+    #[test]
     fn builds_postgres_json_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -2372,6 +2410,7 @@ mod tests {
 
         let cases = [
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
+            (DatabaseType::Sqlite, "EXPLAIN QUERY PLAN SELECT 1", Json, GeneratedSql),
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
@@ -2413,6 +2452,8 @@ mod tests {
             Some(DatabaseType::MongoDb),
             Some(DatabaseType::Gaussdb),
             Some(DatabaseType::StarRocks),
+            Some(DatabaseType::DuckDb),
+            Some(DatabaseType::CloudflareD1),
         ] {
             assert!(estimated_plan_strategy(database_type).is_none(), "{database_type:?}");
             assert!(!supports_explain_plan(database_type), "{database_type:?}");

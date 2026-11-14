@@ -515,6 +515,14 @@ pub fn build_table_data_select_sql_with_database(
         TablePaginationStrategy::Unbounded => {
             format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
         }
+        TablePaginationStrategy::TeradataTop => build_teradata_table_select_sql(
+            &table_alias,
+            &where_clause,
+            order_by,
+            &options.columns,
+            limit,
+            options.offset.unwrap_or(0),
+        ),
         TablePaginationStrategy::SqlServerTop => build_sqlserver_table_select_sql(
             &table_alias,
             &where_clause,
@@ -781,6 +789,11 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
         TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
             format!("SELECT {select_columns} FROM {table}{order_by} FETCH FIRST {limit} ROWS ONLY")
         }
+        // #14604: this summary pagination path has no offset (first page only);
+        // pages past the first go through the row-number template above.
+        TablePaginationStrategy::TeradataTop => {
+            format!("SELECT TOP {limit} {select_columns} FROM {table}{order_by}")
+        }
         TablePaginationStrategy::SqlServerTop => {
             format!("SELECT TOP ({limit}) {select_columns} FROM {table}{order_by}")
         }
@@ -790,6 +803,39 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
             format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {limit};")
         }
     }
+}
+
+/// #14604: Teradata has no ANSI `LIMIT` (error 3706). The first page takes
+/// `SELECT TOP n`; pages past the first wrap the ordered source in a
+/// `ROW_NUMBER()` derived table. Identifiers keep the ANSI double-quote form.
+pub(super) fn build_teradata_table_select_sql(
+    table: &str,
+    where_clause: &str,
+    order_by: Option<&str>,
+    columns: &[String],
+    limit: usize,
+    offset: usize,
+) -> String {
+    let columns_sql = if columns.is_empty() {
+        "*".to_string()
+    } else {
+        columns
+            .iter()
+            .map(|column| quote_table_identifier(Some(DatabaseType::Teradata), column))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if offset == 0 {
+        let order = order_by.map(|order| format!(" ORDER BY {order}")).unwrap_or_default();
+        return format!("SELECT TOP {limit} {columns_sql} FROM {table}{where_clause}{order}");
+    }
+    // The window needs an ORDER BY; position 1 keeps the SQL valid when the caller
+    // has no preferred order.
+    let window = order_by.map(|order| format!("ORDER BY {order}")).unwrap_or_else(|| "ORDER BY 1".to_string());
+    let end = offset + limit;
+    format!(
+        "SELECT {columns_sql} FROM (SELECT {columns_sql}, ROW_NUMBER() OVER ({window}) AS \"__dbx_row_num\" FROM {table}{where_clause}) \"dbx_page\" WHERE \"__dbx_row_num\" > {offset} AND \"__dbx_row_num\" <= {end} ORDER BY \"__dbx_row_num\""
+    )
 }
 
 fn victoriametrics_metric_selector(metric_name: &str) -> String {
@@ -1473,6 +1519,32 @@ mod tests {
         let options = opts(DatabaseType::Mysql, None, Some("aaa"), "apis");
         assert_eq!(build_table_data_select_sql(options.clone()), "SELECT * FROM `apis` LIMIT 10;");
         assert_eq!(build_table_data_select_sql_with_database(options, true), "SELECT * FROM `aaa`.`apis` LIMIT 10;");
+    }
+
+    #[test]
+    fn teradata_table_data_pages_with_top_then_row_number() {
+        // #14604: Teradata rejects `LIMIT`; the preview takes `TOP n` on the first
+        // page and a `ROW_NUMBER()` derived table afterwards.
+        let mut first = opts(DatabaseType::Teradata, None, None, "employee");
+        first.order_by = Some("id".to_string());
+        assert_eq!(build_table_data_select_sql(first), "SELECT TOP 10 * FROM \"employee\" ORDER BY id");
+
+        let mut page = opts(DatabaseType::Teradata, None, None, "employee");
+        page.order_by = Some("id".to_string());
+        page.offset = Some(200);
+        assert_eq!(
+            build_table_data_select_sql(page),
+            "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS \"__dbx_row_num\" FROM \"employee\") \"dbx_page\" WHERE \"__dbx_row_num\" > 200 AND \"__dbx_row_num\" <= 210 ORDER BY \"__dbx_row_num\""
+        );
+
+        // Without a preferred order the window falls back to position 1, and the
+        // first page stays a bare TOP just like the other TOP dialects.
+        let unordered_first = opts(DatabaseType::Teradata, None, None, "employee");
+        assert_eq!(build_table_data_select_sql(unordered_first), "SELECT TOP 10 * FROM \"employee\"");
+        let mut unordered_page = opts(DatabaseType::Teradata, None, None, "employee");
+        unordered_page.offset = Some(200);
+        let unordered = build_table_data_select_sql(unordered_page);
+        assert!(unordered.contains("ROW_NUMBER() OVER (ORDER BY 1)"), "sql was: {unordered}");
     }
 
     /// issue #9262: SQL Server addresses tables as `database.schema.table`, and

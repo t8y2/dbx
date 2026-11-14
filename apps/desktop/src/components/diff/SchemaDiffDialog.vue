@@ -689,6 +689,17 @@ function comparisonEndpointLabel(connectionId: string, database: string, schema:
   return [connection?.name || connectionId, database, schema].filter(Boolean).join(" / ");
 }
 
+/**
+ * Source/target endpoints kept visible above the result and deploy steps, so the
+ * last screen before "deploy to server" still names the two databases (#14877).
+ * The deploy step itself only received the target props, and the config step was
+ * already the only place the choice was visible.
+ */
+const comparisonEndpoints = computed(() => ({
+  source: comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value),
+  target: comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value),
+}));
+
 function restoreSchemaDiffSession(session: SchemaDiffSession): void {
   const config = session.config;
   runWithoutTargetIdentityReset(() => {
@@ -1703,6 +1714,19 @@ const targetConnectionInfo = computed(() => {
           {{ t("diff.title") }}
         </DialogTitle>
       </DialogHeader>
+
+      <!-- #14877: keep both endpoints in view on the result and deploy steps so the
+           user can confirm which two databases the script will touch before running it.
+           The config step is where they are chosen, so it needs no reminder. -->
+      <div v-if="(step === 'result' || step === 'deploy-review') && (comparisonEndpoints.source || comparisonEndpoints.target)" class="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground" data-schema-diff-endpoints>
+        <span class="truncate" :title="comparisonEndpoints.source">
+          {{ t("diff.sourceObject") }}: <span class="text-foreground">{{ comparisonEndpoints.source }}</span>
+        </span>
+        <span aria-hidden="true">→</span>
+        <span class="truncate" :title="comparisonEndpoints.target">
+          {{ t("diff.targetObject") }}: <span class="text-foreground">{{ comparisonEndpoints.target }}</span>
+        </span>
+      </div>
 
       <!-- Result step relies on splitpanes to manage its own scroll/heights, so it keeps
            `overflow-hidden`; the config step's tall content (e.g. the table multi-select

@@ -4764,6 +4764,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "보낼 폴더 선택",
     exportDataMultipleSuccess: "{count}개 테이블을보냈습니다",
     exportStructure: "구조 내보내기",
+    exportObjectDdl: "객체 DDL 내보내기",
     exportStructurePreviewTitle: "구조 - {name}",
     exportStructurePreviewTitleMultiple: "구조 - 객체 {count}개",
     exportStructureLoading: "구조를 불러오는 중...",

@@ -4790,6 +4790,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "選擇匯出資料夾",
     exportDataMultipleSuccess: "已匯出 {count} 張表",
     exportStructure: "匯出資料表結構",
+    exportObjectDdl: "匯出物件 DDL",
     exportStructurePreviewTitle: "資料表結構 - {name}",
     exportStructurePreviewTitleMultiple: "資料表結構 - {count} 個物件",
     exportStructureLoading: "正在讀取資料表結構...",

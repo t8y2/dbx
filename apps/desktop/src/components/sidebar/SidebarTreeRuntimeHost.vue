@@ -21,6 +21,7 @@ import { useI18n } from "vue-i18n";
 import { launchPlDebug, openPlDebugRecovery } from "@/components/debug/plDebugLaunch";
 import { supportsPlDebugRoutine } from "@/lib/database/databaseFeatureSupport";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { exportOracleObjectDdl, supportsOracleObjectExport } from "@/lib/export/oracleObjectExport";
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import { isConnectionTimeoutErrorMessage } from "@/lib/sql/queryError";
 import {
@@ -8289,6 +8290,23 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
 function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items, deleteMenuLabel, deleteMenuAction, truncateMenuLabel, truncateMenuAction, emptyMenuLabel, emptyMenuAction, batchAutoIncrementCount, autoIncrementMenuLabel, autoIncrementMenuAction } = context;
+  const sourceTarget = objectSourceTargetForTreeNode(node);
+  const { connectionId, database, catalog } = node;
+  const isPackageMember = (node.type === "procedure" || node.type === "function") && node.parentType === "package" && !!node.parentName;
+  if (connectionId && database && sourceTarget && !isPackageMember && supportsOracleObjectExport(databaseTypeForNode(node), sourceTarget.objectType)) {
+    items.push({
+      label: t("contextMenu.exportObjectDdl"),
+      icon: FileCode,
+      action: async () => {
+        try {
+          const saved = await exportOracleObjectDdl({ ...sourceTarget, connectionId, database, catalog, schema: sourceTarget.schema || database });
+          if (saved === "saved") toast(t("grid.exported"));
+        } catch (error) {
+          toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+        }
+      },
+    });
+  }
   // 虚拟分组移动入口：对所有可分组行类型统一注入（含 procedure/function/trigger/
   // sequence/event/synonym/job/package/type 等专属分支——它们各自 return true，
   // 若只在 table/view/mv 分支注入，这些行将没有任何分组入口）。表行保持原行为
@@ -8609,7 +8627,6 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   // 8. Procedure / Function / Package
   if (node.type === "procedure" || node.type === "function") {
-    const isPackageMember = node.parentType === "package" && !!node.parentName;
     if (node.connectionId && node.database && supportsPlDebugRoutine(currentDatabaseType())) {
       const target = {
         connectionId: node.connectionId,
@@ -8686,7 +8703,7 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "sequence" || (node.type === "synonym" && currentDatabaseType() === "oceanbase-oracle")) {
+  if (node.type === "sequence" || (node.type === "synonym" && supportsOracleObjectExport(databaseTypeForNode(node), "SYNONYM"))) {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
     if (currentDatabaseType() === "oceanbase-oracle") {
       items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });

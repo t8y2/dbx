@@ -5207,6 +5207,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "选择导出文件夹",
     exportDataMultipleSuccess: "已导出 {count} 张表",
     exportStructure: "导出表结构",
+    exportObjectDdl: "导出对象 DDL",
     exportStructurePreviewTitle: "表结构 - {name}",
     exportStructurePreviewTitleMultiple: "表结构 - {count} 个对象",
     exportStructureLoading: "正在读取表结构...",

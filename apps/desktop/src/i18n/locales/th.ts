@@ -5098,6 +5098,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "เลือกโฟลเดอร์ส่งออก",
     exportDataMultipleSuccess: "ส่งออก {count} ตารางแล้ว",
     exportStructure: "ส่งออกโครงสร้าง",
+    exportObjectDdl: "ส่งออก DDL ของออบเจ็กต์",
     exportStructurePreviewTitle: "โครงสร้าง - {name}",
     exportStructurePreviewTitleMultiple: "โครงสร้าง - {count} Objects",
     exportStructureLoading: "กำลังโหลดโครงสร้าง...",

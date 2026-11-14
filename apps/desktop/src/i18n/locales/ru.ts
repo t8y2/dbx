@@ -4935,6 +4935,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "Выберите папку экспорта",
     exportDataMultipleSuccess: "Экспортировано таблиц: {count}",
     exportStructure: "Экспортировать структуру",
+    exportObjectDdl: "Экспорт DDL объекта",
     exportStructurePreviewTitle: "Структура — {name}",
     exportStructurePreviewTitleMultiple: "Структура — объектов: {count}",
     exportStructureLoading: "Загрузка структуры...",

@@ -5283,6 +5283,7 @@ export default {
     exportDataSelectDirectory: "Select export folder",
     exportDataMultipleSuccess: "Exported {count} tables",
     exportStructure: "Export Structure",
+    exportObjectDdl: "Export Object DDL",
     exportStructurePreviewTitle: "Structure - {name}",
     exportStructurePreviewTitleMultiple: "Structure - {count} objects",
     exportStructureLoading: "Loading structure...",

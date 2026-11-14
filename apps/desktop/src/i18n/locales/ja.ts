@@ -4833,6 +4833,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "エクスポート先フォルダーを選択",
     exportDataMultipleSuccess: "{count} テーブルをエクスポートしました",
     exportStructure: "構造をエクスポート",
+    exportObjectDdl: "オブジェクトの DDL をエクスポート",
     exportStructurePreviewTitle: "構造 - {name}",
     exportStructurePreviewTitleMultiple: "構造 - {count}オブジェクト",
     exportStructureLoading: "構造を読み込み中...",

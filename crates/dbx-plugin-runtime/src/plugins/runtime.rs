@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, oneshot, watch, Mutex, RwLock};
@@ -104,9 +104,22 @@ impl PluginSessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct PluginHandshake {
     pub protocol_version: u32,
-    #[serde(default)]
+    /// `#[serde(default)]` only covers a missing field. A sidecar built
+    /// against the Go SDK before #14972 answers with an explicit JSON `null`
+    /// for a nil capabilities slice; treat that as empty instead of failing
+    /// the whole plugin initialization.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub capabilities: Vec<String>,
     pub plugin: PluginHandshakeIdentity,
+}
+
+/// Accepts an explicit JSON `null` as an empty list.
+fn null_as_empty_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,8 +511,27 @@ impl PluginSidecarSession {
             permissions: &self.plugin.manifest.permissions,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
-        let handshake: PluginHandshake =
-            self.invoke_with_timeout("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT)).await?;
+        let value = self
+            .invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT))
+            .await?;
+        // Point a malformed `capabilities` value at the field instead of
+        // failing with a bare decode error (#14972): `null` and an array of
+        // strings are accepted (see `null_as_empty_vec`); anything else is
+        // the plugin's bug, and the reporter needs the field name to find it.
+        if let Some(capabilities) = value.get("capabilities") {
+            let valid = capabilities.is_null()
+                || capabilities
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(|item| item.is_string()));
+            if !valid {
+                return Err(format!(
+                    "Plugin '{}' initialize result has invalid 'capabilities': expected an array of strings",
+                    self.plugin.manifest.id
+                ));
+            }
+        }
+        let handshake: PluginHandshake = serde_json::from_value(value)
+            .map_err(|error| format!("Failed to decode plugin '{}' result: {error}", self.plugin.manifest.id))?;
         if handshake.protocol_version != SUPPORTED_PLUGIN_PROTOCOL_VERSION {
             return Err(format!(
                 "Plugin selected protocol version {}, expected {}",
@@ -1861,6 +1893,103 @@ sleep 30
         assert_eq!(event.params["value"], 50);
         session.shutdown().await.unwrap();
         assert_eq!(session.status().state, PluginSessionState::Stopped);
+    }
+
+    /// A sidecar that answers `plugin/initialize` with an explicit JSON `null`
+    /// for `capabilities` (what a nil slice encodes as in the Go SDK, #14972)
+    /// must still initialize, with no capabilities.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initializes_sidecar_with_null_capabilities() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":null,"plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.sidecar",
+            "name": "Sample Sidecar",
+            "version": "1.0.0",
+            "publisher": "dbx",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": {
+                "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }
+            }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let session = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default())
+            .await
+            .expect("a null capabilities field should initialize as empty");
+        assert_eq!(session.status().state, PluginSessionState::Running);
+        assert!(session.handshake().await.unwrap().capabilities.is_empty());
+        session.shutdown().await.unwrap();
+        assert_eq!(session.status().state, PluginSessionState::Stopped);
+    }
+
+    /// A `capabilities` value that is neither null nor an array of strings
+    /// must fail with an error that names the field, not a bare decode error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_non_array_capabilities_with_field_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":"events","plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.sidecar",
+            "name": "Sample Sidecar",
+            "version": "1.0.0",
+            "publisher": "dbx",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": {
+                "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }
+            }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let error = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default())
+            .await
+            .expect_err("a string capabilities field should fail initialization");
+        assert!(error.contains("'capabilities'"), "unexpected error: {error}");
+        assert!(error.contains("array of strings"), "unexpected error: {error}");
     }
 
     #[cfg(unix)]

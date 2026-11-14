@@ -301,6 +301,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "ソースに未保存の変更があります。破棄して関連オブジェクトを開きますか？",
   },
   oracleSecurity: {
+    tableGrants: "テーブルの付与権限",
+    grantor: "付与者",
     directSqlNotice: "参照できる直接付与のみを表示します。セッションの有効な権限や完全な再実行スクリプトではありません。継承と付与者は付与元の詳細を参照してください。",
     searchOwner: "owner/schema を検索",
     chooseObjects: "オブジェクトを選択",

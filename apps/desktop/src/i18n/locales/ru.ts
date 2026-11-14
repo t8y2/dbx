@@ -243,6 +243,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "В исходном коде есть несохранённые изменения. Отменить их и открыть связанный объект?",
   },
   oracleSecurity: {
+    tableGrants: "Права на таблицу",
+    grantor: "Кто выдал",
     directSqlNotice: "Только видимые прямые назначения, а не действующие права сеанса или полный скрипт для повторного выполнения. Наследование и выдавшие права указаны в подробностях источников.",
     searchOwner: "Поиск owner/schema",
     chooseObjects: "Выбрать объекты",

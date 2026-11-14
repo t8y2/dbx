@@ -50,6 +50,10 @@ const damengDump = {
 };
 
 export default withEnglishFallback({
+  oracleSecurity: {
+    tableGrants: "สิทธิ์ของตาราง",
+    grantor: "ผู้ให้สิทธิ์",
+  },
   oracleTrigger: {
     errorPositionUnavailable: "เปิดซอร์สแล้ว แต่ไม่สามารถยืนยันตำแหน่งข้อผิดพลาดได้ โปรดตรวจสอบบรรทัดและคอลัมน์ที่แสดง",
     reconcileStructure: "ตรวจสอบการเปลี่ยนแปลงที่ใช้แล้ว",

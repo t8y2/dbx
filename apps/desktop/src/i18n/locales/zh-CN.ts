@@ -299,6 +299,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "当前源码有未保存的修改。放弃修改并打开关联对象？",
   },
   oracleSecurity: {
+    tableGrants: "表授权",
+    grantor: "授权人",
     directSqlNotice: "仅显示可见的直接授权，不代表会话有效权限，也不是完整重放脚本。继承及授予者见来源详情。",
     searchOwner: "搜索 owner/schema",
     chooseObjects: "选择对象",

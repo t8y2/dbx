@@ -353,6 +353,8 @@ export default {
     navigateDiscardConfirm: "The source has unsaved changes. Discard them and open the related object?",
   },
   oracleSecurity: {
+    tableGrants: "Table grants",
+    grantor: "Grantor",
     directSqlNotice: "Visible direct grants only, not effective session permissions or a complete replay script. Inheritance and grantors are in the source details.",
     searchOwner: "Search owner/schema",
     chooseObjects: "Choose objects",

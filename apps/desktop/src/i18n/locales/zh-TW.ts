@@ -282,6 +282,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "原始碼有未儲存的變更。要捨棄變更並開啟相關物件嗎？",
   },
   oracleSecurity: {
+    tableGrants: "資料表授權",
+    grantor: "授權者",
     directSqlNotice: "僅顯示可見的直接授權，不代表工作階段有效權限，也不是完整重播指令碼。繼承及授予者請見來源詳情。",
     searchOwner: "搜尋 owner/schema",
     chooseObjects: "選擇物件",

@@ -148,6 +148,8 @@ async fn round_trip(snapshot: bool, dialect: SqlInsertDialect, extension_schema:
                 batch_size: 2,
                 split_max_mb: None,
                 row_limit_per_table: None,
+                row_limit_sort_column: None,
+                row_limit_sort_descending: false,
             },
             |_| {},
         ),

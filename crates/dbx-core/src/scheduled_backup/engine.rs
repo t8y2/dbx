@@ -378,6 +378,8 @@ impl BackupService {
                         // Scheduled backups stay full-table exports; the manual
                         // dialog's rows-per-table preference must never shrink them (#14750).
                         row_limit_per_table: None,
+                        row_limit_sort_column: None,
+                        row_limit_sort_descending: false,
                     };
                     let terminal_cancelled = std::sync::atomic::AtomicBool::new(false);
                     let created = Arc::new(std::sync::atomic::AtomicBool::new(false));

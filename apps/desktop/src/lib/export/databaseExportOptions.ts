@@ -15,6 +15,8 @@ export interface DatabaseExportSavedOptions {
   splitSqlPartMaxMb: number;
   limitRowsPerTable: boolean;
   rowsPerTableLimit: number;
+  rowLimitSortColumn: string;
+  rowLimitSortDescending: boolean;
 }
 
 export const MIN_SPLIT_SQL_PART_MB = 1;
@@ -52,6 +54,8 @@ export const DEFAULT_DATABASE_EXPORT_OPTIONS: DatabaseExportSavedOptions = {
   splitSqlPartMaxMb: 100,
   limitRowsPerTable: false,
   rowsPerTableLimit: MIN_ROWS_PER_TABLE_LIMIT,
+  rowLimitSortColumn: "",
+  rowLimitSortDescending: false,
 };
 
 export const DATABASE_EXPORT_OPTIONS_STORAGE_KEY = "dbx-database-export-last-options-v1";
@@ -82,6 +86,9 @@ export function loadSavedDatabaseExportOptions(storage?: Pick<Storage, "getItem"
       splitSqlPartMaxMb: typeof parsed.splitSqlPartMaxMb === "number" && Number.isFinite(parsed.splitSqlPartMaxMb) ? Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(parsed.splitSqlPartMaxMb))) : DEFAULT_DATABASE_EXPORT_OPTIONS.splitSqlPartMaxMb,
       limitRowsPerTable: typeof parsed.limitRowsPerTable === "boolean" ? parsed.limitRowsPerTable : DEFAULT_DATABASE_EXPORT_OPTIONS.limitRowsPerTable,
       rowsPerTableLimit: parsed.rowsPerTableLimit === undefined ? DEFAULT_DATABASE_EXPORT_OPTIONS.rowsPerTableLimit : normalizeRowsPerTableLimit(parsed.rowsPerTableLimit),
+      // An empty sort column keeps the existing read order (review on #14799).
+      rowLimitSortColumn: typeof parsed.rowLimitSortColumn === "string" ? parsed.rowLimitSortColumn.trim() : DEFAULT_DATABASE_EXPORT_OPTIONS.rowLimitSortColumn,
+      rowLimitSortDescending: typeof parsed.rowLimitSortDescending === "boolean" ? parsed.rowLimitSortDescending : DEFAULT_DATABASE_EXPORT_OPTIONS.rowLimitSortDescending,
     };
   } catch {
     return { ...DEFAULT_DATABASE_EXPORT_OPTIONS };

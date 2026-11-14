@@ -191,6 +191,18 @@ pub struct DatabaseExportRequest {
     /// applies per table and never turns a table short of `N` into an error.
     #[serde(default)]
     pub row_limit_per_table: Option<u64>,
+    /// Sort column for the per-table row cap (review on #14799): rows are read in
+    /// `ORDER BY {column} {ASC|DESC}` order, so the cap takes the first/last `N`
+    /// rows by that column (e.g. `updated_at` descending = the latest N rows).
+    /// `None` or blank keeps the default read order; only effective together with
+    /// `row_limit_per_table`. Tables without this column fall back to the default
+    /// read order with a comment in the dump.
+    #[serde(default)]
+    pub row_limit_sort_column: Option<String>,
+    /// Direction for `row_limit_sort_column`: `true` = descending, so the cap
+    /// keeps the newest rows by that column.
+    #[serde(default)]
+    pub row_limit_sort_descending: bool,
 }
 
 /// One object picked in the object browser for "export selected".
@@ -3557,15 +3569,40 @@ fn remaining_rows_under_limit(row_limit: Option<u64>, exported: u64) -> Option<u
     row_limit.map(|limit| limit.saturating_sub(exported).min(usize::MAX as u64) as usize)
 }
 
-/// Appends a server-side row cap to the export's self-generated snapshot SELECT.
-/// The statement is always a plain `SELECT ... FROM ...` built by
-/// [`database_export_select_sql`], and the snapshot path only streams MySQL /
-/// PostgreSQL manual transactions (the other transaction kinds are rejected
-/// before any SQL runs), so a trailing `LIMIT n` is valid for every engine that
-/// reaches it. Combined with the batch-budget guard this bounds both the query
-/// result and the written rows.
-fn append_snapshot_row_limit(sql: &str, remaining: usize) -> String {
-    format!("{sql} LIMIT {remaining}")
+/// Appends an optional sort order and a server-side row cap to the export's
+/// self-generated snapshot SELECT. The statement is always a plain
+/// `SELECT ... FROM ...` built by [`database_export_select_sql`], and the
+/// snapshot path only streams MySQL / PostgreSQL manual transactions (the other
+/// transaction kinds are rejected before any SQL runs), so both clauses are
+/// valid for every engine that reaches it. Combined with the batch-budget guard
+/// this bounds the query result, the written rows, and — with the sort column —
+/// keeps the capped rows in the requested order.
+fn append_snapshot_order_and_limit(sql: &str, order_by: Option<&str>, remaining: usize) -> String {
+    let order = order_by.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
+    format!("{sql}{order} LIMIT {remaining}")
+}
+
+/// Builds the `ORDER BY` expression for a sorted capped read (review on
+/// #14799): the requested sort column first, then primary-key columns that are
+/// not already in the order as ascending tiebreakers. Without the tiebreaker a
+/// tie at the cap boundary lets each run keep different rows, so the primary
+/// key turns the sort into a total order wherever the table has one; a sort
+/// column that is itself the whole key already orders uniquely and needs no
+/// tiebreaker.
+fn sorted_cap_order_expression(
+    sort_column: &str,
+    descending: bool,
+    primary_keys: &[String],
+    db_type: &DatabaseType,
+) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    let mut expression = format!("{} {direction}", quote_identifier(sort_column, db_type));
+    for key in primary_keys {
+        if !key.eq_ignore_ascii_case(sort_column) {
+            expression.push_str(&format!(", {} ASC", quote_identifier(key, db_type)));
+        }
+    }
+    expression
 }
 
 #[cfg(test)]
@@ -5930,6 +5967,14 @@ async fn export_database_sql_core_inner_with_phases(
             let col_names = columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
             let col_types = columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
             let col_extras = columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
+            // Primary-key columns that actually appear in the SELECT list: the
+            // sorted capped read (#14799 review) ties its ORDER BY off with them.
+            // Keyset pagination validates its own cursor columns separately below.
+            let primary_keys_in_select = columns
+                .iter()
+                .filter(|column| column.is_primary_key && col_names.iter().any(|name| name == &column.name))
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
 
             if table_ddl_text.is_none()
                 && db_type == DatabaseType::Dameng
@@ -5961,12 +6006,30 @@ async fn export_database_sql_core_inner_with_phases(
                     // satisfy connection reuse. The batch guard below is the correctness
                     // backstop; this clause keeps the server-side work bounded too.
                     let mut table_exported_rows = 0_u64;
+                    // Review on #14799: a sort column orders the capped snapshot read
+                    // the same way the paged path does (latest N rows by `updated_at`,
+                    // ...). MySQL and PostgreSQL manual transactions both take a
+                    // trailing `ORDER BY ... LIMIT n` on this self-generated SELECT.
+                    let snapshot_sort_column = request
+                        .row_limit_sort_column
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .and_then(|name| col_names.iter().find(|column| column.eq_ignore_ascii_case(name)).cloned());
                     let mut sql =
                         database_export_select_sql(&col_names, &col_types, table_name, &request.schema, &db_type);
                     if let Some(remaining) =
                         remaining_rows_under_limit(request.row_limit_per_table, table_exported_rows)
                     {
-                        sql = append_snapshot_row_limit(&sql, remaining);
+                        let order = snapshot_sort_column.as_ref().map(|column| {
+                            sorted_cap_order_expression(
+                                column,
+                                request.row_limit_sort_descending,
+                                &primary_keys_in_select,
+                                &db_type,
+                            )
+                        });
+                        sql = append_snapshot_order_and_limit(&sql, order.as_deref(), remaining);
                     }
                     let cancel_token = CancellationToken::new();
                     await_export_stream_operation(
@@ -6043,12 +6106,42 @@ async fn export_database_sql_core_inner_with_phases(
                         .iter()
                         .filter_map(|primary_key| col_names.iter().position(|column| column == primary_key))
                         .collect::<Vec<_>>();
-                    let use_keyset = !primary_keys.is_empty() && primary_key_indices.len() == primary_keys.len();
+                    // Review on #14799: an optional sort column orders the capped read,
+                    // so the cap keeps the first/last N rows by that column (e.g.
+                    // `updated_at` descending = the latest N rows). Keyset pagination
+                    // walks the primary-key cursor, so a sorted read switches to the
+                    // OFFSET paging path with the sorted order expression.
+                    let sort_column = request
+                        .row_limit_sort_column
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .and_then(|name| col_names.iter().find(|column| column.eq_ignore_ascii_case(name)).cloned());
+                    let use_keyset = sort_column.is_none()
+                        && !primary_keys.is_empty()
+                        && primary_key_indices.len() == primary_keys.len();
                     let mut last_primary_key_values = Vec::new();
                     let mut offset = 0_u64;
                     // #14750: per-table read/write budget under the request's row cap.
                     // `None` (no limit) keeps the loop byte-identical to before.
                     let mut table_exported_rows = 0_u64;
+                    // A requested sort column that this table does not have cannot order
+                    // the read; fall back to the default read order and say so in the
+                    // dump instead of silently returning different rows each run.
+                    if sort_column.is_none()
+                        && table_exported_rows == 0
+                        && remaining_rows_under_limit(request.row_limit_per_table, 0).is_some()
+                    {
+                        if let Some(requested) =
+                            request.row_limit_sort_column.as_deref().map(str::trim).filter(|value| !value.is_empty())
+                        {
+                            writeln!(
+                                file,
+                                "-- Table {table_name}: sort column '{requested}' not found; the row cap follows the default read order"
+                            )
+                            .map_err(|e| format!("Failed to write file: {e}"))?;
+                        }
+                    }
 
                     loop {
                         if is_export_cancelled(&request.export_id).await {
@@ -6082,6 +6175,32 @@ async fn export_database_sql_core_inner_with_phases(
                                 &primary_keys,
                                 &last_primary_key_values,
                                 page_size,
+                                None,
+                            );
+                            replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
+                        } else if let Some(column) = &sort_column {
+                            // Sorted read (#14799 review): every dialect gets a real
+                            // ORDER BY through the shared filter/order pagination
+                            // builder (Oracle rownum wrap, SQL Server ROW_NUMBER,
+                            // Dameng OFFSET/FETCH, generic LIMIT/OFFSET ...). The
+                            // primary key ties the order off so page boundaries and
+                            // the cap stay deterministic.
+                            let order = sorted_cap_order_expression(
+                                column,
+                                request.row_limit_sort_descending,
+                                &primary_keys_in_select,
+                                &db_type,
+                            );
+                            let sql = crate::transfer::pagination_sql_with_filter_order_and_identifier_quote(
+                                &col_names,
+                                table_name,
+                                &request.schema,
+                                &db_type,
+                                offset,
+                                page_size,
+                                None,
+                                Some(&order),
+                                &[],
                                 None,
                             );
                             replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
@@ -6624,7 +6743,7 @@ fn strip_agent_sequence_owned_by(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_snapshot_row_limit, build_database_export_object_source_sql, build_database_sql_export,
+        append_snapshot_order_and_limit, build_database_export_object_source_sql, build_database_sql_export,
         build_export_insert_statements, build_export_insert_statements_excluding,
         build_export_insert_statements_excluding_with_dialect, build_export_object_source_sql, build_export_sql_insert,
         create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
@@ -6639,13 +6758,14 @@ mod tests {
         linux_mount_source_from_proc, linux_network_file_identity_from_mountinfo, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, remaining_rows_under_limit,
-        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
-        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql,
-        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
-        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
+        replace_database_export_select_list, sort_export_views_by_dependencies, sorted_cap_order_expression,
+        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
+        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
@@ -6689,7 +6809,33 @@ mod tests {
             "sales",
             &DatabaseType::Mysql,
         );
-        assert_eq!(append_snapshot_row_limit(&sql, 100), format!("{sql} LIMIT 100"));
+        assert_eq!(append_snapshot_order_and_limit(&sql, None, 100), format!("{sql} LIMIT 100"));
+        // Review on #14799: a sort column orders the capped snapshot read before
+        // the limit, so the cap keeps the first/last N rows by that column.
+        assert_eq!(
+            append_snapshot_order_and_limit(&sql, Some("\"id\" DESC"), 100),
+            format!("{sql} ORDER BY \"id\" DESC LIMIT 100")
+        );
+    }
+
+    #[test]
+    fn sorted_cap_order_expression_tiebreaks_with_primary_keys() {
+        // A sort column that is the whole primary key already orders uniquely.
+        assert_eq!(sorted_cap_order_expression("id", true, &["id".to_string()], &DatabaseType::Mysql), "\"id\" DESC");
+        // A non-key sort column gets the key as an ascending tiebreaker, so a tie
+        // at the cap boundary keeps the same rows on every run.
+        assert_eq!(
+            sorted_cap_order_expression("updated_at", false, &["id".to_string()], &DatabaseType::Mysql),
+            "\"updated_at\" ASC, \"id\" ASC"
+        );
+        // Composite keys contribute only the parts the sort column does not cover.
+        assert_eq!(
+            sorted_cap_order_expression("id", true, &["tenant".to_string(), "id".to_string()], &DatabaseType::Mysql),
+            "\"id\" DESC, \"tenant\" ASC"
+        );
+        // No key: the sort column alone; ties fall back to the engine order and
+        // the dialog warns about run-to-run differences.
+        assert_eq!(sorted_cap_order_expression("created_at", true, &[], &DatabaseType::Mysql), "\"created_at\" DESC");
     }
 
     #[tokio::test]
@@ -6724,6 +6870,8 @@ mod tests {
             batch_size: 100,
             split_max_mb: None,
             row_limit_per_table: Some(0),
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
         };
         let state = Arc::new(test_app_state(&scratch_dir).await);
         let error = crate::data::database_export::export_database_sql_core(&state, &request, |_| {}).await;
@@ -6925,6 +7073,8 @@ mod tests {
             batch_size: 1000,
             split_max_mb: None,
             row_limit_per_table: None,
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
             preserve_original_language: false,
         }
     }

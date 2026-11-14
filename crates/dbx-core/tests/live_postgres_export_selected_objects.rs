@@ -76,6 +76,8 @@ fn export_request(
         batch_size: 1000,
         split_max_mb: None,
         row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     }
 }
 

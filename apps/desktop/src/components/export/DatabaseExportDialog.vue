@@ -96,6 +96,8 @@ const splitSqlOutput = ref(savedOptions.splitSqlOutput);
 const splitSqlPartMaxMb = ref(savedOptions.splitSqlPartMaxMb);
 const limitRowsPerTable = ref(savedOptions.limitRowsPerTable);
 const rowsPerTableLimitInput = ref<string>(savedOptions.rowsPerTableLimit.toString());
+const rowLimitSortColumnInput = ref(savedOptions.rowLimitSortColumn);
+const rowLimitSortDescending = ref(savedOptions.rowLimitSortDescending);
 const executionMode = ref<ManualExportMode>("immediate");
 const desktopTaskStatus = ref<ExportTask["status"] | null>(null);
 let disposed = false;
@@ -116,6 +118,8 @@ function applyStoredExportOptions() {
   splitSqlPartMaxMb.value = saved.splitSqlPartMaxMb;
   limitRowsPerTable.value = saved.limitRowsPerTable;
   rowsPerTableLimitInput.value = saved.rowsPerTableLimit.toString();
+  rowLimitSortColumnInput.value = saved.rowLimitSortColumn;
+  rowLimitSortDescending.value = saved.rowLimitSortDescending;
 }
 
 function persistExportOptions() {
@@ -134,6 +138,8 @@ function persistExportOptions() {
     splitSqlPartMaxMb: normalizedSplitSqlPartMaxMb(),
     limitRowsPerTable: limitRowsPerTable.value,
     rowsPerTableLimit: normalizedRowsPerTableLimit(),
+    rowLimitSortColumn: rowLimitSortColumnInput.value.trim(),
+    rowLimitSortDescending: rowLimitSortDescending.value,
   });
 }
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
@@ -284,6 +290,24 @@ function rowsPerTableLimitRequest(): number | undefined {
 /** The rows-per-table cap as the preference stores it, so a reload keeps the user's intent. */
 function normalizedRowsPerTableLimit(): number {
   return normalizeRowsPerTableLimit(Number(rowsPerTableLimitInput.value));
+}
+
+/**
+ * Sort column for the per-table cap (review on #14799): `undefined` when the
+ * limit is off or the field is blank — blank keeps the existing read order.
+ */
+function rowLimitSortColumnRequest(): string | undefined {
+  if (!limitRowsPerTable.value) return undefined;
+  return rowLimitSortColumnInput.value.trim() || undefined;
+}
+
+/**
+ * Direction for the sort column; only carried when a column is set, so the
+ * backend never applies a direction to the default read order.
+ */
+function rowLimitSortDescendingRequest(): boolean | undefined {
+  if (rowLimitSortColumnRequest() === undefined) return undefined;
+  return rowLimitSortDescending.value;
 }
 
 // Lenient exports write per-object failures into the SQL file as `-- ERROR`
@@ -498,6 +522,8 @@ async function startDesktopExport() {
       batchSize: 1000,
       splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
       rowLimitPerTable: rowsPerTableLimitRequest(),
+      rowLimitSortColumn: rowLimitSortColumnRequest(),
+      rowLimitSortDescending: rowLimitSortDescendingRequest(),
     },
   };
   let destination: string;
@@ -792,6 +818,8 @@ async function startExport() {
           batchSize: 1000,
           splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
           rowLimitPerTable: rowsPerTableLimitRequest(),
+          rowLimitSortColumn: rowLimitSortColumnRequest(),
+          rowLimitSortDescending: rowLimitSortDescendingRequest(),
         };
         return runDatabaseExportUntilTerminal(request, (progress) => {
           exportProgress.value = { ...progress };
@@ -945,6 +973,8 @@ async function startAllDatabasesExport() {
               batchSize: 1000,
               splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
               rowLimitPerTable: rowsPerTableLimitRequest(),
+              rowLimitSortColumn: rowLimitSortColumnRequest(),
+              rowLimitSortDescending: rowLimitSortDescendingRequest(),
             },
             (progress) => {
               const nextRowsExported = Math.max(0, progress.rowsExported);
@@ -1212,11 +1242,31 @@ watch(
   { immediate: true },
 );
 
-watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, omitDatabaseQualifier, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb, limitRowsPerTable, rowsPerTableLimitInput], () => {
-  if (open.value) {
-    persistExportOptions();
-  }
-});
+watch(
+  [
+    includeStructure,
+    includeData,
+    insertDialect,
+    insertMode,
+    includeObjects,
+    includeCreateDatabase,
+    dropTableIfExists,
+    omitAutoIncrement,
+    omitDatabaseQualifier,
+    preserveOriginalLanguage,
+    splitSqlOutput,
+    splitSqlPartMaxMb,
+    limitRowsPerTable,
+    rowsPerTableLimitInput,
+    rowLimitSortColumnInput,
+    rowLimitSortDescending,
+  ],
+  () => {
+    if (open.value) {
+      persistExportOptions();
+    }
+  },
+);
 </script>
 
 <template>
@@ -1460,6 +1510,27 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
             <p v-if="includeData && limitRowsPerTable" class="pl-5 text-[11px] text-muted-foreground">
               {{ t("databaseExport.limitRowsPerTableDescription") }}
             </p>
+            <div v-if="includeData && limitRowsPerTable" class="pl-5 space-y-1.5">
+              <div class="flex items-center gap-2">
+                <label for="database-export-row-limit-sort-column" class="shrink-0 text-xs text-muted-foreground">
+                  {{ t("databaseExport.rowLimitSortColumn") }}
+                </label>
+                <Input id="database-export-row-limit-sort-column" v-model="rowLimitSortColumnInput" class="h-7 w-44 text-xs" :placeholder="t('databaseExport.rowLimitSortColumnPlaceholder')" :aria-label="t('databaseExport.rowLimitSortColumn')" />
+              </div>
+              <div class="flex items-center gap-4 text-xs" role="radiogroup" :aria-label="t('databaseExport.rowLimitSortDirection')">
+                <label class="flex cursor-pointer items-center gap-1.5">
+                  <input v-model="rowLimitSortDescending" type="radio" :value="false" name="row-limit-sort-direction" class="accent-primary" />
+                  <span>{{ t("databaseExport.rowLimitSortEarliestFirst") }}</span>
+                </label>
+                <label class="flex cursor-pointer items-center gap-1.5">
+                  <input v-model="rowLimitSortDescending" type="radio" :value="true" name="row-limit-sort-direction" class="accent-primary" />
+                  <span>{{ t("databaseExport.rowLimitSortLatestFirst") }}</span>
+                </label>
+              </div>
+              <p class="text-[11px] text-muted-foreground">
+                {{ t("databaseExport.rowLimitSortDescription") }}
+              </p>
+            </div>
             <ExportExecutionMode v-if="isTauriRuntime()" v-model="executionMode" />
           </div>
         </div>

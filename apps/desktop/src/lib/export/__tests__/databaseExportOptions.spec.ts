@@ -63,6 +63,8 @@ describe("databaseExportOptions", () => {
       splitSqlPartMaxMb: 250,
       limitRowsPerTable: false,
       rowsPerTableLimit: 1,
+      rowLimitSortColumn: "",
+      rowLimitSortDescending: false,
     });
   });
 
@@ -96,6 +98,9 @@ describe("databaseExportOptions", () => {
     const legacy = loadSavedDatabaseExportOptions(legacyStorage);
     expect(legacy.limitRowsPerTable).toBe(false);
     expect(legacy.rowsPerTableLimit).toBe(1);
+    // Review on #14799: an unknown sort column keeps the default read order.
+    expect(legacy.rowLimitSortColumn).toBe("");
+    expect(legacy.rowLimitSortDescending).toBe(false);
     expect(legacy.splitSqlPartMaxMb).toBe(250);
   });
 
@@ -126,6 +131,20 @@ describe("databaseExportOptions", () => {
     expect(loaded.limitRowsPerTable).toBe(true);
     expect(loaded.rowsPerTableLimit).toBe(25);
     expect(loaded.includeData).toBe(false);
+  });
+
+  it("persists the row-limit sort column and direction (review on #14799)", () => {
+    const storage = createMemoryStorage();
+    saveDatabaseExportOptions({ rowLimitSortColumn: "  created_at  ", rowLimitSortDescending: true }, storage);
+
+    const loaded = loadSavedDatabaseExportOptions(storage);
+    expect(loaded.rowLimitSortColumn).toBe("created_at");
+    expect(loaded.rowLimitSortDescending).toBe(true);
+
+    // A non-string value falls back to the default read order, not to garbage.
+    saveDatabaseExportOptions({ rowLimitSortColumn: 7 as unknown as string, rowLimitSortDescending: false }, storage);
+    expect(loadSavedDatabaseExportOptions(storage).rowLimitSortColumn).toBe("");
+    expect(loadSavedDatabaseExportOptions(storage).rowLimitSortDescending).toBe(false);
   });
 
   it("sorts table names alphabetically", () => {

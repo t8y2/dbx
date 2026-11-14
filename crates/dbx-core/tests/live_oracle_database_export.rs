@@ -112,6 +112,8 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             batch_size: 1000,
             split_max_mb: None,
             row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
         };
         export_database_sql_core(&state, &request, |_| {}).await?;
         let exported = std::fs::read_to_string(&file_path).map_err(|error| error.to_string())?;

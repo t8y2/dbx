@@ -220,6 +220,68 @@ it("omits rowLimitPerTable when the limit is off and captures the cap at submit 
   expect(operations[1]!.request.rowLimitPerTable).toBe(123);
   terminal(1);
 });
+it("carries the row-limit sort column and direction only when the limit is on (review on #14799)", async () => {
+  const dialog = await mountDialog();
+  // Limit off: no sort column may leak into the request either.
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  expect(operations[0]!.request.rowLimitSortColumn).toBeUndefined();
+  expect(operations[0]!.request.rowLimitSortDescending).toBeUndefined();
+  terminal(0);
+  await vi.waitFor(() => expect(useExportTracker().tasks.value[0]!.status).toBe("Done"));
+
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  await vi.waitFor(() => {
+    expect(Array.from(dialog.host.querySelectorAll<HTMLButtonElement>("button")).some((button) => button.textContent?.includes("databaseExport.limitRowsPerTable"))).toBe(true);
+  });
+  const toggle = Array.from(dialog.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("databaseExport.limitRowsPerTable"))!;
+  toggle.click();
+  await nextTick();
+  const capInput = await vi.waitFor(() => {
+    const input = dialog.host.querySelector<HTMLInputElement>('input[aria-label="databaseExport.rowsPerTableLimit"]');
+    expect(input).toBeDefined();
+    return input!;
+  });
+  capInput.value = "10";
+  capInput.dispatchEvent(new Event("input", { bubbles: true }));
+  const sortInput = await vi.waitFor(() => {
+    const input = dialog.host.querySelector<HTMLInputElement>('input[aria-label="databaseExport.rowLimitSortColumn"]');
+    expect(input).toBeDefined();
+    return input!;
+  });
+  sortInput.value = "created_at";
+  sortInput.dispatchEvent(new Event("input", { bubbles: true }));
+  // Default direction is "earliest first": ASC without touching a radio.
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(2));
+  expect(operations[1]!.request.rowLimitPerTable).toBe(10);
+  expect(operations[1]!.request.rowLimitSortColumn).toBe("created_at");
+  expect(operations[1]!.request.rowLimitSortDescending).toBe(false);
+  // Complete run 2 so the tracker lease frees up for the third run below.
+  terminal(1);
+  await vi.waitFor(() => expect(useExportTracker().tasks.value[1]!.status).toBe("Done"));
+
+  // Flip to "latest first" for a third run: DESC reaches the request untouched.
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  // Reopen reloads table metadata; the export button stays disabled until it settles.
+  await vi.waitFor(() => {
+    const exportButton = [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "databaseExport.export")!;
+    expect(exportButton.disabled).toBe(false);
+  });
+  const radios = dialog.host.querySelectorAll<HTMLInputElement>('input[name="row-limit-sort-direction"]');
+  expect(radios).toHaveLength(2);
+  radios[1]!.click();
+  await nextTick();
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(3));
+  expect(operations[2]!.request.rowLimitSortColumn).toBe("created_at");
+  expect(operations[2]!.request.rowLimitSortDescending).toBe(true);
+  terminal(2);
+});
 it("holds the whole multi-database operation across child completion and each rollback", async () => {
   const tracker = useExportTracker();
   const dialog = await mountDialog(true);

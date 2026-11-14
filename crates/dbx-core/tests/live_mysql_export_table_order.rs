@@ -111,6 +111,8 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         batch_size: 1000,
         split_max_mb: None,
         row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
 
     let test_result = async {

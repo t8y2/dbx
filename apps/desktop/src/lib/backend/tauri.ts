@@ -6757,6 +6757,14 @@ export interface DatabaseExportRequest {
    * the unlimited behavior; the backend rejects zero.
    */
   rowLimitPerTable?: number;
+  /**
+   * Sort column the per-table cap takes the first/last N rows by (review on
+   * #14799). `undefined`/empty keeps the export's existing read order; the
+   * backend falls back per table with a dump comment when the column is absent.
+   */
+  rowLimitSortColumn?: string;
+  /** `true` takes the newest rows by `rowLimitSortColumn`; only sent with a column. */
+  rowLimitSortDescending?: boolean;
 }
 
 export interface DatabaseBackupSnapshot {

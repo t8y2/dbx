@@ -4,7 +4,8 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import DataCompareDialog from "@/components/diff/DataCompareDialog.vue";
-import type { DataCompareSession } from "@/composables/useDataCompareSession";
+import type { DataCompareSession, DataCompareSessionConfig } from "@/composables/useDataCompareSession";
+import { useDataCompareConfig } from "@/composables/useDataCompareConfig";
 
 const mocks = vi.hoisted(() => ({
   session: null as DataCompareSession | null,
@@ -14,13 +15,15 @@ const mocks = vi.hoisted(() => ({
   listTables: vi.fn(),
   getColumns: vi.fn(),
   toast: vi.fn(),
+  prepareDataCompareFromTables: vi.fn(),
+  buildDataCompareSyncPlan: vi.fn(),
 }));
 
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
-vi.mock("@/composables/useDataCompareSession", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/composables/useDataCompareSession")>()),
-  getDataCompareSession: (id: string | null | undefined) => (id === mocks.session?.id ? mocks.session : undefined),
-}));
+vi.mock("@/composables/useDataCompareSession", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/composables/useDataCompareSession")>();
+  return { ...original, getDataCompareSession: (id: string | null | undefined) => (id === mocks.session?.id ? mocks.session : original.getDataCompareSession(id)) };
+});
 vi.mock("@/stores/connectionStore", () => {
   const connections = [1, 2, 3].map((index) => ({ id: `pg-${index}`, name: `PostgreSQL ${index}`, db_type: "postgres" }));
   return {
@@ -37,6 +40,8 @@ vi.mock("@/lib/backend/api", () => ({
   listSchemas: mocks.listSchemas,
   listTables: mocks.listTables,
   getColumns: mocks.getColumns,
+  prepareDataCompareFromTables: mocks.prepareDataCompareFromTables,
+  buildDataCompareSyncPlan: mocks.buildDataCompareSyncPlan,
 }));
 
 const mountedApps: App[] = [];
@@ -52,6 +57,12 @@ beforeEach(() => {
   mocks.listTables.mockReset().mockResolvedValue(tables);
   mocks.getColumns.mockReset().mockResolvedValue([{ name: "id", data_type: "integer", is_primary_key: true }]);
   mocks.toast.mockReset();
+  mocks.prepareDataCompareFromTables
+    .mockReset()
+    .mockResolvedValue({ result: { added: [], removed: [], modified: [] }, syncStatements: [], syncSql: "", preSyncStatements: [], sourceRowCount: 0, targetRowCount: 0, sourceTruncated: false, targetTruncated: false, rowBudget: 100000, syncEligible: true });
+  mocks.buildDataCompareSyncPlan.mockReset().mockResolvedValue({ insertCount: 0, updateCount: 0, deleteCount: 0, statementCount: 0, syncStatements: [], syncSql: "" });
+  const configs = useDataCompareConfig();
+  for (const config of configs.configs.value) configs.deleteConfig(config.id);
 });
 
 afterEach(() => {
@@ -67,7 +78,7 @@ async function flushAsyncSetup() {
   }
 }
 
-async function mountLoadedDialog() {
+async function mountLoadedDialog(overrides: Partial<DataCompareSessionConfig> = {}) {
   mocks.session = {
     id: "loaded-compare",
     version: 1,
@@ -89,6 +100,7 @@ async function mountLoadedDialog() {
       targetTable: "invoices",
       keyColumnsByTable: {},
       label: "Loaded comparison",
+      ...overrides,
     },
     progress: null,
     batchResults: [],
@@ -97,9 +109,13 @@ async function mountLoadedDialog() {
     startedAt: 1,
     finishedAt: 2,
   };
+  await mountDialog("loaded-compare");
+}
+
+async function mountDialog(sessionId: string | null) {
   const container = document.createElement("div");
   document.body.append(container);
-  const app = createApp(defineComponent({ setup: () => () => h(DataCompareDialog, { open: true, sessionId: "loaded-compare" }) }));
+  const app = createApp(defineComponent({ setup: () => () => h(DataCompareDialog, { open: true, sessionId }) }));
   mountedApps.push(app);
   app.use(i18n);
   app.mount(container);
@@ -217,4 +233,156 @@ it("preserves loaded databases, schemas and table selections after swap", async 
   expect(mocks.listDatabases).not.toHaveBeenCalled();
   expect(mocks.listSchemas).not.toHaveBeenCalled();
   expect(mocks.listTables).not.toHaveBeenCalled();
+});
+
+function advancedButton() {
+  return [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.advancedOptions")))!;
+}
+
+function filterInput(side: "source" | "target") {
+  const label = [...document.querySelectorAll("label")].find((element) => element.textContent?.includes(i18n.global.t(`dataCompare.${side}Filter`)));
+  return label ? (document.getElementById(label.htmlFor) as HTMLTextAreaElement) : null;
+}
+
+async function setFilter(side: "source" | "target", value: string) {
+  const input = filterInput(side)!;
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await nextTick();
+}
+
+it("starts with collapsed advanced options and blank filters for a legacy session", async () => {
+  await mountLoadedDialog();
+  expect(advancedButton()).toBeDefined();
+  expect(advancedButton().getAttribute("aria-expanded")).toBe("false");
+  advancedButton().click();
+  await nextTick();
+  expect(advancedButton().getAttribute("aria-expanded")).toBe("true");
+  expect(filterInput("source")?.value).toBe("");
+  expect(filterInput("target")?.value).toBe("");
+});
+
+it("restores filters visibly and swaps them with their endpoints", async () => {
+  await mountLoadedDialog({ sourceFilter: "tenant_id = 1", targetFilter: "tenant_id = 2" });
+  expect(advancedButton()?.getAttribute("aria-expanded")).toBe("true");
+  expect(filterInput("source")?.value).toBe("tenant_id = 1");
+  expect(filterInput("target")?.value).toBe("tenant_id = 2");
+  swapButton().click();
+  await flushAsyncSetup();
+  expect(filterInput("source")?.value).toBe("tenant_id = 2");
+  expect(filterInput("target")?.value).toBe("tenant_id = 1");
+});
+
+it("sends edited filters, locks them during comparison, and clears stale results on edits", async () => {
+  await mountLoadedDialog();
+  expect(advancedButton()).toBeDefined();
+  advancedButton().click();
+  await nextTick();
+  await setFilter("source", "id > 10");
+  await setFilter("target", "id > 20");
+  let finish!: (value: unknown) => void;
+  const result = await mocks.prepareDataCompareFromTables();
+  mocks.prepareDataCompareFromTables.mockClear().mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.compare")))!.click();
+  await flushAsyncSetup();
+  expect(mocks.prepareDataCompareFromTables).toHaveBeenCalledWith(expect.objectContaining({ sourceFilter: "id > 10", targetFilter: "id > 20" }));
+  expect(filterInput("source")?.disabled).toBe(true);
+  expect(filterInput("target")?.disabled).toBe(true);
+  finish(result);
+  await flushAsyncSetup();
+  expect(filterInput("source")?.disabled).toBe(false);
+  expect(document.body.textContent).toContain(i18n.global.t("dataCompare.noDifferences"));
+  await setFilter("source", "id > 30");
+  expect(document.body.textContent).not.toContain(i18n.global.t("dataCompare.noDifferences"));
+});
+
+it("saves filter edits and restores them when reopening a saved configuration", async () => {
+  await mountLoadedDialog({ sourceFilter: "id > 10", targetFilter: "id > 20" });
+  document.querySelector<HTMLButtonElement>('[data-testid="data-compare-config-create"]')!.click();
+  await nextTick();
+  expect(useDataCompareConfig().activeConfig.value).toMatchObject({ sourceFilter: "id > 10", targetFilter: "id > 20" });
+  await setFilter("source", "id > 30");
+  await setFilter("target", "");
+  await vi.waitFor(() => expect(useDataCompareConfig().activeConfig.value).toMatchObject({ sourceFilter: "id > 30", targetFilter: "" }));
+  for (const app of mountedApps.splice(0)) app.unmount();
+  document.body.textContent = "";
+
+  await mountDialog(null);
+  expect(advancedButton().getAttribute("aria-expanded")).toBe("true");
+  expect(filterInput("source")?.value).toBe("id > 30");
+  expect(filterInput("target")?.value).toBe("");
+});
+
+it("keeps configured filters active when advanced options are collapsed", async () => {
+  await mountLoadedDialog({ sourceFilter: "id > 10", targetFilter: "id > 20" });
+  advancedButton().click();
+  await nextTick();
+  expect(advancedButton().getAttribute("aria-expanded")).toBe("false");
+  expect(advancedButton().textContent).toContain(i18n.global.t("dataCompare.filtersActive"));
+  [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.compare")))!.click();
+  await flushAsyncSetup();
+  expect(mocks.prepareDataCompareFromTables).toHaveBeenCalledWith(expect.objectContaining({ sourceFilter: "id > 10", targetFilter: "id > 20" }));
+  expect(document.body.textContent).toContain(i18n.global.t("dataCompare.filteredResultsHint"));
+});
+
+it.each(["duplicate", "close", "switch"] as const)("persists pending filter edits before %s without waiting for autosave", async (action) => {
+  await mountLoadedDialog({ sourceFilter: "id > 1" });
+  document.querySelector<HTMLButtonElement>('[data-testid="data-compare-config-create"]')!.click();
+  await nextTick();
+  const originalId = useDataCompareConfig().activeConfigId.value;
+  await setFilter("source", "id > 10");
+  if (action === "duplicate") {
+    document.querySelector<HTMLButtonElement>('[data-testid="data-compare-config-duplicate"]')!.click();
+    await nextTick();
+    expect(useDataCompareConfig().activeConfig.value?.sourceFilter).toBe("id > 10");
+  } else if (action === "close") {
+    for (const app of mountedApps.splice(0)) app.unmount();
+  } else {
+    document.querySelector<HTMLButtonElement>('[data-testid="data-compare-config-create"]')!.click();
+    await nextTick();
+  }
+  expect(useDataCompareConfig().configs.value.find((config) => config.id === originalId)?.sourceFilter).toBe("id > 10");
+});
+
+it("does not overwrite an unrelated saved config when editing a restored session", async () => {
+  await mountLoadedDialog({ sourceFilter: "id > 1" });
+  document.querySelector<HTMLButtonElement>('[data-testid="data-compare-config-create"]')!.click();
+  await nextTick();
+  const savedId = useDataCompareConfig().activeConfigId.value;
+  for (const app of mountedApps.splice(0)) app.unmount();
+  document.body.textContent = "";
+
+  await mountLoadedDialog({ sourceFilter: "id > 99" });
+  await setFilter("source", "id > 123");
+  for (const app of mountedApps.splice(0)) app.unmount();
+  expect(useDataCompareConfig().configs.value.find((config) => config.id === savedId)?.sourceFilter).toBe("id > 1");
+});
+
+it("locks filters while a saved configuration is loading and saves edits after loading", async () => {
+  await mountLoadedDialog({ sourceFilter: "id > 1" });
+  document.querySelector<HTMLButtonElement>('[data-testid="data-compare-config-create"]')!.click();
+  await nextTick();
+  const savedId = useDataCompareConfig().activeConfigId.value;
+  for (const app of mountedApps.splice(0)) app.unmount();
+  document.body.textContent = "";
+  let finish!: (value: unknown) => void;
+  mocks.listDatabases.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+
+  await mountDialog(null);
+  expect(filterInput("source")?.disabled).toBe(true);
+  expect(filterInput("target")?.disabled).toBe(true);
+  finish([{ name: "app" }]);
+  await flushAsyncSetup();
+  expect(filterInput("source")?.disabled).toBe(false);
+  await setFilter("source", "id > 99");
+  for (const app of mountedApps.splice(0)) app.unmount();
+  expect(useDataCompareConfig().configs.value.find((config) => config.id === savedId)?.sourceFilter).toBe("id > 99");
 });

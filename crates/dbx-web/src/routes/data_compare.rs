@@ -33,6 +33,6 @@ pub async fn prepare_data_compare_missing_target(
 
 pub async fn build_data_compare_sync_plan(
     Json(options): Json<dbx_core::data_compare::DataCompareSyncPlanOptions>,
-) -> Json<dbx_core::data_compare::DataCompareSyncPlan> {
-    Json(dbx_core::data_compare::build_data_compare_sync_plan(options))
+) -> Result<Json<dbx_core::data_compare::DataCompareSyncPlan>, AppError> {
+    dbx_core::data_compare::build_data_compare_sync_plan(options).map(Json).map_err(AppError::from)
 }

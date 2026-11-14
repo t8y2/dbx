@@ -12,6 +12,8 @@ import { useToast } from "@/composables/useToast";
 import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { listEventTriggers } from "@/lib/backend/api";
+import { useTableStructurePeek } from "@/composables/useTableStructurePeek";
+import TableStructurePeekDialog from "@/components/editor/TableStructurePeekDialog.vue";
 import {
   filterLocallySearchedTables,
   filterSidebarSearchRootsByConnectionState,
@@ -176,6 +178,7 @@ const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
 const sidebarDdlTarget = ref<TreeNode | null>(null);
 const sidebarDdlOpen = ref(false);
+const { target: sidebarStructureTarget, columns: sidebarStructureColumns, loading: sidebarStructureLoading, error: sidebarStructureError, open: openSidebarStructurePeekState, close: closeSidebarStructurePeek } = useTableStructurePeek();
 const sidebarElasticsearchIndexMetadataTarget = ref<{ node: TreeNode; kind: ElasticsearchIndexMetadataKind } | null>(null);
 const sidebarElasticsearchIndexMetadataOpen = ref(false);
 const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean; initialSection?: ObjectDetailsSection; createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding> } | null>(null);
@@ -2325,6 +2328,12 @@ function openSidebarDdl(node: TreeNode) {
   sidebarDdlOpen.value = true;
 }
 
+function openSidebarStructurePeek(node: TreeNode) {
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
+  beginSidebarAction();
+  void openSidebarStructurePeekState(createSidebarActionTarget(node));
+}
+
 function openSidebarDdlForSelection(): boolean {
   const selectedNodeId = store.selectedTreeNodeId;
   const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
@@ -3053,6 +3062,7 @@ defineExpose({
       @search-toggle="onSearchToggle"
       @node-toggled="onNodeToggled"
       @open-ddl="openSidebarDdl"
+      @peek-structure="openSidebarStructurePeek"
       @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
@@ -3284,6 +3294,17 @@ defineExpose({
       :database-type="sidebarDdlDatabaseType"
       :dialect="codeMirrorSqlDialect(sidebarDdlDatabaseType)"
       :format-dialect="sqlFormatDialectForDbType(sidebarDdlDatabaseType)"
+    />
+
+    <TableStructurePeekDialog
+      v-if="sidebarStructureTarget"
+      :table-name="sidebarStructureTarget.objectName || sidebarStructureTarget.label"
+      :schema="sidebarStructureTarget.schema"
+      :columns="sidebarStructureColumns"
+      :loading="sidebarStructureLoading"
+      :error="sidebarStructureError"
+      :insert-enabled="false"
+      @close="closeSidebarStructurePeek"
     />
 
     <SidebarElasticsearchIndexMetadataDialog

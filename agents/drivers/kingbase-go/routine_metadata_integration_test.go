@@ -86,6 +86,15 @@ func TestKingbaseRoutineMetadataIntegration(t *testing.T) {
 		if item.Name != "void_function" && item.Name != "scalar_function" {
 			t.Fatalf("procedure was incorrectly classified as a function: %+v", item)
 		}
+		if item.Signature == nil || *item.Signature != "" {
+			t.Fatalf("zero-argument function lost its empty signature: %+v", item)
+		}
+		result, _, err := s.dispatch("get_object_source", map[string]json.RawMessage{
+			"schema": rawJSON(schema), "name": rawJSON(item.Name), "object_type": rawJSON(item.ObjectType), "signature": rawJSON(*item.Signature),
+		})
+		if err != nil || !strings.Contains(fmt.Sprint(result), item.Name+"()") {
+			t.Fatalf("source for zero-argument function %s: result=%v err=%v", item.Name, result, err)
+		}
 	}
 	overloads := []objectInfo{}
 	for _, item := range procedures {

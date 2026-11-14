@@ -2,6 +2,8 @@ import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, Fo
 import * as api from "@/lib/backend/api";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
+import { tableDataCopyColumnOptions } from "@/lib/table/tableClipboard";
+import { isMissingKingbaseCatalogOid, isUnsupportedKingbaseTableComment } from "./kingbaseCatalogCompatibility";
 import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseTableClone";
 
 export interface DropObjectSqlOptions {
@@ -126,6 +128,7 @@ export interface DuplicateTableStructurePlanOptions extends DuplicateTableStruct
   database: string;
   catalog?: string;
   sourceColumns?: ColumnInfo[];
+  copyData?: boolean;
 }
 
 export interface DuplicateTableStructurePlan {
@@ -346,17 +349,37 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     return { sql, sourceColumns: columns, executeAsScript: primaryKeyColumns.length > 0 || !!tableComment?.trim() || columnComments.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
-  let sourceColumns = options.sourceColumns;
-  if (options.databaseType === "vastbase" || options.databaseType === "oscar") {
-    sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+  const isKingbase = options.databaseType === "kingbase";
+  const copyColumnComments = options.databaseType === "vastbase" || options.databaseType === "oscar" || isKingbase;
+  const schema = options.schema || "";
+  const columns = options.sourceColumns;
+  const loadColumns = async () => {
+    if (columns || !copyColumnComments) return columns;
+    try {
+      return await api.getColumns(options.connectionId, options.database, schema, options.sourceName, options.catalog);
+    } catch (error) {
+      if (isKingbase && !options.copyData && isMissingKingbaseCatalogOid(error)) return undefined;
+      throw error;
+    }
+  };
+  const tableCommentPromise =
+    isKingbase && options.tableComment == null
+      ? api.getTableComment(options.connectionId, options.database, schema, options.sourceName, options.catalog).catch((error) => {
+          if (isUnsupportedKingbaseTableComment(error)) return null;
+          throw error;
+        })
+      : options.tableComment;
+  const [sourceColumns, tableComment] = await Promise.all([loadColumns(), tableCommentPromise]);
+  if (isKingbase && options.copyData && tableDataCopyColumnOptions("kingbase", sourceColumns ?? []).columns.length === 0) {
+    throw new Error("No writable columns available for table data copy.");
   }
   const sql = await buildDuplicateTableStructureSql({
     databaseType: options.databaseType,
     schema: options.schema,
     sourceName: options.sourceName,
     targetName: options.targetName,
-    tableComment: options.tableComment,
-    columnComments: options.databaseType === "vastbase" || options.databaseType === "oscar" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
+    tableComment,
+    columnComments: copyColumnComments ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
   return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };

@@ -30,7 +30,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   listDatabases: vi.fn().mockResolvedValue(["APP"]),
   listObjects: vi.fn().mockResolvedValue([{ name: "SOURCE", object_type: "TABLE", schema: "APP" }]),
   listObjectStatistics: vi.fn().mockResolvedValue([]),
-  getColumns: vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: true, is_primary_key: false, column_default: null }]),
+  getColumns: vi.fn(),
   listConstraints: vi.fn().mockResolvedValue([]),
   listIndexes: vi.fn().mockResolvedValue([]),
   listTriggers: vi.fn().mockResolvedValue([]),
@@ -52,6 +52,9 @@ beforeEach(() => {
   i18n.global.locale.value = "en";
   vi.mocked(api.listIndexes).mockResolvedValue([]);
   connection.is_production = false;
+  vi.mocked(api.getColumns)
+    .mockReset()
+    .mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: true, is_primary_key: false, column_default: null }]);
   invalidateObjectBrowserRowsCache({});
   vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
   vi.stubGlobal("alert", vi.fn());
@@ -85,17 +88,17 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountEntry(surface: "sidebar" | "objects") {
+async function mountEntry(surface: "sidebar" | "objects", entryConnection = connection) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
-  store.connections = [{ ...connection }];
+  store.connections = [{ ...entryConnection }];
   store.connectedIds.add(connection.id);
   vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
   store.treeNodes = [{ id: `${connection.id}:APP:APP`, type: "schema", label: "APP", connectionId: connection.id, database: "APP", schema: "APP", children: [], isExpanded: false }];
   const refresh = vi.spyOn(store, "refreshObjectListTreeNode");
   const component = ref<any>(null);
-  const context = ref({ connection, database: "APP", schema: "APP" });
+  const context = ref({ connection: entryConnection, database: "APP", schema: "APP" });
   let controller: any;
   const app = createApp({
     setup: () => () =>
@@ -123,7 +126,7 @@ async function mountEntry(surface: "sidebar" | "objects") {
   expect(controller).toBeDefined();
   controller.duplicateTableName = '"MixedCopy"';
   if (surface === "objects") controller.duplicateTarget = { name: "SOURCE", schema: "APP", object_type: "TABLE" };
-  controller.pasteTableEntries = [{ sourceName: "SOURCE", targetName: '"MixedCopy"', connectionId: connection.id, database: "APP", schema: "APP" }];
+  controller.pasteTableEntries = [{ sourceName: "SOURCE", targetName: '"MixedCopy"', connectionId: connection.id, database: "APP", schema: "APP", databaseType: entryConnection.db_type }];
   controller.pasteTableMode = "structure-and-data";
   return { controller, refresh, context, app, runtime: component.value.$.setupState };
 }
@@ -135,6 +138,29 @@ async function acceptClone() {
   button!.click();
   await nextTick();
 }
+
+describe.each(["sidebar", "objects"] as const)("%s Kingbase clone entry points", (surface) => {
+  it.each([
+    ["confirmDuplicateStructure", "structure-only", true],
+    ["confirmPasteTable", "structure-only", true],
+    ["confirmPasteTable", "structure-and-data", false],
+  ] as const)("handles missing catalog OID for %s in %s mode", async (action, mode, shouldCreateTable) => {
+    const kingbase: ConnectionConfig = { ...connection, db_type: "kingbase", driver_profile: "kingbase" };
+    const { controller } = await mountEntry(surface, kingbase);
+    controller.pasteTableMode = mode;
+    vi.spyOn(api, "getTableComment").mockResolvedValue(null);
+    vi.mocked(api.getColumns).mockRejectedValueOnce("Agent RPC error (-1): KINGBASE_CATALOG_OID_UNAVAILABLE: kb: column c.oid does not exist");
+    const ddl = 'CREATE TABLE "APP"."MixedCopy" AS SELECT * FROM "APP"."SOURCE" WHERE 1=0;';
+    backend.buildDuplicateTableStructureSql.mockResolvedValue(ddl);
+
+    await controller[action]();
+
+    expect(api.getColumns).toHaveBeenCalledTimes(1);
+    expect(backend.buildDuplicateTableStructureSql).toHaveBeenCalledTimes(shouldCreateTable ? 1 : 0);
+    expect(ddlCalls().map((call) => call[2])).toEqual(shouldCreateTable ? [ddl] : []);
+    expect(backend.buildCopyTableDataSql).not.toHaveBeenCalled();
+  });
+});
 
 describe.each(["sidebar", "objects"] as const)("%s OceanBase clone entry points", (surface) => {
   it("keeps the captured Spanner identifier quote while data-copy metadata is pending", async () => {

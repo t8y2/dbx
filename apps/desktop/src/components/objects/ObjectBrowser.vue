@@ -4490,7 +4490,7 @@ function reloadTableCopyContext(context: TableCopyContext) {
   return Promise.resolve();
 }
 
-async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
+async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, copyData = false) {
   return buildSharedDuplicateTableStructurePlan({
     connectionId: context.connection.id,
     database: context.database,
@@ -4500,7 +4500,7 @@ async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName
     sourceName,
     targetName,
     tableComment,
-    sourceColumns,
+    copyData,
     identifierQuote: context.identifierQuote,
   });
 }
@@ -4928,7 +4928,7 @@ async function confirmPasteTableImpl() {
     try {
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, sourceColumns));
+        const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, copyData));
         sourceColumns = plan.sourceColumns;
         if (plan.oceanbaseClone) {
           targetName = plan.oceanbaseClone.targetName;

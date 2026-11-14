@@ -162,10 +162,17 @@ func TestRoutineMetadataCachesSignatureFunctionFallback(t *testing.T) {
 }
 
 func TestRoutineSourceUsesExplicitSignatureAndDetectsAmbiguity(t *testing.T) {
-	for _, signature := range []string{"", "value integer", "value \"Type's\""} {
-		t.Run(signature, func(t *testing.T) {
+	for _, tc := range []struct {
+		signature string
+		predicate string
+	}{
+		{"", "length(sys_get_function_identity_arguments(p.oid)) = 0"},
+		{"value integer", "sys_get_function_identity_arguments(p.oid) = 'value integer'"},
+		{"value \"Type's\"", "sys_get_function_identity_arguments(p.oid) = 'value \"Type''s\"'"},
+	} {
+		t.Run(tc.signature, func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				for _, fragment := range []string{"'team''s'", "'proc''s'", "p.prokind", "identity_arguments(", quoteLiteral(signature)} {
+				for _, fragment := range []string{"'team''s'", "'proc''s'", "p.prokind", tc.predicate} {
 					if !strings.Contains(query, fragment) {
 						return nil, errors.New("routine source query lost a quoted identity component: " + query)
 					}
@@ -174,7 +181,7 @@ func TestRoutineSourceUsesExplicitSignatureAndDetectsAmbiguity(t *testing.T) {
 			}}
 			s := newServer()
 			s.db = openMetadataDB(t, state)
-			source, err := s.getObjectSourceWithSignature("team's", "proc's", "PROCEDURE", "", &signature)
+			source, err := s.getObjectSourceWithSignature("team's", "proc's", "PROCEDURE", "", &tc.signature)
 			if err != nil || source["source"] != "selected overload" {
 				t.Fatalf("explicit overload source failed: source=%v err=%v", source, err)
 			}

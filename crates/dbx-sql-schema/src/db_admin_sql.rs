@@ -872,8 +872,12 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         &options.source_name,
         options.identifier_quote.as_deref(),
     );
-    let target =
-        qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
+    let target = qualified_duplicate_target_name(
+        options.database_type,
+        options.schema.as_deref(),
+        &options.target_name,
+        options.identifier_quote.as_deref(),
+    );
     let structure_sql = if matches!(
         options.database_type,
         Some(
@@ -913,14 +917,16 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
             ));
         }
     }
-    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar)) =
-        options.database_type
+    if let Some(
+        database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar | DatabaseType::Kingbase),
+    ) = options.database_type
     {
         comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
                 return None;
             }
-            let column_name = quote_table_identifier(options.database_type, &column.name);
+            let column_name =
+                quote_table_data_identifier(options.database_type, &column.name, options.identifier_quote.as_deref());
             Some(format!(
                 "COMMENT ON COLUMN {target}.{column_name} IS {}",
                 quote_duplicate_table_comment(database_type, &column.comment)
@@ -1000,7 +1006,12 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
         options.identifier_quote.as_deref(),
     );
     let target = if options.normalize_new_target_name {
-        qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name)
+        qualified_duplicate_target_name(
+            options.database_type,
+            options.schema.as_deref(),
+            &options.target_name,
+            options.identifier_quote.as_deref(),
+        )
     } else {
         qualified_name_with_quote(
             options.database_type,
@@ -1014,7 +1025,7 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     };
     let source_column_list = columns
         .iter()
-        .map(|column| quote_table_identifier(options.database_type, column))
+        .map(|column| quote_table_data_identifier(options.database_type, column, options.identifier_quote.as_deref()))
         .collect::<Vec<_>>()
         .join(", ");
     // The unquoted Oracle clone DDL creates the target columns case-folded while the source
@@ -1283,6 +1294,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::Dameng
             | DatabaseType::Vastbase
             | DatabaseType::Oscar
+            | DatabaseType::Kingbase
     )
 }
 
@@ -1344,12 +1356,17 @@ fn qualified_name_with_quote(
     }
 }
 
-fn qualified_duplicate_target_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
+fn qualified_duplicate_target_name(
+    database_type: Option<DatabaseType>,
+    schema: Option<&str>,
+    name: &str,
+    identifier_quote: Option<&str>,
+) -> String {
     // Oracle's clone DDL creates plain identifiers unquoted (uppercase fold). Other types,
     // including Dameng's quoted structured CREATE TABLE, preserve the requested spelling.
     let target = match database_type {
         Some(DatabaseType::Oracle) => crate::table_structure_sql::oracle_new_object_reference(name),
-        _ => return qualified_name(database_type, schema, name),
+        _ => return qualified_name_with_quote(database_type, schema, name, identifier_quote),
     };
     if schema.is_some_and(|schema| !schema.is_empty()) {
         format!("{}.{}", quote_rename_identifier(database_type, schema.unwrap()), target)
@@ -2877,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_table_structure_comments_keep_other_dialects_unchanged() {
+    fn duplicate_table_structure_comments_follow_dialect_support() {
         for (database_type, expected) in [
             (
                 Some(DatabaseType::Postgres),
@@ -2885,7 +2902,10 @@ mod tests {
             ),
             (Some(DatabaseType::Mysql), "CREATE TABLE `copy` LIKE `source`;"),
             (Some(DatabaseType::Highgo), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
-            (Some(DatabaseType::Kingbase), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
+            (
+                Some(DatabaseType::Kingbase),
+                "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;\nCOMMENT ON TABLE \"copy\" IS '表注释';\nCOMMENT ON COLUMN \"copy\".\"note\" IS '字段注释';",
+            ),
             (Some(DatabaseType::DuckDb), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
             (None, "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
         ] {
@@ -2907,6 +2927,44 @@ mod tests {
                 expected,
                 "{database_type:?}"
             );
+        }
+    }
+
+    #[test]
+    fn kingbase_mysql_clone_and_paste_use_connection_quotes() {
+        let structure = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            schema: Some("app".to_string()),
+            source_name: "order".to_string(),
+            target_name: "order`copy".to_string(),
+            table_comment: Some("Customer's orders".to_string()),
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "item`note".to_string(),
+                comment: "Item note".to_string(),
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: Some("`".to_string()),
+        });
+        assert_eq!(
+            structure,
+            "CREATE TABLE `app`.`order``copy` AS SELECT * FROM `app`.`order` WHERE 1=0;\nCOMMENT ON TABLE `app`.`order``copy` IS 'Customer''s orders';\nCOMMENT ON COLUMN `app`.`order``copy`.`item``note` IS 'Item note';"
+        );
+
+        for normalize_new_target_name in [true, false] {
+            let copy = build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Kingbase),
+                schema: Some("app".to_string()),
+                source_name: "order".to_string(),
+                target_name: "order`copy".to_string(),
+                columns: Some(vec!["item`note".to_string()]),
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                dameng_identity_insert: false,
+                normalize_new_target_name,
+                identifier_quote: Some("`".to_string()),
+            });
+            assert_eq!(copy, "INSERT INTO `app`.`order``copy` (`item``note`) SELECT `item``note` FROM `app`.`order`;");
         }
     }
 

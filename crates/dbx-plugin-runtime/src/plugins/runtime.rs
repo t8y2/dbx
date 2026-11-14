@@ -1981,9 +1981,10 @@ sleep 30
         }))
         .unwrap();
         let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
-        let error = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default())
-            .await
-            .expect_err("a string capabilities field should fail initialization");
+        let error = match PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await {
+            Ok(_) => panic!("a string capabilities field should fail initialization"),
+            Err(error) => error,
+        };
         assert!(error.contains("'capabilities'"), "unexpected error: {error}");
         assert!(error.contains("array of strings"), "unexpected error: {error}");
     }

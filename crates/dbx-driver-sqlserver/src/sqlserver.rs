@@ -3074,8 +3074,19 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
 }
 
 fn sqlserver_list_objects_sql(schema: &str) -> String {
-    let s = schema.replace('\'', "''");
     let object_visibility = sqlserver_visible_object_predicate();
+    // A blank schema is the database-wide scope used by sidebar search and by
+    // the database node. `s.name = ''` matched nothing, so searching a table or
+    // procedure from outside a schema returned an empty list (#14183). List
+    // every non-system schema instead; the per-schema nodes always pass an
+    // explicit schema and are unaffected.
+    let schema_filter = if schema.trim().is_empty() {
+        let excluded_schemas =
+            sqlserver_hidden_schema_names().iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(",");
+        format!("s.name NOT IN ({excluded_schemas})")
+    } else {
+        format!("s.name = '{}'", schema.replace('\'', "''"))
+    };
     format!(
         "SELECT o.name, \
          CASE o.type \
@@ -3095,7 +3106,7 @@ fn sqlserver_list_objects_sql(schema: &str) -> String {
          FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description') ep \
-         WHERE s.name = '{s}' \
+         WHERE {schema_filter} \
            AND o.type IN ('U','V','P','FN','IF','TF','FS','FT') \
            AND {object_visibility} \
          ORDER BY CASE o.type \
@@ -6299,6 +6310,25 @@ mod tests {
 
         assert!(sql.contains("create_date"));
         assert!(sql.contains("modify_date"));
+    }
+
+    #[test]
+    fn sqlserver_list_objects_sql_covers_every_schema_when_scope_is_blank() {
+        // A blank schema means "the whole database": sidebar search and the
+        // database node use it, and `s.name = ''` used to match nothing (#14183).
+        let sql = sqlserver_list_objects_sql("");
+
+        assert!(!sql.contains("s.name = ''"), "{sql}");
+        assert!(sql.contains("s.name NOT IN ('guest','INFORMATION_SCHEMA','sys'"), "{sql}");
+        assert!(sql.contains("o.is_ms_shipped = 0"), "{sql}");
+    }
+
+    #[test]
+    fn sqlserver_list_objects_sql_keeps_explicit_schema_scoped() {
+        let sql = sqlserver_list_objects_sql("Sales'Ops");
+
+        assert!(sql.contains("s.name = 'Sales''Ops'"), "{sql}");
+        assert!(!sql.contains("NOT IN ('guest'"), "{sql}");
     }
 
     #[test]

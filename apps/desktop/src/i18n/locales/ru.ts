@@ -5397,6 +5397,7 @@ export default withEnglishFallback({
     materializedViews: "Материализованные представления",
     procedures: "Процедуры",
     functions: "Функции",
+    aggregateFunctions: "Агрегатные функции",
     sequences: "Последовательности",
     schedulerJobs: "Запланированные задания",
     databaseLinks: "Ссылки на базы данных",

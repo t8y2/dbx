@@ -5297,6 +5297,7 @@ export default withEnglishFallback({
     views: "ビュー",
     procedures: "プロシージャ",
     functions: "関数",
+    aggregateFunctions: "集約関数",
     sequences: "シーケンス",
     schedulerJobs: "スケジュール済みジョブ",
     synonyms: "シノニム",

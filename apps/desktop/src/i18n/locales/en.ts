@@ -5755,6 +5755,7 @@ export default {
     materializedViews: "Materialized Views",
     procedures: "Procedures",
     functions: "Functions",
+    aggregateFunctions: "Aggregate Functions",
     sequences: "Sequences",
     schedulerJobs: "Scheduled Jobs",
     databaseLinks: "Database Links",

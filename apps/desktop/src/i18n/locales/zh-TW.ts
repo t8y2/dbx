@@ -5256,6 +5256,7 @@ export default withEnglishFallback({
     views: "檢視",
     procedures: "預存程序",
     functions: "函式",
+    aggregateFunctions: "聚合函式",
     sequences: "序列",
     schedulerJobs: "排程工作",
     synonyms: "同義詞",

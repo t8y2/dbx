@@ -5211,6 +5211,7 @@ export default withEnglishFallback({
     materializedViews: "구체화된 뷰",
     procedures: "프로시저",
     functions: "함수",
+    aggregateFunctions: "집계 함수",
     sequences: "시퀀스",
     schedulerJobs: "예약된 작업",
     synonyms: "동의어",

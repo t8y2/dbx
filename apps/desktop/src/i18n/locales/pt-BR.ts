@@ -5276,6 +5276,7 @@ export default withEnglishFallback({
     views: "Visões",
     procedures: "Procedimentos",
     functions: "Funções",
+    aggregateFunctions: "Funções de agregação",
     sequences: "Sequências",
     schedulerJobs: "Trabalhos agendados",
     synonyms: "Sinônimos",

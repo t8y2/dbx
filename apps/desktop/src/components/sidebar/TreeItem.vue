@@ -405,6 +405,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "procedure":
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "function":
+    case "postgres-aggregate-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
     case "sequence":
       return { icon: ListTree, colorClass: "text-emerald-500" };

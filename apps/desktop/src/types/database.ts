@@ -2167,6 +2167,7 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "postgres-aggregate-functions"
   | "group-internal-functions"
   | "group-udf-functions"
   | "group-types"

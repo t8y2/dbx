@@ -23,6 +23,7 @@ export interface SidebarTreeRuntimeHost {
   openDataInNewTab(node: TreeNode): void;
   openDdlForSelection(node: TreeNode, selectedNodeIds: readonly string[]): Promise<boolean>;
   openStructureEditorForSelection?(node: TreeNode): boolean;
+  createTableForSelection?(node: TreeNode): boolean;
   createDatabaseForSelection?(node: TreeNode): boolean;
   refreshNode?(node?: TreeNode): boolean;
   requestPaste(node: TreeNode): boolean;

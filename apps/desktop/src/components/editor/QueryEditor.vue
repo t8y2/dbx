@@ -59,6 +59,7 @@ import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEdi
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { structurePeekPanelId, structurePeekZIndexesByOrder } from "@/lib/editor/structurePeekPanel";
 import { createQueryEditorNativeSelectionGuard, parkEditorNativeSelection, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
+import SnippetQuickAddDialog from "./SnippetQuickAddDialog.vue";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import QueryEditorContextMenu, { type QueryEditorContextMenuState, type QueryEditorContextMenuActions } from "./QueryEditorContextMenu.vue";
 
@@ -466,6 +467,17 @@ function syncQueryEditorInsertContext(currentView: EditorViewType | null = view.
     schema: props.schema,
     databaseType: props.databaseType,
   });
+}
+
+// Snippet quick-add dialog state
+const snippetQuickAddOpen = ref(false);
+const snippetQuickAddPrefillBody = ref("");
+
+function openSnippetQuickAddDialog() {
+  // Seed the body from the selection the context menu was opened on, if any;
+  // with nothing selected the dialog starts with an empty body.
+  snippetQuickAddPrefillBody.value = selectedSql.value.trim() ? selectedSql.value : "";
+  snippetQuickAddOpen.value = true;
 }
 
 function insertStructurePeekValue(panel: StructurePeekPanelState, value: string, kind: TableStructurePeekInsertKind) {
@@ -1375,6 +1387,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   selectAllSqlFromContextMenu,
   emitContextObjectAction,
   openCodeSnapshot,
+  openSnippetQuickAddDialog,
   sendSelectionToAi: () => {
     if (selectedSql.value.trim()) emit("sendSelectionToAi", selectedSql.value);
   },
@@ -1388,7 +1401,6 @@ const contextMenuActions: QueryEditorContextMenuActions = {
     unfoldAll();
   },
 };
-
 function getContextMenuState(): QueryEditorContextMenuState {
   const target = selectStarExpansionTarget.value;
   return {
@@ -3321,6 +3333,7 @@ defineExpose({
       @activate="bringStructurePeekToFront(panel.id)"
       @insert-value="(value, kind) => insertStructurePeekValue(panel, value, kind)"
     />
+    <SnippetQuickAddDialog v-model:open="snippetQuickAddOpen" :prefill-body="snippetQuickAddPrefillBody" />
     <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />
     <QueryEditorIntentionPopup :state="intentionPopup" @close="closeIntentionPopup" @confirm="executeIntentionAction" @select="intentionPopup && (intentionPopup.selectedIndex = $event)" />
   </div>

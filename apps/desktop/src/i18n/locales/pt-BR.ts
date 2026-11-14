@@ -2446,6 +2446,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Colar e restaurar SQL de origem",
       pasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
       convertNamingStyle: "Alternar estilo de nomenclatura",
+      addSnippet: "Adicionar snippet",
     },
     gotoLine: {
       placeholder: "Número da linha",
@@ -2507,6 +2508,10 @@ export default withEnglishFallback({
     previewChangesComment: "Pré-visualização de alterações (simulação): instrução {operation}",
     previewChangesFailed: "Falha ao pré-visualizar alterações.",
     previewChangesNoStatement: "Selecione ou coloque o cursor em uma instrução UPDATE / INSERT / DELETE para pré-visualizar as alterações.",
+    snippetQuickAdd: {
+      prefixUnique: "A chave de acionamento deve ser única.",
+      saved: "Snippet {label} adicionado",
+    },
   },
   tabs: {
     sql: "SQL",

@@ -2464,6 +2464,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "貼り付けてソース SQL を復元",
       pasteClipboardReadFailed: "クリップボードの読み取りに失敗しました：{message}",
       convertNamingStyle: "命名スタイルの切り替え",
+      addSnippet: "スニペットを追加",
     },
     gotoLine: {
       placeholder: "行番号",
@@ -2527,6 +2528,10 @@ export default withEnglishFallback({
     previewChangesComment: "変更プレビュー（ドライラン）：{operation} ステートメント",
     previewChangesFailed: "変更プレビューに失敗しました。",
     previewChangesNoStatement: "変更をプレビューするには、UPDATE / INSERT / DELETE ステートメントを選択するか、その上にカーソルを置いてください。",
+    snippetQuickAdd: {
+      prefixUnique: "トリガーキーは一意である必要があります。",
+      saved: "スニペット {label} を追加しました",
+    },
   },
   tabs: {
     sql: "SQL",

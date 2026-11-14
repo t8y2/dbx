@@ -3617,6 +3617,8 @@ export default {
     highlightNulls: "Highlight NULL Values",
     clearHighlight: "Clear Highlights",
     highlightActive: "Highlight Active",
+    filterActive: "Filtered",
+    structuredFiltersActive: "{count} condition filters",
     highlightDuplicatesFound: "Highlighted {count} duplicate values",
     highlightDuplicatesNoneFound: "No duplicate values found",
     highlightNullsFound: "Highlighted {count} NULL values",

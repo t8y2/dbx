@@ -24,6 +24,7 @@ use std::fs;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use super::external_config::{external_string, normalize_base_path};
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
 use crate::types::{ColumnInfo, DatabaseInfo, QueryResult, TableInfo};
@@ -44,6 +45,10 @@ pub struct Influxdb3Client {
     http: HttpClient,
     /// Normalized `http[s]://host:port` — no trailing slash.
     base_url: String,
+    /// Optional path prefix for deployments behind a reverse proxy that
+    /// serves InfluxDB under a sub path (`/influxdb/`). Empty means the
+    /// server is reached at the root of `base_url`.
+    base_path: String,
     /// Bearer token from `config.password`. `None` when the server runs
     /// with `--without-auth`.
     token: Option<String>,
@@ -61,9 +66,13 @@ impl Influxdb3Client {
         let default_database =
             config.database.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
         let token = (!config.password.is_empty()).then_some(config.password.clone());
+        let base_path = external_string(config, &["basePath", "base_path"])
+            .map(|value| normalize_base_path(&value))
+            .unwrap_or_default();
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path,
             token,
             url_params: config.url_params.clone(),
             default_database,
@@ -119,8 +128,8 @@ fn auth(client: &Influxdb3Client, req: reqwest::RequestBuilder) -> reqwest::Requ
 
 fn query_url(client: &Influxdb3Client) -> String {
     match client.url_params.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
-        Some(params) => format!("{}/api/v3/query_sql?{params}", client.base_url),
-        None => format!("{}/api/v3/query_sql", client.base_url),
+        Some(params) => format!("{}{}/api/v3/query_sql?{params}", client.base_url, client.base_path),
+        None => format!("{}{}/api/v3/query_sql", client.base_url, client.base_path),
     }
 }
 
@@ -212,10 +221,14 @@ pub async fn test_connection(client: &Influxdb3Client, timeout: Duration) -> Res
     .await
 }
 
+/// Admin endpoint that enumerates databases on Core. `?format=json` is
+/// required — omitting it returns 400.
+fn databases_url(client: &Influxdb3Client) -> String {
+    format!("{}{}/api/v3/configure/database?format=json", client.base_url, client.base_path)
+}
+
 pub async fn list_databases(client: &Influxdb3Client) -> Result<Vec<DatabaseInfo>, String> {
-    // The admin endpoint is the canonical way to enumerate databases on
-    // Core. `?format=json` is required — omitting it returns 400.
-    let url = format!("{}/api/v3/configure/database?format=json", client.base_url);
+    let url = databases_url(client);
     let resp =
         auth(client, client.http.get(&url)).send().await.map_err(|e| format!("InfluxDB 3 request failed: {e}"))?;
     if !resp.status().is_success() {
@@ -417,6 +430,7 @@ mod tests {
         Influxdb3Client {
             http: HttpClient::new(),
             base_url: "http://localhost:8181".to_string(),
+            base_path: String::new(),
             token: Some("t".to_string()),
             url_params: None,
             default_database: Some("mydb".to_string()),
@@ -465,6 +479,28 @@ mod tests {
         let mut c = client();
         c.url_params = Some("trace=1".to_string());
         assert_eq!(query_url(&c), "http://localhost:8181/api/v3/query_sql?trace=1");
+    }
+
+    #[test]
+    fn config_applies_base_path_prefix() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx3",
+            "name": "InfluxDB 3",
+            "db_type": "influxdb3",
+            "host": "127.0.0.1",
+            "port": 8181,
+            "username": "",
+            "password": "my-token",
+            "database": "metrics",
+            "external_config": {
+                "basePath": "influxdb/"
+            }
+        }))
+        .unwrap();
+        let c = Influxdb3Client::new_for_config("http://localhost:8181/", &config, Duration::from_secs(1)).unwrap();
+        assert_eq!(c.base_path, "/influxdb");
+        assert_eq!(query_url(&c), "http://localhost:8181/influxdb/api/v3/query_sql");
+        assert_eq!(databases_url(&c), "http://localhost:8181/influxdb/api/v3/configure/database?format=json");
     }
 
     #[test]

@@ -769,6 +769,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "varsayılan olarak kapalı; etkinleştirmek için bir regex girin",
     elasticsearchIndexGroupingPatternHint: "Varsayılan olarak kapalı (adlandırma şemaları değişkendir). Etkinleştirmek için bir düzenli ifade girin: eşleşen rolling veya zaman serisi dizinleri tek bir sorgulanabilir joker desende toplanır ve günlük ayrıntı gizlenir.",
     version: "Sürüm",
+    influxdbApiPath: "API Yolu",
+    influxdbApiPathHint: "Nginx gibi bir ters vekil InfluxDB'yi bir alt yolda (örneğin /influxdb) sunuyorsa doldurun. Sunucuya kökten erişmek için boş bırakın. Sondaki eğik çizgi yok sayılır.",
     victoriametricsApiPath: "API Yolu",
     victoriametricsApiPathHint: "Tek düğümlü kurulumlar için /prometheus, kümeler için /select/tenantID/prometheus kullanın.",
     victoriametricsLookback: "Meta Veri Geriye Bakış Süresi",

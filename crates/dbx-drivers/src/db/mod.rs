@@ -18,6 +18,7 @@ pub mod dynamodb_driver;
 #[path = "dynamodb_driver_disabled.rs"]
 pub mod dynamodb_driver;
 pub mod easysearch_driver;
+pub mod external_config;
 pub use dbx_driver_elasticsearch as elasticsearch_driver;
 pub use dbx_driver_support::{elasticsearch_sql, file_validator};
 pub mod hbase_driver;

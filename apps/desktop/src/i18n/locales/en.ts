@@ -1719,6 +1719,8 @@ export default {
     elasticsearchIndexGroupingPatternPlaceholder: "off by default; enter a regex to enable",
     elasticsearchIndexGroupingPatternHint: "Off by default (naming schemes vary). Enter a regular expression to enable: matched rolling or time-series indices are aggregated into one queryable wildcard pattern, hiding per-day detail.",
     version: "Version",
+    influxdbApiPath: "API Path",
+    influxdbApiPathHint: "Set this when a reverse proxy such as Nginx serves InfluxDB under a sub path, for example /influxdb. Leave it empty to reach the server at the root. A trailing slash is ignored.",
     victoriametricsApiPath: "API Path",
     victoriametricsApiPathHint: "Use /prometheus for single-node deployments, or /select/tenantID/prometheus for clusters.",
     victoriametricsLookback: "Metadata Lookback",

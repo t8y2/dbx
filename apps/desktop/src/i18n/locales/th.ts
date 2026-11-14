@@ -1531,6 +1531,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "ปิดเป็นค่าเริ่มต้น ป้อน Regex เพื่อเปิดใช้งาน",
     elasticsearchIndexGroupingPatternHint: "ปิดเป็นค่าเริ่มต้น (รูปแบบการตั้งชื่อแตกต่างกัน) ป้อน Regular Expression เพื่อเปิดใช้: Index แบบ Rolling หรือ Time-series ที่ตรงกันจะรวมเป็น Wildcard Pattern เดียวที่ Query ได้ โดยซ่อนรายละเอียดรายวัน",
     version: "เวอร์ชัน",
+    influxdbApiPath: "เส้นทาง API",
+    influxdbApiPathHint: "กรอกเมื่อ reverse proxy เช่น Nginx ให้บริการ InfluxDB ใต้พาธย่อย เช่น /influxdb เว้นว่างไว้เพื่อเข้าถึงเซิร์ฟเวอร์ที่ราก เครื่องหมายทับท้ายจะถูกข้าม",
     victoriametricsApiPath: "เส้นทาง API",
     victoriametricsApiPathHint: "ใช้ /prometheus สำหรับการ Deploy แบบ Single-node หรือ /select/tenantID/prometheus สำหรับ Cluster",
     victoriametricsLookback: "ย้อนดูเมทาดาทา",

@@ -1655,6 +1655,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "默认关闭，填正则表达式开启",
     elasticsearchIndexGroupingPatternHint: "默认关闭（命名格式因环境而异）。填入正则表达式即可开启：将匹配到的滚动或时间序列索引聚合成一个可查询的通配 pattern，隐藏每日明细。",
     version: "版本",
+    influxdbApiPath: "API 路径",
+    influxdbApiPathHint: "通过 Nginx 等反向代理以子路径部署时填写，例如 /influxdb；直连官方端口留空。末尾斜杠会被忽略。",
     victoriametricsApiPath: "API 路径",
     victoriametricsApiPathHint: "单机版通常为 /prometheus；集群版可填写 /select/租户ID/prometheus。",
     victoriametricsLookback: "元数据回看范围",

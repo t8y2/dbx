@@ -1431,6 +1431,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "по умолчанию выключено; введите regex для включения",
     elasticsearchIndexGroupingPatternHint: "По умолчанию выключено (схемы именования различаются). Введите регулярное выражение для включения: совпавшие rolling- или time-series-индексы объединяются в один запрашиваемый шаблон с подстановочным знаком, скрывая детализацию по дням.",
     version: "Версия",
+    influxdbApiPath: "Путь API",
+    influxdbApiPathHint: "Укажите, если обратный прокси, например Nginx, отдаёт InfluxDB по подпути, например /influxdb. Оставьте пустым, чтобы обращаться к серверу по корню. Конечный слеш игнорируется.",
     victoriametricsApiPath: "Путь API",
     victoriametricsApiPathHint: "Используйте /prometheus для одноузловых развёртываний или /select/tenantID/prometheus для кластеров.",
     victoriametricsLookback: "Глубина просмотра метаданных",

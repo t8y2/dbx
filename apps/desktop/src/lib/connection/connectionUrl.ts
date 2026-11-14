@@ -55,6 +55,10 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
   databend: { type: "databend", profile: "databend", label: "Databend", defaultPort: 8000 },
+  influxdb: { type: "influxdb", profile: "influxdb", label: "InfluxDB", defaultPort: 8086 },
+  // InfluxDB 3 is a version option inside the InfluxDB card, so it shares
+  // the `influxdb` driver profile and only differs in the engine it talks to.
+  influxdb3: { type: "influxdb3", profile: "influxdb", label: "InfluxDB", defaultPort: 8181 },
   nebula: { type: "nebula", profile: "nebula", label: "NebulaGraph", defaultPort: 9669 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
@@ -102,6 +106,8 @@ const OCEANBASE_ORACLE_PROFILE: ConnectionProfile = {
 
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   clickhouse: SCHEME_PROFILES.clickhouse,
+  influxdb: SCHEME_PROFILES.influxdb,
+  influxdb3: SCHEME_PROFILES.influxdb3,
   dynamodb: SCHEME_PROFILES.dynamodb,
   elasticsearch: SCHEME_PROFILES.elasticsearch,
   easysearch: SCHEME_PROFILES.easysearch,
@@ -454,6 +460,45 @@ function databendUrlOptions(params: string, isJdbcUrl: boolean): { ssl: boolean;
 
 function isTidbCloudHost(host: string): boolean {
   return host.toLowerCase().endsWith(".tidbcloud.com");
+}
+
+/**
+ * Normalizes a user supplied base path into a prefix that can be appended to
+ * a base URL. Mirrors the Rust side (`dbx-drivers` `normalize_base_path`) so
+ * the value shown in the form matches the URL the driver requests.
+ *
+ * - trims surrounding whitespace
+ * - drops trailing slashes (`/influxdb/` -> `/influxdb`)
+ * - adds the leading slash (`influxdb` -> `/influxdb`)
+ * - maps `/` and empty input to an empty prefix, meaning "no prefix at all"
+ */
+export function normalizeBasePath(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+/**
+ * Reads the base path out of a free-form `external_config` blob.
+ *
+ * `external_config` is arbitrary JSON (it can arrive through an imported
+ * connection file), so the value may be missing, empty, or not a string at
+ * all. The lookup mirrors the Rust side (`dbx-drivers` `external_string` +
+ * `normalize_base_path`) so the form shows exactly what the driver requests:
+ *
+ * - the first present key wins (`basePath` before `base_path`)
+ * - a value that is not a string means "no prefix"
+ * - an empty string means "no prefix" and does not fall through to the alias
+ */
+export function externalBasePath(config: unknown): string {
+  if (!config || typeof config !== "object") return "";
+  const record = config as Record<string, unknown>;
+  for (const key of ["basePath", "base_path"]) {
+    if (!(key in record)) continue;
+    const value = record[key];
+    return typeof value === "string" ? normalizeBasePath(value) : "";
+  }
+  return "";
 }
 
 export function connectionProfileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
@@ -871,6 +916,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const defaultPort = databendOptions?.defaultPort ?? (isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort);
   // A Redis URL path is a numeric db index; redis-cli flags salvaged above.
   const pathDatabase = redisPath ? redisPath.database : databaseFromPath(parsed.pathname);
+  // InfluxDB 3 authenticates with a single token that DBX keeps in the
+  // password field, so a pasted `influxdb3://token@host` URL carries the
+  // token in the userinfo without a colon.
+  const influxCredentials = profile.type === "influxdb3" ? { username: "", password: decodeUrlPart(parsed.password || parsed.username) } : undefined;
 
   return {
     ...(name ? { name } : {}),
@@ -880,13 +929,16 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : defaultPort,
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
-    username: jdbcCredentials?.username ?? decodeUrlPart(parsed.username),
-    password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch || profile.type === "solr" ? undefined : pathDatabase,
+    username: influxCredentials?.username ?? jdbcCredentials?.username ?? decodeUrlPart(parsed.username),
+    password: influxCredentials?.password ?? jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch || profile.type === "solr" || profile.type === "influxdb" || profile.type === "influxdb3" ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
     ssl: databendOptions?.ssl ?? (scheme === "rediss" || scheme === "https" || scheme === "taoswss" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname))),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
     ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
+    // InfluxDB is reached over HTTP/JSON, so a pasted URL path is the
+    // reverse-proxy sub path, not a database or bucket name.
+    ...(profile.type === "influxdb" || profile.type === "influxdb3" ? { basePath: normalizeBasePath(parsed.pathname) } : {}),
   };
 }
 
@@ -934,6 +986,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function applyMeilisearchBasePathToExternalConfig(existing: unknown, basePath: string | undefined): unknown {
+  return applyBasePathToExternalConfig(existing, basePath);
+}
+
+function applyBasePathToExternalConfig(existing: unknown, basePath: string | undefined): unknown {
   const next = isRecord(existing) ? { ...existing } : {};
   delete next.base_path;
   if (basePath) {
@@ -952,6 +1008,9 @@ function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): u
   }
   if (parsed.dbType === "meilisearch") {
     return applyMeilisearchBasePathToExternalConfig(existing, parsed.basePath);
+  }
+  if (parsed.dbType === "influxdb" || parsed.dbType === "influxdb3") {
+    return applyBasePathToExternalConfig(existing, parsed.basePath);
   }
   if (parsed.dbType !== "sqlserver") return existing;
 

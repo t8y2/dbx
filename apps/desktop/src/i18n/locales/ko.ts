@@ -1458,6 +1458,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "off by default; enter a regex to enable",
     elasticsearchIndexGroupingPatternHint: "Off by default (naming schemes vary). Enter a regular expression to enable: matched rolling or time-series indices are aggregated into one queryable wildcard pattern, hiding per-day detail.",
     version: "버전",
+    influxdbApiPath: "API 경로",
+    influxdbApiPathHint: "Nginx 등 리버스 프록시가 InfluxDB를 하위 경로(예: /influxdb)로 제공할 때 입력합니다. 서버에 직접 연결할 때는 비워 두세요. 끝의 슬래시는 무시됩니다.",
     victoriametricsApiPath: "API 경로",
     victoriametricsApiPathHint: "단일 노드 배포에는 /prometheus를, 클러스터에는 /select/tenantID/prometheus를 사용하세요.",
     victoriametricsLookback: "메타데이터 조회 범위",

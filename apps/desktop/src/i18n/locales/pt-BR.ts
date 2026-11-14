@@ -1440,6 +1440,8 @@ export default withEnglishFallback({
     oracleTnsAdminRequired: "O modo Oracle TNS requer o diretório TNS_ADMIN que contém tnsnames.ora.",
     oracleTnsTransportUnsupported: "Oracle TNS não pode usar túneis SSH, proxy ou HTTP. Remova a camada de transporte ou use Serviço/SID.",
     version: "Versão",
+    influxdbApiPath: "Caminho da API",
+    influxdbApiPathHint: "Preencha quando um proxy reverso como o Nginx servir o InfluxDB em um subcaminho, por exemplo /influxdb. Deixe vazio para acessar o servidor na raiz. A barra final é ignorada.",
     victoriametricsApiPath: "Caminho da API",
     victoriametricsApiPathHint: "Use /prometheus para implantações de nó único ou /select/tenantID/prometheus para clusters.",
     victoriametricsLookback: "Intervalo de consulta de metadados",

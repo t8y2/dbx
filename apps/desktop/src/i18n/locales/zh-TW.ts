@@ -1425,6 +1425,8 @@ export default withEnglishFallback({
     oracleTnsAdminRequired: "Oracle TNS 模式需要填寫包含 tnsnames.ora 的 TNS_ADMIN 目錄。",
     oracleTnsTransportUnsupported: "Oracle TNS 連線不能與 SSH、代理或 HTTP Tunnel 組合使用。請移除傳輸層，或改用服務名稱/SID 模式。",
     version: "版本",
+    influxdbApiPath: "API 路徑",
+    influxdbApiPathHint: "透過 Nginx 等反向代理以子路徑部署時填寫，例如 /influxdb；直接連線官方埠時留空。結尾斜線會被忽略。",
     victoriametricsApiPath: "API 路徑",
     victoriametricsApiPathHint: "單機版通常使用 /prometheus；叢集版可填寫 /select/tenantID/prometheus。",
     victoriametricsLookback: "中繼資料回看範圍",

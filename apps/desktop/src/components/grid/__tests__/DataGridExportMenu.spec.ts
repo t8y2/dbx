@@ -129,3 +129,51 @@ it("keeps a readable format column and lets the popover scroll instead of squeez
   // simply clip the trailing column at a narrow viewport.
   expect(narrowGrid.closest(".overflow-x-auto")).not.toBeNull();
 });
+
+/**
+ * #14470 review: the grid must recognize every scope the DataGrid emits, not just
+ * `selected-*` / `page-*`. Selected cells and selected columns were falling through to
+ * the stray list below the matrix, so the translations added for those headers were
+ * never used and #14469 stayed unfixed for those two scopes.
+ */
+it("keeps selected cells and selected columns as their own scope columns", async () => {
+  const onSelect = vi.fn();
+  const items = [
+    { value: "selected-columns-csv", label: "Selected columns CSV" },
+    { value: "selected-cells-csv", label: "Selected cells CSV" },
+    { value: "page-csv", label: "Page CSV" },
+    { value: "csv", label: "All CSV" },
+  ];
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({ render: () => h(DataGridExportMenu, { items, label: "Export", onSelect }) });
+  app.use(i18n);
+  app.mount(host);
+  unmount = () => app.unmount();
+
+  host.querySelector<HTMLButtonElement>("button")!.click();
+  await nextTick();
+  await nextTick();
+
+  const grid = document.querySelector<HTMLElement>("[data-export-menu-grid]")!;
+  const headings = grid.textContent ?? "";
+  expect(headings).toContain(i18n.global.t("grid.exportSelectedColumnsScope"));
+  expect(headings).toContain(i18n.global.t("grid.exportSelectedCellsScope"));
+  expect(headings).toContain(i18n.global.t("grid.exportPageScope"));
+  expect(grid.style.gridTemplateColumns).toBe("minmax(84px,1fr) 80px 80px 80px 88px");
+  expect(grid.style.minWidth).toBe("428px");
+
+  for (const value of ["selected-columns-csv", "selected-cells-csv", "page-csv", "csv"]) {
+    if (host.querySelector("button")!.getAttribute("aria-expanded") !== "true") {
+      host.querySelector<HTMLButtonElement>("button")!.click();
+      await nextTick();
+      await nextTick();
+    }
+    const button = document.querySelector<HTMLButtonElement>(`button[aria-label="${items.find((item) => item.value === value)!.label}"]`);
+    expect(button, value).not.toBeNull();
+    expect(document.querySelectorAll(`button[aria-label="${items.find((item) => item.value === value)!.label}"]`)).toHaveLength(1);
+    button!.click();
+    await nextTick();
+    expect(onSelect).toHaveBeenLastCalledWith(value);
+  }
+});

@@ -2799,6 +2799,8 @@ export default {
     },
   },
   tabs: {
+    sqlTruncatedOnRestore: "{count} tab(s) had SQL larger than the session-restore limit, so only the first part was kept. The full text was saved to:\n{detail}",
+    sqlTruncatedNoPath: "(recovery file unavailable — the truncated part was not saved)",
     sql: "SQL",
     emptyGroup: "No open tabs",
     table: "Table",

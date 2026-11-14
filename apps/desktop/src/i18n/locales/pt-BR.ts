@@ -4812,6 +4812,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "Selecionar pasta de exportação",
     exportDataMultipleSuccess: "Exportadas {count} tabelas",
     exportStructure: "Exportar Estrutura",
+    exportObjectDdl: "Exportar DDL do objeto",
     exportStructurePreviewTitle: "Estrutura - {name}",
     exportStructurePreviewTitleMultiple: "Estrutura - {count} objetos",
     exportStructureLoading: "Carregando estrutura...",

@@ -5450,6 +5450,7 @@ export default withEnglishFallback({
     materializedViews: "Vistas materializadas",
     procedures: "Procedimientos",
     functions: "Funciones",
+    aggregateFunctions: "Funciones de agregación",
     sequences: "Secuencias",
     schedulerJobs: "Trabajos programados",
     synonyms: "Sinónimos",

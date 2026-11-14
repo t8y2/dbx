@@ -5671,6 +5671,7 @@ export default withEnglishFallback({
     materializedViews: "物化视图",
     procedures: "存储过程",
     functions: "函数",
+    aggregateFunctions: "聚合函数",
     sequences: "序列",
     schedulerJobs: "定时作业",
     databaseLinks: "数据库链接",

@@ -511,18 +511,14 @@ impl PluginSidecarSession {
             permissions: &self.plugin.manifest.permissions,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
-        let value = self
-            .invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT))
-            .await?;
+        let value = self.invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT)).await?;
         // Point a malformed `capabilities` value at the field instead of
         // failing with a bare decode error (#14972): `null` and an array of
         // strings are accepted (see `null_as_empty_vec`); anything else is
         // the plugin's bug, and the reporter needs the field name to find it.
         if let Some(capabilities) = value.get("capabilities") {
             let valid = capabilities.is_null()
-                || capabilities
-                    .as_array()
-                    .is_some_and(|items| items.iter().all(|item| item.is_string()));
+                || capabilities.as_array().is_some_and(|items| items.iter().all(|item| item.is_string()));
             if !valid {
                 return Err(format!(
                     "Plugin '{}' initialize result has invalid 'capabilities': expected an array of strings",

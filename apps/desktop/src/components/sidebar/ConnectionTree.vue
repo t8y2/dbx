@@ -37,6 +37,7 @@ import { collectSidebarRemoteSearchResults, mergeSidebarRemoteSearchResults, typ
 import {
   isCancelSearchShortcut,
   isCopySidebarSelectionShortcut,
+  isCreateSidebarDatabaseShortcut,
   isDisconnectSidebarConnectionShortcut,
   isEditSidebarConnectionShortcut,
   isEditSidebarTableStructureShortcut,
@@ -2841,6 +2842,15 @@ function onWindowKeydown(event: KeyboardEvent) {
     }
     if (sidebarShortcutTargetAllowsAppShortcut(event.target) && isEditSidebarTableStructureShortcut(event, settingsStore.editorSettings.shortcuts)) {
       if (openSidebarTableStructureForSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (!event.repeat && sidebarShortcutTargetAllowsAppShortcut(event.target) && isCreateSidebarDatabaseShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      const selectedNodeId = store.selectedTreeNodeId;
+      const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : undefined;
+      if (node && store.selectedTreeNodeIds.length === 1 && sidebarTreeRuntimeHostRef.value?.createDatabaseForSelection?.(node)) {
         event.preventDefault();
         event.stopPropagation();
       }

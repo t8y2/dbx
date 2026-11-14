@@ -351,9 +351,13 @@ func (server *Server) initialize(params json.RawMessage) (any, *PluginError) {
 	}
 	for _, version := range request.Host.ProtocolVersions {
 		if version == ProtocolVersion {
+			capabilities := server.metadata.Capabilities
+			if capabilities == nil {
+				capabilities = []string{}
+			}
 			return map[string]any{
 				"protocolVersion": ProtocolVersion,
-				"capabilities":    server.metadata.Capabilities,
+				"capabilities":    capabilities,
 				"plugin": map[string]string{
 					"id":      server.metadata.ID,
 					"version": server.metadata.Version,

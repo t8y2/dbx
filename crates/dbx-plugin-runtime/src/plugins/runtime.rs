@@ -104,9 +104,17 @@ impl PluginSessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct PluginHandshake {
     pub protocol_version: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_capabilities")]
     pub capabilities: Vec<String>,
     pub plugin: PluginHandshakeIdentity,
+}
+
+fn deserialize_capabilities<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Older Go SDK plugins encode a nil capabilities slice as null.
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1262,8 +1270,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PromptActivity,
-        UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
+        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PluginHandshake,
+        PromptActivity, UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
         USER_INPUT_MIN_TIMEOUT,
     };
     use super::{plugin_stderr_hint, PLUGIN_JAVA_TOO_OLD_MESSAGE};
@@ -1272,6 +1280,44 @@ mod tests {
     #[cfg(unix)]
     use crate::plugins::{InstalledPlugin, PluginManifest, PluginRuntimeEnv};
     use tokio::io::BufReader;
+
+    #[test]
+    fn handshake_accepts_missing_null_and_array_capabilities() {
+        for (capabilities, expected) in [
+            (None, vec![]),
+            (Some(serde_json::Value::Null), vec![]),
+            (Some(serde_json::json!([])), vec![]),
+            (Some(serde_json::json!(["commands", "events"])), vec!["commands", "events"]),
+        ] {
+            let mut value = serde_json::json!({
+                "protocolVersion": 1,
+                "plugin": { "id": "sample.plugin", "version": "1.0.0" }
+            });
+            if let Some(capabilities) = capabilities {
+                value["capabilities"] = capabilities;
+            }
+            let handshake: PluginHandshake = serde_json::from_value(value).unwrap();
+            assert_eq!(handshake.capabilities, expected);
+            assert_eq!(serde_json::to_value(&handshake).unwrap()["capabilities"], serde_json::json!(expected));
+            assert_eq!(handshake.protocol_version, 1);
+            assert_eq!(handshake.plugin.id, "sample.plugin");
+            assert_eq!(handshake.plugin.version, "1.0.0");
+        }
+    }
+
+    #[test]
+    fn handshake_rejects_invalid_capabilities() {
+        for capabilities in
+            [serde_json::json!("commands"), serde_json::json!({}), serde_json::json!([1]), serde_json::json!([null])]
+        {
+            assert!(serde_json::from_value::<PluginHandshake>(serde_json::json!({
+                "protocolVersion": 1,
+                "plugin": { "id": "sample.plugin", "version": "1.0.0" },
+                "capabilities": capabilities
+            }))
+            .is_err());
+        }
+    }
 
     async fn assert_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) {
         std::future::poll_fn(|context| {

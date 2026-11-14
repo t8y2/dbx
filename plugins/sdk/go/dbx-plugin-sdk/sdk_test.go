@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -58,6 +59,65 @@ func TestServerInitializesAndDispatches(t *testing.T) {
 	pong := responses[1]["result"].(map[string]any)
 	if pong["ok"] != true {
 		t.Fatalf("unexpected handler response: %#v", pong)
+	}
+}
+
+func TestServerInitializeCapabilities(t *testing.T) {
+	for _, transport := range []struct {
+		name  string
+		value Transport
+	}{{"jsonl", TransportJSONLines}, {"framed", TransportFramed}} {
+		for _, test := range []struct {
+			name         string
+			capabilities []string
+			want         []string
+		}{
+			{"nil", nil, []string{}},
+			{"empty", []string{}, []string{}},
+			{"populated", []string{"commands", "events"}, []string{"commands", "events"}},
+		} {
+			t.Run(transport.name+"/"+test.name, func(t *testing.T) {
+				request := []byte(`{"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"host":{"protocolVersions":[1]}}}`)
+				var input, output, diagnostics bytes.Buffer
+				if transport.value == TransportFramed {
+					input.WriteByte(frameKindJSON)
+					_ = binary.Write(&input, binary.BigEndian, uint32(len(request)))
+					input.Write(request)
+				} else {
+					input.Write(append(request, '\n'))
+				}
+				server := NewServer(
+					Metadata{ID: "sample.plugin", Version: "1.0.0", Capabilities: test.capabilities},
+					HandlerFunc(func(_ RequestContext, method string, _ json.RawMessage, _ *Emitter) (any, *PluginError) {
+						return nil, MethodNotFound(method)
+					}),
+				).WithTransport(transport.value).WithIO(&input, &output, &diagnostics)
+				if err := server.Serve(); err != nil {
+					t.Fatal(err)
+				}
+				if diagnostics.Len() != 0 {
+					t.Fatalf("unexpected diagnostics: %s", diagnostics.String())
+				}
+				payload := output.Bytes()
+				if transport.value == TransportFramed {
+					if len(payload) < frameHeaderBytes || payload[0] != frameKindJSON || int(binary.BigEndian.Uint32(payload[1:5])) != len(payload)-frameHeaderBytes {
+						t.Fatalf("invalid JSON response frame: %q", payload)
+					}
+					payload = payload[frameHeaderBytes:]
+				}
+				var response struct {
+					Result struct {
+						Capabilities []string `json:"capabilities"`
+					} `json:"result"`
+				}
+				if err := json.Unmarshal(payload, &response); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(response.Result.Capabilities, test.want) {
+					t.Fatalf("capabilities = %#v, want %#v; response: %s", response.Result.Capabilities, test.want, payload)
+				}
+			})
+		}
 	}
 }
 

@@ -5311,6 +5311,7 @@ export default {
     createTable: "Create Table",
     createView: "Create View",
     createProcedure: "Create Procedure",
+    createSequence: "Create Sequence",
     createFunction: "Create Function",
     createTrigger: "Create Trigger",
     dropTable: "Drop Table",

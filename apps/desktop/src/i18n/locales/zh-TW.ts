@@ -5138,6 +5138,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "啟用",
     foreignKeyChecksDisable: "停用",
     foreignKeyChecksHint: "預設沿用工作階段設定。停用時以 SET FOREIGN_KEY_CHECKS = 0 執行，可依任意順序處理被參照的資料表；執行後還原原值。",
+    createSequence: "新增序列",
     viewPostgresRowLevelSecurity: "檢視資料列層級安全性原則",
   },
   visibleDatabases: {

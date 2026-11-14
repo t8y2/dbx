@@ -2657,6 +2657,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "선택한 행",
+    exportSelectedCellsScope: "선택 영역",
+    exportSelectedColumnsScope: "선택 열",
     exportFormat: "형식",
     exportPageScope: "현재 페이지",
     exportResultScope: "전체 결과",

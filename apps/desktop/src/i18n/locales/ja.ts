@@ -2679,6 +2679,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "選択行",
+    exportSelectedCellsScope: "選択セル",
+    exportSelectedColumnsScope: "選択列",
     exportFormat: "形式",
     exportPageScope: "現在のページ",
     exportResultScope: "全結果",

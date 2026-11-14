@@ -4193,7 +4193,7 @@ async fn completion_assistant_search_inner(
         let rows = postgres_query_cached(
             client,
             postgres_completion_tables_sql(),
-            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)],
+            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64), &request.global_search],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -4380,7 +4380,9 @@ fn postgres_completion_tables_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
      WHERE ($1::text IS NOT NULL AND n.nspname = $1 \
-            OR $1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)) \
+            OR $1::text IS NULL AND (pg_catalog.pg_table_is_visible(c.oid) \
+                OR $5::bool AND left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' \
+                   AND pg_catalog.has_schema_privilege(n.oid, 'USAGE'))) \
        AND c.relkind::text = ANY($3::text[]) \
        AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
      ORDER BY c.relname LIMIT $4"

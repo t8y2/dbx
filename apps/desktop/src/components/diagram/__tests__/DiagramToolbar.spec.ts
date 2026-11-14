@@ -79,7 +79,7 @@ afterEach(() => {
   }
 });
 
-function mountToolbar() {
+function mountToolbar(options: { loadingDiagram?: boolean; layoutBusy?: boolean; tablesCount?: number } = {}) {
   const search = ref("");
   const updates: string[] = [];
   const refreshes: number[] = [];
@@ -113,6 +113,7 @@ function mountToolbar() {
             showAllTables: false,
             focusTableName: "",
             generatedJoinSql: "",
+            ...options,
             "onUpdate:table-search": (value: string) => {
               updates.push(value);
               search.value = value;
@@ -128,6 +129,18 @@ function mountToolbar() {
 }
 
 describe("DiagramToolbar", () => {
+  it.each([{ loadingDiagram: true }, { layoutBusy: true }])("disables Auto Layout while busy: %j", async (options) => {
+    const { host } = mountToolbar({ tablesCount: 3, ...options });
+    await nextTick();
+    expect(host.querySelector<HTMLButtonElement>('button[title="diagram.autoLayout"]')?.disabled).toBe(true);
+  });
+
+  it("enables Auto Layout once the graph is ready", async () => {
+    const { host } = mountToolbar({ tablesCount: 3 });
+    await nextTick();
+    expect(host.querySelector<HTMLButtonElement>('button[title="diagram.autoLayout"]')?.disabled).toBe(false);
+  });
+
   it("forwards one search update per typed character through Input's model API", async () => {
     const { host, search, updates } = mountToolbar();
     await nextTick();

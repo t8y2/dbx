@@ -27,6 +27,7 @@ const props = defineProps<{
   loadingDatabases: boolean;
   loadingSchemas: boolean;
   loadingDiagram: boolean;
+  layoutBusy?: boolean;
   diagramReady: boolean;
   tablesCount: number;
   relationshipsCount: number;
@@ -169,7 +170,7 @@ function connectionIconType(id: string) {
       {{ t("diagram.layers") }}
     </Button>
 
-    <Button variant="outline" size="sm" class="h-8 px-2 text-xs" :disabled="tablesCount === 0" :title="t('diagram.autoLayout')" @click="emit('auto-layout')">
+    <Button variant="outline" size="sm" class="h-8 px-2 text-xs" :disabled="tablesCount === 0 || loadingDiagram || layoutBusy" :title="t('diagram.autoLayout')" @click="emit('auto-layout')">
       <LayoutGrid class="mr-1 h-3.5 w-3.5" />
       {{ t("diagram.autoLayout") }}
     </Button>
@@ -179,7 +180,7 @@ function connectionIconType(id: string) {
       {{ t("diagram.copyJoinSql") }}
     </Button>
 
-    <Button v-if="focusTableName && tablesCount > 0" :disabled="loadingDiagram" variant="outline" size="sm" class="h-8 px-2 text-xs" @click="emit('toggle-show-all-tables')">
+    <Button v-if="focusTableName && tablesCount > 0" :disabled="loadingDiagram || layoutBusy" variant="outline" size="sm" class="h-8 px-2 text-xs" @click="emit('toggle-show-all-tables')">
       {{ showAllTables ? t("diagram.relatedTables") : t("diagram.allTables") }}
     </Button>
 

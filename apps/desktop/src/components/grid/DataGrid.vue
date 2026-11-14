@@ -2531,21 +2531,20 @@ const goToColumnTooltip = computed(() => formatShortcutTooltip(t("grid.goToColum
 const goToColumnPanelPinned = computed(() => settingsStore.editorSettings.goToColumnPanelPinned);
 const GO_TO_COLUMN_PANEL_WIDTH = 280;
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
-const resolvedColumnLayoutScopeKey = computed(
-  () =>
-    props.columnLayoutScopeKey ??
-    dataGridColumnLayoutScopeKey({
-      connectionId: props.connectionId,
-      database: props.database,
-      schema: props.schema,
-      context: props.context,
-      tableSchema: props.tableMeta?.schema,
-      tableName: props.tableMeta?.tableName,
-      sql: props.sql,
-      columns: props.result.columns,
-      sourceColumns: props.sourceColumns,
-    }),
-);
+const columnLayoutScope = computed(() => ({
+  connectionId: props.connectionId,
+  database: props.database,
+  schema: props.schema,
+  context: props.context,
+  tableSchema: props.tableMeta?.schema,
+  tableName: props.tableMeta?.tableName,
+  sql: props.sql,
+  databaseType: resolvedDatabaseType.value,
+  columns: props.result.columns,
+  sourceColumns: props.sourceColumns,
+}));
+const resolvedColumnLayoutScopeKey = computed(() => props.columnLayoutScopeKey ?? dataGridColumnLayoutScopeKey(columnLayoutScope.value));
+const legacyColumnLayoutScopeKey = computed(() => (props.columnLayoutScopeKey ? undefined : dataGridColumnLayoutScopeKey(columnLayoutScope.value, true)));
 const tableColumnOrderScopeKey = computed(() => {
   if (props.context !== "table-data" || !props.connectionId || !props.database || !props.tableMeta?.tableName) return "";
   return tableDataGridColumnOrderScopeKey({
@@ -2605,6 +2604,7 @@ const {
   hideEmptyColumns,
   columnOrderKeys,
   layoutScopeKey: resolvedColumnLayoutScopeKey,
+  legacyLayoutScopeKey: legacyColumnLayoutScopeKey,
   tableScopeKey: tableColumnOrderScopeKey,
   // Existing tab snapshots may still carry this field; new changes persist in the internal layout store.
   initialHiddenColumnKeys: computed(() => props.result.local_hidden_column_keys),

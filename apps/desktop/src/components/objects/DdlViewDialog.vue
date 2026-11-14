@@ -62,10 +62,13 @@ const connectionStore = useConnectionStore();
 const originalDdlContent = ref("");
 const formattedDdlContent = ref("");
 const ddlDisplayMode = ref<"formatted" | "original">("formatted");
+const formatDdlOnDemand = computed(() => props.databaseType === "doris");
+const ddlFormatting = ref(false);
 const ddlContent = computed(() => applyDdlTextPreferences(ddlDisplayMode.value === "formatted" ? formattedDdlContent.value : originalDdlContent.value, props.databaseType, settingsStore.editorSettings));
 const ddlLoading = ref(false);
 const ddlError = ref("");
 let ddlRequestId = 0;
+let editorInitId = 0;
 const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlEditorView = shallowRef<EditorView | null>(null);
@@ -303,28 +306,63 @@ async function loadDdl(force = false) {
     catalog: props.catalog,
     separateIndexes: (props.databaseType === "oracle" || props.databaseType === "oceanbase-oracle") && settingsStore.editorSettings.separateDdlIndexes,
   };
-  const formatOptions = {
-    dialect: ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect }),
-    databaseType: props.databaseType,
-    database: props.database,
-    catalog: props.catalog,
-    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-  };
   ddlError.value = "";
   ddlLoading.value = true;
+  ddlFormatting.value = false;
+  if (formatDdlOnDemand.value) {
+    ddlDisplayMode.value = "original";
+    formattedDdlContent.value = "";
+  }
   if (force) destroyDdlEditor();
   try {
     const { ddl } = await loadObjectDdl(request, { force });
     if (requestId !== ddlRequestId || !props.open) return;
-    const formatted = await formatDdlForDisplay(ddl, formatOptions, settingsStore.editorSettings.sqlFormatter);
-    if (requestId !== ddlRequestId || !props.open) return;
+    if (!formatDdlOnDemand.value) {
+      const formatted = await formatDialogDdl(ddl);
+      if (requestId !== ddlRequestId || !props.open) return;
+      formattedDdlContent.value = formatted;
+    }
     originalDdlContent.value = ddl;
-    formattedDdlContent.value = formatted;
   } catch (e: any) {
     if (requestId === ddlRequestId && props.open) ddlError.value = e?.message || String(e);
   } finally {
     if (requestId === ddlRequestId) ddlLoading.value = false;
+  }
+}
+
+function formatDialogDdl(ddl: string) {
+  return formatDdlForDisplay(
+    ddl,
+    {
+      dialect: ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect }),
+      databaseType: props.databaseType,
+      database: props.database,
+      catalog: props.catalog,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+    },
+    settingsStore.editorSettings.sqlFormatter,
+  );
+}
+
+async function showFormattedDdl() {
+  const ddl = originalDdlContent.value;
+  if (!ddl || ddlLoading.value || ddlFormatting.value) return;
+  if (formattedDdlContent.value) {
+    ddlDisplayMode.value = "formatted";
+    return;
+  }
+  const requestId = ddlRequestId;
+  ddlFormatting.value = true;
+  try {
+    const formatted = await formatDialogDdl(ddl);
+    if (requestId !== ddlRequestId || !props.open) return;
+    formattedDdlContent.value = formatted;
+    ddlDisplayMode.value = "formatted";
+  } catch (error) {
+    if (requestId === ddlRequestId && props.open) toast(error instanceof Error ? error.message : String(error), 3000);
+  } finally {
+    if (requestId === ddlRequestId) ddlFormatting.value = false;
   }
 }
 
@@ -336,6 +374,7 @@ watch(
     if (!open) {
       ddlRequestId++;
       ddlLoading.value = false;
+      ddlFormatting.value = false;
       return;
     }
     const active = document.activeElement;
@@ -390,14 +429,16 @@ watch(selectLineEndsShortcut, (shortcut) => {
 });
 
 async function initDdlEditor(content: string) {
-  if (!ddlEditorContainer.value) return;
-  destroyDdlEditor();
+  const container = ddlEditorContainer.value;
+  if (!container || ddlEditorView.value) return;
+  const initId = ++editorInitId;
   const [{ EditorView, keymap }, { EditorState, Prec }, langSql, { basicSetup }, { search: cmSearch }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror"), import("@codemirror/search")]);
   const editorTheme = settingsStore.editorSettings.theme;
   const appAppearance = isDark.value ? "dark" : "light";
   const fontSize = settingsStore.editorSettings.fontSize;
   const fontFamily = settingsStore.editorSettings.fontFamily;
   const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
+  if (initId !== editorInitId || !props.open || container !== ddlEditorContainer.value || content !== ddlContent.value) return;
   const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
   const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect, props.databaseType);
   const state = EditorState.create({
@@ -447,17 +488,18 @@ async function initDdlEditor(content: string) {
       EditorState.readOnly.of(true),
     ],
   });
-  const editorView = new EditorView({ state, parent: ddlEditorContainer.value });
+  const editorView = new EditorView({ state, parent: container });
   ddlEditorView.value = editorView;
   if (typeof ResizeObserver !== "undefined") {
     ddlEditorResizeObserver = new ResizeObserver(() => editorView.requestMeasure());
-    ddlEditorResizeObserver.observe(ddlEditorContainer.value);
+    ddlEditorResizeObserver.observe(container);
   }
   editorView.focus();
 }
 
 /** Tears down the CodeMirror instance when the dialog closes. */
 function destroyDdlEditor() {
+  editorInitId++;
   ddlEditorResizeObserver?.disconnect();
   ddlEditorResizeObserver = null;
   ddlEditorView.value?.destroy();
@@ -519,6 +561,7 @@ watch(ddlContent, (content) => {
 
 // When DDL finishes loading, create the editor inside the dialog.
 watch([ddlLoading, ddlContent], ([loading, content]) => {
+  if (loading) destroyDdlEditor();
   if (!loading && content && props.open) {
     nextTick(() => {
       if (!ddlLoading.value && props.open && ddlContent.value === content) void initDdlEditor(content);
@@ -578,10 +621,11 @@ function onClose() {
         <div v-if="!ddlLoading && !ddlError && ddlContent" class="flex shrink-0 items-center justify-between gap-3">
           <span class="text-sm text-muted-foreground">{{ t("contextMenu.ddlDisplayMode") }}</span>
           <div class="flex items-center gap-1" role="group" :aria-label="t('contextMenu.ddlDisplayMode')">
-            <Button variant="outline" size="sm" :class="ddlDisplayMode === 'formatted' ? 'border-primary bg-accent' : ''" :aria-pressed="ddlDisplayMode === 'formatted'" @click="ddlDisplayMode = 'formatted'">
+            <Button variant="outline" size="sm" :class="ddlDisplayMode === 'formatted' ? 'border-primary bg-accent' : ''" :aria-pressed="ddlDisplayMode === 'formatted'" :disabled="ddlFormatting" @click="showFormattedDdl">
+              <Loader2 v-if="ddlFormatting" class="h-3.5 w-3.5 animate-spin" />
               {{ t("contextMenu.ddlDisplayFormatted") }}
             </Button>
-            <Button variant="outline" size="sm" :class="ddlDisplayMode === 'original' ? 'border-primary bg-accent' : ''" :aria-pressed="ddlDisplayMode === 'original'" @click="ddlDisplayMode = 'original'">
+            <Button variant="outline" size="sm" :class="ddlDisplayMode === 'original' ? 'border-primary bg-accent' : ''" :aria-pressed="ddlDisplayMode === 'original'" :disabled="ddlFormatting" @click="ddlDisplayMode = 'original'">
               {{ t("contextMenu.ddlDisplayOriginal") }}
             </Button>
           </div>

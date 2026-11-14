@@ -12,6 +12,15 @@ import type { KeyBinding } from "@codemirror/view";
  * 这里移除 `Mod-d` 绑定，保证用户可配置的快捷键优先于 CodeMirror 内置硬编码键位
  * （与 #4544 修复 Mod+F / Mod+H 冲突的思路一致）。
  */
+/**
+ * #14623: `searchKeymap` 内置的 `Mod-f` = `openSearchPanel` 同样遮蔽了用户可配置的
+ * Find 快捷键——清空 Find 后编辑器仍会打开搜索面板并吞掉事件，全局 Focus search
+ * 无法触发。过滤逻辑泛化为按键集合。
+ */
 export function searchKeymapWithoutModD(searchKeymap: readonly KeyBinding[]): KeyBinding[] {
-  return searchKeymap.filter((binding) => binding.key !== "Mod-d");
+  return stripKeys(searchKeymap, ["Mod-d", "Mod-f"]);
+}
+
+function stripKeys(searchKeymap: readonly KeyBinding[], keys: readonly string[]): KeyBinding[] {
+  return searchKeymap.filter((binding) => binding.key === undefined || !keys.includes(binding.key));
 }

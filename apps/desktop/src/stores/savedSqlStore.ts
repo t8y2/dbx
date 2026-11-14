@@ -551,6 +551,13 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     await syncToLocalDirectory();
   }
 
+  async function ensureDatabaseFolder(connectionId: string, database?: string): Promise<string | undefined> {
+    if (!connectionId || !database) return undefined;
+    await initFromStorage();
+    const existing = listFolders(connectionId).find((folder) => folder.name === database);
+    return existing?.id ?? (await createFolder(connectionId, database)).id;
+  }
+
   async function deleteFolder(id: string) {
     const removedIds = descendantFolderIds(id);
     const removedFiles = files.value.filter((file) => !!file.folderId && removedIds.has(file.folderId));
@@ -1238,6 +1245,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     ensureFileContent,
     ensureAllFilesLoaded,
     createFolder,
+    ensureDatabaseFolder,
     renameFolder,
     deleteFolder,
     saveFile,

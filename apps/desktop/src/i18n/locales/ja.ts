@@ -3710,6 +3710,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "クエリを実行すると、現在の結果セットにある未コミットの変更が破棄されます。キャンセルして先に変更をコミットするか、変更を破棄してクエリを実行してください。",
     queryDiscardAndExecute: "変更を破棄して実行",
     queryWhileSaving: "結果セットの変更を保存しています。保存が完了してからクエリを実行してください。",
+    filterActive: "フィルター適用済み",
+    structuredFiltersActive: "{count} 件の条件フィルター",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

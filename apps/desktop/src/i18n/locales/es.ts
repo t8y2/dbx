@@ -4969,6 +4969,7 @@ export default withEnglishFallback({
     exportDataSelectDirectory: "Seleccionar carpeta de exportación",
     exportDataMultipleSuccess: "Se exportaron {count} tablas",
     exportStructure: "Exportar estructura",
+    exportObjectDdl: "Exportar DDL del objeto",
     exportStructurePreviewTitle: "Estructura - {name}",
     exportStructurePreviewTitleMultiple: "Estructura - {count} objetos",
     exportStructureLoading: "Cargando estructura...",

@@ -190,6 +190,7 @@ import {
   type TableClipboardContext,
 } from "@/lib/table/tableClipboard";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
+import { exportOracleObjectDdl, supportsOracleObjectExport } from "@/lib/export/oracleObjectExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
@@ -6461,6 +6462,21 @@ function getObjectBrowserActionMenuItems(item: ObjectBrowserRow): ContextMenuIte
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   const items = getObjectBrowserActionMenuItems(item);
+  const objectType = item.type;
+  if (supportsOracleObjectExport(effectiveDatabaseType.value, objectType)) {
+    items.push({
+      label: t("contextMenu.exportObjectDdl"),
+      icon: FileCode,
+      action: async () => {
+        try {
+          const saved = await exportOracleObjectDdl({ connectionId: props.connection.id, database: props.database, schema: item.schema || selectedSchema.value || props.database, catalog: props.catalog, name: item.name, objectType, signature: item.signature ?? undefined });
+          if (saved === "saved") toast(t("grid.exported"));
+        } catch (error) {
+          toast(t("grid.exportFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+        }
+      },
+    });
+  }
   if (item.type === "TABLE" || item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") {
     items.push(
       { label: "", separator: true },

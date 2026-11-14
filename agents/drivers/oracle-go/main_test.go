@@ -2437,19 +2437,19 @@ func TestListTablesQueryAppliesMetadataConstraints(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :4 ESCAPE '\\'") {
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :3 ESCAPE '\\'") {
 		t.Fatalf("table listing should push filter predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "TABLE_TYPE IN (:5,:6)") {
+	if !strings.Contains(sqlText, "TABLE_TYPE IN (:4,:5)") {
 		t.Fatalf("table listing should push table type predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "ROWNUM <= :7") || !strings.Contains(sqlText, "DBX_RN > :8") {
+	if !strings.Contains(sqlText, "ROWNUM <= :6") || !strings.Contains(sqlText, "DBX_RN > :7") {
 		t.Fatalf("table listing should use rownum pagination, got: %s", query.SQL)
 	}
-	if len(query.Args) != 8 {
+	if len(query.Args) != 7 {
 		t.Fatalf("unexpected args: %#v", query.Args)
 	}
-	if query.Args[0] != "APP" || query.Args[1] != "APP" || query.Args[2] != "APP" || query.Args[3] != "%U%\\_%R%" || query.Args[4] != "TABLE" || query.Args[5] != "VIEW" || query.Args[6] != 511 || query.Args[7] != 10 {
+	if !reflect.DeepEqual(query.Args, []any{"APP", "APP", "%U%\\_%R%", "TABLE", "VIEW", 511, 10}) {
 		t.Fatalf("constraints args were not normalized: %#v", query.Args)
 	}
 }
@@ -2580,7 +2580,7 @@ func TestSchemaIndexObjectsPreserveBothOwnersThroughRPC(t *testing.T) {
 func TestSchemaIndexObjectsDoNotReportPGAFailureAsEmpty(t *testing.T) {
 	db, _ := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 		{queryContains: "SYS_CONTEXT('USERENV', 'SESSION_USER')", args: []driver.Value{}, rows: [][]driver.Value{{"APP"}}},
-		{queryContains: "FROM USER_TABLES", args: []driver.Value{"INDEX"}, err: errors.New("ORA-04036: PGA memory used by the instance exceeds PGA_AGGREGATE_LIMIT")},
+		{queryContains: "FROM USER_INDEXES", args: []driver.Value{"INDEX"}, err: errors.New("ORA-04036: PGA memory used by the instance exceeds PGA_AGGREGATE_LIMIT")},
 	})
 	s := newServer()
 	s.db = db
@@ -2594,7 +2594,7 @@ func TestExactSchemaIndexAllDictionaryPagePreservesMissingParent(t *testing.T) {
 	owner := " Index Owner "
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 		{queryContains: "SYS_CONTEXT('USERENV', 'SESSION_USER')", args: []driver.Value{}, rows: [][]driver.Value{{"Other Owner"}}},
-		{queryContains: "ALL_INDEXES", args: []driver.Value{owner, owner, owner, owner, "INDEX", int64(3), int64(1)}, columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, rows: [][]driver.Value{{" Ix (a) ", "INDEX", nil, nil, nil}}},
+		{queryContains: "ALL_INDEXES", args: []driver.Value{owner, "INDEX", int64(3), int64(1)}, columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, rows: [][]driver.Value{{" Ix (a) ", "INDEX", nil, nil, nil}}},
 	})
 	s := newServer()
 	s.db = db
@@ -2757,19 +2757,19 @@ func TestListObjectsQueryAppliesMetadataConstraints(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :5 ESCAPE '\\'") {
+	if !strings.Contains(sqlText, "UPPER(OBJECT_NAME) LIKE :2 ESCAPE '\\'") {
 		t.Fatalf("object listing should push filter predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:6,:7)") {
+	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:3,:4)") {
 		t.Fatalf("object listing should push object type predicate, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "ROWNUM <= :8") || !strings.Contains(sqlText, "DBX_RN > :9") {
+	if !strings.Contains(sqlText, "ROWNUM <= :5") || !strings.Contains(sqlText, "DBX_RN > :6") {
 		t.Fatalf("object listing should use rownum pagination, got: %s", query.SQL)
 	}
-	if len(query.Args) != 9 {
+	if len(query.Args) != 6 {
 		t.Fatalf("unexpected args: %#v", query.Args)
 	}
-	if query.Args[0] != "APP" || query.Args[1] != "APP" || query.Args[2] != "APP" || query.Args[3] != "APP" || query.Args[4] != "%P%K%G%\\%%" || query.Args[5] != "FUNCTION" || query.Args[6] != "PACKAGE" || query.Args[7] != 25 || query.Args[8] != 0 {
+	if !reflect.DeepEqual(query.Args, []any{"APP", "%P%K%G%\\%%", "FUNCTION", "PACKAGE", 25, 0}) {
 		t.Fatalf("object constraints args were not normalized: %#v", query.Args)
 	}
 }
@@ -2782,14 +2782,14 @@ func TestListSessionUserObjectsQueryUsesUserDictionary(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "USER_TABLES") || !strings.Contains(sqlText, "USER_OBJECTS") {
+	if !strings.Contains(sqlText, "USER_OBJECTS") {
 		t.Fatalf("session-user object listing should use USER_* dictionaries, got: %s", query.SQL)
 	}
 	if strings.Contains(sqlText, "ALL_TABLES") || strings.Contains(sqlText, "ALL_OBJECTS") {
 		t.Fatalf("session-user object listing should avoid ALL_* dictionaries, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "USER_SYNONYMS") {
-		t.Fatalf("session-user object listing should include owned synonyms, got: %s", query.SQL)
+	if strings.Contains(sqlText, "USER_TABLES") || strings.Contains(sqlText, "USER_SYNONYMS") || strings.Contains(sqlText, "USER_INDEXES") {
+		t.Fatalf("routine-only listing should avoid unrelated dictionaries, got: %s", query.SQL)
 	}
 	if strings.Contains(sqlText, "OWNER =") {
 		t.Fatalf("session-user object listing should not add owner predicates, got: %s", query.SQL)
@@ -2820,13 +2820,13 @@ func TestListObjectsQuerySupportsSynonymOnlyFiltering(t *testing.T) {
 	})
 	sqlText := strings.ToUpper(query.SQL)
 
-	if !strings.Contains(sqlText, "FROM ALL_SYNONYMS") || !strings.Contains(sqlText, "S.OWNER = :3") {
+	if !strings.Contains(sqlText, "FROM ALL_SYNONYMS") || !strings.Contains(sqlText, "S.OWNER = :1") {
 		t.Fatalf("cross-schema synonym listing should use the selected owner, got: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:6)") {
+	if !strings.Contains(sqlText, "OBJECT_TYPE IN (:3)") {
 		t.Fatalf("synonym filtering should be pushed into the constrained query, got: %s", query.SQL)
 	}
-	if len(query.Args) != 8 || query.Args[2] != "AP" || query.Args[3] != "AP" || query.Args[4] != "%S%P%E%C%" || query.Args[5] != "SYNONYM" || query.Args[6] != 30 || query.Args[7] != 20 {
+	if !reflect.DeepEqual(query.Args, []any{"AP", "%S%P%E%C%", "SYNONYM", 30, 20}) {
 		t.Fatalf("unexpected synonym query args: %#v", query.Args)
 	}
 }
@@ -2834,8 +2834,8 @@ func TestListObjectsQuerySupportsSynonymOnlyFiltering(t *testing.T) {
 func TestListObjectsPagesSameNameTypeAndBodyUnderExactQuotedOwner(t *testing.T) {
 	const owner = " Mixed Owner "
 	steps := []oracleViewSourceQueryStep{
-		{queryContains: "END, OBJECT_NAME, OBJECT_TYPE", columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, args: []driver.Value{"MIXED OWNER", "MIXED OWNER", "MIXED OWNER", owner, "%T%Y%P%E%", "TYPE", "TYPE_BODY", int64(1), int64(0)}, rows: [][]driver.Value{{"Mixed Type", "TYPE", nil, nil, nil}}},
-		{queryContains: "END, OBJECT_NAME, OBJECT_TYPE", columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, args: []driver.Value{"MIXED OWNER", "MIXED OWNER", "MIXED OWNER", owner, "%T%Y%P%E%", "TYPE", "TYPE_BODY", int64(2), int64(1)}, rows: [][]driver.Value{{"Mixed Type", "TYPE_BODY", nil, nil, nil}}},
+		{queryContains: "END, OBJECT_NAME, OBJECT_TYPE", columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, args: []driver.Value{owner, "%T%Y%P%E%", "TYPE", "TYPE_BODY", int64(1), int64(0)}, rows: [][]driver.Value{{"Mixed Type", "TYPE", nil, nil, nil}}},
+		{queryContains: "END, OBJECT_NAME, OBJECT_TYPE", columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, args: []driver.Value{owner, "%T%Y%P%E%", "TYPE", "TYPE_BODY", int64(2), int64(1)}, rows: [][]driver.Value{{"Mixed Type", "TYPE_BODY", nil, nil, nil}}},
 	}
 	db, scripted := openOracleViewSourceTestDB(t, steps)
 	s := newServer()

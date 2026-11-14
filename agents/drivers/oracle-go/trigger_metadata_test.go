@@ -30,7 +30,7 @@ func TestExactTriggerSchemaRPCPreservesPagedIdentity(t *testing.T) {
 	owner, name := " Owner ", " Trigger "
 	metadata := exactTriggerStep(owner, name, "9007199254740993")
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
-		{queryContains: "'PACKAGE BODY', 'INDEX', 'TRIGGER'", args: []driver.Value{owner, owner, owner, owner, "%T%R%I%G%", "TRIGGER", int64(3), int64(2)},
+		{queryContains: "o.OBJECT_TYPE IN ('TRIGGER')", args: []driver.Value{owner, "%T%R%I%G%", "TRIGGER", int64(3), int64(2)},
 			columns: []string{"OBJECT_NAME", "OBJECT_TYPE", "COMMENTS", "PARENT_SCHEMA", "PARENT_NAME"}, rows: [][]driver.Value{{name, "TRIGGER", nil, nil, nil}}},
 		metadata,
 	})

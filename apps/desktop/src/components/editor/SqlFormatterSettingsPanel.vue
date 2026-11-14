@@ -115,6 +115,7 @@ const indentStyleOptions: { value: SqlFormatterIndentStyle; labelKey: string }[]
 const layoutStyleOptions: { value: SqlFormatterLayoutStyle; labelKey: string }[] = [
   { value: "classic", labelKey: "settings.sqlFormatterLayoutStyleClassic" },
   { value: "dbx", labelKey: "settings.sqlFormatterLayoutStyleDbx" },
+  { value: "datagrip", labelKey: "settings.sqlFormatterLayoutStyleDataGrip" },
 ];
 
 const tabWidthOptions: SqlFormatterTabWidth[] = [2, 4];
@@ -236,7 +237,7 @@ function onIndentStyle(value: any) {
 }
 
 function onLayoutStyle(value: any) {
-  if (value === "dbx" || value === "classic") updateOption("layoutStyle", value);
+  if (value === "dbx" || value === "classic" || value === "datagrip") updateOption("layoutStyle", value);
 }
 
 function onLogicalOperatorNewline(value: any) {
@@ -292,7 +293,7 @@ function schedulePreview() {
     previewError.value = "";
     let diagnostic: "custom-rules-fallback" | undefined;
     try {
-      const result = await formatSqlText(previewSql.value, previewDialect.value, settings.value, (value) => (diagnostic = value));
+      const result = await formatSqlText(previewSql.value, previewDialect.value, settings.value, (value) => (diagnostic = value), "sql-formatter-preview");
       if (requestId !== previewRequestId) return;
       previewResult.value = result;
       previewDiagnostic.value = diagnostic === "custom-rules-fallback";
@@ -916,6 +917,7 @@ onBeforeUnmount(() => {
                     <SelectItem value="oracle">Oracle</SelectItem>
                     <SelectItem value="postgres">PostgreSQL</SelectItem>
                     <SelectItem value="mysql">MySQL</SelectItem>
+                    <SelectItem value="sqlite">SQLite</SelectItem>
                     <SelectItem value="sqlserver">SQL Server</SelectItem>
                   </SelectContent>
                 </Select>

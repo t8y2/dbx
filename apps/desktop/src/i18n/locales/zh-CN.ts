@@ -10114,6 +10114,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "表格式右对齐",
     sqlFormatterLayoutStyle: "排版风格",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "经典",
     sqlFormatterLogicalOperatorNewline: "逻辑运算符换行",
     sqlFormatterLogicalBefore: "运算符前换行",

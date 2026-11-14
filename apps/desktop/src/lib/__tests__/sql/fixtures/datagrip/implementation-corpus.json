@@ -1,0 +1,260 @@
+[
+  {
+    "dialect": "postgres",
+    "name": "case",
+    "actual": "select id, case when total > 100 then 'high' when total > 0 then 'normal' else 'zero' end as bucket\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "comments",
+    "actual": "-- heading\nselect id, /* inline */ name\nfrom users -- trailing\nwhere id = 1;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "create_table",
+    "actual": "create table account\n(\n    id         bigint primary key,\n    email      varchar(255) not null unique,\n    created_at timestamp default current_timestamp,\n    constraint fk_user foreign key (id) references users (id)\n);\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "cte",
+    "actual": "with recent as (select id, user_id, total from orders where created_at > current_date)\nselect u.id, r.total\nfrom users u\n         join recent r on r.user_id = u.id;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "delete",
+    "actual": "delete\nfrom orders\nwhere user_id = 1\n  and total < 0;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "insert_values",
+    "actual": "insert into users (id, name, email)\nvalues (1, 'A', 'a@example.com'),\n       (2, 'B', 'b@example.com');\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "join_where",
+    "actual": "select u.id, u.name, o.total\nfrom users u\n         left join orders o on o.user_id = u.id\nwhere u.active = true\n  and o.total > 10\norder by o.total desc;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "multi_statement",
+    "actual": "select id\nfrom users;\n\nselect id\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_create_table",
+    "actual": "create table if not exists public.account\n(\n    id         bigint generated always as identity primary key,\n    email      text not null unique,\n    created_at timestamptz default now()\n);\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_dollar_cast",
+    "actual": "select payload::jsonb->>'name'\nfrom events\nwhere tags @> array['sql'];\nselect $$BEGIN NULL;\nEND$$;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "pg_returning",
+    "actual": "with moved as (delete from orders where total < 0 returning id, user_id)\ninsert into order_archive\nselect *\nfrom moved\nreturning id;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "select_list",
+    "actual": "select id, name, email\nfrom users;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "subquery",
+    "actual": "select id, (select max(total) from orders o where o.user_id = u.id) as max_total\nfrom users u;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "update_set",
+    "actual": "update users\nset name='A',\n    email='a@example.com',\n    updated_at=current_timestamp\nwhere id = 1\n  and active = true;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "postgres",
+    "name": "window",
+    "actual": "select id, total, row_number() over (partition by user_id order by created_at desc) as rn\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "case",
+    "actual": "select id, case when total > 100 then 'high' when total > 0 then 'normal' else 'zero' end as bucket\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "comments",
+    "actual": "-- heading\nselect id, /* inline */ name\nfrom users -- trailing\nwhere id = 1;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "create_table",
+    "actual": "create table account\n(\n    id         bigint primary key,\n    email      varchar(255) not null unique,\n    created_at timestamp default current_timestamp,\n    constraint fk_user foreign key (id) references users (id)\n);\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "cte",
+    "actual": "with recent as (select id, user_id, total from orders where created_at > current_date)\nselect u.id, r.total\nfrom users u\n         join recent r on r.user_id = u.id;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "delete",
+    "actual": "delete\nfrom orders\nwhere user_id = 1\n  and total < 0;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "insert_values",
+    "actual": "insert into users (id, name, email)\nvalues (1, 'A', 'a@example.com'),\n       (2, 'B', 'b@example.com');\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "join_where",
+    "actual": "select u.id, u.name, o.total\nfrom users u\n         left join orders o on o.user_id = u.id\nwhere u.active = true\n  and o.total > 10\norder by o.total desc;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "multi_statement",
+    "actual": "select id\nfrom users;\n\nselect id\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "mysql_create_table",
+    "actual": "create table if not exists `app`.`Account`\n(\n    `id`         bigint unsigned auto_increment primary key,\n    `email`      varchar(255) not null unique,\n    `created_at` timestamp default current_timestamp\n) engine = InnoDB;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "mysql_replace_limit",
+    "actual": "replace\ninto users (id,name) values (1,'A');\nselect id\nfrom users limit 10\noffset 20;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "select_list",
+    "actual": "select id, name, email\nfrom users;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "subquery",
+    "actual": "select id, (select max(total) from orders o where o.user_id = u.id) as max_total\nfrom users u;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "update_set",
+    "actual": "update users\nset name='A',\n    email='a@example.com',\n    updated_at=current_timestamp\nwhere id = 1\n  and active = true;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "mysql",
+    "name": "window",
+    "actual": "select id, total, row_number() over (partition by user_id order by created_at desc) as rn\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "case",
+    "actual": "select id, case when total > 100 then 'high' when total > 0 then 'normal' else 'zero' end as bucket\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "comments",
+    "actual": "-- heading\nselect id, /* inline */ name\nfrom users -- trailing\nwhere id = 1;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "create_table",
+    "actual": "create table account\n(\n    id         bigint primary key,\n    email      varchar(255) not null unique,\n    created_at timestamp default current_timestamp,\n    constraint fk_user foreign key (id) references users (id)\n);\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "cte",
+    "actual": "with recent as (select id, user_id, total from orders where created_at > current_date)\nselect u.id, r.total\nfrom users u\n         join recent r on r.user_id = u.id;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "delete",
+    "actual": "delete\nfrom orders\nwhere user_id = 1\n  and total < 0;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "insert_values",
+    "actual": "insert into users (id, name, email)\nvalues (1, 'A', 'a@example.com'),\n       (2, 'B', 'b@example.com');\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "join_where",
+    "actual": "select u.id, u.name, o.total\nfrom users u\n         left join orders o on o.user_id = u.id\nwhere u.active = true\n  and o.total > 10\norder by o.total desc;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "multi_statement",
+    "actual": "select id\nfrom users;\n\nselect id\nfrom orders;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "select_list",
+    "actual": "select id, name, email\nfrom users;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "sqlite_create_table",
+    "actual": "create table if not exists main.account\n(\n    id         integer primary key autoincrement,\n    email      text not null unique,\n    created_at text default current_timestamp\n);\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "sqlite_upsert",
+    "actual": "insert into users (id, name)\nvalues (1, 'A')\non conflict (id) do update\nset name=excluded.name;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "subquery",
+    "actual": "select id, (select max(total) from orders o where o.user_id = u.id) as max_total\nfrom users u;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "update_set",
+    "actual": "update users\nset name='A',\n    email='a@example.com',\n    updated_at=current_timestamp\nwhere id = 1\n  and active = true;\n",
+    "idempotent": true
+  },
+  {
+    "dialect": "sqlite",
+    "name": "window",
+    "actual": "select id, total, row_number() over (partition by user_id order by created_at desc) as rn\nfrom orders;\n",
+    "idempotent": true
+  }
+]

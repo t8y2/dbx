@@ -8,7 +8,7 @@ const SQL_FORMATTER_CONFIG_VERSIONS = new Set([1, 2]);
 
 const CASE_VALUES = ["preserve", "upper", "lower"] as const;
 const INDENT_STYLE_VALUES = ["standard", "tabularLeft", "tabularRight"] as const;
-const LAYOUT_STYLE_VALUES = ["dbx", "classic"] as const;
+const LAYOUT_STYLE_VALUES = ["dbx", "classic", "datagrip"] as const;
 const LOGICAL_OPERATOR_NEWLINE_VALUES = ["before", "after", "none"] as const;
 const COMMA_POSITION_VALUES = ["after", "before"] as const;
 const FROM_CLAUSE_LAYOUT_VALUES = ["newLine", "sameLine"] as const;

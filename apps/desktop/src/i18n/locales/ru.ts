@@ -1149,6 +1149,9 @@ export default withEnglishFallback({
     surfaceObjectSource: "Исходный код объекта",
     surfaceConfigUnencryptedExport: "Подтверждение экспорта без шифрования",
     updateBlocked: "Обновление не выполнено: {error}",
+    blockedRetryTitle: "Перед перезагрузкой необходимо завершить эти операции",
+    blockedRetryConsequence: "После подтверждения выполняемые запросы будут отменены, фоновые задачи остановлены, а незафиксированные транзакции откачены; незафиксированные изменения в транзакциях будут потеряны.",
+    blockedRetryAccept: "Закрыть все и продолжить",
   },
   pluginDock: {
     close: "Закрыть терминал",

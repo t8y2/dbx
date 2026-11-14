@@ -7,14 +7,33 @@ import type { UpdateChannel as SettingsUpdateChannel, UpdateDownloadSource as Se
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
-import { isUpdatePreparationError, UpdatePreparationError } from "@/lib/app/updatePreparation";
+import { isUpdatePreparationError, UpdatePreparationError, type UpdatePreparationBlockCode } from "@/lib/app/updatePreparation";
 import { displayAppVersion, recordPromotedBuild } from "@/lib/app/promotedBuild";
 import { uuid } from "@/lib/common/utils";
 import { isUpdatePreviewMockEnabled, previewAppUpdateInfo } from "@/lib/updates/updatePreviewMock";
 
 interface UseAppUpdaterOptions {
   getActiveTaskCount?: () => number;
-  prepareForUpdate?: () => Promise<() => void>;
+  /**
+   * `force` asks the host to settle whatever blocked the previous attempt
+   * (running queries, background tasks, open transactions) before preparing.
+   * It is only ever set from the confirmation the block itself produced.
+   */
+  prepareForUpdate?: (options: { force: boolean }) => Promise<() => void>;
+}
+
+/**
+ * A preparation refusal the user can confirm away: the host knows which
+ * operations are in flight and can cancel/roll them back on request. Blocks
+ * that cannot be settled this way (dialogs, unsaved drafts) keep reporting an
+ * error message instead of offering the confirmation.
+ */
+export interface UpdatePreparationBlock {
+  code: UpdatePreparationBlockCode;
+  /** Localized reason, produced by the host's preparation guard. */
+  message: string;
+  /** Whether confirming retries a restart only or a full install. */
+  restartOnly: boolean;
 }
 
 export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
@@ -178,6 +197,12 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateCheckFailed = ref(false);
   const showUpdateDialog = ref(false);
   const downloadProgress = ref<number | null>(null);
+  /**
+   * Set when preparation refused because operations are still running. The
+   * host can settle those, but only the user may authorise it — cancelling
+   * queries and rolling back open transactions is destructive.
+   */
+  const blockedPreparation = ref<UpdatePreparationBlock | null>(null);
   const isIgnoringUpdate = ref(false);
   const checkingUpdates = computed(() => phase.value === "checking");
   const isDownloadingUpdate = computed(() => phase.value === "downloading");
@@ -261,9 +286,31 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     clearRetry();
     clearError();
   }
+  /**
+   * Only an http(s) address may leave the app: release pages come from the
+   * update manifest, which a mirror or a compromised response could point at
+   * `javascript:` or a local file URL.
+   */
+  function safeExternalUrl(url: string): string | null {
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+    } catch {
+      return null;
+    }
+  }
   function openUrl(url: string) {
-    if (isTauriRuntime()) void import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
-    else window.open(url, "_blank", "noopener,noreferrer");
+    const target = safeExternalUrl(url);
+    if (!target) return;
+    if (isTauriRuntime()) {
+      void import("@tauri-apps/plugin-shell").then(({ open }) => open(target));
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = target;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.click();
   }
   function openLatestRelease() {
     openUrl(resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl));
@@ -492,16 +539,17 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     // here, so a normal check cannot surprise anyone.
     await checkUpdates();
   }
-  async function performInstall(restartOnly: boolean) {
+  async function performInstall(restartOnly: boolean, force = false) {
     if (!isTauriRuntime() || isInstallingUpdate.value || isIgnoringUpdate.value || (!restartOnly && !downloaded.value)) return;
     const cache = downloaded.value;
     let release: (() => void) | undefined;
     phase.value = "preparing";
     clearError();
+    blockedPreparation.value = null;
     let installed = restartOnly;
     let failed = false;
     try {
-      release = await options.prepareForUpdate?.();
+      release = await options.prepareForUpdate?.({ force });
       updatePreparationRelease = release;
       if (shouldBlockAppUpdate(activeTaskCount.value)) throw new UpdatePreparationError(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), "tasks");
       phase.value = "installing";
@@ -518,8 +566,15 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     } catch (error) {
       failed = true;
       phase.value = installed ? "restart" : "ready";
-      updateCheckFailed.value = true;
       const message = error instanceof Error ? error.message : String(error);
+      // Running queries/tasks and open transactions are preconditions the user
+      // can clear by confirming, so offer that instead of a dead-end message.
+      // Anything else (an open dialog, unsaved drafts) still reports an error.
+      if (!installed && isUpdatePreparationError(error) && error.code === "tasks") {
+        blockedPreparation.value = { code: error.code, message, restartOnly };
+        return;
+      }
+      updateCheckFailed.value = true;
       // A held-back update was never attempted: say that plainly and keep the
       // reason (which dialog to close) instead of calling it an install failure.
       if (installed) updateCheckMessage.value = t("updates.restartFailed", { error: message });
@@ -547,6 +602,16 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   async function installDownloadedUpdate() {
     if (updaterDisabled) return;
     await performInstall(false);
+  }
+  /** Confirms the block: settle the running work, then retry the same action. */
+  async function confirmBlockedInstall() {
+    const block = blockedPreparation.value;
+    if (!block || isInstallingUpdate.value) return;
+    blockedPreparation.value = null;
+    await performInstall(block.restartOnly, true);
+  }
+  function dismissBlockedInstall() {
+    blockedPreparation.value = null;
   }
   async function restartApp() {
     if (updaterDisabled) return;
@@ -652,6 +717,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     showUpdateDialog,
     isDownloadingUpdate,
     downloadProgress,
+    blockedPreparation,
     updateDownloaded,
     updateDownloadedVersion,
     isInstallingUpdate,
@@ -674,6 +740,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     cancelDownload,
     installDownloadedUpdate,
     restartApp,
+    confirmBlockedInstall,
+    dismissBlockedInstall,
     initialize,
     dispose,
   };

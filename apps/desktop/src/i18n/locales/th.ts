@@ -1249,6 +1249,9 @@ export default withEnglishFallback({
     surfaceObjectSource: "ซอร์สโค้ดออบเจ็กต์",
     surfaceConfigUnencryptedExport: "การยืนยันการส่งออกแบบไม่เข้ารหัส",
     updateBlocked: "ไม่ได้ดำเนินการอัปเดต: {error}",
+    blockedRetryTitle: "จำเป็นต้องสิ้นสุดการดำเนินการเหล่านี้ก่อนรีสตาร์ท",
+    blockedRetryConsequence: "เมื่อยืนยันแล้ว ระบบจะยกเลิกคิวรีที่กำลังดำเนินการ ยุติงานเบื้องหลัง และย้อนกลับธุรกรรมที่ยังไม่ได้คอมมิต; การแก้ไขที่ยังไม่ได้คอมมิตในธุรกรรมจะสูญหาย",
+    blockedRetryAccept: "ปิดทั้งหมดและดำเนินการต่อ",
   },
   pluginDock: {
     close: "ปิด Terminal",

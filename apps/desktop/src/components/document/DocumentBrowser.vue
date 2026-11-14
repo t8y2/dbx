@@ -41,6 +41,7 @@ import {
   documentFieldPathOptionsFromDocuments,
   documentFieldPathTreeFromDocuments,
   flattenDocumentFieldPathTree,
+  mongoFilterDateSamplesByPathFromDocuments,
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptionsFor,
@@ -89,7 +90,6 @@ import {
   mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
-  mongoExtendedJsonValueType,
   parseMongoDocumentInputValue,
   serializeMongoDocumentId,
   type MongoInputValue,
@@ -827,8 +827,7 @@ const mongoFilterDateSamplesByPath = computed(() => {
   if (documentStoreProvider.value.kind !== "mongodb" || !mongoCopyDocumentsAvailable.value) return new Map<string, unknown>();
   // Display documents represent BSON dates as text. Use the paired Extended JSON
   // for date inference and keep the existing inference for other BSON types.
-  const fields = flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(copyDocuments.value));
-  return new Map(fields.filter((field) => mongoExtendedJsonValueType(field.sampleValue) === "date").map((field) => [field.path, field.sampleValue]));
+  return mongoFilterDateSamplesByPathFromDocuments(copyDocuments.value);
 });
 const documentStructuredFilterCount = computed(() => {
   if (!appliedDocumentFilter.value) return 0;

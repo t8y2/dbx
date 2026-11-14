@@ -285,6 +285,11 @@ export function documentFieldPathOptionsFromDocuments(documents: readonly Record
   return flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents)).map((node) => node.path);
 }
 
+export function mongoFilterDateSamplesByPathFromDocuments(documents: readonly Record<string, unknown>[]): Map<string, unknown> {
+  const fields = flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents));
+  return new Map(fields.filter((field) => inferMongoFilterValueType(field.sampleValue) === "date").map((field) => [field.path, field.sampleValue]));
+}
+
 export function elasticsearchFieldPathTreeFromFieldNames(fieldNames: readonly string[], fieldTypes: ReadonlyMap<string, string> = new Map()): DocumentFieldPathNode[] {
   const rootNodes: ElasticsearchFieldPathAccumulatorNode[] = [];
   const rootByKey = new Map<string, ElasticsearchFieldPathAccumulatorNode>();

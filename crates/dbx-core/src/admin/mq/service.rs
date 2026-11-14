@@ -14,6 +14,8 @@ use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
 const MAX_PEEK_MESSAGES: u32 = 100;
+/// 主题内搜索的结果上限；扫描仍受 agent 端预算约束。
+const MAX_SEARCH_MESSAGES: u32 = 100_000;
 
 /// Test connectivity to the message queue admin endpoint. Successful MQ
 /// adapters are cached so agent-backed systems do not cold-start on every
@@ -541,11 +543,23 @@ pub async fn mq_peek_messages_core(
     if count == 0 {
         return Ok(PeekMessagesResult::default());
     }
-    if count > MAX_PEEK_MESSAGES {
-        return Err(format!("Peek message count must be between 1 and {MAX_PEEK_MESSAGES}"));
+    let options = options.unwrap_or_default();
+    let max_count = peek_count_limit(&options);
+    if count > max_count {
+        return Err(format!("Peek message count must be between 1 and {max_count}"));
     }
     let adapter = get_adapter(state, conn_id).await?;
-    adapter.peek_messages(&topic, &sub, count, options.unwrap_or_default()).await
+    adapter.peek_messages(&topic, &sub, count, options).await
+}
+
+/// 主题内搜索（带 searchQuery）放宽结果上限；普通浏览仍保持 100 条。
+fn peek_count_limit(options: &PeekMessagesOptions) -> u32 {
+    let searching = options.search_query.as_deref().is_some_and(|query| !query.trim().is_empty());
+    if searching {
+        MAX_SEARCH_MESSAGES
+    } else {
+        MAX_PEEK_MESSAGES
+    }
 }
 
 pub async fn mq_expire_messages_core(
@@ -918,6 +932,15 @@ mod tests {
     use super::*;
     use crate::models::connection::{ConnectionConfig, DatabaseType};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn peek_count_limit_allows_large_searches_only() {
+        assert_eq!(peek_count_limit(&PeekMessagesOptions::default()), MAX_PEEK_MESSAGES);
+        let blank = PeekMessagesOptions { search_query: Some("   ".to_string()), ..Default::default() };
+        assert_eq!(peek_count_limit(&blank), MAX_PEEK_MESSAGES);
+        let searching = PeekMessagesOptions { search_query: Some("kafka".to_string()), ..Default::default() };
+        assert_eq!(peek_count_limit(&searching), MAX_SEARCH_MESSAGES);
+    }
 
     fn mq_connection(read_only: bool) -> ConnectionConfig {
         ConnectionConfig {

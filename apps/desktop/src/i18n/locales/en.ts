@@ -8900,6 +8900,7 @@ export default {
     },
   },
   transfer: {
+    reviewBeforeStart: "Select Start Transfer to review the transfer plan and confirm before any data is written.",
     log: {
       title: "Execution log",
       tableStarted: "Transferring table {table} ({index}/{total})",

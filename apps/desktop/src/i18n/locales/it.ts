@@ -7654,6 +7654,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "Seleziona Avvia trasferimento per rivedere il piano e confermare prima di scrivere i dati.",
     log: {
       title: "Log di esecuzione",
       tableStarted: "Trasferimento della tabella {table} ({index}/{total})",

@@ -10029,10 +10029,7 @@ export const useQueryStore = defineStore("query", () => {
         current.resultCountSql = countSql;
         current.resultSessionId = current.result?.session_id ?? undefined;
         current.resultClientSessionId = current.resultSessionId ? executionClientSessionId : undefined;
-        // A refreshed page keeps reporting its totals as loading: the stale-total
-        // pass just below only checks the preserved value, and the COUNT that
-        // replaces it is started further down.
-        const preserveTotalRowCountPending = options?.preserveTotalRowCountDuringExecution === true && typeof current.resultTotalRowCount === "number";
+        const hasPreservedTotalRowCount = options?.preserveTotalRowCountDuringExecution === true && typeof current.resultTotalRowCount === "number";
         if (!options?.preserveTotalRowCountDuringExecution) {
           current.resultTotalRowCount = undefined;
         }
@@ -10050,7 +10047,7 @@ export const useQueryStore = defineStore("query", () => {
         const exactIncompletePageTotal = paginationPageResult ? exactTotalFromIncompletePage(paginationPageResult, pageLimit, pageOffset, useAgentResultSession) : undefined;
         const totalKnownFromIncompletePage = typeof exactIncompletePageTotal === "number";
         let totalRowCountResolved = false;
-        if (paginationPageResult?.page_has_more === false && typeof exactIncompletePageTotal === "number") {
+        if (typeof exactIncompletePageTotal === "number" && (paginationPageResult?.page_has_more === false || shouldAppendResult)) {
           current.resultTotalRowCount = exactIncompletePageTotal;
           current.resultTotalRowCountLoading = false;
           totalRowCountResolved = true;
@@ -10076,8 +10073,7 @@ export const useQueryStore = defineStore("query", () => {
         // page. A page that proves nothing about the total must not mark it
         // resolved either: the background COUNT below still owns it, so the list
         // keeps reporting the previous total as loading.
-        if (!totalRowCountResolved && preserveTotalRowCountPending) {
-          current.resultTotalRowCountLoading = !totalKnownFromIncompletePage;
+        if (!totalRowCountResolved && hasPreservedTotalRowCount) {
           totalRowCountResolved = totalKnownFromIncompletePage;
         }
         const dataCountTarget =
@@ -10107,9 +10103,9 @@ export const useQueryStore = defineStore("query", () => {
           !totalRowCountResolved &&
           settingsStore.editorSettings.autoCalculateTotalRows &&
           ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
-        // A refreshed page whose total is being recounted keeps the spinner on even
-        // though auto-count is served by the same background COUNT below.
-        current.resultTotalRowCountLoading = canAutoCalculateTotalRows || (preserveTotalRowCountPending && typeof current.resultTotalRowCount === "number");
+        // Appending rows preserves the known total without scheduling a new COUNT.
+        const recountingPreservedTotal = !options?.appendResult && !resultLimitReached && !totalRowCountResolved && hasPreservedTotalRowCount && typeof current.resultTotalRowCount === "number";
+        current.resultTotalRowCountLoading = canAutoCalculateTotalRows || recountingPreservedTotal;
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the

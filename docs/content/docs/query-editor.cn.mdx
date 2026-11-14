@@ -161,6 +161,10 @@ vnoremap <Space>r :DbxExecuteSql<CR>
 - MySQL、PostgreSQL、SQL Server、ClickHouse 等方言的函数和语法建议
 - 用户配置的 [SQL 代码片段](/cn/docs/sql-snippets)
 
+PostgreSQL、MySQL 和 SQLite 还会从整个编辑器文档读取未执行的 DDL。`CREATE TABLE`、简单的 `CREATE TABLE AS SELECT` 投影以及 `ALTER TABLE ADD COLUMN` 无需执行即可提供表和字段候选，远端元数据为空或加载失败时同样可用。该 overlay 按编辑器标签页隔离，文本编辑后根据最新内容重新计算，并复用现有 alias/JOIN 补全路径，不会写入连接元数据。
+
+本地 overlay 不等同于完整数据库目录。它支持限定名和带引号标识符，会排除表级约束，重复建表时保留第一份定义，也不会把 `DROP TABLE` 当作已执行的目录变更。复杂 CTAS 表达式和其他 DDL 形式仍需刷新真实连接元数据。
+
 语义诊断会标出部分无法解析的表、字段、别名和 SQL 结构。它用于提前发现问题，不代表数据库一定会拒绝或接受语句；厂商扩展语法仍以服务端结果为准。
 
 <Callout type="info">刚创建或修改对象后，先刷新连接元数据。DBX 会缓存并按需加载表结构，以减少大型 Schema 的重复请求。</Callout>

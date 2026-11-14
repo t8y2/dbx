@@ -1,0 +1,207 @@
+[
+  {
+    "name": "select_join",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT);\nCREATE TABLE b (a_id INTEGER, value TEXT);\nSELECT a.id, a.name, b.value FROM a JOIN b ON b.a_id = a.id;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "ctas",
+    "sql": "CREATE TABLE c AS SELECT 1 AS value;\nSELECT c.value FROM c;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "alter_add",
+    "sql": "CREATE TABLE a (id INTEGER);\nALTER TABLE a ADD COLUMN name TEXT;\nSELECT a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "drop",
+    "sql": "CREATE TABLE a (id INTEGER);\nDROP TABLE a;\nSELECT a.id FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "forward_reference",
+    "sql": "SELECT a.id FROM a;\nCREATE TABLE a (id INTEGER);\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "duplicate",
+    "sql": "CREATE TABLE a (id INTEGER);\nCREATE TABLE a (id INTEGER, name TEXT);\nSELECT a.id, a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "incomplete",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT;\nSELECT a.id, a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "join_alias",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT);\nCREATE TABLE b (a_id INTEGER);\nSELECT first.id, first.name, second.a_id FROM a AS first JOIN b AS second ON second.a_id = first.id;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "quoted",
+    "sql": "CREATE TABLE \"Mixed\" (\"Id\" INTEGER, \"DisplayName\" TEXT);\nSELECT \"Mixed\".\"DisplayName\" FROM \"Mixed\";\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "select_join",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT);\nCREATE TABLE b (a_id INTEGER, value TEXT);\nSELECT a.id, a.name, b.value FROM a JOIN b ON b.a_id = a.id;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "ctas",
+    "sql": "CREATE TABLE c AS SELECT 1 AS value;\nSELECT c.value FROM c;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "alter_add",
+    "sql": "CREATE TABLE a (id INTEGER);\nALTER TABLE a ADD COLUMN name TEXT;\nSELECT a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "drop",
+    "sql": "CREATE TABLE a (id INTEGER);\nDROP TABLE a;\nSELECT a.id FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "forward_reference",
+    "sql": "SELECT a.id FROM a;\nCREATE TABLE a (id INTEGER);\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "duplicate",
+    "sql": "CREATE TABLE a (id INTEGER);\nCREATE TABLE a (id INTEGER, name TEXT);\nSELECT a.id, a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": false,
+    "problems": [
+      {
+        "line": 3,
+        "offset": 15,
+        "length": 4,
+        "element": "name",
+        "message": "Unable to resolve column 'name'"
+      }
+    ]
+  },
+  {
+    "name": "incomplete",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT;\nSELECT a.id, a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "join_alias",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT);\nCREATE TABLE b (a_id INTEGER);\nSELECT first.id, first.name, second.a_id FROM a AS first JOIN b AS second ON second.a_id = first.id;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "quoted",
+    "sql": "CREATE TABLE `Mixed` (`Id` INTEGER, `DisplayName` TEXT);\nSELECT `Mixed`.`DisplayName` FROM `Mixed`;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "select_join",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT);\nCREATE TABLE b (a_id INTEGER, value TEXT);\nSELECT a.id, a.name, b.value FROM a JOIN b ON b.a_id = a.id;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "ctas",
+    "sql": "CREATE TABLE c AS SELECT 1 AS value;\nSELECT c.value FROM c;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "alter_add",
+    "sql": "CREATE TABLE a (id INTEGER);\nALTER TABLE a ADD COLUMN name TEXT;\nSELECT a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "drop",
+    "sql": "CREATE TABLE a (id INTEGER);\nDROP TABLE a;\nSELECT a.id FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "forward_reference",
+    "sql": "SELECT a.id FROM a;\nCREATE TABLE a (id INTEGER);\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "duplicate",
+    "sql": "CREATE TABLE a (id INTEGER);\nCREATE TABLE a (id INTEGER, name TEXT);\nSELECT a.id, a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": false,
+    "problems": [
+      {
+        "line": 3,
+        "offset": 15,
+        "length": 4,
+        "element": "name",
+        "message": "Unable to resolve column 'name'"
+      }
+    ]
+  },
+  {
+    "name": "incomplete",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT;\nSELECT a.id, a.name FROM a;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "join_alias",
+    "sql": "CREATE TABLE a (id INTEGER, name TEXT);\nCREATE TABLE b (a_id INTEGER);\nSELECT first.id, first.name, second.a_id FROM a AS first JOIN b AS second ON second.a_id = first.id;\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  },
+  {
+    "name": "quoted",
+    "sql": "CREATE TABLE main.\"Mixed\" (\"Id\" INTEGER, \"DisplayName\" TEXT);\nSELECT \"Mixed\".\"DisplayName\" FROM main.\"Mixed\";\n",
+    "inspectionExitCode": 0,
+    "missingResolveOutput": true,
+    "problems": []
+  }
+]

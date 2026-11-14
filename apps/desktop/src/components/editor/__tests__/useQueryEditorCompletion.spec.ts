@@ -832,3 +832,64 @@ describe.each([false, true])("bare alias-dot column resolution (semantic=%s)", (
     expect(result?.options.some((option) => option.label === "id")).toBe(true);
   });
 });
+
+describe("unexecuted local DDL completion", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  function harnessAtMarker(markedSql: string, databaseType: "postgres" | "mysql" | "sqlite" = "postgres") {
+    const cursor = markedSql.indexOf("|");
+    const modelValue = markedSql.replace("|", "");
+    const harness = createHarness({ databaseType, dialect: databaseType, modelValue }, undefined, true);
+    harness.currentView.dispatch({ selection: { anchor: cursor } });
+    return harness;
+  }
+
+  it.each(["postgres", "mysql", "sqlite"] as const)("serves CREATE TABLE columns on local and async %s paths without remote metadata", async (dialect) => {
+    const { provide, store } = harnessAtMarker("CREATE TABLE users (id BIGINT, display_name TEXT);\nSELECT | FROM users", dialect);
+    const local = await provide(false);
+    expect(local?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    const asyncResult = await provide();
+    expect(asyncResult?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("keeps alias and JOIN completion available when remote metadata fails", async () => {
+    const { provide, store } = harnessAtMarker("CREATE TABLE users (id BIGINT, display_name TEXT);\nCREATE TABLE orders (id BIGINT, user_id BIGINT);\nSELECT u.| FROM users u JOIN orders o ON o.user_id = u.id");
+    store.listCompletionColumns.mockRejectedValue(new Error("offline"));
+    store.refreshCompletionColumns.mockRejectedValue(new Error("offline"));
+    const result = await provide();
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["id", "display_name"]));
+    expect(result?.options.map((option) => option.label)).not.toContain("user_id");
+    expect(store.listCompletionColumns).not.toHaveBeenCalled();
+  });
+
+  it("includes ALTER and CTAS columns from the whole document", async () => {
+    const { provide } = harnessAtMarker("CREATE TABLE source (id BIGINT, payload TEXT);\nCREATE TABLE report AS SELECT id AS source_id, payload FROM source;\nALTER TABLE report ADD COLUMN created_at TEXT;\nSELECT | FROM report");
+    const result = await provide(false);
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["source_id", "payload", "created_at"]));
+  });
+
+  it("isolates overlays between editor documents", async () => {
+    const first = harnessAtMarker("CREATE TABLE first_table (first_column INT);\nSELECT | FROM first_table");
+    const second = harnessAtMarker("CREATE TABLE second_table (second_column INT);\nSELECT | FROM second_table");
+    const firstResult = await first.provide(false);
+    const secondResult = await second.provide(false);
+    expect(firstResult?.options.map((option) => option.label)).toContain("first_column");
+    expect(firstResult?.options.map((option) => option.label)).not.toContain("second_column");
+    expect(secondResult?.options.map((option) => option.label)).toContain("second_column");
+    expect(secondResult?.options.map((option) => option.label)).not.toContain("first_column");
+  });
+
+  it("preserves quoted PostgreSQL identifier case", async () => {
+    const { provide } = harnessAtMarker('CREATE TABLE "Mixed" ("Id" BIGINT, "Display Name" TEXT);\nSELECT | FROM "Mixed"');
+    const result = await provide(false);
+    const labels = result?.options.map((option) => option.label) ?? [];
+    expect(labels.some((label) => label === "Id" || label.startsWith("Id "))).toBe(true);
+    expect(labels.some((label) => label === "Display Name" || label.startsWith("Display Name "))).toBe(true);
+  });
+  it("keeps case-distinct quoted PostgreSQL tables separate", async () => {
+    const { provide } = harnessAtMarker('CREATE TABLE "Mixed" ("Id" BIGINT);\nCREATE TABLE "mixed" ("other" TEXT);\nSELECT * FROM |');
+    const result = await provide(false);
+    expect(result?.options.map((option) => option.label)).toEqual(expect.arrayContaining(["Mixed", "mixed"]));
+  });
+});

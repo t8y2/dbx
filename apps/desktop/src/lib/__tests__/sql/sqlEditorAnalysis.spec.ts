@@ -40,6 +40,16 @@ describe("background SQL completion parity", () => {
     const replaced = { ...request, sql: "SELECT o. FROM orders o", cursor: 9 };
     expect(engine.analyze(replaced)).toEqual(new SqlCompletionAnalysisEngine().analyze(replaced));
   });
+  it("rebuilds the document-local DDL overlay after edits", () => {
+    const engine = new SqlCompletionAnalysisEngine();
+    const sql = "CREATE TABLE users (id BIGINT);\nSELECT  FROM users";
+    const request: SqlCompletionAnalysisRequest = { sql, cursor: sql.indexOf("  FROM") + 1, databaseType: "postgres", dialect: "postgres", semanticCompletionEnabled: true };
+    expect(engine.analyze(request).localSchema.tables[0]?.columns.map((column) => column.name)).toEqual(["id"]);
+    const editedSql = "CREATE TABLE users (id BIGINT, display_name TEXT);\nSELECT  FROM users";
+    const edited = engine.analyze({ ...request, sql: editedSql, cursor: editedSql.indexOf("  FROM") + 1 });
+    expect(edited.localSchema.tables[0]?.columns.map((column) => column.name)).toEqual(["id", "display_name"]);
+    expect(structuredClone(edited)).toEqual(edited);
+  });
 });
 
 describe("background statement and diagnostic parity", () => {

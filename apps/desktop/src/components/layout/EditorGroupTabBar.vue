@@ -49,6 +49,7 @@ import {
   Maximize2,
   Minimize2,
   Package,
+  FilePlus2,
   PanelBottom,
   PanelLeft,
   PanelRight,
@@ -56,7 +57,6 @@ import {
   Pencil,
   Pin,
   PlugZap,
-  Plus,
   RotateCcw,
   RotateCw,
   Rows2,
@@ -2095,7 +2095,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
       <Tooltip v-if="canNewQuery">
         <TooltipTrigger as-child>
           <button type="button" data-new-query-tab :class="verticalTabToolbarButtonClass" :aria-label="t('toolbar.newQuery')" @click="toolbar?.newQuery(groupId)">
-            <Plus class="h-4 w-4" />
+            <FilePlus2 class="h-4 w-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
@@ -2506,7 +2506,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             :aria-label="t('toolbar.newQuery')"
             @click="toolbar?.newQuery(groupId)"
           >
-            <Plus class="h-4 w-4" />
+            <FilePlus2 class="h-4 w-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>

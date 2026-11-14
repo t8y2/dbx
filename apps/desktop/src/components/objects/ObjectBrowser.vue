@@ -36,6 +36,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  FilePlus2,
   FileText,
   Info,
   GripVertical,
@@ -66,7 +67,6 @@ import {
   Table,
   Table2,
   TableProperties,
-  TerminalSquare,
   Trash2,
   WrapText,
   X,
@@ -6254,7 +6254,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (isVictoriaMetrics.value) {
     return [
       { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery },
       ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
       { label: "", separator: true },
       exportDataSubmenu(item),
@@ -6302,7 +6302,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     },
     ...(canOpenStructureEditor.value ? [{ sidebarActionId: "contextMenu.editStructure", label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ sidebarActionId: "contextMenu.renameObject", label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
-    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery },
     ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
     ...(canOpenDiagram.value ? [{ sidebarActionId: "diagram.open", label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     ...(canOpenTableImport.value ? [{ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
@@ -6346,7 +6346,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       icon: ScrollText,
     },
     ...(canRename(item) ? [{ sidebarActionId: "contextMenu.renameObject", label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
-    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery },
     ...(canOpenDiagram.value ? [{ sidebarActionId: "diagram.open", label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
@@ -7221,7 +7221,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               :aria-label="t('contextMenu.newQuery')"
               @click="openNewQuery(sidePanelRow, true)"
             >
-              <TerminalSquare class="w-3 h-3" />
+              <FilePlus2 class="w-3 h-3" />
               <span class="table-info-action-label">{{ t("contextMenu.newQuery") }}</span>
             </Button>
             <div v-if="tableInfoTab === 'ddl' && tableMetadataCapabilities.ddl" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">

@@ -173,6 +173,7 @@ vi.mock("@/lib/table/tableEditing", () => ({
   },
   usesSyntheticRowIdKey: () => false,
   shouldIncludeSyntheticRowId: () => mocks.includeSyntheticRowId,
+  postgresTupleLocatorUnsupportedEngine: () => false,
 }));
 vi.mock("@/lib/table/tableOpenPageLimit", () => ({ tableOpenPageLimit: () => 100 }));
 vi.mock("@/lib/tabs/dataTabActivation", () => ({ canActivateExistingDataTableTab: () => false }));

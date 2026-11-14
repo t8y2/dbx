@@ -89,7 +89,7 @@ import { extractGraphCells, graphResultRows, mergeGraphResults } from "@/lib/gra
 import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
-import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -5949,7 +5949,7 @@ export const useQueryStore = defineStore("query", () => {
 
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId) && !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(tab.connectionId));
       const buildRefreshSql = (includeRowId: boolean) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,
@@ -7797,9 +7797,7 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const serverVersion = conn?.database_info?.productVersion?.toLowerCase() ?? "";
-      const isGreenplum = serverVersion.includes("greenplum") || serverVersion.includes("cloudberry");
-      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !isGreenplum && !rowIdLocatorUnsupported(tab.connectionId);
+      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId);
       const syntheticRowId = postgresCtidRowId || ((databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType));
       // Base tables without a natural identifier use the same physical row locator
       // as table-data tabs (Oracle, OceanBase Oracle, Xugu, and PostgreSQL). Confirm
@@ -10903,7 +10901,7 @@ export const useQueryStore = defineStore("query", () => {
               identifierQuote: source.identifierQuote,
               serverVersion: source.serverVersion,
               includeDatabaseName: settings.generateSqlIncludeDatabaseName,
-              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported,
+              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported && !postgresTupleLocatorUnsupportedEngine(connection),
               timeoutSecs: queryTimeoutSecsForConnection(connection, settings.globalQueryTimeoutSecs),
             },
             requests,

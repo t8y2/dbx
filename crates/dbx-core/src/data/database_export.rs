@@ -3256,6 +3256,36 @@ where
     }
 }
 
+// Catalog visibility alone does not grant access to a schema (#14272).
+// Use the same effective privileges during worker discovery and snapshot
+// discovery, including ownership, role membership, and grants to PUBLIC.
+const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
+     WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+     AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+     AND n.nspname NOT LIKE 'pg_temp_%' \
+     AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') ORDER BY n.nspname";
+
+pub(crate) async fn list_database_backup_schemas_core(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    database: &str,
+) -> Result<Vec<String>, String> {
+    let db_type = state
+        .configs
+        .read()
+        .await
+        .get(connection_id)
+        .map(|config| config.db_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
+    if !matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
+        return Ok(vec![database.to_string()]);
+    }
+    let result =
+        crate::query::execute_sql_statement(state, connection_id, database, POSTGRES_BACKUP_SCHEMAS_SQL, None, None)
+            .await?;
+    Ok(result.rows.into_iter().filter_map(|row| row.into_iter().next()?.as_str().map(str::to_string)).collect())
+}
+
 pub async fn begin_database_backup_snapshot_core(
     state: &crate::connection::AppState,
     connection_id: &str,
@@ -3322,10 +3352,6 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     };
 
     let schemas_result = if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
-        const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
-             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
-             AND n.nspname NOT LIKE 'pg_toast_temp_%' \
-             AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname";
         let operation = crate::query::execute_in_manual_transaction(
             state,
             &session_id,

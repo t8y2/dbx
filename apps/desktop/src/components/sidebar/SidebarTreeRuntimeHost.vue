@@ -194,7 +194,7 @@ import { schemaIndexIsSameOwner, schemaIndexNodeIdentity } from "@/lib/table/sch
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, isSameHBaseTable, isSameTable, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { supersedeSidebarDataNavigation } from "@/lib/sidebar/sidebarDataOpenCoordinator";
-import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isModRShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isPasteSidebarSelectionShortcut, isSidebarRefreshShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { sidebarNodeSupportsStructureEdit } from "@/lib/sidebar/sidebarTreeStructureShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
@@ -1511,7 +1511,7 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  if (isRefreshDataShortcut(event, settingsStore.editorSettings.shortcuts) || isModRShortcut(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F5")) {
+  if (isSidebarRefreshShortcut(event, settingsStore.editorSettings.shortcuts)) {
     if (!requestRefreshSelectedNode()) return;
     event.preventDefault();
     event.stopPropagation();
@@ -5243,6 +5243,13 @@ const canCreateDatabase = computed(() => {
   return activeNode.value.type === "connection" && canCreateConnectionNamespace(config);
 });
 
+function canCreateDatabaseFromNode(node: TreeNode): boolean {
+  if (node.type !== "connection" && node.type !== "database" && node.type !== "mongo-db") return false;
+  if (!node.connectionId || isSqlServerLinkedNode(node)) return false;
+  const target = connectionNamespaceCreationTarget(connectionStore.getConfig(node.connectionId));
+  return target === "database" || target === "special";
+}
+
 const canCreateNacosNamespace = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   return activeNode.value.type === "connection" && config?.db_type === "nacos" && !connectionIsEffectivelyReadOnly(config);
@@ -5665,6 +5672,25 @@ function openConnectionNamespaceCreation() {
     return;
   }
   void openCreateDatabase();
+}
+
+function createDatabaseForSelection(node: TreeNode): boolean {
+  if (!canCreateDatabaseFromNode(node)) return false;
+  activateRuntimeNode(node);
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController(node);
+  openCreateDatabaseDialog();
+  return true;
+}
+
+function createDatabaseMenuItem(node: TreeNode): ContextMenuItem {
+  return {
+    sidebarActionId: "contextMenu.createDatabase",
+    label: node.type === "connection" ? connectionNamespaceCreationLabel() : t("contextMenu.createDatabase"),
+    action: node.type === "connection" ? openConnectionNamespaceCreation : openCreateDatabaseDialog,
+    icon: Plus,
+    shortcut: canCreateDatabaseFromNode(node) ? settingsStore.editorSettings.shortcuts.createSidebarDatabase : undefined,
+  };
 }
 
 function connectionNamespaceCreationLabel() {
@@ -7347,7 +7373,7 @@ const shortcutDisconnectConnection = computed(() => settingsStore.editorSettings
 
 const shortcutRename = "F2";
 
-const shortcutRefresh = computed(() => settingsStore.editorSettings.shortcuts.refreshData || "F5");
+const shortcutRefresh = computed(() => settingsStore.editorSettings.shortcuts.refreshData);
 
 const shortcutDelete = "Delete";
 
@@ -7579,12 +7605,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       items.push({ sidebarActionId: "databaseBackup.title", label: t("databaseBackup.title"), action: openScheduledBackups, icon: CalendarClock });
     }
     if (canCreateDatabase.value) {
-      items.push({
-        sidebarActionId: "contextMenu.createDatabase",
-        label: connectionNamespaceCreationLabel(),
-        action: openConnectionNamespaceCreation,
-        icon: Plus,
-      });
+      items.push(createDatabaseMenuItem(node));
     }
     if (canCreateNacosNamespace.value) {
       items.push({
@@ -7842,6 +7863,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canCreateTable.value) {
       items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
+    if (canCreateDatabaseFromNode(node)) items.push(createDatabaseMenuItem(node));
     const isSimpleDisplay = settingsStore.editorSettings.sidebarObjectDisplay === "simple";
     if (canCreateTable.value && isSimpleDisplay && isTableVGroupContainerNode(node) && !node.children?.some(isGroupLabel)) {
       items.push({
@@ -8065,6 +8087,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "vector-database") {
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (canCreateDatabaseFromNode(node)) items.push(createDatabaseMenuItem(node));
     if (node.type === "mongo-db" && canOpenObjectBrowser.value) {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
     }
@@ -9256,6 +9279,7 @@ defineExpose({
   openDataInNewTab,
   openDdlForSelection,
   openStructureEditorForSelection,
+  createDatabaseForSelection,
   refreshNode,
   requestPaste,
   toggleNode,

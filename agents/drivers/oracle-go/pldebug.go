@@ -30,6 +30,13 @@ import (
 
 const (
 	plDebugPackageName   = "DBX_PL_DEBUG_PACKAGE"
+
+	// plDebugPendingLineVar names the package-body variable behind chunked
+	// DBX_FETCH_OUTPUT. Oracle 11g caps identifiers at 30 characters (128 only
+	// from 12.2 on), and the package-name-prefixed spelling exceeded it, so the
+	// whole body failed with PLS-00114 on 11g and took the debugger down with
+	// it (#14786).
+	plDebugPendingLineVar = "DBX_PLD_PENDING_LINE"
 	plDebugTimeoutMillis = int64(10 * 60 * 1000)
 	plDebugOpenTimeout   = 20 * time.Second
 	// plDebugCallTimeout bounds every post-attach DBMS_DEBUG call: the helper
@@ -410,7 +417,7 @@ const plDebugVersionNote = "-- DBX PL Debug Package Version: V6 (ODC V3.3.2.1 al
 // All changes are inert on engines whose set_breakpoint ignores namespace / entrypointname
 // (OceanBase Oracle mode resolves the name only) and whose get_runtime_info ignores the
 // request mask, so the shared package stays correct for both agents.
-const plDebugBodyFixNote = "-- DBX PL Debug Package Fix: V6.5 DBX_FETCH_BACKTRACE structured table-overload backtrace with textual fallback (V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume, V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)"
+const plDebugBodyFixNote = "-- DBX PL Debug Package Fix: V6.6 DBX_PLD_PENDING_LINE rename for the Oracle 11g 30-char identifier limit (V6.5 DBX_FETCH_BACKTRACE structured table-overload backtrace with textual fallback (V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume, V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain, V6.2 program_info.entrypointname arm for package subprograms, V6.1 namespace-aware set_breakpoint + explicit run_info mask retained)"
 
 // plDebugStructuredFieldSep / plDebugStructuredFrameSep are the separators of the
 // DBX_FETCH_BACKTRACE payload: CHR(31) between the fields of one frame, CHR(30) after
@@ -563,13 +570,13 @@ const plDebugPackageBodyDDL = `CREATE OR REPLACE PACKAGE BODY "%[1]s".` + plDebu
 -- ODC V3.3.2.1): resume restored to break_any_return, run_info message keys
 -- renamed to run_info.* without the line#, CNT_EXIT added.
 -- V2: resume (DBX_CNT_NEXT_BREAKPOINT) passed breakflags 0.
--- V6.3: DBX_PENDING_LINE is the one line a DBX_FETCH_OUTPUT chunk boundary had to
+-- V6.3: DBX_PLD_PENDING_LINE (kept <= 30 chars for Oracle 11g) is the one line a DBX_FETCH_OUTPUT chunk boundary had to
 -- cut off. It has to be a package-level variable, and it has to be declared here --
 -- a package body's declarations precede its subprogram bodies -- because
 -- DBMS_OUTPUT.GET_LINE pops the line it hands out, so a chunk that stops at the
 -- requested size would otherwise lose that line on the next call.
 
-` + plDebugPackageName + `_PENDING_LINE VARCHAR2(32767) := NULL;
+` + plDebugPendingLineVar + ` VARCHAR2(32767) := NULL;
 
 PROCEDURE ` + procSetBreakpoint + `(owner IN VARCHAR2, name IN VARCHAR2, line# IN BINARY_INTEGER, breakpoint# OUT BINARY_INTEGER, result OUT BINARY_INTEGER) IS pro_info dbms_debug.program_info; BEGIN pro_info.name := name; pro_info.owner := owner; ` + plDebugNamespaceFallbackDDL + ` END;
 
@@ -675,15 +682,15 @@ BEGIN
   -- is swallowed.
   BEGIN ignored := dbms_debug.set_timeout(1); EXCEPTION WHEN OTHERS THEN NULL; END;
   <<dbx_drain>> LOOP
-    IF ` + plDebugPackageName + `_PENDING_LINE IS NOT NULL THEN
-      fetched := ` + plDebugPackageName + `_PENDING_LINE;
-      ` + plDebugPackageName + `_PENDING_LINE := NULL;
+    IF ` + plDebugPendingLineVar + ` IS NOT NULL THEN
+      fetched := ` + plDebugPendingLineVar + `;
+      ` + plDebugPendingLineVar + ` := NULL;
     ELSE
       dbms_output.get_line(fetched, status);
       IF status <> 0 THEN EXIT dbx_drain; END IF;
     END IF;
     IF buffer IS NOT NULL AND LENGTH(buffer) + 1 + LENGTH(fetched) > limit_chars THEN
-      ` + plDebugPackageName + `_PENDING_LINE := fetched;
+      ` + plDebugPendingLineVar + ` := fetched;
       EXIT dbx_drain;
     END IF;
     IF buffer IS NULL THEN buffer := fetched; ELSE buffer := buffer || chr(10) || fetched; END IF;

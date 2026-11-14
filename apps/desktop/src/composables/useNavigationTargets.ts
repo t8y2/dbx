@@ -6,7 +6,7 @@ import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/quer
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
-import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
@@ -218,7 +218,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
     }
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
-    const eagerIncludeRowId = Boolean(eagerMetadata) && shouldIncludeSyntheticRowId(effectiveDbType, eagerPrimaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId);
+    const eagerIncludeRowId = Boolean(eagerMetadata) && shouldIncludeSyntheticRowId(effectiveDbType, eagerPrimaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId) && !postgresTupleLocatorUnsupportedEngine(config);
     const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes, effectiveDbType), identifierQuote);
     const tableSelectSqlOptions = {
       databaseType: effectiveDbType,
@@ -324,7 +324,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
       if (!isCurrentTarget() || !isCurrentGeneration()) return;
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(target.connectionId));
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         catalog: target.catalog,

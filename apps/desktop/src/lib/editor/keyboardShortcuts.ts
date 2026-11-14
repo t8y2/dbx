@@ -1,5 +1,5 @@
 import { isMacShortcutPlatform, parseShortcutParts } from "@/lib/editor/shortcutDisplay";
-import { readNormalizedShortcutSettings, type ShortcutActionId, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { readNormalizedShortcutSettings, DEFAULT_SHORTCUT_SETTINGS, type ShortcutActionId, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 
 export interface ShortcutLikeEvent {
   key: string;
@@ -335,6 +335,19 @@ export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Part
   return matchesShortcut(event, actionShortcut("refreshData", shortcuts));
 }
 
+/**
+ * Sidebar tree refresh predates the configurable `refreshData` binding and also
+ * accepted Ctrl/Cmd+R. Keep that alias only while the user runs the default
+ * binding: once the shortcut is customized (#14919), every other key — the old
+ * F5 included — must stop refreshing the tree.
+ */
+export function isSidebarRefreshShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  if (isRefreshDataShortcut(event, shortcuts)) return true;
+  const configured = shortcuts?.refreshData;
+  if (configured !== undefined && configured !== DEFAULT_SHORTCUT_SETTINGS.refreshData) return false;
+  return isModRShortcut(event);
+}
+
 export function isToggleResultsPaneShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleResultsPane", shortcuts));
 }
@@ -498,6 +511,10 @@ export function isViewTableDdlShortcut(event: ShortcutLikeEvent, shortcuts?: Par
 
 export function isEditSidebarTableStructureShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("editSidebarTableStructure", shortcuts, platform), platform);
+}
+
+export function isCreateSidebarDatabaseShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("createSidebarDatabase", shortcuts));
 }
 
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

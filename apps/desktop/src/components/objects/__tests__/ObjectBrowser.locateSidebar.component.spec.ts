@@ -210,7 +210,8 @@ describe.each(["list", "grid", "compact"] as const)("ObjectBrowser locate in sid
     const host = await mountBrowser({ schema: "browser_schema" });
     expect(host.querySelector('[title="objects.configureColumns"]')).not.toBeNull();
     expect(host.querySelector('[data-object-column-resize="name"]')).not.toBeNull();
-    expect(host.querySelector('[data-object-column-resize="comment"]')).toBeNull();
+    const header = host.querySelector(".object-browser-table > div:first-child .grid")!;
+    expect(header.lastElementChild?.querySelector("[data-object-column-resize]")).toBeNull();
   });
 
   it("keeps the compact card icon and full-name tooltip", async () => {

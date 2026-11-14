@@ -85,6 +85,8 @@ fn native_job_configuration_rpc_fixture() {
                         if mode == "oracle-query-failed"
                             || (mode == "dameng-current-user"
                                 && sql != "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL")
+                            || (mode == "dameng-current-user-rejected"
+                                && sql == "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL")
                         {
                             json!({"columns":[],"rows":[],"execution_error":true,"error":{"diagnostics":{"category":"sql","vendorCode":942}}})
                         } else {
@@ -352,6 +354,47 @@ async fn dameng_runtime_identity_uses_current_user() {
         .with_env(vec![
             ("DBX_NATIVE_JOB_RPC_LOG".into(), log.to_string_lossy().into_owned()),
             ("DBX_NATIVE_JOB_RPC_MODE".into(), "dameng-current-user".into()),
+        ]);
+    let mut client = AgentDriverClient::spawn(launch).await.unwrap();
+    assert!(client.try_optional_handshake("test").await.is_some());
+    let client = Arc::new(PooledAgentClient::new(client));
+    let pool = PoolKind::Agent(client.clone());
+
+    let identity = match runtime_identity(&config, &pool, "").await {
+        Ok(identity) => identity,
+        Err(err) => panic!("expected success, got {err}"),
+    };
+    assert_eq!(identity.session_user, "Owner");
+
+    client.lock().await.shutdown().await;
+    state.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn dameng_runtime_identity_falls_back_to_user_when_current_user_is_rejected() {
+    // Dameng reserves CURRENT_USER: instances that reject the spelling must
+    // still open the job runtime through the plain USER probe (#14859).
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("requests.jsonl");
+    let storage = dbx_core::persistence::test_storage::open(&dir.path().join("state.db")).await.unwrap();
+    let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+        storage,
+        dir.path().join("plugins"),
+        dir.path().join("agents"),
+        "test",
+    ));
+    let config: ConnectionConfig = serde_json::from_value(json!({
+        "id": "dameng-conn", "name": "Dameng fixture", "db_type": "dameng", "host": "127.0.0.1", "port": 5236,
+        "username": "Owner", "password": "", "database": ""
+    }))
+    .unwrap();
+    state.configs.write().await.insert("dameng-conn".into(), config.clone());
+
+    let launch = AgentLaunchSpec::new(std::env::current_exe().unwrap())
+        .with_args(["--exact", "native_job_configuration_rpc_fixture", "--nocapture", "--test-threads=1"])
+        .with_env(vec![
+            ("DBX_NATIVE_JOB_RPC_LOG".into(), log.to_string_lossy().into_owned()),
+            ("DBX_NATIVE_JOB_RPC_MODE".into(), "dameng-current-user-rejected".into()),
         ]);
     let mut client = AgentDriverClient::spawn(launch).await.unwrap();
     assert!(client.try_optional_handshake("test").await.is_some());

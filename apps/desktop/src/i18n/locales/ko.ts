@@ -3149,6 +3149,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "컬럼 머리글을 드래그하여 순서 변경",
     invertColumnVisibility: "반전",
     resetColumnOrder: "순서 초기화",
+    confirmColumnOrderTitle: "열 순서를 저장하시겠습니까?",
+    confirmColumnOrderDescription: "새 순서가 이 테이블의 데이터 보기에 저장됩니다.",
     showAllColumns: "모두 표시",
     showSelectedColumns: "선택 항목 표시",
     showSelectedColumnsHint: "현재 검색과 일치하는 필드만 표시합니다.",

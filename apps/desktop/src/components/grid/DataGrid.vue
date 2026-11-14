@@ -65,7 +65,7 @@ import {
   Highlighter,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -3048,12 +3048,37 @@ function onSynchronizedTableDataGridColumnOrderChanged(event: Event) {
   applyColumnOrderChange(() => onTableDataGridColumnOrderChanged(event));
 }
 
+const pendingColumnOrder = shallowRef<{ scope: string; keys: string[]; current: number[]; next: number[] } | null>(null);
+const confirmColumnOrderOpen = computed({
+  get: () => pendingColumnOrder.value !== null,
+  set: (open: boolean) => {
+    if (!open) pendingColumnOrder.value = null;
+  },
+});
+
 function persistDraggedColumnOrder(indexes: number[]) {
-  applyColumnOrderChange(() => persistColumnOrder(indexes));
+  const current = orderedDisplayableColumnIndexes.value;
+  if (current.every((index, position) => index === indexes[position])) return;
+  if (props.context !== "table-data") {
+    applyColumnOrderChange(() => persistColumnOrder(indexes));
+    return;
+  }
+  pendingColumnOrder.value = { scope: tableColumnOrderScopeKey.value, keys: [...columnOrderKeys.value], current: [...current], next: indexes };
 }
 
 function moveDisplayableColumn(fromDisplayableIndex: number, toDisplayableIndex: number) {
   applyColumnOrderChange(() => moveDisplayableColumnInLayout(fromDisplayableIndex, toDisplayableIndex));
+}
+
+function confirmColumnOrder() {
+  const pending = pendingColumnOrder.value;
+  pendingColumnOrder.value = null;
+  if (!pending || props.context !== "table-data" || pending.scope !== tableColumnOrderScopeKey.value) return;
+  const keys = columnOrderKeys.value;
+  const order = orderedDisplayableColumnIndexes.value;
+  if (keys.length !== pending.keys.length || !keys.every((key, index) => key === pending.keys[index])) return;
+  if (order.length !== pending.current.length || !order.every((column, index) => column === pending.current[index])) return;
+  applyColumnOrderChange(() => persistColumnOrder(pending.next));
 }
 
 function resetColumnOrder() {
@@ -14590,6 +14615,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   gridClipboardActive = false;
+  pendingColumnOrder.value = null;
   gridClipboardLifecycle++;
   rowPreparationController?.abort();
   autoRefresh.stop();
@@ -17918,6 +17944,19 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
     <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
     <DataGridFilterModeOrderDialog v-model:open="filterModeOrderDialogOpen" :database-type="resolvedDatabaseType" :options="supportedFilterModeOptions" @saved="onFilterModeOrderSaved" />
+
+    <Dialog v-model:open="confirmColumnOrderOpen">
+      <DialogContent class="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("grid.confirmColumnOrderTitle") }}</DialogTitle>
+          <DialogDescription>{{ t("grid.confirmColumnOrderDescription") }}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" @click="confirmColumnOrderOpen = false">{{ t("common.cancel") }}</Button>
+          <Button @click="confirmColumnOrder">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog v-model:open="esDeepPageJumpConfirmOpen">
       <DialogContent class="sm:max-w-[480px]">

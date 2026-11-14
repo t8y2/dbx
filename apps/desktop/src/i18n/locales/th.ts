@@ -3416,6 +3416,8 @@ export default withEnglishFallback({
     dragColumnToReorder: "ลากส่วนหัวคอลัมน์เพื่อจัดลำดับใหม่",
     invertColumnVisibility: "กลับด้าน",
     resetColumnOrder: "รีเซ็ตลำดับ",
+    confirmColumnOrderTitle: "บันทึกลำดับคอลัมน์หรือไม่",
+    confirmColumnOrderDescription: "ระบบจะบันทึกลำดับใหม่สำหรับมุมมองข้อมูลของตารางนี้",
     showAllColumns: "แสดงทั้งหมด",
     showSelectedColumns: "แสดงที่เลือก",
     showSelectedColumnsHint: "แสดงเฉพาะฟิลด์ที่ตรงกับการค้นหาปัจจุบัน",

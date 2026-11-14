@@ -15,6 +15,7 @@ pub enum DialectKind {
     Informix,
     Questdb,
     Soql,
+    Transwarp,
     Unsupported,
 }
 
@@ -37,6 +38,7 @@ impl DialectKind {
             DialectKind::Informix => Some(DatabaseType::Informix),
             DialectKind::Questdb => Some(DatabaseType::Questdb),
             DialectKind::Soql => Some(DatabaseType::Salesforce),
+            DialectKind::Transwarp => Some(DatabaseType::Transwarp),
             DialectKind::Unsupported => None,
         }
     }
@@ -55,6 +57,7 @@ impl DialectKind {
             DialectKind::Informix => "informix",
             DialectKind::Questdb => "questdb",
             DialectKind::Soql => "soql",
+            DialectKind::Transwarp => "transwarp",
             DialectKind::Unsupported => "unsupported",
         }
     }
@@ -83,6 +86,7 @@ impl DialectKind {
             "informix" => Some(DialectKind::Informix),
             "questdb" => Some(DialectKind::Questdb),
             "soql" | "salesforce" => Some(DialectKind::Soql),
+            "transwarp" => Some(DialectKind::Transwarp),
             _ => None,
         }
     }
@@ -595,6 +599,13 @@ impl DialectCapabilityDescriptor {
                 max_identifier_length: 40,
                 max_columns_per_table: 500,
                 max_query_size_bytes: 20_000,
+                ..Default::default()
+            },
+            DialectKind::Transwarp => Self {
+                dialect: DialectKind::Transwarp,
+                flags: CAP_ADD_COLUMN | CAP_CREATE_TABLE | CAP_DROP_TABLE,
+                max_identifier_length: 128,
+                supports_schemas: true,
                 ..Default::default()
             },
             DialectKind::Unsupported => Self::default(),

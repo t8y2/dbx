@@ -888,7 +888,7 @@ impl DialectYaml {
         ddl_caps.apply_descriptor_flags(desc.flags);
 
         let identifier_rules = match kind {
-            DialectKind::Mysql => IdentifierRules {
+            DialectKind::Mysql | DialectKind::Transwarp => IdentifierRules {
                 quote_char: "`".to_string(),
                 case_sensitive: false,
                 max_length: desc.max_identifier_length,
@@ -960,6 +960,7 @@ fn kind_name(kind: DialectKind) -> String {
         DialectKind::Informix => "Informix",
         DialectKind::Questdb => "QuestDB",
         DialectKind::Soql => "SOQL",
+        DialectKind::Transwarp => "Transwarp",
         DialectKind::Unsupported => "Unsupported",
     }
     .to_string()

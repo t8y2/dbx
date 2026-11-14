@@ -5569,6 +5569,7 @@ export default withEnglishFallback({
     materializedViews: "Materialized Views",
     procedures: "Procedures",
     functions: "Functions",
+    aggregateFunctions: "ฟังก์ชันรวม",
     sequences: "Sequences",
     schedulerJobs: "Scheduled Jobs",
     databaseLinks: "Database Links",

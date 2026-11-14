@@ -976,7 +976,27 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
     queryStore.openDamengJobAdmin(node.connectionId);
   } else if (node.type === "database-job-admin") {
     queryStore.openDatabaseJobAdmin(node.connectionId);
+  } else if (node.type === "postgres-aggregate-functions") {
+    await openPostgresAggregateFunctions(node, requestId);
   }
+}
+
+async function openPostgresAggregateFunctions(node: TreeNode, requestId: number) {
+  if (!node.connectionId || !node.database || !node.schema || databaseTypeForNode(node) !== "postgres") return;
+  // Escape strings are interpreted consistently regardless of standard_conforming_strings.
+  const schemaLiteral = `E'${node.schema.replaceAll("\\", "\\\\").replaceAll("'", "''")}'`;
+  const sql = `SELECT p.proname AS aggregate_name,
+       pg_catalog.pg_get_function_arguments(p.oid) AS argument_types,
+       pg_catalog.pg_get_function_result(p.oid) AS return_type,
+       pg_catalog.obj_description(p.oid, 'pg_proc') AS comment
+FROM pg_catalog.pg_aggregate AS a
+JOIN pg_catalog.pg_proc AS p ON p.oid = a.aggfnoid
+JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+WHERE n.nspname = ${schemaLiteral}
+ORDER BY p.proname, argument_types;`;
+  if (!isCurrentNavigationRequest(requestId)) return;
+  const tabId = queryStore.createTab(node.connectionId, node.database, `${t("tree.aggregateFunctions")} - ${node.schema}`, "query", node.schema, sql, node.catalog, { forceNew: true, sourceView: true });
+  await queryStore.executeTabSql(tabId, sql);
 }
 
 async function toggle(requestId = beginNavigationRequest()) {
@@ -7858,6 +7878,23 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     if (canOpenObjectBrowser.value) {
       items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+    }
+    if (node.type === "schema" && node.schema && databaseTypeForNode(node) === "postgres") {
+      items.push({
+        sidebarActionId: "tree.aggregateFunctions",
+        label: t("tree.aggregateFunctions"),
+        icon: Braces,
+        action: async () => {
+          if (!node.connectionId) return;
+          const requestId = beginNavigationRequest();
+          try {
+            await connectionStore.ensureConnected(node.connectionId);
+            await openPostgresAggregateFunctions(node, requestId);
+          } catch (error) {
+            if (isCurrentNavigationRequest(requestId)) toastConnectFailed(node.connectionId, error);
+          }
+        },
+      });
     }
     if (currentDatabaseType() === "postgres" && hasTreeNodeDatabaseContext(node)) {
       items.push({ sidebarActionId: "contextMenu.viewPostgresRowLevelSecurity", label: t("contextMenu.viewPostgresRowLevelSecurity"), action: () => openPostgresRowLevelSecurity(node), icon: ShieldCheck });

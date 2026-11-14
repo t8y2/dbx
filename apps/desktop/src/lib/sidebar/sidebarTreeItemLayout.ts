@@ -8,6 +8,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "event",
   "procedure",
   "function",
+  "postgres-aggregate-functions",
   "synonym",
   "oracle-db-link",
   "package",

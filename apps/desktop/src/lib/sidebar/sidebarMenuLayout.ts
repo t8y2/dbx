@@ -79,6 +79,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.viewDdl",
     "contextMenu.viewSource",
     "contextMenu.viewDependencies",
+    "tree.aggregateFunctions",
     "contextMenu.viewPostgresRowLevelSecurity",
     "contextMenu.exportStructure",
     "contextMenu.duplicateStructure",

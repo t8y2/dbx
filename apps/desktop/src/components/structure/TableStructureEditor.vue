@@ -151,6 +151,7 @@ import { formatBytes } from "@/lib/database/serverMetrics";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, localTableColumnDatabaseOrder, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { sortStructureIndexesByColumns, type StructureIndexColumnSort } from "@/lib/table/structureIndexSort";
+import { sortStructureColumnRows, type StructureColumnSortValue, type StructureColumnViewSort } from "@/lib/table/structureColumnViewSort";
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
@@ -2246,12 +2247,87 @@ function columnNeedsVariableGeometryHeight(column: EditableStructureColumn): boo
   return isPostgresGeometryDataType(databaseType.value, column.dataType) && !postgresGeometryTypeValue(column.dataType) && !!postgresGeometrySridValue(column.dataType);
 }
 const columnVirtualItemSize = computed(() => (columns.value.some(columnNeedsVariableGeometryHeight) ? null : structureColumnRowHeight.value));
+// View-only ordering of the column grid (Q1/Q9). Never mutates `columns.value`;
+// each row keeps its table-structure `ordinal` so the # column, drag handlers,
+// search navigation and focus recovery keep referring to the real order.
+const columnViewSort = ref<StructureColumnViewSort | null>(null);
+const columnSortableKeys = new Set(["name", "type", "length", "nullable", "primaryKey", "defaultValue", "comment", "characterSet", "collation"]);
+
+function isColumnSortable(key: string): boolean {
+  return columnSortableKeys.has(key) && colLabels.value.some((label) => label.key === key);
+}
+
+function columnSortValue(column: EditableStructureColumn, key: string): StructureColumnSortValue {
+  switch (key) {
+    case "name":
+      return column.name;
+    case "type":
+      return dataTypeBaseInputValue(databaseType.value, column.dataType);
+    case "length":
+      return [dataTypeLengthInputValue(databaseType.value, column.dataType), dataTypeLengthUnitValue(databaseType.value, column.dataType)].filter(Boolean).join(" ");
+    case "nullable":
+      return column.isNullable;
+    case "primaryKey":
+      return column.isPrimaryKey;
+    case "defaultValue":
+      return column.defaultValue;
+    case "comment":
+      return column.comment;
+    case "characterSet":
+      return columnCharset(column);
+    case "collation":
+      return columnCollation(column);
+    default:
+      return "";
+  }
+}
+
+function toggleColumnViewSort(key: string) {
+  if (!isColumnSortable(key)) return;
+  const current = columnViewSort.value;
+  if (!current || current.key !== key) columnViewSort.value = { key, direction: "asc" };
+  else if (current.direction === "asc") columnViewSort.value = { key, direction: "desc" };
+  else columnViewSort.value = null;
+}
+
+function clearColumnViewSort() {
+  columnViewSort.value = null;
+}
+
+function columnSortIndicator(key: string): string {
+  const current = columnViewSort.value;
+  if (!current || current.key !== key) return "↕";
+  return current.direction === "asc" ? "▲" : "▼";
+}
+
+// aria-sort belongs only on the actively sorted column; leaving it off the
+// others keeps `th[aria-sort]` unambiguous alongside the index tab's header.
+function columnAriaSort(key: string): "ascending" | "descending" | undefined {
+  const current = columnViewSort.value;
+  if (!current || current.key !== key) return undefined;
+  return current.direction === "asc" ? "ascending" : "descending";
+}
+
+// Ordinal -> display position, for scrollToItem when sorting is active (Q10).
+function columnDisplayIndex(ordinal: number): number {
+  if (!columnViewSort.value) return ordinal;
+  const index = displayedColumnRows.value.findIndex((row) => row.ordinal === ordinal);
+  return index < 0 ? ordinal : index;
+}
+
+const displayedColumnRows = computed(() => {
+  const rows = columns.value.map((column, ordinal) => ({ column, ordinal }));
+  const sort = columnViewSort.value;
+  if (!sort || !isColumnSortable(sort.key)) return rows;
+  return sortStructureColumnRows(rows, sort, columnSortValue);
+});
+
 const columnVirtualRows = computed(() => {
   const geometryHintHeight = Math.ceil(structureDensityMetric.value.fontSize * structureDensityMetric.value.lineHeight) + 2;
-  return columns.value.map((column, index) => ({
+  return displayedColumnRows.value.map(({ column, ordinal }) => ({
     id: column.id,
     column,
-    index,
+    index: ordinal,
     size: structureColumnRowHeight.value + (columnNeedsVariableGeometryHeight(column) ? geometryHintHeight : 0),
   }));
 });
@@ -4657,7 +4733,7 @@ async function scrollColumnRowIntoView(index: number, block: ScrollLogicalPositi
   let row = renderedColumnRow(index);
   if (!row) {
     const virtualScroller = columnsScrollerRef.value;
-    if (virtualScroller && !(virtualScroller instanceof HTMLElement)) virtualScroller.scrollToItem?.(index, { align: block });
+    if (virtualScroller && !(virtualScroller instanceof HTMLElement)) virtualScroller.scrollToItem?.(columnDisplayIndex(index), { align: block });
     await nextTick();
     row = renderedColumnRow(index);
   }
@@ -5003,6 +5079,7 @@ function applyPastedColumns(text: string) {
   );
   if (result.diagnostics.length || !result.columns.length) return;
   const drafts = createPastedColumnDrafts(result.columns, uuid);
+  clearColumnViewSort();
   columns.value.splice(resolveInsertColumnIndex(columns.value, selectedColumnId.value), 0, ...drafts);
   selectSingleColumn(drafts[drafts.length - 1]);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
@@ -5021,6 +5098,7 @@ function applyCopiedColumns() {
   const copiedColumns = createCopiedColumnDrafts(sourceColumns, databaseType.value, uuid);
   if (!copiedColumns.length) return;
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  clearColumnViewSort();
   columns.value.splice(insertAt, 0, ...copiedColumns);
   const lastCopiedColumn = copiedColumns[copiedColumns.length - 1];
   if (lastCopiedColumn) selectSingleColumn(lastCopiedColumn);
@@ -5033,6 +5111,7 @@ async function copyColumn(column: EditableStructureColumn) {
   const sourceIndex = columns.value.findIndex((item) => item.id === column.id);
   if (sourceIndex < 0) return;
   const copiedColumn = cloneColumnDraftAsNew(column, uuid);
+  clearColumnViewSort();
   columns.value.splice(sourceIndex + 1, 0, copiedColumn);
   selectSingleColumn(copiedColumn);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
@@ -5059,6 +5138,7 @@ async function addColumn(afterColumn?: EditableStructureColumn) {
   };
   const sourceIndex = afterColumn ? columns.value.findIndex((item) => item.id === afterColumn.id) : -1;
   const insertAt = sourceIndex >= 0 ? sourceIndex + 1 : resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  clearColumnViewSort();
   columns.value.splice(insertAt, 0, column);
   selectSingleColumn(column);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
@@ -5084,6 +5164,7 @@ function applyColumnTemplate(templateId: string) {
     }
   }
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
+  clearColumnViewSort();
   columns.value.splice(insertAt, 0, ...templateColumns);
   const lastTemplateColumn = templateColumns[templateColumns.length - 1];
   if (lastTemplateColumn) selectSingleColumn(lastTemplateColumn);
@@ -5115,6 +5196,7 @@ let columnDragTracking = false;
 
 function canDragColumn(index: number): boolean {
   if (loading.value || saving.value) return false;
+  if (columnViewSort.value) return false;
   if (!Number.isInteger(index) || index < 0 || index >= columns.value.length) return false;
   const column = columns.value[index];
   if (!column || column.markedForDrop) return false;
@@ -5557,7 +5639,7 @@ function scrollToColumnSearchMatch(direction: 1 | -1 = 1) {
     focusColumnSearch();
     return;
   }
-  const matches = columns.value.map((column, index) => ({ column, index })).filter(({ column }) => columnMatchesSearch(column));
+  const matches = displayedColumnRows.value.map(({ column, ordinal }) => ({ column, index: ordinal })).filter(({ column }) => columnMatchesSearch(column));
   if (!matches.length) return;
   const currentIndex = highlightedColumnId.value ? matches.findIndex(({ column }) => column.id === highlightedColumnId.value) : -1;
   const nextMatch = matches[(currentIndex + direction + matches.length) % matches.length] ?? matches[0];
@@ -5707,6 +5789,7 @@ async function copyColumnRows(targets: EditableStructureColumn[]) {
   if (!canAddColumn.value) return;
   const sources = targets.filter((column) => !column.markedForDrop);
   if (!sources.length) return;
+  clearColumnViewSort();
   const copiedIds: string[] = [];
   // Insert from bottom to top so earlier inserts do not shift later source indexes.
   for (let index = sources.length - 1; index >= 0; index--) {
@@ -8390,9 +8473,71 @@ watch(
 
     <PostgresForeignTableOptionsEditor v-if="isCreatingForeignTable" v-model="postgresForeignTable" :connection-id="props.connectionId" :database="props.database" :catalog="props.catalog" :disabled="saving" />
 
+    <div v-if="supportsMysqlEngine" class="flex flex-wrap items-center gap-2 shrink-0">
+      <div class="flex shrink-0 items-center gap-2">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.mysqlTableEngine") }}</label>
+        <SearchableSelect
+          v-model="mysqlTableEngine"
+          :options="mysqlTableEngineOptions"
+          :placeholder="t('structureEditor.mysqlTableEnginePlaceholder')"
+          :search-placeholder="t('structureEditor.mysqlTableEngineSearchPlaceholder')"
+          :empty-text="t('structureEditor.mysqlTableEngineEmpty')"
+          :loading-text="t('common.loading')"
+          :loading="mysqlTableEngineLoading"
+          :disabled="mysqlTableEngineLoading || !!mysqlTableEngineLoadError || saving"
+          :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
+          data-mysql-table-engine-select
+        />
+        <Loader2 v-if="mysqlTableEngineLoading" :class="[structureIconClass, 'animate-spin text-muted-foreground']" />
+        <Tooltip v-else-if="mysqlTableEngineLoadError">
+          <TooltipTrigger as-child>
+            <AlertTriangle :class="[structureIconClass, 'shrink-0 text-destructive']" />
+          </TooltipTrigger>
+          <TooltipContent>{{ t("structureEditor.mysqlTableEngineLoadFailed", { message: mysqlTableEngineLoadError }) }}</TooltipContent>
+        </Tooltip>
+      </div>
+
+      <div class="flex shrink-0 items-center gap-2">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.characterSet") }}</label>
+        <SearchableSelect
+          :model-value="mysqlTableCharset"
+          :options="mysqlCharsetOptions"
+          :placeholder="t('structureEditor.charsetPlaceholder')"
+          :search-placeholder="t('structureEditor.charsetPlaceholder')"
+          :empty-text="t('structureEditor.noMatchingType')"
+          :allow-custom="true"
+          :clearable="isCreateMode"
+          :loading="charsetMetadataLoading"
+          :loading-text="t('common.loading')"
+          :disabled="charsetMetadataLoading || saving"
+          :trigger-class="[structureMonoControlClass, 'w-[180px] max-w-[180px]']"
+          data-mysql-table-charset-select
+          @update:model-value="onMysqlTableCharsetChange"
+        />
+      </div>
+
+      <div class="flex shrink-0 items-center gap-2">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.collation") }}</label>
+        <SearchableSelect
+          v-model="mysqlTableCollation"
+          :options="collationOptionsForCharset(mysqlTableCharset)"
+          :placeholder="t('structureEditor.collationPlaceholder')"
+          :search-placeholder="t('structureEditor.collationPlaceholder')"
+          :empty-text="t('structureEditor.noMatchingType')"
+          :allow-custom="true"
+          :clearable="isCreateMode"
+          :loading="charsetMetadataLoading"
+          :loading-text="t('common.loading')"
+          :disabled="charsetMetadataLoading || saving || !mysqlTableCharset"
+          :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
+          data-mysql-table-collation-select
+        />
+      </div>
+    </div>
+
     <div class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.comment") }}</label>
-      <Input v-model="tableComment" :placeholder="t('structureEditor.tableCommentPlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="isTableCommentDisabled" data-table-comment-input />
+      <Input v-model="tableComment" :placeholder="t('structureEditor.tableCommentPlaceholder')" :class="[structureControlClass, 'flex-1 min-w-0 w-full']" :disabled="isTableCommentDisabled" data-table-comment-input />
       <Tooltip v-if="isTableCommentDisabled">
         <TooltipTrigger as-child>
           <Info :class="[structureIconClass, 'shrink-0 text-muted-foreground']" />
@@ -8404,66 +8549,6 @@ watch(
     <div v-if="canEditPrimaryKeyName" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.primaryKeyName") }}</label>
       <Input v-model="primaryKeyName" :placeholder="t('structureEditor.primaryKeyNamePlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="saving || loading" data-primary-key-name-input />
-    </div>
-
-    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.mysqlTableEngine") }}</label>
-      <SearchableSelect
-        v-model="mysqlTableEngine"
-        :options="mysqlTableEngineOptions"
-        :placeholder="t('structureEditor.mysqlTableEnginePlaceholder')"
-        :search-placeholder="t('structureEditor.mysqlTableEngineSearchPlaceholder')"
-        :empty-text="t('structureEditor.mysqlTableEngineEmpty')"
-        :loading-text="t('common.loading')"
-        :loading="mysqlTableEngineLoading"
-        :disabled="mysqlTableEngineLoading || !!mysqlTableEngineLoadError || saving"
-        :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
-        data-mysql-table-engine-select
-      />
-      <Loader2 v-if="mysqlTableEngineLoading" :class="[structureIconClass, 'animate-spin text-muted-foreground']" />
-      <Tooltip v-else-if="mysqlTableEngineLoadError">
-        <TooltipTrigger as-child>
-          <AlertTriangle :class="[structureIconClass, 'shrink-0 text-destructive']" />
-        </TooltipTrigger>
-        <TooltipContent>{{ t("structureEditor.mysqlTableEngineLoadFailed", { message: mysqlTableEngineLoadError }) }}</TooltipContent>
-      </Tooltip>
-    </div>
-
-    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.characterSet") }}</label>
-      <SearchableSelect
-        :model-value="mysqlTableCharset"
-        :options="mysqlCharsetOptions"
-        :placeholder="t('structureEditor.charsetPlaceholder')"
-        :search-placeholder="t('structureEditor.charsetPlaceholder')"
-        :empty-text="t('structureEditor.noMatchingType')"
-        :allow-custom="true"
-        :clearable="isCreateMode"
-        :loading="charsetMetadataLoading"
-        :loading-text="t('common.loading')"
-        :disabled="charsetMetadataLoading || saving"
-        :trigger-class="[structureMonoControlClass, 'w-[180px] max-w-[180px]']"
-        data-mysql-table-charset-select
-        @update:model-value="onMysqlTableCharsetChange"
-      />
-    </div>
-
-    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.collation") }}</label>
-      <SearchableSelect
-        v-model="mysqlTableCollation"
-        :options="collationOptionsForCharset(mysqlTableCharset)"
-        :placeholder="t('structureEditor.collationPlaceholder')"
-        :search-placeholder="t('structureEditor.collationPlaceholder')"
-        :empty-text="t('structureEditor.noMatchingType')"
-        :allow-custom="true"
-        :clearable="isCreateMode"
-        :loading="charsetMetadataLoading"
-        :loading-text="t('common.loading')"
-        :disabled="charsetMetadataLoading || saving || !mysqlTableCharset"
-        :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
-        data-mysql-table-collation-select
-      />
     </div>
 
     <TablePhysicalOptionsEditor v-if="isCreateMode && databaseType === 'transwarp'" v-model="physicalOptions" :config="INCEPTOR_PHYSICAL_OPTIONS" :columns="columns.filter((column) => !column.markedForDrop && !!column.name.trim())" :disabled="saving" />
@@ -8763,6 +8848,7 @@ watch(
                           :key="columnLabel.key"
                           :class="[structureHeaderCellClass, 'bg-background-solid select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
                           :data-column-selected="columnLabel.key === 'actions' ? undefined : selectedStructureColumnKeys.has(columnLabel.key)"
+                          :aria-sort="columnAriaSort(columnLabel.key)"
                           :style="{
                             width: visibleColWidths[i] + 'px',
                             minWidth: visibleColWidths[i] + 'px',
@@ -8771,11 +8857,32 @@ watch(
                         >
                           <template v-if="columnLabel.key === 'actions'">
                             <div class="flex min-w-0 items-center">
-                              <span class="shrink-0 border-r pr-0.5 text-center text-muted-foreground" :style="{ width: columnOrdinalIndicatorWidth + 'px' }">#</span>
+                              <button
+                                type="button"
+                                data-column-sort-clear
+                                class="shrink-0 border-r pr-0.5 text-center text-muted-foreground hover:text-foreground"
+                                :style="{ width: columnOrdinalIndicatorWidth + 'px' }"
+                                :title="t('grid.clearSort')"
+                                :aria-label="t('grid.clearSort')"
+                                @click.stop="clearColumnViewSort"
+                              >
+                                #
+                              </button>
                               <span class="min-w-0 flex-1 pl-0.5 text-center">{{ columnLabel.label }}</span>
                             </div>
                           </template>
-                          <template v-else>{{ columnLabel.label }}</template>
+                          <template v-else>
+                            {{ columnLabel.label
+                            }}<button
+                              v-if="isColumnSortable(columnLabel.key)"
+                              type="button"
+                              :data-column-sort-key="columnLabel.key"
+                              :data-sort-indicator="columnSortIndicator(columnLabel.key)"
+                              class="structure-column-sort-button ml-1 inline-flex items-center align-baseline text-[10px] leading-none text-muted-foreground hover:text-foreground"
+                              :aria-label="t('grid.sort')"
+                              @click.stop="toggleColumnViewSort(columnLabel.key)"
+                            ></button>
+                          </template>
                           <div
                             v-if="columnLabel.key !== 'actions' && i < colLabels.length - 1"
                             class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize hover:bg-primary/30"
@@ -10364,6 +10471,12 @@ watch(
 </template>
 
 <style scoped>
+/* Keep the sort glyph visual-only so <th> textContent stays the plain column
+   label (header selection/copy specs match headers by their text). */
+.structure-column-sort-button::after {
+  content: attr(data-sort-indicator);
+}
+
 .structure-grid-column-selected {
   background-color: color-mix(in oklab, var(--primary) 14%, transparent) !important;
 }

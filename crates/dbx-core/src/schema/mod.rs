@@ -25,6 +25,8 @@ mod agent_pg_sequences;
 #[cfg(all(test, unix))]
 mod external_table_filter_tests;
 mod kingbase;
+mod postgres_view_comments;
+pub(crate) use postgres_view_comments::enrich_postgres_view_ddl_with_comments;
 mod mongodb_columns;
 mod oracle_ddl_indexes;
 pub mod oracle_routines;
@@ -11340,6 +11342,18 @@ async fn get_table_ddl_core_with_options(
                 .await,
             ));
         }
+        if database_type == Some(DatabaseType::Postgres) {
+            return enrich_postgres_view_ddl_with_comments(
+                state,
+                connection_id,
+                database,
+                schema,
+                table,
+                &sanitize_ddl_string(ddl),
+                client_session_id,
+            )
+            .await;
+        }
         return Ok(sanitize_ddl_string(ddl));
     }
     if matches!(object_type, Some(db::ObjectSourceKind::MaterializedView)) {
@@ -11354,7 +11368,21 @@ async fn get_table_ddl_core_with_options(
             None,
         )
         .await?;
-        return Ok(sanitize_ddl_string(source.source));
+        let ddl = sanitize_ddl_string(source.source);
+        if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::Postgres)
+        {
+            return enrich_postgres_view_ddl_with_comments(
+                state,
+                connection_id,
+                database,
+                schema,
+                table,
+                &ddl,
+                client_session_id,
+            )
+            .await;
+        }
+        return Ok(ddl);
     }
     if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
         // Routines, packages, triggers, types and the other schema objects have no

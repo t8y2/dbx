@@ -2613,6 +2613,15 @@ const {
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
+const quickBuilderColumns = computed(() => {
+  if (!hasCustomColumnOrder.value) return undefined;
+  const columns = filterBuilderColumnOptions.value;
+  const available = new Set(columns);
+  const ordered = new Set(orderedDisplayableColumnIndexes.value.map((index) => props.result.columns[index]).filter((name) => available.has(name)));
+  // A field can be filterable even when it is absent from the current result.
+  for (const name of columns) ordered.add(name);
+  return [...ordered];
+});
 // The WHERE field dropdown follows the grid's custom column order instead of the
 // stored result order, so it matches what the user sees after reordering columns
 // (#14836). Falls back to the table/result columns when nothing is displayable yet.
@@ -15588,6 +15597,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :show-order-by="dataGridOrderByVisible"
                   :where-pane-ratio="dataGridWhereRatio"
                   :columns="whereFilterColumns"
+                  :quick-builder-columns="quickBuilderColumns"
                   :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
                   :identifier-quote="conditionIdentifierQuote"

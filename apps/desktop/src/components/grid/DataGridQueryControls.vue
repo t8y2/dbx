@@ -30,6 +30,7 @@ const props = withDefaults(
     whereInput: string;
     orderByInput: string;
     columns: readonly string[];
+    quickBuilderColumns?: readonly string[];
     commentByColumn?: ReadonlyMap<string, string>;
     conditionColumns: readonly DataGridConditionColumnOption[];
     identifierQuote?: string;
@@ -103,6 +104,12 @@ const emit = defineEmits<{
   clearSortRules: [];
   applySortRules: [];
 }>();
+
+const quickFilteredColumns = computed(() => {
+  if (!props.quickBuilderColumns) return props.filteredColumns;
+  const matching = new Set(props.filteredColumns);
+  return props.quickBuilderColumns.filter((column) => matching.has(column));
+});
 
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement>();
@@ -281,8 +288,8 @@ onUnmounted(onResizeEnd);
               :rules="rules"
               :show-apply-only="true"
               :apply-only-busy="applyOnlyBusy"
-              :columns="[...columns]"
-              :filtered-columns="filteredColumns"
+              :columns="[...(quickBuilderColumns ?? columns)]"
+              :filtered-columns="quickFilteredColumns"
               :mode-options="modeOptions"
               :column-search="columnSearch"
               :disabled="!canUseWhereSearch"
@@ -369,7 +376,7 @@ onUnmounted(onResizeEnd);
           <PopoverContent data-sort-rules-scroll align="start" :collision-padding="8" class="max-h-[var(--reka-popover-content-available-height)] w-fit max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain p-2.5">
             <DataGridSortBuilder
               :rules="sortRules ?? []"
-              :columns="columns"
+              :columns="quickBuilderColumns ?? columns"
               :comment-by-column="commentByColumn"
               :busy="sortBuilderBusy"
               :apply-only-busy="sortApplyOnlyBusy"

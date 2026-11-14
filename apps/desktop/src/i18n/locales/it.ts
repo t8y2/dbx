@@ -9705,6 +9705,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "Salva SQL",
     shortcutAcceptCompletion: "Accetta completamento",
     shortcutTriggerCompletion: "Attiva completamento",
+    shortcutPreviousCompletion: "Suggerimento di completamento precedente",
+    shortcutNextCompletion: "Suggerimento di completamento successivo",
     shortcutFormatSql: "Formatta SQL",
     shortcutExpandSelectStar: "Espandi * in colonne",
     shortcutToggleLineComment: "Attiva/disattiva commento di riga",

@@ -11334,6 +11334,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "Сохранить SQL",
     shortcutAcceptCompletion: "Принять автодополнение",
     shortcutTriggerCompletion: "Вызвать автодополнение",
+    shortcutPreviousCompletion: "Предыдущий вариант автодополнения",
+    shortcutNextCompletion: "Следующий вариант автодополнения",
     shortcutFormatSql: "Форматировать SQL",
     shortcutExpandSelectStar: "Развернуть * в столбцы",
     shortcutToggleLineComment: "Переключить однострочный комментарий",

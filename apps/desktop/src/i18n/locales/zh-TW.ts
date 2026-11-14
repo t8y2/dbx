@@ -8782,6 +8782,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "儲存 SQL",
     shortcutAcceptCompletion: "接受補全",
     shortcutTriggerCompletion: "觸發補全",
+    shortcutPreviousCompletion: "上一個補全項目",
+    shortcutNextCompletion: "下一個補全項目",
     shortcutFormatSql: "格式化 SQL",
     shortcutExpandSelectStar: "將 * 展開為欄位",
     shortcutToggleLineComment: "切換行註解",

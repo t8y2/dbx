@@ -168,6 +168,9 @@ async fn live_doris_database_export_writes_all_rows_inner() {
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 100,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
     // Mirrors production: the Tauri command parks the export body on a
     // dedicated large-stack blocking thread (data/export_runtime.rs) because the

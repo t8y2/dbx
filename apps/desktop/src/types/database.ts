@@ -2279,6 +2279,7 @@ export interface TreeNode {
   nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";

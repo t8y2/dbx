@@ -508,7 +508,9 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
     // Filtering can move the old scroll position into another database/schema.
     // Reveal the edited scope before looking for its input: the original row
     // may not even be mounted in the virtual renderer at the old position.
-    const pinnedSearchIsVisible = stickyTableSearchNode.value?.node.tableSearchParentId === focusRestore.parentNodeId && !stickyHeaderStyle.value.transform;
+    const connectionHeaderHeight = root.querySelector(".sticky-connection-header")?.getBoundingClientRect().height ?? 0;
+    const headerClearance = Number.parseFloat(String(stickyHeaderStyle.value["--sticky-header-clearance"] ?? "Infinity"));
+    const pinnedSearchIsVisible = stickyTableSearchNode.value?.node.tableSearchParentId === focusRestore.parentNodeId && headerClearance >= connectionHeaderHeight;
     const searchIndex = flatNodes.value.findIndex(({ node }) => isSidebarTableSearchControlNode(node) && node.tableSearchParentId === focusRestore.parentNodeId);
     if (searchIndex < 0) return;
     const scroller = currentTreeScroller();
@@ -519,7 +521,7 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
         viewportHeight: scroller.clientHeight,
         scrollHeight: scroller.scrollHeight,
         rowHeight: sidebarTreeRowHeight.value,
-        topOcclusionHeight: sidebarTreeRowHeight.value,
+        topOcclusionHeight: sidebarTreeRowHeight.value + connectionHeaderHeight,
         align: "nearest",
       });
       updateSidebarScrollMetrics();
@@ -1149,8 +1151,10 @@ watch(
 // boundary, while native sticky rows would cover that non-sticky connection.
 const stickyScrollTop = ref(0);
 const plainStickyContainerIndex = ref(-1);
+const plainStickyConnectionIndex = ref(-1);
 const sidebarScrollMetrics = ref({ scrollTop: 0, scrollLeft: 0, clientHeight: 0, clientWidth: 0, scrollHeight: 0, scrollWidth: 0 });
 const stickyRowRef = ref<HTMLElement | null>(null);
+const stickyConnectionRowRef = ref<HTMLElement | null>(null);
 const isScrollingSidebar = ref(false);
 const isDraggingSidebarScrollbar = ref(false);
 const isDraggingSidebarHorizontalScrollbar = ref(false);
@@ -1171,10 +1175,12 @@ function updateSidebarScrollMetrics() {
   stickyScrollTop.value = scroller.scrollTop;
   if (useVirtualTree.value || isTreeSearchFiltering.value) {
     plainStickyContainerIndex.value = -1;
+    plainStickyConnectionIndex.value = -1;
   } else {
     const scrollerTop = scroller.getBoundingClientRect().top + scroller.clientTop;
     const rows = Array.from(scroller.querySelectorAll<HTMLElement>("[data-node-id]")).map((row) => ({ nodeId: row.dataset.nodeId ?? "", top: row.getBoundingClientRect().top }));
     plainStickyContainerIndex.value = resolvePlainStickyContainerIndex(flatNodes.value, flatTreeIndex.value, rows, scrollerTop);
+    plainStickyConnectionIndex.value = resolvePlainStickyContainerIndex(flatNodes.value, flatTreeIndex.value, rows, scrollerTop, "connection");
   }
   sidebarScrollMetrics.value = {
     scrollTop: scroller.scrollTop,
@@ -1277,6 +1283,33 @@ const stickyContainerIndex = computed(() => {
 
 const stickyNode = computed<FlatTreeNode | null>(() => flatNodes.value[stickyContainerIndex.value] ?? null);
 
+const stickyConnectionIndex = computed(() => {
+  if (isTreeSearchFiltering.value || stickyScrollTop.value <= 0) return -1;
+  if (!useVirtualTree.value) return plainStickyConnectionIndex.value;
+  const topIndex = Math.min(Math.floor(stickyScrollTop.value / sidebarTreeRowHeight.value), flatNodes.value.length - 1);
+  const index = flatTreeIndex.value.connectionIndexByIndex[topIndex] ?? -1;
+  return index >= 0 && stickyScrollTop.value > index * sidebarTreeRowHeight.value ? index : -1;
+});
+const stickyConnection = computed(() => {
+  const connection = flatNodes.value[stickyConnectionIndex.value];
+  return connection?.node.isExpanded ? connection : null;
+});
+const stickyConnectionStyle = computed<CSSProperties>(() => {
+  if (!stickyConnection.value) return {};
+  const height = sidebarTreeRowHeight.value;
+  const nextBoundary = flatTreeIndex.value.nextBoundaryIndexByIndex[stickyConnectionIndex.value] ?? -1;
+  if (nextBoundary < 0) return { height: `${height}px` };
+  let distance = nextBoundary * height - stickyScrollTop.value;
+  if (!useVirtualTree.value) {
+    const scroller = plainTreeScrollerRef.value;
+    const nextId = flatNodes.value[nextBoundary]?.id;
+    const row = nextId ? scroller?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(nextId)}"]`) : undefined;
+    if (scroller && row) distance = row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientTop;
+  }
+  return { height: `${height}px`, transform: `translateY(${Math.min(0, distance - height)}px)` };
+});
+const stickyConnectionHeight = computed(() => (stickyConnection.value ? sidebarTreeRowHeight.value : 0));
+
 // Search controls belong to their parent subtree, including schema and table
 // group scopes. Build the lookup once per tree change, not on every scroll.
 type StickyTableSearchScope = { item: FlatTreeNode; endIndex: number };
@@ -1317,21 +1350,20 @@ const stickyTableSearchScope = computed(() => {
 const stickyTableSearchNode = computed(() => stickyTableSearchScope.value?.item ?? null);
 
 function syncStickyRowHorizontalPosition(scroller = currentTreeScroller()) {
-  const row = stickyRowRef.value;
-  if (!row) return;
-
-  if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll || !scroller) {
-    row.style.removeProperty("width");
-    row.style.removeProperty("transform");
-    return;
+  for (const row of [stickyRowRef.value, stickyConnectionRowRef.value]) {
+    if (!row) continue;
+    if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll || !scroller) {
+      row.style.removeProperty("width");
+      row.style.removeProperty("transform");
+    } else {
+      row.style.width = `${Math.max(scroller.clientWidth, sidebarTreeContentWidth.value)}px`;
+      row.style.transform = `translate3d(${-scroller.scrollLeft}px, 0, 0)`;
+    }
   }
-
-  row.style.width = `${Math.max(scroller.clientWidth, sidebarTreeContentWidth.value)}px`;
-  row.style.transform = `translate3d(${-scroller.scrollLeft}px, 0, 0)`;
 }
 
 watch(
-  [stickyNode, useVirtualTree, treeScrollerRef, plainTreeScrollerRef],
+  [stickyNode, stickyConnection, useVirtualTree, treeScrollerRef, plainTreeScrollerRef],
   () => {
     void nextTick(() => syncStickyRowHorizontalPosition());
   },
@@ -1355,11 +1387,17 @@ const stickyHeaderStyle = computed<CSSProperties>(() => {
     const nextRow = nextNodeId ? Array.from(scroller?.querySelectorAll<HTMLElement>("[data-node-id]") ?? []).find((row) => row.dataset.nodeId === nextNodeId) : undefined;
     if (scroller && nextRow) distanceToNext = nextRow.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
   }
-  if (distanceToNext >= stickyHeaderHeight.value) return {};
+  const clearance = distanceToNext - stickyHeaderHeight.value;
   return {
-    transform: `translateY(${Math.min(0, distanceToNext - stickyHeaderHeight.value)}px)`,
+    "--sticky-header-clearance": `${clearance}px`,
+    ...(clearance < 0 ? { transform: `translateY(${clearance}px)` } : {}),
   };
 });
+
+const stickyContainerStyle = computed<CSSProperties>(() => ({
+  ...stickyHeaderStyle.value,
+  transform: `translateY(min(0px, calc(var(--sticky-header-clearance, 100vh) - ${stickyConnectionHeight.value}px)))`,
+}));
 
 // Keep the badge outside the translated header so production-to-production
 // handovers do not cover or remount it. Both tree renderers share this context.
@@ -1701,9 +1739,9 @@ async function flashSidebarNode(nodeId: string) {
 }
 
 function topOcclusionHeightForSidebarNode(nodeId: string): number {
+  if (stickyConnection.value?.id === nodeId) return 0;
   const sticky = stickyNode.value;
-  if (!sticky || sticky.id === nodeId) return 0;
-  return stickyHeaderHeight.value;
+  return stickyConnectionHeight.value + (sticky && sticky.id !== nodeId ? stickyHeaderHeight.value : 0);
 }
 
 /** Select and reveal a freshly created table group. */
@@ -2227,6 +2265,12 @@ function onNodeToggled(node: TreeNode, expanded: boolean) {
     nodeType: node.type,
     expanded,
   });
+}
+
+function handleTreeNodeToggled(node: TreeNode, expanded: boolean) {
+  const restorePinnedFocus = !expanded && node.type === "connection" && stickyConnectionRowRef.value?.contains(document.activeElement);
+  onNodeToggled(node, expanded);
+  if (restorePinnedFocus) void focusSidebarTreeNode(node.id);
 }
 
 let contextMenuRequest = 0;
@@ -3071,7 +3115,7 @@ defineExpose({
       :node="sidebarTreeRuntimeInitialNode"
       :depth="0"
       @search-toggle="onSearchToggle"
-      @node-toggled="onNodeToggled"
+      @node-toggled="handleTreeNodeToggled"
       @open-ddl="openSidebarDdl"
       @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
@@ -3191,21 +3235,28 @@ defineExpose({
             />
           </template>
         </RecycleScroller>
-        <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5]" :style="stickyHeaderStyle">
-          <div ref="stickyRowRef">
-            <TreeItem
-              :node="stickyNode.node"
-              :depth="stickyNode.depth"
-              :reorder-disabled="true"
-              :reference-drag-disabled="true"
-              :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
-              :is-sticky-context="stickyProductionContext"
-              @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-            />
+        <div v-if="stickyConnection" class="sticky-connection-header absolute inset-x-0 top-0 z-[7]" :style="stickyConnectionStyle">
+          <div ref="stickyConnectionRowRef">
+            <TreeItem :key="stickyConnection.renderKey" :node="stickyConnection.node" :depth="stickyConnection.depth" :reorder-disabled="true" :reference-drag-disabled="true" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
           </div>
-          <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
         </div>
-        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
+        <div v-if="stickyNode" class="pointer-events-none absolute inset-x-0 z-[5] overflow-clip" :style="{ top: `${stickyConnectionHeight}px` }">
+          <div class="sticky-database-header pointer-events-auto" :style="stickyContainerStyle">
+            <div ref="stickyRowRef">
+              <TreeItem
+                :node="stickyNode.node"
+                :depth="stickyNode.depth"
+                :reorder-disabled="true"
+                :reference-drag-disabled="true"
+                :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+                :is-sticky-context="stickyProductionContext"
+                @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+              />
+            </div>
+            <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
+          </div>
+        </div>
+        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ top: `${stickyConnectionHeight}px`, height: `${sidebarTreeRowHeight}px` }">
           <ProductionContextBadge compact />
         </div>
         <div
@@ -3246,21 +3297,28 @@ defineExpose({
             />
           </div>
         </div>
-        <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5]" :style="stickyHeaderStyle">
-          <div ref="stickyRowRef">
-            <TreeItem
-              :node="stickyNode.node"
-              :depth="stickyNode.depth"
-              :reorder-disabled="true"
-              :reference-drag-disabled="true"
-              :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
-              :is-sticky-context="stickyProductionContext"
-              @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
-            />
+        <div v-if="stickyConnection" class="sticky-connection-header absolute inset-x-0 top-0 z-[7]" :style="stickyConnectionStyle">
+          <div ref="stickyConnectionRowRef">
+            <TreeItem :key="stickyConnection.renderKey" :node="stickyConnection.node" :depth="stickyConnection.depth" :reorder-disabled="true" :reference-drag-disabled="true" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
           </div>
-          <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
         </div>
-        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ height: `${sidebarTreeRowHeight}px` }">
+        <div v-if="stickyNode" class="pointer-events-none absolute inset-x-0 z-[5] overflow-clip" :style="{ top: `${stickyConnectionHeight}px` }">
+          <div class="sticky-database-header pointer-events-auto" :style="stickyContainerStyle">
+            <div ref="stickyRowRef">
+              <TreeItem
+                :node="stickyNode.node"
+                :depth="stickyNode.depth"
+                :reorder-disabled="true"
+                :reference-drag-disabled="true"
+                :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)"
+                :is-sticky-context="stickyProductionContext"
+                @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
+              />
+            </div>
+            <TreeItem v-if="stickyTableSearchNode" :key="stickyTableSearchNode.renderKey" :node="stickyTableSearchNode.node" :depth="stickyTableSearchNode.depth" :reorder-disabled="true" :reference-drag-disabled="true" />
+          </div>
+        </div>
+        <div v-if="stickyProductionContext" class="sidebar-sticky-production" :style="{ top: `${stickyConnectionHeight}px`, height: `${sidebarTreeRowHeight}px` }">
           <ProductionContextBadge compact />
         </div>
         <div
@@ -3411,14 +3469,14 @@ defineExpose({
 .sidebar-sticky-production {
   pointer-events: none;
   position: absolute;
-  top: 0;
   right: 8px;
   z-index: 6;
   display: flex;
   align-items: center;
 }
 
-.sticky-database-header {
+.sticky-database-header,
+.sticky-connection-header {
   background-color: var(--sidebar);
   container-type: inline-size;
   overflow: clip;

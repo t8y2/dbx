@@ -5357,6 +5357,7 @@ export default {
     editView: "Edit View",
     viewSource: "View Source",
     viewDependencies: "View Dependencies",
+    viewPostgresRowLevelSecurity: "View Row-Level Security",
     viewObject: "View",
     changeOpenMode: "Change open mode",
     copyDdl: "Copy DDL",

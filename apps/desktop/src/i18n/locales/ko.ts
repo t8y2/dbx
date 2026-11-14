@@ -5089,6 +5089,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "활성화",
     foreignKeyChecksDisable: "비활성화",
     foreignKeyChecksHint: "기본적으로 세션 설정을 따릅니다. 비활성화하면 SET FOREIGN_KEY_CHECKS = 0으로 실행하며, 참조되는 테이블을 임의 순서로 처리할 수 있습니다. 실행 후 원래 값으로 복원합니다.",
+    viewPostgresRowLevelSecurity: "행 수준 보안 정책 보기",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

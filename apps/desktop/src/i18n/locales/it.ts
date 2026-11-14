@@ -3688,6 +3688,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "Eseguendo la query verranno perse le modifiche non confermate nel set di risultati corrente. Puoi annullare per confermare prima le modifiche, oppure ignorare le modifiche ed eseguire la query.",
     queryDiscardAndExecute: "Ignora modifiche ed esegui",
     queryWhileSaving: "Salvataggio delle modifiche al set di risultati in corso. Attendi il completamento del salvataggio prima di eseguire la query.",
+    filterActive: "Filtro applicato",
+    structuredFiltersActive: "{count} filtri condizione",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

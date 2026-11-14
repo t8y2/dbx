@@ -3686,6 +3686,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "Executar a consulta descartará as alterações não confirmadas no conjunto de resultados atual. Você pode cancelar e confirmar as alterações primeiro, ou descartar as alterações e executar a consulta.",
     queryDiscardAndExecute: "Descartar alterações e executar",
     queryWhileSaving: "As alterações do conjunto de resultados estão sendo salvas. Aguarde a conclusão do salvamento antes de executar a consulta.",
+    filterActive: "Filtro aplicado",
+    structuredFiltersActive: "{count} filtros de condição",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

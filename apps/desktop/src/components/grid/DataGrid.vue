@@ -518,6 +518,7 @@ const columnHeaderLabels = computed(() => ({
   regularIndex: t("grid.columnRegularIndex"),
   formatterActive: t("grid.columnFormatterActive"),
   highlightActive: t("grid.highlightActive"),
+  filterActive: t("grid.filterActive"),
   sort: t("grid.sort"),
   columnActions: t("grid.columnActions"),
 }));
@@ -1606,6 +1607,17 @@ const isPersistentFilterView = computed(() => filterEditorView.value === "condit
 // do not use it as a lock: the toolbar toggle must always be able to close them.
 filterBuilderOpen.value = isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
+// Column names with an active structured rule (#14969): the header funnel must
+// track exactly the same completeness rule as the toolbar count badge.
+const structuredFilteredColumnNames = computed(() => {
+  const names = new Set<string>();
+  for (const rule of structuredFilterRules.value) {
+    if (!rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)) {
+      names.add(rule.columnName);
+    }
+  }
+  return names;
+});
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
   keyDataType?: string;
@@ -6375,6 +6387,10 @@ const nullHighlightKeys = computed(() => columnHighlightMatches.value.nullKeys);
 
 function columnHasHighlight(colIdx: number): boolean {
   return hasColumnHighlight(columnHighlightRules.value, colIdx);
+}
+
+function columnHasStructuredFilter(column: string): boolean {
+  return structuredFilteredColumnNames.value.has(column);
 }
 
 function cellIsDuplicateHighlight(displayRow: number, col: number): boolean {
@@ -16354,6 +16370,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :formatter-label="columnHeaderLabels.formatterActive"
                     :highlight-active="columnHasHighlight(col.actualColIdx)"
                     :highlight-label="columnHeaderLabels.highlightActive"
+                    :filter-active="columnHasStructuredFilter(col.name)"
+                    :filter-label="columnHeaderLabels.filterActive"
                     @pointerdown="startColumnHeaderDrag(col.visibleColIdx, $event)"
                     @click-capture="onHeaderClickCapture"
                     @click="onHeaderClick(col.visibleColIdx, $event)"

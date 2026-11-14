@@ -3668,6 +3668,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "執行查詢會捨棄目前結果集中未提交的修改。可取消後先提交修改，或放棄修改並執行查詢。",
     queryDiscardAndExecute: "放棄修改並執行",
     queryWhileSaving: "正在儲存結果集修改，請等待儲存完成後再執行查詢。",
+    filterActive: "已套用篩選",
+    structuredFiltersActive: "{count} 個條件篩選",
   },
   exportProgress: {
     recoveryTitle: "刪除尚未確認結束的匯出？",

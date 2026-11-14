@@ -3548,6 +3548,8 @@ export default withEnglishFallback({
     highlightNulls: "高亮空值",
     clearHighlight: "清除高亮",
     highlightActive: "已启用高亮",
+    filterActive: "已应用筛选",
+    structuredFiltersActive: "{count} 个条件筛选",
     highlightDuplicatesFound: "已高亮 {count} 个重复值",
     highlightDuplicatesNoneFound: "未发现重复值",
     highlightNullsFound: "已高亮 {count} 个空值",

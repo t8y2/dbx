@@ -5174,6 +5174,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "有効",
     foreignKeyChecksDisable: "無効",
     foreignKeyChecksHint: "デフォルトではセッション設定を引き継ぎます。無効時は SET FOREIGN_KEY_CHECKS = 0 で実行し、参照されるテーブルを任意の順序で処理できます。実行後は元の値に戻します。",
+    duplicateStructureCommentsUnavailable: "テーブル構造は複製されましたが、一部のソーステーブルのコメントを読み取れないため、コピーされていない可能性があります。",
   },
   visibleDatabases: {
     title: "表示するデータベース",

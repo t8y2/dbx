@@ -5272,6 +5272,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "Включить",
     foreignKeyChecksDisable: "Отключить",
     foreignKeyChecksHint: "По умолчанию используется параметр сеанса. При отключении выполняется с SET FOREIGN_KEY_CHECKS = 0, что позволяет обрабатывать таблицы, на которые есть ссылки, в любом порядке; после выполнения исходное значение восстанавливается.",
+    duplicateStructureCommentsUnavailable: "Структура таблицы клонирована, но некоторые комментарии исходной таблицы не удалось прочитать; возможно, они не были скопированы.",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

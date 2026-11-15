@@ -5086,6 +5086,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "활성화",
     foreignKeyChecksDisable: "비활성화",
     foreignKeyChecksHint: "기본적으로 세션 설정을 따릅니다. 비활성화하면 SET FOREIGN_KEY_CHECKS = 0으로 실행하며, 참조되는 테이블을 임의 순서로 처리할 수 있습니다. 실행 후 원래 값으로 복원합니다.",
+    duplicateStructureCommentsUnavailable: "테이블 구조가 복제되었지만 일부 원본 테이블 주석을 읽을 수 없어 복사되지 않았을 수 있습니다.",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

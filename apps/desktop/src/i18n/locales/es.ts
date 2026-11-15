@@ -5332,6 +5332,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "Habilitar",
     foreignKeyChecksDisable: "Deshabilitar",
     foreignKeyChecksHint: "De forma predeterminada, se usa la configuración de la sesión. Al deshabilitarla, se ejecuta con SET FOREIGN_KEY_CHECKS = 0, lo que permite procesar las tablas referenciadas en cualquier orden; después de la ejecución, se restaura el valor original.",
+    duplicateStructureCommentsUnavailable: "La estructura de la tabla se ha clonado, pero algunos comentarios de las tablas de origen no se pudieron leer y es posible que no se hayan copiado.",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

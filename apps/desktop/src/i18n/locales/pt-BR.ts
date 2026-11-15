@@ -5151,6 +5151,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "Ativar",
     foreignKeyChecksDisable: "Desativar",
     foreignKeyChecksHint: "Por padrão, segue a configuração da sessão. Quando desativado, executa com SET FOREIGN_KEY_CHECKS = 0, permitindo processar as tabelas referenciadas em qualquer ordem; após a execução, o valor original é restaurado.",
+    duplicateStructureCommentsUnavailable: "A estrutura da tabela foi clonada, mas alguns comentários da tabela de origem não puderam ser lidos e podem não ter sido copiados.",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

@@ -23,6 +23,12 @@ const tasks = ref<OracleDatapumpTaskState[]>([]);
 const activeTaskId = ref<string | null>(null);
 // 对话框当前应显示的页面。
 const viewMode = ref<"configure" | "result">("configure");
+// 对话框状态（给常驻药丸组件判断：对话框打开且非最小化时，隐藏正在展示的任务）。
+const dialogOpen = ref(false);
+const dialogMinimized = ref(false);
+// 最小化时保存的表单状态（没开始任务就最小化 → 点药丸恢复配置）。
+const formMinimized = ref(false);
+const savedForm = ref<Record<string, string> | null>(null);
 
 export function useOracleDatapumpTask() {
   function begin(request: Omit<OracleDatapumpRequest, "taskId">): void {
@@ -50,12 +56,7 @@ export function useOracleDatapumpTask() {
         if (!t) return;
         t.progress = progress;
         t.running = false;
-        // 顺利收尾 6 秒后从列表移除；出错保留等人看。
-        if (progress.status === "Done" || progress.status === "Cancelled") {
-          setTimeout(() => {
-            tasks.value = tasks.value.filter((t) => t.taskId !== taskId);
-          }, 6000);
-        }
+        // 药丸绝不自动关闭：无论成功/失败/取消，都由用户手动关闭。
       })
       .catch((cause) => {
         const t = tasks.value.find((t) => t.taskId === taskId);
@@ -83,6 +84,10 @@ export function useOracleDatapumpTask() {
     tasks.value = [];
     activeTaskId.value = null;
     viewMode.value = "configure";
+    dialogOpen.value = false;
+    dialogMinimized.value = false;
+    formMinimized.value = false;
+    savedForm.value = null;
   }
 
   function openResult(): void {
@@ -98,6 +103,10 @@ export function useOracleDatapumpTask() {
     tasks,
     activeTaskId,
     viewMode,
+    dialogOpen,
+    dialogMinimized,
+    formMinimized,
+    savedForm,
     begin,
     cancel,
     dismiss,

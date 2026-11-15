@@ -58,7 +58,8 @@ const error = computed(() => activeTask.value?.error || localError.value);
 const step = computed(() => dpTask.viewMode.value);
 const cancelling = ref(false);
 const confirming = ref(false);
-const minimized = ref(false);
+// 最小化状态放在 composable：常驻药丸组件需要读它。
+const minimized = dpTask.dialogMinimized;
 let generation = 0;
 
 const tableExistsActionOptions = ["SKIP", "REPLACE", "TRUNCATE", "APPEND"] as const;
@@ -85,8 +86,21 @@ function defaultDumpfile() {
 function resetConfigure() {
   generation += 1;
   minimized.value = false;
-  if (anyRunning.value && activeTask.value) {
-    dpTask.openResult();
+  // 从最小化恢复：还原保存的表单（不清空），让用户继续配置。
+  if (dpTask.formMinimized.value && dpTask.savedForm.value) {
+    const saved = dpTask.savedForm.value;
+    dpTask.formMinimized.value = false;
+    directory.value = saved.directory || "";
+    dumpfile.value = saved.dumpfile || defaultDumpfile();
+    logfile.value = saved.logfile || "";
+    jobMode.value = (saved.jobMode as "schema" | "table") || "schema";
+    schemas.value = saved.schemas ?? (exporting.value ? props.database : "");
+    tables.value = saved.tables || "";
+    remapTo.value = saved.remapTo ?? (exporting.value ? "" : props.database);
+    tableExistsAction.value = saved.tableExistsAction || "SKIP";
+    compression.value = saved.compression || "NONE";
+    dpTask.openConfigure();
+    void loadDirectories();
     return;
   }
   directories.value = [];
@@ -111,18 +125,23 @@ function resetConfigure() {
   tables.value = "";
   tableExistsAction.value = "SKIP";
   compression.value = "NONE";
-  error.value = "";
-  progress.value = null;
+  localError.value = "";
+  // 菜单打开永远进 configure（新表单）。pill 恢复靠 indicator 的 nextTick
+  // focusTask 覆盖——不需要在这里判断 activeTaskId（begin() 启动任务时也会
+  // 设 activeTaskId，会导致菜单再开时误入旧任务的结果页）。
   dpTask.openConfigure();
   void loadDirectories();
 }
 function cleanup() {
   generation += 1;
+  dpTask.dialogOpen.value = false;
+  dpTask.dialogMinimized.value = false;
 }
 onBeforeUnmount(cleanup);
 watch(
   open,
   (value) => {
+    dpTask.dialogOpen.value = value;
     if (value) resetConfigure();
     else cleanup();
   },
@@ -234,8 +253,7 @@ async function start() {
   if (!canStart.value) return;
   confirming.value = true;
   const current = ++generation;
-  error.value = "";
-  progress.value = null;
+  localError.value = "";
   try {
     if (!exporting.value) {
       const allowed = await executeWithProductionContextGuard({
@@ -250,7 +268,6 @@ async function start() {
     if (current !== generation || !open.value) return;
     dpTask.openResult();
     confirming.value = false;
-    dpTask.openResult();
     await connectionStore.ensureConnected(props.connectionId);
     if (current !== generation) return;
     dpTask.begin({
@@ -287,10 +304,31 @@ async function cancel() {
 // 最小化：无论是否在运行都收到右下角药丸（对齐 TableImportDialog；
 // 空闲最小化时药丸显示警示图标 + 可直接关闭）。
 // 关闭（X/Esc/页脚）：运行中保护为最小化，任务不丢失。
+// 最小化 = 直接关闭弹窗（药丸独立于弹窗，永远在右下角）。
+// 点药丸的恢复按钮会重新打开弹窗并显示对应任务的结果页。
+// 最小化 = 保存表单 → 关弹窗。有任务：药丸显示进度；没任务：药丸显示"继续配置"。
 function minimize() {
-  minimized.value = true;
+  dpTask.savedForm.value = {
+    directory: directory.value,
+    dumpfile: dumpfile.value,
+    logfile: logfile.value,
+    jobMode: jobMode.value,
+    schemas: schemas.value,
+    tables: tables.value,
+    remapTo: remapTo.value,
+    tableExistsAction: tableExistsAction.value,
+    compression: compression.value,
+  };
+  dpTask.formMinimized.value = true;
+  open.value = false;
 }
+// 关闭（X）= 关弹窗 + 清任务药丸 + 丢弃保存的表单（用户不要了）。
 function close() {
+  if (activeTask.value && !activeTask.value.running) {
+    dpTask.dismiss(activeTask.value.taskId);
+  }
+  dpTask.formMinimized.value = false;
+  dpTask.savedForm.value = null;
   open.value = false;
 }
 // 阶段标签：Oracle 的 phase 数字 → 用户可读文本；
@@ -316,14 +354,11 @@ const elapsedSeconds = computed(() => (progress.value?.elapsedMs != null ? `${(p
     :open="open"
     @update:open="
       (value) => {
-        if (!value) {
-          if (running.value) minimize();
-          else close();
-        }
+        if (!value) open.value = false;
       }
     "
   >
-    <DialogScrollContent v-if="!minimized" :show-close-button="false" class="flex max-h-[calc(var(--dbx-viewport-height)-4rem)] min-h-0 flex-col overflow-hidden sm:max-w-[640px]">
+    <DialogScrollContent :show-close-button="false" class="flex max-h-[calc(var(--dbx-viewport-height)-4rem)] min-h-0 flex-col overflow-hidden sm:max-w-[640px]">
       <DialogHeader class="flex shrink-0 flex-row items-center pr-2 pt-1"
         ><DialogTitle class="flex min-w-0 flex-1 items-center gap-2 text-base"><DatabaseBackup class="h-4 w-4" />{{ t(exporting ? "oracleDatapump.exportTitle" : "oracleDatapump.importTitle") }}</DialogTitle>
         <Button variant="ghost" size="icon-sm" :aria-label="t('oracleDatapump.minimize')" :title="t('oracleDatapump.minimize')" @click="minimize">
@@ -480,34 +515,4 @@ const elapsedSeconds = computed(() => (progress.value?.elapsedMs != null ? `${(p
       >
     </DialogScrollContent>
   </Dialog>
-
-  <Teleport to="body">
-    <div v-if="minimized && dpTask.tasks.value.length > 0" class="fixed bottom-4 right-4 z-[100] flex max-w-[calc(100vw-2rem)] flex-col gap-2">
-      <div v-for="task in dpTask.tasks.value" :key="task.taskId" class="flex items-center gap-2 rounded-md border bg-popover px-3 py-2 text-popover-foreground shadow-lg" :title="task.running ? t('oracleDatapump.backgroundWarning') : undefined">
-        <Loader2 v-if="task.running" class="h-4 w-4 shrink-0 animate-spin text-primary" />
-        <CheckCircle2 v-else-if="task.progress?.status === 'Done'" class="h-4 w-4 shrink-0 text-emerald-600" />
-        <AlertTriangle v-else class="h-4 w-4 shrink-0 text-destructive" />
-        <span class="min-w-0 truncate text-xs">
-          {{ t(task.kind === "export" ? "oracleDatapump.exportTitle" : "oracleDatapump.importTitle") }} ·
-          {{ task.running ? (task.progress?.percent != null ? Math.round(task.progress.percent) + "%" : "…") : task.error || task.progress?.status === "Error" ? t("oracleDatapump.failed") : t("oracleDatapump.done") }}
-        </span>
-        <span class="max-w-44 truncate font-mono text-xs text-muted-foreground" :title="task.dumpfile">{{ task.dumpfile }}</span>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          :aria-label="t('oracleDatapump.restore')"
-          :title="t('oracleDatapump.restore')"
-          @click="
-            dpTask.focusTask(task.taskId);
-            minimized = false;
-          "
-        >
-          <Maximize2 class="h-4 w-4" />
-        </Button>
-        <Button v-if="!task.running" variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="dpTask.dismiss(task.taskId)">
-          <X class="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
-  </Teleport>
 </template>

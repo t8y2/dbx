@@ -486,6 +486,25 @@ func TestDatapumpHandleInvalidationWithResidualJobRow(t *testing.T) {
 	}
 }
 
+func TestDatapumpFinishedEntrySurvivesNewStart(t *testing.T) {
+	s, d := datapumpTestServer(t)
+	datapumpFastPoll(t)
+	// 任务 A 成功完成
+	d.statusSeq = []datapumpStatusValues{{JobState: "COMPLETED", Percent: 100}}
+	s.startDatapump(datapumpValidRequest("op-1"))
+	datapumpWaitState(t, s, "op-1", "succeeded")
+
+	// 启动任务 B：清理不得删除刚完成的 A（保留期内）。
+	d.statusSeq = []datapumpStatusValues{{JobState: "EXECUTING", Percent: 10}}
+	s.startDatapump(datapumpValidRequest("op-2"))
+
+	// A 的状态查询必须仍然可用（否则前端会拿到 session_unavailable）。
+	status := s.datapumpStatusResultFor("op-1")
+	if status.State != "succeeded" {
+		t.Fatalf("finished entry was evicted too early: %+v", status)
+	}
+}
+
 func TestDatapumpStatusUnknownOperation(t *testing.T) {
 	s, _ := datapumpTestServer(t)
 	result := s.datapumpStatusResultFor("nope")

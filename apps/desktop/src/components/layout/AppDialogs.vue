@@ -19,6 +19,7 @@ const MongoImportDialog = defineAsyncComponent(() => import("@/components/docume
 const MongoDatabaseDumpDialog = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpDialog.vue"));
 const DamengDumpDialog = defineAsyncComponent(() => import("@/components/document/DamengDumpDialog.vue"));
 const OracleDatapumpDialog = defineAsyncComponent(() => import("@/components/document/OracleDatapumpDialog.vue"));
+const OracleDatapumpTaskIndicator = defineAsyncComponent(() => import("@/components/document/OracleDatapumpTaskIndicator.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
@@ -326,6 +327,7 @@ watch(
   />
   <DamengDumpDialog v-if="dialogs.showDamengDumpDialog.value" v-model:open="dialogs.showDamengDumpDialog.value" :connection-id="dialogs.damengDumpPrefillConnectionId.value" :database="dialogs.damengDumpPrefillDatabase.value" :mode="dialogs.damengDumpMode.value" />
   <OracleDatapumpDialog v-if="dialogs.showOracleDatapumpDialog.value" v-model:open="dialogs.showOracleDatapumpDialog.value" :connection-id="dialogs.oracleDatapumpPrefillConnectionId.value" :database="dialogs.oracleDatapumpPrefillDatabase.value" :mode="dialogs.oracleDatapumpMode.value" />
+  <OracleDatapumpTaskIndicator />
   <DataGenerateDialog
     v-if="dialogs.showTableDataGenerateDialog.value"
     v-model:open="dialogs.showTableDataGenerateDialog.value"

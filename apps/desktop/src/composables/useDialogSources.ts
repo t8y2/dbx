@@ -372,7 +372,17 @@ export function useDialogSources() {
         oracleDatapumpPrefillConnectionId.value = source.connectionId;
         oracleDatapumpPrefillDatabase.value = source.database;
         oracleDatapumpMode.value = source.mode;
-        showOracleDatapumpDialog.value = true;
+        // 已打开（可能处于最小化态）时先脉冲 false→true 强制重挂载，
+        // 否则 open 不变化、resetConfigure 不触发、用户永远进不了新表单。
+        // 任务状态在 composable 里，重挂载不丢失。
+        if (showOracleDatapumpDialog.value) {
+          showOracleDatapumpDialog.value = false;
+          nextTick(() => {
+            showOracleDatapumpDialog.value = true;
+          });
+        } else {
+          showOracleDatapumpDialog.value = true;
+        }
         connectionStore.oracleDatapumpSource = null;
       },
     );

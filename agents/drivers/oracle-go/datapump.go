@@ -33,7 +33,11 @@ type datapumpEntry struct {
 	// 过期就自动 STOP_JOB（防止宿主崩溃后任务变孤儿）。
 	leaseDeadline time.Time
 	stopRequested bool // 取消标志：stop RPC 只改它，由轮询循环去执行 STOP_JOB
-	pollCancel    context.CancelFunc
+	// finishedAt 记录进入终态的时刻。清理只删"终态且超过保留期"的 entry——
+	// 否则刚完成的任务会被新一轮 start 的清理删掉，前端轮询拿到
+	// session_unavailable（任务其实已成功）。
+	finishedAt time.Time
+	pollCancel context.CancelFunc
 	done          chan struct{} // 轮询循环退出的信号（channel ≈ 单元素 BlockingQueue）
 }
 
@@ -116,12 +120,13 @@ func (s *server) startDatapump(request datapumpStartRequest) datapumpStartResult
 		defer existing.mu.Unlock()
 		return datapumpStartResult{OperationID: request.OperationID, JobName: existing.jobName, State: existing.state, Reason: existing.reason, VendorCode: existing.vendorCode}
 	}
-	// 惰性清理：移除已终态的 entry（避免 map 无限增长）。
+	// 惰性清理：只删"已终态且超过保留期"的 entry。刚完成的任务必须保留，
+	// 否则前端还在轮询旧任务时会拿到 session_unavailable（任务其实成功了）。
 	for id, e := range s.datapumps {
 		e.mu.Lock()
-		terminal := e.terminalLocked()
+		expired := e.terminalLocked() && !e.finishedAt.IsZero() && time.Since(e.finishedAt) > datapumpEntryRetention
 		e.mu.Unlock()
-		if terminal {
+		if expired {
 			delete(s.datapumps, id)
 		}
 	}
@@ -404,6 +409,7 @@ func (e *datapumpEntry) finish(state, reason string, cause error, oci, detach bo
 		return
 	}
 	e.state, e.reason = state, reason
+	e.finishedAt = time.Now()
 	e.vendorCode = oracleVendorCode(cause)
 	conn, handle := e.conn, e.handle
 	e.conn = nil
@@ -467,6 +473,10 @@ func (s *server) stopDatapump(operationID string) datapumpStatusResult {
 	}
 	return s.datapumpStatusResultFor(operationID)
 }
+
+// datapumpEntryRetention 是终态 entry 的保留时长：足够前端把最后几次轮询
+// 读完、用户回看结果，又不会让 map 无限增长。
+const datapumpEntryRetention = 10 * time.Minute
 
 // datapumpStopWait 限定 stop RPC 等待轮询循环完成 STOP_JOB 的最长时间。
 var datapumpStopWait = 10 * time.Second

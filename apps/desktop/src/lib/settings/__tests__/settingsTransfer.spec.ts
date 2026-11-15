@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, type EditorSettings } from "@/stores/settingsStore";
 import { EDITOR_SETTINGS_DRAFT_KEYS } from "../editorSettingsDraft";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, mergeToolbarItemOrder, type ToolbarItemKey } from "../toolbarCustomization";
 import { buildSettingsTransferFilename, collectTransferCategories, parseSettingsTransferFile, pickTransferableDesktopSettings, serializeSettingsTransfer, SETTINGS_TRANSFER_FORMAT_VERSION, transferCategoryForKey } from "../settingsTransfer";
 
 function fileWith(editor: Record<string, unknown>, overrides: Record<string, unknown> = {}): string {
@@ -273,6 +274,31 @@ describe("settingsTransfer", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) return;
     expect(result.error.detail).toContain("toolbarItems");
+  });
+
+  it("keeps legacy toolbar objects partial during import", () => {
+    const fieldsAddedByToolbarCustomization = new Set(["newConnection", "newQuery", "openSql", "databaseBackups", "mcpSettings", "exportProgress", "settings", "logout"]);
+    const legacyToolbarItems = Object.fromEntries(Object.entries(DEFAULT_EDITOR_SETTINGS.toolbarItems).filter(([key]) => !fieldsAddedByToolbarCustomization.has(key)));
+    const result = parseSettingsTransferFile(fileWith({ toolbarItems: legacyToolbarItems }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.toolbarItems).toEqual(legacyToolbarItems);
+    expect(result.value.editorSettings.toolbarItemOrder).toBeUndefined();
+  });
+
+  it("keeps omitted toolbar order entries in their current slots", () => {
+    const currentOrder: ToolbarItemKey[] = ["newConnection", "alwaysOnTop", ...DEFAULT_TOOLBAR_ITEM_ORDER.filter((key) => key !== "newConnection" && key !== "alwaysOnTop")];
+    const importedOrder = DEFAULT_TOOLBAR_ITEM_ORDER.filter((key) => key !== "alwaysOnTop").reverse();
+    const merged = mergeToolbarItemOrder(currentOrder, importedOrder);
+    expect(merged[1]).toBe("alwaysOnTop");
+    expect(merged.filter((key) => key !== "alwaysOnTop")).toEqual(importedOrder);
+  });
+
+  it("can omit desktop-only toolbar entries from Web exports", () => {
+    const text = serializeSettingsTransfer(DEFAULT_EDITOR_SETTINGS, {}, {}, { omitToolbarItemKeys: ["alwaysOnTop"] });
+    const editor = JSON.parse(text).settings.editor;
+    expect(editor.toolbarItems).not.toHaveProperty("alwaysOnTop");
+    expect(editor.toolbarItemOrder).not.toContain("alwaysOnTop");
   });
 
   it("rejects empty active custom theme ids", () => {

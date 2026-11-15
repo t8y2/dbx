@@ -1473,6 +1473,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -1537,6 +1539,8 @@ export interface GlobalSearchRequest {
    * (Quick Open behavior).
    */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -1550,8 +1554,22 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
   return invoke("global_search", { request });
+}
+
+export async function cancelGlobalSearch(searchId: string): Promise<void> {
+  return invoke("cancel_global_search", { searchId });
 }
 
 // --- AI Conversations ---

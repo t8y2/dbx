@@ -384,9 +384,9 @@ function revealActiveTabAfterLayout() {
 const showOverflowControl = computed(() => {
   void tabLayoutRevision.value;
   // In two-row mode the detail strip represents a selected semantic group.
-  // Keep its tab-list affordance stable when switching groups, even when the
-  // current group's tabs happen to fit without physical overflow.
-  if (isTwoRowLayout.value) return twoRowSelectedTabCount.value > 1;
+  // Keep its tab-list affordance available for every rendered group, including
+  // single-tab plugin pages, instead of deriving it from physical overflow.
+  if (isTwoRowLayout.value) return twoRowSelectedTabCount.value > 0;
 
   // A single-row strip hides tabs in two ways: they scroll out of the viewport
   // (real overflow) or they stay in it and ellipsize their labels, which the
@@ -2508,7 +2508,8 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           <button
             type="button"
             data-new-query-tab
-            class="mx-0.5 inline-flex h-8 w-8 shrink-0 self-center items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="tab-bar-action-button inline-flex shrink-0 self-center items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :class="showOverflowControl ? [isClassicLayout ? 'absolute right-[2.125rem]' : 'absolute right-[2.625rem]', 'top-1/2 z-30 -translate-y-1/2'] : 'mx-0.5'"
             :aria-label="t('toolbar.newQuery')"
             @click="toolbar?.newQuery(groupId)"
           >
@@ -2517,10 +2518,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
       </Tooltip>
-      <div v-if="showOverflowControl" class="tab-overflow-control absolute top-0 z-30 flex h-full items-center" :class="canNewQuery ? (isClassicLayout ? 'right-[2.125rem]' : 'right-[2.625rem]') : 'right-0'">
+      <div v-if="showOverflowControl" class="tab-overflow-control absolute right-0 top-0 z-30 flex h-full items-center">
         <Popover v-model:open="tabOverflowOpen">
           <PopoverTrigger as-child>
-            <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
+            <button type="button" class="tab-bar-action-button inline-flex shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>

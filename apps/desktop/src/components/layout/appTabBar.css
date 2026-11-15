@@ -192,9 +192,9 @@
  * narrowed the strip, the narrower strip re-measured as "fits", the arrow hid,
  * the strip re-widened — an endless per-frame flicker. A constant reservation
  * keeps hasTabOverflow stable, so the arrow becomes a pure overlay that never
- * alters the layout it is measured from. Keep the value in step with the
- * arrow's own offset (`.tab-overflow-control`'s `right-[…]` classes), which is
- * what clears the last tab. */
+ * alters the layout it is measured from. The overflow control stays at the far
+ * right; the new-query button uses the adjacent reserved slot when both are
+ * visible. */
 .app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .app-tab-strip {
   padding-inline-end: 2.5rem;
 }
@@ -259,13 +259,23 @@
   max-width: 100%;
 }
 
-.tab-overflow-control button {
-  width: 34px;
-  height: 34px;
+.tab-bar-action-button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
   min-width: 0;
-  border-color: color-mix(in oklch, var(--foreground) 18%, var(--border));
-  background-color: color-mix(in oklch, var(--muted) 72%, var(--background));
-  box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 10%, transparent);
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background-color: transparent;
+  color: var(--muted-foreground);
+  box-shadow: none;
+}
+
+.tab-bar-action-button:hover {
+  border-color: var(--border);
+  background-color: var(--muted);
+  color: var(--foreground);
 }
 
 [data-settings-page-tab],
@@ -1497,11 +1507,7 @@ html.dbx-legacy-webview .vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[d
  * upward, so the group color reads as depth instead of a flat tint. */
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-tab[data-active-tab="true"] {
   background-color: var(--background, #fff);
-  background-image: linear-gradient(
-    to top,
-    color-mix(in srgb, var(--tab-group-color) 12%, transparent),
-    color-mix(in srgb, var(--tab-group-color) 0%, transparent)
-  );
+  background-image: linear-gradient(to top, color-mix(in srgb, var(--tab-group-color) 12%, transparent), color-mix(in srgb, var(--tab-group-color) 0%, transparent));
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
 }
 

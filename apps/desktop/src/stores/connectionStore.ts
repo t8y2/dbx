@@ -78,6 +78,7 @@ import {
   connectionGroupDestinationRows,
   connectionGroupIdForSelection,
   connectionSidebarSearchAliases,
+  findEntryParentGroupId,
   type DropPosition,
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
@@ -12522,6 +12523,9 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     groupIdForConnection(connectionId: string): string | null {
       return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;
+    },
+    parentGroupIdForSidebarEntry(entryId: string): string | null {
+      return findEntryParentGroupId(sidebarLayout.value.order, entryId) ?? null;
     },
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
       markSidebarLayoutPlacementsEdited([draggedId]);

@@ -1285,10 +1285,17 @@ function updateTreeDragTarget(event: MouseEvent) {
   if (activeNode.value.vgroupKind === "databases") return;
   updateTarget(event, activeNode.value.id, activeNode.value.type);
   // While the list is display-sorted, the underlying manual order used for
-  // before/after positioning is invisible, so only moving into a different
-  // group (a display-order-independent operation) is a coherent drop.
+  // before/after positioning is invisible, so a before/after drop is only
+  // coherent when it changes the dragged row's parent group: moving it into
+  // a different group, or back out to the root level. A same-parent
+  // before/after drop would only reorder the invisible manual order, so it
+  // stays blocked; dropping inside a group was never blocked.
   if (props.moveToGroupOnly && dragState.dropPosition !== "inside") {
-    clearTarget(activeNode.value.id);
+    const draggedParentGroupId = connectionStore.parentGroupIdForSidebarEntry(dragState.draggedId);
+    const targetParentGroupId = connectionStore.parentGroupIdForSidebarEntry(activeNode.value.id);
+    if (draggedParentGroupId === targetParentGroupId) {
+      clearTarget(activeNode.value.id);
+    }
   }
 }
 

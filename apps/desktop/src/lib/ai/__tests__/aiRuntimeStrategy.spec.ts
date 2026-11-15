@@ -19,10 +19,17 @@ describe("AI runtime platform strategy", () => {
   afterEach(() => resetDesktopAiRunRegistryForTests());
 
   it("enables detached runs only for the Tauri desktop runtime", () => {
-    expect(resolveAiRuntimeStrategy(true)).toBe("desktop-background");
+    expect(resolveAiRuntimeStrategy(true, false)).toBe("desktop-background");
     expect(supportsBackgroundAiRuns("desktop-background")).toBe(true);
     expect(resolveAiRuntimeStrategy(false)).toBe("web-cancel-on-navigation");
     expect(supportsBackgroundAiRuns("web-cancel-on-navigation")).toBe(false);
+  });
+
+  it("does not recover another window's background runs in a detached editor", () => {
+    const strategy = resolveAiRuntimeStrategy(true, true);
+    expect(strategy).toBe("desktop-cancel-on-close");
+    expect(supportsBackgroundAiRuns(strategy)).toBe(false);
+    expect(resolveAiRuntimeStrategy(false, true)).toBe("web-cancel-on-navigation");
   });
 
   it("keeps a desktop run addressable by conversation until terminal", () => {

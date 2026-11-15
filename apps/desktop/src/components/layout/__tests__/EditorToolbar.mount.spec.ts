@@ -14,7 +14,8 @@ vi.mock("@/components/ui/button", () => ({
 vi.mock("@/components/ui/searchable-select", () => ({
   SearchableSelect: {
     name: "SearchableSelectStub",
-    template: `<div />`,
+    props: ["options"],
+    template: `<div><slot v-for="option in options" name="option-action" :option="option" :label="option" /></div>`,
   },
 }));
 
@@ -90,6 +91,10 @@ vi.mock("@/components/common/ProductionContextBadge.vue", () => ({
   },
 }));
 
+const clipboard = vi.hoisted(() => ({ copy: vi.fn() }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: clipboard.copy }));
+
+import { useToast } from "@/composables/useToast";
 import EditorToolbar from "../EditorToolbar.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -108,6 +113,7 @@ describe("EditorToolbar mount contract", () => {
   let i18n: ReturnType<typeof createI18n>;
 
   beforeEach(() => {
+    clipboard.copy.mockReset().mockResolvedValue(undefined);
     document.body.innerHTML = "";
     pinia = createPinia();
     setActivePinia(pinia);
@@ -116,6 +122,36 @@ describe("EditorToolbar mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it("copies the current raw database name without switching databases and reports failures", async () => {
+    const host = createHost();
+    const tab = reactive({ id: "tab-copy", title: "SQL", connectionId: "conn-copy", database: "数据库 with spaces", sql: "", mode: "query", isExecuting: false });
+    const onChangeDatabase = vi.fn();
+    const app = createApp({ render: () => h(EditorToolbar, { activeTab: tab as never, activeConnection: { id: "conn-copy", name: "Connection", db_type: "mysql" } as never, onChangeDatabase }) });
+    app.use(pinia).use(i18n).mount(host);
+    await nextTick();
+    const button = () => host.querySelector<HTMLButtonElement>("[data-copy-database-name]");
+    try {
+      expect(button()).not.toBeNull();
+      button()!.click();
+      await nextTick();
+      expect(clipboard.copy).toHaveBeenLastCalledWith("数据库 with spaces");
+      expect(onChangeDatabase).not.toHaveBeenCalled();
+      expect(useToast().message.value).toBe("connection.copied");
+      tab.database = "another_db";
+      await nextTick();
+      clipboard.copy.mockRejectedValueOnce(new Error("permission denied"));
+      button()!.click();
+      await nextTick();
+      expect(clipboard.copy).toHaveBeenLastCalledWith("another_db");
+      expect(useToast().message.value).toBe("grid.copyFailed");
+      tab.database = "";
+      await nextTick();
+      expect(button()).toBeNull();
+    } finally {
+      app.unmount();
+    }
   });
 
   it.each([

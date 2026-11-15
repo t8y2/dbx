@@ -151,6 +151,14 @@ pub struct TableAdminSqlOptions {
     /// the database type alone. See [`qualified_name_with_quote`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
+    /// Whether the target relation is a foreign table (PostgreSQL `relkind = 'f'`).
+    ///
+    /// PostgreSQL requires `DROP FOREIGN TABLE` for those; `DROP TABLE` fails with
+    /// `"<name>" is not a table`. Callers set this from the relation's reported
+    /// table type, so only dialects that actually report foreign tables take the
+    /// foreign branch.
+    #[serde(default)]
+    pub foreign_table: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -536,6 +544,13 @@ pub fn build_drop_table_sql(options: TableAdminSqlOptions) -> String {
     } else {
         ""
     };
+    // PostgreSQL rejects `DROP TABLE` on a foreign table ("is not a table", #14717),
+    // so the statement keyword follows the relation kind. `foreign_table` is only
+    // ever set from a reported `FOREIGN TABLE`, which PostgreSQL-family drivers are
+    // the only ones to produce.
+    if options.foreign_table {
+        return format!("DROP FOREIGN TABLE {table}{cascade};");
+    }
     // Unknown database type: fall back to the ANSI shape rather than guessing a profile.
     let Some(database_type) = options.database_type else {
         return format!("DROP TABLE {table}{cascade};");
@@ -1932,6 +1947,7 @@ mod tests {
     #[test]
     fn builds_drop_and_clear_table_sql() {
         let options = TableAdminSqlOptions {
+            foreign_table: false,
             database_type: Some(DatabaseType::Postgres),
             schema: Some("public".to_string()),
             table_name: "events".to_string(),
@@ -1941,6 +1957,7 @@ mod tests {
         assert_eq!(build_drop_table_sql(options.clone()), "DROP TABLE \"public\".\"events\";");
         assert_eq!(
             build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Postgres),
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
@@ -1951,6 +1968,7 @@ mod tests {
         );
         assert_eq!(
             build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Mysql),
                 schema: None,
                 table_name: "events".to_string(),
@@ -1963,6 +1981,7 @@ mod tests {
         assert_eq!(build_truncate_table_sql(options.clone()), "TRUNCATE TABLE \"public\".\"events\";");
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Postgres),
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
@@ -1973,6 +1992,7 @@ mod tests {
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Mysql),
                 schema: None,
                 table_name: "events".to_string(),
@@ -1983,6 +2003,7 @@ mod tests {
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::ClickHouse),
                 schema: None,
                 table_name: "PresetSubjectInfo".to_string(),
@@ -1993,6 +2014,7 @@ mod tests {
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::ClickHouse),
                 schema: None,
                 table_name: "PresetSubjectInfo".to_string(),
@@ -2003,6 +2025,7 @@ mod tests {
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Bigquery),
                 schema: None,
                 table_name: "events".to_string(),
@@ -2015,6 +2038,7 @@ mod tests {
         // so unlike BigQuery it must not fall through to the TRUNCATE default.
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Spanner),
                 schema: None,
                 table_name: "events".to_string(),
@@ -2025,6 +2049,7 @@ mod tests {
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Spanner),
                 schema: None,
                 table_name: "events".to_string(),
@@ -2037,6 +2062,7 @@ mod tests {
         // quote has to come from the connection rather than from the static per-type mapping.
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Spanner),
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
@@ -2047,6 +2073,7 @@ mod tests {
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Spanner),
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
@@ -2058,6 +2085,7 @@ mod tests {
         // GoogleSQL reports a backtick, which matches the static mapping.
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Spanner),
                 schema: None,
                 table_name: "OrderItems".to_string(),
@@ -2070,6 +2098,7 @@ mod tests {
         // available; this documents the fallback rather than a PostgreSQL-dialect expectation.
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Spanner),
                 schema: Some("public".to_string()),
                 table_name: "events".to_string(),
@@ -2080,6 +2109,7 @@ mod tests {
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Cassandra),
                 schema: None,
                 table_name: "events".to_string(),
@@ -2090,6 +2120,7 @@ mod tests {
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::DuckDb),
                 schema: None,
                 table_name: "events".to_string(),
@@ -2100,6 +2131,7 @@ mod tests {
         );
         assert_eq!(
             build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Iotdb),
                 schema: Some("root.test".to_string()),
                 table_name: "DCU_101".to_string(),
@@ -2110,6 +2142,7 @@ mod tests {
         );
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Iotdb),
                 schema: Some("root.test".to_string()),
                 table_name: "root.test.DCU_101".to_string(),
@@ -2120,6 +2153,7 @@ mod tests {
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Iotdb),
                 schema: Some("root.test".to_string()),
                 table_name: "DCU_101".to_string(),
@@ -2131,6 +2165,7 @@ mod tests {
 
         assert_eq!(
             build_empty_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Questdb),
                 schema: None,
                 table_name: "table_sample".to_string(),
@@ -2141,6 +2176,7 @@ mod tests {
         );
         assert_eq!(
             build_truncate_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(DatabaseType::Questdb),
                 schema: None,
                 table_name: "table_sample".to_string(),
@@ -2155,6 +2191,7 @@ mod tests {
         for database_type in [DatabaseType::Doris, DatabaseType::StarRocks] {
             assert_eq!(
                 build_empty_table_sql(TableAdminSqlOptions {
+                    foreign_table: false,
                     database_type: Some(database_type),
                     schema: None,
                     table_name: "events".to_string(),
@@ -2170,9 +2207,42 @@ mod tests {
     /// profile families plus DuckDB (which resolves to `conservative_ansi`, not the SQLite
     /// family) must all produce a valid statement.
     #[test]
+    fn builds_drop_foreign_table_sql_for_postgres_relations() {
+        let drop_sql = |cascade: Option<bool>| {
+            build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: true,
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("de_dd".to_string()),
+                table_name: "vmes_bfl_last".to_string(),
+                cascade,
+                identifier_quote: None,
+            })
+        };
+
+        // PostgreSQL rejects `DROP TABLE` for relkind = 'f' with "is not a table",
+        // so the keyword has to follow the relation kind (#14717).
+        assert_eq!(drop_sql(None), "DROP FOREIGN TABLE \"de_dd\".\"vmes_bfl_last\";");
+        assert_eq!(drop_sql(Some(true)), "DROP FOREIGN TABLE \"de_dd\".\"vmes_bfl_last\" CASCADE;");
+
+        // A plain relation keeps the ordinary statement.
+        assert_eq!(
+            build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
+                database_type: Some(DatabaseType::Postgres),
+                schema: Some("de_dd".to_string()),
+                table_name: "vmes_bfl_last".to_string(),
+                cascade: None,
+                identifier_quote: None,
+            }),
+            "DROP TABLE \"de_dd\".\"vmes_bfl_last\";"
+        );
+    }
+
+    #[test]
     fn builds_drop_table_sql_per_profile_family() {
         let drop_sql = |database_type: DatabaseType, schema: Option<&str>, cascade: Option<bool>| {
             build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(database_type),
                 schema: schema.map(str::to_string),
                 table_name: "events".to_string(),
@@ -2191,6 +2261,7 @@ mod tests {
         // `qualified_name_with_quote`, and no CASCADE.
         assert_eq!(
             build_drop_table_sql(TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: None,
                 schema: None,
                 table_name: "events".to_string(),

@@ -23,6 +23,16 @@ function fileWithSections(sections: Record<string, unknown>): string {
 }
 
 describe("settingsTransfer", () => {
+  it.each([false, true])("round-trips database activation auto-expansion %s as a navigation preference", (enabled) => {
+    const result = parseSettingsTransferFile(serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarAutoExpandOnDatabaseActivation: enabled }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sidebarAutoExpandOnDatabaseActivation).toBe(enabled);
+    expect(transferCategoryForKey("sidebarAutoExpandOnDatabaseActivation")).toBe("navigation");
+    for (const invalid of ["false", 0, null]) {
+      expect(parseSettingsTransferFile(fileWith({ sidebarAutoExpandOnDatabaseActivation: invalid })).ok).toBe(false);
+    }
+  });
+
   it("round-trips sidebar hover preferences in navigation and rejects invalid values", () => {
     const result = parseSettingsTransferFile(serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarHoverEnabled: false, sidebarHoverDelay: 750 }));
     expect(result.ok).toBe(true);

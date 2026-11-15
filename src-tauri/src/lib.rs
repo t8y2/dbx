@@ -2700,6 +2700,7 @@ pub fn run() {
             commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
+            commands::query::build_oracle_object_export_sql,
             commands::query::build_routine_rename_object_source_statements,
             commands::query::rewrite_oracle_routine_references,
             commands::query::rewrite_oracle_table_references,

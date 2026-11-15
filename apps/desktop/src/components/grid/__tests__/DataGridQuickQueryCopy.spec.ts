@@ -35,6 +35,8 @@ function result(overrides: Partial<QueryResult> = {}): QueryResult {
   });
 }
 
+type MountedGrid = { toggleColumnVisibility: (columnIndex: number) => void };
+
 function mountGrid(databaseType: DatabaseType = "mysql", options: { showStatusSql?: boolean } = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -43,6 +45,7 @@ function mountGrid(databaseType: DatabaseType = "mysql", options: { showStatusSq
   const state = reactive({ result: result(), loading: false, sql: "SELECT * FROM orders;", pageSql: "SELECT * FROM orders LIMIT 100;", initialWhereInput: "status = 999", initialOrderByInput: "id ASC", onExecuteSql: vi.fn() as (() => void) | undefined });
   const host = document.createElement("div");
   document.body.append(host);
+  let grid: MountedGrid | null = null;
   const app = createApp({
     render: () =>
       h(
@@ -51,6 +54,9 @@ function mountGrid(databaseType: DatabaseType = "mysql", options: { showStatusSq
         {
           default: () =>
             h(DataGrid, {
+              ref: (instance) => {
+                grid = instance as unknown as MountedGrid | null;
+              },
               ...state,
               context: "table-data",
               databaseType,
@@ -67,7 +73,7 @@ function mountGrid(databaseType: DatabaseType = "mysql", options: { showStatusSq
   app.use(i18n);
   app.mount(host);
   mounted.push({ app, host });
-  return { host, state, settings, errors, button: () => host.querySelector<HTMLButtonElement>("[data-grid-copy-query-sql]")! };
+  return { host, state, settings, errors, grid: () => grid!, button: () => host.querySelector<HTMLButtonElement>("[data-grid-copy-query-sql]")! };
 }
 
 async function settle() {
@@ -179,6 +185,48 @@ describe("quick-query SQL copy", () => {
     expect(button().disabled).toBe(true);
     expect(footerCopy(host)).toBeNull();
     expect(mocks.copy).toHaveBeenCalledTimes(2);
+    expect(errors).toEqual([]);
+  });
+
+  it("copies a table query that selects only the columns left visible in the column menu", async () => {
+    const projected = "SELECT `id`, `status` FROM orders WHERE status = 4 ORDER BY id DESC LIMIT 100 OFFSET 100;";
+    mocks.buildSelect.mockResolvedValue(projected);
+    const { button, state, grid, errors } = mountGrid();
+    state.result = result({ columns: ["id", "status", "body"], rows: [[1, 4, "x"]] });
+    await settle();
+    expect(mocks.buildSelect).not.toHaveBeenCalled();
+    button().click();
+    await settle();
+    expect(mocks.copy).toHaveBeenLastCalledWith(PAGE_SQL);
+
+    grid().toggleColumnVisibility(2);
+    await settle();
+    expect(mocks.buildSelect).toHaveBeenLastCalledWith(expect.objectContaining({ columns: ["id", "status"], projectColumns: true, whereInput: "status = 4", orderBy: "id DESC", limit: 100, offset: 100 }));
+    button().click();
+    await settle();
+    expect(mocks.copy).toHaveBeenLastCalledWith(projected);
+
+    // Showing the column again goes back to the executed statement.
+    grid().toggleColumnVisibility(2);
+    await settle();
+    button().click();
+    await settle();
+    expect(mocks.copy).toHaveBeenLastCalledWith(PAGE_SQL);
+    expect(errors).toEqual([]);
+  });
+
+  it("keeps the executed statement when a visible column cannot be mapped to a table column", async () => {
+    const { button, state, grid, errors } = mountGrid();
+    state.result = result({ columns: ["id", "status", "body"], rows: [[1, 4, "x"]] });
+    await settle();
+    (state as unknown as { sourceColumns: Array<string | undefined> }).sourceColumns = ["id", undefined, "body"];
+    await settle();
+    grid().toggleColumnVisibility(2);
+    await settle();
+    expect(mocks.buildSelect).not.toHaveBeenCalled();
+    button().click();
+    await settle();
+    expect(mocks.copy).toHaveBeenLastCalledWith(PAGE_SQL);
     expect(errors).toEqual([]);
   });
 

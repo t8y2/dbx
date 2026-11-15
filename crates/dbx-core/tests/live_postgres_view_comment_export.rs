@@ -249,6 +249,9 @@ async fn round_trip(cross_schema: bool) {
         snapshot_session_id: None,
         batch_size: 100,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
     let progress = Mutex::new(Vec::new());
     let exported = Box::pin(export_database_sql_core(&state, &request, |event| progress.lock().unwrap().push(event)))

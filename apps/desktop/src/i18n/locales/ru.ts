@@ -2304,6 +2304,7 @@ export default withEnglishFallback({
     saveAllChanges: "Сохранить все",
     selectConnection: "Выбрать подключение",
     searchConnection: "Поиск подключений...",
+    noConnectedConnections: "Нет активных подключений. Сначала откройте подключение на боковой панели.",
     selectCatalog: "Выбрать каталог",
     searchCatalog: "Поиск каталогов...",
     selectDatabase: "Выбрать базу данных",

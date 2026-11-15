@@ -80,25 +80,6 @@ export function useTauriEvents(deps: {
           }),
         );
 
-        // Plugins report live transport state through plugin events; when an
-        // SSH session dies, flip the sidebar entry offline so the tree stops
-        // showing a connection that no longer exists.
-        track(
-          listen<{ method: string; params: { state?: string; connectionId?: string } }>("dbx-plugin-event", async (event) => {
-            try {
-              const payload = event.payload ?? ({} as typeof event.payload);
-              if (payload.method !== "ssh/session/state" || payload.params?.state !== "disconnected") return;
-              const connectionId = payload.params?.connectionId;
-              if (!connectionId) return;
-              if (!connectionStore.connections.length) await connectionStore.initFromDisk();
-              if (!connectionStore.getConfig(connectionId)) return;
-              connectionStore.markConnectionOffline(connectionId);
-            } catch (e) {
-              console.error("[DBX] dbx-plugin-event (ssh/session/state) error:", e);
-            }
-          }),
-        );
-
         track(
           listen("mcp-reload-connections", async () => {
             try {

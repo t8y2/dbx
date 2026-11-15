@@ -1291,10 +1291,13 @@ function updateTreeDragTarget(event: MouseEvent) {
   // before/after drop would only reorder the invisible manual order, so it
   // stays blocked; dropping inside a group was never blocked.
   if (props.moveToGroupOnly && dragState.dropPosition !== "inside") {
-    const draggedParentGroupId = connectionStore.parentGroupIdForSidebarEntry(dragState.draggedId);
-    const targetParentGroupId = connectionStore.parentGroupIdForSidebarEntry(activeNode.value.id);
-    if (draggedParentGroupId === targetParentGroupId) {
-      clearTarget(activeNode.value.id);
+    const draggedId = dragState.draggedId;
+    if (draggedId !== null) {
+      const draggedParentGroupId = connectionStore.parentGroupIdForSidebarEntry(draggedId);
+      const targetParentGroupId = connectionStore.parentGroupIdForSidebarEntry(activeNode.value.id);
+      if (draggedParentGroupId === targetParentGroupId) {
+        clearTarget(activeNode.value.id);
+      }
     }
   }
 }

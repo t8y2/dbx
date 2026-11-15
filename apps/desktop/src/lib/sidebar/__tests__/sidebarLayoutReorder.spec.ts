@@ -109,9 +109,7 @@ describe("reorderEntries — moving a folder out of its parent", () => {
         {
           type: "group",
           id: "P",
-          children: [
-            { type: "group", id: "G", children: [{ type: "connection", id: "C" }] },
-          ],
+          children: [{ type: "group", id: "G", children: [{ type: "connection", id: "C" }] }],
         },
       ],
     };

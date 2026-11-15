@@ -5403,6 +5403,11 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // Keep `relid` first and every field in the same order as the two
 // `pg_attribute` tiers — `column_info_from_row_offset` decodes the row by
 // position.
+//
+// The precision/scale/length casts use the `::int` shorthand instead of
+// `CAST(... AS int)`: GaussDB parses the shorthand but rejects the ANSI form
+// with `syntax error at or near "int"`, which made `getColumns` fail outright
+// there (#14613).
 fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
     "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
              CASE WHEN ic.data_type = 'USER-DEFINED' THEN ic.udt_name ELSE ic.data_type END AS full_type, \
@@ -5423,9 +5428,9 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
              ) AS is_pk, \
              NULL::text AS column_comment, \
              NULL::text AS column_extra, \
-             CAST(ic.numeric_precision AS int) AS numeric_precision, \
-             CAST(ic.numeric_scale AS int) AS numeric_scale, \
-             CAST(ic.character_maximum_length AS int) AS character_maximum_length, \
+             ic.numeric_precision::int AS numeric_precision, \
+             ic.numeric_scale::int AS numeric_scale, \
+             ic.character_maximum_length::int AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns ic \
              JOIN pg_catalog.pg_namespace n ON n.nspname = ic.table_schema \
@@ -8508,6 +8513,10 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
+// Last-resort single-relation tier: only `information_schema` columns, for
+// servers where the `pg_attribute` tiers yield nothing. Casts the precision,
+// scale and length with `::int` because GaussDB rejects `CAST(... AS int)`
+// with `syntax error at or near "int"` (#14613).
 const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
              c.is_nullable = 'YES' AS is_nullable, \
@@ -8527,9 +8536,9 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              ) AS is_pk, \
              NULL::text AS column_comment, \
              NULL::text AS column_extra, \
-             CAST(c.numeric_precision AS int) AS numeric_precision, \
-             CAST(c.numeric_scale AS int) AS numeric_scale, \
-             CAST(c.character_maximum_length AS int) AS character_maximum_length, \
+             c.numeric_precision::int AS numeric_precision, \
+             c.numeric_scale::int AS numeric_scale, \
+             c.character_maximum_length::int AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns c \
              WHERE c.table_schema = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END) \
@@ -16994,6 +17003,32 @@ mod tests {
         assert!(!sql.contains("pg_attribute"));
         assert!(!sql.contains("pg_index"));
         assert!(!sql.contains('$'));
+    }
+
+    /// GaussDB rejects `CAST(x AS int)` with `syntax error at or near "int"`
+    /// (#14613), while the `::int` shorthand is accepted. Keep both
+    /// information-schema column tiers on the shorthand so a server that only
+    /// has `information_schema` left can still list columns.
+    ///
+    /// The assertions below run on the SQL text itself (not the source file),
+    /// so the explanatory comments above the definitions are irrelevant here.
+    /// Column order is asserted as well: `column_info_from_row_offset` decodes
+    /// these rows positionally, so the cast spelling may change but the order
+    /// and count must not.
+    #[test]
+    fn information_schema_columns_sql_avoids_cast_to_int_for_gaussdb() {
+        for sql in [POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL, postgres_columns_for_relations_information_schema_sql()] {
+            let lowered = sql.to_lowercase();
+            assert!(!lowered.contains("cast("), "ANSI CAST is a syntax error on GaussDB here: {sql}");
+            assert!(!lowered.contains(" as int"), "CAST(... AS int) is a syntax error on GaussDB: {sql}");
+            let precision = sql.find("AS numeric_precision").expect("numeric_precision column");
+            let scale = sql.find("AS numeric_scale").expect("numeric_scale column");
+            let length = sql.find("AS character_maximum_length").expect("character_maximum_length column");
+            assert!(precision < scale && scale < length, "column order changed: {sql}");
+            assert!(sql.contains("numeric_precision::int"), "{sql}");
+            assert!(sql.contains("numeric_scale::int"), "{sql}");
+            assert!(sql.contains("character_maximum_length::int"), "{sql}");
+        }
     }
 
     #[test]

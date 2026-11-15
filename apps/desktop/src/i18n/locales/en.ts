@@ -710,6 +710,7 @@ export default {
       urlEncode: "URL component encode",
       urlDecode: "URL component decode",
       radix: "Integer base conversion",
+      flattenLines: "Collapse lines to one",
     },
     units: {
       auto: "Auto (10/13 digits)",

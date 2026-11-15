@@ -10151,6 +10151,13 @@ export default {
     exportDiffSuccess: "Diffs exported: {path}",
   },
   settings: {
+    toolbarGroup_primary: "Primary actions",
+    toolbarGroup_menu: "More menu",
+    toolbarGroup_right: "Right toolbar",
+    toolbarGroup_controls: "System actions",
+    toolbarOrderHint: "Drag to reorder within each group. Hidden primary and system actions remain available in More.",
+    toolbarReorderItem: "Drag to reorder {item}",
+    toolbarExportProgress: "Task progress",
     historyRetentionLimit: "Query history retention",
     mcpHistoryRetentionLimit: "MCP history retention",
     mcpHistoryRetentionDescription: "Controls MCP call history independently from SQL history.",

@@ -3605,6 +3605,23 @@ fn sorted_cap_order_expression(
     expression
 }
 
+fn write_row_limit_sort_fallback_comment<W: Write>(
+    file: &mut W,
+    request: &DatabaseExportRequest,
+    table: &str,
+    matched_sort_column: Option<&str>,
+) -> Result<(), String> {
+    if request.row_limit_per_table.is_none() || matched_sort_column.is_some() {
+        return Ok(());
+    }
+    let Some(requested) = request.row_limit_sort_column.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    writeln!(file, "-- Table {table}: sort column '{requested}' not found; the row cap follows the default read order")
+        .map_err(|error| format!("Failed to write file: {error}"))
+}
+
 #[cfg(test)]
 fn write_database_export_rows<W: Write>(
     file: &mut W,
@@ -6021,6 +6038,12 @@ async fn export_database_sql_core_inner_with_phases(
                     if let Some(remaining) =
                         remaining_rows_under_limit(request.row_limit_per_table, table_exported_rows)
                     {
+                        write_row_limit_sort_fallback_comment(
+                            &mut file,
+                            request,
+                            table_name,
+                            snapshot_sort_column.as_deref(),
+                        )?;
                         let order = snapshot_sort_column.as_ref().map(|column| {
                             sorted_cap_order_expression(
                                 column,
@@ -6128,19 +6151,9 @@ async fn export_database_sql_core_inner_with_phases(
                     // A requested sort column that this table does not have cannot order
                     // the read; fall back to the default read order and say so in the
                     // dump instead of silently returning different rows each run.
-                    if sort_column.is_none()
-                        && table_exported_rows == 0
-                        && remaining_rows_under_limit(request.row_limit_per_table, 0).is_some()
+                    if table_exported_rows == 0 && remaining_rows_under_limit(request.row_limit_per_table, 0).is_some()
                     {
-                        if let Some(requested) =
-                            request.row_limit_sort_column.as_deref().map(str::trim).filter(|value| !value.is_empty())
-                        {
-                            writeln!(
-                                file,
-                                "-- Table {table_name}: sort column '{requested}' not found; the row cap follows the default read order"
-                            )
-                            .map_err(|e| format!("Failed to write file: {e}"))?;
-                        }
+                        write_row_limit_sort_fallback_comment(&mut file, request, table_name, sort_column.as_deref())?;
                     }
 
                     loop {
@@ -6760,9 +6773,9 @@ mod tests {
         record_export_destination_identity, record_export_error, remaining_rows_under_limit,
         replace_database_export_select_list, sort_export_views_by_dependencies, sorted_cap_order_expression,
         split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
-        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
-        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        write_row_limit_sort_fallback_comment, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
         PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
         POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
@@ -6816,6 +6829,24 @@ mod tests {
             append_snapshot_order_and_limit(&sql, Some("\"id\" DESC"), 100),
             format!("{sql} ORDER BY \"id\" DESC LIMIT 100")
         );
+    }
+
+    #[test]
+    fn missing_row_limit_sort_column_writes_a_fallback_comment() {
+        let mut request = export_request(true, true, true, Vec::new());
+        request.row_limit_per_table = Some(10);
+        request.row_limit_sort_column = Some("created_at".to_string());
+
+        let mut output = Vec::new();
+        write_row_limit_sort_fallback_comment(&mut output, &request, "orders", None).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "-- Table orders: sort column 'created_at' not found; the row cap follows the default read order\n"
+        );
+
+        let mut output = Vec::new();
+        write_row_limit_sort_fallback_comment(&mut output, &request, "orders", Some("created_at")).unwrap();
+        assert!(output.is_empty(), "a matched sort column must not emit a fallback comment");
     }
 
     #[test]

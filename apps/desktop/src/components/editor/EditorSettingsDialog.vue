@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import ToolbarSettingsList from "@/components/editor/ToolbarSettingsList.vue";
-import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, type ToolbarItemGroup, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, mergeToolbarItemOrder, type ToolbarItemGroup, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
@@ -378,6 +378,7 @@ import {
   shouldConfirmEditorSettingsDialogClose,
   type EditorSettingsDraft,
   type EditorSettingsDraftKey,
+  type EditorSettingsImportPatch,
 } from "@/lib/settings/editorSettingsDraft";
 import { applyEditorSettingsDraftToRefs, type EditorSettingsDraftRefMap } from "@/lib/settings/applyEditorSettingsDraft";
 import { pickTransferableDesktopSettings, serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId, type SettingsTransferExtras, type TransferableDesktopSettings, type TransferableDesktopSettingsKey } from "@/lib/settings/settingsTransfer";
@@ -4293,6 +4294,7 @@ function buildSettingsExportPayload(): string {
       // real tray/close preferences on import.
       desktopSettings: isWeb ? undefined : pickTransferableDesktopSettings(settingsStore.desktopSettings),
     },
+    isWeb ? { omitToolbarItemKeys: ["alwaysOnTop"] } : {},
   );
 }
 
@@ -4318,8 +4320,14 @@ async function buildAppliedExportPayload(): Promise<string | null> {
 // table-column template row that has no field name yet — keep their exact
 // draft state. The base snapshot is untouched so everything stays unapplied
 // until the user clicks Apply (or discards via the close flow).
-function applyImportedEditorSettings(imported: Partial<EditorSettings>) {
+function applyImportedEditorSettings(imported: EditorSettingsImportPatch) {
   const patch = editorSettingsDraftPatchFromSettings(imported);
+  if (imported.toolbarItems !== undefined) {
+    patch.toolbarItems = { ...editToolbarItems.value, ...imported.toolbarItems };
+  }
+  if (imported.toolbarItemOrder !== undefined) {
+    patch.toolbarItemOrder = mergeToolbarItemOrder(editToolbarItemOrder.value, imported.toolbarItemOrder);
+  }
   applyEditorSettingsKeysToRefs(patch as EditorSettingsDraft, Object.keys(patch) as EditorSettingsDraftKey[]);
   hasImportedSettingsPendingApply.value = true;
 }
@@ -4352,7 +4360,7 @@ function applyImportedExtras(extras: SettingsTransferExtras) {
 
 // Categories whose draft values differ from the saved base AND are covered by
 // the imported file — these draft changes will be replaced by the import.
-function getDraftConflictCategories(imported: Partial<EditorSettings>, extras?: SettingsTransferExtras): SettingsTransferCategoryId[] {
+function getDraftConflictCategories(imported: EditorSettingsImportPatch, extras?: SettingsTransferExtras): SettingsTransferCategoryId[] {
   const changedKeys = new Set(Object.keys(editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value)));
   const conflicts = new Set<SettingsTransferCategoryId>();
   for (const key of Object.keys(imported)) {

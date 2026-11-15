@@ -29,6 +29,24 @@ export function replaceToolbarItemOrder(value: unknown, reorderedKeys: ToolbarIt
   return order.map((key) => (keys.has(key) ? reorderedKeys[index++]! : key));
 }
 
+/**
+ * Applies a transfer-file order while keeping entries omitted by that file in
+ * their current slots. Web exports use this for desktop-only toolbar entries;
+ * legacy files also benefit because they may lack newly introduced keys.
+ */
+export function mergeToolbarItemOrder(value: unknown, importedKeys: readonly ToolbarItemKey[]): ToolbarItemKey[] {
+  const order = normalizeToolbarItemOrder(value);
+  const known = new Set<ToolbarItemKey>(DEFAULT_TOOLBAR_ITEM_ORDER);
+  const imported = [...new Set(importedKeys.filter((key) => known.has(key)))];
+  const importedSet = new Set(imported);
+  let index = 0;
+  const merged = order.map((key) => (importedSet.has(key) ? imported[index++]! : key));
+  for (const key of imported) {
+    if (!order.includes(key)) merged.push(key);
+  }
+  return merged;
+}
+
 // Reorder managed slots without moving overflow/fallback entries from other zones.
 export function orderToolbarItems<T>(items: T[], order: readonly ToolbarItemKey[], keyFor: (item: T) => string): T[] {
   const ranks = new Map<string, number>(order.map((key, index) => [key, index]));

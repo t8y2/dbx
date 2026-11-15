@@ -6445,6 +6445,7 @@ export default withEnglishFallback({
     preview: "SQL önbaxışı",
     execute: "İcra et",
     clearValues: "Dəyərləri təmizlə",
+    clearHistory: "Tarixçəni təmizlə",
     useRawForAll: "Hamısı üçün xam SQL-dən istifadə et",
     ignore: "Nəzərə alma",
     kind: {
@@ -8108,7 +8109,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Hər əhatə dairəsində cədvəlləri müstəqil süzmək üçün genişləndirilmiş verilənlər bazaları, sxemlər və ya cədvəl qruplarının altında yerli cədvəl axtarışı sahəsi göstər.",
     sidebarObjectInfoMode: "Yan paneldə əlavə məlumat",
     sidebarObjectInfoModeDescription:
-      "Şərhləri, obyekt ölçülərini, hər ikisini göstərməyi və ya əlavə məlumatı gizlətməyi seçin. Hər ikisi seçildikdə şərh addan sonra, ölçü isə ən sağda göstərilir. Məlumatı olmayan hissələr gizlədilir. Verilənlər bazalarının ümumi ölçüləri hazırda PostgreSQL üçün; cədvəl ölçüləri isə MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng və ClickHouse üçün dəstəklənir.",
+      "Şərhləri, obyekt ölçülərini, hər ikisini göstərməyi və ya əlavə məlumatı gizlətməyi seçin. Hər ikisi seçildikdə şərh addan sonra, ölçü isə ən sağda göstərilir. Məlumatı olmayan hissələr gizlədilir. Verilənlər bazalarının ümumi ölçüləri hazırda PostgreSQL üçün; cədvəl ölçüləri isə MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris və StarRocks üçün dəstəklənir.",
     sidebarObjectInfoModeCommentInline: "Şərhlər (addan sonra)",
     sidebarObjectInfoModeCommentAligned: "Şərhlər (eyni səviyyədəkiləri düzləndir)",
     sidebarObjectInfoModeCommentRight: "Şərhlər (sağa düzləndir)",
@@ -8515,6 +8516,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "SQL-i yadda saxla",
     shortcutAcceptCompletion: "Tamamlamanı qəbul et",
     shortcutTriggerCompletion: "Tamamlamanı başlat",
+    shortcutPreviousCompletion: "Əvvəlki tamamlama təklifi",
+    shortcutNextCompletion: "Növbəti tamamlama təklifi",
     shortcutFormatSql: "SQL-i formatla",
     shortcutExpandSelectStar: "* işarəsini sütunlarla əvəz et",
     shortcutToggleLineComment: "Sətir şərhini aç/bağla",

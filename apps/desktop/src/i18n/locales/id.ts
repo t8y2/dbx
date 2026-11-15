@@ -7107,6 +7107,7 @@ export default withEnglishFallback({
     preview: "Pratinjau SQL",
     execute: "Jalankan",
     clearValues: "Bersihkan Nilai",
+    clearHistory: "Hapus riwayat",
     useRawForAll: "Gunakan SQL Mentah untuk Semua",
     ignore: "Abaikan",
     kind: {
@@ -8878,7 +8879,7 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnlyDescription: "Pencarian bilah sisi hanya memuat database yang sudah Anda buka pada koneksi aktif. Nonaktifkan untuk mencari semua database pada koneksi tersebut.",
     sidebarObjectInfoMode: "Info tambahan bilah sisi",
     sidebarObjectInfoModeDescription:
-      "Pilih komentar, ukuran objek, keduanya, atau tanpa info tambahan. Jika keduanya dipilih, komentar tampil setelah nama dan ukuran di paling kanan. Informasi yang datanya tidak tersedia akan disembunyikan. Total database saat ini mendukung PostgreSQL; ukuran tabel mendukung MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, dan ClickHouse.",
+      "Pilih komentar, ukuran objek, keduanya, atau tanpa info tambahan. Jika keduanya dipilih, komentar tampil setelah nama dan ukuran di paling kanan. Informasi yang datanya tidak tersedia akan disembunyikan. Total database saat ini mendukung PostgreSQL; ukuran tabel mendukung MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris, dan StarRocks.",
     sidebarObjectInfoModeCommentInline: "Komentar (setelah nama)",
     sidebarObjectInfoModeCommentAligned: "Komentar (sejajarkan dengan item sejenis)",
     sidebarObjectInfoModeCommentRight: "Komentar (rata kanan)",
@@ -9330,6 +9331,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "Simpan SQL",
     shortcutAcceptCompletion: "Terima pelengkapan",
     shortcutTriggerCompletion: "Picu pelengkapan",
+    shortcutPreviousCompletion: "Saran pelengkapan sebelumnya",
+    shortcutNextCompletion: "Saran pelengkapan berikutnya",
     shortcutFormatSql: "Format SQL",
     shortcutExpandSelectStar: "Perluas * menjadi kolom",
     shortcutToggleLineComment: "Aktifkan/nonaktifkan komentar baris",

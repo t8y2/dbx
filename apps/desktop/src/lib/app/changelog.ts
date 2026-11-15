@@ -83,6 +83,21 @@ export function changelogReleaseUrl(tag: string): string {
   return `https://github.com/t8y2/dbx/releases/tag/${encodeURIComponent(tag)}`;
 }
 
+/**
+ * Tag to show in version lists. A beta promoted to stable is not renamed —
+ * the release keeps its beta tag while its name already reads `DBX vX.Y.Z` —
+ * so a stable user would read a beta identifier for what is actually the
+ * stable release (#14739). Genuine beta releases never reach the index
+ * (the sync only keeps non-prerelease releases), so a `-beta.` tag here is
+ * always a promoted build: show its stable base version. The raw tag stays
+ * the fetch and link key; only the label changes.
+ */
+export function displayChangelogTag(tag: string): string {
+  const trimmed = tag.trim();
+  const match = trimmed.match(/^(v[0-9]+\.[0-9]+\.[0-9]+)-beta\..*$/);
+  return match ? match[1] : trimmed;
+}
+
 function cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>, force: boolean): Promise<T> {
   if (force) cache.delete(key);
   let pending = cache.get(key);

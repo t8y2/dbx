@@ -2167,6 +2167,7 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "postgres-aggregate-functions"
   | "group-internal-functions"
   | "group-udf-functions"
   | "group-types"
@@ -3024,6 +3025,12 @@ export interface QueryTab {
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;
+  /** Session restore truncated this tab's SQL because it exceeded the persistence cap. */
+  sqlTruncated?: boolean;
+  /** Original SQL length before truncation. */
+  sqlTruncatedChars?: number;
+  /** Path of the recovery file that holds the full SQL, when it was spilled. */
+  sqlRecoveryPath?: string;
   /** Whether to use auto-commit mode (default true). When false, multiple statements are
    *  wrapped in a single transaction. */
   autoCommit?: boolean;

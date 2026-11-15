@@ -1847,6 +1847,7 @@ export interface SqlCompletionContext {
   isEmptyGroupBy: boolean;
   nonAggregatedSelectColumns: string[];
   comparisonLeftColumn?: string;
+  mysqlWherePredicateStart?: boolean;
   onStar: boolean;
   selectListColumnContext: boolean;
   selectListWildcardAfterCursor?: boolean;
@@ -3190,6 +3191,12 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     isEmptyGroupBy: isEmptyGroupByContext(beforeCursor),
     nonAggregatedSelectColumns: extractNonAggregatedSelectColumns(fullStatement),
     comparisonLeftColumn: detectComparisonLeftColumn(beforeCursor),
+    mysqlWherePredicateStart:
+      (options.databaseType === "mysql" || (!options.databaseType && options.dialect === "mysql")) &&
+      prefix.length > 0 &&
+      !trailingIdentifier?.prefixQuoted &&
+      startsMysqlWherePredicate(beforeToken) &&
+      /^(?:\s*(?:$|[);]|\b(?:AND|OR|ORDER|GROUP|LIMIT|HAVING|UNION)\b))/i.test(sql.slice(cursor, statementSpan.end)),
     onStar: detectOnStar(beforeCursor),
     selectListColumnContext,
     selectListWildcardAfterCursor,
@@ -3789,6 +3796,21 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
   // Match: column_name = | column.column = | alias.column =
   const match = /\b([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)\s*(?:=|!=|<>|>=|<=|>|<)\s*$/i.exec(beforeCursor);
   return match?.[1];
+}
+
+function startsMysqlWherePredicate(beforeIdentifier: string): boolean {
+  if (!/\b(?:where|and|or)$/i.test(beforeIdentifier)) return false;
+  const tokens = tokenizeSqlSemantic(beforeIdentifier, "mysql").filter((token) => token.kind !== "comment");
+  const last = tokens[tokens.length - 1];
+  if (last?.kind !== "word" || !["where", "and", "or"].includes(last.normalized)) return false;
+  if (last.normalized === "where") return true;
+  for (let index = tokens.length - 2; index >= 0; index--) {
+    const token = tokens[index]!;
+    if (token.kind !== "word" || token.depth !== last.depth) continue;
+    if (token.normalized === "where") return true;
+    if (["between", "case", "select", "from", "on", "group", "order", "having", "limit", "set", "join"].includes(token.normalized)) return false;
+  }
+  return false;
 }
 
 function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string; nameQuoted?: boolean; schemaQuoted?: boolean } | null {
@@ -6185,10 +6207,10 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
   const quoteBatchColumns = !!batchSelectionMode && quoteIdentifiers !== false && (databaseType === "mysql" || databaseType === "starrocks");
 
-  return rankedColumns.map(({ column, boost }) => {
+  return rankedColumns.flatMap(({ column, boost }): SqlCompletionItem[] => {
     const nameMatches = matchesIdentifierSearch(column.name, context.prefix, matchMode) || matchesIdentifierSearch(column.displayLabel, context.prefix, matchMode);
     const filterText = column.displayLabel !== column.name ? column.name : nameMatches ? undefined : column.comment?.trim() || context.prefix;
-    return {
+    const item: SqlCompletionItem = {
       label: column.displayLabel,
       filterText,
       type: "column" as const,
@@ -6204,6 +6226,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       batchSelectionQualifier: batchSelectionMode === "select" && context.qualifier ? (context.qualifierParts ?? context.qualifier.split(".").filter(Boolean)).map((part) => quoteCompletionApplyIdentifier(part, dialect)).join(".") : undefined,
       comment: column.comment?.trim() || undefined,
     };
+    if (!context.mysqlWherePredicateStart || !/^(?:var)?char\b/i.test(column.dataType?.trim() ?? "") || !item.apply) return [item];
+    return [item, { label: `${column.displayLabel} = ''`, filterText, type: "snippet", detail: item.detail, apply: `${item.apply} = '\${}'`, boost: boost - 100 }];
   });
 }
 

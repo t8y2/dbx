@@ -2662,6 +2662,10 @@ export async function buildEditableObjectSource(input: BuildEditableObjectSource
   return invoke("build_editable_object_source", { input });
 }
 
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return invoke("build_oracle_object_export_sql", { input });
+}
+
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return invoke("build_routine_rename_object_source_statements", { input });
 }

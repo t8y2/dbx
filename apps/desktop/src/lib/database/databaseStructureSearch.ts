@@ -124,7 +124,7 @@ export async function supportsDatabaseStructureSearchBackend(databaseType?: Data
   return api.supportsDatabaseStructureSearch(databaseType, driverProfile);
 }
 
-export async function runSqlCatalogStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
+export async function runSqlCatalogStructureSearch<T extends Omit<DatabaseStructureSearchOptions, "listTables" | "getColumns">>(options: T): Promise<DatabaseStructureSearchHit[]> {
   if (options.shouldAbort?.()) return [];
   const query = await buildDatabaseStructureSearchSql({
     databaseType: options.databaseType,

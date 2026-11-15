@@ -3148,7 +3148,63 @@ pub async fn list_object_statistics(
 }
 
 pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    Ok(get_column_metadata(client, schema, table).await?.into_iter().map(|metadata| metadata.column).collect())
+    let mut metadata = get_column_metadata(client, schema, table).await?;
+    // A synonym has no columns of its own. The synonym lookup only runs when the
+    // name has no columns, so ordinary tables and views pay no extra round trip.
+    if metadata.is_empty() {
+        if let Some(target) = resolve_synonym_target(client, schema, table).await? {
+            metadata = get_column_metadata(client, &target.schema, &target.name).await?;
+        }
+    }
+    Ok(metadata.into_iter().map(|metadata| metadata.column).collect())
+}
+
+/// The table or view a synonym stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlServerSynonymTarget {
+    pub schema: String,
+    pub name: String,
+    pub is_view: bool,
+}
+
+fn sqlserver_synonym_target_sql() -> &'static str {
+    // Only a base object in the current database can be read with the local catalog
+    // views, so synonyms that name another database or a linked server resolve to nothing.
+    "SELECT OBJECT_SCHEMA_NAME(o.object_id) AS target_schema, o.name AS target_name, o.type AS target_type \
+     FROM sys.synonyms sn \
+     JOIN sys.schemas s ON s.schema_id = sn.schema_id \
+     JOIN sys.objects o ON o.object_id = OBJECT_ID(sn.base_object_name) \
+     WHERE s.name = COALESCE(NULLIF(@P1, N''), SCHEMA_NAME()) \
+       AND sn.name = @P2 \
+       AND PARSENAME(sn.base_object_name, 4) IS NULL \
+       AND (PARSENAME(sn.base_object_name, 3) IS NULL OR PARSENAME(sn.base_object_name, 3) = DB_NAME()) \
+       AND o.type IN ('U', 'V')"
+}
+
+/// Resolves `schema.name` to the table or view behind it when it is a synonym.
+///
+/// Returns `None` for a name that is not a synonym, and for a synonym whose base object is
+/// missing, is not a table or view, or lives in another database or on a linked server.
+pub async fn resolve_synonym_target(
+    client: &mut SqlServerClient,
+    schema: &str,
+    name: &str,
+) -> Result<Option<SqlServerSynonymTarget>, String> {
+    let schema = schema.trim();
+    let rows = client
+        .query(sqlserver_synonym_target_sql(), &[&schema, &name])
+        .await
+        .map_err(|error| error.to_string())?
+        .into_first_result()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let (Some(schema), Some(name)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) else { return Ok(None) };
+    Ok(Some(SqlServerSynonymTarget {
+        schema: schema.to_string(),
+        name: name.to_string(),
+        is_view: row.get::<&str, _>(2).is_some_and(|object_type| object_type.trim() == "V"),
+    }))
 }
 
 pub async fn get_column_metadata(
@@ -4700,11 +4756,11 @@ mod tests {
         sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
         sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
         sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_temporal_metadata_sql,
-        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
-        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_synonym_target_sql, sqlserver_table_comment_sql, sqlserver_table_objects_sql,
+        sqlserver_temporal_metadata_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
+        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -6044,6 +6100,19 @@ mod tests {
         assert!(sql.contains("ep.minor_id = c.column_id"));
         assert!(sql.contains("MS_Description"));
         assert!(sql.contains("c.is_computed = 1 THEN 'computed'"));
+    }
+
+    #[test]
+    fn sqlserver_synonym_target_sql_reads_only_local_tables_and_views() {
+        let sql = sqlserver_synonym_target_sql();
+
+        assert!(sql.contains("FROM sys.synonyms sn"));
+        assert!(sql.contains("OBJECT_ID(sn.base_object_name)"));
+        assert!(sql.contains("COALESCE(NULLIF(@P1, N''), SCHEMA_NAME())"));
+        assert!(sql.contains("sn.name = @P2"));
+        assert!(sql.contains("PARSENAME(sn.base_object_name, 4) IS NULL"));
+        assert!(sql.contains("PARSENAME(sn.base_object_name, 3) = DB_NAME()"));
+        assert!(sql.contains("o.type IN ('U', 'V')"));
     }
 
     #[test]

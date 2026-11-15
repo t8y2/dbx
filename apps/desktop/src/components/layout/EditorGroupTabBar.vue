@@ -383,14 +383,19 @@ function revealActiveTabAfterLayout() {
 
 const showOverflowControl = computed(() => {
   void tabLayoutRevision.value;
+  // In two-row mode the detail strip represents a selected semantic group.
+  // Keep its tab-list affordance stable when switching groups, even when the
+  // current group's tabs happen to fit without physical overflow.
+  if (isTwoRowLayout.value) return twoRowSelectedTabCount.value > 1;
+
   // A single-row strip hides tabs in two ways: they scroll out of the viewport
   // (real overflow) or they stay in it and ellipsize their labels, which the
   // scroll box cannot see because a capped pill narrows itself instead of
-  // overflowing (useTabTitleTruncation). The two-row layout decides from its
+  // overflowing (useTabTitleTruncation). The fixed-row layout decides from its
   // rows' scroll extents alone: its first row narrows itself by the arrow's
   // reserved width (.tab-section-frame--with-overflow-control), so feeding
-  // clipping back into the arrow there would rebuild the loop that the constant
-  // reservation exists to break.
+  // clipping back into the arrow there would rebuild the loop that the
+  // constant reservation exists to break.
   const hasHiddenTab = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value || hasTruncatedTabTitle.value;
   return props.tabs.length > 0 && hasHiddenTab && !isWrapLayout.value && !isVerticalLayout.value;
 });
@@ -1240,6 +1245,7 @@ const twoRowSelectedKey = computed<string | null>(() => {
   if (twoRowFocusedGroupKey.value !== null && items.some((item) => item.key === twoRowFocusedGroupKey.value)) return twoRowFocusedGroupKey.value;
   return items[0]!.key;
 });
+const twoRowSelectedTabCount = computed(() => twoRowGroupItems.value.find((group) => group.key === twoRowSelectedKey.value)?.count ?? 0);
 
 type SpecialPageSurface = "pluginCenter" | "settings" | "driverStore";
 
@@ -2502,7 +2508,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           <button
             type="button"
             data-new-query-tab
-            class="mx-0.5 inline-flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="mx-0.5 inline-flex h-8 w-8 shrink-0 self-center items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             :aria-label="t('toolbar.newQuery')"
             @click="toolbar?.newQuery(groupId)"
           >

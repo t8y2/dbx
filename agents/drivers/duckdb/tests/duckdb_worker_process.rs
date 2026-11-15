@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbx_core::db::duckdb_worker_process::DuckDbWorkerClient;
@@ -179,10 +179,14 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
     let registered = running_queries
         .register_task(execution_id.to_string(), RunningTaskMetadata::query("duckdb-conn", "main", None));
     let cancel_client = client.clone();
+    let cancel_finished = Arc::new(tokio::sync::Notify::new());
+    let cancel_finished_signal = cancel_finished.clone();
     running_queries.register_interrupt(execution_id, move || {
         let cancel_client = cancel_client.clone();
+        let cancel_finished_signal = cancel_finished_signal.clone();
         tokio::spawn(async move {
             let _ = cancel_client.cancel().await;
+            cancel_finished_signal.notify_one();
         });
     });
 
@@ -203,6 +207,9 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
         .expect("cancelled query should return promptly");
     assert_eq!(cancelled.expect_err("long query should be cancelled"), dbx_core::query::canceled_error());
     drop(registered);
+    tokio::time::timeout(Duration::from_secs(5), cancel_finished.notified())
+        .await
+        .expect("registered cancel interrupt should finish");
 
     let probe = tokio::time::timeout(
         Duration::from_secs(5),

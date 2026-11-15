@@ -11,6 +11,7 @@ import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
@@ -239,6 +240,7 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
       {
         label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
         action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
+        disabled: isDefault && !canClearDefaultDatabase(props.connection.db_type),
         icon: Database,
       },
       { label: "", separator: true },

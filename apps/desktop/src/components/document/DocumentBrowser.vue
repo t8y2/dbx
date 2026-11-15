@@ -41,6 +41,7 @@ import {
   documentFieldPathOptionsFromDocuments,
   documentFieldPathTreeFromDocuments,
   flattenDocumentFieldPathTree,
+  mongoFilterDateSamplesByPathFromDocuments,
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptionsFor,
@@ -527,6 +528,11 @@ const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
 });
+const documentViewerText = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb" || selectedIdx.value === null || !mongoCopyDocumentsAvailable.value) return editJson.value;
+  const document = copyDocuments.value[selectedIdx.value];
+  return document ? formatMongoShellLiteral(document, { pretty: true }) : editJson.value;
+});
 const selectedDocumentIdLabel = computed(() => {
   if (isNew.value) return "New";
   return formatDocumentStoreIdLabel(selectedDoc.value?._id, documentStoreProvider.value.kind);
@@ -822,6 +828,12 @@ const documentFilterFieldOptions = computed(() => {
 });
 const documentFilterFieldRows = computed<DocumentFilterFieldTreeRow[]>(() => visibleDocumentFilterFieldRows(documentFilterFieldTree.value));
 const documentFilterFieldByPath = computed(() => new Map(flattenDocumentFieldPathTree(documentFilterFieldTree.value).map((node) => [node.path, node])));
+const mongoFilterDateSamplesByPath = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb" || !mongoCopyDocumentsAvailable.value) return new Map<string, unknown>();
+  // Display documents represent BSON dates as text. Use the paired Extended JSON
+  // for date inference and keep the existing inference for other BSON types.
+  return mongoFilterDateSamplesByPathFromDocuments(copyDocuments.value);
+});
 const documentStructuredFilterCount = computed(() => {
   if (!appliedDocumentFilter.value) return 0;
   if (documentStoreProvider.value.kind !== "elasticsearch") return 1;
@@ -1472,7 +1484,7 @@ async function applyDocumentStructuredFilters() {
         rule,
         condition: buildDocumentFilterCondition(rule, {
           kind: documentStoreProvider.value.kind,
-          sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
+          sampleValue: mongoFilterDateSamplesByPath.value.get(rule.fieldName) ?? documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
         }),
       }))
       .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
@@ -3485,7 +3497,7 @@ defineExpose({ focusSearch });
             </div>
 
             <div v-else data-document-json-viewer class="flex-1 min-h-0 select-text bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
-              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
+              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="documentViewerText" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">

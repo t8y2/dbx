@@ -221,6 +221,7 @@ import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolb
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
+import { formatQueryDuration } from "@/lib/format/duration";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
@@ -3124,7 +3125,7 @@ defineExpose({
                         </span>
                       </div>
                       <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
-                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? formatQueryDuration(item.executionTimeMs) : "—" }}</div>
                     </div>
                   </DynamicScrollerItem>
                 </DynamicScroller>

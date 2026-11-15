@@ -34,7 +34,7 @@ describe("Windows offline installer template", () => {
     expect(template).toContain('${GetParent} "$EXEPATH" $0');
     // The fixed-runtime build says which systems it targets in the installer
     // title; productName must stay path-safe ("/" is rejected by Tauri).
-    expect(template).toContain('!define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2"');
+    expect(template).toContain('!define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2+"');
     expect(clientConfig.productName).toBe("DBX");
     expect(fixedRuntimeConfig.productName).toBeUndefined();
     expect(template).toContain("DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}");
@@ -45,9 +45,9 @@ describe("Windows offline installer template", () => {
 
   it("localizes the Windows 7 package guidance in every installer language", () => {
     expect(template.match(/LangString dbxWin7InstallerRequired/g)).toHaveLength(3);
-    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2008 R2.");
-    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2008 R2。");
-    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2008 R2。");
+    expect(template).toContain("For Windows 7 or Windows Server 2008 R2 and later, use the dedicated Windows 7 / Server 2008 R2+ package.");
+    expect(template).toContain("Windows 7 与 Windows Server 2008 R2 及以上请使用 Windows 7 / Server 2008 R2+ 专用包。");
+    expect(template).toContain("Windows 7 與 Windows Server 2008 R2 及以上請改用 Windows 7 / Server 2008 R2+ 專用套件。");
   });
 
   it.each([

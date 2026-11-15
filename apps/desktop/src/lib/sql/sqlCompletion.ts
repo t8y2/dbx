@@ -553,6 +553,8 @@ const MYSQL_SQL_KEYWORDS = [
   "CURRENT_USER",
   "DUPLICATE KEY",
   "FORCE INDEX",
+  "IGNORE INDEX",
+  "USE INDEX",
   "JSON_EXTRACT",
   "JSON_UNQUOTE",
   "DATE_FORMAT",
@@ -1845,6 +1847,7 @@ export interface SqlCompletionContext {
   isEmptyGroupBy: boolean;
   nonAggregatedSelectColumns: string[];
   comparisonLeftColumn?: string;
+  mysqlWherePredicateStart?: boolean;
   onStar: boolean;
   selectListColumnContext: boolean;
   selectListWildcardAfterCursor?: boolean;
@@ -2003,6 +2006,7 @@ export interface SqlCompletionProviderInput {
   functionCase?: SqlKeywordCase;
   identifierCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
+  qualifyColumnCompletions?: boolean;
   tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
   quoteIdentifiers?: boolean;
   functionCompletionIncludeParams?: boolean;
@@ -2029,6 +2033,7 @@ export function buildSqlCompletionItems(
     functionCase?: SqlKeywordCase;
     identifierCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
+    qualifyColumnCompletions?: boolean;
     tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
     quoteIdentifiers?: boolean;
     functionCompletionIncludeParams?: boolean;
@@ -2186,7 +2191,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
-      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers, this.matchMode));
+      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers, this.matchMode, this.input.qualifyColumnCompletions));
       this.items.push(...buildSelectAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.databaseType, this.matchMode));
       this.items.push(...buildInsertAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.input.keywordCase, this.matchMode));
       if ((this.input.sequenceCompletionEnabled ?? true) && (isOracleLikeDatabase(this.databaseType) || isSequenceCompletionDatabase(this.databaseType)) && context.qualifier && !completionQualifierIsReferencedTable(context)) {
@@ -3071,8 +3076,16 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // CTE bodies are their own scope: resolve them first so the outer query's
   // referenced tables are read from a statement with those bodies blanked out.
   const cteDefs = scanCteDefinitions(fullStatement, options.databaseType);
-  let referencedTables = extractReferencedTables(maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs), options.databaseType);
-  for (const cte of cteDefs) {
+  // Inside a CTE body only that body's own sources and the CTEs declared before it
+  // are in scope; the CTE being defined (unless the body references it, as a
+  // recursive CTE does) and the outer query would otherwise count as extra row
+  // sources and force every column suggestion to be qualified (#14109).
+  const enclosingCteIndex = cteDefs.findIndex((cte) => cursorInStatement > cte.bodyStart && cursorInStatement <= cte.bodyEnd);
+  const enclosingCte = enclosingCteIndex >= 0 ? cteDefs[enclosingCteIndex] : undefined;
+  const scopedStatement = enclosingCte ? keepOnlyCteBody(fullStatement, enclosingCte) : maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs);
+  let referencedTables = extractReferencedTables(scopedStatement, options.databaseType);
+  const visibleCteDefs = enclosingCte ? cteDefs.slice(0, enclosingCteIndex).concat(referencedTables.some((rt) => rt.name.toLowerCase() === enclosingCte.name.toLowerCase()) ? [enclosingCte] : []) : cteDefs;
+  for (const cte of visibleCteDefs) {
     const matching = referencedTables.filter((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
     if (matching.length === 0) {
       referencedTables.push({ name: cte.name, columns: cte.columns, kind: "cte" });
@@ -3087,7 +3100,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   }
 
   // Merge subquery alias references
-  const subqueryRefs = extractSubqueryReferences(fullStatement, cteDefs, options.databaseType);
+  const subqueryRefs = extractSubqueryReferences(enclosingCte ? scopedStatement : fullStatement, cteDefs, options.databaseType);
   for (const sq of subqueryRefs) {
     if (!referencedTables.some((rt) => rt.name.toLowerCase() === sq.name.toLowerCase() && rt.alias === sq.alias)) {
       referencedTables.push(sq);
@@ -3178,6 +3191,12 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     isEmptyGroupBy: isEmptyGroupByContext(beforeCursor),
     nonAggregatedSelectColumns: extractNonAggregatedSelectColumns(fullStatement),
     comparisonLeftColumn: detectComparisonLeftColumn(beforeCursor),
+    mysqlWherePredicateStart:
+      (options.databaseType === "mysql" || (!options.databaseType && options.dialect === "mysql")) &&
+      prefix.length > 0 &&
+      !trailingIdentifier?.prefixQuoted &&
+      startsMysqlWherePredicate(beforeToken) &&
+      /^(?:\s*(?:$|[);]|\b(?:AND|OR|ORDER|GROUP|LIMIT|HAVING|UNION)\b))/i.test(sql.slice(cursor, statementSpan.end)),
     onStar: detectOnStar(beforeCursor),
     selectListColumnContext,
     selectListWildcardAfterCursor,
@@ -3779,13 +3798,29 @@ function detectComparisonLeftColumn(beforeCursor: string): string | undefined {
   return match?.[1];
 }
 
+function startsMysqlWherePredicate(beforeIdentifier: string): boolean {
+  if (!/\b(?:where|and|or)$/i.test(beforeIdentifier)) return false;
+  const tokens = tokenizeSqlSemantic(beforeIdentifier, "mysql").filter((token) => token.kind !== "comment");
+  const last = tokens[tokens.length - 1];
+  if (last?.kind !== "word" || !["where", "and", "or"].includes(last.normalized)) return false;
+  if (last.normalized === "where") return true;
+  for (let index = tokens.length - 2; index >= 0; index--) {
+    const token = tokens[index]!;
+    if (token.kind !== "word" || token.depth !== last.depth) continue;
+    if (token.normalized === "where") return true;
+    if (["between", "case", "select", "from", "on", "group", "order", "having", "limit", "set", "join"].includes(token.normalized)) return false;
+  }
+  return false;
+}
+
 function detectInsertColumnListContext(beforeCursor: string): { table: string; database?: string; schema?: string; nameQuoted?: boolean; schemaQuoted?: boolean } | null {
   // Keep quoted identifiers intact so schema/table targets resolve to their
   // real names instead of placeholder string contents.
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
   const identifier = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
   const qualifiedIdentifier = `${identifier}(?:\\.${identifier}){0,2}`;
-  const match = new RegExp(`\\binsert\\s+into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
+  // MySQL's `INSERT IGNORE INTO` targets a table the same way as `INSERT INTO`.
+  const match = new RegExp(`\\binsert\\s+(?:ignore\\s+)?into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
   if (!match) return null;
   const fullTable = match[1];
   if (!fullTable) return null;
@@ -3851,7 +3886,7 @@ function preferredKeywordsForCompletion(
   if (selectListColumnContext && hasSelectListExpression(beforeCursor, databaseType)) keywords.push("FROM");
   if (isAfterJoinModifierContext(beforeCursor, databaseType)) keywords.push("JOIN");
   if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) {
-    if (databaseType === "mysql" && /\sforce$/i.test(beforeToken)) keywords.push("INDEX");
+    if (databaseType === "mysql" && /\s(?:force|ignore|use)$/i.test(beforeToken)) keywords.push("INDEX");
     keywords.push("LIMIT");
   }
   if (isAfterConditionExpression(beforeToken, databaseType)) keywords.push("AND", "OR");
@@ -4721,6 +4756,14 @@ function maskResolvedCteBodies(statement: string, cursorOffset: number, ctes: re
     masked = `${masked.slice(0, cte.bodyStart + 1)}${" ".repeat(bodyLength)}${masked.slice(cte.bodyEnd)}`;
   }
   return masked;
+}
+
+/**
+ * Blanks everything outside one CTE body, keeping offsets, so completion inside
+ * that body reads only the body's own row sources (#14109).
+ */
+function keepOnlyCteBody(statement: string, cte: ScannedCteDefinition): string {
+  return `${" ".repeat(cte.bodyStart + 1)}${statement.slice(cte.bodyStart + 1, cte.bodyEnd)}${" ".repeat(Math.max(0, statement.length - cte.bodyEnd))}`;
 }
 
 function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
@@ -5974,6 +6017,7 @@ function isInTableListContext(beforeToken: string, databaseType: DatabaseType | 
   if (lastTableIntro < 0) return false;
 
   const lastBoundary = Math.max(
+    lastTopLevelKeywordIndex(cleaned, "values"),
     lastTopLevelKeywordIndex(cleaned, "where"),
     lastTopLevelKeywordIndex(cleaned, "set"),
     lastTopLevelKeywordIndex(cleaned, "group"),
@@ -6094,7 +6138,7 @@ function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: M
   });
 }
 
-function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, quoteIdentifiers?: boolean, matchMode: SqlCompletionMatchMode = "fuzzy"): SqlCompletionItem[] {
+function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, quoteIdentifiers?: boolean, matchMode: SqlCompletionMatchMode = "fuzzy", qualifyColumns = true): SqlCompletionItem[] {
   // Build a bounded candidate pool before doing duplicate detection, ranking,
   // and completion object materialization. Canonical column arrays remain the
   // source of truth; the per-array prefix index is only a derived accelerator.
@@ -6122,9 +6166,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     nameCount.set(nameKey, (nameCount.get(nameKey) || 0) + 1);
   }
 
-  // Multi-source queries always insert a qualified column. Duplicate names remain
-  // separate choices so the user can select the intended row source.
-  const qualifyAllColumns = !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
+  // Keep ambiguous names qualified even when optional table prefixes are disabled.
+  const qualifyAllColumns = qualifyColumns && !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
   const seen = new Set<string>();
   const uniqueColumns: Array<SqlCompletionColumn & { key: string; displayLabel: string }> = [];
   for (const c of relevantCols) {
@@ -6164,10 +6207,10 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
   const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
   const quoteBatchColumns = !!batchSelectionMode && quoteIdentifiers !== false && (databaseType === "mysql" || databaseType === "starrocks");
 
-  return rankedColumns.map(({ column, boost }) => {
+  return rankedColumns.flatMap(({ column, boost }): SqlCompletionItem[] => {
     const nameMatches = matchesIdentifierSearch(column.name, context.prefix, matchMode) || matchesIdentifierSearch(column.displayLabel, context.prefix, matchMode);
     const filterText = column.displayLabel !== column.name ? column.name : nameMatches ? undefined : column.comment?.trim() || context.prefix;
-    return {
+    const item: SqlCompletionItem = {
       label: column.displayLabel,
       filterText,
       type: "column" as const,
@@ -6183,6 +6226,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       batchSelectionQualifier: batchSelectionMode === "select" && context.qualifier ? (context.qualifierParts ?? context.qualifier.split(".").filter(Boolean)).map((part) => quoteCompletionApplyIdentifier(part, dialect)).join(".") : undefined,
       comment: column.comment?.trim() || undefined,
     };
+    if (!context.mysqlWherePredicateStart || !/^(?:var)?char\b/i.test(column.dataType?.trim() ?? "") || !item.apply) return [item];
+    return [item, { label: `${column.displayLabel} = ''`, filterText, type: "snippet", detail: item.detail, apply: `${item.apply} = '\${}'`, boost: boost - 100 }];
   });
 }
 
@@ -6988,7 +7033,7 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     .filter((keyword) => {
       if (functionSignatures.has(keyword) && !dataTypeKeywords.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
       if (WINDOW_FUNCTIONS.has(keyword)) return false;
-      if (keyword === "FORCE INDEX" && context.preferredKeywords.includes("INDEX")) return false;
+      if (MYSQL_INDEX_HINT_KEYWORDS.has(keyword) && context.preferredKeywords.includes("INDEX")) return false;
       if (!matchesPrefix(keyword, prefix, matchMode)) return false;
       if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || dataTypeKeywords.has(keyword))) return false;
       if (context.followingKeyword && keyword.includes(" ") && keyword.toUpperCase().endsWith(` ${context.followingKeyword}`)) return false;
@@ -7010,7 +7055,9 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     });
 }
 
-const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", "FORCE INDEX"]);
+// MySQL index hints that follow a table reference (#14431, #14598).
+const MYSQL_INDEX_HINT_KEYWORDS = new Set(["FORCE INDEX", "IGNORE INDEX", "USE INDEX"]);
+const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", ...MYSQL_INDEX_HINT_KEYWORDS]);
 // Enough to outrank a routine's initials match plus the procedure type boost.
 const TABLE_REFERENCE_CLAUSE_KEYWORD_BOOST = 3000;
 

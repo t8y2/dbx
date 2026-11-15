@@ -2839,7 +2839,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
   box-shadow:
     0 5px 0 currentColor,
     0 10px 0 currentColor;
-  color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+  color: var(--muted-foreground);
   content: "";
   opacity: 0.75;
   pointer-events: none;

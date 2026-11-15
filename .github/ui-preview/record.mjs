@@ -110,7 +110,7 @@ async function checkLeak(page, where) {
 }
 
 // any OpenAI-compatible endpoint; PLAN_API_URL/PLAN_API_KEY/PLAN_MODEL move
-// it off DeepSeek (AtlasCloud and friends) without touching this file
+// it off the default DeepSeek endpoint without touching this file
 const API_URL = env("PLAN_API_URL", "https://api.deepseek.com/v1/chat/completions");
 const API_KEY = env("PLAN_API_KEY") || env("DEEPSEEK_API_KEY");
 

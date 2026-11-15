@@ -167,6 +167,8 @@ import NacosAdminConsole from "@/components/nacos/NacosAdminConsole.vue";
 
 type NacosAdminSetupState = {
   activeTab: "configs" | "services";
+  configAppName: string;
+  configDataId: string;
   configGroup: string;
   configPageNo: number;
   configPageSize: number;
@@ -246,6 +248,21 @@ afterEach(() => {
   host?.remove();
   host = null;
   document.body.innerHTML = "";
+});
+
+describe("NacosAdminConsole config filters", () => {
+  it("only reserves clear-button space when a filter has a value", async () => {
+    const inputs = [host!.querySelector<HTMLInputElement>('input[placeholder="dataId"]'), host!.querySelector<HTMLInputElement>('input[placeholder="nacos.configListGroup"]'), host!.querySelector<HTMLInputElement>('input[placeholder="nacos.configListApplication"]')];
+
+    expect(inputs.every((input) => !input?.className.includes("pr-8"))).toBe(true);
+
+    state.configDataId = "data-id";
+    state.configGroup = "group";
+    state.configAppName = "application";
+    await flushUi();
+
+    expect(inputs.every((input) => input?.className.includes("pr-8"))).toBe(true);
+  });
 });
 
 describe("NacosAdminConsole config deletion", () => {

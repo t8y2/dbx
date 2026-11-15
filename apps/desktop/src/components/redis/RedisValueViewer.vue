@@ -798,6 +798,7 @@ const streamRows = computed<RedisStreamRow[]>(() => {
     id: `${index}:${entry.id}`,
     index,
     entry,
+    timestamp: streamEntryTimestamp(entry.id),
   }));
 });
 
@@ -1035,6 +1036,7 @@ type RedisStreamRow = {
   id: string;
   index: number;
   entry: RedisStreamEntry;
+  timestamp: number | undefined;
 };
 
 function replaceStreamEntries(value: RedisValue) {
@@ -1315,8 +1317,15 @@ function formatStreamDurationTitle(value: number | string | undefined): string {
 }
 
 function formatStreamDateTime(timestamp: number): string {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
+  if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > 8_640_000_000_000_000) return "-";
   return streamDateTimeFormatter.value.format(new Date(timestamp));
+}
+
+function streamEntryTimestamp(id: string): number | undefined {
+  const milliseconds = /^(\d+)-\d+$/.exec(id)?.[1];
+  if (milliseconds === undefined) return;
+  const timestamp = Number(milliseconds);
+  if (Number.isSafeInteger(timestamp) && timestamp <= 8_640_000_000_000_000) return timestamp;
 }
 
 function formatStreamLastDelivery(value: number | string | undefined): string {
@@ -3215,7 +3224,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           <Badge v-if="stringValueDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ stringValueDetectionLabel }}</Badge>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
-          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
+          <!-- Issue #14653: keep the toggle on one line. Without shrink-0 the label is the only
+               shrinkable item in this row and gets squeezed to min-content (one CJK glyph per
+               line), overflowing over the 视图 row; the codec strip already scrolls itself. -->
+          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -3387,7 +3399,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
           </div>
-          <label class="flex items-center gap-1.5 text-muted-foreground">
+          <!-- Issue #14653: same one-line contract as the codec row toggle. -->
+          <label class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -3702,7 +3715,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <template #default="{ item: row, active }">
                 <DynamicScrollerItem :item="row" :active="active" :size-dependencies="[streamFieldCount(row)]" :data-index="row.index">
                   <div data-redis-stream-entry class="dbx-editor-font-family px-4 py-2 border-b text-sm hover:bg-accent/50">
-                    <div class="mb-1 text-xs text-muted-foreground">{{ row.entry.id }}</div>
+                    <div class="mb-1 flex items-baseline gap-2 whitespace-nowrap text-xs text-muted-foreground">
+                      <span class="truncate" :title="row.entry.id">{{ row.entry.id }}</span>
+                      <time v-if="row.timestamp !== undefined" class="min-w-0 truncate tabular-nums" :title="t('redis.streamEntryTime')">{{ formatStreamDateTime(row.timestamp) }}</time>
+                    </div>
                     <div
                       v-for="(field, fieldIndex) in row.entry.fields"
                       :key="`${row.id}:${field.field}:${fieldIndex}`"
@@ -4080,7 +4096,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberPluginCodecView }" :disabled="hasUnsavedRedisDraft" @click="memberPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
             </RedisHorizontalScrollbar>
             <span class="flex-1" />
-            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
+            <!-- Issue #14653: the member dialog narrows with the viewport, same one-line contract. -->
+            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
               {{ t("redis.wordWrap") }}
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />

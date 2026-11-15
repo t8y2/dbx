@@ -62,7 +62,7 @@ import {
   type PendingComponentUpdatePlan,
 } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
-import { useExportTracker } from "@/composables/useExportTracker";
+import { restoreExportTasksFromStorage, useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
 import { useSqlFilePicker } from "@/composables/useSqlFilePicker";
 import { usePanelResize } from "@/composables/usePanelResize";
@@ -5225,6 +5225,7 @@ async function initApp() {
     markStartupPhase("connections-ready");
     console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
+    void restoreExportTasksFromStorage();
     markStartupPhase("tabs-restored");
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
   };

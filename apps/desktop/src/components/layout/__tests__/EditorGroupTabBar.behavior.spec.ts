@@ -9,12 +9,12 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
     name: "CustomContextMenuStub",
     props: ["items"],
     mounted() {
-      (this.$el as any).__ctxMenuItems = this.items;
+      (this.$el as any).__ctxMenuItems = typeof this.items === "function" ? this.items() : this.items;
     },
     updated() {
-      (this.$el as any).__ctxMenuItems = this.items;
+      (this.$el as any).__ctxMenuItems = typeof this.items === "function" ? this.items() : this.items;
     },
-    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.flatMap((item) => item.children ?? [item]).map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
+    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify((typeof items === 'function' ? items() : items).flatMap((item) => item.children ?? [item]).map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
   },
 }));
 
@@ -197,11 +197,38 @@ describe("EditorGroupTabBar behavior", () => {
     await settle();
     const buttons = host.querySelectorAll<HTMLButtonElement>("[data-new-query-tab]");
     expect(buttons).toHaveLength(1);
+    expect(buttons[0]!.classList.contains("items-center")).toBe(true);
+    expect(buttons[0]!.classList.contains("justify-center")).toBe(true);
     buttons[0].click();
     expect(actions.newQuery).toHaveBeenCalledExactlyOnceWith(store.groups[0].id);
     actions.canNewQuery.value = false;
     await settle();
     expect(host.querySelector("[data-new-query-tab]")).toBeNull();
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps the tab list control at the far right of the new query button", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.appLayout = "separated";
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabGroupRows = "two-row";
+    settings.editorSettings.tabPlacement = "top";
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    const actions = createNoopEditorToolbarActions();
+    actions.canNewQuery = ref(true);
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia, undefined, undefined, actions);
+    await settle();
+
+    const newQueryButton = host.querySelector<HTMLButtonElement>("[data-new-query-tab]");
+    const actionControls = host.querySelector<HTMLElement>(".has-tab-action-controls");
+    const overflowControl = host.querySelector<HTMLElement>(".tab-overflow-control");
+    expect(newQueryButton?.classList.contains("absolute")).toBe(true);
+    expect(newQueryButton?.classList.contains("right-7")).toBe(true);
+    expect(actionControls).not.toBeNull();
+    expect(overflowControl?.classList.contains("right-0")).toBe(true);
+
     app.unmount();
     host.remove();
   });

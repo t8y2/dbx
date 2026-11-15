@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
+import { buildConnectionGroupIdPathMap, buildConnectionGroupPathMap } from "@/lib/sidebar/sidebarLayout";
 import PluginOpenUrlDialog from "./PluginOpenUrlDialog.vue";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
@@ -616,6 +617,13 @@ function createBridge() {
         }
         const providerIds = new Set((props.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "connection-provider").map((candidate) => candidate.id));
         if (ownerPluginId !== props.plugin.manifest.id) return [];
+        // Sidebar group of each connection (t8y2/dbx#15002): the scoped branch passes
+        // through the layout tree's owning group so plugins can mirror the sidebar
+        // structure; ungrouped connections get null. Pure-increment optional fields.
+        const groupLayout = connectionStore.sidebarLayout;
+        const groupIds = buildConnectionGroupIdPathMap(groupLayout);
+        const groupNames = buildConnectionGroupPathMap(groupLayout);
+        const ownerIdFor = (path: string[] | undefined): string | null => (path && path.length > 0 ? path[path.length - 1] : null);
         return connectionStore.connections
           .filter((connection) => providerIds.has(connection.plugin_connection_provider ?? ""))
           .map((connection) => {
@@ -635,6 +643,8 @@ function createBridge() {
               schema: connection.default_schema,
               // #193b — dock/tab titles bound to the connection (dock first), so plugins can label session rows after renamed terminals.
               workbenchTitles: queryStore.pluginWorkbenchTitles(connection.id),
+              groupId: ownerIdFor(groupIds.get(connection.id)),
+              groupName: ownerIdFor(groupNames.get(connection.id)),
             };
           });
       },

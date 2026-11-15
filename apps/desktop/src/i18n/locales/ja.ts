@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlEncode: "URL コンポーネントのエンコード",
       urlDecode: "URL コンポーネントのデコード",
       radix: "整数の基数変換",
+      flattenLines: "複数行を1行に圧縮",
     },
     units: {
       auto: "自動（10/13 桁）",

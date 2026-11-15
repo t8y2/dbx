@@ -473,6 +473,7 @@ export default withEnglishFallback({
       urlEncode: "เข้ารหัสส่วนประกอบ URL",
       urlDecode: "ถอดรหัสส่วนประกอบ URL",
       radix: "การแปลงฐานจำนวนเต็ม",
+      flattenLines: "บีบอัดหลายบรรทัดให้เป็นบรรทัดเดียว",
     },
     units: {
       auto: "อัตโนมัติ (10/13 หลัก)",

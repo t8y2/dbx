@@ -513,6 +513,7 @@ export default withEnglishFallback({
       urlEncode: "Codifica componente URL",
       urlDecode: "Decodifica componente URL",
       radix: "Conversione di base degli interi",
+      flattenLines: "Comprimi più righe in una riga",
     },
     units: {
       auto: "Automatica (10/13 cifre)",

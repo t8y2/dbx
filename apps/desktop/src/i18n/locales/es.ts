@@ -515,6 +515,7 @@ export default withEnglishFallback({
       urlEncode: "Codificar componente URL",
       urlDecode: "Decodificar componente URL",
       radix: "Conversión de base de enteros",
+      flattenLines: "Comprimir varias líneas en una sola",
     },
     units: {
       auto: "Automática (10/13 dígitos)",

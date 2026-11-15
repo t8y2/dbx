@@ -495,6 +495,7 @@ export default withEnglishFallback({
       urlEncode: "URL 元件編碼",
       urlDecode: "URL 元件解碼",
       radix: "整數進位轉換",
+      flattenLines: "多行壓縮為一行",
     },
     units: {
       auto: "自動（10/13 位）",

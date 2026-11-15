@@ -512,6 +512,7 @@ export default withEnglishFallback({
       urlEncode: "URL 구성 요소 인코딩",
       urlDecode: "URL 구성 요소 디코딩",
       radix: "정수 진법 변환",
+      flattenLines: "여러 줄을 한 줄로 압축",
     },
     units: {
       auto: "자동(10/13자리)",

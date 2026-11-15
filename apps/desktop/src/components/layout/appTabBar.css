@@ -176,11 +176,13 @@
 }
 
 /* Keep the overflow affordance out of the measurement box. Otherwise its own
- * width reduces the scroll viewport and can create a false overflow state. */
+ * width reduces the scroll viewport and can create a false overflow state. Both
+ * action buttons use the same 28px slot so they can sit directly next to each
+ * other when they are visible together. */
 .tab-overflow-control {
   box-sizing: border-box;
-  width: 34px;
-  flex: 0 0 34px;
+  width: 28px;
+  flex: 0 0 28px;
   padding: 0;
   background: transparent;
   justify-content: flex-end;
@@ -193,8 +195,8 @@
  * the strip re-widened — an endless per-frame flicker. A constant reservation
  * keeps hasTabOverflow stable, so the arrow becomes a pure overlay that never
  * alters the layout it is measured from. The overflow control stays at the far
- * right; the new-query button uses the adjacent reserved slot when both are
- * visible. */
+ * right; when the new-query button is also visible, the strip reserves both
+ * adjacent 28px action slots. */
 .app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .app-tab-strip {
   padding-inline-end: 2.5rem;
 }
@@ -203,9 +205,17 @@
   inset-inline-end: 2.5rem;
 }
 
-/* The top-row overflow control overlays a small reserved area. Blend that
- * area into the tab strip so the gap before the button does not read as an
- * opaque empty block while keeping the button itself fully visible. */
+.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .has-tab-action-controls .app-tab-strip {
+  padding-inline-end: 3.5rem;
+}
+
+.has-tab-action-controls .app-tab-scrollbar {
+  inset-inline-end: 3.5rem;
+}
+
+/* The top-row action controls overlay a reserved area. Blend that area into
+ * the tab strip so the space behind the buttons does not read as an opaque
+ * empty block while keeping the buttons themselves fully visible. */
 .app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control {
   isolation: isolate;
 }
@@ -225,8 +235,8 @@
   z-index: 1;
 }
 
-/* In the two-row layout, only the first row shares its right edge with the
- * overflow button. The fixed row must retain the full width of its own strip. */
+/* In the fixed-row layout, only the first row shares its right edge with the
+ * action controls. The fixed row must retain the full width of its own strip. */
 .horizontal-fixed-tabs .has-tab-overflow-control .app-tab-strip {
   padding-inline-end: 0;
 }
@@ -243,14 +253,23 @@
   inset-inline-end: 35px;
 }
 
+.horizontal-fixed-tabs .has-tab-action-controls .tab-section-frame--with-overflow-control {
+  padding-inline-end: 3.5rem;
+}
+
+.horizontal-fixed-tabs .has-tab-action-controls .tab-section-frame--with-overflow-control .app-tab-scrollbar {
+  inset-inline-end: 3.5rem;
+}
+
 .horizontal-fixed-tabs-scroll .tab-section-frame--horizontal:not(:first-child) .app-tab-scrollbar {
   inset-inline-end: 0;
 }
 
 .horizontal-fixed-tabs .tab-overflow-control {
   box-sizing: border-box;
-  width: 35px;
-  padding-inline: 0 1px;
+  width: 28px;
+  flex-basis: 28px;
+  padding-inline: 0;
   height: 2.25rem !important;
   align-items: center;
 }

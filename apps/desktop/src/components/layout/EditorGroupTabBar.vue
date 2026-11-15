@@ -2222,7 +2222,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         </div>
       </div>
     </div>
-    <div class="relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl }]">
+    <div
+      class="relative flex w-full min-w-0 shrink-0 overflow-hidden"
+      :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl, 'has-tab-action-controls': showOverflowControl && canNewQuery }]"
+    >
       <LightDropdown
         v-if="!isVerticalLayout && !isTwoRowLayout"
         model-value=""
@@ -2509,7 +2512,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             type="button"
             data-new-query-tab
             class="tab-bar-action-button inline-flex shrink-0 self-center items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            :class="showOverflowControl ? [isClassicLayout ? 'absolute right-[2.125rem]' : 'absolute right-[2.625rem]', 'top-1/2 z-30 -translate-y-1/2'] : 'mx-0.5'"
+            :class="showOverflowControl ? ['absolute right-7', 'top-1/2 z-30 -translate-y-1/2'] : 'mx-0.5'"
             :aria-label="t('toolbar.newQuery')"
             @click="toolbar?.newQuery(groupId)"
           >

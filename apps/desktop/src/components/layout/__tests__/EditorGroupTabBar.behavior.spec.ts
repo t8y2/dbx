@@ -222,9 +222,11 @@ describe("EditorGroupTabBar behavior", () => {
     await settle();
 
     const newQueryButton = host.querySelector<HTMLButtonElement>("[data-new-query-tab]");
+    const actionControls = host.querySelector<HTMLElement>(".has-tab-action-controls");
     const overflowControl = host.querySelector<HTMLElement>(".tab-overflow-control");
     expect(newQueryButton?.classList.contains("absolute")).toBe(true);
-    expect(newQueryButton?.classList.contains("right-[2.625rem]")).toBe(true);
+    expect(newQueryButton?.classList.contains("right-7")).toBe(true);
+    expect(actionControls).not.toBeNull();
     expect(overflowControl?.classList.contains("right-0")).toBe(true);
 
     app.unmount();

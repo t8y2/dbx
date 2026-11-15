@@ -1,0 +1,66 @@
+[
+  {
+    "id": "ldap",
+    "kind": "ldap",
+    "label": "Mock LDAP",
+    "enabled": true,
+    "config": {
+      "url": "ldap://127.0.0.1:13890",
+      "base_dn": "dc=example,dc=org",
+      "user_filter": "(uid={username})",
+      "username_attr": "uid",
+      "display_name_attr": "displayName",
+      "email_attr": "mail",
+      "group_attr": "memberOf",
+      "role_map": {
+        "cn=admins,ou=groups,dc=example,dc=org": "admin",
+        "cn=ops-admin,ou=groups,dc=example,dc=org": "admin",
+        "*": "member"
+      },
+      "default_role": "member",
+      "timeout_secs": 5
+    }
+  },
+  {
+    "id": "sso",
+    "kind": "oidc",
+    "label": "Mock SSO",
+    "enabled": true,
+    "config": {
+      "issuer": "http://127.0.0.1:8111",
+      "client_id": "demo-client",
+      "client_secret": "demo-secret",
+      "groups_claim": "groups",
+      "role_map": { "admins": "admin", "ops-admin": "admin", "*": "member" },
+      "default_role": "member",
+      "timeout_secs": 5
+    }
+  },
+  {
+    "id": "callback",
+    "kind": "http_callback",
+    "label": "Mock Callback",
+    "enabled": true,
+    "config": {
+      "url": "http://127.0.0.1:8112/auth/callback",
+      "role_map": { "admins": "admin", "ops-admin": "admin", "*": "member" },
+      "default_role": "member",
+      "timeout_secs": 5
+    }
+  },
+  {
+    "id": "proxy",
+    "kind": "proxy_header",
+    "label": "Mock Gateway",
+    "enabled": true,
+    "config": {
+      "user_header": "X-Forwarded-User",
+      "email_header": "X-Forwarded-Email",
+      "display_name_header": "X-Forwarded-Display-Name",
+      "groups_header": "X-Forwarded-Groups",
+      "trusted_proxies": ["127.0.0.0/8", "::1/128"],
+      "role_map": { "admins": "admin", "ops-admin": "admin", "*": "member" },
+      "default_role": "member"
+    }
+  }
+]

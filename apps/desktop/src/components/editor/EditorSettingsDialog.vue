@@ -359,6 +359,9 @@ import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import WebLoginCaptchaSetting from "@/components/settings/WebLoginCaptchaSetting.vue";
+import WebAuthProvidersSetting from "@/components/settings/WebAuthProvidersSetting.vue";
+import WebAuthUsersSetting from "@/components/settings/WebAuthUsersSetting.vue";
+import WebCurrentUserInfo from "@/components/settings/WebCurrentUserInfo.vue";
 import SettingsTransferPanel from "@/components/settings/SettingsTransferPanel.vue";
 import McpCapabilityBrowser from "@/components/settings/McpCapabilityBrowser.vue";
 import McpPluginToolsModeSetting from "@/components/settings/McpPluginToolsModeSetting.vue";
@@ -14073,6 +14076,7 @@ LIMIT 100;</pre>
             </section>
 
             <section v-else-if="activeSettingsTab === 'security' && isWeb" data-settings-search-id="security" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('security')]">
+              <WebCurrentUserInfo />
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
                 <p class="text-sm text-muted-foreground">
@@ -14088,6 +14092,14 @@ LIMIT 100;</pre>
 
               <div class="border-t border-border/60 pt-5 space-y-3">
                 <WebLoginCaptchaSetting />
+              </div>
+
+              <div class="border-t border-border/60 pt-5 space-y-3">
+                <WebAuthProvidersSetting />
+              </div>
+
+              <div class="border-t border-border/60 pt-5 space-y-3">
+                <WebAuthUsersSetting />
               </div>
 
               <div class="border-t border-border/60 pt-5 space-y-3">

@@ -1,0 +1,44 @@
+# Seed data for the DBX LDAP test container (deploy/docker-compose.ldap-test.yml).
+# The memberOf overlay is requested here so user entries carry the operational
+# memberOf attribute that DBX's LDAP provider reads via `group_attr`.
+
+dn: cn=module{0},cn=config
+changetype: modify
+add: olcModuleLoad
+olcModuleLoad: memberof
+
+dn: olcOverlay={0}memberof,olcDatabase={2}mdb,cn=config
+objectClass: olcOverlayConfig
+objectClass: olcMemberOf
+olcOverlay: memberof
+olcMemberOfDN: cn=dbx-groups,dc=example,dc=org
+olcMemberOfGroupOC: groupOfNames
+
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: cn=dbx-admins,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: dbx-admins
+member: uid=alice,ou=people,dc=example,dc=org
+
+dn: uid=alice,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: alice
+cn: Alice
+sn: Tester
+mail: alice@example.org
+userPassword: alicepass
+
+dn: uid=bob,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+uid: bob
+cn: Bob
+sn: Tester
+mail: bob@example.org
+userPassword: bobpass

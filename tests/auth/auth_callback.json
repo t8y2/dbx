@@ -1,0 +1,5 @@
+[{"id":"http_callback","kind":"http_callback","label":"Mock HTTP Callback","enabled":true,"config":{
+  "url":"http://127.0.0.1:8112/auth/callback",
+  "role_map":{"admins":"admin","ops-admin":"admin","*":"member"},
+  "default_role":"member","timeout_secs":5
+}}]

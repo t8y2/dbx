@@ -127,6 +127,60 @@ export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly
 
 const desktopOnly = (context: SettingsSearchContext) => !context.isWeb;
 const webOnly = (context: SettingsSearchContext) => context.isWeb;
+
+const PROVIDER_SETTING_KEYS: string[] = [
+  "settings.authProvidersHttpCallback",
+  "settings.authProvidersSaved",
+  "settings.authProvidersSaveFailed",
+  "settings.authProvidersTest",
+  "settings.authProvidersTestOk",
+  "settings.authProvidersTestFailed",
+  "settings.authProvidersRemoveConfirm",
+  "settings.authProvidersEnabled",
+  "settings.authProvidersDisabled",
+  "settings.authProvidersEnable",
+  "settings.authProvidersDisable",
+  "settings.authProvidersAddTitle",
+  "settings.authProvidersEditTitle",
+  "settings.authProvidersId",
+  "settings.authProvidersLabel",
+  "settings.authProvidersUrl",
+  "settings.authProvidersStartTls",
+  "settings.authProvidersBaseDn",
+  "settings.authProvidersBindDn",
+  "settings.authProvidersBindPassword",
+  "settings.authProvidersSecretKeep",
+  "settings.authProvidersUserFilter",
+  "settings.authProvidersUsernameAttr",
+  "settings.authProvidersDisplayNameAttr",
+  "settings.authProvidersEmailAttr",
+  "settings.authProvidersGroupAttr",
+  "settings.authProvidersSharedSecret",
+  "settings.authProvidersTimeout",
+  "settings.authProvidersRoleMap",
+  "settings.authProvidersRoleMapHint",
+  "settings.authProvidersDefaultRole",
+  "settings.authProvidersRoleMember",
+  "settings.authProvidersRoleAdmin",
+  "settings.authUsersSaved",
+];
+
+const USER_SETTING_KEYS: string[] = [
+  "settings.authUsersCreated",
+  "settings.authUsersSaveFailed",
+  "settings.authUsersRemoveConfirm",
+  "settings.authUsersDisabled",
+  "settings.authUsersReset",
+  "settings.authUsersNewPassword",
+  "settings.authUsersAdd",
+  "settings.authUsersUsername",
+  "settings.authUsersPassword",
+  "settings.authProvidersRoleMember",
+  "settings.authProvidersRoleAdmin",
+  "settings.authProvidersEnable",
+  "settings.authProvidersDisable",
+];
+
 const sqlServerSpaceCompletionVisible = (context: SettingsSearchContext) => context.hasSqlServerConnection === true || context.sqlServerSpaceConfirmsCompletionEnabled === true;
 
 export interface ShortcutSearchDefinitionSource {
@@ -786,6 +840,24 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     targetId: "web-login-captcha",
     visible: webOnly,
     keywordKeys: ["settings.webCaptchaAlways", "settings.webCaptchaAuto", "settings.webCaptchaOff"],
+  },
+  {
+    id: "security-auth-providers",
+    category: "security",
+    titleKey: "settings.authProvidersTitle",
+    descriptionKey: "settings.authProvidersDescription",
+    targetId: "web-auth-providers",
+    visible: webOnly,
+    keywordKeys: ["settings.authProvidersHttpCallback", ...PROVIDER_SETTING_KEYS],
+  },
+  {
+    id: "security-auth-users",
+    category: "security",
+    titleKey: "settings.authUsersTitle",
+    descriptionKey: "settings.authUsersDescription",
+    targetId: "web-auth-users",
+    visible: webOnly,
+    keywordKeys: USER_SETTING_KEYS,
   },
   { id: "about-support", category: "about", titleKey: "settings.supportInfoTitle", descriptionKey: "settings.supportInfoDescription", targetId: "about" },
   { id: "about-transfer", category: "about", titleKey: "settings.settingsTransferTitle", descriptionKey: "settings.settingsTransferDescription", targetId: "about" },

@@ -25,6 +25,7 @@ sqlserver-native-attention = ["dbx-core/sqlserver-native-attention"]
 embed-static = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
+dbx-auth = { path = "../dbx-auth" }
 dbx-core = { path = "../dbx-core", default-features = false, features = ["openapi"] }
 dbx-mcp = { path = "../dbx-mcp", default-features = false }
 redis = { version = "1.7.1", features = ["tokio-comp"] }
@@ -36,6 +37,7 @@ serde_json = "1.0"
 utoipa = { version = "5.5", features = ["axum_extras"] }
 uuid = { version = "1", features = ["v4"] }
 argon2 = "0.5"
+async-trait = "0.1"
 getrandom = "0.3"
 log = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
@@ -58,3 +60,6 @@ mime_guess = { version = "2", optional = true }
 [dev-dependencies]
 dbx-core = { path = "../dbx-core", default-features = false, features = ["test-support"] }
 reqwest = { version = "0.12", default-features = false, features = ["multipart"] }
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+jsonwebtoken = "9" 

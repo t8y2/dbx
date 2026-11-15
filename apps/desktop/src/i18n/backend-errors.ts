@@ -95,6 +95,16 @@ const exactMessageKeys: Record<string, string> = {
   "SQL folder is outside the opened root folder": "sqlFileTree.folderOutsideRoot",
   "Plugin update is in progress. Please try again after it finishes.": "pluginPlatform.updateInProgress",
   "Plugin update blocked by active operations. Please wait for them to finish.": "pluginPlatform.updateBlockedByOperations",
+  // Multi-user auth error codes (crates/dbx-web/src/auth/handlers.rs)
+  invalid_credentials: "auth.loginFailed",
+  user_disabled: "auth.userDisabled",
+  provider_required: "auth.providerRequired",
+  invalid_provider: "auth.providerInvalid",
+  external_user_password: "auth.externalUserPassword",
+  username_required: "auth.usernameRequired",
+  oidc_failed: "auth.oidcFailed",
+  oidc_unavailable: "auth.oidcUnavailable",
+  oidc_misconfigured: "auth.oidcMisconfigured",
   [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
   [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
 };

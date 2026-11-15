@@ -1,0 +1,9 @@
+[{"id":"ldap","kind":"ldap","label":"Mock LDAP","enabled":true,"config":{
+  "url":"ldap://127.0.0.1:13890",
+  "base_dn":"dc=example,dc=org",
+  "user_filter":"(uid={username})",
+  "username_attr":"uid","display_name_attr":"displayName","email_attr":"mail",
+  "group_attr":"memberOf",
+  "role_map":{"cn=admins,ou=groups,dc=example,dc=org":"admin","cn=ops-admin,ou=groups,dc=example,dc=org":"admin","*":"member"},
+  "default_role":"member","timeout_secs":5
+}}]

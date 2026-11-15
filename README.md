@@ -516,6 +516,30 @@ environment:
 When building the frontend yourself with an absolute asset base, set
 `VITE_DBX_BASE_PATH=/dbx/` before `pnpm build`.
 
+### Multi-user & SSO login
+
+Beyond the single shared admin password, DBX Web supports multi-user login with
+pluggable providers: local accounts (admin-managed), LDAP, OIDC/SSO (Keycloak,
+Auth0, Casdoor, or any standard OIDC server), a generic HTTP callback for
+custom authentication systems, and trusted reverse-proxy identity headers.
+Providers can be managed in the web UI (`Settings → Security`) or declared
+declaratively for container deployments:
+
+```yaml
+environment:
+  # Login users (a local admin is migrated from DBX_PASSWORD automatically)
+  - DBX_WEB_SESSION_TTL_SECS=86400
+  - DBX_AUTH_CONFIG_FILE=/app/auth-providers.json
+```
+
+`auth-providers.json` declares LDAP / OIDC / HTTP-callback / proxy-header
+providers (group→role mapping included); see
+[docs/content/docs/web-api.mdx](docs/content/docs/web-api.mdx) for the full
+schema and the admin API. Env-declared entries are read-only in the UI and win
+over UI-managed entries with the same id. Secrets entered in the UI are stored
+encrypted. Behind a reverse proxy, set `DBX_PUBLIC_URL` so OIDC redirect URIs
+are derived correctly.
+
 ## Getting Started
 
 ### Prerequisites

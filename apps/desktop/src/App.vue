@@ -5206,19 +5206,24 @@ function onLoginSuccess() {
 
 async function handleWebLogout() {
   if (!window.confirm(t("auth.logoutConfirm"))) return;
+  let logoutUrl: string | undefined;
   try {
-    await logoutWeb();
+    ({ logoutUrl } = await logoutWeb());
   } catch (error) {
     console.error("Failed to log out:", error);
-  } finally {
-    authenticated.value = false;
-    needsAuth.value = true;
-    const target = webPath("/login");
-    if (window.location.pathname === target) {
-      window.location.reload();
-    } else {
-      window.location.href = target;
-    }
+  }
+  if (logoutUrl) {
+    // RP-initiated logout: the IdP ends its own SSO session, then redirects the browser back to /login.
+    window.location.href = logoutUrl;
+    return;
+  }
+  authenticated.value = false;
+  needsAuth.value = true;
+  const target = webPath("/login");
+  if (window.location.pathname === target) {
+    window.location.reload();
+  } else {
+    window.location.href = target;
   }
 }
 

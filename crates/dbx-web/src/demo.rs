@@ -65,7 +65,7 @@ const BLOCKED_EXACT: &[&str] = &[
 
 /// 非 GET 请求整族拦截的前缀：插件/JDBC/驱动安装与运行时控制、云同步外发通道。
 /// GET 保持放行（商店浏览、已装列表、安装进度）。
-const BLOCKED_MUTATING_PREFIXES: &[&str] = &["plugins/", "jdbc/", "agents/", "cloud-sync/"];
+const BLOCKED_MUTATING_PREFIXES: &[&str] = &["plugins/", "jdbc/", "agents/", "cloud-sync/", "auth/admin/"];
 
 /// AI 供应商配置写入与按配置外呼的端点（无配置时本就不可用，一并封锁防止访客
 /// 自带 key 配置后把服务器当外呼跳板）。会话、取消与只读 GET 不受影响。

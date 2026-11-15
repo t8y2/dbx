@@ -37,15 +37,23 @@ Example response:
 {
   "authenticated": false,
   "required": true,
-  "setup_required": false
+  "setup_required": false,
+  "providers": [
+    { "id": "local", "kind": "local", "label": "Local", "mode": "form", "requires_username": false },
+    { "id": "corp-ldap", "kind": "ldap", "label": "Corp LDAP", "mode": "form", "requires_username": true },
+    { "id": "sso", "kind": "oidc", "label": "Corp SSO", "mode": "redirect", "requires_username": false }
+  ],
+  "user": { "username": "alice", "role": "admin", "provider_id": "local" }
 }
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `required` | Password protection is enabled |
-| `setup_required` | First-run password setup is still needed |
+| `setup_required` | First-run setup is still needed (skipped when external providers exist) |
 | `authenticated` | Current request already has a valid session |
+| `providers` | Login methods available on the login page (additive; optional) |
+| `user` | Current identity when authenticated (additive; optional) |
 
 ### First-Run Setup
 
@@ -69,15 +77,47 @@ Content-Type: application/json
 }
 ```
 
+Multi-user deployments send `username` (required when several local users or LDAP/callback providers are enabled) and may select `provider`:
+
+```json
+{ "username": "alice", "password": "your-password", "provider": "corp-ldap" }
+```
+
 On success, the response sets `Set-Cookie: dbx_session=...`. Reuse that cookie on later requests.
 
-Five consecutive login failures trigger an approximately 60-second lockout. Sessions live in the current Web process and require login again after restart. The cookie is `HttpOnly`, uses `SameSite=Lax`, and follows `DBX_PUBLIC_BASE_PATH` for its path.
+Five consecutive login failures for the same account trigger an approximately 60-second lockout. Sessions live in the current Web process and require login again after restart. The cookie is `HttpOnly`, uses `SameSite=Lax`, and follows `DBX_PUBLIC_BASE_PATH` for its path.
+
+### SSO (OIDC)
+
+```http
+GET /api/auth/oidc/{provider}/authorize?next=/connections   # 302 to the identity provider
+GET /api/auth/oidc/{provider}/callback                      # IdP redirects here; creates the session and redirects back
+```
+
+The flow uses Authorization Code + PKCE(S256) + state + nonce and verifies the `id_token` against the provider's JWKS. The `next` query parameter is an in-site path the browser returns to after login. Roles come from the configured groups claim via the provider's role mapping.
+
+### Admin APIs (role: admin)
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/auth/providers` | Public list of enabled providers for the login page |
+| `GET /api/auth/admin/providers` · `PUT /api/auth/admin/providers` | List / replace DB-managed providers (env-configured entries are read-only) |
+| `POST /api/auth/admin/providers/test` | Connectivity test before saving |
+| `GET /api/auth/admin/users` · `POST /api/auth/admin/users` | List / create local users |
+| `PATCH /api/auth/admin/users/{id}` · `DELETE /api/auth/admin/users/{id}` | Change role, disable, reset password, delete |
+| `GET /api/auth/admin/sessions` | Active sessions (tokens are never returned) |
 
 ### Logout
 
 ```http
 POST /api/auth/logout
 Cookie: dbx_session=...
+```
+
+Destroys the current session and clears the cookie. For SSO (OIDC redirect) sessions the response also carries `logout_url`: the IdP's end-session endpoint (`client_id` + `post_logout_redirect_uri` included) the browser should be sent to, so the IdP-side SSO session does not silently re-login on the next authorize round-trip. Form/legacy responses keep the original `{ "ok": true }` shape.
+
+```json
+{ "ok": true, "logout_url": "https://idp.example.com/logout?client_id=dbx&post_logout_redirect_uri=https%3A%2F%2Fdbx.example.com%2Flogin" }
 ```
 
 ### Environment Variables
@@ -89,11 +129,50 @@ Cookie: dbx_session=...
 | `DBX_PORT` | Change the listen port (default `4224`) |
 | `DBX_DATA_DIR` | Data directory containing `dbx.db` |
 | `DBX_PUBLIC_BASE_PATH` | Serve DBX under a subpath such as `/dbx` |
+| `DBX_PUBLIC_URL` | Externally visible origin used to derive OIDC redirect URIs behind reverse proxies |
+| `DBX_WEB_SESSION_TTL_SECS` | Optional server-side session lifetime; unset keeps browser-session behavior |
+| `DBX_AUTH_CONFIG` | Inline JSON array of authentication providers (see below) |
+| `DBX_AUTH_CONFIG_FILE` | Path to the same JSON when you prefer a mounted file |
 | `DBX_MAX_UPLOAD_MB` | Override the general request and uploaded-file limit; default 1024 MB. Multipart routes reserve fixed protocol overhead (set at least `4096` for a 4 GiB file) |
 | `DBX_AGENT_DIR` | Override the Web Agent/driver directory; defaults to `agents` under the data directory |
 | `DBX_STATIC_DIR` | Override the Web static asset directory |
 | `RUST_LOG` | Configure Rust backend log filtering; the default is `dbx_web=info,tower_http=info` |
 | `RUST_BACKTRACE=1` | Include Rust backtraces when an error reports one |
+
+### Declarative Auth Providers (`DBX_AUTH_CONFIG`)
+
+```json
+[
+  {
+    "id": "corp-ldap",
+    "kind": "ldap",
+    "label": "Corp LDAP",
+    "enabled": true,
+    "config": {
+      "url": "ldaps://ldap.corp.example:636",
+      "base_dn": "dc=corp,dc=example,dc=com",
+      "user_filter": "(&(objectClass=user)(sAMAccountName={username}))",
+      "username_attr": "sAMAccountName",
+      "group_attr": "memberOf",
+      "role_map": { "ops-admin": "admin", "*": "member" }
+    }
+  },
+  {
+    "id": "sso",
+    "kind": "oidc",
+    "label": "Corp SSO",
+    "config": {
+      "issuer": "https://authsvr.example:8001",
+      "client_id": "dbx",
+      "client_secret": "...",
+      "groups_claim": "roles",
+      "role_map": { "super_admin": "admin", "*": "member" }
+    }
+  }
+]
+```
+
+Supported kinds: `ldap`, `oidc`, `http_callback` (generic login-style API with a response field mapping), and `proxy_header` (trusted reverse-proxy identity headers such as `X-Forwarded-User`). Entries declared here are read-only in the settings dialog; UI-managed providers live in the database and are merged by `id` with env entries winning. Secrets (`bind_password`, `client_secret`, `shared_secret`) are stored encrypted when configured through the UI.
 
 ## Logging and Troubleshooting
 

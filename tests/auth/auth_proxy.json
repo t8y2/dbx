@@ -1,0 +1,7 @@
+[{"id":"proxy","kind":"proxy_header","label":"Mock Gateway","enabled":true,"config":{
+  "user_header":"X-Forwarded-User","email_header":"X-Forwarded-Email",
+  "display_name_header":"X-Forwarded-Display-Name","groups_header":"X-Forwarded-Groups",
+  "trusted_proxies":["127.0.0.0/8","::1/128"],
+  "role_map":{"admins":"admin","ops-admin":"admin","*":"member"},
+  "default_role":"member"
+}}]

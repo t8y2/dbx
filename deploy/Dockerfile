@@ -34,6 +34,7 @@ RUN dpkg --add-architecture arm64 \
 # Copy dependency manifests only and create dummy sources to pre-compile dependencies.
 # This layer is cached by GHA as long as Cargo.toml/Cargo.lock don't change.
 COPY Cargo.toml Cargo.lock ./
+COPY crates/dbx-auth/Cargo.toml crates/dbx-auth/
 COPY crates/dbx-core/Cargo.toml crates/dbx-core/
 COPY crates/dbx-platform/Cargo.toml crates/dbx-platform/
 COPY crates/dbx-types/Cargo.toml crates/dbx-types/
@@ -72,6 +73,7 @@ RUN for crate in dbx-platform dbx-types dbx-sql dbx-sql-core dbx-sql-data dbx-sq
     done \
     && echo 'fn main() {}' > crates/dbx-sqlite-worker/src/main.rs
 RUN mkdir -p crates/dbx-core/src && echo '' > crates/dbx-core/src/lib.rs \
+    && mkdir -p crates/dbx-auth/src && echo '' > crates/dbx-auth/src/lib.rs \
     && mkdir -p crates/dbx-web/src && echo 'fn main() {}' > crates/dbx-web/src/main.rs \
     && mkdir -p crates/dbx-mcp/src && echo '' > crates/dbx-mcp/src/lib.rs && echo 'fn main() {}' > crates/dbx-mcp/src/main.rs \
     && mkdir -p crates/dbx-cli/src && echo 'fn main() {}' > crates/dbx-cli/src/main.rs \

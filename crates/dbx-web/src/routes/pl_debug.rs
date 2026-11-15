@@ -33,7 +33,13 @@ pub fn router() -> Router<Arc<WebState>> {
 }
 
 async fn access(state: &WebState, headers: &HeaderMap) -> Result<PlDebugAccess, AppError> {
-    validated_access(&*state.sessions.read().await, headers)
+    let sessions = active_session_tokens(state).await;
+    validated_access(&sessions, headers)
+}
+
+/// Snapshot of the currently live session tokens (keeps `validated_access`'s existing `HashSet` signature).
+async fn active_session_tokens(state: &WebState) -> std::collections::HashSet<String> {
+    state.sessions.tokens().await
 }
 
 fn validated_access(
@@ -55,7 +61,7 @@ pub(crate) async fn claim_mutation<'a>(
     headers: &HeaderMap,
     scope: PlDebugMutationScope,
 ) -> Result<PlDebugMutationPermit<'a>, AppError> {
-    let sessions = state.sessions.read().await;
+    let sessions = active_session_tokens(state).await;
     let access = auth::session_token_from_headers(headers)
         .filter(|token| sessions.contains(token))
         .map(PlDebugAccess::web)
@@ -69,14 +75,27 @@ async fn bootstrap(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Re
         return Ok(Json(pl_debug::pl_debug_bootstrap_core(&state.app)).into_response());
     }
     let supplied = auth::session_token_from_headers(&headers);
-    let mut sessions = state.sessions.write().await;
-    if supplied.as_ref().is_some_and(|token| sessions.contains(token)) {
-        return Ok(Json(pl_debug::pl_debug_bootstrap_core(&state.app)).into_response());
+    if let Some(token) = supplied {
+        if state.sessions.contains(&token).await {
+            return Ok(Json(pl_debug::pl_debug_bootstrap_core(&state.app)).into_response());
+        }
     }
-    let token = Uuid::new_v4().to_string();
-    sessions.insert(token.clone());
-    drop(sessions);
-    let cookie = auth::session_cookie(&state, &token);
+    // In password-disabled mode, issue an anonymous session for the debugger (keeping the browser-token isolation semantics).
+    let anonymous = dbx_auth::AuthUserRecord {
+        id: "anonymous".to_string(),
+        username: "anonymous".to_string(),
+        display_name: None,
+        email: None,
+        password_hash: None,
+        role: dbx_auth::UserRole::Admin,
+        provider_id: "local".to_string(),
+        subject: "anonymous".to_string(),
+        disabled: false,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let record = state.sessions.create(&anonymous).await;
+    let cookie = auth::session_cookie(&state, &record.token);
     Ok((StatusCode::OK, [("set-cookie", cookie)], Json(pl_debug::pl_debug_bootstrap_core(&state.app))).into_response())
 }
 
@@ -104,10 +123,9 @@ async fn inspect(
     let owner = access(&state, &headers).await?;
     let result = match pl_debug::pl_debug_prepare_inspection_core(&state.app, &request).await? {
         Some(admission) => {
-            let sessions = state.sessions.read().await;
+            let sessions = active_session_tokens(&state).await;
             let owner = validated_access(&sessions, &headers)?;
             let submission = pl_debug::pl_debug_submit_inspection_core(&state.app, &owner, admission)?;
-            drop(sessions);
             submission.wait().await
         }
         None => pl_debug::pl_debug_inspect_core(&state.app, &owner, request).await,
@@ -121,9 +139,9 @@ async fn start(
     headers: HeaderMap,
     Json(request): Json<PlDebugStart>,
 ) -> Result<Json<PlDebugReceipt>, AppError> {
-    // Registration and revocation share this short boundary. No RPC is awaited
-    // while holding the auth lock, and logout cannot miss a just-accepted start.
-    let sessions = state.sessions.read().await;
+    // Registration and revocation share this short boundary: the token
+    // snapshot is validated, then registration runs without holding a lock.
+    let sessions = active_session_tokens(&state).await;
     let owner = validated_access(&sessions, &headers)?;
     Ok(Json(
         pl_debug::pl_debug_start_submission_core(&state.app, &owner, request)
@@ -148,7 +166,7 @@ async fn submit_prepared_compilation(
     headers: &HeaderMap,
     admission: pl_debug::PlDebugCompileAdmission,
 ) -> Result<Json<Value>, AppError> {
-    let sessions = state.sessions.read().await;
+    let sessions = active_session_tokens(state).await;
     let owner = validated_access(&sessions, headers)?;
     Ok(Json(
         pl_debug::pl_debug_submit_compile_core(&state.app, &owner, admission)
@@ -161,7 +179,7 @@ async fn compile_status(
     headers: HeaderMap,
     Json(reference): Json<PlDebugCompileRef>,
 ) -> Result<Json<Value>, AppError> {
-    let sessions = state.sessions.read().await;
+    let sessions = active_session_tokens(&state).await;
     let owner = validated_access(&sessions, &headers)?;
     Ok(Json(pl_debug::pl_debug_compile_status_core(&state.app, &owner, reference)?))
 }
@@ -265,9 +283,6 @@ mod tests {
         ));
         let mut state = WebState::for_tests(app, directory.path().to_path_buf());
         state.password_disabled = disabled;
-        if !disabled {
-            *state.password_hash.get_mut() = Some("configured".into());
-        }
         let state = Arc::new(state);
         let routes = router()
             .route("/auth/logout", post(auth::logout))
@@ -304,7 +319,7 @@ mod tests {
         assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"));
         let token = cookie.split(';').next().unwrap();
         assert_ne!(token, "dbx_session=untrusted");
-        assert_eq!(state.sessions.read().await.len(), 1);
+        assert_eq!(state.sessions.len().await, 1);
         let bootstrap: Value = first.json().await.unwrap();
         let list_body = serde_json::json!({"serverEpoch":bootstrap["serverEpoch"],"connectionId":"conn"});
         let denied = routes.post("/pl-debug/list", Some("dbx_session=untrusted"), list_body.clone()).await;
@@ -321,10 +336,10 @@ mod tests {
         assert_eq!(denied_inspect.status(), StatusCode::FORBIDDEN);
         let reused = routes.post("/pl-debug/bootstrap", Some(token), serde_json::json!({})).await;
         assert!(reused.headers().get("set-cookie").is_none());
-        assert_eq!(state.sessions.read().await.len(), 1);
+        assert_eq!(state.sessions.len().await, 1);
         let allowed = routes.post("/pl-debug/list", Some(token), list_body.clone()).await;
         assert_eq!(allowed.status(), StatusCode::OK);
-        state.sessions.write().await.clear();
+        state.sessions.clear().await;
         let revoked = routes.post("/pl-debug/list", Some(token), list_body).await;
         assert_eq!(revoked.status(), StatusCode::FORBIDDEN);
     }
@@ -334,13 +349,13 @@ mod tests {
         let (_directory, state, routes) = fixture(false).await;
         let denied = routes.post("/pl-debug/bootstrap", None, serde_json::json!({})).await;
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-        assert!(state.sessions.read().await.is_empty());
-        state.sessions.write().await.insert("validated-login".into());
+        assert!(state.sessions.is_empty().await);
+        state.sessions.register_anonymous("validated-login").await;
         let allowed =
             routes.post("/pl-debug/bootstrap", Some("dbx_session=validated-login"), serde_json::json!({})).await;
         assert_eq!(allowed.status(), StatusCode::OK);
         assert!(allowed.headers().get("set-cookie").is_none());
-        assert_eq!(state.sessions.read().await.len(), 1);
+        assert_eq!(state.sessions.len().await, 1);
     }
 
     async fn configure_agent(state: &WebState, routes: &TestServer) {
@@ -424,7 +439,7 @@ for line in sys.stdin:
     }
 
     async fn start_session_at(state: &WebState, routes: &TestServer, owner: &str, connection_id: &str) -> Value {
-        state.sessions.write().await.insert(owner.into());
+        state.sessions.register_anonymous(&owner).await;
         let cookie = format!("dbx_session={owner}");
         let bootstrap: Value =
             routes.post("/pl-debug/bootstrap", Some(&cookie), serde_json::json!({})).await.json().await.unwrap();
@@ -467,7 +482,8 @@ for line in sys.stdin:
     async fn admission_http_distinguishes_new_rejections_from_owner_and_epoch_failures() {
         let (_directory, state, routes) = fixture(false).await;
         configure_agent(&state, &routes).await;
-        state.sessions.write().await.extend(["first".into(), "second".into()]);
+        state.sessions.register_anonymous("first").await;
+         state.sessions.register_anonymous("second").await;
         let cookie = Some("dbx_session=first");
         let bootstrap: Value = routes.post("/pl-debug/bootstrap", cookie, json!({})).await.json().await.unwrap();
         let rejected_start: Value = routes
@@ -539,7 +555,7 @@ for line in sys.stdin:
                 state.app.configs.write().await.get_mut("conn").unwrap().transport_layers =
                     vec![serde_json::from_value(reference).unwrap()];
                 start_session(&state, &routes, "first").await;
-                state.sessions.write().await.insert("second".into());
+                state.sessions.register_anonymous("second").await;
                 if remove_config {
                     state.app.configs.write().await.remove("conn");
                 } else {
@@ -584,7 +600,7 @@ for line in sys.stdin:
                 state.app.configs.write().await.get_mut("conn").unwrap().transport_layers =
                     vec![serde_json::from_value(layer).unwrap()];
                 start_session(&state, &routes, "first").await;
-                state.sessions.write().await.insert("second".into());
+                state.sessions.register_anonymous("second").await;
                 if orphan {
                     state.app.storage.save_tunnel_profiles(&[]).await.unwrap();
                 }
@@ -747,7 +763,7 @@ for line in sys.stdin:
         state.app.configs.write().await.get_mut("conn").unwrap().transport_layers =
             vec![serde_json::from_value(reference).unwrap()];
         start_session(&state, &routes, "first").await;
-        state.sessions.write().await.insert("second".into());
+        state.sessions.register_anonymous("second").await;
         let mut renamed = serde_json::to_value(&profile).unwrap();
         renamed["name"] = serde_json::json!("Renamed");
         renamed["enabled"] = serde_json::json!(false);
@@ -783,7 +799,7 @@ for line in sys.stdin:
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
             start_session(&state, &routes, "first").await;
-            state.sessions.write().await.insert("second".into());
+            state.sessions.register_anonymous("second").await;
             let original = state.app.configs.read().await.get("conn").unwrap().clone();
             let mut replacement = serde_json::to_value(&original).unwrap();
             replacement["host"] = serde_json::json!("127.0.0.2");
@@ -827,8 +843,8 @@ for line in sys.stdin:
         {
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
-            state.sessions.write().await.insert("first".into());
-            state.sessions.write().await.insert("second".into());
+            state.sessions.register_anonymous("first").await;
+            state.sessions.register_anonymous("second").await;
             let mut config = serde_json::to_value(state.app.configs.read().await.get("conn").unwrap()).unwrap();
             config["transport_layers"] = serde_json::json!([{
                 "type":"proxy","id":"proxy","name":"Proxy","enabled":true,"proxy_type":"socks5",
@@ -905,7 +921,7 @@ for line in sys.stdin:
                     .await
                     .unwrap();
                 start_session(&state, &routes, "first").await;
-                state.sessions.write().await.insert("second".into());
+                state.sessions.register_anonymous("second").await;
                 let before = serde_json::to_value(state.app.storage.load_connections().await.unwrap()).unwrap();
                 let body = if path == "/connection/mcp/add" {
                     let mut replacement = original.clone();
@@ -961,7 +977,7 @@ for line in sys.stdin:
                     .await
                     .unwrap();
                 start_session(&state, &routes, "first").await;
-                state.sessions.write().await.insert("second".into());
+                state.sessions.register_anonymous("second").await;
                 let target = if scenario == "unrelated" { "unrelated" } else { "conn" };
                 let body = if path == "/connection/mcp/add" {
                     let mut replacement = original.clone();
@@ -1009,7 +1025,7 @@ for line in sys.stdin:
                 let (_directory, state, routes) = fixture(disabled).await;
                 configure_agent(&state, &routes).await;
                 state.app.configs.write().await.get_mut("conn").unwrap().read_only = true;
-                state.sessions.write().await.insert("first".into());
+                state.sessions.register_anonymous("first").await;
                 let first_cookie = Some("dbx_session=first");
                 let unlocked = routes
                     .post(
@@ -1020,7 +1036,7 @@ for line in sys.stdin:
                     .await;
                 assert_eq!(unlocked.status(), StatusCode::OK);
                 start_session(&state, &routes, "first").await;
-                state.sessions.write().await.insert("second".into());
+                state.sessions.register_anonymous("second").await;
                 let response =
                     routes.post(path, cookie, serde_json::json!({"connectionId":"conn","durationSecs":300})).await;
                 let remaining: Value = routes
@@ -1083,7 +1099,7 @@ for line in sys.stdin:
     async fn configuration_save_keeps_password_disabled_browser_credentials_in_the_original_empty_scope() {
         let (_directory, state, routes) = fixture(true).await;
         configure_agent(&state, &routes).await;
-        state.sessions.write().await.insert("first".into());
+        state.sessions.register_anonymous("first").await;
         let mut config = state.app.configs.read().await.get("conn").unwrap().clone();
         config.password = "first-secret".into();
         let saved = routes
@@ -1167,7 +1183,7 @@ for line in sys.stdin:
         persisted.host = "127.0.0.2".into();
         state.app.storage.save_connections(&[persisted]).await.unwrap();
         start_session(&state, &routes, "first").await;
-        state.sessions.write().await.insert("second".into());
+        state.sessions.register_anonymous("second").await;
         let driver = state.app.agent_manager.driver_dir("oracle");
         std::fs::write(driver.join("delay-close"), "ready").unwrap();
         let address = routes.address;
@@ -1211,7 +1227,7 @@ for line in sys.stdin:
         state.app.configs.write().await.insert("conn".into(), original.clone());
         state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
         let reference = start_session(&state, &routes, "first").await;
-        state.sessions.write().await.insert("second".into());
+        state.sessions.register_anonymous("second").await;
         let saved = routes
             .post(
                 "/connection/save",
@@ -1250,7 +1266,7 @@ for line in sys.stdin:
                 let stored = if path == "/connection/list" { changed.clone() } else { original.clone() };
                 state.app.storage.save_connections(&[stored]).await.unwrap();
                 start_session(&state, &routes, "first").await;
-                state.sessions.write().await.insert("second".into());
+                state.sessions.register_anonymous("second").await;
                 let before = serde_json::to_value(state.app.storage.load_connections().await.unwrap()).unwrap();
                 let response = if path == "/connection/list" {
                     let mut request = reqwest::Client::new().get(format!("http://{}{path}", routes.address));
@@ -1302,7 +1318,7 @@ for line in sys.stdin:
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
             let reference = start_session(&state, &routes, "first").await;
-            state.sessions.write().await.insert("second".into());
+            state.sessions.register_anonymous("second").await;
             let response =
                 routes.post("/connection/disconnect", cookie, serde_json::json!({"connectionId":"conn"})).await;
             let status: Value = routes
@@ -1356,7 +1372,7 @@ for line in sys.stdin:
             let (_directory, state, routes) = fixture(true).await;
             configure_agent(&state, &routes).await;
             start_session(&state, &routes, "first").await;
-            state.sessions.write().await.insert("second".into());
+            state.sessions.register_anonymous("second").await;
             let before = state.app.agent_manager.connection_runtimes.lock().await.len();
             assert_eq!(before, 1);
             let response = routes.post(path, Some("dbx_session=second"), body.clone()).await;
@@ -1489,10 +1505,18 @@ for line in sys.stdin:
         use argon2::{Argon2, PasswordHasher};
         let (_directory, state, routes) = fixture(false).await;
         configure_agent(&state, &routes).await;
-        *state.password_hash.write().await =
+        // Create a real local admin with a password and bind both debug sessions to it,
+        // exercising the real password-change flow (verify old password → revoke sibling sessions).
+        let mut admin = dbx_auth::new_local_user("admin", None, dbx_auth::UserRole::Admin);
+        admin.password_hash =
             Some(Argon2::default().hash_password(b"old", &SaltString::generate(&mut OsRng)).unwrap().to_string());
+        let admin = state.auth_users.create_user(admin).await.unwrap();
         let reference = start_session(&state, &routes, "first").await;
         start_session(&state, &routes, "second").await;
+        // start_session registers sessions with anonymous records internally; before the password change,
+        // re-bind both sessions to the real admin user (the change-password handler locates the account by the session's user_id).
+        state.sessions.register("first", &admin).await;
+        state.sessions.register("second", &admin).await;
         let changed = routes
             .post(
                 "/auth/change-password",
@@ -1503,8 +1527,8 @@ for line in sys.stdin:
         assert_eq!(changed.status(), StatusCode::OK);
         wait_events(&state, "shutdown", 1).await;
         assert_eq!(events(&state, "pl_debug_close"), 1);
-        assert!(state.sessions.read().await.contains("first"));
-        assert!(!state.sessions.read().await.contains("second"));
+        assert!(state.sessions.contains("first").await);
+        assert!(!state.sessions.contains("second").await);
         let status: Value = routes
             .post("/pl-debug/status", Some("dbx_session=first"), serde_json::json!({"reference":reference}))
             .await
@@ -1547,7 +1571,8 @@ for line in sys.stdin:
         for disabled in [true, false] {
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
-            state.sessions.write().await.extend(["first".into(), "second".into()]);
+            state.sessions.register_anonymous("first").await;
+             state.sessions.register_anonymous("second").await;
             let body = compilation_body(&routes, "first").await;
             let accepted = routes.post("/pl-debug/compile", Some("dbx_session=first"), body.clone()).await;
             assert_eq!(accepted.status(), StatusCode::OK);
@@ -1601,7 +1626,7 @@ for line in sys.stdin:
         for disabled in [true, false] {
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
-            state.sessions.write().await.insert("first".into());
+            state.sessions.register_anonymous("first").await;
             let body = compilation_body(&routes, "first").await;
             let mut headers = HeaderMap::new();
             headers.insert("cookie", "dbx_session=first".parse().unwrap());
@@ -1625,7 +1650,7 @@ for line in sys.stdin:
     async fn compilation_http_readonly_rejection_is_authoritative_not_started() {
         let (_directory, state, routes) = fixture(true).await;
         configure_agent(&state, &routes).await;
-        state.sessions.write().await.insert("first".into());
+        state.sessions.register_anonymous("first").await;
         let body = compilation_body(&routes, "first").await;
         state.app.configs.write().await.get_mut("conn").unwrap().read_only = true;
         let response = routes.post("/pl-debug/compile", Some("dbx_session=first"), body).await;
@@ -1641,7 +1666,7 @@ for line in sys.stdin:
         for disabled in [true, false] {
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
-            state.sessions.write().await.insert("first".into());
+            state.sessions.register_anonymous("first").await;
             let bootstrap: Value =
                 routes.post("/pl-debug/bootstrap", Some("dbx_session=first"), json!({})).await.json().await.unwrap();
             let response =
@@ -1683,7 +1708,7 @@ for line in sys.stdin:
             let (_directory, state, routes) = fixture(disabled).await;
             configure_agent(&state, &routes).await;
             let second = start_session(&state, &routes, "second").await;
-            state.sessions.write().await.insert("first".into());
+            state.sessions.register_anonymous("first").await;
             let driver = state.app.agent_manager.driver_dir("oracle");
             std::fs::write(driver.join("delay-inspect"), b"1").unwrap();
             let address = routes.address;

@@ -5517,6 +5517,7 @@ export default {
     emptyTableSubmitted: 'Empty task submitted for "{name}"',
     truncateTableSuccess: 'Table "{name}" truncated',
     duplicateStructureSuccess: 'Table cloned as "{name}"',
+    duplicateStructureCommentsUnavailable: "Table structure was cloned, but some source comments could not be read and may not have been copied.",
     tableOperationFailed: "Operation failed: {message}",
     tableOperationTimedOut: 'The operation on "{name}" is taking longer than expected and has not been cancelled — it may still be running on the database. Check the result later, or click Cancel to stop it. ({message})',
     tableOperationCancelled: 'Operation on "{name}" cancelled',

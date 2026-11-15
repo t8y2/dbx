@@ -166,7 +166,7 @@ func TestRoutineSourceUsesExplicitSignatureAndDetectsAmbiguity(t *testing.T) {
 		signature string
 		predicate string
 	}{
-		{"", "length(sys_get_function_identity_arguments(p.oid)) = 0"},
+		{"", "coalesce(length(sys_get_function_identity_arguments(p.oid)), 0) = 0"},
 		{"value integer", "sys_get_function_identity_arguments(p.oid) = 'value integer'"},
 		{"value \"Type's\"", "sys_get_function_identity_arguments(p.oid) = 'value \"Type''s\"'"},
 	} {
@@ -201,9 +201,12 @@ func TestRoutineSourceUsesExplicitSignatureAndDetectsAmbiguity(t *testing.T) {
 }
 
 func TestLegacyRoutineSourceDoesNotIgnoreOverloadIdentity(t *testing.T) {
-	for _, signature := range []*string{nil, stringPtr("value integer")} {
+	for _, signature := range []*string{nil, stringPtr(""), stringPtr("value integer")} {
 		t.Run("overloaded", func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if signature != nil && *signature == "" && !strings.Contains(query, "coalesce(length(") {
+					return nil, errors.New("legacy zero-argument routine predicate did not normalize NULL identity: " + query)
+				}
 				if !strings.Contains(query, "SELECT COUNT(*)") || strings.Contains(query, "DBMS_METADATA") {
 					return nil, errors.New("legacy name-only DDL must not run for an ambiguous name: " + query)
 				}

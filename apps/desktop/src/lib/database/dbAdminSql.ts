@@ -110,6 +110,8 @@ export interface DuplicateTableStructurePlan {
   sql: string;
   sourceColumns?: ColumnInfo[];
   executeAsScript: boolean;
+  /** True when the clone ran without enough Kingbase metadata to guarantee comment preservation. */
+  commentMetadataIncomplete?: boolean;
   oceanbaseClone?: OceanbaseTableClone;
 }
 
@@ -328,19 +330,26 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
   const copyColumnComments = options.databaseType === "vastbase" || options.databaseType === "oscar" || isKingbase;
   const schema = options.schema || "";
   const columns = options.sourceColumns;
+  let commentMetadataIncomplete = false;
   const loadColumns = async () => {
     if (columns || !copyColumnComments) return columns;
     try {
       return await api.getColumns(options.connectionId, options.database, schema, options.sourceName, options.catalog);
     } catch (error) {
-      if (isKingbase && !options.copyData && isMissingKingbaseCatalogOid(error)) return undefined;
+      if (isKingbase && !options.copyData && isMissingKingbaseCatalogOid(error)) {
+        commentMetadataIncomplete = true;
+        return undefined;
+      }
       throw error;
     }
   };
   const tableCommentPromise =
     isKingbase && options.tableComment == null
       ? api.getTableComment(options.connectionId, options.database, schema, options.sourceName, options.catalog).catch((error) => {
-          if (isUnsupportedKingbaseTableComment(error)) return null;
+          if (isUnsupportedKingbaseTableComment(error)) {
+            commentMetadataIncomplete = true;
+            return null;
+          }
           throw error;
         })
       : options.tableComment;
@@ -357,7 +366,12 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     columnComments: copyColumnComments ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
-  return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
+  return {
+    sql,
+    sourceColumns,
+    executeAsScript: duplicateTableStructureRequiresScript(sql),
+    ...(commentMetadataIncomplete ? { commentMetadataIncomplete: true } : {}),
+  };
 }
 
 export interface CopyTableDataSqlOptions {

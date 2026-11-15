@@ -563,7 +563,7 @@ describe("buildDuplicateTableStructurePlan", () => {
     const sql = 'CREATE TABLE "copy" AS SELECT * FROM "source" WHERE 1=0;\nCOMMENT ON TABLE "copy" IS \'table note\';';
     apiMock.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
 
-    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, tableComment: "table note" })).resolves.toEqual({ sql, sourceColumns: undefined, executeAsScript: true });
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, tableComment: "table note" })).resolves.toEqual({ sql, sourceColumns: undefined, executeAsScript: true, commentMetadataIncomplete: true });
     expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: "table note", columnComments: [] }));
   });
 
@@ -597,7 +597,7 @@ describe("buildDuplicateTableStructurePlan", () => {
     apiMock.getColumns.mockResolvedValueOnce(columns);
     apiMock.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
 
-    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, copyData })).resolves.toEqual({ sql, sourceColumns: columns, executeAsScript: true });
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, copyData })).resolves.toEqual({ sql, sourceColumns: columns, executeAsScript: true, commentMetadataIncomplete: true });
     expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: null, columnComments: [{ name: "note", comment: "column note" }] }));
   });
 
@@ -607,7 +607,7 @@ describe("buildDuplicateTableStructurePlan", () => {
     const sql = "CREATE TABLE copy AS SELECT * FROM source WHERE 1=0;";
     apiMock.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
 
-    await expect(buildDuplicateTableStructurePlan(kingbaseClone)).resolves.toEqual({ sql, sourceColumns: undefined, executeAsScript: false });
+    await expect(buildDuplicateTableStructurePlan(kingbaseClone)).resolves.toEqual({ sql, sourceColumns: undefined, executeAsScript: false, commentMetadataIncomplete: true });
     expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: null, columnComments: [] }));
   });
 

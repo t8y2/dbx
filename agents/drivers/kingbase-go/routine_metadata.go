@@ -106,7 +106,9 @@ WHERE n.nspname = %s AND %s ORDER BY p.proname, signature`, kind, identity, cata
 func routineSignaturePredicate(identity, signature string) string {
 	if signature == "" {
 		// Kingbase can interpret an empty string literal as NULL in Oracle mode.
-		return "length(" + identity + ") = 0"
+		// The identity argument expression itself can therefore be NULL for a
+		// zero-argument routine; normalize it before applying the predicate.
+		return "coalesce(length(" + identity + "), 0) = 0"
 	}
 	return identity + " = " + quoteLiteral(signature)
 }

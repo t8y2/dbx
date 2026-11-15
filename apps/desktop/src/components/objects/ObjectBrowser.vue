@@ -4446,6 +4446,11 @@ async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName
   });
 }
 
+function duplicateStructureSuccessMessage(name: string, plan: DuplicateTableStructurePlan) {
+  const success = t("contextMenu.duplicateStructureSuccess", { name });
+  return plan.commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success;
+}
+
 function executeDuplicateStructurePlan(context: TableCopyContext, plan: DuplicateTableStructurePlan, schema: string | undefined) {
   if (plan.oceanbaseClone) return executeOceanbaseTableClone(plan.oceanbaseClone, (sql) => api.executeQuery(context.connection.id, context.database, sql, plan.oceanbaseClone!.targetSchema));
   return plan.executeAsScript ? api.executeScript(context.connection.id, context.database, plan.sql, schema) : api.executeQuery(context.connection.id, context.database, plan.sql, schema);
@@ -4467,7 +4472,7 @@ async function confirmDuplicateStructureImpl() {
     if (!(await cloneDialog.request([{ plan, scope: [context.connection.id, context.database, context.catalog || ""] }]))) return;
     const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(context, plan, schema), context);
     if (!executed) return;
-    toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
+    toast(duplicateStructureSuccessMessage(newName, plan), plan.commentMetadataIncomplete ? 5000 : 2000);
     await reloadTableCopyContext(context);
     await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, schema);
   } catch (e: any) {
@@ -4846,6 +4851,7 @@ async function confirmPasteTableImpl() {
   let firstPasteError: unknown;
   let pasteCancelled = false;
   let hasMutatedTable = false;
+  let commentMetadataIncomplete = false;
   const preparedClones = new Map<(typeof entries)[number], DuplicateTableStructurePlan>();
   if (context.databaseType === "oceanbase-oracle" && mode !== "data-only") {
     try {
@@ -4869,6 +4875,7 @@ async function confirmPasteTableImpl() {
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
         const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, copyData));
+        commentMetadataIncomplete ||= !!plan.commentMetadataIncomplete;
         sourceColumns = plan.sourceColumns;
         if (plan.oceanbaseClone) {
           targetName = plan.oceanbaseClone.targetName;
@@ -4937,7 +4944,8 @@ async function confirmPasteTableImpl() {
       try {
         await reloadTableCopyContext(context);
         await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, context.schema);
-        toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
+        const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+        toast(`${t("contextMenu.pasteTableCancelledAfterPartial")}${warning}`, 5000);
       } catch (e: any) {
         toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e) }), 5000);
       }
@@ -4949,9 +4957,11 @@ async function confirmPasteTableImpl() {
     if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
-    toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
+    const success = t("contextMenu.batchPasteSuccess", { count: successCount });
+    toast(commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success, commentMetadataIncomplete ? 5000 : 3000);
   } else {
-    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, 5000);
+    const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}${warning}`, 5000);
   }
   await reloadTableCopyContext(context);
   await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, context.schema);

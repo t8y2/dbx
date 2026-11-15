@@ -6093,6 +6093,11 @@ function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureS
   return node.type === "table" && !!node.connectionId && !!node.database;
 }
 
+function duplicateStructureSuccessMessage(name: string, plan: DuplicateTableStructurePlan) {
+  const success = t("contextMenu.duplicateStructureSuccess", { name });
+  return plan.commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success;
+}
+
 async function confirmDuplicateStructure() {
   const node = duplicateStructureSource.value || activeNode.value;
   return databaseTypeForNode(node) === "oceanbase-oracle" ? cloneDialog.run(confirmDuplicateStructureImpl) : confirmDuplicateStructureImpl();
@@ -6128,7 +6133,7 @@ async function confirmDuplicateStructureImpl() {
       execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(node.connectionId, node.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs, catalog: node.catalog })) : undefined,
     });
     if (!executed) return;
-    toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
+    toast(duplicateStructureSuccessMessage(newName, plan), plan.commentMetadataIncomplete ? 5000 : 3000);
     await refreshTableList(node);
   } catch (e: any) {
     if (e instanceof OceanbaseTableCloneError) {
@@ -6223,6 +6228,7 @@ async function confirmPasteTableImpl() {
     }
   }
   let cloneFailure: { error: unknown; remaining: string[] } | undefined;
+  let commentMetadataIncomplete = false;
   const completedCloneTargets: string[] = [];
   for (const entry of entries) {
     let targetName = entry.targetName.trim();
@@ -6246,6 +6252,7 @@ async function confirmPasteTableImpl() {
             identifierQuote: entry.identifierQuote,
             copyData,
           }));
+        commentMetadataIncomplete ||= !!plan.commentMetadataIncomplete;
         sourceColumns = plan.sourceColumns;
         if (plan.oceanbaseClone) {
           targetName = plan.oceanbaseClone.targetName;
@@ -6332,7 +6339,8 @@ async function confirmPasteTableImpl() {
   }
   if (pasteCancelled) {
     if (hasMutatedTable && refreshFailCount === 0) {
-      toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
+      const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+      toast(`${t("contextMenu.pasteTableCancelledAfterPartial")}${warning}`, 5000);
     }
     if (refreshFailCount > 0) {
       const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
@@ -6345,9 +6353,11 @@ async function confirmPasteTableImpl() {
     if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
-    toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
+    const success = t("contextMenu.batchPasteSuccess", { count: successCount });
+    toast(commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success, commentMetadataIncomplete ? 5000 : 3000);
   } else {
-    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, { persistent: true });
+    const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}${warning}`, { persistent: true });
   }
   if (refreshFailCount > 0) {
     const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);

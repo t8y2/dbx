@@ -37,6 +37,7 @@ const columnOpen = defineModel<boolean>("columnOpen", { default: false });
 const rowSearch = ref("");
 const columnSearch = ref("");
 const rowJsonPreview = ref(false);
+const JSON_COMMENT_GAP = "        ";
 const showRowJsonPreview = computed(() => props.canPreviewRowJson && rowJsonPreview.value);
 const rowJsonFields = computed(() => (showRowJsonPreview.value && props.rowDetail ? dataGridRowDetailPreviewFields(props.rowDetail, props.databaseType) : []));
 const filteredRowFields = computed(() => (props.rowDetail ? filterDataGridDetailFields(props.rowDetail.fields, rowSearch.value) : []));
@@ -88,16 +89,25 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
         <div v-if="!showRowJsonPreview" class="relative w-56 max-w-full"><Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><Input v-model="rowSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" /></div>
         <Button v-if="canPreviewRowJson" :variant="showRowJsonPreview ? 'secondary' : 'outline'" size="sm" class="h-7 text-xs" :aria-pressed="showRowJsonPreview" @click="rowJsonPreview = !rowJsonPreview"> <Code2 class="mr-1.5 h-3 w-3" />{{ t("grid.rowJsonPreview") }} </Button>
       </div>
-      <div v-if="showRowJsonPreview" class="min-h-0 flex-1 overflow-auto rounded border bg-muted/20 p-3 text-xs">
-        <div class="dbx-data-grid-value-font whitespace-pre">{</div>
-        <div v-for="field in rowJsonFields" :key="field.columnIndex" class="grid grid-cols-1 gap-x-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-          <pre class="dbx-data-grid-value-font whitespace-pre-wrap break-words">{{ field.text }}</pre>
-          <div v-if="field.comment || field.previewLength !== undefined" class="min-w-0 whitespace-pre-wrap break-words text-muted-foreground">
-            <div v-if="field.comment">{{ field.comment }}</div>
-            <div v-if="field.previewLength !== undefined">{{ t("grid.largeValuePreviewHint", { count: field.previewLength }) }}</div>
+      <div v-if="showRowJsonPreview" class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20">
+        <div class="min-w-0 p-3 font-mono text-[13px] leading-6 text-foreground">
+          <div class="flex min-w-0">
+            <span class="w-10 shrink-0 select-none pr-3 text-right text-[11px] tabular-nums text-muted-foreground/60">1</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words">{</span>
+          </div>
+          <div v-for="(field, index) in rowJsonFields" :key="field.columnIndex" class="flex min-w-0">
+            <span class="w-10 shrink-0 select-none pr-3 text-right text-[11px] tabular-nums text-muted-foreground/60">{{ index + 2 }}</span>
+            <div class="min-w-0 whitespace-pre-wrap break-words">
+              <span>{{ field.text }}</span
+              ><span v-if="field.comment" class="text-muted-foreground/85">{{ JSON_COMMENT_GAP }}{{ field.comment }}</span>
+              <div v-if="field.previewLength !== undefined" class="pl-2 text-[11px] leading-5 text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.previewLength }) }}</div>
+            </div>
+          </div>
+          <div class="flex min-w-0">
+            <span class="w-10 shrink-0 select-none pr-3 text-right text-[11px] tabular-nums text-muted-foreground/60">{{ rowJsonFields.length + 2 }}</span>
+            <span class="min-w-0 whitespace-pre-wrap break-words">}</span>
           </div>
         </div>
-        <div class="dbx-data-grid-value-font whitespace-pre">}</div>
       </div>
       <div v-else class="min-h-0 flex-1 overflow-auto rounded border">
         <table class="w-full min-w-[640px] text-xs">

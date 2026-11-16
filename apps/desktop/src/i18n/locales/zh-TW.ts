@@ -4769,6 +4769,7 @@ export default withEnglishFallback({
     instanceInfo: "實例資訊",
     newSql: "新增 SQL",
     generateSql: "產生 SQL",
+    copyGeneratedSql: "複製產生的 SQL",
     insertRowsDialogTitle: "產生多行 INSERT",
     insertRowsDialogDescription: "為選中的每張資料表產生指定行數的 INSERT 範本，多行時佔位值將按行號區分。",
     insertRowsDialogCountLabel: "行數",

@@ -2551,6 +2551,7 @@ export default withEnglishFallback({
     expandCellDetailMetadata: "Hücre meta verisini genişlet",
     openCellDetailsDialog: "Hücre Ayrıntılarını Aç",
     rowDetails: "Satır Ayrıntıları",
+    rowJsonPreview: "JSON Önizlemesi",
     rowDetailsFor: "{row}. Satırın Ayrıntıları",
     openRowDetailsDialog: "Satır Ayrıntılarını Aç",
     openColumnDetailsDialog: "Sütun Ayrıntılarını Aç",

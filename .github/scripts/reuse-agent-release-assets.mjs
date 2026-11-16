@@ -6,7 +6,7 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const REGISTRY_ASSET = "agent-registry.json";
-const NATIVE_MODULES = new Set(["duckdb", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2"]);
+const NATIVE_MODULES = new Set(["duckdb", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "cnosdb", "etcd", "etcd2"]);
 // Native modules that intentionally publish a subset of the six platforms. The
 // Oracle OCI ("thick") agent links the Oracle Client through CGO and is built
 // for Windows x64 only, so a reused release must cover exactly that platform —

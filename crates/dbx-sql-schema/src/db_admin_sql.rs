@@ -422,6 +422,7 @@ pub fn supports_create_database_target(database_type: Option<DatabaseType>, _dri
                 | DatabaseType::Databend
                 | DatabaseType::Snowflake
                 | DatabaseType::Tdengine
+                | DatabaseType::Cnosdb
                 | DatabaseType::Postgres
                 | DatabaseType::Redshift
                 | DatabaseType::Gaussdb
@@ -1721,6 +1722,19 @@ mod tests {
             })
             .unwrap(),
             "CREATE DATABASE `analytics db`;"
+        );
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Cnosdb),
+                driver_profile: None,
+                target: None,
+                parent: None,
+                name: "analytics db".to_string(),
+                charset: None,
+                collation: None,
+            })
+            .unwrap(),
+            "CREATE DATABASE \"analytics db\";"
         );
     }
 

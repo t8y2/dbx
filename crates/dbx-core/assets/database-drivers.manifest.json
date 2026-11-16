@@ -3298,6 +3298,42 @@
       }
     },
     {
+      "dbType": "cnosdb",
+      "compareModes": [
+        "schema",
+        "data"
+      ],
+      "label": "CnosDB",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "cnosdb",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 56,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8902,
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": true,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": true,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "jdbc",
       "label": "JDBC",
       "runtimeMode": "external",

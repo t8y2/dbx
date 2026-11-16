@@ -1505,6 +1505,8 @@ export default withEnglishFallback({
     spannerHostHint: "Lascia vuoto l'host per Google Cloud. Per l'emulatore locale è sufficiente impostare l'host localhost con la porta 9010: il gRPC in chiaro viene abilitato automaticamente sugli host di loopback.",
     spannerCredentialsHint: "L'autenticazione usa Application Default Credentials. Per usare un file di chiave del service account, aggiungi credentials=/path/key.json ai parametri URL.",
     spannerFieldsRequired: "Progetto, istanza e database di Cloud Spanner sono obbligatori.",
+    cnosdbTenant: "Tenant CnosDB",
+    cnosdbTenantHint: "Namespace di isolamento multi-tenant, non il nome utente di accesso. Facoltativo; per le distribuzioni open-source il valore predefinito è cnosdb.",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "Deve corrispondere al DBSERVERNAME del server o a DBSERVERALIASES.",
     gbaseServerMismatch: "Connessione GBase 8s non riuscita: GBASEDBTSERVER non corrisponde al DBSERVERNAME del server o a uno dei DBSERVERALIASES. Inserisci il nome server effettivo.",

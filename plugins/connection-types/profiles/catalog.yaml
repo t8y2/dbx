@@ -636,6 +636,13 @@ profiles:
     port: 6041
     user: root
     category: timeseries
+  - id: cnosdb
+    dbType: cnosdb
+    label: CnosDB
+    icon: cnosdb
+    port: 8902
+    user: root
+    category: timeseries
   - id: xugu
     dbType: xugu
     label: 虚谷 XuguDB

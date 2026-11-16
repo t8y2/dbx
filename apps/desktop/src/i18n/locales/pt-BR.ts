@@ -5224,6 +5224,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "Por padrão, segue a configuração da sessão. Quando desativado, executa com SET FOREIGN_KEY_CHECKS = 0, permitindo processar as tabelas referenciadas em qualquer ordem; após a execução, o valor original é restaurado.",
     createSequence: "Nova sequência",
     viewPostgresRowLevelSecurity: "Ver políticas de segurança em nível de linha",
+    copyGeneratedSql: "Copiar SQL gerado",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

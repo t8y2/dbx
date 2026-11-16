@@ -5246,6 +5246,7 @@ export default {
     instanceInfo: "Instance Info",
     newSql: "New SQL",
     generateSql: "Generate SQL",
+    copyGeneratedSql: "Copy generated SQL",
     insertRowsDialogTitle: "Generate INSERT Rows",
     insertRowsDialogDescription: "Generates the given number of INSERT template rows for each selected table; placeholder values are numbered per row when more than one row is generated.",
     insertRowsDialogCountLabel: "Row count",

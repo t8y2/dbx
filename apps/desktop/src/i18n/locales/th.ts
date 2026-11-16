@@ -5520,6 +5520,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "โดยค่าเริ่มต้นจะใช้การตั้งค่าของเซสชัน เมื่อปิดใช้งาน จะดำเนินการด้วย SET FOREIGN_KEY_CHECKS = 0 และสามารถจัดการตารางที่ถูกอ้างอิงในลำดับใดก็ได้ หลังจากดำเนินการแล้วจะคืนค่าเดิม",
     createSequence: "สร้างซีเควนซ์",
     viewPostgresRowLevelSecurity: "ดูนโยบายความปลอดภัยระดับแถว",
+    copyGeneratedSql: "คัดลอก SQL ที่สร้างขึ้น",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

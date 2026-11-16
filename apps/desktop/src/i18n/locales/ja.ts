@@ -5244,6 +5244,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "デフォルトではセッション設定を引き継ぎます。無効時は SET FOREIGN_KEY_CHECKS = 0 で実行し、参照されるテーブルを任意の順序で処理できます。実行後は元の値に戻します。",
     createSequence: "シーケンスの作成",
     viewPostgresRowLevelSecurity: "行レベルセキュリティポリシーを表示",
+    copyGeneratedSql: "生成された SQL をコピー",
   },
   visibleDatabases: {
     title: "表示するデータベース",

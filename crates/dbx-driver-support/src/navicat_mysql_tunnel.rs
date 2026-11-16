@@ -13,6 +13,7 @@ const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
 const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 const SERVER_CAPABILITIES: u32 = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
 const MAX_PACKET_SIZE: usize = 16 * 1024 * 1024;
+const REQUEST_AUTOCOMMIT_SQL: &str = "SET SESSION autocommit = 1";
 
 #[derive(Clone)]
 pub struct NavicatMysqlEndpoint {
@@ -79,6 +80,9 @@ impl NavicatMysqlEndpoint {
             ("password", self.password.clone()),
             ("db", database.to_string()),
             ("encodeBase64", "1".to_string()),
+            // q[] entries execute on the same PHP/MySQL connection. Setup on
+            // an earlier HTTP request cannot affect this request's session.
+            ("q[]", base64::engine::general_purpose::STANDARD.encode(REQUEST_AUTOCOMMIT_SQL)),
             ("q[]", encoded_query),
         ];
         log::debug!(
@@ -251,7 +255,7 @@ async fn serve_client(stream: &mut TcpStream, endpoint: Arc<NavicatMysqlEndpoint
                     write_packet(stream, sequence.wrapping_add(1), &mysql_ok_packet(0, 0, "")).await?;
                     continue;
                 }
-                match endpoint.query(&database, &sql).await.and_then(|body| parse_navicat_response(&body)) {
+                match endpoint.query(&database, &sql).await.and_then(|body| parse_autocommit_response(&body)) {
                     Ok(result) => write_query_result(stream, result).await?,
                     Err(error) => send_mysql_error(stream, sequence.wrapping_add(1), 1105, &error).await?,
                 }
@@ -399,7 +403,16 @@ fn is_supported_navicat_tunnel_version(raw: u16) -> bool {
     (NAVICAT_TUNNEL_MIN_SCRIPT_VERSION..=NAVICAT_TUNNEL_MAX_SCRIPT_VERSION).contains(&raw)
 }
 
+#[cfg(test)]
 fn parse_navicat_response(data: &[u8]) -> Result<NavicatResult, String> {
+    parse_navicat_results(data, 1)
+}
+
+fn parse_autocommit_response(data: &[u8]) -> Result<NavicatResult, String> {
+    parse_navicat_results(data, 2)
+}
+
+fn parse_navicat_results(data: &[u8], expected_results: usize) -> Result<NavicatResult, String> {
     if data.len() < 16 || u32::from_be_bytes(data[0..4].try_into().unwrap()) != 1111 {
         return Err("Invalid Navicat HTTP tunnel response header".to_string());
     }
@@ -415,6 +428,34 @@ fn parse_navicat_response(data: &[u8]) -> Result<NavicatResult, String> {
         let message = read_navicat_block(data, &mut cursor)?;
         return Err(format!("MySQL connection error {connect_error}: {}", String::from_utf8_lossy(&message)));
     }
+    let mut last = None;
+    for index in 0..expected_results {
+        let result = parse_navicat_result(data, &mut cursor).map_err(|error| {
+            if expected_results == 2 && index == 0 {
+                format!("Navicat per-request autocommit initialization could not be verified: {error}; the SQL outcome may be unknown, do not retry automatically")
+            } else {
+                error
+            }
+        })?;
+        if expected_results == 2 && index == 0 && !result.columns.is_empty() {
+            return Err("Navicat HTTP tunnel did not acknowledge per-request autocommit initialization".into());
+        }
+        let expected_separator = if index + 1 == expected_results { 0 } else { 1 };
+        if data.get(cursor) != Some(&expected_separator) {
+            return Err(
+                "Navicat HTTP tunnel must execute and acknowledge autocommit setup and SQL in the same request".into(),
+            );
+        }
+        cursor += 1;
+        last = Some(result);
+    }
+    if cursor != data.len() {
+        return Err("Unexpected trailing Navicat query results".into());
+    }
+    last.ok_or_else(|| "Missing Navicat query result".into())
+}
+
+fn parse_navicat_result(data: &[u8], cursor: &mut usize) -> Result<NavicatResult, String> {
     let mut result = NavicatResult {
         affected_rows: 0,
         last_insert_id: 0,
@@ -422,49 +463,43 @@ fn parse_navicat_response(data: &[u8]) -> Result<NavicatResult, String> {
         rows: Vec::new(),
         info: String::new(),
     };
-    if cursor == data.len() {
-        return Ok(result);
-    }
     // Navicat's result-set header has five 4-byte integers followed by
     // twelve reserved bytes: 32 bytes total.
-    if data.len() - cursor < 32 {
+    if data.len().saturating_sub(*cursor) < 32 {
         return Err("Truncated Navicat query result header".to_string());
     }
-    let query_error = u32::from_be_bytes(data[cursor..cursor + 4].try_into().unwrap());
-    result.affected_rows = u32::from_be_bytes(data[cursor + 4..cursor + 8].try_into().unwrap()) as u64;
-    result.last_insert_id = u32::from_be_bytes(data[cursor + 8..cursor + 12].try_into().unwrap()) as u64;
-    let column_count = u32::from_be_bytes(data[cursor + 12..cursor + 16].try_into().unwrap()) as usize;
-    let row_count = u32::from_be_bytes(data[cursor + 16..cursor + 20].try_into().unwrap()) as usize;
-    cursor += 32;
+    let query_error = read_u32_be(data, cursor)?;
+    result.affected_rows = read_u32_be(data, cursor)? as u64;
+    result.last_insert_id = read_u32_be(data, cursor)? as u64;
+    let column_count = read_u32_be(data, cursor)? as usize;
+    let row_count = read_u32_be(data, cursor)? as usize;
+    *cursor += 12;
     if query_error != 0 {
-        let message = read_navicat_block(data, &mut cursor)?;
+        let message = read_navicat_block(data, cursor)?;
         return Err(format!("MySQL query error {query_error}: {}", String::from_utf8_lossy(&message)));
     }
     for _ in 0..column_count {
-        let name = read_navicat_block(data, &mut cursor)?;
-        let table = read_navicat_block(data, &mut cursor)?;
-        let column_type = read_u32_be(data, &mut cursor)? as u8;
-        let flags = read_u32_be(data, &mut cursor)?;
-        let length = read_u32_be(data, &mut cursor)?;
+        let name = read_navicat_block(data, cursor)?;
+        let table = read_navicat_block(data, cursor)?;
+        let column_type = read_u32_be(data, cursor)? as u8;
+        let flags = read_u32_be(data, cursor)?;
+        let length = read_u32_be(data, cursor)?;
         result.columns.push(NavicatColumn { name, table, column_type, flags, length });
     }
     for _ in 0..row_count {
         let mut row = Vec::with_capacity(column_count);
         for _ in 0..column_count {
-            if data.get(cursor) == Some(&0xff) {
-                cursor += 1;
+            if data.get(*cursor) == Some(&0xff) {
+                *cursor += 1;
                 row.push(None);
             } else {
-                row.push(Some(read_navicat_block(data, &mut cursor)?));
+                row.push(Some(read_navicat_block(data, cursor)?));
             }
         }
         result.rows.push(row);
     }
     if result.columns.is_empty() {
-        result.info = String::from_utf8_lossy(&read_navicat_block(data, &mut cursor)?).to_string();
-    }
-    if data.get(cursor) != Some(&0) || cursor + 1 != data.len() {
-        return Err("Invalid or missing Navicat result terminator".to_string());
+        result.info = String::from_utf8_lossy(&read_navicat_block(data, cursor)?).to_string();
     }
     Ok(result)
 }
@@ -675,10 +710,13 @@ mod tests {
                     if request.len() >= header_end + 4 + content_length {
                         let body = String::from_utf8_lossy(&request[header_end + 4..]).into_owned();
                         stream
-                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n")
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 84\r\nConnection: close\r\n\r\n")
                             .await
                             .unwrap();
                         stream.write_all(&[0, 0, 4, 87, 0, 206, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).await.unwrap();
+                        stream.write_all(&[0; 33]).await.unwrap();
+                        stream.write_all(&[1]).await.unwrap();
+                        stream.write_all(&[0; 34]).await.unwrap();
                         return body;
                     }
                 }
@@ -701,9 +739,57 @@ mod tests {
         assert!(body.split('&').any(|field| field == "login="), "{body}");
         assert!(body.split('&').any(|field| field == "password="), "{body}");
         let request_url = reqwest::Url::parse(&format!("http://localhost/?{body}")).unwrap();
-        let query = request_url.query_pairs().find_map(|(key, value)| (key == "q[]").then_some(value)).unwrap();
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(query.as_bytes()).unwrap(), setup_sql.as_bytes());
+        let queries =
+            request_url.query_pairs().filter_map(|(key, value)| (key == "q[]").then_some(value)).collect::<Vec<_>>();
+        assert_eq!(queries.len(), 2);
+        for query in queries {
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD.decode(query.as_bytes()).unwrap(),
+                setup_sql.as_bytes()
+            );
+        }
         bridge.abort();
+    }
+
+    #[test]
+    fn autocommit_response_requires_both_results_and_preserves_write_metadata() {
+        let header = [0, 0, 4, 87, 0, 206, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut body = header.to_vec();
+        body.extend_from_slice(&[0; 33]);
+        body.push(1);
+        let mut result = [0; 32];
+        result[4..8].copy_from_slice(&3u32.to_be_bytes());
+        result[8..12].copy_from_slice(&42u32.to_be_bytes());
+        body.extend_from_slice(&result);
+        body.extend_from_slice(&[0, 0]);
+        let parsed = super::parse_autocommit_response(&body).unwrap();
+        assert_eq!((parsed.affected_rows, parsed.last_insert_id), (3, 42));
+
+        // Scripts ignoring extra q[] entries must never report setup as the
+        // user's INSERT result; legacy header-only responses also fail closed.
+        assert!(super::parse_autocommit_response(&header).is_err());
+        let mut only_setup = body[..49].to_vec();
+        only_setup.push(0);
+        assert!(super::parse_autocommit_response(&only_setup).is_err());
+        assert!(super::parse_autocommit_response(&body[..body.len() - 1]).is_err());
+        let mut trailing = body.clone();
+        trailing.push(0);
+        assert!(super::parse_autocommit_response(&trailing).is_err());
+
+        let mut failed_setup = header.to_vec();
+        let mut error_header = [0; 32];
+        error_header[..4].copy_from_slice(&1235u32.to_be_bytes());
+        failed_setup.extend_from_slice(&error_header);
+        push_lenenc_bytes(&mut failed_setup, b"setup failed");
+        failed_setup.extend_from_slice(&body[49..]);
+        let error = super::parse_autocommit_response(&failed_setup).err().unwrap();
+        assert!(error.contains("initialization could not be verified"));
+
+        let mut failed_sql = body[..50].to_vec();
+        failed_sql.extend_from_slice(&error_header);
+        push_lenenc_bytes(&mut failed_sql, b"write failed");
+        failed_sql.push(0);
+        assert!(super::parse_autocommit_response(&failed_sql).err().unwrap().contains("write failed"));
     }
 
     #[test]

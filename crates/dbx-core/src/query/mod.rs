@@ -1873,6 +1873,14 @@ fn apply_mysql_client_session_context<'a>(
     database: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(async move {
+        if pool.is_stateless_http_tunnel() {
+            // COM_INIT_DB updates the bridge's per-client request database;
+            // there is no physical MySQL session to pin or restore here.
+            if !database.is_empty() {
+                db::mysql::select_session_database(conn, database).await?;
+            }
+            return Ok(());
+        }
         if !pool.is_client_session_pool() {
             return Ok(());
         }
@@ -8158,6 +8166,51 @@ mod tests {
     use crate::query_cancel::RunningTaskMetadata;
     use std::sync::atomic::Ordering;
     use tokio::time::timeout;
+
+    #[tokio::test]
+    #[ignore = "requires DBX_NAVICAT_MYSQL_SOCKET for an isolated MySQL instance"]
+    async fn stateless_mysql_context_survives_pool_replacement_on_first_execution() {
+        use mysql_async::prelude::Queryable;
+        let socket = std::env::var("DBX_NAVICAT_MYSQL_SOCKET").unwrap();
+        let opts = mysql_async::OptsBuilder::default().socket(Some(socket)).user(Some("root"));
+        let mut conn = mysql_async::Conn::new(opts).await.unwrap();
+        let database = format!("dbx_context_{}", uuid::Uuid::new_v4().simple());
+        conn.query_drop(format!("CREATE DATABASE `{database}`")).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("dbx-navicat-context-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
+        let key = "conn:session:tab-1";
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.id = "conn".into();
+        state.configs.write().await.insert(config.id.clone(), config);
+        let old = db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(key.into(), PoolKind::Mysql(old.clone(), crate::connection::MysqlMode::Normal))
+            })
+            .await;
+        state.mysql_client_session_database_change(key, &old, 1, "").await.unwrap();
+        let mut pool = db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        pool.set_stateless_http_tunnel();
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(key.into(), PoolKind::Mysql(pool.clone(), crate::connection::MysqlMode::Normal))
+            })
+            .await;
+        // First execution after replacement must apply database context, not
+        // consume the query with a false persistent-session-loss error.
+        apply_mysql_client_session_context(&state, key, &pool, &mut conn, &database).await.unwrap();
+        assert_eq!(conn.query_first::<String, _>("SELECT DATABASE()").await.unwrap(), Some(database.clone()));
+        apply_mysql_client_session_context(&state, key, &pool, &mut conn, "information_schema").await.unwrap();
+        assert_eq!(
+            conn.query_first::<String, _>("SELECT DATABASE()").await.unwrap(),
+            Some("information_schema".into())
+        );
+        conn.query_drop(format!("DROP DATABASE `{database}`")).await.unwrap();
+        conn.disconnect().await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn deferred_cells_reach_all_multi_result_success_constructors_once() {

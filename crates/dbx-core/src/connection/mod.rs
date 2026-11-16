@@ -3584,7 +3584,7 @@ impl AppState {
         let pool_result = async {
         let pool = match db_config.db_type {
             DatabaseType::Mysql => {
-                let (pool, mode) = connect_mysql_metadata_pool(
+                let (mut pool, mode) = connect_mysql_metadata_pool(
                     &config,
                     &db_config,
                     &host,
@@ -3593,6 +3593,9 @@ impl AppState {
                     mysql_pool_max_connections,
                 )
                 .await?;
+                if matches!(&transport_stamp.plan.route, ConnectionTransportRoute::Navicat { .. }) {
+                    pool.set_stateless_http_tunnel();
+                }
                 PoolKind::Mysql(pool, mode)
             }
             DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {

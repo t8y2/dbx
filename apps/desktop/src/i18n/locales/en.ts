@@ -3026,6 +3026,9 @@ export default {
     },
   },
   queryMessages: {
+    copyAll: "Copy all",
+    copied: "Messages copied",
+    copyFailed: "Failed to copy messages: {message}",
     empty: "No messages",
     code: "Code: {code}",
     mongoShell: "Generated mongo shell",

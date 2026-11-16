@@ -1902,6 +1902,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "Hamısını kopyala",
+    copied: "Mesajlar kopyalandı",
+    copyFailed: "Mesajları kopyalamaq alınmadı: {message}",
     empty: "Mesaj yoxdur",
     code: "Kod: {code}",
     mongoShell: "Yaradılmış mongo shell",

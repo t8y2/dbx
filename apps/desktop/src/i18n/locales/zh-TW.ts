@@ -2625,6 +2625,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "複製全部",
+    copied: "訊息已複製",
+    copyFailed: "複製訊息失敗：{message}",
     empty: "沒有訊息",
     code: "代碼：{code}",
     mongoShell: "產生的 mongo shell",

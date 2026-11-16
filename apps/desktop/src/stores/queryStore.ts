@@ -260,6 +260,7 @@ function snapshotClosedTab(tab: QueryTab): QueryTab {
     queryExecutionStartedAt: undefined,
     executionId: undefined,
     executingResultRunId: undefined,
+    resultRunSelectionExecutionId: undefined,
     isExplaining: false,
     explainExecutionId: undefined,
     txnSessionId: undefined,
@@ -1826,6 +1827,7 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       executionId: undefined,
       executingResultRunId: undefined,
+      resultRunSelectionExecutionId: undefined,
       queryExecutionStartedAt: undefined,
       batchSqlExecution: undefined,
       cancelRequestCount: 0,
@@ -2001,6 +2003,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.results = undefined;
     tab.activeResultIndex = undefined;
     tab.batchSqlExecution = undefined;
+    tab.resultRunSelectionExecutionId = undefined;
     tab.resultEditorFingerprint = undefined;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
@@ -2113,6 +2116,7 @@ export const useQueryStore = defineStore("query", () => {
   function projectResultRun(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
     const activeIndex = run.activeResultIndex ?? 0;
     tab.activeResultRunId = run.id;
+    tab.resultRunSelectionExecutionId = tab.isExecuting ? tab.executionId : undefined;
     tab.result = run.result ?? run.results?.[activeIndex];
     tab.results = run.results;
     tab.activeResultIndex = run.activeResultIndex;
@@ -2121,7 +2125,14 @@ export const useQueryStore = defineStore("query", () => {
     // safe by starting a fresh logical result.
     tab.resultViewGeneration = run.resultViewGeneration ?? uuid();
     tab.resultColumnWidthRevision = run.resultColumnWidthRevision;
-    tab.batchSqlExecution = cloneBatchSqlExecution(run.batchSqlExecution);
+    if (tab.isExecuting && tab.executionId && tab.executingResultRunId === run.id) {
+      // A refresh retains its previous dataset until completion, but its log
+      // must continue observing the current batch, including future progress.
+      const liveBatch = liveBatchSqlExecutions.get(tab);
+      tab.batchSqlExecution = liveBatch?.executionId === tab.executionId ? liveBatch : undefined;
+    } else {
+      tab.batchSqlExecution = cloneBatchSqlExecution(run.batchSqlExecution);
+    }
     tab.resultBaseSql = run.resultBaseSql;
     tab.resultEditorFingerprint = run.resultEditorFingerprint;
     tab.resultSortedSql = run.resultSortedSql;
@@ -2168,6 +2179,10 @@ export const useQueryStore = defineStore("query", () => {
     if (!runId) return false;
     const run = tab.resultRuns?.find((item) => item.id === runId);
     if (!run || !resultRunHasPayload(run)) return false;
+    // Restoring a retained run also restores its output. The aborted execution
+    // must not replace that batch or append its notices during finalization.
+    clearLiveBatchSqlExecution(tab, executionId);
+    tab.liveQueryMessages = undefined;
     projectResultRun(tab, run);
     evictInactiveResultRunPayloads(tab);
     return true;
@@ -2630,11 +2645,26 @@ export const useQueryStore = defineStore("query", () => {
     return run?.result === tab.result || !!run?.results?.some((item) => item === tab.result);
   }
 
-  function syncActiveResultRunFromDisplayed(tab: QueryTab, sql?: string) {
+  function syncActiveResultRunFromDisplayed(tab: QueryTab, sql?: string, publishedExecutionId?: string) {
     if (!tab.activeResultRunId || !tab.resultRuns?.length) return;
     const index = tab.resultRuns.findIndex((run) => run.id === tab.activeResultRunId);
     if (index < 0) return;
     const previousRun = tab.resultRuns[index];
+    // Child-result selection, local sorting and delayed metadata can sync the retained grid
+    // while a replacement is running. Its archive must keep the batch that
+    // produced those rows until this execution publishes a new result.
+    const sourceExecutionId = tab.result?.sourceExecutionId;
+    // Local sorting copies the result object but keeps its execution identity.
+    // A different target also protects cached results whose source IDs were omitted;
+    // otherwise source-less results require reference identity, never two absent IDs.
+    const ownsDisplayedResult = (result: QueryResult | undefined) => !!result && (result === tab.result || (!!sourceExecutionId && result.sourceExecutionId === sourceExecutionId));
+    const preserveRetainedBatch =
+      tab.isExecuting &&
+      !!tab.executionId &&
+      publishedExecutionId !== tab.executionId &&
+      previousRun.batchSqlExecution?.executionId !== tab.executionId &&
+      sourceExecutionId !== tab.executionId &&
+      (tab.executingResultRunId !== tab.activeResultRunId || ownsDisplayedResult(previousRun.result) || previousRun.results?.some(ownsDisplayedResult));
     const run = {
       ...tab.resultRuns[index],
       ...(sql ? { sql } : {}),
@@ -2645,7 +2675,7 @@ export const useQueryStore = defineStore("query", () => {
       resultGridRevision: tab.resultGridRevision,
       resultViewGeneration: tab.resultViewGeneration,
       resultColumnWidthRevision: tab.resultColumnWidthRevision,
-      batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
+      batchSqlExecution: cloneBatchSqlExecution(preserveRetainedBatch ? previousRun.batchSqlExecution : tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
       resultSortedSql: tab.resultSortedSql,
@@ -2689,12 +2719,19 @@ export const useQueryStore = defineStore("query", () => {
     releaseReplacedResultLargeValues(tab, previousRun.result, ...(previousRun.results ?? []));
   }
 
-  function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false, options: ResultRunCaptureOptions = {}) {
+  function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false, options: ResultRunCaptureOptions & { publishedExecutionId?: string } = {}) {
     if (tab.mode !== "query" || !tab.result) return;
+    const publishedExecutionId = options.publishedExecutionId && options.publishedExecutionId === tab.executionId ? options.publishedExecutionId : undefined;
+    if (publishedExecutionId) {
+      // A newly published result owns this execution's batch, even when the
+      // user selected history while it ran. Non-SQL results need not carry a
+      // sourceExecutionId, and nonbatch executions must clear the old batch.
+      tab.batchSqlExecution = batchSqlExecutionFor(tab, publishedExecutionId);
+    }
     if (captureNewRun) {
       captureDisplayedResultRun(tab, sql, Date.now(), { ...options, reuseResultCacheKey: false });
     } else if (tab.activeResultRunId) {
-      syncActiveResultRunFromDisplayed(tab, sql);
+      syncActiveResultRunFromDisplayed(tab, sql, publishedExecutionId);
     } else if (tab.resultAutoSave) {
       captureDisplayedResultRun(tab, sql);
     }
@@ -3845,6 +3882,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = false;
     tab.executionId = undefined;
     tab.executingResultRunId = undefined;
+    tab.resultRunSelectionExecutionId = undefined;
     tab.queryExecutionStartedAt = undefined;
     // An externally-supplied result is a brand-new dataset, not the previous
     // one: publish a fresh generation so the tab can capture a view snapshot.
@@ -5675,6 +5713,7 @@ export const useQueryStore = defineStore("query", () => {
       editorSelection: undefined,
       executionId: undefined,
       executingResultRunId: undefined,
+      resultRunSelectionExecutionId: undefined,
       isExplaining: false,
       explainExecutionId: undefined,
       mode: original.mode,
@@ -7071,6 +7110,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.isExecuting = isExecuting;
     tab.executingResultRunId = isExecuting ? null : undefined;
+    tab.resultRunSelectionExecutionId = undefined;
     tab.queryExecutionStartedAt = isExecuting ? Date.now() : undefined;
     if (!isExecuting) {
       tab.isCancelling = false;
@@ -7084,6 +7124,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.isExecuting = true;
     tab.executingResultRunId = null;
     tab.executionId = executionId;
+    tab.resultRunSelectionExecutionId = undefined;
     tab.isCancelling = false;
     tab.queryExecutionStartedAt = Date.now();
   }
@@ -7135,6 +7176,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryExecutionStartedAt = undefined;
     tab.executionId = undefined;
     tab.executingResultRunId = undefined;
+    tab.resultRunSelectionExecutionId = undefined;
     touchResult(tab);
   }
 
@@ -7150,6 +7192,7 @@ export const useQueryStore = defineStore("query", () => {
       current.isCancelling = false;
       current.executionId = undefined;
       current.executingResultRunId = undefined;
+      current.resultRunSelectionExecutionId = undefined;
       current.queryExecutionStartedAt = undefined;
       if (!restorePendingResultRun(current, executionId)) {
         current.result = toErrorResult(new Error("Query canceled"));
@@ -8498,6 +8541,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.isCancelling = false;
       tab.executionId = preparationId;
       tab.executingResultRunId = null;
+      tab.resultRunSelectionExecutionId = undefined;
       tab.queryExecutionStartedAt = Date.now();
       const isCurrent = () => findExecutionTab(id) === tab && tab.executionId === preparationId && pendingResultRunPreparations.get(tab) === preparationId;
       let prepared = false;
@@ -8517,6 +8561,7 @@ export const useQueryStore = defineStore("query", () => {
             tab.isCancelling = false;
             tab.executionId = undefined;
             tab.executingResultRunId = undefined;
+            tab.resultRunSelectionExecutionId = undefined;
             tab.queryExecutionStartedAt = undefined;
           }
         }
@@ -8550,6 +8595,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.queryExecutionStartedAt = Date.now();
     }
     tab.executionId = executionId;
+    tab.resultRunSelectionExecutionId = undefined;
     const tableDataNativeSelectionBlockOwner = tab.mode === "data" ? {} : undefined;
     tab.liveQueryMessages = [];
     if (tableDataNativeSelectionBlockOwner) beginDataGridNativeSelectionBlock(tableDataNativeSelectionBlockOwner);
@@ -8704,6 +8750,9 @@ export const useQueryStore = defineStore("query", () => {
       );
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
+      const currentBeforeBatch = findExecutionTab(id);
+      if (currentBeforeBatch !== tab || currentBeforeBatch.executionId !== executionId) return false;
+      if (captureResultRun && currentBeforeBatch.isCancelling && restorePendingResultRun(currentBeforeBatch, executionId)) return false;
       if (!batchResume) {
         const statementExecution =
           tab.mode === "query"
@@ -8722,8 +8771,12 @@ export const useQueryStore = defineStore("query", () => {
                 sqlStatementParameterOptions,
               )
             : undefined;
-        tab.batchSqlExecution = statementExecution && (tab.autoCommit !== false || statementExecution.total === 1) ? statementExecution : undefined;
-        if (tab.batchSqlExecution) liveBatchSqlExecutions.set(tab, tab.batchSqlExecution);
+        // Connection preparation can outlive a user's switch to a historical
+        // run. Track live progress independently without replacing that view.
+        const liveBatch = statementExecution && (tab.autoCommit !== false || statementExecution.total === 1) ? reactive(statementExecution) : undefined;
+        if (liveBatch) liveBatchSqlExecutions.set(tab, liveBatch);
+        const displayingHistory = tab.resultRunSelectionExecutionId === executionId && tab.activeResultRunId && tab.activeResultRunId !== lockedResultRunId;
+        if (!displayingHistory) tab.batchSqlExecution = liveBatch;
       }
       queryExecutionLog("info", "previous-session-close:start", { traceId, elapsed: elapsed() });
       await previousResultSessionClose;
@@ -8771,7 +8824,7 @@ export const useQueryStore = defineStore("query", () => {
               current.mongoEditTarget = undefined;
               if (!producedResult) {
                 publishResultGeneration(current, "execute");
-                syncDisplayedResultRun(current, "MONITOR", captureResultRun);
+                syncDisplayedResultRun(current, "MONITOR", captureResultRun, { publishedExecutionId: executionId });
               }
               producedResult = true;
               touchResult(current);
@@ -8842,7 +8895,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql, captureResultRun);
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql, captureResultRun, { publishedExecutionId: executionId });
           // Reflect db switches from SELECT N in the tab so the toolbar dropdown, tab title and
           // sidebar stay in sync with the command's effective db.
           if (!usesExternalExecutionTarget && current.database !== String(currentDb)) {
@@ -9327,7 +9380,7 @@ export const useQueryStore = defineStore("query", () => {
           current.resultClientSessionId = undefined;
           current.resultTotalRowCount = mongoFindPageState?.totalIsExact ? mongoFindPageState.total : undefined;
           current.resultTotalRowCountLoading = false;
-          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql, captureResultRun);
+          syncDisplayedResultRun(current, current.resultBaseSql ?? options?.resultBaseSql ?? sql, captureResultRun, { publishedExecutionId: executionId });
           if (!usesExternalExecutionTarget && current.database !== currentDatabase) current.database = currentDatabase;
         }
         return producedResult;
@@ -9391,7 +9444,7 @@ export const useQueryStore = defineStore("query", () => {
           current.tableMeta = undefined;
           current.resultBaseSql = options?.resultBaseSql ?? sql;
           current.resultSortedSql = undefined;
-          syncDisplayedResultRun(current, current.resultBaseSql, captureResultRun);
+          syncDisplayedResultRun(current, current.resultBaseSql, captureResultRun, { publishedExecutionId: executionId });
         }
         return producedResult;
       }
@@ -9531,7 +9584,8 @@ export const useQueryStore = defineStore("query", () => {
       // could not rewrite the SQL for these engines, so a plain execution
       // would return the first page again (#8993).
       const isOffsetJumpPage = typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId;
-      const needsOffsetReplay = useAgentResultSession && isOffsetJumpPage && (tab.mode === "query" || tab.mode === "data") && !(tab.batchSqlExecution && tab.batchSqlExecution.total > 1);
+      const executionBatch = batchSqlExecutionFor(tab, executionId);
+      const needsOffsetReplay = useAgentResultSession && isOffsetJumpPage && (tab.mode === "query" || tab.mode === "data") && !(executionBatch && executionBatch.total > 1);
       const isReplayCancelled = () => {
         const current = findExecutionTab(id);
         return current !== tab || current.executionId !== executionId || current.isCancelling === true || (current.cancelRequestCount ?? 0) !== cancelRequestCountAtStart || manualTransactionTargetEpoch(current) !== executionTargetEpoch;
@@ -9606,6 +9660,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       const currentBeforeDispatch = findExecutionTab(id);
       if (currentBeforeDispatch?.executionId !== executionId || currentBeforeDispatch.isCancelling || manualTransactionTargetEpoch(currentBeforeDispatch) !== executionTargetEpoch) {
+        if (currentBeforeDispatch?.executionId === executionId && captureResultRun && currentBeforeDispatch.isCancelling) restorePendingResultRun(currentBeforeDispatch, executionId);
         queryExecutionLog("info", "dispatch:skipped-cancelled", { traceId, elapsed: elapsed() });
         return false;
       }
@@ -9674,7 +9729,7 @@ export const useQueryStore = defineStore("query", () => {
           });
         }
         const request =
-          tab.batchSqlExecution && tab.batchSqlExecution.total > 1
+          executionBatch && executionBatch.total > 1
             ? api.executeMultiWithProgress(
                 executionConnectionId,
                 executionDatabase,
@@ -10157,7 +10212,7 @@ export const useQueryStore = defineStore("query", () => {
         // targeted; switching result runs mid-execution must not overwrite the
         // run the user is now looking at.
         if (lockedResultRunId === null || current.activeResultRunId === lockedResultRunId) {
-          syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
+          syncDisplayedResultRun(current, queryBaseSql, captureResultRun, { publishedExecutionId: executionId });
         }
         if (!batchPagination && !options?.appendResult && !resultLimitReached && !totalRowCountResolved && (current.mode === "query" || current.mode === "data") && current.result) {
           countQueryTotalRowsInBackground({
@@ -10299,7 +10354,7 @@ export const useQueryStore = defineStore("query", () => {
         if (refreshActiveResultRun) {
           refreshFailedPreservingRun = true;
         } else if (lockedResultRunId === null || current.activeResultRunId === lockedResultRunId) {
-          syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
+          syncDisplayedResultRun(current, queryBaseSql, captureResultRun, { publishedExecutionId: executionId });
         }
       }
     } finally {
@@ -10336,6 +10391,7 @@ export const useQueryStore = defineStore("query", () => {
         current.queryExecutionStartedAt = undefined;
         current.executionId = undefined;
         current.executingResultRunId = undefined;
+        current.resultRunSelectionExecutionId = undefined;
         clearLiveBatchSqlExecution(current, executionId);
         queryExecutionLog("info", "finish", { traceId, elapsed: elapsed() });
       } else {
@@ -10791,6 +10847,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.isCancelling = false;
       tab.executionId = undefined;
       tab.executingResultRunId = undefined;
+      tab.resultRunSelectionExecutionId = undefined;
       tab.queryExecutionStartedAt = undefined;
       return true;
     }
@@ -10809,6 +10866,7 @@ export const useQueryStore = defineStore("query", () => {
           current.isCancelling = false;
           current.executionId = undefined;
           current.executingResultRunId = undefined;
+          current.resultRunSelectionExecutionId = undefined;
           current.queryExecutionStartedAt = undefined;
           clearLiveBatchSqlExecution(current, executionId);
         }
@@ -10827,6 +10885,7 @@ export const useQueryStore = defineStore("query", () => {
           current.queryExecutionStartedAt = undefined;
           current.executionId = undefined;
           current.executingResultRunId = undefined;
+          current.resultRunSelectionExecutionId = undefined;
         } else {
           // 复用 setErrorResult 的完整清理：分组结果不清空的话，错误结果不会展示，
           // 估算值也会继续按旧的 results 计算

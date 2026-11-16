@@ -2233,6 +2233,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "Kopiuj wszystko",
+    copied: "Skopiowano komunikaty",
+    copyFailed: "Nie udało się skopiować komunikatów: {message}",
     empty: "Brak wiadomości",
     code: "Kod: {code}",
   },

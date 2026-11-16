@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   mongoExplainFind: vi.fn(),
   cancelQuery: vi.fn(),
   mongoParseShellCommand: vi.fn(),
+  tabResultSnapshots: new Map<string, unknown>(),
 }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
@@ -36,6 +37,21 @@ vi.mock("@/stores/settingsStore", () => ({
   }),
 }));
 
+vi.mock("@/lib/tabs/tabResultCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tabs/tabResultCache")>();
+  return {
+    ...actual,
+    writeTabResultSnapshot: vi.fn(async (key: string, snapshot: Parameters<typeof actual.encodeTabResultSnapshot>[0]) => {
+      mocks.tabResultSnapshots.set(key, actual.decodeTabResultSnapshot(actual.encodeTabResultSnapshot(snapshot)));
+      return true;
+    }),
+    readTabResultSnapshot: vi.fn(async (key: string) => mocks.tabResultSnapshots.get(key)),
+    deleteTabResultSnapshot: vi.fn(async (key: string) => {
+      mocks.tabResultSnapshots.delete(key);
+    }),
+  };
+});
+
 function installLocalStorage() {
   const data = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -49,6 +65,7 @@ describe("queryStore MongoDB execution summary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    mocks.tabResultSnapshots.clear();
     installLocalStorage();
     setActivePinia(createPinia());
     mocks.ensureConnected.mockResolvedValue(undefined);
@@ -109,6 +126,63 @@ describe("queryStore MongoDB execution summary", () => {
     expect(tab.result?.rows).toHaveLength(2);
     expect(tab.result?.truncated).toBe(false);
     expect(tab.resultTotalRowCount).toBe(2);
+  });
+
+  it.each((["auto-keep", "new-result"] as const).flatMap((mode) => (["success", "error"] as const).map((status) => ({ mode, status }))))("preserves the new MongoDB summary after viewing history during execution ($mode, $status)", async ({ mode, status }) => {
+    const oldSql = "db.old_collection.find()";
+    const newSql = "db.new_collection.find()";
+    const oldResponse = { documents: [{ _id: "old" }], extended_documents: [], total: 1, total_is_exact: true };
+    const newResponse = { documents: [{ _id: "new-1" }, { _id: "new-2" }], extended_documents: [], total: 2, total_is_exact: true };
+    mocks.mongoFindDocuments.mockResolvedValueOnce(oldResponse);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mongo-1", "app", "Query");
+    if (mode === "auto-keep") store.toggleResultAutoSave(tabId);
+    const options = { openInNewResultTab: mode === "new-result" };
+    await store.executeTabSql(tabId, oldSql, options);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const oldRunId = tab.activeResultRunId!;
+    const oldBatch = JSON.parse(JSON.stringify(tab.batchSqlExecution));
+
+    let resolve!: (value: typeof newResponse) => void;
+    let reject!: (reason: Error) => void;
+    mocks.mongoFindDocuments.mockImplementationOnce(
+      () =>
+        new Promise<typeof newResponse>((resolvePromise, rejectPromise) => {
+          resolve = resolvePromise;
+          reject = rejectPromise;
+        }),
+    );
+    const execution = store.executeTabSql(tabId, newSql, options);
+    await vi.waitFor(() => expect(mocks.mongoFindDocuments).toHaveBeenCalledTimes(2));
+    const executionId = tab.executionId;
+    await store.setActiveResultRun(tabId, oldRunId, { evictInactive: false });
+    expect(tab.batchSqlExecution).toEqual(oldBatch);
+    if (status === "error") reject(new Error("current query failed"));
+    else resolve(newResponse);
+    await execution;
+
+    const newRunId = tab.activeResultRunId!;
+    expect(newRunId).not.toBe(oldRunId);
+    expect(tab.resultRuns).toHaveLength(2);
+    expect(tab.result?.sourceStatement).toBe(newSql);
+    expect(tab.result?.rows).toHaveLength(status === "success" ? 2 : 1);
+    expect(tab.batchSqlExecution).toMatchObject({
+      executionId,
+      completed: 1,
+      finishedAt: expect.any(Number),
+      items: [{ sql: newSql, status, affectedRows: status === "success" ? 2 : 0, executionTimeMs: expect.any(Number) }],
+    });
+    if (status === "error") expect(tab.batchSqlExecution?.items[0]?.error).toContain("current query failed");
+    const completedBatch = JSON.parse(JSON.stringify(tab.batchSqlExecution));
+    expect(tab.resultRuns!.find((run) => run.id === oldRunId)!.batchSqlExecution).toEqual(oldBatch);
+
+    await store.setActiveResultRun(tabId, oldRunId, { evictInactive: false });
+    expect(tab.batchSqlExecution).toEqual(oldBatch);
+    await store.setActiveResultRun(tabId, newRunId, { evictInactive: false });
+    expect(tab.result?.sourceStatement).toBe(newSql);
+    expect(tab.batchSqlExecution).toEqual(completedBatch);
+    expect(tab.resultRuns!.find((run) => run.id === newRunId)!.batchSqlExecution).toEqual(completedBatch);
   });
 
   it("keeps counting when an explicit limit spans more than one page", async () => {

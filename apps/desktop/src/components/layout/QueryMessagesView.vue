@@ -8,7 +8,7 @@ import { copyToClipboard, eventTargetUsesNativeClipboard, isPlainClipboardShortc
 import { useToast } from "@/composables/useToast";
 import type { QueryMessage } from "@/types/database";
 
-defineProps<{ messages: QueryMessage[] }>();
+const props = defineProps<{ messages: QueryMessage[] }>();
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -36,9 +36,22 @@ function onKeydown(event: KeyboardEvent) {
   selection.addRange(range);
 }
 
-async function copyShell(message: string) {
-  await copyToClipboard(message);
-  toast(t("toolbar.mongoShellCopied"));
+async function copyMessages(text: string, successMessage: string) {
+  try {
+    await copyToClipboard(text);
+    toast(successMessage);
+  } catch (error) {
+    toast(t("queryMessages.copyFailed", { message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+function copyAll() {
+  const text = props.messages.map((message) => [`[${message.severity}] ${message.message}`, message.detail, message.hint, message.code && message.code !== "mongo-shell" ? t("queryMessages.code", { code: message.code }) : undefined].filter(Boolean).join("\n")).join("\n\n");
+  return copyMessages(text, t("queryMessages.copied"));
+}
+
+function copyShell(message: string) {
+  return copyMessages(message, t("toolbar.mongoShellCopied"));
 }
 
 type SeverityTone = "muted" | "warning" | "error";
@@ -62,25 +75,33 @@ const severityBadgeClasses: Record<SeverityTone, string> = {
     <div v-if="messages.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
       {{ t("queryMessages.empty") }}
     </div>
-    <div v-else ref="messageContentsRef" class="overflow-hidden">
-      <div v-for="(message, index) in messages" :key="index" class="flex items-start gap-2 border-b px-3 py-2 text-xs last:border-b-0">
-        <Badge variant="secondary" class="mt-px shrink-0 select-none font-mono text-[10px] uppercase" :class="severityBadgeClasses[severityTone(message.severity)]">
-          {{ message.severity }}
-        </Badge>
-        <div class="min-w-0 flex-1">
-          <div v-if="message.code === 'mongo-shell'" class="mb-1 flex select-none items-center gap-2">
-            <span class="text-muted-foreground">{{ t("queryMessages.mongoShell") }}</span>
-            <Button variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-[10px]" @click="copyShell(message.message)">
-              <Copy class="h-3 w-3" />
-              {{ t("queryMessages.copyMongoShell") }}
-            </Button>
+    <template v-else>
+      <div class="sticky top-0 z-10 flex select-none justify-end border-b bg-background px-3 py-1">
+        <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs" @click="copyAll">
+          <Copy class="h-3 w-3" />
+          {{ t("queryMessages.copyAll") }}
+        </Button>
+      </div>
+      <div ref="messageContentsRef" class="overflow-hidden">
+        <div v-for="(message, index) in messages" :key="index" class="flex items-start gap-2 border-b px-3 py-2 text-xs last:border-b-0">
+          <Badge variant="secondary" class="mt-px shrink-0 select-none font-mono text-[10px] uppercase" :class="severityBadgeClasses[severityTone(message.severity)]">
+            {{ message.severity }}
+          </Badge>
+          <div class="min-w-0 flex-1">
+            <div v-if="message.code === 'mongo-shell'" class="mb-1 flex select-none items-center gap-2">
+              <span class="text-muted-foreground">{{ t("queryMessages.mongoShell") }}</span>
+              <Button variant="ghost" size="sm" class="h-5 gap-1 px-1.5 text-[10px]" @click="copyShell(message.message)">
+                <Copy class="h-3 w-3" />
+                {{ t("queryMessages.copyMongoShell") }}
+              </Button>
+            </div>
+            <div class="font-mono text-[11px] whitespace-pre-wrap break-words text-foreground">{{ message.message }}</div>
+            <div v-if="message.detail" class="mt-0.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted-foreground">{{ message.detail }}</div>
+            <div v-if="message.hint" class="mt-0.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted-foreground">{{ message.hint }}</div>
+            <div v-if="message.code && message.code !== 'mongo-shell'" class="mt-0.5 select-none font-mono text-[10px] text-muted-foreground">{{ t("queryMessages.code", { code: message.code }) }}</div>
           </div>
-          <div class="font-mono text-[11px] whitespace-pre-wrap break-words text-foreground">{{ message.message }}</div>
-          <div v-if="message.detail" class="mt-0.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted-foreground">{{ message.detail }}</div>
-          <div v-if="message.hint" class="mt-0.5 font-mono text-[11px] whitespace-pre-wrap break-words text-muted-foreground">{{ message.hint }}</div>
-          <div v-if="message.code && message.code !== 'mongo-shell'" class="mt-0.5 select-none font-mono text-[10px] text-muted-foreground">{{ t("queryMessages.code", { code: message.code }) }}</div>
         </div>
       </div>
-    </div>
+    </template>
   </div>
 </template>

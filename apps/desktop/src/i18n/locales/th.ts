@@ -2883,6 +2883,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "คัดลอกทั้งหมด",
+    copied: "คัดลอกข้อความแล้ว",
+    copyFailed: "คัดลอกข้อความไม่สำเร็จ: {message}",
     empty: "ไม่มีข้อความ",
     code: "โค้ด: {code}",
     mongoShell: "mongo shell ที่สร้างขึ้น",

@@ -2733,6 +2733,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "Копировать всё",
+    copied: "Сообщения скопированы",
+    copyFailed: "Не удалось скопировать сообщения: {message}",
     empty: "Нет сообщений",
     code: "Код: {code}",
     mongoShell: "Сгенерированный mongo shell",

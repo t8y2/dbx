@@ -10711,6 +10711,7 @@ export default withEnglishFallback({
     sidebarObjectDisplayGroupedDescription: "按表、视图、过程、函数分组展示，适合对象类型较多的库。",
     sidebarObjectDisplaySimple: "简单视图",
     sidebarObjectDisplaySimpleDescription: "数据库或 schema 下直接平铺表和视图，减少中间层级。",
+    sidebarSimpleHideIndexes: "隐藏与表并列的索引",
     routineSourceOpenMode: "函数/过程/视图打开方式",
     routineSourceOpenModeQueryTab: "数据标签页",
     routineSourceOpenModeQueryTabDescription: "在新的数据标签页中打开源码，与执行 SQL 查询方式相同。",

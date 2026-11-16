@@ -10747,6 +10747,7 @@ export default {
     sidebarObjectDisplayGroupedDescription: "Group objects by tables, views, procedures, and functions for databases with more object types.",
     sidebarObjectDisplaySimple: "Simple view",
     sidebarObjectDisplaySimpleDescription: "List tables and views directly under each database or schema to reduce intermediate levels.",
+    sidebarSimpleHideIndexes: "Hide indexes listed alongside tables",
     routineSourceOpenMode: "Function / procedure / view open mode",
     routineSourceOpenModeQueryTab: "Data tab",
     routineSourceOpenModeQueryTabDescription: "Open source in a new data tab, the same way as running SQL queries.",

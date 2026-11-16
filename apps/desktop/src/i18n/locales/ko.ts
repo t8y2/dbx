@@ -962,6 +962,9 @@ export default withEnglishFallback({
     saveSqlFile: "원본 파일에 저장",
     pluginCenter: "플러그인 센터",
     executeAllSql: "모든 SQL 실행",
+    rightToolbarLabels: "오른쪽 도구 모음 텍스트",
+    showRightToolbarLabels: "오른쪽 도구 모음 텍스트 표시",
+    hideRightToolbarLabels: "오른쪽 도구 모음 텍스트 숨기기",
   },
   multiDbExecute: {
     manualTransaction: "수동 트랜잭션",

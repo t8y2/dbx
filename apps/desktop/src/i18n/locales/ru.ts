@@ -936,6 +936,9 @@ export default withEnglishFallback({
     mongoShellCopied: "Команда mongo shell скопирована",
     multiDbExecute: "Выполнение на нескольких БД",
     executeAllSql: "Выполнить весь SQL",
+    rightToolbarLabels: "Подписи правой панели инструментов",
+    showRightToolbarLabels: "Показать подписи правой панели инструментов",
+    hideRightToolbarLabels: "Скрыть подписи правой панели инструментов",
   },
   multiDbExecute: {
     manualTransaction: "Ручная транзакция",

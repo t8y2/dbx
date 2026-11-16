@@ -1038,6 +1038,9 @@ export default withEnglishFallback({
     copyMongoShell: "คัดลอก shell ที่สร้างขึ้น",
     mongoShellCopied: "คัดลอกคำสั่ง Mongo shell แล้ว",
     executeAllSql: "เรียกใช้ SQL ทั้งหมด",
+    rightToolbarLabels: "ข้อความแถบเครื่องมือด้านขวา",
+    showRightToolbarLabels: "แสดงข้อความแถบเครื่องมือด้านขวา",
+    hideRightToolbarLabels: "ซ่อนข้อความแถบเครื่องมือด้านขวา",
   },
   multiDbExecute: {
     manualTransaction: "Transaction แบบ Manual",

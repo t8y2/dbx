@@ -2,6 +2,7 @@ import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { formatJsonText, looksLikeJsonContainerText } from "@/lib/dataGrid/cellDetailPresentation";
+import { isJsonTreeContainer } from "@/lib/common/jsonTree";
 import { cqlLiteralToJsonText } from "@/lib/dataGrid/cqlLiteralJson";
 import type { DatabaseType } from "@/types/database";
 
@@ -234,20 +235,155 @@ export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocumen
   return JSON.stringify(jsonDetailDisplayValue(row), null, 2);
 }
 
-export function dataGridRowDetailPreviewFields(detail: DataGridRowDetail, databaseType?: DatabaseType) {
+export const DATA_GRID_JSON_COMMENT_GAP = "    ";
+
+export interface DataGridRowDetailPreviewField {
+  columnIndex: number;
+  column: string;
+  value: unknown;
+  text: string;
+  comment: string;
+  previewLength?: number;
+  isTruncated: boolean;
+}
+
+export interface DataGridJsonPreviewLine {
+  key: string;
+  lineNumber: number;
+  text: string;
+  comment?: string;
+  previewLength?: number;
+  togglePath?: string;
+  toggleLabel?: string;
+  expanded?: boolean;
+}
+
+export function dataGridRowDetailPreviewFields(detail: DataGridRowDetail, databaseType?: DatabaseType): DataGridRowDetailPreviewField[] {
   return detail.fields.map((field, index) => {
     const sourceClipped = field.isSourceTruncated || field.rawValuePreview.length < field.rawValue.length;
     const value = sourceClipped ? field.rawValuePreview : jsonDetailDisplayValue(dataGridRowFieldValue(field, databaseType));
     const json = JSON.stringify(value, null, 2);
     const preview = json.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH);
+    const isTruncated = sourceClipped || preview.length < json.length;
     const comma = index < detail.fields.length - 1 ? "," : "";
     return {
       columnIndex: field.colIndex,
-      text: `  ${JSON.stringify(field.column)}: ${preview.replaceAll("\n", "\n  ")}${preview.length < json.length ? "…" : ""}${comma}`,
+      column: field.column,
+      value,
+      text: `  ${JSON.stringify(field.column)}: ${preview.replaceAll("\n", "\n  ")}${isTruncated ? "…" : ""}${comma}`,
       comment: field.comment,
-      previewLength: sourceClipped ? field.rawValuePreview.length : preview.length < json.length ? preview.length : undefined,
+      previewLength: sourceClipped ? field.rawValuePreview.length : isTruncated ? preview.length : undefined,
+      isTruncated,
     };
   });
+}
+
+export function buildDataGridJsonPreviewLines(fields: readonly DataGridRowDetailPreviewField[], collapsedPaths: ReadonlySet<string> = new Set()): DataGridJsonPreviewLine[] {
+  const lines: Omit<DataGridJsonPreviewLine, "lineNumber">[] = [{ key: "root-open", text: "{" }];
+
+  fields.forEach((field, index) => {
+    const path = `/${index}`;
+    if (field.isTruncated) {
+      appendRawPreviewField(lines, field, path);
+      return;
+    }
+
+    appendJsonPreviewValue(lines, {
+      value: field.value,
+      depth: 1,
+      path,
+      label: field.column,
+      comma: index < fields.length - 1 ? "," : "",
+      comment: field.comment,
+      previewLength: field.previewLength,
+      collapsedPaths,
+    });
+  });
+
+  lines.push({ key: "root-close", text: "}" });
+  return lines.map((line, index) => ({ ...line, lineNumber: index + 1 }));
+}
+
+type JsonPreviewLine = Omit<DataGridJsonPreviewLine, "lineNumber">;
+
+type AppendJsonPreviewValueOptions = {
+  value: unknown;
+  depth: number;
+  path: string;
+  label?: string;
+  comma: string;
+  comment?: string;
+  previewLength?: number;
+  collapsedPaths: ReadonlySet<string>;
+};
+
+function appendRawPreviewField(lines: JsonPreviewLine[], field: DataGridRowDetailPreviewField, path: string) {
+  const textLines = field.text.split("\n");
+  textLines.forEach((text, index) => {
+    const lastLine = index === textLines.length - 1;
+    lines.push({
+      key: `${path}/raw/${index}`,
+      text,
+      comment: lastLine ? field.comment : undefined,
+      previewLength: lastLine ? field.previewLength : undefined,
+    });
+  });
+}
+
+function appendJsonPreviewValue(lines: JsonPreviewLine[], options: AppendJsonPreviewValueOptions) {
+  const { value, depth, path, label, comma, comment, previewLength, collapsedPaths } = options;
+  const indent = "  ".repeat(depth);
+  const labelText = label === undefined ? "" : `${JSON.stringify(label)}: `;
+
+  if (!isJsonTreeContainer(value) || Object.keys(value).length === 0) {
+    lines.push({
+      key: `${path}/value`,
+      text: `${indent}${labelText}${JSON.stringify(value)}${comma}`,
+      comment,
+      previewLength,
+    });
+    return;
+  }
+
+  const opening = Array.isArray(value) ? "[" : "{";
+  const closing = Array.isArray(value) ? "]" : "}";
+  const toggleLabel = label ?? (path || "$");
+  if (collapsedPaths.has(path)) {
+    lines.push({
+      key: `${path}/collapsed`,
+      text: `${indent}${labelText}${opening}…${closing}${comma}`,
+      comment,
+      previewLength,
+      togglePath: path,
+      toggleLabel,
+      expanded: false,
+    });
+    return;
+  }
+
+  lines.push({
+    key: `${path}/open`,
+    text: `${indent}${labelText}${opening}`,
+    comment,
+    previewLength,
+    togglePath: path,
+    toggleLabel,
+    expanded: true,
+  });
+
+  const children = Array.isArray(value) ? value.map((child, index) => [String(index), child] as const) : Object.entries(value);
+  children.forEach(([key, child], index) => {
+    appendJsonPreviewValue(lines, {
+      value: child,
+      depth: depth + 1,
+      path: `${path}/${index}`,
+      label: Array.isArray(value) ? undefined : key,
+      comma: index < children.length - 1 ? "," : "",
+      collapsedPaths,
+    });
+  });
+
+  lines.push({ key: `${path}/close`, text: `${indent}${closing}${comma}` });
 }
 
 export function jsonDetailDisplayValue(value: unknown): unknown {

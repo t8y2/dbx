@@ -223,14 +223,31 @@ function externalDetailFieldValue(value: CellValue, externalValue: DataGridDetai
   return external === undefined ? value : external;
 }
 
+function dataGridRowFieldValue(field: DataGridCellDetail, databaseType?: DatabaseType, externalValue?: DataGridDetailExternalValue): CellValue {
+  const value = externalDetailFieldValue(field.value, externalValue);
+  return binaryCellClipboardText(value, field.type, databaseType) ?? value;
+}
+
 export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown, databaseType?: DatabaseType, externalValue?: DataGridDetailExternalValue): string {
   if (originalDocument !== undefined) return JSON.stringify(jsonDetailDisplayValue(originalDocument), null, 2);
-  const row: Record<string, CellValue> = {};
-  detail.fields.forEach((field) => {
-    const value = externalDetailFieldValue(field.value, externalValue);
-    row[field.column] = binaryCellClipboardText(value, field.type, databaseType) ?? value;
-  });
+  const row = Object.fromEntries(detail.fields.map((field) => [field.column, dataGridRowFieldValue(field, databaseType, externalValue)]));
   return JSON.stringify(jsonDetailDisplayValue(row), null, 2);
+}
+
+export function dataGridRowDetailPreviewFields(detail: DataGridRowDetail, databaseType?: DatabaseType) {
+  return detail.fields.map((field, index) => {
+    const sourceClipped = field.isSourceTruncated || field.rawValuePreview.length < field.rawValue.length;
+    const value = sourceClipped ? field.rawValuePreview : jsonDetailDisplayValue(dataGridRowFieldValue(field, databaseType));
+    const json = JSON.stringify(value, null, 2);
+    const preview = json.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH);
+    const comma = index < detail.fields.length - 1 ? "," : "";
+    return {
+      columnIndex: field.colIndex,
+      text: `  ${JSON.stringify(field.column)}: ${preview.replaceAll("\n", "\n  ")}${preview.length < json.length ? "…" : ""}${comma}`,
+      comment: field.comment,
+      previewLength: sourceClipped ? field.rawValuePreview.length : preview.length < json.length ? preview.length : undefined,
+    };
+  });
 }
 
 export function jsonDetailDisplayValue(value: unknown): unknown {

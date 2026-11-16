@@ -3233,6 +3233,7 @@ export default withEnglishFallback({
     expandCellDetailMetadata: "展開儲存格中繼資訊",
     openCellDetailsDialog: "儲存格詳情",
     rowDetails: "資料詳情",
+    rowJsonPreview: "JSON 預覽",
     rowDetailsFor: "第 {row} 筆資料詳情",
     openRowDetailsDialog: "資料詳情",
     openColumnDetailsDialog: "欄位詳情",

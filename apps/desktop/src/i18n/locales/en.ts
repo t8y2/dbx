@@ -3822,6 +3822,7 @@ export default {
     openCellDetailsDialog: "Open Cell Details",
     rowDetails: "Row Details",
     rowDetailsFor: "Row {row} Details",
+    rowJsonPreview: "JSON Preview",
     openRowDetailsDialog: "Open Row Details",
     openColumnDetailsDialog: "Open Column Details",
     columnDetailsFor: "{column} Column Details",

@@ -64,10 +64,10 @@ impl PluginRegistry {
                     startup.0 = None;
                     return Err(match shutdown {
                         Ok(()) => {
-                            "Update the JDBC plugin to a version supporting embedded H2 logical sessions".to_string()
+                            "Update the JDBC plugin to a version supporting embedded file JDBC logical sessions".to_string()
                         }
                         Err(error) => format!(
-                            "Update the JDBC plugin to a version supporting embedded H2 logical sessions; additionally \
+                            "Update the JDBC plugin to a version supporting embedded file JDBC logical sessions; additionally \
                              failed to stop its runtime: {error}"
                         ),
                     });

@@ -2348,7 +2348,7 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<ConnectionTestResult, String> {
         let params = serde_json::json!({ "connection": config });
-        if driver_id == "jdbc" && is_embedded_h2_jdbc(config) {
+        if driver_id == "jdbc" && uses_shared_embedded_jdbc_runtime(config) {
             let PoolKind::ExternalDriver { session, .. } = self.external_driver_pool(driver_id, config).await? else {
                 unreachable!();
             };
@@ -2384,7 +2384,7 @@ impl AppState {
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
         let env = self.external_driver_runtime_env(driver_id)?;
-        let session = if driver_id == "jdbc" && is_embedded_h2_jdbc(config) {
+        let session = if driver_id == "jdbc" && uses_shared_embedded_jdbc_runtime(config) {
             let runtime_key = serde_json::to_string(&(
                 &config.jdbc_driver_class,
                 &config.jdbc_driver_paths,
@@ -8359,6 +8359,27 @@ fn is_embedded_h2_jdbc(config: &ConnectionConfig) -> bool {
         && !location.starts_with("ssl:")
         && !location.starts_with("mem:")
         && !location.is_empty()
+}
+
+/// Derby boots an embedded file database at most once per JVM, so the metadata
+/// and query sessions must live in one shared runtime just like embedded H2
+/// (#14912). Network (`jdbc:derby://`) and in-memory URLs have no file lock and
+/// keep their dedicated processes.
+fn is_embedded_derby_jdbc(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Jdbc {
+        return false;
+    }
+    let Some(url) = config.connection_string.as_deref() else { return false };
+    let normalized = url.trim().to_ascii_lowercase();
+    let Some(location) = normalized.strip_prefix("jdbc:derby:") else { return false };
+    !location.starts_with("//") && !location.starts_with("memory:") && !location.is_empty()
+}
+
+/// Embedded file engines whose boot lock forces every logical session into one
+/// JVM; the runtime key still scopes by driver class, jar paths and Java
+/// options, so unrelated drivers and options never share a process.
+fn uses_shared_embedded_jdbc_runtime(config: &ConnectionConfig) -> bool {
+    is_embedded_h2_jdbc(config) || is_embedded_derby_jdbc(config)
 }
 
 fn is_postgres_jdbc(config: &ConnectionConfig) -> bool {

@@ -24,6 +24,7 @@ pub(super) fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest 
         columns: vec![column("id", 0), column("name", 1)],
         selected_column_indexes: vec![0, 1],
         rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace, Hopper")]],
+        selected_mask: None,
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
         spatial_columns: None,
@@ -1695,6 +1696,7 @@ fn sqlserver_spatial_extract_selection_replays_cell_srid() {
             vec![json!("POINT (1 2)"), json!("POINT (10 20)")],
             vec![json!("POINT (3 4)"), json!("POINT (30 40)")],
         ],
+        selected_mask: None,
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
         spatial_columns: Some(vec![
@@ -1763,6 +1765,7 @@ fn sqlserver_spatial_extract_updates_replay_cell_srid() {
         ],
         selected_column_indexes: vec![0, 1],
         rows: vec![vec![json!(1), json!("POINT (1 2)")], vec![json!(2), json!("POINT (3 4)")]],
+        selected_mask: None,
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
         spatial_columns: Some(vec![SpatialColumn { column_index: 1, srid: Some(0) }]),
@@ -2710,5 +2713,135 @@ fn deletes_inserts_requires_table_meta_and_primary_key() {
     assert_eq!(
         extract_data_grid_selection(nosql).expect_err("nosql unsupported").code,
         DataGridExtractErrorCode::UnsupportedDatabase
+    );
+}
+
+fn sparse_request(extractor: DataGridExtractorId) -> DataGridExtractRequest {
+    let mut request = request(extractor);
+    request.columns = vec![column("id", 0), column("name", 1), column("email", 2)];
+    request.selected_column_indexes = vec![0, 1, 2];
+    request.rows = vec![
+        vec![json!(1), json!("Ada"), json!("ada@example.com")],
+        vec![json!(2), json!("Bob"), json!("bob@example.com")],
+        vec![json!(3), json!("Grace, Hopper"), json!("grace@example.com")],
+    ];
+    request.selected_mask = Some(vec![vec![true, false, false], vec![false, false, false], vec![false, true, true]]);
+    request.source_table_name = Some("users".to_string());
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: None,
+    });
+    request
+}
+
+#[test]
+fn sparse_positional_extractors_preserve_row_and_column_gaps() {
+    let tsv = extract_data_grid_selection(sparse_request(DataGridExtractorId::Tsv)).expect("sparse TSV");
+    assert_eq!(tsv.text, "1\t\t\n\t\t\n\tGrace, Hopper\tgrace@example.com");
+
+    let csv = extract_data_grid_selection(sparse_request(DataGridExtractorId::Csv)).expect("sparse CSV");
+    assert_eq!(csv.text, "1,,\n,,\n,\"Grace, Hopper\",grace@example.com");
+
+    let markdown = extract_data_grid_selection(sparse_request(DataGridExtractorId::Markdown)).expect("sparse Markdown");
+    assert_eq!(
+        markdown.text,
+        "| id | name | email |\n| --- | --- | --- |\n| 1 |  |  |\n|  |  |  |\n|  | Grace, Hopper | grace@example.com |"
+    );
+
+    let html = extract_data_grid_selection(sparse_request(DataGridExtractorId::Html)).expect("sparse HTML");
+    assert!(html.text.contains("<tr><td>1</td><td></td><td></td></tr>"));
+    assert!(html.text.contains("<tr><td></td><td></td><td></td></tr>"));
+}
+
+#[test]
+fn sparse_object_extractors_omit_unselected_fields_and_keep_structural_rows() {
+    let json = extract_data_grid_selection(sparse_request(DataGridExtractorId::Json)).expect("sparse JSON");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json.text).unwrap(),
+        json!([
+            {"id": 1},
+            {},
+            {"name": "Grace, Hopper", "email": "grace@example.com"}
+        ])
+    );
+
+    let xml = extract_data_grid_selection(sparse_request(DataGridExtractorId::Xml)).expect("sparse XML");
+    assert!(xml.text.contains("<row>\n  </row>"));
+    assert!(!xml.text.contains("<column name=\"email\">ada@example.com</column>"));
+
+    let php = extract_data_grid_selection(sparse_request(DataGridExtractorId::Php)).expect("sparse PHP");
+    assert!(php.text.contains("[\"id\" => 1]"));
+    assert!(php.text.contains("[],"));
+
+    let dbunit = extract_data_grid_selection(sparse_request(DataGridExtractorId::Dbunit)).expect("sparse DbUnit");
+    assert_eq!(dbunit.text.lines().filter(|line| line.trim_start().starts_with("<USERS")).count(), 2);
+}
+
+#[test]
+fn sparse_dbunit_ignores_columns_that_are_only_bounding_box_gaps() {
+    let mut request = sparse_request(DataGridExtractorId::Dbunit);
+    request.columns[1].display_name = "invalid column name".to_string();
+    request.selected_mask = Some(vec![vec![true, false, false], vec![false, false, false], vec![false, false, true]]);
+
+    let result = extract_data_grid_selection(request).expect("sparse DbUnit with an unselected invalid column");
+
+    assert!(!result.text.contains("invalid column name"));
+    assert!(result.text.contains("ID=\"1\""));
+    assert!(result.text.contains("EMAIL=\"grace@example.com\""));
+}
+
+#[test]
+fn sparse_sql_extractors_use_each_rows_mask_and_selected_delete_values() {
+    let inserts = extract_data_grid_selection(sparse_request(DataGridExtractorId::SqlInserts)).expect("sparse inserts");
+    assert!(inserts.text.contains("(\"id\")"));
+    assert!(inserts.text.contains("(\"name\", \"email\")"));
+    assert!(!inserts.text.contains("Bob"));
+
+    let updates = extract_data_grid_selection(sparse_request(DataGridExtractorId::SqlUpdates)).expect("sparse updates");
+    assert!(updates.text.contains("SET \"name\" = 'Grace, Hopper', \"email\" = 'grace@example.com' WHERE \"id\" = 3"));
+    assert_eq!(
+        updates.warnings.iter().filter(|warning| warning.code == DataGridExtractWarningCode::SparseRowsSkipped).count(),
+        1
+    );
+
+    let deletes = extract_data_grid_selection(sparse_request(DataGridExtractorId::SqlDeletes)).expect("sparse deletes");
+    assert_eq!(
+        deletes.text,
+        "DELETE FROM \"users\" WHERE \"id\" = 1;\nDELETE FROM \"users\" WHERE \"name\" = 'Grace, Hopper' AND \"email\" = 'grace@example.com';"
+    );
+
+    let replace = extract_data_grid_selection(sparse_request(DataGridExtractorId::SqlDeletesInserts))
+        .expect("sparse delete/insert");
+    assert!(replace
+        .text
+        .contains("DELETE FROM \"users\" WHERE \"name\" = 'Grace, Hopper' AND \"email\" = 'grace@example.com';"));
+    assert!(replace.text.contains("(\"id\", \"name\", \"email\")"));
+
+    let where_clause =
+        extract_data_grid_selection(sparse_request(DataGridExtractorId::WhereClause)).expect("sparse where");
+    assert_eq!(where_clause.text, "(\"id\" = 1) OR (\"name\" = 'Grace, Hopper' AND \"email\" = 'grace@example.com')");
+}
+
+#[test]
+fn sparse_sql_delete_does_not_require_a_primary_key_and_preserves_null_predicates() {
+    let mut request = sparse_request(DataGridExtractorId::SqlDeletes);
+    request.table_meta.as_mut().unwrap().primary_keys.clear();
+    request.rows[0][0] = serde_json::Value::Null;
+    let result = extract_data_grid_selection(request).expect("keyless sparse delete");
+    assert!(result.text.starts_with("DELETE FROM \"users\" WHERE \"id\" IS NULL;"));
+    assert!(result.text.contains("WHERE \"name\" = 'Grace, Hopper' AND \"email\" = 'grace@example.com';"));
+}
+
+#[test]
+fn sparse_selection_mask_shape_is_validated() {
+    let mut request = sparse_request(DataGridExtractorId::Json);
+    request.selected_mask = Some(vec![vec![true]]);
+    assert_eq!(
+        extract_data_grid_selection(request).expect_err("invalid sparse mask").code,
+        DataGridExtractErrorCode::InvalidSelectionMask
     );
 }

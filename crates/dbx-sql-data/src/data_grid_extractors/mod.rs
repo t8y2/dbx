@@ -35,6 +35,26 @@ struct ExtractContext<'a> {
     selected_column_info: Vec<Option<&'a crate::data_grid_sql::DataGridColumnInfo>>,
 }
 
+impl ExtractContext<'_> {
+    fn is_selected(&self, row_index: usize, selected_column_offset: usize) -> bool {
+        self.request
+            .selected_mask
+            .as_ref()
+            .and_then(|rows| rows.get(row_index))
+            .and_then(|row| row.get(selected_column_offset))
+            .copied()
+            .unwrap_or(true)
+    }
+
+    fn row_has_selection(&self, row_index: usize) -> bool {
+        self.request
+            .selected_mask
+            .as_ref()
+            .and_then(|rows| rows.get(row_index))
+            .map_or(true, |row| row.iter().any(|selected| *selected))
+    }
+}
+
 pub fn extract_data_grid_selection(
     request: DataGridExtractRequest,
 ) -> Result<DataGridExtractResult, DataGridExtractError> {
@@ -113,6 +133,22 @@ fn build_context(request: &DataGridExtractRequest) -> Result<ExtractContext<'_>,
             DataGridExtractErrorCode::EmptySelection,
             "Select at least one data grid cell before extracting data.",
         ));
+    }
+    if let Some(mask) = &request.selected_mask {
+        let valid_shape = mask.len() == request.rows.len()
+            && mask.iter().all(|row| row.len() == request.selected_column_indexes.len());
+        if !valid_shape {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::InvalidSelectionMask,
+                "Sparse selection mask must match rows x selectedColumnIndexes.",
+            ));
+        }
+        if !mask.iter().flatten().any(|selected| *selected) {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::EmptySelection,
+                "Select at least one data grid cell before extracting data.",
+            ));
+        }
     }
     let mut selected_columns = Vec::with_capacity(request.selected_column_indexes.len());
     let mut unique_selected_indexes = std::collections::HashSet::with_capacity(request.selected_column_indexes.len());

@@ -333,6 +333,10 @@ pub struct DataGridExtractRequest {
     pub selected_column_indexes: Vec<usize>,
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
+    /// Sparse cell-selection mask aligned to rows x selected_column_indexes.
+    /// Older callers omit it, which means every selected-column cell is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_mask: Option<Vec<Vec<bool>>>,
     #[serde(default)]
     pub selection_kind: DataGridSelectionKind,
     #[serde(default)]
@@ -350,6 +354,7 @@ pub enum DataGridExtractWarningCode {
     OmittedColumns,
     DuplicateJsonColumnNames,
     PhpDateNotIso,
+    SparseRowsSkipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +390,7 @@ pub enum DataGridExtractErrorCode {
     InvalidSelectSelection,
     InvalidColumnIndex,
     InvalidColumnMapping,
+    InvalidSelectionMask,
     MissingTableMetadata,
     MissingPrimaryKey,
     NullPrimaryKey,

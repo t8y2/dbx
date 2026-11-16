@@ -174,13 +174,15 @@ export interface DataGridExtractRequest {
   columns: DataGridExtractColumn[];
   selectedColumnIndexes: number[];
   rows: unknown[][];
+  /** Sparse cell-selection mask aligned to rows x selectedColumnIndexes. Missing means every cell is selected. */
+  selectedMask?: boolean[][];
   selectionKind: DataGridSelectionKind;
   options: DataGridExtractorOptions;
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
 }
 
-export type DataGridExtractWarningCode = "omitted-columns" | "duplicate-json-column-names" | "php-date-not-iso";
+export type DataGridExtractWarningCode = "omitted-columns" | "duplicate-json-column-names" | "php-date-not-iso" | "sparse-rows-skipped";
 
 export interface DataGridExtractResult {
   text: string;

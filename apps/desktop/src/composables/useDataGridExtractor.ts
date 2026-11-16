@@ -112,6 +112,25 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   const hasUnsupportedDiscreteSelection = computed(() => options.hasCellSelection.value && options.selectedCellMatrix.value === null);
   const requestSources = new WeakMap<DataGridExtractRequest, ExtractorRequestSource>();
 
+  function sparseSelectionMatrix(): CellSelectionClipboardMatrix | null {
+    return hasUnsupportedDiscreteSelection.value ? (options.selectedCellClipboardMatrix?.value ?? null) : null;
+  }
+
+  function sparseSqlInListHasConsistentColumns(matrix: CellSelectionClipboardMatrix): boolean {
+    const masks = matrix.selectedMask.filter((row) => row.some(Boolean));
+    const first = masks[0];
+    return !!first && masks.every((row) => row.length === first.length && row.every((selected, index) => selected === first[index]));
+  }
+
+  function supportsSparseSelection(extractor: DataGridCopyExtractorId): boolean {
+    const matrix = sparseSelectionMatrix();
+    if (!hasUnsupportedDiscreteSelection.value) return true;
+    if (!matrix) return false;
+    if (extractor === "raw") return false;
+    if (extractor === "sql-in-list") return sparseSqlInListHasConsistentColumns(matrix);
+    return true;
+  }
+
   function normalizeCellValue(value: unknown, columnType: string | undefined, keepUnsafeJsonText: boolean): unknown {
     if (typeof value !== "string" || columnType?.trim().toLowerCase() !== "json") return value;
     try {
@@ -196,19 +215,9 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     let selectedSourceIndexes: number[] = [];
     let selectionKind: DataGridExtractRequest["selectionKind"] = "cells";
 
-    const matrix = matrixOverride ?? options.selectedCellMatrix.value;
-    const sourceRowsForMatrix = (items: ExtractorRowItem[]) =>
-      items.map((item, rowOffset) => {
-        const sourceRow = [...(fullItemsById.get(item.id) ?? item).data];
-        if (!matrixOverride) return sourceRow;
-        for (let columnOffset = 0; columnOffset < matrixOverride.columnIndexes.length; columnOffset++) {
-          if (matrixOverride.selectedMask[rowOffset]?.[columnOffset] !== false) continue;
-          const visibleIndex = matrixOverride.columnIndexes[columnOffset];
-          const sourceIndex = visibleIndex === undefined ? undefined : (visibleIndexes[visibleIndex] ?? visibleIndex);
-          if (sourceIndex !== undefined) sourceRow[sourceIndex] = "";
-        }
-        return sourceRow;
-      });
+    const sparseMatrix = matrixOverride ?? (options.selectedCellMatrix.value === null ? (options.selectedCellClipboardMatrix?.value ?? undefined) : undefined);
+    const matrix = options.selectedCellMatrix.value ?? sparseMatrix;
+    const sourceRowsForMatrix = (items: ExtractorRowItem[]) => items.map((item) => [...(fullItemsById.get(item.id) ?? item).data]);
     const isMultiCellSelection = !!matrix && (matrix.rowIndexes.length > 1 || matrix.columnIndexes.length > 1);
     const contextCell = options.contextCell.value;
     // A right-click sets contextCell.col to the clicked column (≥ 0); the test
@@ -231,10 +240,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // happens to be the primary key. sql-select intentionally keeps using only
     // the selected cell via the matrix branch below.
     const hasNonSyntheticContextCell = !!options.contextCell.value && options.contextCell.value.col >= 0 && !options.contextSelectionIsSynthetic.value && !!matrix && !isMultiCellSelection;
-    // INSERT and UPDATE need the complete record to retain key columns and
-    // writable values. Other extractors should respect the actual cell range
-    // that a right-click creates, just like keyboard copy does.
-    const requiresFullRowContext = extractor === "sql-inserts" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
+    // INSERT, UPDATE, and identity-based operations need complete row context.
+    // Sparse DELETE is value-based, so it deliberately keeps only the columns
+    // represented by the selection mask.
+    const sparseValueDelete = extractor === "sql-deletes" && !!sparseMatrix;
+    const requiresFullRowContext = extractor === "sql-inserts" || (extractor === "sql-deletes" && !sparseValueDelete) || extractor === "sql-deletes-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
 
     if (contextPredicateCell) {
       const item = fullItemsById.get(contextPredicateCell.rowId);
@@ -253,7 +263,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
       selectionKind = "rows";
     } else if (isMultiCellSelection && matrix) {
-      const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && !item.isDraft);
+      const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && (!item.isDraft || !!sparseMatrix));
       sourceRows = sourceRowsForMatrix(items);
       sourceRowIds = items.map((item) => item.id);
       sourceItems = items.map((item) => fullItemsById.get(item.id) ?? item);
@@ -272,7 +282,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       }
     } else if (matrix) {
       // Single-cell matrix without a context cell — still honor the explicit selection.
-      const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && !item.isDraft);
+      const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && (!item.isDraft || !!sparseMatrix));
       sourceRows = sourceRowsForMatrix(items);
       sourceRowIds = items.map((item) => item.id);
       sourceItems = items.map((item) => fullItemsById.get(item.id) ?? item);
@@ -288,7 +298,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const hasCompleteIdentity = primaryKeys.length > 0 && identityIndexes.every((index) => index >= 0) && sourceRows.every((row) => identityIndexes.every((index) => row[index] !== null && row[index] !== undefined));
       selectedSourceIndexes = hasCompleteIdentity ? identityIndexes : [...fullColumns.keys()];
       requiredSourceIndexes.splice(0, requiredSourceIndexes.length, ...selectedSourceIndexes);
-    } else if (extractor === "sql-updates" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts") {
+    } else if (extractor === "sql-updates" || (extractor === "sql-deletes" && !sparseValueDelete) || extractor === "sql-deletes-inserts") {
       for (const primaryKey of options.tableMeta.value?.primaryKeys ?? []) {
         const primaryKeyIndex = fullColumns.findIndex((displayName, index) => normalizeName(sourceNames?.[index] ?? displayName) === normalizeName(primaryKey));
         if (primaryKeyIndex >= 0 && !requiredSourceIndexes.includes(primaryKeyIndex)) requiredSourceIndexes.push(primaryKeyIndex);
@@ -317,21 +327,20 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const keepUnsafeJsonText = descriptor.category === "sql";
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
-    const selectedMask = matrixOverride
+    const sourceSelectedMask = sparseMatrix
       ? sourceRows.map((_row, rowIndex) =>
           requiredSourceIndexes.map((sourceIndex) => {
             const visibleIndex = visibleIndexes.indexOf(sourceIndex);
-            const columnOffset = matrixOverride.columnIndexes.indexOf(visibleIndex >= 0 ? visibleIndex : sourceIndex);
-            return columnOffset < 0 || matrixOverride.selectedMask[rowIndex]?.[columnOffset] !== false;
+            const columnOffset = sparseMatrix.columnIndexes.indexOf(visibleIndex >= 0 ? visibleIndex : sourceIndex);
+            return columnOffset < 0 || sparseMatrix.selectedMask[rowIndex]?.[columnOffset] !== false;
           }),
         )
       : undefined;
     const effectiveValueFormat = descriptor.category === "sql" ? "native" : extractorOptions.valueFormat === "default" ? (extractor === "dbunit" || extractor === "php" ? "native" : "legacy") : extractorOptions.valueFormat;
-    const rows = rawRows.map((row, rowIndex) =>
+    const rows = rawRows.map((row) =>
       row.map((value, index) => {
-        // Sparse clipboard placeholders describe unselected cells rather than
-        // actual empty values, so they must bypass external/column formatters.
-        if (selectedMask?.[rowIndex]?.[index] === false) return "";
+        // Unselected values remain intact in the request. The backend applies
+        // selectedMask according to each extractor's positional or semantic rules.
         const formatNumbers = ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit";
         const cellFormat = formatNumbers !== "inherit" && isNumericColumnType(columnTypes[index]) ? formatNumbers : effectiveValueFormat;
         return extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index, requiredSourceIndexes[index], cellFormat);
@@ -379,6 +388,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       columns,
       selectedColumnIndexes,
       rows,
+      selectedMask: sparseMatrix
+        ? sourceRows.map((_row, rowIndex) =>
+            selectedSourceIndexes.map((sourceIndex) => {
+              const visibleIndex = visibleIndexes.indexOf(sourceIndex);
+              const columnOffset = sparseMatrix.columnIndexes.indexOf(visibleIndex >= 0 ? visibleIndex : sourceIndex);
+              return columnOffset >= 0 && sparseMatrix.selectedMask[rowIndex]?.[columnOffset] === true;
+            }),
+          )
+        : undefined,
       selectionKind,
       // For dialects whose tableMeta keeps the schema qualifier regardless of
       // the flag (DATABASE_SCHEMA_QUALIFIED_TYPES), the backend strips every
@@ -399,7 +417,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       valueFormat: effectiveValueFormat,
       formatNumbers: ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit",
       rawRows,
-      selectedMask,
+      selectedMask: sourceSelectedMask,
     });
     return request;
   }
@@ -411,6 +429,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       return {
         ...request,
         rows: request.rows.slice(0, rowLimit),
+        selectedMask: request.selectedMask?.slice(0, rowLimit),
         spatialValues: request.spatialValues?.slice(0, rowLimit),
       };
     }
@@ -428,6 +447,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const limitedRequest = {
         ...request,
         rows: request.rows.slice(0, rowLimit),
+        selectedMask: request.selectedMask?.slice(0, rowLimit),
         spatialValues: request.spatialValues?.slice(0, rowLimit),
       };
       requestSources.set(limitedRequest, limitedSource);
@@ -444,9 +464,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         return sourceIndex !== undefined && values.has(sourceIndex) ? values.get(sourceIndex) : value;
       });
     });
-    const rows = rawRows.map((row, rowIndex) =>
+    const rows = rawRows.map((row) =>
       row.map((value, index) => {
-        if (limitedSource.selectedMask?.[rowIndex]?.[index] === false) return "";
         const cellFormat = limitedSource.formatNumbers !== "inherit" && isNumericColumnType(limitedSource.columnTypes[index]) ? limitedSource.formatNumbers : limitedSource.valueFormat;
         return extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.keepUnsafeJsonText, limitedSource.presentBinaryText, index, limitedSource.sourceColumnIndexes[index], cellFormat);
       }),
@@ -454,6 +473,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const resolvedRequest = {
       ...request,
       rows,
+      selectedMask: rowLimit === undefined ? request.selectedMask : request.selectedMask?.slice(0, rowLimit),
       spatialValues: rowLimit === undefined ? request.spatialValues : request.spatialValues?.slice(0, rowLimit),
     };
     requestSources.set(resolvedRequest, { ...limitedSource, rawRows });
@@ -481,7 +501,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   function canCopyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
     if (options.allowExtractor?.(extractor) === false) return false;
     const contextPredicateTarget = hasContextPredicateTarget(extractor);
-    if (hasUnsupportedDiscreteSelection.value && !contextPredicateTarget) return false;
+    if (!contextPredicateTarget && !supportsSparseSelection(extractor)) return false;
     if (!options.hasRowSelection.value && !options.hasCellSelection.value && !options.contextCell.value) return false;
     if (extractorUnavailableForDatabase(extractor, options.databaseType.value)) return false;
     if (extractor === "sql-inserts") {
@@ -499,6 +519,9 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
     if (extractor === "sql-deletes") {
       const request = buildRequest(extractor, extractorOptions);
+      if (request?.selectedMask) {
+        return !!request.tableMeta?.tableName.trim() && request.selectedMask.some((row) => row.some(Boolean));
+      }
       const primaryKeys = request?.tableMeta?.primaryKeys ?? [];
       if (!request || primaryKeys.length === 0) return false;
       return primaryKeys.every((primaryKey) => {
@@ -586,17 +609,17 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // Derive the grid paste-back payload from the effective request schema so
     // hidden support columns, row headers, NULLs, tabs, and newlines keep the
     // same shape and values as the rendered raw text or TSV.
-    const isGridTabularCopy = extractor === "raw" || extractor === "tsv" || extractor === "tsv-with-headers";
+    const isGridTabularCopy = extractor === "raw" || extractor === "tsv" || extractor === "tsv-with-headers" || extractor === "csv" || extractor === "csv-with-headers";
     const gridCopy = isGridTabularCopy
       ? (() => {
           const includeRowHeader = extractor !== "raw" && request.options.dsv.includeRowHeader;
           const rawRows = requestSources.get(request)?.rawRows ?? request.rows;
           const rows = rawRows.map((row, rowIndex) => {
-            const selectedRow = request.selectedColumnIndexes.map((index) => row[index]);
+            const selectedRow = request.selectedColumnIndexes.map((index, columnIndex) => (request.selectedMask?.[rowIndex]?.[columnIndex] === false ? "" : row[index]));
             return includeRowHeader ? [rowIndex + 1, ...selectedRow] : selectedRow;
           });
           const selectedHeaders = request.selectedColumnIndexes.map((index) => request.columns[index]?.displayName ?? "");
-          const header = extractor === "tsv-with-headers" ? (includeRowHeader ? ["#", ...selectedHeaders] : selectedHeaders) : undefined;
+          const header = extractor === "tsv-with-headers" || extractor === "csv-with-headers" ? (includeRowHeader ? ["#", ...selectedHeaders] : selectedHeaders) : undefined;
           return { rows, header };
         })()
       : undefined;
@@ -614,7 +637,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
   async function copyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, isSessionValid?: () => boolean): Promise<boolean> {
     if (isSessionValid && !isSessionValid()) return false;
-    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) {
+    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor) && !supportsSparseSelection(extractor)) {
       toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
       return false;
     }
@@ -632,9 +655,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const matrix = options.selectedCellClipboardMatrix?.value;
     if (!matrix || (isSessionValid && !isSessionValid())) return false;
     try {
-      // Arbitrary Ctrl/Cmd selections have no safe SQL/JSON schema. The default
-      // copy path therefore emits a compressed TSV matrix and leaves unselected
-      // intersections empty, while explicit semantic extractors stay disabled.
+      // Default clipboard copy remains TSV for interoperability. Explicit menu
+      // formats use copyWithExtractor and interpret the same mask themselves.
       const extraction = await extractWithExtractor("tsv", extractorOptions, undefined, matrix);
       return extraction ? await writeExtractionToClipboard("tsv", extraction, isSessionValid) : false;
     } catch (error: unknown) {
@@ -644,7 +666,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function previewWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
-    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
+    if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor) && !supportsSparseSelection(extractor)) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
     const extraction = await extractWithExtractor(extractor, extractorOptions, DATA_GRID_EXTRACTOR_PREVIEW_MAX_ROWS);
     if (!extraction) throw new Error(t("grid.copyExtractorEmptySelection"));
     const { initialRequest, result } = extraction;
@@ -660,7 +682,6 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function previewWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
-    if (hasUnsupportedDiscreteSelection.value) throw new Error(t("grid.copyExtractorUnsupportedSelection"));
     const extractor = resolveCopyPreference(preference, extractorOptions);
     if (!extractor) throw new Error(t("grid.copyExtractorEmptySelection"));
     return previewWithExtractor(extractor, extractorOptions);
@@ -669,12 +690,25 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   function showWarnings(warnings: Array<{ code: DataGridExtractWarningCode; message: string }> | undefined, omittedColumns: string[] | undefined) {
     if (!warnings?.length) return;
     for (const warning of warnings) {
-      const message = warning.code === "omitted-columns" ? t("grid.copyExtractorWarningOmittedColumns", { columns: omittedColumns?.join(", ") || "-" }) : warning.code === "php-date-not-iso" ? t("grid.copyExtractorWarningPhpDateNotIso") : t("grid.copyExtractorWarningDuplicateJsonColumns");
+      const message =
+        warning.code === "omitted-columns"
+          ? t("grid.copyExtractorWarningOmittedColumns", { columns: omittedColumns?.join(", ") || "-" })
+          : warning.code === "php-date-not-iso"
+            ? t("grid.copyExtractorWarningPhpDateNotIso")
+            : warning.code === "sparse-rows-skipped"
+              ? warning.message
+              : t("grid.copyExtractorWarningDuplicateJsonColumns");
       toast(message, 5000);
     }
   }
 
-  return { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor };
+  function canCopyWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
+    if (hasUnsupportedDiscreteSelection.value) return sparseSelectionMatrix() !== null && canCopyWithExtractor("tsv", extractorOptions);
+    const extractor = resolveCopyPreference(preference, extractorOptions);
+    return extractor !== null && canCopyWithExtractor(extractor, extractorOptions);
+  }
+
+  return { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor, canCopyWithPreference };
 }
 
 function extractorAllowsEmptyOutput(extractor: DataGridCopyExtractorId): boolean {

@@ -20,6 +20,126 @@ use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::Write;
 
+fn sparse_row_request(
+    context: &ExtractContext<'_>,
+    row_index: usize,
+    include_primary_keys: bool,
+) -> Result<Option<super::DataGridExtractRequest>, DataGridExtractError> {
+    let Some(mask) = context.request.selected_mask.as_ref().and_then(|rows| rows.get(row_index)) else {
+        return Ok(None);
+    };
+    if !mask.iter().any(|selected| *selected) {
+        return Ok(None);
+    }
+    let mut selected_column_indexes = context
+        .request
+        .selected_column_indexes
+        .iter()
+        .zip(mask)
+        .filter_map(|(column_index, selected)| selected.then_some(*column_index))
+        .collect::<Vec<_>>();
+    if include_primary_keys {
+        if let Some(table_meta) = &context.request.table_meta {
+            let mut primary_key_indexes = Vec::new();
+            for primary_key in &table_meta.primary_keys {
+                if let Some(column_index) = context.request.columns.iter().position(|column| {
+                    normalized_name_eq(column.source_name.as_deref().unwrap_or(&column.display_name), primary_key)
+                }) {
+                    primary_key_indexes.push(column_index);
+                }
+            }
+            let remaining = selected_column_indexes
+                .into_iter()
+                .filter(|column_index| !primary_key_indexes.contains(column_index))
+                .collect::<Vec<_>>();
+            primary_key_indexes.extend(remaining);
+            selected_column_indexes = primary_key_indexes;
+        }
+    }
+    let mut request = context.request.clone();
+    request.selected_column_indexes = selected_column_indexes;
+    request.rows = vec![context.request.rows[row_index].clone()];
+    request.selected_mask = None;
+    request.spatial_values =
+        context.request.spatial_values.as_ref().and_then(|rows| rows.get(row_index)).cloned().map(|row| vec![row]);
+    Ok(Some(request))
+}
+
+fn sparse_rows_skipped_warning(count: usize, action: &str) -> DataGridExtractWarning {
+    DataGridExtractWarning {
+        code: DataGridExtractWarningCode::SparseRowsSkipped,
+        message: format!("Skipped {count} sparse selection row(s) with no {action} columns."),
+    }
+}
+
+fn sparse_delete_statement(
+    context: &ExtractContext<'_>,
+    row_index: usize,
+) -> Result<Option<String>, DataGridExtractError> {
+    if !context.row_has_selection(row_index) {
+        return Ok(None);
+    }
+    let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
+        DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingTableMetadata,
+            "SQL Deletes requires table metadata.",
+        )
+    })?;
+    if !supports_relational_copy_predicates(context.request.database_type) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::UnsupportedDatabase,
+            "SQL Deletes is not supported for this database type.",
+        ));
+    }
+    let row = &context.request.rows[row_index];
+    let quote =
+        if context.request.options.sql.quote_identifiers { context.request.identifier_quote.as_deref() } else { None };
+    let predicates = context
+        .selected_source_indexes
+        .iter()
+        .enumerate()
+        .filter(|(column_offset, _)| context.is_selected(row_index, *column_offset))
+        .map(|(column_offset, source_index)| {
+            let column = context.selected_columns[column_offset];
+            let column_name = column.source_name.as_deref().unwrap_or(&column.display_name);
+            let value = row.get(*source_index).unwrap_or(&Value::Null);
+            build_column_predicate(
+                context.request.database_type,
+                column_name,
+                value,
+                context.selected_column_info[column_offset],
+                false,
+                quote,
+            )
+        })
+        .collect::<Vec<_>>();
+    if predicates.is_empty() {
+        return Ok(None);
+    }
+    let table = data_grid_generated_table_name(
+        context.request.database_type,
+        table_meta.catalog.as_deref(),
+        table_meta.schema.as_deref(),
+        table_meta.database.as_deref(),
+        &table_meta.table_name,
+        context.request.identifier_quote.as_deref(),
+        context.request.options.sql.include_database_name,
+    );
+    let table = if context.request.options.sql.quote_identifiers {
+        table
+    } else {
+        identifiers::unquote_optional_identifiers(
+            table,
+            context.request.database_type,
+            context.request.identifier_quote.as_deref(),
+        )
+    };
+    Ok(Some(data_grid_statement(
+        context.request.database_type,
+        data_grid_delete_sql(context.request.database_type, &table, &predicates.join(" AND ")),
+    )))
+}
+
 #[path = "sql_identifiers.rs"]
 mod identifiers;
 
@@ -38,13 +158,35 @@ pub(super) fn write_sql_in_list(
         .iter()
         .map(|col| (col.column_index, col.srid))
         .collect();
+    let expected_mask = context
+        .request
+        .selected_mask
+        .as_ref()
+        .and_then(|rows| rows.iter().find(|row| row.iter().any(|selected| *selected)));
+    if context.request.selected_mask.as_ref().is_some_and(|rows| {
+        rows.iter().filter(|row| row.iter().any(|selected| *selected)).any(|row| Some(row) != expected_mask)
+    }) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::InvalidSelectionMask,
+            "SQL IN-list requires the same selected columns on every non-empty sparse row.",
+        ));
+    }
     for (row_index, row) in context.request.rows.iter().enumerate() {
+        if !context.row_has_selection(row_index) {
+            continue;
+        }
         let mut tuple = Vec::new();
-        if context.selected_columns.len() > 1 {
+        let selected_count =
+            (0..context.selected_columns.len()).filter(|column| context.is_selected(row_index, *column)).count();
+        if selected_count > 1 {
             tuple.push(b'(');
         }
+        let mut tuple_value_count = 0usize;
         for (column_index, source_index) in context.selected_source_indexes.iter().enumerate() {
-            if column_index > 0 {
+            if !context.is_selected(row_index, column_index) {
+                continue;
+            }
+            if tuple_value_count > 0 {
                 tuple.extend_from_slice(b", ");
             }
             let value = &row[*source_index];
@@ -68,8 +210,9 @@ pub(super) fn write_sql_in_list(
                 )
                 .as_bytes(),
             );
+            tuple_value_count += 1;
         }
-        if context.selected_columns.len() > 1 {
+        if selected_count > 1 {
             tuple.push(b')');
         }
         if let Entry::Vacant(entry) = seen_rows.entry(tuple) {
@@ -85,6 +228,54 @@ pub(super) fn write_sql_in_list(
 }
 
 pub(super) fn write_sql_inserts(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<WriteMetadata, DataGridExtractError> {
+    if context.request.selected_mask.is_some() {
+        let mut wrote = false;
+        let mut skipped = 0usize;
+        let mut omitted_columns = Vec::new();
+        let mut warnings = Vec::new();
+        for row_index in 0..context.request.rows.len() {
+            let Some(request) = sparse_row_request(context, row_index, false)? else { continue };
+            let row_context = super::build_context(&request)?;
+            let mut buffer = Vec::new();
+            match write_sql_inserts_regular(&row_context, &mut buffer) {
+                Ok(metadata) => {
+                    if wrote {
+                        write_bytes(output, b"\n")?;
+                    }
+                    write_bytes(output, &buffer)?;
+                    wrote = true;
+                    omitted_columns.extend(metadata.omitted_columns);
+                    warnings.extend(
+                        metadata
+                            .warnings
+                            .into_iter()
+                            .filter(|warning| warning.code != DataGridExtractWarningCode::OmittedColumns),
+                    );
+                }
+                Err(error) if error.code == DataGridExtractErrorCode::NoWritableColumns => skipped += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        if !wrote {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::NoWritableColumns,
+                "No sparse selection row contains insertable columns.",
+            ));
+        }
+        let mut metadata = sql_metadata(omitted_columns);
+        metadata.warnings.extend(warnings);
+        if skipped > 0 {
+            metadata.warnings.push(sparse_rows_skipped_warning(skipped, "insertable"));
+        }
+        return Ok(metadata);
+    }
+    write_sql_inserts_regular(context, output)
+}
+
+fn write_sql_inserts_regular(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
 ) -> Result<WriteMetadata, DataGridExtractError> {
@@ -185,6 +376,54 @@ pub(super) fn write_sql_updates(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
 ) -> Result<WriteMetadata, DataGridExtractError> {
+    if context.request.selected_mask.is_some() {
+        let mut wrote = false;
+        let mut skipped = 0usize;
+        let mut omitted_columns = Vec::new();
+        let mut warnings = Vec::new();
+        for row_index in 0..context.request.rows.len() {
+            let Some(request) = sparse_row_request(context, row_index, false)? else { continue };
+            let row_context = super::build_context(&request)?;
+            let mut buffer = Vec::new();
+            match write_sql_updates_regular(&row_context, &mut buffer) {
+                Ok(metadata) => {
+                    if wrote {
+                        write_bytes(output, b"\n")?;
+                    }
+                    write_bytes(output, &buffer)?;
+                    wrote = true;
+                    omitted_columns.extend(metadata.omitted_columns);
+                    warnings.extend(
+                        metadata
+                            .warnings
+                            .into_iter()
+                            .filter(|warning| warning.code != DataGridExtractWarningCode::OmittedColumns),
+                    );
+                }
+                Err(error) if error.code == DataGridExtractErrorCode::NoWritableColumns => skipped += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        if !wrote {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::NoWritableColumns,
+                "No sparse selection row contains updatable columns.",
+            ));
+        }
+        let mut metadata = sql_metadata(omitted_columns);
+        metadata.warnings.extend(warnings);
+        if skipped > 0 {
+            metadata.warnings.push(sparse_rows_skipped_warning(skipped, "updatable"));
+        }
+        return Ok(metadata);
+    }
+    write_sql_updates_regular(context, output)
+}
+
+fn write_sql_updates_regular(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<WriteMetadata, DataGridExtractError> {
     ensure_sql_builder_budget(context)?;
     reject_selected_opaque_aggregate_states(context)?;
     let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
@@ -238,6 +477,16 @@ pub(super) fn write_sql_deletes(
 ) -> Result<WriteMetadata, DataGridExtractError> {
     ensure_sql_builder_budget(context)?;
     reject_selected_opaque_aggregate_states(context)?;
+    if context.request.selected_mask.is_some() {
+        let delete_statements = (0..context.request.rows.len())
+            .map(|row_index| sparse_delete_statement(context, row_index))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        write_bytes(output, delete_statements.join("\n").as_bytes())?;
+        return Ok(sql_metadata(Vec::new()));
+    }
     let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
         DataGridExtractError::new(
             DataGridExtractErrorCode::MissingTableMetadata,
@@ -299,6 +548,9 @@ pub(super) fn write_sql_deletes(
 
     let mut delete_statements = Vec::with_capacity(context.request.rows.len());
     for (row_index, row) in context.request.rows.iter().enumerate() {
+        if !context.row_has_selection(row_index) {
+            continue;
+        }
         let mut predicates = Vec::with_capacity(primary_key_indices.len());
         for (pk_index, (pk_name, src_idx)) in primary_key_indices.iter().enumerate() {
             let val = row.get(*src_idx).unwrap_or(&Value::Null);
@@ -326,6 +578,82 @@ pub(super) fn write_sql_deletes(
 }
 
 pub(super) fn write_sql_deletes_inserts(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<WriteMetadata, DataGridExtractError> {
+    if context.request.selected_mask.is_some() {
+        let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
+            DataGridExtractError::new(
+                DataGridExtractErrorCode::MissingTableMetadata,
+                "SQL DELETEs/INSERTs requires table metadata.",
+            )
+        })?;
+        if table_meta.primary_keys.is_empty() {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::MissingPrimaryKey,
+                "SQL DELETEs/INSERTs requires at least one primary key column for the replacement INSERT.",
+            ));
+        }
+        let mut wrote = false;
+        let mut omitted_columns = Vec::new();
+        let mut warnings = Vec::new();
+        for row_index in 0..context.request.rows.len() {
+            let Some(delete_statement) = sparse_delete_statement(context, row_index)? else { continue };
+            for primary_key in &table_meta.primary_keys {
+                let column = context
+                    .request
+                    .columns
+                    .iter()
+                    .find(|column| {
+                        normalized_name_eq(column.source_name.as_deref().unwrap_or(&column.display_name), primary_key)
+                    })
+                    .ok_or_else(|| {
+                        DataGridExtractError::new(
+                            DataGridExtractErrorCode::MissingPrimaryKey,
+                            format!("Primary key column '{primary_key}' is not present in the result set."),
+                        )
+                    })?;
+                if context.request.rows[row_index].get(column.source_index).unwrap_or(&Value::Null).is_null() {
+                    return Err(DataGridExtractError::new(
+                        DataGridExtractErrorCode::NullPrimaryKey,
+                        format!("Row {row_index} has a NULL value for primary key '{primary_key}'."),
+                    ));
+                }
+            }
+            let Some(mut request) = sparse_row_request(context, row_index, true)? else { continue };
+            request.options.sql.primary_key_mode = DataGridPrimaryKeyMode::Include;
+            let row_context = super::build_context(&request)?;
+            let mut insert_buffer = Vec::new();
+            let metadata = write_sql_inserts_regular(&row_context, &mut insert_buffer)?;
+            if wrote {
+                write_bytes(output, b"\n")?;
+            }
+            write_bytes(output, delete_statement.as_bytes())?;
+            write_bytes(output, b"\n")?;
+            write_bytes(output, &insert_buffer)?;
+            wrote = true;
+            omitted_columns.extend(metadata.omitted_columns);
+            warnings.extend(
+                metadata
+                    .warnings
+                    .into_iter()
+                    .filter(|warning| warning.code != DataGridExtractWarningCode::OmittedColumns),
+            );
+        }
+        if !wrote {
+            return Err(DataGridExtractError::new(
+                DataGridExtractErrorCode::EmptySelection,
+                "No sparse selection rows can produce SQL DELETEs/INSERTs.",
+            ));
+        }
+        let mut metadata = sql_metadata(omitted_columns);
+        metadata.warnings.extend(warnings);
+        return Ok(metadata);
+    }
+    write_sql_deletes_inserts_regular(context, output)
+}
+
+fn write_sql_deletes_inserts_regular(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
 ) -> Result<WriteMetadata, DataGridExtractError> {
@@ -722,15 +1050,25 @@ pub(super) fn write_where_clause(
             "WHERE-clause extraction is not supported for this database type.",
         ));
     }
+    let selected_row_count =
+        (0..context.request.rows.len()).filter(|row_index| context.row_has_selection(*row_index)).count();
+    let mut wrote_row = false;
     for (row_index, row) in context.request.rows.iter().enumerate() {
-        if row_index > 0 {
+        if !context.row_has_selection(row_index) {
+            continue;
+        }
+        if wrote_row {
             write_bytes(output, b" OR ")?;
         }
-        if context.request.rows.len() > 1 {
+        if selected_row_count > 1 {
             write_bytes(output, b"(")?;
         }
+        let mut wrote_column = false;
         for (column_index, source_index) in context.selected_source_indexes.iter().enumerate() {
-            if column_index > 0 {
+            if !context.is_selected(row_index, column_index) {
+                continue;
+            }
+            if wrote_column {
                 write_bytes(output, b" AND ")?;
             }
             let column = context.selected_columns[column_index];
@@ -747,10 +1085,12 @@ pub(super) fn write_where_clause(
                 context.request.identifier_quote.as_deref(),
             );
             write_bytes(output, predicate.as_bytes())?;
+            wrote_column = true;
         }
-        if context.request.rows.len() > 1 {
+        if selected_row_count > 1 {
             write_bytes(output, b")")?;
         }
+        wrote_row = true;
     }
     Ok(())
 }

@@ -1932,14 +1932,14 @@ describe("useDataGridExport prepared row statements", () => {
     expect(toast).toHaveBeenCalledWith("grid.copyExtractorUnsupportedSelection", 5000);
   });
 
-  it("copies A1 plus B2:C2 as a compressed sparse TSV matrix", async () => {
+  it("copies A1 plus B2:C2 as a masked sparse TSV matrix", async () => {
     const clipboardMatrix: CellSelectionClipboardMatrix = {
       rowIndexes: [0, 1],
       columnIndexes: [0, 1, 2],
       columns: ["id", "name", "email"],
       rows: [
-        [null, "", ""],
-        ["", "Grace", "grace@example.com"],
+        [null, "Ada", "ada@example.com"],
+        [2, "Grace", "grace@example.com"],
       ],
       selectedMask: [
         [true, false, false],
@@ -1994,10 +1994,14 @@ describe("useDataGridExport prepared row statements", () => {
       expect.objectContaining({
         extractor: "tsv",
         rows: [
-          [null, "", ""],
-          ["", "Grace", "grace@example.com"],
+          [null, "Ada", "ada@example.com"],
+          ["2", "Grace", "grace@example.com"],
         ],
         selectedColumnIndexes: [0, 1, 2],
+        selectedMask: [
+          [true, false, false],
+          [false, true, true],
+        ],
       }),
     );
     expect(resolveSourceValues).toHaveBeenCalledWith([1, 2], [0, 1, 2]);
@@ -2006,6 +2010,58 @@ describe("useDataGridExport prepared row statements", () => {
       [null, "", ""],
       ["", "Grace", "grace@example.com"],
     ]);
+  });
+
+  it("enables explicit sparse formats and sends original values with the selection mask", async () => {
+    const clipboardMatrix: CellSelectionClipboardMatrix = {
+      rowIndexes: [0, 1, 2],
+      columnIndexes: [0, 1, 2],
+      columns: ["id", "name", "email"],
+      rows: [
+        [1, "Ada", "ada@example.com"],
+        [2, "Bob", "bob@example.com"],
+        [3, "Grace", "grace@example.com"],
+      ],
+      selectedMask: [
+        [true, false, false],
+        [false, false, false],
+        [false, true, true],
+      ],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: '[{"id":1},{},{"name":"Grace","email":"grace@example.com"}]', mimeType: "application/json", fileExtension: "json", rowCount: 3, columnCount: 3 });
+    const state = createExportState(
+      { ...editableTable, primaryKeys: [] },
+      ["id", "name", "email"],
+      undefined,
+      undefined,
+      { columns: ["id", "name", "email"], rows: [[1], ["Grace", "grace@example.com"]] },
+      clipboardMatrix.rows,
+      [],
+      DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      false,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      "mysql",
+      undefined,
+      { selectedCellClipboardMatrix: computed(() => clipboardMatrix) },
+    );
+
+    expect(state.canCopyWithExtractor("json")).toBe(true);
+    expect(state.canCopyWithExtractor("csv")).toBe(true);
+    expect(state.canCopyWithExtractor("markdown")).toBe(true);
+    expect(state.canCopyWithExtractor("sql-deletes")).toBe(true);
+    expect(state.canCopyWithExtractor("raw")).toBe(false);
+    await expect(state.copyWithExtractor("json")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "json",
+        rows: clipboardMatrix.rows,
+        selectedMask: clipboardMatrix.selectedMask,
+      }),
+    );
   });
 
   it("saves exactly the same configured extractor output used by copy and preview", async () => {

@@ -331,12 +331,42 @@ describe("useDataGridSelection", () => {
         columnIndexes: [0, 1, 2],
         columns: ["id", "name", "email"],
         rows: [
-          [1, "", ""],
-          ["", "name-2", "user-2@example.com"],
+          [1, "name-1", "user-1@example.com"],
+          [2, "name-2", "user-2@example.com"],
         ],
         selectedMask: [
           [true, false, false],
           [false, true, true],
+        ],
+      });
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("preserves intermediate row and column gaps in the sparse clipboard bounding box", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 2, colIndex: 2 }) });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.handleDataCellMousedown(2, 2, 3, { button: 0, buttons: 1, clientX: 10, clientY: 10, ctrlKey: true, preventDefault() {} } as unknown as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+
+      expect(selection.selectedCellClipboardMatrix.value).toEqual({
+        rowIndexes: [0, 1, 2],
+        columnIndexes: [0, 1, 2],
+        columns: ["id", "name", "email"],
+        rows: [
+          [1, "name-1", "user-1@example.com"],
+          [2, "name-2", "user-2@example.com"],
+          [3, "name-3", "user-3@example.com"],
+        ],
+        selectedMask: [
+          [true, false, false],
+          [false, false, false],
+          [false, false, true],
         ],
       });
     } finally {

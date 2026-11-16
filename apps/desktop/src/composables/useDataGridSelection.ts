@@ -189,9 +189,19 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
     if (selectedCellKeys.value.size === 0) return null;
     const positions = [...selectedCellKeys.value].map(parseCellKey).filter((position): position is CellPosition => !!position && position.rowIndex < displayItems.value.length && position.colIndex < columns.value.length && !displayItems.value[position.rowIndex]?.isDraft);
-    const rowIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.rowIndex));
-    const columnIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.colIndex));
-    if (rowIndexes.length === 0 || columnIndexes.length === 0) return null;
+    const selectedRowIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.rowIndex));
+    const selectedColumnIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.colIndex));
+    if (selectedRowIndexes.length === 0 || selectedColumnIndexes.length === 0) return null;
+
+    // Sparse clipboard formats preserve the visual layout of disjoint ranges.
+    // Build the complete bounding box here; selectedMask keeps genuine values
+    // distinct from the empty cells and rows that only bridge separate ranges.
+    const firstRow = selectedRowIndexes[0]!;
+    const lastRow = selectedRowIndexes[selectedRowIndexes.length - 1]!;
+    const firstColumn = selectedColumnIndexes[0]!;
+    const lastColumn = selectedColumnIndexes[selectedColumnIndexes.length - 1]!;
+    const rowIndexes = Array.from({ length: lastRow - firstRow + 1 }, (_, index) => firstRow + index);
+    const columnIndexes = Array.from({ length: lastColumn - firstColumn + 1 }, (_, index) => firstColumn + index);
 
     const selectedKeys = new Set(positions.map((position) => cellKey(position.rowIndex, position.colIndex)));
     const selectedMask = rowIndexes.map((rowIndex) => columnIndexes.map((columnIndex) => selectedKeys.has(cellKey(rowIndex, columnIndex))));
@@ -199,7 +209,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
       rowIndexes,
       columnIndexes,
       columns: columnIndexes.map((index) => columns.value[index]),
-      rows: rowIndexes.map((rowIndex, rowOffset) => columnIndexes.map((columnIndex, columnOffset) => (selectedMask[rowOffset]?.[columnOffset] ? (displayItems.value[rowIndex]?.data[columnIndex] ?? null) : ""))),
+      rows: rowIndexes.map((rowIndex) => columnIndexes.map((columnIndex) => displayItems.value[rowIndex]?.data[columnIndex] ?? null)),
       selectedMask,
     };
   });

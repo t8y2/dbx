@@ -158,6 +158,7 @@ mod tests {
             }],
             selected_column_indexes: vec![0],
             rows,
+            selected_mask: None,
             selection_kind: DataGridSelectionKind::Cells,
             options: Default::default(),
             spatial_columns: None,

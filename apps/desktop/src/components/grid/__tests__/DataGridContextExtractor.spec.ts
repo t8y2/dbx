@@ -129,6 +129,12 @@ function gridCell(host: HTMLElement): HTMLElement {
   return cell;
 }
 
+function dataCell(host: HTMLElement, rowIndex: number, columnIndex: number): HTMLElement {
+  const cell = host.querySelector<HTMLElement>(`[data-row-index="${rowIndex}"] [data-visible-col-index="${columnIndex}"]`);
+  if (!cell) throw new Error(`Grid cell not found: ${rowIndex}:${columnIndex}`);
+  return cell;
+}
+
 function pasteGridCell(host: HTMLElement, value: string) {
   const cell = gridCell(host);
   cell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
@@ -782,6 +788,47 @@ describe("DataGrid context menu target lifecycle", () => {
 
     expect(contextMenuLabels()).toContain("Copy");
     expect(contextMenuLabels()).not.toContain("Copy Column Name");
+  });
+
+  it("keeps default, advanced, CSV and JSON copy menu entries enabled for a sparse selection", async () => {
+    const result: QueryResult = {
+      columns: ["id", "payload"],
+      rows: [
+        [1, "first"],
+        [2, "middle"],
+        [3, "last"],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const { host } = mountGrid(result);
+    await settle();
+
+    dataCell(host, 0, 0).dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+    dataCell(host, 2, 1).dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 1, ctrlKey: true }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, ctrlKey: true }));
+
+    openContextMenu(dataCell(host, 2, 1));
+    await settle();
+    contextMenuButton("Copy").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+
+    expect(contextMenuButton("Advanced copy…").disabled).toBe(false);
+    expect(contextMenuButton("Smart Copy").disabled).toBe(false);
+    expect(contextMenuButton("CSV").disabled).toBe(false);
+    expect(contextMenuButton("JSON Array").disabled).toBe(false);
+
+    contextMenuButton("Advanced copy…").click();
+    await settle();
+    const raw = document.querySelector<HTMLInputElement>('input[type="radio"][value="raw"]');
+    const sqlInList = document.querySelector<HTMLInputElement>('input[type="radio"][value="sql-in-list"]');
+    const csv = document.querySelector<HTMLInputElement>('input[type="radio"][value="csv"]');
+    expect(raw?.disabled).toBe(true);
+    expect(sqlInList?.disabled).toBe(true);
+    expect(csv?.disabled).toBe(false);
+    expect(raw?.closest("label")?.textContent).toContain("requires the same columns to be selected in every row");
+    expect(sqlInList?.closest("label")?.textContent).toContain("requires the same columns to be selected in every row");
   });
 });
 

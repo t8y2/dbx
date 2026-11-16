@@ -626,6 +626,82 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackToJdbcMetadataWhenAllObjectsViewIsMissing() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            sqls,
+            jdbcMetadataCalls,
+            List.of(
+                List.of("TABLE_A", "TABLE", "table comment"),
+                List.of("VIEW_B", "VIEW", "view comment")
+            ),
+            null,
+            new SQLException("第7 行附近出现错误:\n无效的表或视图名[ALL_OBJECTS]", "22000", -2106)
+        ));
+
+        List<TableInfo> tables = agent.listTables("APP");
+
+        Assertions.assertEquals(List.of("TABLE_A", "VIEW_B"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertTrue(sqls.size() >= 2, String.join("\n", sqls));
+        Assertions.assertEquals(
+            List.of("catalog=null,schema=APP,table=%,types=null"),
+            jdbcMetadataCalls
+        );
+    }
+
+    @Test
+    void fallsBackToJdbcMetadataObjectsWhenAllObjectsViewIsMissing() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> jdbcMetadataCalls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            sqls,
+            jdbcMetadataCalls,
+            List.of(List.of("TABLE_A", "TABLE", "table comment")),
+            null,
+            new SQLException("第7 行附近出现错误:\n无效的表或视图名[ALL_OBJECTS]", "22000", -2106)
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertEquals(List.of("TABLE_A"), objects.stream().map(ObjectInfo::getName).toList());
+        Assertions.assertTrue(sqls.size() >= 2, String.join("\n", sqls));
+        Assertions.assertEquals(
+            List.of("catalog=null,schema=APP,table=%,types=null"),
+            jdbcMetadataCalls
+        );
+    }
+
+    @Test
+    void exactIdentityObjectListingStillThrowsWhenAllObjectsViewIsMissing() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, restrictedTableConnection(
+            new ArrayList<>(),
+            new ArrayList<>(),
+            List.of(),
+            null,
+            new SQLException("第7 行附近出现错误:\n无效的表或视图名[ALL_OBJECTS]", "22000", -2106)
+        ));
+
+        RuntimeException error = Assertions.assertThrows(
+            RuntimeException.class,
+            () -> agent.listObjects(
+                "APP",
+                new MetadataListConstraints("TABLE_A", 1, 0, List.of("TABLE")),
+                MetadataReadOptions.EXACT
+            )
+        );
+
+        Assertions.assertTrue(
+            String.valueOf(error.getCause() == null ? "" : error.getCause().getMessage()).contains("ALL_OBJECTS")
+                || String.valueOf(error.getMessage()).contains("ALL_OBJECTS"),
+            String.valueOf(error)
+        );
+    }
+
+    @Test
     void mapsTableCommentToObjectMetadata() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, metadataConnection());

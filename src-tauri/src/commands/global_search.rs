@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use grep::matcher::Matcher;
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
@@ -34,6 +34,39 @@ const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 const DEFAULT_LIMIT: usize = 500;
 
+static ACTIVE_SEARCHES: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn active_searches() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    ACTIVE_SEARCHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ActiveSearchGuard {
+    search_id: Option<String>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl ActiveSearchGuard {
+    fn register(search_id: Option<String>, cancellation: Arc<AtomicBool>) -> Self {
+        if let Some(search_id) = search_id.as_ref() {
+            active_searches().lock().unwrap().insert(search_id.clone(), cancellation.clone());
+        }
+        Self { search_id, cancellation }
+    }
+}
+
+impl Drop for ActiveSearchGuard {
+    fn drop(&mut self) {
+        self.cancellation.store(true, Ordering::Relaxed);
+        let Some(search_id) = self.search_id.as_ref() else {
+            return;
+        };
+        let mut searches = active_searches().lock().unwrap();
+        if searches.get(search_id).is_some_and(|registered| Arc::ptr_eq(registered, &self.cancellation)) {
+            searches.remove(search_id);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalSearchRequest {
@@ -64,6 +97,9 @@ pub struct GlobalSearchRequest {
     /// deeper than the panel is able to display.
     #[serde(default)]
     pub max_depth: Option<usize>,
+    /// Client generated identifier used to cancel an in-flight scan.
+    #[serde(default)]
+    pub search_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -79,6 +115,35 @@ pub struct GlobalSearchMatch {
     pub match_text: String,
     /// The full matching line, used for snippet highlighting.
     pub line_text: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalSearchError {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalSearchResponse {
+    pub matches: Vec<GlobalSearchMatch>,
+    pub errors: Vec<GlobalSearchError>,
+}
+
+#[derive(Debug, Default)]
+struct SearchRootResult {
+    matches: Vec<GlobalSearchMatch>,
+    errors: Vec<GlobalSearchError>,
+}
+
+const MAX_SEARCH_ERRORS: usize = 32;
+
+fn push_search_error(errors: &mut Vec<GlobalSearchError>, path: impl Into<String>, message: impl Into<String>) {
+    if errors.len() >= MAX_SEARCH_ERRORS {
+        return;
+    }
+    errors.push(GlobalSearchError { path: path.into(), message: message.into() });
 }
 
 fn build_matcher(request: &GlobalSearchRequest) -> Result<RegexMatcher, String> {
@@ -103,15 +168,19 @@ fn matches_in_text(
     file_name: &str,
     count: &AtomicUsize,
     limit: usize,
+    cancelled: &AtomicBool,
 ) -> Vec<GlobalSearchMatch> {
     let mut results = Vec::new();
     for (index, line) in text.lines().enumerate() {
-        if count.load(Ordering::Relaxed) >= limit {
+        if cancelled.load(Ordering::Relaxed) || count.load(Ordering::Relaxed) >= limit {
             break;
         }
         let line_bytes = line.as_bytes();
         let mut search_from = 0;
         while let Ok(Some(found)) = matcher.find_at(line_bytes, search_from) {
+            if cancelled.load(Ordering::Relaxed) {
+                return results;
+            }
             let (start, end) = (found.start(), found.end());
             if start >= line_bytes.len() {
                 break;
@@ -147,7 +216,7 @@ fn is_pruned_dir(name: &str) -> bool {
     PRUNED_DIRS.iter().any(|dir| name.eq_ignore_ascii_case(dir))
 }
 
-fn search_root(request: &GlobalSearchRequest, root: &str) -> Vec<GlobalSearchMatch> {
+fn search_root(request: &GlobalSearchRequest, root: &str, cancelled: &AtomicBool) -> SearchRootResult {
     let extensions: HashSet<String> = request
         .extensions
         .as_ref()
@@ -162,12 +231,15 @@ fn search_root(request: &GlobalSearchRequest, root: &str) -> Vec<GlobalSearchMat
     let count = Arc::new(AtomicUsize::new(0));
     let stopped = Arc::new(AtomicBool::new(false));
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
+    let mut output = SearchRootResult::default();
     let matcher = match build_matcher(request) {
         Ok(matcher) => matcher,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            push_search_error(&mut output.errors, root, error);
+            return output;
+        }
     };
 
-    let mut results = Vec::new();
     let mut builder = WalkBuilder::new(root);
     // `WalkBuilder`'s ignore options all default to `true`; flipping them off is
     // what makes the walk enumerate the same set of files that a plain
@@ -199,12 +271,15 @@ fn search_root(request: &GlobalSearchRequest, root: &str) -> Vec<GlobalSearchMat
     });
 
     for result in builder.build() {
-        if stopped.load(Ordering::Relaxed) {
+        if cancelled.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed) {
             break;
         }
         let entry = match result {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(error) => {
+                push_search_error(&mut output.errors, root, error.to_string());
+                continue;
+            }
         };
         if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
             continue;
@@ -228,18 +303,24 @@ fn search_root(request: &GlobalSearchRequest, root: &str) -> Vec<GlobalSearchMat
         };
         let contents = match std::fs::read(entry.path()) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(_) => continue,
+            Err(error) => {
+                push_search_error(&mut output.errors, &path, error.to_string());
+                continue;
+            }
         };
 
-        let file_results = matches_in_text(&contents, &matcher, &path, &file_name, &count, limit);
+        let file_results = matches_in_text(&contents, &matcher, &path, &file_name, &count, limit, cancelled);
         // If the file body produced no hits but the file name matches the query,
         // surface the file anyway as a filename match (line 0 is the filename sentinel).
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
         if file_results.is_empty() && count.load(Ordering::Relaxed) < limit {
             if let Ok(Some(found)) = matcher.find_at(file_name.as_bytes(), 0) {
                 let (start, end) = (found.start(), found.end());
                 let column = file_name[..start].chars().count() as u64 + 1;
                 let reached = count.fetch_add(1, Ordering::Relaxed) + 1;
-                results.push(GlobalSearchMatch {
+                output.matches.push(GlobalSearchMatch {
                     path: path.clone(),
                     file_name: file_name.clone(),
                     line: 0,
@@ -253,39 +334,56 @@ fn search_root(request: &GlobalSearchRequest, root: &str) -> Vec<GlobalSearchMat
                 }
             }
         }
-        results.extend(file_results);
+        output.matches.extend(file_results);
         if count.load(Ordering::Relaxed) >= limit {
             stopped.store(true, Ordering::Relaxed);
             break;
         }
     }
 
-    results
+    output
 }
 
 #[tauri::command]
-pub async fn global_search(request: GlobalSearchRequest) -> Result<Vec<GlobalSearchMatch>, String> {
+pub async fn global_search(request: GlobalSearchRequest) -> Result<GlobalSearchResponse, String> {
     if request.roots.is_empty() {
-        return Ok(Vec::new());
+        return Ok(GlobalSearchResponse { matches: Vec::new(), errors: Vec::new() });
     }
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let _active_search_guard = ActiveSearchGuard::register(request.search_id.clone(), cancellation.clone());
     let request = Arc::new(request);
     // Filesystem walking + regex searching is blocking work; run it on a thread
     // pool so the Tauri main thread (and thus the webview) does not freeze.
     let roots = request.roots.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut results = Vec::new();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut response = GlobalSearchResponse { matches: Vec::new(), errors: Vec::new() };
         for root in roots {
-            let matches = search_root(&request, &root);
-            results.extend(matches);
-            if results.len() >= request.limit.unwrap_or(DEFAULT_LIMIT) {
+            if cancellation.load(Ordering::Relaxed) {
+                break;
+            }
+            let root_result = search_root(&request, &root, &cancellation);
+            response.matches.extend(root_result.matches);
+            for error in root_result.errors {
+                push_search_error(&mut response.errors, error.path, error.message);
+            }
+            if response.matches.len() >= request.limit.unwrap_or(DEFAULT_LIMIT) {
                 break;
             }
         }
-        results.truncate(request.limit.unwrap_or(DEFAULT_LIMIT));
-        Ok(results)
+        response.matches.truncate(request.limit.unwrap_or(DEFAULT_LIMIT));
+        Ok(response)
     })
     .await
-    .map_err(|error| format!("Failed to run global search: {error}"))?
+    .map_err(|error| format!("Failed to run global search: {error}"))?;
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_global_search(search_id: String) -> Result<(), String> {
+    if let Some(cancellation) = active_searches().lock().unwrap().get(&search_id) {
+        cancellation.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -304,6 +402,7 @@ mod tests {
             limit: None,
             respect_ignore_rules: None,
             max_depth: None,
+            search_id: None,
         }
     }
 
@@ -319,11 +418,20 @@ mod tests {
         let file = root.join("data.sql");
         std::fs::write(&file, "SELECT id\nFROM users\nWHERE name = 'alice';\n").unwrap();
         let r = req(&[root.to_str().unwrap()], "users");
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].line, 2);
         assert_eq!(results[0].match_text, "users");
         assert!(results[0].line_text.contains("FROM users"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn counts_unicode_columns_as_characters() {
+        let root = temp_dir("unicode-column");
+        std::fs::write(root.join("a.sql"), "😀needle\n").unwrap();
+        let results = global_search(req(&[root.to_str().unwrap()], "needle")).await.unwrap().matches;
+        assert_eq!(results[0].column, 2);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -333,7 +441,7 @@ mod tests {
         std::fs::write(root.join("a.sql"), "SELECT user, users FROM t;\n").unwrap();
         let mut r = req(&[root.to_str().unwrap()], "user");
         r.whole_word = Some(true);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         // "user" as a whole word appears once (in "user"), "users" is not a whole-word match.
         assert!(!results.is_empty());
         assert!(results.iter().any(|m| m.match_text == "user"));
@@ -346,12 +454,12 @@ mod tests {
         std::fs::write(root.join("a.sql"), "SELECT USERS FROM t;\n").unwrap();
         let mut r = req(&[root.to_str().unwrap()], "users");
         r.case_sensitive = Some(true);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert!(results.is_empty());
 
         let mut r2 = req(&[root.to_str().unwrap()], "USERS");
         r2.case_sensitive = Some(true);
-        let results2 = global_search(r2).await.unwrap();
+        let results2 = global_search(r2).await.unwrap().matches;
         assert!(!results2.is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -363,7 +471,7 @@ mod tests {
         std::fs::write(root.join("b.txt"), "needle here\n").unwrap();
         let mut r = req(&[root.to_str().unwrap()], "needle");
         r.extensions = Some(vec!["sql".to_string()]);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(results.len(), 1);
         assert!(results[0].path.ends_with("a.sql"));
         std::fs::remove_dir_all(&root).unwrap();
@@ -375,7 +483,7 @@ mod tests {
         std::fs::write(root.join("a.sql"), "SELECT needle;\nSELECT needle;\nSELECT needle;\n").unwrap();
         let mut r = req(&[root.to_str().unwrap()], "needle");
         r.limit = Some(2);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(results.len(), 2);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -388,7 +496,7 @@ mod tests {
         // "other.sql" has "users" in its body.
         std::fs::write(root.join("other.sql"), "SELECT users;\n").unwrap();
         let r = req(&[root.to_str().unwrap()], "users");
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert!(
             results.iter().any(|m| m.file_name == "users_tbl.sql" && m.line == 0),
             "expected a filename-only match for users_tbl.sql with line 0"
@@ -405,7 +513,7 @@ mod tests {
         std::fs::write(nested.join("dep.sql"), "SELECT needle;\n").unwrap();
         std::fs::write(root.join("main.sql"), "SELECT needle;\n").unwrap();
         let r = req(&[root.to_str().unwrap()], "needle");
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(results.len(), 1);
         assert!(results[0].path.ends_with("main.sql"));
         std::fs::remove_dir_all(&root).unwrap();
@@ -436,7 +544,7 @@ mod tests {
         let root = ignore_rules_fixture("ignore-default");
         let r = req(&[root.to_str().unwrap()], "needle");
         assert_eq!(r.respect_ignore_rules, None);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(matched_file_names(&results), vec!["visible.sql".to_string()]);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -446,7 +554,7 @@ mod tests {
         let root = ignore_rules_fixture("ignore-off");
         let mut r = req(&[root.to_str().unwrap()], "needle");
         r.respect_ignore_rules = Some(false);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(
             matched_file_names(&results),
             vec!["ignored.sql".to_string(), "nested.sql".to_string(), "visible.sql".to_string()]
@@ -462,7 +570,7 @@ mod tests {
         std::fs::write(root.join("main.sql"), "SELECT needle;\n").unwrap();
         let mut r = req(&[root.to_str().unwrap()], "needle");
         r.respect_ignore_rules = Some(false);
-        let results = global_search(r).await.unwrap();
+        let results = global_search(r).await.unwrap().matches;
         assert_eq!(matched_file_names(&results), vec!["main.sql".to_string()]);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -477,12 +585,12 @@ mod tests {
 
         let mut shallow = req(&[root.to_str().unwrap()], "needle");
         shallow.max_depth = Some(1);
-        assert_eq!(matched_file_names(&global_search(shallow).await.unwrap()), vec!["top.sql".to_string()]);
+        assert_eq!(matched_file_names(&global_search(shallow).await.unwrap().matches), vec!["top.sql".to_string()]);
 
         let mut exact = req(&[root.to_str().unwrap()], "needle");
         exact.max_depth = Some(3);
         assert_eq!(
-            matched_file_names(&global_search(exact).await.unwrap()),
+            matched_file_names(&global_search(exact).await.unwrap().matches),
             vec!["deep.sql".to_string(), "top.sql".to_string()]
         );
 
@@ -490,9 +598,59 @@ mod tests {
         let unlimited = req(&[root.to_str().unwrap()], "needle");
         assert_eq!(unlimited.max_depth, None);
         assert_eq!(
-            matched_file_names(&global_search(unlimited).await.unwrap()),
+            matched_file_names(&global_search(unlimited).await.unwrap().matches),
             vec!["deep.sql".to_string(), "top.sql".to_string()]
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_filesystem_errors_without_discarding_matches() {
+        let matches_root = temp_dir("partial-matches");
+        std::fs::write(matches_root.join("available.sql"), "SELECT needle;\n").unwrap();
+        let missing_root = temp_dir("missing-root");
+        let missing_root_path = missing_root.to_string_lossy().into_owned();
+        std::fs::remove_dir_all(&missing_root).unwrap();
+
+        let matches_root_path = matches_root.to_string_lossy().into_owned();
+        let response = global_search(req(&[&matches_root_path, &missing_root_path], "needle")).await.unwrap();
+
+        assert!(response.matches.iter().any(|result| result.path.ends_with("available.sql")));
+        assert!(response.errors.iter().any(|error| error.path == missing_root_path));
+        std::fs::remove_dir_all(&matches_root).unwrap();
+    }
+
+    #[test]
+    fn active_search_guard_cancels_and_preserves_newer_registration() {
+        let search_id = format!("guard-{}", uuid::Uuid::new_v4());
+        let first_cancellation = Arc::new(AtomicBool::new(false));
+        let first_guard = ActiveSearchGuard::register(Some(search_id.clone()), first_cancellation.clone());
+        let second_cancellation = Arc::new(AtomicBool::new(false));
+        let second_guard = ActiveSearchGuard::register(Some(search_id.clone()), second_cancellation.clone());
+
+        drop(first_guard);
+
+        assert!(first_cancellation.load(Ordering::Relaxed));
+        assert!(!second_cancellation.load(Ordering::Relaxed));
+        assert!(active_searches()
+            .lock()
+            .unwrap()
+            .get(&search_id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, &second_cancellation)));
+
+        drop(second_guard);
+
+        assert!(second_cancellation.load(Ordering::Relaxed));
+        assert!(!active_searches().lock().unwrap().contains_key(&search_id));
+    }
+
+    #[test]
+    fn cancelled_search_stops_before_walking_files() {
+        let root = temp_dir("cancelled");
+        std::fs::write(root.join("a.sql"), "needle\n").unwrap();
+        let cancelled = AtomicBool::new(true);
+        let results = search_root(&req(&[root.to_str().unwrap()], "needle"), root.to_str().unwrap(), &cancelled);
+        assert!(results.matches.is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -519,8 +677,9 @@ mod tests {
         let mut request = req(&[root.to_str().unwrap()], "needle");
         request.extensions = Some(vec!["sql".to_string()]);
         request.respect_ignore_rules = Some(false);
-        let results = search_root(&request, root.to_str().unwrap());
-        let paths: HashSet<_> = results.iter().map(|result| result.path.clone()).collect();
+        let cancelled = AtomicBool::new(false);
+        let results = search_root(&request, root.to_str().unwrap(), &cancelled);
+        let paths: HashSet<_> = results.matches.iter().map(|result| result.path.clone()).collect();
         let expected: HashSet<_> = [
             "normal.sql",
             "relative-file.sql",
@@ -532,7 +691,7 @@ mod tests {
         .map(|path| root.join(path).to_string_lossy().into_owned())
         .collect();
         assert_eq!(paths, expected);
-        assert_eq!(results.len(), expected.len());
+        assert_eq!(results.matches.len(), expected.len());
         std::fs::remove_dir_all(base).unwrap();
     }
 }

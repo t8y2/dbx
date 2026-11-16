@@ -116,6 +116,8 @@ const UUID_HEX_ASCII_RE = /^(?:0[xX])([0-9a-fA-F]{72})$/;
 const UUID_HEX_RAW_RE = /^(?:0[xX])([0-9a-fA-F]{32})$/;
 const UUID_CANONICAL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
+const ORACLE_RAW_TYPE_RE = /^raw(?:\s*\(\s*\d+\s*\))?$/i;
+const MAX_INLINE_ORACLE_RAW_BYTES = 16;
 const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
 const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
 const VARBINARY_TYPE_RE = /^varbinary(?:\b|\()/i;
@@ -263,6 +265,10 @@ export function binaryCellDisplayText(value: unknown, columnType?: string, origi
   if (uuidText !== null) return uuidText;
   const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
+  // SYS_GUID() is a complete 16-byte RAW value and fits as inline hex.
+  if (databaseType === "oracle" && ORACLE_RAW_TYPE_RE.test(columnType?.trim() ?? "") && bytes.length > 0 && bytes.length <= MAX_INLINE_ORACLE_RAW_BYTES && (originalBytes === undefined || originalBytes === bytes.length)) {
+    return binaryCellBytesToHexValue(bytes);
+  }
   if (isBinaryCellTextPreviewColumn(columnType, databaseType)) {
     const text = binaryCellTextPreviewBytes(bytes, columnType, databaseType);
     if (text !== null) return text;

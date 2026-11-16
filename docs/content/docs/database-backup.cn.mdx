@@ -22,6 +22,8 @@ description: 在 DBX 桌面端为 MySQL、PostgreSQL 和 openGauss 创建可手�
 | 表范围 | 全部、按模式包含、按模式排除 |
 | 保留 | 按计划保留最近若干次成功备份文件 |
 
+PostgreSQL 和 openGauss 备份只遍历当前账号具有 `USAGE` 权限的非系统 Schema，包括账号自有和获得授权的 Schema。Schema 内的表或对象仍需具备相应读取权限；读取失败会使备份失败。需要完整备份数据库时，请使用对所有目标 Schema 和对象都有读取权限的账号。
+
 ## 立即执行一次备份
 
 <Steps>

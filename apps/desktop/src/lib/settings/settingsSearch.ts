@@ -1,3 +1,4 @@
+import type { ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
 import { getPlatform } from "@/lib/backend/platform";
 import { SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS } from "@/lib/sql/sqlVariableSyntax";
 import { APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme";
@@ -65,11 +66,12 @@ export interface SettingsSearchRoute {
 
 export type Translate = (key: string) => string;
 
-type ToolbarVisibilityItemKey = "immediateSync" | "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "github" | "alwaysOnTop";
+type ToolbarVisibilityItemKey = ToolbarItemKey;
 
 export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: string; title?: never } | { key: ToolbarVisibilityItemKey; title: string; titleKey?: never }) & {
   /** The matching toolbar button can only exist in the desktop app, so the Web build hides the switch. */
   desktopOnly?: true;
+  webOnly?: true;
 };
 
 /**
@@ -78,6 +80,15 @@ export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: 
  * settings search.
  */
 export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
+  { key: "newConnection", titleKey: "toolbar.newConnection" },
+  { key: "newQuery", titleKey: "toolbar.newQuery" },
+  { key: "openSql", titleKey: "toolbar.openSql" },
+  { key: "databaseBackups", titleKey: "databaseBackup.title" },
+  { key: "mcpSettings", titleKey: "settings.openMcpSettings" },
+  { key: "exportProgress", titleKey: "settings.toolbarExportProgress" },
+  { key: "settings", titleKey: "settings.title" },
+  { key: "logout", titleKey: "auth.logout", webOnly: true },
+
   { key: "dataTransfer", titleKey: "transfer.dataTransfer" },
   { key: "driverManager", titleKey: "toolbar.driverManager" },
   { key: "pluginCenter", titleKey: "toolbar.pluginCenter" },
@@ -101,7 +112,7 @@ export function toolbarVisibilityItemLabel(item: ToolbarVisibilityItem, translat
 
 /** Desktop-only toolbar switches are hidden in the Web build, where the matching button can never render. */
 export function visibleToolbarVisibilityItems(items: readonly ToolbarVisibilityItem[], isWeb: boolean): ToolbarVisibilityItem[] {
-  return items.filter((item) => !item.desktopOnly || !isWeb);
+  return items.filter((item) => (!item.desktopOnly || !isWeb) && (!item.webOnly || isWeb));
 }
 
 export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly ToolbarVisibilityItem[] = TOOLBAR_VISIBILITY_ITEMS): SettingsSearchDefinition[] {
@@ -110,7 +121,7 @@ export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly
     category: "appearance",
     ...(item.titleKey ? { titleKey: item.titleKey } : { title: item.title }),
     targetId: "appearance",
-    ...(item.desktopOnly ? { visible: desktopOnly } : {}),
+    ...(item.desktopOnly ? { visible: desktopOnly } : item.webOnly ? { visible: webOnly } : {}),
   }));
 }
 
@@ -202,6 +213,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.tableCompletionSchemaQualificationNever", "settings.tableCompletionSchemaQualificationCollision", "settings.tableCompletionSchemaQualificationAlways"],
   },
   { id: "editor-auto-alias", category: "editor", titleKey: "settings.autoAliasTables", descriptionKey: "settings.autoAliasTablesDescription", targetId: "editor" },
+  { id: "editor-qualify-columns", category: "editor", titleKey: "settings.qualifyColumnCompletions", descriptionKey: "settings.qualifyColumnCompletionsDescription", targetId: "editor" },
   { id: "editor-batch-column-comments", category: "editor", titleKey: "settings.batchColumnSelectionIncludeComments", descriptionKey: "settings.batchColumnSelectionIncludeCommentsDescription", targetId: "editor" },
   { id: "editor-unsaved-close", category: "editor", titleKey: "settings.confirmUnsavedSqlClose", descriptionKey: "settings.confirmUnsavedSqlCloseDescription", targetId: "editor" },
   {
@@ -370,6 +382,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-quit", category: "appearance", titleKey: "settings.quitOnClose", descriptionKey: "settings.quitOnCloseDescription", targetId: "appearance", visible: desktopOnly },
   { id: "about-debug-logs", category: "about", titleKey: "settings.debugLoggingEnabled", descriptionKey: "settings.debugLoggingEnabledDescription", targetId: "about", visible: desktopOnly },
   { id: "navigation", category: "navigation", titleKey: "settings.navigationTab", targetId: "navigation" },
+  { id: "navigation-column-double-click", category: "navigation", titleKey: "settings.sidebarColumnDoubleClickAction", descriptionKey: "settings.sidebarColumnDoubleClickDescription", targetId: "navigation" },
   { id: "navigation-sidebar", category: "navigation", titleKey: "settings.sidebarActivation", targetId: "navigation" },
   {
     id: "navigation-routine-source",
@@ -519,6 +532,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-toolbar", category: "appearance", titleKey: "settings.toolbarTitle", descriptionKey: "settings.toolbarHiddenHint", targetId: "appearance" },
   { id: "appearance-exclusive-sidebar-panels", category: "appearance", titleKey: "settings.exclusiveRightSidebarPanels", descriptionKey: "settings.exclusiveRightSidebarPanelsDescription", targetId: "appearance" },
   ...createToolbarVisibilitySettingsSearchDefinitions(),
+  { id: "appearance-toolbar-order", category: "appearance", titleKey: "settings.toolbarTitle", descriptionKey: "settings.toolbarOrderHint", targetId: "appearance" },
   { id: "data-datetime", category: "data", titleKey: "settings.dateTimeSection", targetId: "data" },
   { id: "data-datetime-display-format", category: "data", titleKey: "settings.globalDateTimeDisplayFormat", descriptionKey: "settings.globalDateTimeDisplayFormatDescription", targetId: "data" },
   { id: "data-datetime-export-format", category: "data", titleKey: "settings.globalDateTimeExportFormat", descriptionKey: "settings.globalDateTimeExportFormatDescription", targetId: "data" },
@@ -846,6 +860,8 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-sidebar-copy-table-name-separator", category: "navigation", titleKey: "settings.sidebarCopyTableNameSeparator", descriptionKey: "settings.sidebarCopyTableNameSeparatorDescription", targetId: "navigation" },
   { id: "navigation-sidebar-copy-table-name-include-schema", category: "navigation", titleKey: "settings.sidebarCopyTableNameIncludeSchema", descriptionKey: "settings.sidebarCopyTableNameIncludeSchemaDescription", targetId: "navigation" },
   { id: "data-data-grid-keep-filter-editor-expanded", category: "data", titleKey: "settings.dataGridKeepFilterEditorExpanded", descriptionKey: "settings.dataGridKeepFilterEditorExpandedDescription", targetId: "data-grid-filter-view" },
+  { id: "data-data-grid-order-by-visible", category: "data", titleKey: "settings.dataGridOrderByVisible", descriptionKey: "settings.dataGridOrderByVisibleDescription", targetId: "data-grid-filter-view" },
+  { id: "data-data-grid-where-ratio", category: "data", titleKey: "settings.dataGridWhereRatio", descriptionKey: "settings.dataGridWhereRatioDescription", targetId: "data-grid-filter-view" },
   { id: "data-pin-result-tab-on-click", category: "data", titleKey: "settings.pinResultTabOnClick", descriptionKey: "settings.pinResultTabOnClickDescription", targetId: "pin-result-tab-on-click" },
   { id: "data-query-result-max-rows-enabled", category: "data", titleKey: "settings.queryResultMaxRowsEnabled", targetId: "query-result-max-rows" },
   { id: "data-data-grid-cell-detail-button-visible", category: "data", titleKey: "settings.dataGridCellDetailButtonVisible", descriptionKey: "settings.dataGridCellDetailButtonVisibleDescription", targetId: "data" },

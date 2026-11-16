@@ -3777,6 +3777,7 @@ export default withEnglishFallback({
     queryWhileSaving: "Сохранение изменений в наборе результатов выполняется. Дождитесь завершения сохранения, прежде чем выполнять запрос.",
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
+    rowJsonPreview: "Предпросмотр JSON",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

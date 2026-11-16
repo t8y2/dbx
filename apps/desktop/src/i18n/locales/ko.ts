@@ -3646,6 +3646,7 @@ export default withEnglishFallback({
     queryWhileSaving: "결과 집합 변경 사항을 저장하는 중입니다. 저장이 완료된 후 쿼리를 실행하세요.",
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
+    rowJsonPreview: "JSON 미리보기",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

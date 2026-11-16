@@ -3750,6 +3750,7 @@ export default withEnglishFallback({
     expandCellDetailMetadata: "展开单元格元信息",
     openCellDetailsDialog: "单元格详情",
     rowDetails: "行详情",
+    rowJsonPreview: "JSON 预览",
     rowDetailsFor: "第 {row} 行详情",
     openRowDetailsDialog: "行详情",
     openColumnDetailsDialog: "列详情",

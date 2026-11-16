@@ -3716,6 +3716,7 @@ export default withEnglishFallback({
     queryWhileSaving: "結果セットの変更を保存しています。保存が完了してからクエリを実行してください。",
     filterActive: "フィルター適用済み",
     structuredFiltersActive: "{count} 件の条件フィルター",
+    rowJsonPreview: "JSON プレビュー",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

@@ -2909,6 +2909,7 @@ export default withEnglishFallback({
     expandCellDetailMetadata: "Rozwiń metadane komórki",
     openCellDetailsDialog: "Otwórz szczegóły komórki",
     rowDetails: "Szczegóły wiersza",
+    rowJsonPreview: "Podgląd JSON",
     rowDetailsFor: "Szczegóły wiersza {row}",
     openRowDetailsDialog: "Otwórz szczegóły wiersza",
     openColumnDetailsDialog: "Otwórz szczegóły kolumny",

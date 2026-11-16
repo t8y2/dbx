@@ -55,6 +55,35 @@ describe("visibleDatabases schema filtering", () => {
     ).toEqual(["sys_catalog"]);
   });
 
+  it("applies the schema filter stored under the empty key to the single-db sentinel", () => {
+    const connection = {
+      db_type: "oceanbase-oracle" as const,
+      username: "sys@obtest",
+      visible_schemas: { "": ["APP", "SYS"] },
+    };
+
+    expect(filterSchemaNamesForConnection(["APP", "SYS", "MDSYS", "REPORT"], connection, "_")).toEqual(["APP", "SYS"]);
+  });
+
+  it("hides schemas unchecked in the filter when addressed via the sentinel key", () => {
+    const connection = {
+      db_type: "oceanbase-oracle" as const,
+      username: "sys@obtest",
+      visible_schemas: { "": ["APP"] },
+    };
+
+    expect(filterSchemaNamesForConnection(["APP", "SYS", "REPORT"], connection, "_")).toEqual(["APP"]);
+  });
+
+  it("keeps the login schema visible for user@tenant usernames", () => {
+    expect(
+      filterSchemaNamesForVisiblePicker(["APP", "MDSYS", "SYS", "SYSTEM"], {
+        db_type: "oceanbase-oracle",
+        username: "sys@obtest",
+      }),
+    ).toEqual(["APP", "SYS"]);
+  });
+
   it("matches prefix-based system schema rules", () => {
     expect(isSystemSchemaName("kingbase", "xlog_record_read")).toBe(true);
     expect(isSystemSchemaName("opengauss", "dbe_pldeveloper")).toBe(true);
@@ -89,6 +118,16 @@ describe("visible database wildcard patterns (issue #7164)", () => {
     const { filterDatabaseNamesForConnection } = await import("@/lib/database/visibleDatabases");
     const connection = { db_type: "mysql" as const, visible_database_patterns: ["%n1%"] };
     expect(filterDatabaseNamesForConnection(["n1_order", "main", "mysql", "sys"], connection)).toEqual(["n1_order"]);
+  });
+
+  it.each([
+    [["main"], [], true],
+    [[], ["%ak%"], true],
+    [[], [], false],
+    [[], ["  "], false],
+  ])("allows saving checks %j with patterns %j: %s (issue #14221)", async (selected, patterns, expected) => {
+    const { canSaveVisibleDatabaseSelection } = await import("@/lib/database/visibleDatabases");
+    expect(canSaveVisibleDatabaseSelection(selected, patterns)).toBe(expected);
   });
 
   it("parses user pattern input with separators, trimming and dedupe", async () => {

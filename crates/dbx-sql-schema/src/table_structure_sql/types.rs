@@ -1,0 +1,620 @@
+use serde::{Deserialize, Serialize};
+
+use crate::models::connection::DatabaseType;
+use crate::types::PgPartitionKind;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableStructureColumn {
+    pub id: String,
+    pub name: String,
+    pub data_type: String,
+    pub is_nullable: bool,
+    #[serde(default)]
+    pub default_value: String,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub is_primary_key: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<ColumnExtra>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<ColumnInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_position: Option<usize>,
+    #[serde(default)]
+    pub marked_for_drop: bool,
+    #[serde(default)]
+    pub character_set: String,
+    #[serde(default)]
+    pub collation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnExtra {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_increment: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update_current_timestamp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ColumnIdentity>,
+    /// MySQL generated column. Tri-state: `None` inherits the original
+    /// definition (legacy payloads), `Some` with an empty `expression`
+    /// removes the generated-column attribute, otherwise the clause is
+    /// rendered from these values. MariaDB `PERSISTENT` is reported by
+    /// introspection as `STORED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<ColumnGenerated>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_indexed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_stored: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_attribute: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manticore_secondary_index: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnGenerated {
+    /// Generation expression without the surrounding parentheses. An empty
+    /// (or whitespace-only) value means the column is not generated.
+    #[serde(default)]
+    pub expression: String,
+    /// `VIRTUAL` or `STORED`; `None` renders as the MySQL default `VIRTUAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub increment: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub is_nullable: bool,
+    pub column_default: Option<String>,
+    #[serde(default)]
+    pub is_primary_key: bool,
+    #[serde(default)]
+    pub extra: Option<String>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_set: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableStructureIndex {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub is_unique: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+    #[serde(default)]
+    pub filter: String,
+    #[serde(default)]
+    pub index_type: String,
+    #[serde(default)]
+    pub included_columns: Vec<String>,
+    /// Parallel to `columns`: operator class for each key column (PostgreSQL).
+    /// `None` means default operator class. The UI keeps this array in lockstep
+    /// with `columns`; when empty, opclasses fall back to `original` matching.
+    #[serde(default)]
+    pub column_opclasses: Vec<Option<String>>,
+    #[serde(default)]
+    pub comment: String,
+    #[serde(default)]
+    pub concurrently: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<IndexInfo>,
+    /// Oracle-family partial-rebuild recovery: preserve `original` as key metadata but skip its already-committed DROP.
+    #[serde(default)]
+    pub oracle_original_missing: bool,
+    #[serde(default)]
+    pub marked_for_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexInfo {
+    pub name: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub is_unique: bool,
+    #[serde(default)]
+    pub is_primary: bool,
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    pub index_type: Option<String>,
+    #[serde(default)]
+    pub included_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Parallel to `columns`: `true` at index `i` means `columns[i]` is a raw expression
+    /// (e.g. sourced from `pg_get_indexdef`), not a plain column name.
+    #[serde(default)]
+    pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: Oracle-family key order (`ASC` or `DESC`).
+    #[serde(default)]
+    pub key_directions: Vec<String>,
+    /// Oracle-family index visibility (`VISIBLE` or `INVISIBLE`).
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// True only when expression, direction and visibility metadata are aligned and complete.
+    #[serde(default)]
+    pub key_metadata_complete: bool,
+    /// Parallel to `columns`: operator class name for each key column, if non-default.
+    #[serde(default)]
+    pub column_opclasses: Vec<Option<String>>,
+    /// Round-tripped from `crate::types::IndexInfo`: `true` when the introspected index is
+    /// the object behind a PRIMARY KEY / UNIQUE constraint. Dameng only accepts constraint
+    /// level DDL for those (#7959); a standalone unique index keeps the index-level path.
+    /// Defaults to `false`, so a payload from an older client (or a source that does not
+    /// report it) behaves exactly as before.
+    #[serde(default)]
+    pub constraint_backed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableStructureForeignKey {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub column: String,
+    #[serde(default)]
+    pub ref_schema: String,
+    #[serde(default)]
+    pub ref_table: String,
+    #[serde(default)]
+    pub ref_column: String,
+    #[serde(default)]
+    pub on_update: String,
+    #[serde(default)]
+    pub on_delete: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<ForeignKeyInfo>,
+    #[serde(default)]
+    pub marked_for_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub column: String,
+    #[serde(default)]
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_column: String,
+    #[serde(default)]
+    pub on_update: Option<String>,
+    #[serde(default)]
+    pub on_delete: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditableStructureTrigger {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub timing: String,
+    #[serde(default)]
+    pub event: String,
+    #[serde(default)]
+    pub statement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Explicit exact workflow; absence preserves the legacy structured SQL contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_exact: Option<OracleStructureTriggerContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<TriggerInfo>,
+    #[serde(default)]
+    pub marked_for_drop: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleStructureTriggerContext {
+    pub owner: String,
+    pub parent_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTriggerStructureOperation {
+    pub draft_id: String,
+    pub action: String,
+    pub owner: String,
+    pub name: String,
+    pub statement_index: usize,
+    pub statement_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    pub event: String,
+    pub timing: String,
+    #[serde(default)]
+    pub statement: Option<String>,
+    /// Catalog-reported `WHEN` clause (Dameng `ALL_TRIGGERS.WHEN_CLAUSE`). A non-empty
+    /// condition means the timing/event/body form cannot rebuild the trigger without
+    /// dropping it.
+    #[serde(default)]
+    pub condition: Option<String>,
+    /// Carries the catalog-reported enabled state so SQL Server edits can
+    /// restore it after the DROP + CREATE rebuild (`DISABLE TRIGGER`).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStructureSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    /// Driver profile reported by the connection (e.g. `"gbase8s"`). GBase 8s
+    /// is Informix-compatible rather than MySQL-compatible like the rest of
+    /// the `Gbase` family, so this disambiguates which dialect to generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub columns: Vec<EditableStructureColumn>,
+    #[serde(default)]
+    pub indexes: Vec<EditableStructureIndex>,
+    #[serde(default)]
+    pub foreign_keys: Vec<EditableStructureForeignKey>,
+    #[serde(default)]
+    pub triggers: Vec<EditableStructureTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_table_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_auto_increment_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transwarp_create: Option<TranswarpCreateTableOptions>,
+    /// MySQL only: the table's current default collation
+    /// (`information_schema.TABLES.TABLE_COLLATION`). A column whose collation
+    /// merely matches it inherits the table default, so its `CHARACTER SET` /
+    /// `COLLATE` clauses are redundant and are dropped from the generated DDL.
+    /// Introspection keeps reporting the column's real values, which is what
+    /// the structure editor renders in its charset/collation pickers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_collation: Option<String>,
+    /// Whether the target table is a partitioned parent table (PostgreSQL
+    /// `relkind = 'p'`). PostgreSQL rejects `CREATE INDEX CONCURRENTLY` on
+    /// partitioned parents, so the builder refuses such a request up front
+    /// (`validate_concurrent_index_scope`) instead of emitting SQL the server
+    /// will reject or downgrading to a blocking `CREATE INDEX`.
+    #[serde(default)]
+    pub partitioned: bool,
+    /// Whether the target table is a PostgreSQL foreign table (`relkind = 'f'`).
+    /// PostgreSQL rejects `COMMENT ON TABLE` for foreign tables
+    /// (`"<name>" is not a table`), so the table-comment statement must use
+    /// `COMMENT ON FOREIGN TABLE` when this is set.
+    #[serde(default)]
+    pub foreign_table: bool,
+    /// When true, the connection is GaussDB M-mode which uses MySQL-compatible
+    /// SQL dialect with backtick quoting. The structure editor maps this to
+    /// `StructureDialect::Mysql` so that DDL is generated with MySQL syntax.
+    #[serde(default)]
+    pub is_gaussdb_m_mode: bool,
+    /// Optional constraint name for a **newly created** primary key. Empty or
+    /// `None` keeps the anonymous `PRIMARY KEY (...)` form and lets the server
+    /// auto-name the constraint. Only applied when the draft adds a primary key
+    /// that did not exist before; replacing an existing key never renames it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_name: Option<String>,
+    /// An ordered change to an existing Oracle-family primary key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_change: Option<ExistingPrimaryKeyChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_foreign_key_changes: Option<Vec<OracleForeignKeyChange>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_constraint_changes: Option<Vec<OracleConstraintChange>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintChange {
+    pub original: Option<OracleConstraintDefinition>,
+    pub target: Option<OracleConstraintDefinition>,
+    #[serde(default)]
+    pub index_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "definition")]
+#[allow(clippy::large_enum_variant)]
+pub enum OracleConstraintDefinition {
+    Check(OracleCheckConstraint),
+    Unique(OracleUniqueConstraint),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleCheckConstraint {
+    pub name: String,
+    pub expression: String,
+    pub state: OraclePrimaryKeyState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleUniqueConstraint {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub state: OraclePrimaryKeyState,
+    #[serde(default)]
+    pub rely_raw: String,
+    pub index: OracleConstraintIndex,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintIndex {
+    pub owner: String,
+    pub name: String,
+    pub table_owner: String,
+    pub table_name: String,
+    pub sharing: String,
+    pub metadata_complete: bool,
+    pub index_type: String,
+    pub uniqueness: String,
+    pub status: String,
+    pub partitioned: bool,
+    pub visibility: String,
+    /// `None` is a catalog NULL only when `metadata_complete` is true.
+    pub secondary: Option<String>,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default)]
+    pub directions: Vec<String>,
+    #[serde(default)]
+    pub key_is_expression: Vec<bool>,
+    #[serde(default)]
+    pub included_columns: Vec<String>,
+    #[serde(default)]
+    pub new_name_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleForeignKeyChange {
+    pub original: Option<OracleForeignKeyDefinition>,
+    pub target: Option<OracleForeignKeyDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleForeignKeyDefinition {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    pub on_delete: String,
+    pub state: OraclePrimaryKeyState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingPrimaryKeyChange {
+    pub name: String,
+    pub original_columns: Vec<String>,
+    /// Empty means remove the existing key.
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_index: Option<OraclePrimaryKeyIndex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_state: Option<OraclePrimaryKeyState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OraclePrimaryKeyState {
+    pub enabled: bool,
+    pub validated: bool,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub rely: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OraclePrimaryKeyIndex {
+    pub policy: String,
+    pub owner: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranswarpCreateTableOptions {
+    #[serde(default)]
+    pub partition_columns: Vec<String>,
+    #[serde(default)]
+    pub bucket_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_format: Option<String>,
+    #[serde(default)]
+    pub transactional: bool,
+}
+
+/// Options for `build_table_partition_operation_sql`.
+///
+/// Partition maintenance is deliberately kept out of `TableStructureSqlOptions`:
+/// the operations are explicit user actions (never diffed against introspected
+/// state), and keeping them separate means a column/index draft cannot
+/// accidentally trigger or suppress partition DDL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// The edited table; also the default parent of every operation.
+    pub table_name: String,
+    #[serde(default)]
+    pub operations: Vec<TablePartitionOperation>,
+}
+
+/// Declarative partitioning for a table being created (`CREATE TABLE ...
+/// PARTITION BY ...`). PostgreSQL only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionDefinition {
+    pub kind: PgPartitionKind,
+    /// Partition-key columns, used when `expression` is empty.
+    #[serde(default)]
+    pub columns: Vec<String>,
+    /// Raw partition-key expression (e.g. `date_trunc('month', ts)`), used
+    /// instead of `columns` when non-empty.
+    #[serde(default)]
+    pub expression: String,
+}
+
+/// One partition maintenance operation. The parent is the edited table unless
+/// `parent_table` names another relation (used when detaching the partition
+/// currently being edited).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionOperation {
+    #[serde(default)]
+    pub id: String,
+    pub kind: TablePartitionOperationKind,
+    /// Partitioned parent's schema; empty falls back to the edited table's schema.
+    #[serde(default)]
+    pub parent_schema: String,
+    /// Partitioned parent; empty falls back to the edited table.
+    #[serde(default)]
+    pub parent_table: String,
+    /// Schema of the partition relation; empty falls back to the parent's schema.
+    #[serde(default)]
+    pub schema: String,
+    pub name: String,
+    /// Required for `create`/`attach`; must be absent for `detach`/`drop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<TablePartitionBoundDraft>,
+    /// Emit `DETACH PARTITION ... CONCURRENTLY` (PostgreSQL 14+).
+    #[serde(default)]
+    pub concurrently: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TablePartitionOperationKind {
+    Create,
+    Attach,
+    Detach,
+    Drop,
+}
+
+/// Partition bound as entered in the UI. Values are SQL literal text; the
+/// builder only wraps them in the PostgreSQL `FOR VALUES` grammar, so `1`,
+/// `'2024-01-01'`, `MINVALUE`, and `MAXVALUE` all round-trip unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum TablePartitionBoundDraft {
+    Range { from: Vec<String>, to: Vec<String> },
+    List { values: Vec<String> },
+    Hash { modulus: i32, remainder: i32 },
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStructureSqlResult {
+    pub statements: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableStructureSqlPlan {
+    #[serde(flatten)]
+    pub sql: TableStructureSqlResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_operations: Vec<OracleTriggerStructureOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_trigger_contract: Option<u8>,
+}
+
+impl From<TableStructureSqlResult> for TableStructureSqlPlan {
+    fn from(sql: TableStructureSqlResult) -> Self {
+        Self { sql, trigger_operations: Vec::new(), oracle_trigger_contract: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableOwnerChangeSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub original_owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqliteTableStructurePreview {
+    pub statements: Vec<String>,
+    pub warnings: Vec<String>,
+    pub schema_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleColumnAlterSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub column: EditableStructureColumn,
+}

@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'com.exasol:exasol-jdbc:26.2.7'
+    implementation 'com.exasol:exasol-jdbc:26.2.10'
 }
 
 tasks.named('shadowJar') {

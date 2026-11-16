@@ -22,10 +22,27 @@ describe("dataGridConditionColumnOptions", () => {
     ]);
   });
 
-  it.each(["mysql", "sqlserver", "oracle"] as const)("keeps existing %s condition insertions unchanged", (databaseType) => {
+  it.each(["mysql", "sqlserver"] as const)("keeps existing %s condition insertions unchanged", (databaseType) => {
     expect(dataGridConditionColumnOptions(["OrderId", "order"], databaseType)).toEqual([
       { name: "OrderId", insertText: "OrderId" },
       { name: "order", insertText: "order" },
+    ]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"] as const)("quotes case-sensitive Oracle-family columns for %s while keeping foldable names bare", (databaseType) => {
+    expect(dataGridConditionColumnOptions(["Id", "NO", "OrderId", "V$SESSION"], databaseType)).toEqual([
+      { name: "Id", insertText: '"Id"' },
+      { name: "NO", insertText: "NO" },
+      { name: "OrderId", insertText: '"OrderId"' },
+      { name: "V$SESSION", insertText: "V$SESSION" },
+    ]);
+  });
+
+  it("backtick-quotes ClickHouse non-ASCII and keyword columns while keeping plain ASCII bare", () => {
+    expect(dataGridConditionColumnOptions(["姓名", "user_id", "final"], "clickhouse")).toEqual([
+      { name: "姓名", insertText: "`姓名`" },
+      { name: "user_id", insertText: "user_id" },
+      { name: "final", insertText: "`final`" },
     ]);
   });
 

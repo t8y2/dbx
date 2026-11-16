@@ -13,6 +13,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useConsulStore } from "@/stores/consulStore";
 import { consulMeshWorkspaceVisible } from "@/lib/consul/meshVisibility";
 import { useI18n } from "vue-i18n";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const ConsulKeyBrowser = defineAsyncComponent(() => import("@/components/consul/ConsulKeyBrowser.vue"));
 const ConsulServices = defineAsyncComponent(() => import("@/components/consul/ConsulServices.vue"));
@@ -27,10 +28,16 @@ const ConsulOperator = defineAsyncComponent(() => import("@/components/consul/Co
 type WorkspaceTab = "kv" | "services" | "health" | "sessions" | "acl" | "scope" | "mesh" | "tools" | "operator";
 type Refreshable = { refresh?: () => boolean | Promise<unknown>; focusSearch?: () => boolean };
 const props = defineProps<{ connectionId: string }>();
+interface ConsulTabUiState {
+  activeTab?: WorkspaceTab;
+  scopeOpen?: boolean;
+  scopeDraft?: { datacenter: string; partition: string; namespace: string };
+}
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<ConsulTabUiState>({}, "ConsulWorkspace");
 const connectionStore = useConnectionStore();
 const consulStore = useConsulStore();
 const { t } = useI18n();
-const activeTab = ref<WorkspaceTab>("kv");
+const activeTab = ref<WorkspaceTab>(restoredUiState.activeTab ?? "kv");
 const keyRef = ref<Refreshable>();
 const servicesRef = ref<Refreshable>();
 const healthRef = ref<Refreshable>();
@@ -43,11 +50,13 @@ const operatorRef = ref<Refreshable>();
 const capabilities = ref<ConsulCapabilities | null>(null);
 const discoveredDatacenters = ref<string[]>([]);
 const scopeRevision = ref(0);
-const scopeOpen = ref(false);
+const scopeOpen = ref(restoredUiState.scopeOpen ?? false);
 const scopeSaving = ref(false);
 const scopeError = ref("");
-const scopeDraft = ref({ datacenter: "", partition: "", namespace: "" });
+const scopeDraft = ref(restoredUiState.scopeDraft ?? { datacenter: "", partition: "", namespace: "" });
 const pendingSearchFocus = ref(false);
+
+trackUiState(() => ({ activeTab: activeTab.value, scopeOpen: scopeOpen.value, scopeDraft: scopeDraft.value }));
 let contextSequence = 0;
 const activeScope = computed(() => {
   const external = connectionStore.getConfig(props.connectionId)?.external_config;

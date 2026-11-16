@@ -1,5 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { generateTimeInRange } from "@/lib/dataGrid/generatorTimeRange";
+import { generateRegexValue } from "@/lib/dataGrid/regexGenerate";
 
 export interface GeneratorNode {
   key: string;
@@ -18,6 +20,7 @@ export const GeneratorHierarchy: GeneratorNode[] = [
       { key: "time", label: "时间" },
       { key: "sequence", label: "序列" },
       { key: "enum", label: "枚举" },
+      { key: "bitmask", label: "位串" },
       { key: "text", label: "文本" },
       { key: "image", label: "图像或二进制" },
       { key: "foreign_key", label: "外键" },
@@ -123,6 +126,9 @@ export interface GeneratorParams {
   sequenceCycle?: boolean;
   // enum
   values?: string;
+  // bit string
+  bitWidth?: number;
+  bitVarying?: boolean;
   // regex
   pattern?: string;
   rawPattern?: boolean;
@@ -944,8 +950,39 @@ function transformText(text: string, mode: string): string {
 function generateEmail(): string {
   return `${pick(firstNames).toLowerCase()}.${pick(lastNames).toLowerCase()}@${pick(domains)}`;
 }
-function generatePhone(): string {
-  return `+1${randInt(200, 999)}${randInt(100, 999)}${randInt(1000, 9999)}`;
+function generatePhone(params?: GeneratorParams): string {
+  const regions = params?.phoneRegions?.length ? params.phoneRegions : ["us"];
+  const region = pick(regions);
+  const separator = params?.phoneSeparator === true;
+  const format = params?.phoneFormat ?? "domestic";
+  let phone: string;
+
+  if (region === "uk") {
+    const first = randInt(1000, 9999);
+    const second = randInt(100000, 999999);
+    phone = separator ? `${first} ${second}` : `+44${first}${second}`;
+  } else if (region === "jp") {
+    const first = randInt(10, 99);
+    const second = randInt(1000, 9999);
+    const third = randInt(1000, 9999);
+    phone = separator ? `0${first}-${second}-${third}` : `+810${first}${second}${third}`;
+  } else if (region === "cn" || region === "other") {
+    const first = randInt(130, 199);
+    const second = randInt(1000, 9999);
+    const third = randInt(1000, 9999);
+    const domestic = separator ? `${first}-${second}-${third}` : `${first}${second}${third}`;
+    phone = format === "international" ? `+86${domestic.replace(/[^0-9]/g, "")}` : domestic;
+  } else {
+    const first = randInt(200, 999);
+    const second = randInt(100, 999);
+    const third = randInt(1000, 9999);
+    phone = separator ? `(${first}) ${second}-${third}` : `+1${first}${second}${third}`;
+  }
+
+  const maxLength = params?.maxLength;
+  if (maxLength === undefined || !Number.isFinite(maxLength) || maxLength < 1 || phone.length <= maxLength) return phone;
+  const digits = phone.replace(/\D/g, "");
+  return digits.length <= maxLength ? digits : digits.slice(-Math.floor(maxLength));
 }
 function generateIP(): string {
   return `${randInt(1, 255)}.${randInt(0, 255)}.${randInt(0, 255)}.${randInt(1, 255)}`;
@@ -1163,20 +1200,100 @@ const KnownColumnPatterns: Array<{ pattern: RegExp; generatorKey: string }> = [
   { pattern: /owner|creator|author|created_by|updated_by|modified_by|operator|user$/i, generatorKey: "full_name" },
 ];
 
+/**
+ * Column metadata carries the full SQL type, modifiers included: `time(3)`,
+ * `bit(1)`, `numeric(10,2)`, `character varying(64)`,
+ * `timestamp(6) without time zone`. Comparing that raw string made every
+ * comparison below miss the moment a modifier was present — `time(3)` and
+ * `bit(1)` columns fell through to the plain text generator and received values
+ * the server rejects for that column (#12994). Strip the modifiers and collapse
+ * whitespace so the classifier sees the bare type name.
+ *
+ * `tinyint(1)` is the one type that still needs its modifier, which is why
+ * {@link isBooleanColumnType} looks at the original string.
+ */
+export function normalizeColumnDataType(dataType: string): string {
+  return dataType
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const BOOLEAN_COLUMN_TYPE_RE = /^(?:bool|boolean|bit)$/;
+const TINYINT_BOOLEAN_WIDTH_RE = /^tinyint\s*\(\s*1\s*\)$/;
+const BIT_WIDTH_RE = /^bit\s*\(\s*(\d+)\s*\)$/;
+
+/** `bool` / `boolean` / `bit(1)` / MySQL's `tinyint(1)` all hold a boolean flag. */
+export function isBooleanColumnType(dataType: string): boolean {
+  const raw = dataType.toLowerCase().trim();
+  if (TINYINT_BOOLEAN_WIDTH_RE.test(raw)) return true;
+  const bitWidth = BIT_WIDTH_RE.exec(raw);
+  if (bitWidth) return Number(bitWidth[1]) === 1;
+  return BOOLEAN_COLUMN_TYPE_RE.test(normalizeColumnDataType(raw));
+}
+
+const BIT_COLUMN_TYPE_RE = /^(bit|varbit)(?:\s+varying)?\s*(?:\(\s*(\d+)\s*\))?$/;
+
+export interface BitColumnShape {
+  /** Number of bits the column stores; 1 for a bare `bit`. */
+  width: number;
+  /** `bit varying` / `varbit` accept any length up to `width`. */
+  varying: boolean;
+}
+
+/**
+ * Width and variability of a `bit` family column, or null for every other type.
+ * PostgreSQL and MySQL keep the declared width in the type text (`bit(8)`,
+ * `bit varying(8)`, `varbit(8)`), and a value written to those columns must
+ * have exactly that many bits, so the generator needs the width rather than
+ * just the bare type name (#13014). The raw type text is parsed here because
+ * {@link normalizeColumnDataType} strips the parenthesized modifier.
+ */
+export function bitColumnShape(dataType: string): BitColumnShape | null {
+  const match = BIT_COLUMN_TYPE_RE.exec(dataType.toLowerCase().replace(/\s+/g, " ").trim());
+  if (!match) return null;
+  const varying = match[1] === "varbit" || /varying/.test(match[0]);
+  return { width: match[2] ? Number(match[2]) : 1, varying };
+}
+
+/**
+ * `serial` and its aliases are the only types whose name contains "serial":
+ * PostgreSQL's `serial` / `smallserial` / `bigserial` pseudo-type (and the
+ * `serial2` / `serial4` / `serial8` spellings). Matching the substring instead
+ * classified any other type whose text mentions serial, such as the
+ * `serial_number_code` column the app-tests cover, as an integer.
+ */
+const SERIAL_TYPE_RE = /^(?:big|small)?serial[248]?$/;
+
+function isSerialType(dataType: string): boolean {
+  return SERIAL_TYPE_RE.test(normalizeColumnDataType(dataType));
+}
+
 export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
   if (isAutoIncrement) return "sequence";
-  const type = dataType.toLowerCase();
-  const isNumeric = /^number(?:\s*\([^)]*\))?$/.test(type.trim()) || type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
-  const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
+  const type = normalizeColumnDataType(dataType);
+  // `serial` / `bigserial` increment by definition, so they stay on the sequence
+  // generator even when the driver does not report a default for them.
+  if (isSerialType(dataType)) return "sequence";
+  const isNumeric = /^number$/.test(type) || type.includes("int") || type.includes("bool") || /^bit\b/.test(type) || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+  const isDateTime = type.includes("date") || type.includes("timestamp") || /^time\b/.test(type);
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
-  const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
+  const isBoolType = isBooleanColumnType(dataType);
+  const bitShape = bitColumnShape(dataType);
   const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(columnName);
+  // A wider `bit(n)` / `bit varying(n)` column stores a bit string of exactly
+  // n bits, so it gets its own generator that honours the width; only `bit(1)`
+  // (and the bare `bit` boolean spellings) stay on the 0/1 enum. Checked before
+  // the numeric/date/binary split because `varbit` matches none of them.
+  if (bitShape && (bitShape.varying || bitShape.width > 1)) return "bitmask";
   if (isNumeric || isDateTime || isBinary) {
-    if (type.includes("serial")) return "sequence";
-    if (isBoolType || (isNumeric && isBoolName)) return "enum";
+    if (isBoolType || /^bit\b/.test(type) || (isNumeric && isBoolName)) return "enum";
     if (/status|state/i.test(columnName)) return "enum";
     if (isNumeric) return "number";
-    if (type === "time") return "time";
+    // `time`, `time(6)` and `time without time zone` must not fall through to the
+    // datetime generator: a full timestamp is not a valid value for a TIME column.
+    if (/^time\b/.test(type)) return "time";
     if (isDateTime) return "datetime";
     if (isBinary) return "text";
   }
@@ -1195,9 +1312,35 @@ export interface ColumnAttrs {
   numericPrecision?: number | null;
   numericScale?: number | null;
   characterMaximumLength?: number | null;
+  /// True when a single-column unique constraint (primary key or unique index)
+  /// covers this column on the target table.
+  uniqueConstraint?: boolean;
 }
 
+/// Generators that already produce a distinct value per row, so an extra
+/// uniqueness check would only burn attempts without changing the result.
+const INHERENTLY_UNIQUE_GENERATORS = new Set(["sequence", "uuid"]);
+
+/**
+ * Resolve the default parameters for one column.
+ *
+ * Columns covered by a single-column unique constraint (PRIMARY KEY or UNIQUE
+ * index) must not receive duplicated values: a multi-row INSERT that repeats a
+ * value is rejected by the server, so the whole batch is lost behind an opaque
+ * "Statement N failed" error (#5958). Turn the per-column uniqueness
+ * bookkeeping on by default for those columns; users can still clear the
+ * "唯一" checkbox when they want raw random values.
+ *
+ * `sequence` / `uuid` already emit a distinct value per row, so the extra
+ * bookkeeping stays off for them.
+ */
 export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, generatorKey: string): GeneratorParams {
+  const params = buildDefaultGeneratorParams(_columnName, attrs, generatorKey);
+  if (attrs.uniqueConstraint && !INHERENTLY_UNIQUE_GENERATORS.has(generatorKey)) params.unique = true;
+  return params;
+}
+
+function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, generatorKey: string): GeneratorParams {
   const params: GeneratorParams = {};
   const type = attrs.dataType.toLowerCase();
   const precision = attrs.numericPrecision ?? null;
@@ -1376,8 +1519,8 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
   }
 
   if (generatorKey === "time") {
-    params.startTime = "00";
-    params.endTime = "23";
+    params.startTime = "00:00";
+    params.endTime = "23:59";
     return params;
   }
 
@@ -1387,9 +1530,9 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
   }
 
   if (generatorKey === "enum") {
-    const t = attrs.dataType.toLowerCase();
-    const isNum = t.includes("int") || t.includes("bool") || t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real";
-    const isBoolType = t === "bool" || t === "boolean" || t === "bit" || t === "tinyint(1)";
+    const normalizedType = normalizeColumnDataType(attrs.dataType);
+    const isNum = normalizedType.includes("int") || normalizedType.includes("bool") || /^bit\b/.test(normalizedType) || normalizedType.includes("decimal") || normalizedType.includes("numeric") || normalizedType.includes("float") || normalizedType.includes("double") || normalizedType === "real";
+    const isBoolType = isBooleanColumnType(attrs.dataType);
     const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(_columnName);
     if (isBoolType || (isNum && isBoolName)) {
       params.values = "0\n1";
@@ -1398,6 +1541,13 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
     } else {
       params.values = "A\nB\nC\nD\nE";
     }
+    return params;
+  }
+
+  if (generatorKey === "bitmask") {
+    const shape = bitColumnShape(attrs.dataType);
+    params.bitWidth = shape?.width ?? 8;
+    params.bitVarying = shape?.varying ?? false;
     return params;
   }
 
@@ -1429,6 +1579,7 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
     params.phoneFormat = "domestic";
     params.phoneSeparator = true;
     params.phoneRegions = ["us"];
+    if (charLen !== null && charLen > 0) params.maxLength = Math.min(charLen, 2000);
     return params;
   }
   if (generatorKey === "email") {
@@ -1590,13 +1741,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     if (params?.allDay) {
       const [rangeStart, rangeEnd] = ensureRange(start, end);
       const d = new Date(rangeStart.getTime() + Math.random() * (rangeEnd.getTime() - rangeStart.getTime()));
-      const sh = parseInt(params.startTime ?? "00") || 0;
-      const sm = parseInt(params.endTime ?? "23") || 23;
-      const h = Math.floor(Math.random() * (sm - sh + 1)) + sh;
-      const m = Math.floor(Math.random() * 60);
-      const s = Math.floor(Math.random() * 60);
-      const pad = (n: number) => String(n).padStart(2, "0");
-      return `${formatLocalDate(d)} ${pad(h)}:${pad(m)}:${pad(s)}`;
+      return `${formatLocalDate(d)} ${generateTimeInRange(params.startTime, params.endTime)}`;
     }
     return randTimestamp(start, end);
   }
@@ -1606,17 +1751,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return randDate(start, end);
   }
   if (key === "time") {
-    let sh = 0,
-      sm = 23;
-    if (!params?.allDay) {
-      sh = parseInt(params?.startTime ?? "00") || 0;
-      sm = parseInt(params?.endTime ?? "23") || 23;
-    }
-    const h = Math.floor(Math.random() * (sm - sh + 1)) + sh;
-    const m = Math.floor(Math.random() * 60);
-    const s = Math.floor(Math.random() * 60);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${pad(h)}:${pad(m)}:${pad(s)}`;
+    return params?.allDay ? generateTimeInRange() : generateTimeInRange(params?.startTime, params?.endTime);
   }
   if (key === "enum") {
     const vals = (params?.values ?? "")
@@ -1625,6 +1760,16 @@ export function generateValue(columnName: string, dataType: string, generatorKey
       .filter(Boolean);
     if (vals.length === 0) return pick(["A", "B", "C", "D", "E"]);
     return vals[Math.floor(Math.random() * vals.length)];
+  }
+  if (key === "bitmask") {
+    // A fixed `bit(n)` column rejects any value whose length differs from n,
+    // while `bit varying(n)` accepts 1..n bits; the width comes from the column
+    // declaration, falling back to the parameter panel value (#13014).
+    const shape = bitColumnShape(dataType);
+    const width = Math.max(1, params?.bitWidth ?? shape?.width ?? 8);
+    const varying = params?.bitVarying ?? shape?.varying ?? false;
+    const length = varying ? 1 + Math.floor(Math.random() * width) : width;
+    return Array.from({ length }, () => (Math.random() < 0.5 ? "0" : "1")).join("");
   }
   if (key === "text") {
     const fmt = params?.textFormat ?? "lorem";
@@ -1707,6 +1852,10 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     return randInt(params?.min ?? 1, params?.max ?? 500);
   }
   if (key === "image") return `0x${Array.from({ length: 16 }, () => randInt(0, 255).toString(16).padStart(2, "0")).join("")}`;
+  if (key === "regex") {
+    const generated = generateRegexValue(params?.pattern, params?.rawPattern);
+    if (generated.status === "ok") return generated.value;
+  }
 
   const fn = GeneratorFunctions[key];
   if (fn) return fn(params);
@@ -1715,12 +1864,15 @@ export function generateValue(columnName: string, dataType: string, generatorKey
 }
 
 function generateByType(type: string, rowIndex: number): unknown {
-  const t = type.toLowerCase();
-  if (t.includes("int") || t.includes("serial") || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
+  const t = normalizeColumnDataType(type);
+  if (t.includes("int") || isSerialType(type) || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
   if (t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real") return randDecimal(0, 10000, 2);
   if (t.includes("bool")) return Math.random() > 0.5 ? 1 : 0;
+  // `datetime` / `timestamp` need a full timestamp; a bare TIME column only
+  // accepts a clock time, so it must not reuse the timestamp generator (#12994).
+  if (t.includes("timestamp") || t.includes("datetime")) return randTimestamp(new Date("2020-01-01"), new Date("2025-12-31"));
+  if (/^time\b/.test(t)) return generateTimeInRange();
   if (t.includes("date")) return randDate(new Date("2020-01-01"), new Date("2025-12-31"));
-  if (t.includes("time")) return randTimestamp(new Date("2020-01-01"), new Date("2025-12-31"));
   return `value_${rowIndex + 1}`;
 }
 
@@ -1754,11 +1906,57 @@ export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
   const stringValue = String(value);
+  const bitLiteral = formatBitStringLiteral(stringValue, databaseType, dataType);
+  if (bitLiteral) return bitLiteral;
   if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && dataType) {
     const temporalValue = formatOracleTemporalValue(stringValue, dataType);
     if (temporalValue) return temporalValue;
   }
+  if (isJsonType(dataType)) {
+    // MySQL (and MariaDB) reject any non-JSON text in a JSON column, so free
+    // text from a string generator must land as a JSON string scalar; values
+    // that are already valid JSON pass through untouched.
+    const jsonText = isWellFormedJson(stringValue) ? stringValue : JSON.stringify(stringValue);
+    // MySQL's lexer consumes backslash escapes inside '...' literals, so the
+    // JSON escape sequences must double their backslashes to survive the trip.
+    if (databaseType === "mysql") return quoteGeneratedString(jsonText.replace(/\\/g, "\\\\"));
+    return quoteGeneratedString(jsonText);
+  }
   return quoteGeneratedString(stringValue);
+}
+
+const POSTGRES_BIT_LITERAL_DATABASES = new Set<string>(["postgres", "kingbase", "highgo", "uxdb", "vastbase", "gaussdb", "opengauss", "redshift", "kwdb"]);
+const MYSQL_BIT_LITERAL_DATABASES = new Set<string>(["mysql", "doris", "starrocks", "goldendb", "databend", "sundb", "gbase"]);
+
+/**
+ * Bit strings need their dialect literal: PostgreSQL reads `B'1010'` and MySQL
+ * `b'1010'`, and MySQL rejects a bare `'1010'` for a `BIT(n)` column while
+ * PostgreSQL coerces it (#13014). Unknown dialects keep the quoted string so
+ * this never emits a literal the target cannot parse.
+ */
+function formatBitStringLiteral(value: string, databaseType: DatabaseType | undefined, dataType: string | undefined): string | null {
+  if (!databaseType || !dataType || !bitColumnShape(dataType) || !/^[01]+$/.test(value)) return null;
+  if (POSTGRES_BIT_LITERAL_DATABASES.has(databaseType)) return `B'${value}'`;
+  if (MYSQL_BIT_LITERAL_DATABASES.has(databaseType)) return `b'${value}'`;
+  return null;
+}
+
+function isJsonType(dataType: string | undefined): boolean {
+  return !!dataType && dataType.toLowerCase().includes("json");
+}
+
+function isWellFormedJson(value: string): boolean {
+  // Cheap pre-filter: plain prose (the common case from string generators)
+  // can't be JSON, so skip the parse for it.
+  if (!/^".*"$/.test(value) && !/^\{.*\}$/.test(value) && !/^\[.*\]$/.test(value) && !/^(true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?)$/.test(value)) {
+    return false;
+  }
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function displayGeneratedValue(value: unknown): string {
@@ -1827,24 +2025,62 @@ function generateTdengineChildTableName(): string {
   return `dbx_gen_${Date.now().toString(36)}_${randomSuffix}`;
 }
 
-export function generateTableData(config: TableGenerateConfig, databaseType?: DatabaseType): GenerateResult {
+/**
+ * Cross-chunk generation state.
+ *
+ * Bulk generation is streamed one chunk at a time so the UI never holds the
+ * full row set in memory. Anything that must stay coherent across chunks
+ * (uniqueness sets, TDengine tag values, the global row index, the TDengine
+ * child-table name) therefore has to live outside the chunk function.
+ */
+export interface TableGenerateChunkState {
+  readonly isTdengineStable: boolean;
+  readonly shouldAddTbname: boolean;
+  readonly tbname: string | null;
+  readonly colNames: string[];
+  readonly targetTable: string;
+  readonly columnList: string;
+  readonly insertPrefix: string;
+  readonly uniqueValues: (Set<string> | null)[];
+  readonly tagValues: Map<string, unknown>;
+  nextIndex: number;
+}
+
+export function createTableGenerateState(config: TableGenerateConfig, databaseType?: DatabaseType): TableGenerateChunkState {
   const isTdengineStable = isTdengineStableGenerate(config, databaseType);
   const hasTbnameColumn = config.columns.some((column) => column.columnName.toLowerCase() === "tbname");
   const shouldAddTbname = isTdengineStable && !hasTbnameColumn;
-  const tdengineChildTableName = shouldAddTbname ? generateTdengineChildTableName() : null;
-  const tagValues = new Map<string, unknown>();
-  const uniqueValues = config.columns.map((column) => (column.generatorParams?.unique ? new Set<string>() : null));
   const colNames = shouldAddTbname ? ["tbname", ...config.columns.map((c) => c.columnName)] : config.columns.map((c) => c.columnName);
-  const rows: unknown[][] = [];
+  const columnList = colNames.map((column) => quoteTableIdentifier(databaseType, column)).join(", ");
+  const targetTable = qualifiedTableName({ databaseType, schema: config.schema, tableName: config.tableName, database: config.database });
+  return {
+    isTdengineStable,
+    shouldAddTbname,
+    tbname: shouldAddTbname ? generateTdengineChildTableName() : null,
+    colNames,
+    targetTable,
+    columnList,
+    insertPrefix: `INSERT INTO ${targetTable} (${columnList}) VALUES`,
+    uniqueValues: config.columns.map((column) => (column.generatorParams?.unique ? new Set<string>() : null)),
+    tagValues: new Map<string, unknown>(),
+    nextIndex: 0,
+  };
+}
 
-  for (let i = 0; i < config.rowCount; i++) {
+/** Generates the next `chunkSize` rows (or whatever remains) and advances `state.nextIndex`. */
+export function generateTableRowsChunk(config: TableGenerateConfig, state: TableGenerateChunkState, chunkSize: number): unknown[][] {
+  const rows: unknown[][] = [];
+  if (chunkSize <= 0) return rows;
+  const total = Math.max(0, config.rowCount);
+  const end = Math.min(total, state.nextIndex + chunkSize);
+  for (let i = state.nextIndex; i < end; i++) {
     const row = config.columns.map((col, columnIndex) => {
-      if (isTdengineStable && col.isTag && tagValues.has(col.columnName)) {
-        return tagValues.get(col.columnName);
+      if (state.isTdengineStable && col.isTag && state.tagValues.has(col.columnName)) {
+        return state.tagValues.get(col.columnName);
       }
       let value: unknown;
       if (col.generatorParams?.unique) {
-        const seen = uniqueValues[columnIndex]!;
+        const seen = state.uniqueValues[columnIndex]!;
         let found = false;
         for (let attempt = 0; attempt < MAX_UNIQUE_GENERATION_ATTEMPTS; attempt++) {
           value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
@@ -1861,29 +2097,98 @@ export function generateTableData(config: TableGenerateConfig, databaseType?: Da
       } else {
         value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
       }
-      if (isTdengineStable && col.isTag) {
-        tagValues.set(col.columnName, value);
+      if (state.isTdengineStable && col.isTag) {
+        state.tagValues.set(col.columnName, value);
       }
       return value;
     });
-    rows.push(shouldAddTbname ? [tdengineChildTableName, ...row] : row);
+    rows.push(state.tbname !== null ? [state.tbname, ...row] : row);
   }
+  state.nextIndex = end;
+  return rows;
+}
 
-  const quotedCols = colNames.map((column) => quoteTableIdentifier(databaseType, column));
-  const targetTable = qualifiedTableName({ databaseType, schema: config.schema, tableName: config.tableName, database: config.database });
-  const columnList = quotedCols.join(", ");
-  const insertPrefix = `INSERT INTO ${targetTable} (${columnList}) VALUES`;
-  const valueRows = rows.map(
-    (row) =>
-      `(${row
-        .map((value, index) => {
-          const configIndex = shouldAddTbname ? index - 1 : index;
-          return formatGeneratedValue(value, databaseType, configIndex >= 0 ? config.columns[configIndex]?.dataType : undefined);
-        })
-        .join(", ")})`,
-  );
-  const statements = databaseType === "oracle" ? buildOracleInsertStatements(targetTable, columnList, valueRows) : supportsGeneratedMultiRowValues(databaseType) ? [`${insertPrefix}\n${valueRows.join(",\n")};`] : valueRows.map((values) => `${insertPrefix} ${values};`);
-  const sql = statements.join("\n");
+export function formatGeneratedRowValues(config: TableGenerateConfig, databaseType: DatabaseType | undefined, state: TableGenerateChunkState, row: unknown[]): string {
+  const values = row
+    .map((value, index) => {
+      const configIndex = state.shouldAddTbname ? index - 1 : index;
+      return formatGeneratedValue(value, databaseType, configIndex >= 0 ? config.columns[configIndex]?.dataType : undefined);
+    })
+    .join(", ");
+  return `(${values})`;
+}
 
-  return { columns: colNames, rows, sql, statements };
+/**
+ * Builds the INSERT statements for a batch together with the number of value
+ * rows each statement carries.
+ *
+ * `rowsPerStatement` is aligned index-by-index with `statements`, so a caller
+ * that executes the statements can map each returned per-statement result back
+ * to the rows it inserted. This is what makes failed-batch accounting possible
+ * on backends that report failures inside the result array instead of throwing.
+ */
+export function generateInsertBatches(databaseType: DatabaseType | undefined, state: TableGenerateChunkState, valueRows: string[], forceSingleRow = false): { statements: string[]; rowsPerStatement: number[] } {
+  if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const statements = buildOracleInsertStatements(state.targetTable, state.columnList, valueRows);
+    return { statements, rowsPerStatement: oracleRowsPerStatement(valueRows, statements) };
+  }
+  if (!supportsGeneratedMultiRowValues(databaseType) || forceSingleRow) {
+    return { statements: valueRows.map((values) => `${state.insertPrefix} ${values};`), rowsPerStatement: valueRows.map(() => 1) };
+  }
+  if (valueRows.length === 0) return { statements: [], rowsPerStatement: [] };
+  return { statements: [`${state.insertPrefix}\n${valueRows.join(",\n")};`], rowsPerStatement: [valueRows.length] };
+}
+
+/**
+ * Oracle batches INSERT ALL statements `ORACLE_INSERT_ALL_BATCH_SIZE` rows at a
+ * time, so the per-statement row counts have to mirror that chunking.
+ */
+function oracleRowsPerStatement(valueRows: string[], statements: string[]): number[] {
+  if (statements.length === 0) return [];
+  // A single value row is emitted as a plain VALUES statement, not INSERT ALL.
+  if (valueRows.length === 1) return [1];
+  const counts: number[] = [];
+  for (let remaining = valueRows.length; remaining > 0; remaining -= ORACLE_INSERT_ALL_BATCH_SIZE) {
+    counts.push(Math.min(ORACLE_INSERT_ALL_BATCH_SIZE, remaining));
+  }
+  return counts;
+}
+
+export function buildGenerateInsertStatements(databaseType: DatabaseType | undefined, state: TableGenerateChunkState, valueRows: string[], forceSingleRow = false): string[] {
+  return generateInsertBatches(databaseType, state, valueRows, forceSingleRow).statements;
+}
+
+/**
+ * Splits formatted value rows into statement groups that stay within a byte budget.
+ *
+ * Servers reject statements larger than `max_allowed_packet`, so an oversized
+ * multi-row INSERT has to be cut into several statements before it is sent.
+ * Splitting happens after generation (never by rewinding the generator state)
+ * so uniqueness bookkeeping stays intact.
+ */
+export function splitValueRowsByByteBudget(state: TableGenerateChunkState, valueRows: string[], maxBytes: number): string[][] {
+  if (maxBytes <= 0) return valueRows.length > 0 ? [valueRows] : [];
+  const groups: string[][] = [];
+  let current: string[] = [];
+  let currentBytes = 0;
+  for (const values of valueRows) {
+    const bytes = values.length + state.insertPrefix.length + 4;
+    if (current.length > 0 && currentBytes + bytes > maxBytes) {
+      groups.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(values);
+    currentBytes += bytes;
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+export function generateTableData(config: TableGenerateConfig, databaseType?: DatabaseType): GenerateResult {
+  const state = createTableGenerateState(config, databaseType);
+  const rows = generateTableRowsChunk(config, state, config.rowCount);
+  const valueRows = rows.map((row) => formatGeneratedRowValues(config, databaseType, state, row));
+  const statements = buildGenerateInsertStatements(databaseType, state, valueRows);
+  return { columns: state.colNames, rows, sql: statements.join("\n"), statements };
 }

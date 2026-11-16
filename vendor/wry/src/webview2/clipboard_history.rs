@@ -74,7 +74,8 @@ const OPEN_ATTEMPTS: usize = 10;
 const OPEN_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 /// Rounds of re-owning, covering copies that land while a re-own is already
-/// in progress (their update notification is coalesced away).
+/// in progress (their update notification is coalesced away). The tail sleep
+/// after the last round is covered by a final re-check in the worker instead.
 const REOWN_ROUNDS: usize = 3;
 
 /// Standard clipboard format ids (`winuser.h`), widened from the windows
@@ -84,6 +85,13 @@ const CF_METAFILEPICT: u32 = Ole::CF_METAFILEPICT.0 as u32;
 const CF_PALETTE: u32 = Ole::CF_PALETTE.0 as u32;
 const CF_ENHMETAFILE: u32 = Ole::CF_ENHMETAFILE.0 as u32;
 const CF_OWNERDISPLAY: u32 = Ole::CF_OWNERDISPLAY.0 as u32;
+/// Text and image formats, which `snapshot_and_reapply` re-sets first (see
+/// `replay_priority`).
+const CF_TEXT: u32 = Ole::CF_TEXT.0 as u32;
+const CF_OEMTEXT: u32 = Ole::CF_OEMTEXT.0 as u32;
+const CF_UNICODETEXT: u32 = Ole::CF_UNICODETEXT.0 as u32;
+const CF_DIB: u32 = Ole::CF_DIB.0 as u32;
+const CF_DIBV5: u32 = Ole::CF_DIBV5.0 as u32;
 
 /// Set while a re-own worker is running so bursts of clipboard updates
 /// (WebView2 writes several formats in a row) coalesce into a single worker.
@@ -159,6 +167,15 @@ unsafe fn on_clipboard_update(host: HWND) {
       }
       unsafe { reown_from_webview2(host) };
       std::thread::sleep(REOWN_DELAY);
+    }
+    // A copy landing during the tail sleep of the last round is coalesced
+    // away by `REOWN_IN_FLIGHT` and its update notification never
+    // re-arrives, so without this check it would silently miss Clipboard
+    // History. One final re-check while the flag is still held (no other
+    // worker can race for it) re-owns the copy; a no-op unless one is
+    // pending, because `reown_from_webview2` re-verifies the owner first.
+    if unsafe { clipboard_update_from_webview2(host) } {
+      unsafe { reown_from_webview2(host) };
     }
   });
 }
@@ -260,6 +277,24 @@ fn payload_kind(format: u32) -> PayloadKind {
   }
 }
 
+/// Replay order of a payload: lower values are re-set first. After
+/// `EmptyClipboard` a failed `SetClipboardData` loses exactly its own
+/// format — and under memory pressure several re-sets can fail in a row —
+/// so the primary text/image payloads go first and the worst case is
+/// bounded to secondary private/registered formats, regardless of where
+/// the original writer's enumeration order placed them. Stable, so the
+/// writer's own order is kept within each class.
+fn replay_priority(format: u32) -> u32 {
+  match format {
+    CF_TEXT | CF_OEMTEXT | CF_UNICODETEXT => 0,
+    CF_BITMAP | CF_DIB | CF_DIBV5 => 1,
+    // Remaining standard formats (file lists, metafiles, locale, ...).
+    0x0001..=0x007F => 2,
+    // Private (0x0200-0x7FFF) and registered (0xC000+) formats.
+    _ => 3,
+  }
+}
+
 /// A single clipboard format carried across the `EmptyClipboard`.
 enum Payload {
   Bytes { format: u32, data: Vec<u8> },
@@ -268,6 +303,15 @@ enum Payload {
 }
 
 impl Payload {
+  /// The clipboard format id this payload re-sets.
+  fn format(&self) -> u32 {
+    match self {
+      Payload::Bytes { format, .. } => *format,
+      Payload::Bitmap(_) => CF_BITMAP,
+      Payload::EnhancedMetafile(_) => CF_ENHMETAFILE,
+    }
+  }
+
   /// Frees duplicated GDI handles when a payload can no longer be applied.
   unsafe fn release(self) {
     match self {
@@ -284,8 +328,11 @@ impl Payload {
 
 /// With the clipboard already open: snapshots every format, empties the
 /// clipboard and re-sets all payloads — which transfers the ownership to the
-/// window the clipboard was opened with. Returns `false` when the re-own was
-/// deliberately skipped; the original clipboard is then left untouched.
+/// window the clipboard was opened with. Standard formats are re-set before
+/// private and registered ones, so a failed `SetClipboardData` can at worst
+/// cost a secondary format (see `replay_priority`). Returns `false` when the
+/// re-own was deliberately skipped; the original clipboard is then left
+/// untouched.
 unsafe fn snapshot_and_reapply() -> bool {
   let mut payloads: Vec<Payload> = Vec::new();
   let mut format = EnumClipboardFormats(0);
@@ -316,6 +363,11 @@ unsafe fn snapshot_and_reapply() -> bool {
   if payloads.is_empty() {
     return false;
   }
+
+  // Replay primary formats first: a re-set that fails below is gone for
+  // good, so the valuable payloads must not depend on where the original
+  // writer's enumeration order happened to place them.
+  payloads.sort_by_key(|payload| replay_priority(payload.format()));
 
   if EmptyClipboard().is_err() {
     for payload in payloads {
@@ -422,9 +474,6 @@ mod tests {
   };
 
   static CLIPBOARD_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-  /// Only used by the tests; kept here so the lib build has no dead const.
-  const CF_UNICODETEXT: u32 = Ole::CF_UNICODETEXT.0 as u32;
 
   unsafe extern "system" fn test_wndproc(
     hwnd: HWND,
@@ -583,7 +632,7 @@ mod tests {
   }
 
   #[test]
-  fn reown_roundtrip_preserves_formats_bytes_order_and_owner() {
+  fn reown_roundtrip_preserves_formats_bytes_and_owner() {
     let _lock = CLIPBOARD_TEST_LOCK.lock().unwrap();
     unsafe {
       let window = create_test_window();
@@ -602,6 +651,10 @@ mod tests {
 
       assert!(open_clipboard(window), "OpenClipboard failed");
       let formats_before = enumerated_formats();
+      let data_before: Vec<(u32, Vec<u8>)> = formats_before
+        .iter()
+        .map(|&format| (format, read_clipboard_bytes(format).unwrap()))
+        .collect();
       assert!(CloseClipboard().is_ok());
 
       // Act: the re-own mechanics with the clipboard opened by `window`.
@@ -617,11 +670,69 @@ mod tests {
       let owner = GetClipboardOwner().unwrap();
       assert_eq!(owner, window, "the host window must own the clipboard");
 
-      // Assert: same formats in the same order with identical bytes.
+      // Assert: the same set of formats with identical bytes, led by
+      // CF_UNICODETEXT (see `replay_priority`). Enumeration order is
+      // deliberately not compared verbatim: Windows synthesizes CF_TEXT/
+      // CF_OEMTEXT/CF_LOCALE when the original clipboard is closed, and
+      // the replay puts the text formats first rather than wherever that
+      // synthesis appended them.
       assert!(open_clipboard(window), "OpenClipboard failed");
-      assert_eq!(enumerated_formats(), formats_before);
+      let formats_after = enumerated_formats();
+      assert_eq!(formats_after.first(), Some(&CF_UNICODETEXT));
+      let mut sorted_before = formats_before;
+      let mut sorted_after = formats_after;
+      sorted_before.sort_unstable();
+      sorted_after.sort_unstable();
+      assert_eq!(sorted_after, sorted_before, "same set of formats");
+      for (format, data) in &data_before {
+        assert_eq!(read_clipboard_bytes(*format).unwrap(), *data);
+      }
+      assert!(CloseClipboard().is_ok());
+
+      let _ = DestroyWindow(window);
+    }
+  }
+
+  #[test]
+  fn reown_replays_standard_formats_before_private_ones() {
+    let _lock = CLIPBOARD_TEST_LOCK.lock().unwrap();
+    unsafe {
+      let window = create_test_window();
+      let text_bytes = utf16_bytes("standard formats replay first");
+      let custom_format = RegisterClipboardFormatW(w!("Wry.ClipboardHistory.ReplayOrder"));
+      assert_ne!(custom_format, 0);
+
+      // Arrange: a registered format enumerated BEFORE CF_UNICODETEXT —
+      // enumeration follows SetClipboardData order, so a blind replay
+      // would put the private format first.
+      assert!(open_clipboard(window), "OpenClipboard failed");
+      assert!(EmptyClipboard().is_ok());
+      assert!(set_clipboard_bytes(custom_format, &[9u8, 8, 7]));
+      assert!(set_clipboard_bytes(CF_UNICODETEXT, &text_bytes));
+      assert!(CloseClipboard().is_ok());
+
+      // The registered format is enumerated before the text.
+      assert!(open_clipboard(window), "OpenClipboard failed");
+      assert_eq!(enumerated_formats().first(), Some(&custom_format));
+      assert!(CloseClipboard().is_ok());
+
+      assert!(open_clipboard(window), "OpenClipboard failed");
+      assert!(
+        snapshot_and_reapply(),
+        "HGLOBAL-only clipboards must be re-owned"
+      );
+      assert!(CloseClipboard().is_ok());
+
+      // Assert: text was re-set first — setting CF_UNICODETEXT also makes
+      // Windows synthesize CF_TEXT/CF_OEMTEXT/CF_LOCALE right behind it —
+      // so a failed re-set of the trailing registered format can at worst
+      // drop that format, never the text.
+      assert!(open_clipboard(window), "OpenClipboard failed");
+      let formats = enumerated_formats();
+      assert_eq!(formats.first(), Some(&CF_UNICODETEXT));
+      assert_eq!(formats.last(), Some(&custom_format));
       assert_eq!(read_clipboard_bytes(CF_UNICODETEXT).unwrap(), text_bytes);
-      assert_eq!(read_clipboard_bytes(custom_format).unwrap(), custom_data);
+      assert_eq!(read_clipboard_bytes(custom_format).unwrap(), [9u8, 8, 7]);
       assert!(CloseClipboard().is_ok());
 
       let _ = DestroyWindow(window);

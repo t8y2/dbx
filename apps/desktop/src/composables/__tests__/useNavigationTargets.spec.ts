@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import type { QueryTab } from "@/types/database";
@@ -8,13 +9,17 @@ const mocks = vi.hoisted(() => ({
   activeTabId: "",
   buildTableSelectSql: vi.fn(),
   databaseType: "postgres" as string,
+  tableOpenSortMode: "none" as "none" | "database" | "local",
   ensureConnected: vi.fn(),
   executeTabSql: vi.fn(),
   getColumns: vi.fn(),
   invalidateCompletionTableCache: vi.fn(),
+  refreshTableColumnsTree: vi.fn(),
   listIndexes: vi.fn(),
+  setErrorResult: vi.fn(),
   setTableMeta: vi.fn(),
   updateSql: vi.fn(),
+  databaseInfo: undefined as { productName?: string; productVersion?: string } | undefined,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -25,11 +30,12 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     activeConnectionId: "",
-    getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType }),
+    getConfig: () => ({ id: "connection-1", db_type: mocks.databaseType, database_info: mocks.databaseInfo }),
     ensureConnected: mocks.ensureConnected,
     connectionIdentifierQuote: () => undefined,
     metadataGenerationFor: () => 0,
     refreshObjectListTreeNode: vi.fn(),
+    refreshTableColumnsTree: mocks.refreshTableColumnsTree,
     invalidateCompletionTableCache: mocks.invalidateCompletionTableCache,
   }),
 }));
@@ -75,16 +81,21 @@ vi.mock("@/stores/queryStore", () => ({
     }),
     updateSql: mocks.updateSql,
     executeTabSql: mocks.executeTabSql,
-    setErrorResult: vi.fn(),
+    setErrorResult: mocks.setErrorResult,
     invalidateTableStructure: vi.fn(),
   }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: "same-table" } }),
+  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: "same-table", tableOpenSortMode: mocks.tableOpenSortMode, tableDatabaseSortDirection: "desc", tableLocalSortDirection: "asc" } }),
 }));
 
-vi.mock("@/lib/table/tableSelectSql", () => ({
+vi.mock("@/stores/tunnelProfileStore", () => ({
+  useTunnelProfileStore: () => ({ profileById: () => undefined }),
+}));
+
+vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/table/tableSelectSql")>()),
   buildTableSelectSql: mocks.buildTableSelectSql,
 }));
 
@@ -100,15 +111,69 @@ function column(name: string) {
 
 describe("useNavigationTargets openTableTarget", () => {
   beforeEach(() => {
+    setActivePinia(createPinia());
     clearTableMetadataCache();
     vi.clearAllMocks();
     mocks.tabs.length = 0;
     mocks.databaseType = "postgres";
+    mocks.tableOpenSortMode = "none";
+    mocks.databaseInfo = undefined;
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.buildTableSelectSql.mockImplementation(async ({ tableName }: { tableName: string }) => `SELECT * FROM ${tableName}`);
     mocks.executeTabSql.mockResolvedValue(undefined);
     mocks.getColumns.mockResolvedValue([column("id")]);
     mocks.listIndexes.mockResolvedValue([]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "xugu", "neo4j"])("keeps %s synthetic row identifiers out of default database ordering", async (databaseType) => {
+    mocks.databaseType = databaseType;
+    mocks.tableOpenSortMode = "database";
+    mocks.getColumns.mockResolvedValue([{ ...column("name"), is_primary_key: false }]);
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.executeTabSql).toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalled();
+    for (const [options] of mocks.buildTableSelectSql.mock.calls) {
+      expect(options.orderBy).toBeUndefined();
+    }
+    expect(mocks.tabs[0]?.orderByInput).toBeUndefined();
+  });
+
+  it("forwards the connected server version to the table SQL builder (#10503)", async () => {
+    mocks.databaseType = "neo4j";
+    mocks.databaseInfo = { productName: "Neo4j", productVersion: "Neo4j/4.4.44" };
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "neo4j", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ serverVersion: "Neo4j/4.4.44" }));
+  });
+
+  it("reads the server version when the SQL is built, not from the config captured before connect (#10503)", async () => {
+    mocks.databaseType = "neo4j";
+    mocks.databaseInfo = undefined;
+    // The store swaps the config object when the probe lands, so the reference captured before
+    // connect never sees the version.
+    mocks.getColumns.mockImplementation(async () => {
+      mocks.databaseInfo = { productName: "Neo4j", productVersion: "Neo4j/4.4.44" };
+      return [column("id")];
+    });
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "neo4j", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ serverVersion: "Neo4j/4.4.44" }));
+  });
+
+  it.each(["oracle", "oceanbase-oracle"])("uses the %s physical primary index for default ordering", async (databaseType) => {
+    mocks.databaseType = databaseType;
+    mocks.tableOpenSortMode = "database";
+    mocks.getColumns.mockResolvedValue([{ ...column("id"), is_primary_key: false }]);
+    mocks.listIndexes.mockResolvedValue([{ name: "users_pk", columns: ["id"], is_unique: true, is_primary: true }]);
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    expect(mocks.setErrorResult).not.toHaveBeenCalled();
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"id" DESC' }));
   });
 
   it("loads stable row identity before the first PostgreSQL table query", async () => {
@@ -156,17 +221,48 @@ describe("useNavigationTargets openTableTarget", () => {
       tableName: target.tableName,
     });
 
+    expect(mocks.refreshTableColumnsTree).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.invalidateCompletionTableCache).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.getColumns).toHaveBeenCalledTimes(2);
     expect(mocks.tabs.map((tab) => tab.tableMeta?.primaryKeys)).toEqual([["fresh_id"], ["fresh_id"]]);
   });
 
+  it("refreshes sidebar columns even without a data tab", async () => {
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await useNavigationTargets(dialogs).onStructureEditorSaved(vi.fn(), vi.fn(), target);
+    expect(mocks.refreshTableColumnsTree).toHaveBeenCalledWith("connection-1", "app", "users", "public", undefined);
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+  });
+
+  it("still refreshes data tab metadata if the sidebar reload fails", async () => {
+    const navigation = useNavigationTargets(dialogs);
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await navigation.openLineageTarget(target);
+    mocks.refreshTableColumnsTree.mockRejectedValueOnce(new Error("sidebar unavailable"));
+    mocks.getColumns.mockResolvedValueOnce([column("fresh_id")]);
+    const toast = vi.fn();
+    await navigation.onStructureEditorSaved(vi.fn(), toast, target);
+    expect(toast).toHaveBeenCalledWith("sidebar unavailable", 5000);
+    expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["fresh_id"]);
+  });
+
   it("keeps row identity pending when shared metadata loading fails", async () => {
-    mocks.getColumns.mockRejectedValueOnce(new Error("metadata unavailable"));
+    mocks.getColumns.mockRejectedValue(new Error("metadata unavailable"));
 
     await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "users" });
 
     expect(mocks.tabs[0]?.tableMeta?.columns).toEqual([]);
+    expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
+  });
+
+  it.each(["none", "database", "local"] as const)("opens the table when metadata preload fails in %s sort mode", async (mode) => {
+    mocks.databaseType = "sqlite";
+    mocks.tableOpenSortMode = mode;
+    mocks.getColumns.mockRejectedValue(new Error("metadata unavailable"));
+
+    await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "app", tableName: "users" });
+
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
     expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
   });
 
@@ -257,5 +353,37 @@ describe("useNavigationTargets openTableTarget", () => {
 
     // 无取消请求：元数据落地后按既有行为执行第二次查询
     expect(mocks.executeTabSql).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries without the synthetic row-id locator when the engine rejects system columns (Hologres, #12647)", async () => {
+    const { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
+    // Hologres-like: keyless PostgreSQL base table; the engine rejects every
+    // locator-bearing SELECT (tableoid/ctid/xmin do not exist there).
+    mocks.databaseType = "postgres";
+    mocks.getColumns.mockResolvedValue([{ ...column("payload"), is_primary_key: false }]);
+    mocks.listIndexes.mockResolvedValue([]);
+    mocks.buildTableSelectSql.mockImplementation(async ({ tableName, includeRowId }: { tableName: string; includeRowId?: boolean }) => (includeRowId ? `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM ${tableName}` : `SELECT * FROM ${tableName}`));
+    mocks.executeTabSql.mockImplementation(async (id: string, sql?: string) => {
+      const tab = mocks.tabs.find((item) => item.id === id);
+      if (!tab || typeof sql !== "string") return;
+      if (sql.includes("__DBX_ROWID")) {
+        tab.result = { columns: ["db error"], rows: [['ERROR: column "tableoid" does not exist']], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"];
+      } else {
+        tab.result = { columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as QueryTab["result"];
+      }
+    });
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    const executedSql = mocks.executeTabSql.mock.calls.map((call) => String(call[1]));
+    expect(executedSql.some((sql) => sql.includes("__DBX_ROWID"))).toBe(true);
+    // Same degradation contract as the sidebar open path: replay once without
+    // the locator so the table still opens (read-only), then remember the
+    // connection so later opens skip the locator up front.
+    expect(executedSql.some((sql) => !sql.includes("__DBX_ROWID") && sql.includes("FROM users"))).toBe(true);
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
+    resetRowIdLocatorStateForTests();
   });
 });

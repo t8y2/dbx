@@ -48,6 +48,38 @@ test("bumps the SQLite SSH worker from its crate path", () => {
   assert.deepEqual(result.nativeModules, ["sqlite-worker"]);
 });
 
+test("bumps both Oracle variants when their shared module changes", () => {
+  // `oracle` and `oracle-oci` are built from the same `oracle-go` module (with
+  // and without the `oci` build tag), so a change there must rebuild and
+  // re-release both artifacts — otherwise the `oci` variant silently keeps a
+  // stale version and `reuse-previous-assets` re-publishes the old binary.
+  const result = evaluateAgentVersionBump({
+    versions: { oracle: "0.1.66", "oracle-oci": "0.1.0" },
+    changedFiles: ["agents/drivers/oracle-go/oci.go"],
+    moduleExists: (path) => path === "agents/drivers/oracle-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions.oracle, "0.1.67");
+  assert.equal(result.versions["oracle-oci"], "0.1.1");
+  assert.deepEqual(result.changedModules.sort(), ["oracle", "oracle-oci"]);
+  assert.deepEqual(result.nativeModules.sort(), ["oracle", "oracle-oci"]);
+});
+
+test("keeps a manually versioned Oracle OCI release without touching the thin variant", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { oracle: "0.1.66", "oracle-oci": "0.1.0" },
+    prevVersions: { oracle: "0.1.66" },
+    changedFiles: ["agents/versions.json"],
+    moduleExists: (path) => path === "agents/drivers/oracle-go",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions["oracle-oci"], "0.1.0");
+  assert.equal(result.versions.oracle, "0.1.66");
+  assert.deepEqual(result.changedModules, ["oracle-oci"]);
+});
+
 test("classifies TDengine Rust changes as native-only", () => {
   const result = evaluateAgentVersionBump({
     versions: { tdengine: "0.1.39" },
@@ -86,11 +118,7 @@ test("bumps the native RocketMQ agent from its Go directory", () => {
 });
 
 test("bumps ZooKeeper from native and shared SASL source directories", () => {
-  for (const changedFile of [
-    "agents/drivers/zookeeper/main.go",
-    "agents/go-common/gosasl/sasl.go",
-    "agents/go-common/go-gssapi/krb5/krb5.go",
-  ]) {
+  for (const changedFile of ["agents/drivers/zookeeper/main.go", "agents/go-common/gosasl/sasl.go", "agents/go-common/go-gssapi/krb5/krb5.go"]) {
     const result = evaluateAgentVersionBump({
       versions: { zookeeper: "0.1.0" },
       changedFiles: [changedFile],
@@ -129,12 +157,7 @@ test("bumps Cassandra from its native Go source directory", () => {
 });
 
 test("bumps Hive from native and shared Kerberos source directories", () => {
-  for (const changedFile of [
-    "agents/drivers/hive-go/main.go",
-    "agents/go-common/gohive/driver.go",
-    "agents/go-common/gosasl/gssapi.go",
-    "agents/go-common/go-gssapi/krb5/krb5.go",
-  ]) {
+  for (const changedFile of ["agents/drivers/hive-go/main.go", "agents/go-common/gohive/driver.go", "agents/go-common/gosasl/gssapi.go", "agents/go-common/go-gssapi/krb5/krb5.go"]) {
     const result = evaluateAgentVersionBump({
       versions: { hive: "0.1.43" },
       changedFiles: [changedFile],
@@ -175,12 +198,7 @@ test("bumps IoTDB from its native Go source directory", () => {
 });
 
 test("rebuilds native modules when shared native packaging changes", () => {
-  const existing = new Set([
-    "agents/drivers/access",
-    "agents/drivers/access/build.gradle",
-    "agents/drivers/duckdb",
-    "agents/drivers/neo4j-go",
-  ]);
+  const existing = new Set(["agents/drivers/access", "agents/drivers/access/build.gradle", "agents/drivers/duckdb", "agents/drivers/neo4j-go"]);
   const result = evaluateAgentVersionBump({
     versions: { access: "0.1.37", duckdb: "0.1.3", neo4j: "0.1.40" },
     changedFiles: ["agents/scripts/version_agent_artifacts.py"],
@@ -223,12 +241,7 @@ test("bumps DuckDB when its Cargo target configuration changes", () => {
 });
 
 test("builds only common-dependent Java modules for a shared runtime change", () => {
-  const existing = new Set([
-    "agents/drivers/access",
-    "agents/drivers/access/build.gradle",
-    "agents/drivers/mongodb",
-    "agents/drivers/mongodb/build.gradle",
-  ]);
+  const existing = new Set(["agents/drivers/access", "agents/drivers/access/build.gradle", "agents/drivers/mongodb", "agents/drivers/mongodb/build.gradle"]);
   const result = evaluateAgentVersionBump({
     versions: { access: "0.1.0", mongodb: "0.1.0" },
     changedFiles: ["agents/common/src/main/java/com/dbx/Agent.java"],
@@ -309,7 +322,7 @@ function createRepository(versions) {
   mkdirSync(join(repository, "agents/drivers/duckdb"), { recursive: true });
   writeVersions(repository, versions);
   writeFileSync(join(repository, "agents/drivers/kingbase-go/kingbase_metadata.go"), "package main\n");
-  writeFileSync(join(repository, "agents/drivers/duckdb/Cargo.toml"), "[package]\nname = \"duckdb-test\"\n");
+  writeFileSync(join(repository, "agents/drivers/duckdb/Cargo.toml"), '[package]\nname = "duckdb-test"\n');
   commitAll(repository, "feat(agents): initial release state");
   return repository;
 }

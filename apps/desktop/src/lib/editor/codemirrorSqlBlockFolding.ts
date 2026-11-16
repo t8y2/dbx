@@ -1,19 +1,22 @@
 import { foldService, syntaxTree } from "@codemirror/language";
 import type { EditorState } from "@codemirror/state";
+import { elasticsearchRestRequestRanges } from "@/lib/sql/sqlStatementRanges";
+import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 
 // `@lezer/common` is only a transitive dependency here (see sqlSyntaxTreeWindow.ts's comment on
 // the same pattern), so derive the node types structurally instead of importing them.
 type SyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolve"]>;
 type Tree = ReturnType<typeof syntaxTree>;
 
-interface FoldRange {
+export interface FoldRange {
   from: number;
   to: number;
 }
 
 // `@codemirror/lang-sql`'s grammar is deliberately shallow (see its `foldNodeProp`, which only
 // covers the flat `Statement` and `BlockComment` nodes). This service adds structure-aware folds
-// for procedural blocks and query expressions without replacing CodeMirror's native folds.
+// for procedural blocks and parenthesized query expressions without replacing CodeMirror's native
+// folds.
 //
 // Scoped to `BEGIN...END` and `CASE...END` (issue #6574) -- `BEGIN TRY`/`END TRY` and
 // `BEGIN CATCH`/`END CATCH` fall out of this for free, since `BEGIN` is matched regardless of a
@@ -35,10 +38,39 @@ const TRACKED_END_CONTINUATIONS = new Set(["CASE", "TRY", "CATCH"]);
 // the stack; nothing on it belongs to them.
 const UNTRACKED_END_CONTINUATIONS = new Set(["IF", "WHILE", "LOOP"]);
 
-// A comment is legal SQL wherever whitespace is, so "END /* note */ CASE" must still read as a
-// continuation; this matches a run of pure whitespace and/or `--`/`/* */` comments so real code
-// between the two words (e.g. a `;` starting an unrelated statement) still fails the check.
-const GAP_IS_WHITESPACE_OR_COMMENT = /^(?:\s|--[^\n]*|\/\*[\s\S]*?\*\/)*$/;
+// Comments are legal wherever whitespace is, so "END /* note */ CASE" is still a
+// continuation. Scan once: a repeated regex can split a long `-----` comment in
+// exponentially many ways when a label or other code follows it.
+function gapIsWhitespaceOrComment(gap: string): boolean {
+  let index = 0;
+  while (index < gap.length) {
+    if (/\s/.test(gap[index])) {
+      index++;
+    } else if (gap.startsWith("--", index)) {
+      const newline = gap.indexOf("\n", index + 2);
+      if (newline < 0) return true;
+      index = newline + 1;
+    } else if (gap.startsWith("/*", index)) {
+      let depth = 1;
+      index += 2;
+      while (depth > 0 && index < gap.length) {
+        if (gap.startsWith("/*", index)) {
+          depth++;
+          index += 2;
+        } else if (gap.startsWith("*/", index)) {
+          depth--;
+          index += 2;
+        } else {
+          index++;
+        }
+      }
+      if (depth > 0) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 
 // T-SQL transaction openers do not have a matching `END`, so they must not consume the closer
 // of an enclosing procedural `BEGIN...END` block. Match complete keyword tokens only: `TRAN` is
@@ -47,14 +79,14 @@ const SQLSERVER_TRANSACTION_BEGIN_WORDS = new Set(["TRAN", "TRANSACTION"]);
 
 function isSqlServerTransactionBegin(state: EditorState, tokens: SyntaxNode[], index: number): boolean {
   const next = tokens[index + 1];
-  if (!next || !GAP_IS_WHITESPACE_OR_COMMENT.test(state.sliceDoc(tokens[index].to, next.from))) return false;
+  if (!next || !gapIsWhitespaceOrComment(state.sliceDoc(tokens[index].to, next.from))) return false;
 
   const nextText = state.sliceDoc(next.from, next.to).toUpperCase();
   if (SQLSERVER_TRANSACTION_BEGIN_WORDS.has(nextText)) return true;
   if (nextText !== "DISTRIBUTED") return false;
 
   const transaction = tokens[index + 2];
-  return Boolean(transaction && GAP_IS_WHITESPACE_OR_COMMENT.test(state.sliceDoc(next.to, transaction.from)) && state.sliceDoc(transaction.from, transaction.to).toUpperCase() === "TRANSACTION");
+  return Boolean(transaction && gapIsWhitespaceOrComment(state.sliceDoc(next.to, transaction.from)) && state.sliceDoc(transaction.from, transaction.to).toUpperCase() === "TRANSACTION");
 }
 
 // Keyed by the `Tree` instance (not `Text`): the syntax tree is also invalidated when the SQL
@@ -62,7 +94,7 @@ function isSqlServerTransactionBegin(state: EditorState, tokens: SyntaxNode[], i
 // watcher), and when Lezer's incremental parser finishes covering more of a large document in the
 // background -- both produce a new `Tree` without a new `Text`, so keying on `Text` alone would
 // keep serving ranges computed from a stale or partial parse.
-const rangeCache = new WeakMap<Tree, Map<number, FoldRange>>();
+const rangeCache = new WeakMap<Tree, Map<string, Map<number, FoldRange>>>();
 
 function addMultilineFoldRange(state: EditorState, ranges: Map<number, FoldRange>, openerPosition: number, endPosition: number, overwrite = false) {
   const openerLine = state.doc.lineAt(openerPosition);
@@ -92,16 +124,6 @@ function queryScopeEnd(state: EditorState, scope: SyntaxNode): number {
   return end;
 }
 
-function isQueryParens(state: EditorState, node: SyntaxNode): boolean {
-  for (let child = node.firstChild; child; child = child.nextSibling) {
-    if (child.name === "(" || child.name === "LineComment" || child.name === "BlockComment") continue;
-    if (child.name !== "Keyword") return false;
-    const keyword = state.sliceDoc(child.from, child.to).toUpperCase();
-    return keyword === "SELECT" || keyword === "WITH";
-  }
-  return false;
-}
-
 interface QueryScopeTokens {
   scope: SyntaxNode;
   tokens: Array<{ from: number; keyword: "SELECT" | "UNION" }>;
@@ -129,7 +151,10 @@ function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map
   const scopes = new Map<string, QueryScopeTokens>();
   tree.iterate({
     enter(node) {
-      if (node.name === "Parens" && isQueryParens(state, node.node)) {
+      // Fold any multiline parenthesized expression, including large `IN (...)`
+      // value lists. The opening line remains visible so the surrounding SQL
+      // structure is still readable while the contents can be collapsed.
+      if (node.name === "Parens") {
         addMultilineFoldRange(state, ranges, node.from, queryScopeEnd(state, node.node));
       }
       if (node.name !== "Keyword") return;
@@ -154,12 +179,32 @@ function addQueryStructureFoldRanges(state: EditorState, tree: Tree, ranges: Map
   }
 }
 
-function computeBlockFoldRanges(state: EditorState): Map<number, FoldRange> {
-  const tree = syntaxTree(state);
-  const cached = rangeCache.get(tree);
+function addRestRequestFoldRanges(state: EditorState, ranges: Map<number, FoldRange>, databaseType?: DatabaseType): boolean {
+  if (databaseType && !isElasticsearchCompatibleDatabaseType(databaseType) && !isMeilisearchDatabaseType(databaseType) && !isSolrDatabaseType(databaseType)) return false;
+  const requests = elasticsearchRestRequestRanges(state.doc.toString(), databaseType ?? "elasticsearch");
+  if (requests.length === 0) return false;
+
+  for (const request of requests) {
+    addMultilineFoldRange(state, ranges, request.from, request.to);
+  }
+  return true;
+}
+
+export function computeBlockFoldRanges(state: EditorState, databaseType?: DatabaseType, tree: Tree = syntaxTree(state)): Map<number, FoldRange> {
+  const cacheByDatabaseType = rangeCache.get(tree);
+  const cacheKey = databaseType ?? "auto-detect";
+  const cached = cacheByDatabaseType?.get(cacheKey);
   if (cached) return cached;
 
   const byOpenerLine = new Map<number, FoldRange>();
+  const isRestDocument = addRestRequestFoldRanges(state, byOpenerLine, databaseType);
+  if (isRestDocument) {
+    const nextCacheByDatabaseType = cacheByDatabaseType ?? new Map<string, Map<number, FoldRange>>();
+    nextCacheByDatabaseType.set(cacheKey, byOpenerLine);
+    rangeCache.set(tree, nextCacheByDatabaseType);
+    return byOpenerLine;
+  }
+
   const tokens: SyntaxNode[] = [];
   tree.iterate({
     enter(node) {
@@ -173,7 +218,7 @@ function computeBlockFoldRanges(state: EditorState): Map<number, FoldRange> {
     const text = state.sliceDoc(token.from, token.to).toUpperCase();
     if (text === "END") {
       const next = tokens[i + 1];
-      const continuation = next && GAP_IS_WHITESPACE_OR_COMMENT.test(state.sliceDoc(token.to, next.from)) ? state.sliceDoc(next.from, next.to).toUpperCase() : null;
+      const continuation = next && gapIsWhitespaceOrComment(state.sliceDoc(token.to, next.from)) ? state.sliceDoc(next.from, next.to).toUpperCase() : null;
       if (continuation && UNTRACKED_END_CONTINUATIONS.has(continuation)) {
         i++; // "END IF"/"END WHILE"/... -- closes something we don't track; skip past it untouched
         continue;
@@ -197,12 +242,21 @@ function computeBlockFoldRanges(state: EditorState): Map<number, FoldRange> {
 
   addQueryStructureFoldRanges(state, tree, byOpenerLine);
 
-  rangeCache.set(tree, byOpenerLine);
+  const nextCacheByDatabaseType = cacheByDatabaseType ?? new Map<string, Map<number, FoldRange>>();
+  nextCacheByDatabaseType.set(cacheKey, byOpenerLine);
+  rangeCache.set(tree, nextCacheByDatabaseType);
   return byOpenerLine;
 }
 
-/** Adds procedural-block, query-parenthesis, and UNION-branch folds to the SQL editor. */
-export const sqlBlockFoldService = foldService.of((state, lineStart) => {
-  const range = computeBlockFoldRanges(state).get(state.doc.lineAt(lineStart).number);
-  return range ?? null;
-});
+/** Creates folding for REST requests, procedural blocks, query parentheses, and UNION branches. */
+export function createSqlBlockFoldService(databaseType?: DatabaseType | (() => DatabaseType | undefined), cachedRange?: (state: EditorState, lineStart: number) => FoldRange | null | undefined) {
+  return foldService.of((state, lineStart) => {
+    const cached = cachedRange?.(state, lineStart);
+    if (cached !== undefined) return cached;
+    const range = computeBlockFoldRanges(state, typeof databaseType === "function" ? databaseType() : databaseType).get(state.doc.lineAt(lineStart).number);
+    return range ?? null;
+  });
+}
+
+/** Public compatibility extension with REST request auto-detection for text editors. */
+export const sqlBlockFoldService = createSqlBlockFoldService();

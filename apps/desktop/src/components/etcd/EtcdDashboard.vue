@@ -7,18 +7,23 @@ import { Badge } from "@/components/ui/badge";
 import * as api from "@/lib/backend/api";
 import { classifyEtcdDashboardError } from "@/lib/kv/etcdDashboardError";
 import { counterMapRates, counterRate, histogramAverageMilliseconds, histogramMapAverageMilliseconds, ratePercentage } from "@/lib/kv/etcdDashboardMetrics";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 
 const props = defineProps<{ connectionId: string }>();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ refreshSeconds?: number }>({}, "EtcdDashboard");
 const { t } = useI18n();
 const status = ref<api.KvStatusResponse | null>(null);
 const previousMetrics = ref<api.KvPrometheusMetrics | null>(null);
 const loading = ref(false);
 const error = ref("");
 const unsupported = ref(false);
-const refreshSeconds = ref(0);
+const refreshSeconds = ref([0, 5, 10, 30, 60].includes(restoredUiState.refreshSeconds ?? -1) ? restoredUiState.refreshSeconds! : 0);
 let timer: ReturnType<typeof setInterval> | null = null;
 let loadGeneration = 0;
 let loadingConnectionId: string | null = null;
+
+trackUiState(() => ({ refreshSeconds: refreshSeconds.value }));
 
 const reachable = computed(() => status.value?.members.filter((member) => member.reachable).length ?? 0);
 const totalDbSize = computed(() => status.value?.members.reduce((sum, member) => sum + Number(member.dbSize || 0), 0) ?? 0);
@@ -193,6 +198,14 @@ function refresh(): boolean {
   return true;
 }
 
+function disableAutoRefresh() {
+  refreshSeconds.value = 0;
+}
+
+function selectAutoRefreshInterval(seconds: number) {
+  refreshSeconds.value = seconds;
+}
+
 watch(
   () => props.connectionId,
   () => {
@@ -223,18 +236,18 @@ defineExpose({ refresh });
       <p class="hidden truncate text-xs text-muted-foreground sm:block">{{ t("etcd.dashboard.description") }}</p>
       <div class="flex-1" />
       <div class="flex items-center gap-2">
-        <select v-model.number="refreshSeconds" class="h-8 rounded-md border bg-background px-2 text-xs">
-          <option :value="0">{{ t("etcd.dashboard.autoRefreshOff") }}</option>
-          <option :value="5">5s</option>
-          <option :value="10">10s</option>
-          <option :value="30">30s</option>
-          <option :value="60">60s</option>
-        </select>
-        <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="load">
-          <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
-          <RefreshCw v-else class="h-3.5 w-3.5" />
-          {{ t("etcd.dashboard.refresh") }}
-        </Button>
+        <AutoRefreshControl
+          :enabled="refreshSeconds > 0"
+          :interval-seconds="refreshSeconds || 5"
+          :intervals="[5, 10, 30, 60]"
+          :loading="loading"
+          :label="t('redis.autoRefresh')"
+          :off-label="t('etcd.dashboard.autoRefreshOff')"
+          :refresh-label="t('etcd.dashboard.refresh')"
+          @refresh="load"
+          @disable="disableAutoRefresh"
+          @select="selectAutoRefreshInterval"
+        />
       </div>
     </header>
 

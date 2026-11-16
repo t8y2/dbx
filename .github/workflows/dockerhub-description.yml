@@ -14,9 +14,13 @@ permissions:
 
 jobs:
   update:
+    # 这条流水线改的是上游 Docker Hub 账号下 dbx 镜像的描述页，凭据也只在上游；
+    # fork 每次同步带进 deploy/dockerhub/README.md 改动都会失败一次。
+    # 描述页属于上游的发布资产，fork 不该跑它（同 contributors.yml）。
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Update Docker Hub overview
         uses: peter-evans/dockerhub-description@v5

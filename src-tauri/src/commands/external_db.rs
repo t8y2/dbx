@@ -44,7 +44,7 @@ fn db_file_path_from_arg(arg: &str, cwd: &Path) -> Option<String> {
         return None;
     }
 
-    let path = PathBuf::from(arg);
+    let path = PathBuf::from(super::launch_args::normalize_launch_path_arg(arg)?);
     if !is_db_file_path(&path) {
         return None;
     }
@@ -89,6 +89,13 @@ mod tests {
         let paths = db_file_paths_from_args(["data/mydb.db"], Path::new("/work"));
 
         assert_eq!(paths, vec!["/work/data/mydb.db"]);
+    }
+
+    #[test]
+    fn accepts_db_file_args_passed_as_file_urls() {
+        let paths = db_file_paths_from_args(["file:///tmp/a.db", "file:///tmp/my%20data.sqlite"], Path::new("/work"));
+
+        assert_eq!(paths, vec!["/tmp/a.db", "/tmp/my data.sqlite"]);
     }
 
     #[test]

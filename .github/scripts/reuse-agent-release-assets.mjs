@@ -1,29 +1,24 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const REGISTRY_ASSET = "agent-registry.json";
-const NATIVE_MODULES = new Set(["duckdb", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2"]);
-const PLATFORMS = [
-  "macos-aarch64",
-  "macos-x64",
-  "linux-aarch64",
-  "linux-x64",
-  "windows-aarch64",
-  "windows-x64",
-];
+const NATIVE_MODULES = new Set(["duckdb", "oracle", "oracle-oci", "xugu", "kingbase", "iotdb", "neo4j", "nebula", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2"]);
+// Native modules that intentionally publish a subset of the six platforms. The
+// Oracle OCI ("thick") agent links the Oracle Client through CGO and is built
+// for Windows x64 only, so a reused release must cover exactly that platform —
+// requiring all six would reject a perfectly complete release.
+const NATIVE_MODULE_PLATFORMS = {
+  "oracle-oci": ["windows-x64"],
+};
+const PLATFORMS = ["macos-aarch64", "macos-x64", "linux-aarch64", "linux-x64", "windows-aarch64", "windows-x64"];
+
+function expectedNativePlatforms(moduleName) {
+  return [...(NATIVE_MODULE_PLATFORMS[moduleName] ?? PLATFORMS)].sort();
+}
 
 function artifactFilename(url) {
   return basename(url.split(/[?#]/, 1)[0]);
@@ -78,12 +73,11 @@ export function collectReusableAssetPlan({ registry, release, versions, modules,
 
     const nativePlatforms = Object.keys(driver.native ?? {}).sort();
     if (NATIVE_MODULES.has(moduleName)) {
-      const missingPlatforms = PLATFORMS.filter((platform) => !nativePlatforms.includes(platform));
-      const extraPlatforms = nativePlatforms.filter((platform) => !PLATFORMS.includes(platform));
+      const expectedPlatforms = expectedNativePlatforms(moduleName);
+      const missingPlatforms = expectedPlatforms.filter((platform) => !nativePlatforms.includes(platform));
+      const extraPlatforms = nativePlatforms.filter((platform) => !expectedPlatforms.includes(platform));
       if (missingPlatforms.length > 0 || extraPlatforms.length > 0) {
-        throw new Error(
-          `Previous native artifacts are incomplete for ${moduleName}: missing=${missingPlatforms.join(",") || "none"}, extra=${extraPlatforms.join(",") || "none"}`,
-        );
+        throw new Error(`Previous native artifacts are incomplete for ${moduleName}: missing=${missingPlatforms.join(",") || "none"}, extra=${extraPlatforms.join(",") || "none"}`);
       }
     }
 
@@ -107,9 +101,7 @@ export function collectReusableAssetPlan({ registry, release, versions, modules,
       const missingPlatforms = PLATFORMS.filter((platform) => !platforms.includes(platform));
       const extraPlatforms = platforms.filter((platform) => !PLATFORMS.includes(platform));
       if (missingPlatforms.length > 0 || extraPlatforms.length > 0) {
-        throw new Error(
-          `Previous JRE ${jreKey} artifacts are incomplete: missing=${missingPlatforms.join(",") || "none"}, extra=${extraPlatforms.join(",") || "none"}`,
-        );
+        throw new Error(`Previous JRE ${jreKey} artifacts are incomplete: missing=${missingPlatforms.join(",") || "none"}, extra=${extraPlatforms.join(",") || "none"}`);
       }
       for (const platform of platforms) {
         jreAssets.push({
@@ -198,13 +190,17 @@ export function extractReusableDriverPackages({ packagesDir, outputDir, versions
 
     const javaName = `dbx-agent-${moduleName}-${releaseVersion}.tar.zst`;
     if (filenames.has(javaName)) {
-      extractRawDriver(join(packagesDir, javaName), {
-        name: javaName,
-        moduleName,
-        kind: "jar",
-        platform: "",
-        releaseVersion,
-      }, outputDir);
+      extractRawDriver(
+        join(packagesDir, javaName),
+        {
+          name: javaName,
+          moduleName,
+          kind: "jar",
+          platform: "",
+          releaseVersion,
+        },
+        outputDir,
+      );
       extracted += 1;
     }
 
@@ -213,17 +209,21 @@ export function extractReusableDriverPackages({ packagesDir, outputDir, versions
       const nativeName = `dbx-agent-${moduleName}-${releaseVersion}-${platform}.tar.zst`;
       if (!filenames.has(nativeName)) continue;
       nativePlatforms.push(platform);
-      extractRawDriver(join(packagesDir, nativeName), {
-        name: nativeName,
-        moduleName,
-        kind: "native",
-        platform,
-        releaseVersion,
-      }, outputDir);
+      extractRawDriver(
+        join(packagesDir, nativeName),
+        {
+          name: nativeName,
+          moduleName,
+          kind: "native",
+          platform,
+          releaseVersion,
+        },
+        outputDir,
+      );
       extracted += 1;
     }
 
-    if (NATIVE_MODULES.has(moduleName) && nativePlatforms.length !== PLATFORMS.length) {
+    if (NATIVE_MODULES.has(moduleName) && nativePlatforms.length !== expectedNativePlatforms(moduleName).length) {
       throw new Error(`Reusable native package set is incomplete for ${moduleName}.`);
     }
     if (!filenames.has(javaName) && nativePlatforms.length === 0) {
@@ -241,23 +241,7 @@ function gh(args, options = {}) {
 
 function downloadReleaseAssets(assets, downloadDir) {
   if (assets.length === 0) return;
-  const args = [
-    "--fail",
-    "--location",
-    "--silent",
-    "--show-error",
-    "--retry",
-    "5",
-    "--retry-all-errors",
-    "--retry-delay",
-    "2",
-    "--connect-timeout",
-    "30",
-    "--parallel",
-    "--parallel-immediate",
-    "--parallel-max",
-    "6",
-  ];
+  const args = ["--fail", "--location", "--silent", "--show-error", "--retry", "5", "--retry-all-errors", "--retry-delay", "2", "--connect-timeout", "30", "--parallel", "--parallel-immediate", "--parallel-max", "6"];
   for (const asset of assets) {
     if (!asset.browser_download_url) {
       throw new Error(`GitHub release asset is missing browser_download_url: ${asset.name}`);
@@ -347,7 +331,10 @@ function main() {
     }));
 
     if (plannedAssets.length > 0) {
-      downloadReleaseAssets(plannedAssets.map((asset) => asset.releaseAsset), downloadDir);
+      downloadReleaseAssets(
+        plannedAssets.map((asset) => asset.releaseAsset),
+        downloadDir,
+      );
     }
 
     for (const asset of plannedAssets) {

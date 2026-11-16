@@ -1,0 +1,8 @@
+schema_version = 1
+
+[package]
+include = ["assets", "ui"]
+
+[dev]
+ui_build = ["npm", "run", "build"]
+ui_watch = ["npm", "run", "build:watch"]

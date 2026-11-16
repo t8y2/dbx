@@ -106,7 +106,7 @@ function activeTransferStorageValue(transferId: string): string {
 
 export function isDetachedTabWindow(): boolean {
   if (typeof window === "undefined") return false;
-  if (new URLSearchParams(window.location.search).has(DETACHED_TAB_QUERY)) return true;
+  if (new URLSearchParams(window.location?.search).has(DETACHED_TAB_QUERY)) return true;
   try {
     return window.sessionStorage.getItem(DETACHED_TAB_WINDOW_SESSION_KEY) === "1";
   } catch {
@@ -250,7 +250,7 @@ export async function tabWindowAtCursor(): Promise<string | null> {
     windows
       // The native preview follows the cursor, so it would always win this hit
       // test unless it is explicitly excluded from transferable destinations.
-      .filter((window) => window.label !== sourceWindowLabel && !window.label.startsWith(TAB_DRAG_PREVIEW_WINDOW_PREFIX))
+      .filter((window) => window.label !== sourceWindowLabel && isTransferableTabWindowLabel(window.label))
       .map(async (window) => {
         try {
           const [position, size, focused] = await Promise.all([window.outerPosition(), window.outerSize(), window.isFocused()]);
@@ -342,20 +342,20 @@ export async function sendTabWindowInfoResponse(targetWindowLabel: string, paylo
 
 export async function listenForTabWindowTransfer(handler: (payload: TabWindowTransferPayload) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => {};
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<TabWindowTransferPayload>(TAB_WINDOW_TRANSFER_EVENT, (event) => handler(event.payload));
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  return getCurrentWebviewWindow().listen<TabWindowTransferPayload>(TAB_WINDOW_TRANSFER_EVENT, (event) => handler(event.payload));
 }
 
 export async function listenForTabWindowInfoRequest(handler: (payload: TabWindowInfoRequest) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => {};
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<TabWindowInfoRequest>(TAB_WINDOW_INFO_REQUEST_EVENT, (event) => handler(event.payload));
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  return getCurrentWebviewWindow().listen<TabWindowInfoRequest>(TAB_WINDOW_INFO_REQUEST_EVENT, (event) => handler(event.payload));
 }
 
 export async function listenForTabWindowInfoResponse(handler: (payload: TabWindowInfoResponse) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => {};
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<TabWindowInfoResponse>(TAB_WINDOW_INFO_RESPONSE_EVENT, (event) => handler(event.payload));
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  return getCurrentWebviewWindow().listen<TabWindowInfoResponse>(TAB_WINDOW_INFO_RESPONSE_EVENT, (event) => handler(event.payload));
 }
 
 export async function emitTabWindowDragPreview(payload: TabWindowDragPreviewPayload): Promise<void> {

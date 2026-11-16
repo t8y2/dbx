@@ -16,6 +16,7 @@ import {
   parseRedisJsonDetail,
   preferredRedisValueFormat,
   redisClipboardSafeText,
+  redisHashRowCopyText,
   redisMemberCopyText,
   redisValueCopyText,
 } from "../../apps/desktop/src/lib/redis/redisValuePresentation.ts";
@@ -318,3 +319,32 @@ test("renders JSON values as YAML and XML text", () => {
   assert.equal(jsonToYamlText({ id: 1, tags: ["a", "b"] }), "id: 1\ntags:\n  - a\n  - b\n");
   assert.equal(jsonToXmlText({ id: 1 }), '<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <id>1</id>\n</root>');
 });
+
+test("copies hash row field, value, and field+value targets", () => {
+  const field = blobFromText("1653624095260016668");
+  const value = blobFromText("S");
+
+  assert.equal(redisHashRowCopyText(field, value, "field"), "1653624095260016668");
+  assert.equal(redisHashRowCopyText(field, value, "value"), "S");
+  assert.equal(redisHashRowCopyText(field, value, "fieldValue"), "1653624095260016668\tS");
+});
+
+test("escapes clipboard-unsafe controls in hash row copies", () => {
+  const field = blobFromText("name\x00suffix");
+  const value = blobFromText("Ada");
+
+  assert.equal(redisHashRowCopyText(field, value, "field"), "name\\x00suffix");
+  assert.equal(redisHashRowCopyText(field, value, "fieldValue"), "name\\x00suffix\tAda");
+});
+
+test("copies plain string hash rows without JSON reformatting", () => {
+  assert.equal(redisHashRowCopyText('{"id":1}', "1", "field"), '{"id":1}');
+  assert.equal(redisHashRowCopyText('{"id":1}', "1", "fieldValue"), '{"id":1}\t1');
+});
+
+test("copies the value target without resolving the field", () => {
+  // The default row copy must stay a pure value read: a hash row always has a
+  // field, but the value path must not depend on the field being copyable.
+  assert.equal(redisHashRowCopyText(undefined, blobFromText("S"), "value"), "S");
+});
+

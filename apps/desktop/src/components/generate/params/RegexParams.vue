@@ -5,6 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
+import { generateRegexValue } from "@/lib/dataGrid/regexGenerate";
 import CommonOptions from "./CommonOptions.vue";
 import { useI18n } from "vue-i18n";
 
@@ -15,21 +16,11 @@ const { t } = useI18n();
 const previewKey = ref(0);
 const previewVal = computed(() => {
   void previewKey.value;
-  const p = props.params.pattern ?? "";
-  if (!p) return t("dataGenerate.notSet");
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  try {
-    const regex = new RegExp("^" + p + "$");
-    let attempt = "";
-    for (let i = 0; i < 100; i++) {
-      const len = p.includes("{") ? parseInt(p.match(/\{(\d+)/)?.[1] ?? "10") : 10;
-      attempt = Array.from({ length: Math.min(len, 50) }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-      if (regex.test(attempt)) return attempt;
-    }
-    return attempt || t("dataGenerate.noMatch");
-  } catch {
-    return t("dataGenerate.invalidRegex");
-  }
+  const result = generateRegexValue(props.params.pattern, props.params.rawPattern);
+  if (result.status === "ok") return result.value;
+  if (result.status === "empty") return t("dataGenerate.notSet");
+  if (result.status === "invalid") return t("dataGenerate.invalidRegex");
+  return t("dataGenerate.noMatch");
 });
 
 function refresh() {

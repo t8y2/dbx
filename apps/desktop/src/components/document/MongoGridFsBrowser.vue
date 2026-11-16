@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ArrowDown, ArrowUp, ArrowUpDown, Filter, FolderOpen, Plus, RefreshCcw, Trash2, X } from "@lucide/vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -10,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import { currentGridFsBucketFilter, currentGridFsBucketSort, currentGridFsBucketSortDirection, gridFsBucketSortInputForColumn } from "@/lib/document/gridFsBrowser";
+import { restoreGridFsBrowserState, saveGridFsBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useQueryStore } from "@/stores/queryStore";
@@ -17,7 +18,16 @@ import { useQueryStore } from "@/stores/queryStore";
 const props = defineProps<{
   connectionId: string;
   database: string;
+  /** Tab id; query conditions and the listing are cached per tab. */
+  stateKey?: string;
 }>();
+
+type GridFsBucket = Awaited<ReturnType<typeof api.documentListGridFsBuckets>>[number];
+
+// ContentArea renders only the active tab, so this component is unmounted on
+// every tab switch. Without the per-tab cache, coming back re-lists every
+// bucket and drops the user's filter/sort (#8679).
+const restoredGridFsState = props.stateKey ? restoreGridFsBrowserState<GridFsBucket>(props.stateKey) : undefined;
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -28,13 +38,13 @@ const loading = ref(false);
 const creating = ref(false);
 const deleting = ref(false);
 const error = ref("");
-const buckets = ref<Awaited<ReturnType<typeof api.documentListGridFsBuckets>>>([]);
-const selectedBucketName = ref("");
+const buckets = ref<GridFsBucket[]>([]);
+const selectedBucketName = ref(restoredGridFsState?.selectedId ?? "");
 const showCreateDialog = ref(false);
 const showDeleteConfirm = ref(false);
 const newBucketName = ref("");
-const filterInput = ref("");
-const sortInput = ref("");
+const filterInput = ref(restoredGridFsState?.filterInput ?? "");
+const sortInput = ref(restoredGridFsState?.sortInput ?? "");
 const filterBuilderOpen = ref(false);
 
 const selectedBucket = computed(() => buckets.value.find((bucket) => bucket.name === selectedBucketName.value) || null);
@@ -49,12 +59,42 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function gridFsSignature(): string {
+  return JSON.stringify([props.connectionId, props.database, filterInput.value, sortInput.value]);
+}
+
+// Rows are only replayed when the conditions that produced them still match, so
+// an edit made while a listing was in flight can never pair new conditions with
+// stale rows on the next remount.
+let loadedGridFsSignature: string | undefined;
+if (restoredGridFsState?.rows && restoredGridFsState.signature === gridFsSignature()) {
+  buckets.value = restoredGridFsState.rows;
+  loadedGridFsSignature = restoredGridFsState.signature;
+}
+const restoredGridFsBuckets = loadedGridFsSignature !== undefined;
+
+function persistGridFsState(options: { includeRows?: boolean } = {}) {
+  if (!props.stateKey) return;
+  const signature = gridFsSignature();
+  const keepRows = options.includeRows === true && !loading.value && !error.value && loadedGridFsSignature === signature;
+  saveGridFsBrowserState(props.stateKey, {
+    filterInput: filterInput.value,
+    sortInput: sortInput.value,
+    selectedId: selectedBucketName.value,
+    signature: keepRows ? signature : undefined,
+    rows: keepRows ? toRaw(buckets.value) : undefined,
+  });
+}
+
+watch([filterInput, sortInput, selectedBucketName], () => persistGridFsState());
+
 async function loadBuckets() {
   loading.value = true;
   error.value = "";
   try {
     const nextBuckets = await api.documentListGridFsBuckets(props.connectionId, props.database, currentGridFsBucketFilter(filterInput.value), currentGridFsBucketSort(sortInput.value));
     buckets.value = nextBuckets;
+    loadedGridFsSignature = gridFsSignature();
     if (selectedBucketName.value && !nextBuckets.some((bucket) => bucket.name === selectedBucketName.value)) {
       selectedBucketName.value = "";
     }
@@ -148,7 +188,12 @@ async function deleteBucket() {
 }
 
 onMounted(() => {
-  void loadBuckets();
+  // A restored listing means the tab switch costs no round trip; every explicit
+  // refresh and mutation path still calls loadBuckets().
+  if (!restoredGridFsBuckets) void loadBuckets();
+});
+onBeforeUnmount(() => {
+  persistGridFsState({ includeRows: true });
 });
 </script>
 

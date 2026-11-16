@@ -7,16 +7,33 @@ public final class ForeignKeyInfo {
     private String column;
     private String ref_table;
     private String ref_column;
+    private String ref_schema;
+    private String on_delete;
 
     public ForeignKeyInfo() {
         this("", "", "", "");
     }
 
     public ForeignKeyInfo(String name, String column, String ref_table, String ref_column) {
+        this(name, column, ref_table, ref_column, null, null);
+    }
+
+    public ForeignKeyInfo(String name, String column, String ref_table, String ref_column,
+                          String ref_schema, String on_delete) {
         this.name = name;
         this.column = column;
         this.ref_table = ref_table;
         this.ref_column = ref_column;
+        this.ref_schema = ref_schema;
+        this.on_delete = on_delete;
+    }
+
+    public String getRef_schema() {
+        return ref_schema;
+    }
+
+    public String getOn_delete() {
+        return on_delete;
     }
 
     public String getName() {
@@ -59,12 +76,14 @@ public final class ForeignKeyInfo {
         return Objects.equals(name, that.name)
             && Objects.equals(column, that.column)
             && Objects.equals(ref_table, that.ref_table)
-            && Objects.equals(ref_column, that.ref_column);
+            && Objects.equals(ref_column, that.ref_column)
+            && Objects.equals(ref_schema, that.ref_schema)
+            && Objects.equals(on_delete, that.on_delete);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, column, ref_table, ref_column);
+        return Objects.hash(name, column, ref_table, ref_column, ref_schema, on_delete);
     }
 
     @Override

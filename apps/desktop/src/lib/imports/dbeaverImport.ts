@@ -2,6 +2,7 @@ import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/data
 import { uuid } from "@/lib/common/utils";
 import { JDBCX_JDBC_DRIVER_CLASS } from "@/lib/database/jdbcxBuiltinDriver";
 import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -47,6 +48,7 @@ const profileMap: Record<string, ConnectionProfile> = {
   sqlserver: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
   mssql: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
   oracle: { dbType: "oracle", profile: "oracle", label: "Oracle", port: 1521, user: "system" },
+  db2: { dbType: "db2", profile: "db2", label: "IBM DB2", port: 50000, user: "db2inst1" },
   clickhouse: { dbType: "clickhouse", profile: "clickhouse", label: "ClickHouse", port: 8123, user: "default" },
   duckdb: { dbType: "duckdb", profile: "duckdb", label: "DuckDB", port: 0, user: "" },
   mongodb: { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
@@ -79,6 +81,15 @@ function getString(value: unknown) {
 function getNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+// DBeaver's own driver id (e.g. "db2", "mysql8") is a short internal registry
+// key, not a Java class name; passing it straight to the JDBC agent as
+// `jdbc_driver_class` makes it try `Class.forName("db2")` and fail with
+// ClassNotFoundException. Only fall back to it when it is actually
+// package-qualified, which is how DBeaver identifies genuinely custom drivers.
+function looksLikeJdbcDriverClassName(value: string) {
+  return /^[a-zA-Z_$][\w$]*(\.[a-zA-Z_$][\w$]*)+$/.test(value);
 }
 
 function firstNonEmptyString(...values: unknown[]) {
@@ -254,11 +265,11 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     color: getString(config.color || config["connection-color"]),
     transport_layers: [],
     connect_timeout_secs: 10,
-    query_timeout_secs: 30,
+    query_timeout_secs: DEFAULT_QUERY_TIMEOUT_SECS,
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsedUrl.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? url || undefined : undefined,
-    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || (profile.profile === "jdbcx" ? JDBCX_JDBC_DRIVER_CLASS : entry.driver)) || undefined : undefined,
+    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || (profile.profile === "jdbcx" ? JDBCX_JDBC_DRIVER_CLASS : looksLikeJdbcDriverClassName(getString(entry.driver)) ? entry.driver : undefined)) || undefined : undefined,
     jdbc_driver_paths: [],
   };
 

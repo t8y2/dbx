@@ -79,7 +79,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     /**
      * Wrap {@link AbstractJdbcAgent#resultValue} so PostGIS-style {@code geometry}
      * and {@code geography} columns are decoded into WKT (matching the native
-     * tokio_postgres path in {@code crates/dbx-core/src/db/postgres.rs}).
+     * tokio_postgres path in {@code crates/dbx-driver-postgres/src/postgres.rs}).
      */
     private JdbcExecutor.ColumnAwareResultValueReader geometryAwareResolver() {
         return (rs, index, sqlType, columnTypeName) -> {
@@ -206,7 +206,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(
                 "SELECT p.proname AS routine_name, " +
@@ -280,12 +280,13 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             // Table comment is optional; DDL generation should still succeed without it.
         }
 
+        List<ColumnInfo> columns = attributeCache == null
+            ? getColumns(schema, table)
+            : getColumns(schema, table, attributeCache);
         return DdlBuilder.buildTableDdl(
             schema,
             table,
-            attributeCache == null
-                ? getColumns(schema, table)
-                : getColumns(schema, table, attributeCache),
+            postgresDdlColumns(columns),
             indexes,
             foreignKeys,
             checkConstraints,
@@ -405,11 +406,21 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             Set<String> primaryKeys = primaryKeys(schema, table, attributeCache);
             List<ColumnInfo> result = new ArrayList<>();
+            // Legacy serial columns own their sequence with an AUTO ('a') dependency;
+            // identity columns use an INTERNAL ('i') dependency and stay unmarked.
             String sql = "SELECT a.attname AS column_name, " +
                 profile.catalogBuiltinFunction("format_type") + "(a.atttypid, a.atttypmod) AS data_type, " +
                 "NOT a.attnotnull AS is_nullable, " +
                 profile.catalogPrefixedFunction("get_expr") + "(ad.adbin, ad.adrelid) AS column_default, " +
                 profile.catalogBuiltinFunction("col_description") + "(a.attrelid, a.attnum) AS column_comment, " +
+                "CASE WHEN a.atttypid IN (20, 21, 23) AND serial_seq.oid IS NOT NULL " +
+                "AND " + profile.catalogPrefixedFunction("get_expr") + "(ad.adbin, ad.adrelid) = " +
+                "format('nextval(%L::regclass)', serial_seq.oid::regclass::text) " +
+                "THEN CASE a.atttypid " +
+                "WHEN 21 THEN 'smallserial' " +
+                "WHEN 23 THEN 'serial' " +
+                "WHEN 20 THEN 'bigserial' " +
+                "END ELSE NULL END AS column_extra, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
                 "THEN ((a.atttypmod - 4) >> 16) & 65535 ELSE NULL END AS numeric_precision, " +
                 "CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 " +
@@ -421,6 +432,24 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                 "JOIN " + profile.catalogRelation("class") + " c ON c.oid = a.attrelid " +
                 "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = c.relnamespace " +
                 "LEFT JOIN " + profile.catalogRelation("attrdef") + " ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum " +
+                "LEFT JOIN " + profile.catalogRelation("class") + " serial_seq ON serial_seq.oid = (" +
+                "SELECT sequence_dep.objid " +
+                "FROM " + profile.catalogRelation("depend") + " sequence_dep " +
+                "JOIN " + profile.catalogRelation("class") + " sequence_class " +
+                "ON sequence_class.oid = sequence_dep.objid AND sequence_class.relkind = 'S' " +
+                "WHERE sequence_dep.classid = " + catalogRegclass("class") + " " +
+                "AND sequence_dep.objsubid = 0 " +
+                "AND sequence_dep.refclassid = " + catalogRegclass("class") + " " +
+                "AND sequence_dep.refobjid = a.attrelid AND sequence_dep.refobjsubid = a.attnum " +
+                "AND sequence_dep.deptype = 'a' AND EXISTS (" +
+                "SELECT 1 FROM " + profile.catalogRelation("depend") + " serial_default_dep " +
+                "WHERE serial_default_dep.classid = " + catalogRegclass("attrdef") + " " +
+                "AND serial_default_dep.objid = ad.oid AND serial_default_dep.objsubid = 0 " +
+                "AND serial_default_dep.refclassid = " + catalogRegclass("class") + " " +
+                "AND serial_default_dep.refobjid = sequence_dep.objid " +
+                "AND serial_default_dep.refobjsubid = 0 AND serial_default_dep.deptype = 'n'" +
+                ") ORDER BY sequence_dep.objid LIMIT 1) " +
+                "AND serial_seq.relkind = 'S' " +
                 "WHERE n.nspname = ? AND c.relname = ? " +
                 "AND a.attnum > 0 AND NOT a.attisdropped " +
                 "ORDER BY a.attnum";
@@ -436,7 +465,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                             rs.getBoolean("is_nullable"),
                             rs.getString("column_default"),
                             primaryKeys.contains(colName),
-                            null,
+                            rs.getString("column_extra"),
                             rs.getString("column_comment"),
                             intObject(rs, "numeric_precision"),
                             intObject(rs, "numeric_scale"),
@@ -542,11 +571,16 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             // dropped; their text comes from pg_get_indexdef instead of a.attname, and
             // is_expression records which case applied so Rust never has to guess from
             // characters in the text (#6312 review).
+            // `a.attname::text` keeps the cast: a bare COALESCE(name, text) resolves to
+            // `name`, which truncates an expression key part to 63 bytes (NAMEDATALEN - 1)
+            // and makes the rebuilt CREATE INDEX invalid (#9988).
             Map<String, IndexBuilder> byName = new LinkedHashMap<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
                 "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
-                "COALESCE(a.attname, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
-                "(a.attname IS NULL) AS is_expression " +
+                "COALESCE(a.attname::text, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
+                "(a.attname IS NULL) AS is_expression, " +
+                "array_length(ix.indoption, 1) AS nkeyatts, k.n AS key_position, " +
+                "ix.indoption[(k.n - 1)::int] AS key_option " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
                 "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +
                 "JOIN " + profile.catalogRelation("class") + " i ON i.oid = ix.indexrelid " +
@@ -569,24 +603,36 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                             indexName,
                             name -> new IndexBuilder(name, indexType, isUnique, isPrimary)
                         );
-                        builder.columns.add(rs.getString("column_text"));
+                        String columnText = rs.getString("column_text");
+                        if (rs.getObject("nkeyatts") != null && rs.getObject("key_position") != null
+                            && rs.getInt("key_position") > rs.getInt("nkeyatts")) {
+                            builder.includedColumns.add(columnText);
+                            continue;
+                        }
+                        builder.columns.add(columnText);
                         builder.keyIsExpression.add(rs.getBoolean("is_expression"));
+                        Object keyOption = rs.getObject("key_option");
+                        if (keyOption != null) {
+                            builder.keyOptions.add(rs.getInt("key_option"));
+                        }
                     }
                 }
             }
             List<IndexInfo> result = new ArrayList<>();
             for (IndexBuilder builder : byName.values()) {
-                result.add(new IndexInfo(
+                IndexInfo index = new IndexInfo(
                     builder.name,
                     builder.columns,
                     builder.isUnique,
                     builder.isPrimary,
                     null,
                     builder.indexType,
-                    null,
+                    builder.includedColumns.isEmpty() ? null : builder.includedColumns,
                     null,
                     builder.keyIsExpression
-                ));
+                );
+                index.setKey_options(builder.keyOptions);
+                result.add(index);
             }
             return result;
         });
@@ -598,8 +644,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         private final boolean isUnique;
         private final boolean isPrimary;
         private final List<String> columns = new ArrayList<>();
+        private final List<String> includedColumns = new ArrayList<>();
         private final List<Boolean> keyIsExpression = new ArrayList<>();
-
+        private final List<Integer> keyOptions = new ArrayList<>();
         private IndexBuilder(String name, String indexType, boolean isUnique, boolean isPrimary) {
             this.name = name;
             this.indexType = indexType;
@@ -1087,6 +1134,52 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
 
     private String quoteQualifiedIdentifier(String schema, String name) {
         return quoteIdentifier(schema) + "." + quoteIdentifier(name);
+    }
+
+    private String catalogRegclass(String relation) {
+        return "'" + profile.catalogRelation(relation) + "'::regclass";
+    }
+
+    /**
+     * PostgreSQL reports legacy serial columns as their integer type plus a
+     * sequence default. Convert only the positively identified markers for
+     * table DDL, keeping the generic DDL builder unchanged for other agents.
+     */
+    private static List<ColumnInfo> postgresDdlColumns(List<ColumnInfo> columns) {
+        List<ColumnInfo> result = new ArrayList<>(columns.size());
+        for (ColumnInfo column : columns) {
+            String serialType = serialType(column.getExtra());
+            if (serialType == null) {
+                result.add(column);
+                continue;
+            }
+            result.add(new ColumnInfo(
+                column.getName(),
+                serialType,
+                column.getIs_nullable(),
+                null,
+                column.getIs_primary_key(),
+                null,
+                column.getComment(),
+                column.getNumeric_precision(),
+                column.getNumeric_scale(),
+                column.getCharacter_maximum_length(),
+                column.getCharacter_set(),
+                column.getCollation()
+            ));
+        }
+        return result;
+    }
+
+    private static String serialType(String extra) {
+        if (extra == null) {
+            return null;
+        }
+        String normalized = extra.trim().toLowerCase(Locale.ROOT);
+        if ("smallserial".equals(normalized) || "serial".equals(normalized) || "bigserial".equals(normalized)) {
+            return normalized;
+        }
+        return null;
     }
 
     private static Integer intObject(ResultSet rs, String column) throws Exception {

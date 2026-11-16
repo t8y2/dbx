@@ -11,6 +11,8 @@ export interface ObjectBrowserRowsCacheScope {
   database: string;
   schema: string;
   catalog?: string;
+  oracleTriggerContract?: 1;
+  exactIdentity?: boolean;
 }
 
 export interface ObjectBrowserRowsCacheWriteToken {
@@ -37,12 +39,31 @@ function objectBrowserRowsScope(scope: ObjectBrowserRowsCacheScope): MetadataSco
     connectionId: scope.connectionId,
     database: scope.database,
     schema: scope.schema,
-    extra: scope.catalog ? { catalog: scope.catalog } : undefined,
+    extra:
+      scope.catalog || scope.exactIdentity || scope.oracleTriggerContract !== undefined ? { catalog: scope.catalog, ...(scope.exactIdentity ? { exactIdentity: true } : {}), ...(scope.oracleTriggerContract !== undefined ? { oracleTriggerContract: scope.oracleTriggerContract } : {}) } : undefined,
   };
 }
 
 function cloneRows(rows: readonly ObjectBrowserRow[]): ObjectBrowserRow[] {
-  return rows.map((row) => ({ ...row }));
+  return rows.map((row) => {
+    if (!row.trigger) return { ...row };
+    const metadata = row.trigger.oracle_metadata;
+    return {
+      ...row,
+      trigger: {
+        ...row.trigger,
+        oracle_metadata: metadata
+          ? {
+              ...metadata,
+              parent: metadata.parent ? { ...metadata.parent } : metadata.parent,
+              definition: metadata.definition ? { ...metadata.definition } : metadata.definition,
+              errors: metadata.errors?.map((error) => ({ ...error })) ?? metadata.errors,
+              reads: Object.fromEntries(Object.entries(metadata.reads).map(([field, value]) => [field, value ? { ...value } : value])),
+            }
+          : metadata,
+      },
+    };
+  });
 }
 
 function objectBrowserRowsCacheGeneration(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheGeneration {
@@ -76,6 +97,28 @@ function objectBrowserRowsCacheInvalidation(match: MetadataCacheInvalidation): M
 export function getCachedObjectBrowserRows(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRow[] | undefined {
   const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope));
   return hit ? cloneRows(hit.value) : undefined;
+}
+
+export interface ObjectBrowserRowsCacheHit {
+  rows: ObjectBrowserRow[];
+  stale: boolean;
+  ageMs: number;
+  cachedAt: number;
+}
+
+/**
+ * Reads the cached rows for a scope as a **scaffold**, allowing stale entries
+ * (beyond the TTL) to be surfaced and refreshed in the background. This never
+ * adds a new cache entry or expands capacity — a stale hit is the same Map entry
+ * the TTL would otherwise refuse to return, only now with its freshness metadata.
+ *
+ * Carries `stale`/`ageMs`/`cachedAt` so the caller can decide: keep an entry
+ * under TTL as-is, or present it immediately then revalidate in the background.
+ */
+export function getCachedObjectBrowserRowsForScaffold(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheHit | undefined {
+  const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope), { allowStale: true });
+  if (!hit) return undefined;
+  return { rows: cloneRows(hit.value), stale: hit.stale, ageMs: hit.ageMs, cachedAt: hit.cachedAt };
 }
 
 export function createObjectBrowserRowsCacheWriteToken(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheWriteToken {

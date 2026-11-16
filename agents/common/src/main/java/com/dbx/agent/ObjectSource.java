@@ -8,6 +8,8 @@ public final class ObjectSource {
     private String schema;
     private String source;
     private boolean editable;
+    private TriggerInfo trigger;
+    private transient String sourceOrigin;
 
     public ObjectSource() {
         this("", "", null, "", true);
@@ -49,6 +51,14 @@ public final class ObjectSource {
         return editable;
     }
 
+    public String getSourceOrigin() {
+        return sourceOrigin;
+    }
+
+    public void setSourceOrigin(String sourceOrigin) {
+        this.sourceOrigin = sourceOrigin;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -69,6 +79,14 @@ public final class ObjectSource {
         this.editable = editable;
     }
 
+    public TriggerInfo getTrigger() {
+        return trigger;
+    }
+
+    public void setTrigger(TriggerInfo trigger) {
+        this.trigger = trigger;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -78,12 +96,13 @@ public final class ObjectSource {
             && Objects.equals(object_type, that.object_type)
             && Objects.equals(schema, that.schema)
             && Objects.equals(source, that.source)
-            && editable == that.editable;
+            && editable == that.editable
+            && Objects.equals(trigger, that.trigger);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, object_type, schema, source, editable);
+        return Objects.hash(name, object_type, schema, source, editable, trigger);
     }
 
     @Override

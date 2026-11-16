@@ -1,4 +1,5 @@
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 // pi-lens-ignore: typescript:2307
 import type { KeyBinding } from "@codemirror/view";
@@ -9,7 +10,22 @@ interface QueryEditorSearchKeymapOptions {
   isReadOnly: () => boolean;
 }
 
-export function createQueryEditorSearchKeymap(options: QueryEditorSearchKeymapOptions): KeyBinding[] {
+/**
+ * CodeMirror key for the built-in replace fallback (the non-configurable alias
+ * that keeps replace reachable when the user clears the `replace` shortcut).
+ *
+ * macOS must not bind `Mod-h`: ⌘H is the system-wide Hide-App shortcut, and
+ * because this binding calls `preventDefault()` the event never reaches AppKit,
+ * so the menu's Hide key equivalent cannot fire and DBX becomes impossible to
+ * hide with the standard shortcut (#9068). macOS therefore uses the platform's
+ * conventional find-and-replace key — ⌥⌘F, as in VS Code and TextEdit —
+ * while Windows/Linux keep Ctrl+H.
+ */
+export function replaceFallbackKey(platform = globalThis.navigator?.platform || ""): string {
+  return isMacShortcutPlatform(platform) ? "Alt-Mod-f" : "Mod-h";
+}
+
+export function createQueryEditorSearchKeymap(options: QueryEditorSearchKeymapOptions, platform = globalThis.navigator?.platform || ""): KeyBinding[] {
   return [
     {
       key: "Mod-f",
@@ -17,7 +33,7 @@ export function createQueryEditorSearchKeymap(options: QueryEditorSearchKeymapOp
       run: options.openSearch,
     },
     {
-      key: "Mod-h",
+      key: replaceFallbackKey(platform),
       preventDefault: true,
       // Consume the shortcut in previews without exposing mutation controls.
       run: () => options.isReadOnly() || options.openReplace(),

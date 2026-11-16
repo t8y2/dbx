@@ -22,6 +22,7 @@ interface SchemaDiffTableListCoordinatorOptions {
   getIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity;
   setTables(side: SchemaDiffTableSide, tables: TableInfo[]): void;
   onSourceTablesLoaded?(tables: TableInfo[]): void;
+  onTargetTablesLoaded?(tables: TableInfo[]): void;
 }
 
 function identityKey(identity: SchemaDiffTableIdentity): string {
@@ -89,6 +90,7 @@ export function createSchemaDiffTableListCoordinator(options: SchemaDiffTableLis
 
         options.setTables(side, tables);
         if (side === "source") options.onSourceTablesLoaded?.(tables);
+        else options.onTargetTablesLoaded?.(tables);
         return true;
       } catch {
         if (generation === generations[side] && sameSchemaDiffTableIdentity(identity, options.getIdentity(side))) {

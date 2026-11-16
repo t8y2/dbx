@@ -84,6 +84,7 @@ Every production write requires a new explicit decision. Confirmation is not per
 | Data grid | Disables or rejects saves, deletes, and other mutations until the same unlock window is confirmed | Row saves and deletes enter the shared production confirmation flow |
 | Table structure and object actions | Hides or disables recognizable mutation entry points until the unlock window is confirmed | DDL, source saves, and database administration enter the shared confirmation flow |
 | Schema diff, SQL files, and data generation | Cannot write to a read-only target | Generated SQL or scripts require production confirmation before execution |
+| Data Transfer | Cannot target a read-only connection; **Drop Target Before Create** is blocked on production databases | Dangerous table-replacement operations require explicit confirmation and show DROP SQL preview |
 | Redis, MongoDB, etcd, message queues, and similar systems | Rechecks read-only state for system-specific commands and actions | Mutation entry points remain subject to production and specialized danger rules |
 | AI Ask | Does not execute SQL | Does not execute SQL |
 | AI Agent | Cannot bypass read-only state | Returns production SQL to the editor for human review and manual execution |

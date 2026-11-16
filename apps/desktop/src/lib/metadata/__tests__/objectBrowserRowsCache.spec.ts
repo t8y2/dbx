@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { reactive } from "vue";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
-import { cacheObjectBrowserRows, clearObjectBrowserRowsCache, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import { cacheObjectBrowserRows, clearObjectBrowserRowsCache, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, getCachedObjectBrowserRowsForScaffold, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 
 const row: ObjectBrowserRow = {
   id: "table:users",
@@ -42,6 +43,53 @@ describe("objectBrowserRowsCache", () => {
     cached[0].displayName = "changed";
 
     expect(getCachedObjectBrowserRows(scope)?.[0].displayName).toBe("users");
+  });
+
+  it("separates the trigger exact contract from legacy scaffolds and preserves raw scopes", () => {
+    const legacy = { connectionId: "c1", database: "db", schema: " Owner " };
+    const exact = { ...legacy, oracleTriggerContract: 1 as const };
+    cacheRows(legacy);
+    expect(getCachedObjectBrowserRows(exact)).toBeUndefined();
+    cacheRows(exact, [{ ...row, name: "Exact" }]);
+    expect(getCachedObjectBrowserRows(legacy)?.[0].name).toBe("users");
+    expect(getCachedObjectBrowserRows(exact)?.[0].name).toBe("Exact");
+    expect(getCachedObjectBrowserRows({ ...exact, schema: "Owner" })).toBeUndefined();
+  });
+
+  it("does not share mutable nested trigger snapshots across a cache boundary", () => {
+    const scope = { connectionId: "c1", database: "db", schema: " Owner ", oracleTriggerContract: 1 as const };
+    const triggerRow: ObjectBrowserRow = {
+      ...row,
+      type: "TRIGGER",
+      trigger: {
+        name: " Trigger ",
+        event: "INSERT",
+        timing: "BEFORE",
+        enabled: false,
+        oracle_metadata: { contractVersion: 1, identityMode: "exact", owner: " Owner ", name: " Trigger ", engine: "oracle", scope: "VIEW", parent: { owner: "ParentOwner", name: "Parent", objectType: "VIEW" }, reads: { identity: { state: "available" } } },
+      },
+    };
+    cacheRows(scope, [reactive(triggerRow)]);
+    triggerRow.trigger!.oracle_metadata!.parent!.name = "changed at producer";
+    const cached = getCachedObjectBrowserRows(scope)!;
+    expect(cached[0].trigger!.oracle_metadata!.parent!.name).toBe("Parent");
+    cached[0].trigger!.oracle_metadata!.reads.identity!.state = "error";
+    expect(getCachedObjectBrowserRows(scope)![0].trigger!.oracle_metadata!.reads.identity!.state).toBe("available");
+  });
+
+  it("invalidates both trigger contracts only in the affected raw schema and rejects their late writers", () => {
+    const exact = { connectionId: "c1", database: "db", schema: " Owner ", oracleTriggerContract: 1 as const };
+    const legacy = { connectionId: "c1", database: "db", schema: " Owner " };
+    const other = { ...exact, schema: "Owner" };
+    const exactToken = createObjectBrowserRowsCacheWriteToken(exact);
+    const legacyToken = createObjectBrowserRowsCacheWriteToken(legacy);
+    cacheRows(exact);
+    cacheRows(legacy);
+    cacheRows(other);
+    expect(invalidateObjectBrowserRowsCache({ connectionId: "c1", database: "db", schema: " Owner " })).toBe(2);
+    expect(cacheObjectBrowserRows(exactToken, [row])).toBeUndefined();
+    expect(cacheObjectBrowserRows(legacyToken, [row])).toBeUndefined();
+    expect(getCachedObjectBrowserRows(other)).toEqual([row]);
   });
 
   it("restores fresh rows when a remounted component reads the shared cache", () => {
@@ -126,5 +174,44 @@ describe("objectBrowserRowsCache", () => {
 
     expect(invalidateObjectBrowserRowsCache({ ...scope, tableName: "users" })).toBe(1);
     expect(getCachedObjectBrowserRows(scope)).toBeUndefined();
+  });
+
+  describe("scaffold reads (allowStale)", () => {
+    it("returns a fresh hit marked stale=false before the TTL", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+      const scope = { connectionId: "c1", database: "db", schema: "public" };
+      cacheRows(scope);
+
+      const hit = getCachedObjectBrowserRowsForScaffold(scope);
+      expect(hit).toBeDefined();
+      expect(hit!.rows).toEqual([row]);
+      expect(hit!.stale).toBe(false);
+      expect(hit!.ageMs).toBe(0);
+      expect(hit!.cachedAt).toBe(Date.now());
+    });
+
+    it("surfaces an expired entry as a stale scaffold instead of refusing it", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+      const scope = { connectionId: "c1", database: "db", schema: "public" };
+      cacheRows(scope);
+
+      vi.advanceTimersByTime(30_001);
+      const hit = getCachedObjectBrowserRowsForScaffold(scope);
+      expect(hit).toBeDefined();
+      expect(hit!.rows).toEqual([row]);
+      expect(hit!.stale).toBe(true);
+      expect(hit!.ageMs).toBeGreaterThan(30_000);
+    });
+
+    it("returns undefined when no scaffold is available (uncached or invalidated)", () => {
+      const scope = { connectionId: "c1", database: "db", schema: "public" };
+      expect(getCachedObjectBrowserRowsForScaffold(scope)).toBeUndefined();
+
+      cacheRows(scope);
+      invalidateObjectBrowserRowsCache({ connectionId: "c1", database: "db", schema: "public" });
+      expect(getCachedObjectBrowserRowsForScaffold(scope)).toBeUndefined();
+    });
   });
 });

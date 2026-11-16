@@ -13,7 +13,8 @@ multi-session JSON-RPC protocol without a JVM.
 - Astra validation: secure-connect bundle parsing and transport configuration;
   live Astra credentials were not available
 - Authentication: username/password and Kerberos/GSSAPI
-- TLS: CA verification, optional client certificate/key, hostname verification
+- TLS: CA verification, optional client certificate/key, JKS/PKCS#12 stores,
+  hostname verification
 - Cloud: DataStax Astra secure connect bundles
 - Configuration: Java Driver 4 HOCON `configfile` mapping plus native extensions
 - Metadata: keyspaces, tables, columns, indexes, CQL table DDL, completion search
@@ -38,6 +39,8 @@ syntax.
 | `enablessl` | TLS enablement |
 | `sslenginefactory` | the standard `DefaultSslEngineFactory` maps to native TLS |
 | `hostnameverification` | TLS hostname verification; enabled by default |
+| `truststorepath`, `truststorepassword` | JKS/PKCS#12 server trust configuration |
+| `keystorepath`, `keystorepassword` | JKS/PKCS#12 client certificate configuration |
 | `user`, `password` | password authentication |
 | `configfile` | Java Driver 4 HOCON configuration; overrides URL options except contact points and keyspace |
 | `usekrb5` | Kerberos/GSSAPI authentication using password, keytab, or FILE credential cache |
@@ -48,8 +51,8 @@ syntax.
 
 The Agent rejects custom Java implementation classes because they cannot be
 loaded by a native binary. This includes custom authentication, SSL, retry,
-reconnection, and load-balancing classes. Java JKS/PKCS12 truststores and
-keystores are not read directly; use the native PEM paths described below.
+reconnection, and load-balancing classes. The default SSL engine's JKS and
+PKCS#12 truststores and keystores are supported directly.
 
 ## Java Driver HOCON configuration
 
@@ -66,7 +69,8 @@ Mapped Java Driver paths include:
 - `advanced.socket.tcp-no-delay` and `keep-alive`
 - `advanced.protocol.version`, retry policy, and reconnection policy
 - `advanced.auth-provider` plaintext and Instaclustr Kerberos options
-- `advanced.ssl-engine-factory` default TLS and hostname validation
+- `advanced.ssl-engine-factory` default TLS, hostname validation, truststore,
+  and keystore settings
 
 Native-only settings can be placed under `dbx.cassandra`:
 
@@ -133,7 +137,8 @@ go test -run TestCassandraIntegration -v
 
 Optional variables include `CASSANDRA_TEST_URL_PARAMS`, `CASSANDRA_TEST_SSL`,
 `CASSANDRA_TEST_CA_CERT_PATH`, `CASSANDRA_TEST_CLIENT_CERT_PATH`, and
-`CASSANDRA_TEST_CLIENT_KEY_PATH`.
+`CASSANDRA_TEST_CLIENT_KEY_PATH`. Truststore and keystore settings can also be
+provided through `CASSANDRA_TEST_URL_PARAMS`.
 
 See `bench/README.md` for the archived JDBC comparison workflow and measured
 Cassandra 4.1.10 results.

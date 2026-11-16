@@ -47,7 +47,7 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
     @Override
     public List<String> listSchemas() {
-        return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), profile);
+        return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), profile, configuredDatabase);
     }
 
     @Override
@@ -151,7 +151,19 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
             // Table comment is optional; DDL generation should still succeed without it.
         }
 
-        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), indexes, foreignKeys, Collections.emptyList(), false, false, tableComment);
+        return DdlBuilder.buildTableDdl(
+            schema, table, getColumns(schema, table), indexes, foreignKeys,
+            Collections.emptyList(), false, includeColumnCommentsInTableDdl(), tableComment,
+            defaultBeforeNotNullInTableDdl()
+        );
+    }
+
+    protected boolean defaultBeforeNotNullInTableDdl() {
+        return false;
+    }
+
+    protected boolean includeColumnCommentsInTableDdl() {
+        return false;
     }
 
     @Override

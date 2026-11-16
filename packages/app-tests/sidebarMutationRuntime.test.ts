@@ -6,7 +6,7 @@ const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTre
 const connectionMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarConnectionMutationRuntime.ts", "utf8");
 const databaseSpecificMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarDatabaseSpecificMutationRuntime.ts", "utf8");
 const tableMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarTableMutationRuntime.ts", "utf8");
-const localeSources = Object.fromEntries(["en", "es", "it", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"].map((locale) => [locale, readFileSync(`apps/desktop/src/i18n/locales/${locale}.ts`, "utf8")]));
+const localeSources = Object.fromEntries(["az", "en", "es", "id", "it", "ja", "ko", "pt-BR", "ru", "tr", "zh-CN", "zh-TW"].map((locale) => [locale, readFileSync(`apps/desktop/src/i18n/locales/${locale}.ts`, "utf8")]));
 
 function functionBody(name: string): string {
   const source = [runtimeHost, connectionMutationRuntime, databaseSpecificMutationRuntime, tableMutationRuntime].find((candidate) => candidate.includes(`function ${name}(`));
@@ -97,6 +97,16 @@ test("all locales define the object drop refresh warning with its message placeh
     assert.equal(keys.length, 1, `${locale} must define objectDropRefreshFailed exactly once`);
     assert.match(source, /objectDropRefreshFailed\s*:\s*["'][^\n]*\{message\}/, `${locale} must preserve the message placeholder`);
   }
+});
+
+test("object rename dialog prefills the current object name instead of a stale draft (#14158)", () => {
+  const open = functionBody("openRenameObjectDialog");
+  // The preview watcher updates currentSidebarViewRenameTargetKey on every selection change, so it
+  // cannot tell whether the dialog was last opened for this object.
+  assert.doesNotMatch(open, /currentSidebarViewRenameTargetKey/);
+  assert.match(open, /if \(targetKey !== renameObjectDialogTargetKey\) renameObjectName\.value = node\.objectName \|\| node\.label;/);
+  assert.match(open, /renameObjectDialogTargetKey = targetKey;/);
+  assert.match(functionBody("openRenameDatabaseDialog"), /renameObjectDialogTargetKey = "";/);
 });
 
 test("database rename uses a maintenance connection and mutates state only after guarded script execution", () => {

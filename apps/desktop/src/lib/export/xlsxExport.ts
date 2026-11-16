@@ -10,6 +10,8 @@ export interface XlsxWorksheetData {
   rows: readonly (readonly XlsxCellValue[])[];
   numericColumnRightAlign?: boolean;
   autoFilter?: boolean;
+  /** Render comments as a second header row (names row 1, comments row 2, data from row 3). */
+  headerCommentRows?: boolean;
 }
 
 interface XlsxWorksheetSegment {
@@ -114,12 +116,30 @@ function normalizeUniqueSheetNames(sheets: readonly { sheetName?: string }[]): s
   return names;
 }
 
-function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], rowStart: number, rowEnd: number, columnComments?: readonly (string | null)[]): number[] {
+function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], rowStart: number, rowEnd: number, columnComments?: readonly (string | null)[], headerCommentRows = false): number[] {
   return columns.map((column, colIndex) => {
-    const headerText = columnComments?.[colIndex] || column;
+    // With a separate comment row both texts are visible, so the column must
+    // fit the wider of the two; otherwise the comment overrides the header.
+    const headerText = headerCommentRows ? column : columnComments?.[colIndex] || column;
+    const commentText = headerCommentRows ? columnComments?.[colIndex] || "" : "";
+    const isSqlCol = column.toUpperCase() === "SQL";
+    const maxClamp = isSqlCol ? 100 : 60;
     const values = Array.from({ length: Math.min(100, rowEnd - rowStart) }, (_, index) => rows[rowStart + index]?.[colIndex]);
-    const maxLen = [headerText, ...values.map((value) => (value == null ? "" : String(value)))].map((value) => Math.min(value.length, 60)).reduce((max, length) => Math.max(max, length), 8);
-    return Math.max(10, Math.min(60, maxLen + 2));
+    const maxLen = [
+      headerText,
+      commentText,
+      ...values.map((value) => {
+        if (value == null) return "";
+        const str = String(value);
+        if (isSqlCol || str.includes("\n")) {
+          return str.split("\n").reduce((max, line) => Math.max(max, line.length), 0);
+        }
+        return str.length;
+      }),
+    ]
+      .map((value) => Math.min(typeof value === "number" ? value : value.length, maxClamp))
+      .reduce((max, length) => Math.max(max, length), 8);
+    return Math.max(isSqlCol ? 40 : 10, Math.min(maxClamp, maxLen + 2));
   });
 }
 
@@ -133,15 +153,20 @@ function safeExcelNumber(value: string): string | undefined {
 
 const NUMERIC_RIGHT_ALIGN_STYLE_INDEX = 2;
 const NUMERIC_LEFT_ALIGN_STYLE_INDEX = 3;
+const XLSX_WRAP_TEXT_STYLE_INDEX = 4;
 
 function numericColumnStyle(columnType?: string, enabled = true): number | undefined {
   if (!isNumericColumnType(columnType)) return undefined;
   return enabled ? NUMERIC_RIGHT_ALIGN_STYLE_INDEX : NUMERIC_LEFT_ALIGN_STYLE_INDEX;
 }
 
-function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number, columnType?: string): string {
+function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style?: number, columnType?: string, columnName?: string): string {
   const ref = cellRef(rowIndex, colIndex);
-  const styleAttr = style == null ? "" : ` s="${style}"`;
+  const isSqlCol = columnName?.toLowerCase() === "sql";
+  const strVal = typeof value === "string" ? value : undefined;
+  const isMultiline = strVal !== undefined && (strVal.includes("\n") || strVal.includes("\r"));
+  const effectiveStyle = isSqlCol || isMultiline ? XLSX_WRAP_TEXT_STYLE_INDEX : style;
+  const styleAttr = effectiveStyle == null ? "" : ` s="${effectiveStyle}"`;
   if (value == null) return `<c r="${ref}"${styleAttr}/>`;
   if (typeof value === "number" && Number.isFinite(value)) {
     return `<c r="${ref}"${styleAttr}><v>${value}</v></c>`;
@@ -155,23 +180,28 @@ function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style
     const number = safeExcelNumber(value);
     if (number !== undefined) return `<c r="${ref}"${styleAttr}><v>${number}</v></c>`;
   }
-  return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t>${escapeXml(String(value))}</t></is></c>`;
+  const spaceAttr = typeof value === "string" && /^\s|\s$|[\r\n\t]/.test(value) ? ' xml:space="preserve"' : "";
+  return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t${spaceAttr}>${escapeXml(String(value))}</t></is></c>`;
 }
 
 function worksheetXml(segment: XlsxWorksheetSegment): string {
   const data = segment.worksheet;
   const columns = data.columns;
   const rows = data.rows;
-  const totalRows = segment.rowEnd - segment.rowStart + 1;
+  const hasCommentRow = data.headerCommentRows === true && data.columnComments?.some((comment) => !!comment?.trim());
+  const headerRows = hasCommentRow ? 2 : 1;
+  const totalRows = segment.rowEnd - segment.rowStart + headerRows;
   const range = sheetRange(columns.length, totalRows);
-  const widths = estimateColumnWidths(columns, rows, segment.rowStart, segment.rowEnd, data.columnComments);
+  const widths = estimateColumnWidths(columns, rows, segment.rowStart, segment.rowEnd, data.columnComments, hasCommentRow);
   const rightAlignEnabled = data.numericColumnRightAlign !== false;
   const colsXml = widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("");
-  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(data.columnComments?.[index] || column, 0, index, 1)).join("")}</row>`;
+  const headerXml = `<row r="1">${columns.map((column, index) => cellXml(hasCommentRow ? column : data.columnComments?.[index] || column, 0, index, 1)).join("")}</row>${
+    hasCommentRow ? `<row r="2">${columns.map((_, index) => cellXml(data.columnComments?.[index] ?? null, 1, index, 1)).join("")}</row>` : ""
+  }`;
   const bodyXml = Array.from({ length: segment.rowEnd - segment.rowStart }, (_, rowIndex) => {
     const row = rows[segment.rowStart + rowIndex]!;
-    const excelRowIndex = rowIndex + 2;
-    const cells = columns.map((_, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, numericColumnStyle(data.columnTypes?.[colIndex], rightAlignEnabled), data.columnTypes?.[colIndex])).join("");
+    const excelRowIndex = rowIndex + headerRows + 1;
+    const cells = columns.map((colName, colIndex) => cellXml(row[colIndex], excelRowIndex - 1, colIndex, numericColumnStyle(data.columnTypes?.[colIndex], rightAlignEnabled), data.columnTypes?.[colIndex], colName)).join("");
     return `<row r="${excelRowIndex}">${cells}</row>`;
   }).join("");
 
@@ -180,7 +210,7 @@ function worksheetXml(segment: XlsxWorksheetSegment): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="${range}"/>
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="${headerRows}" topLeftCell="A${headerRows + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="15"/>
   <cols>${colsXml}</cols>
   <sheetData>${headerXml}${bodyXml}</sheetData>${autoFilterXml}
@@ -254,7 +284,7 @@ function stylesXml(): string {
   <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left"/></xf></cellXfs>
+  <cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="right"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="left"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 }

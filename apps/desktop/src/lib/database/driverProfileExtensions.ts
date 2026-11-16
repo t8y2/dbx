@@ -1,6 +1,7 @@
+import { COCKROACHDB_DRIVER_PROFILE_EXTENSION } from "@/lib/database/cockroachdbProfile";
 import { DOLT_DRIVER_PROFILE_EXTENSION } from "@/lib/database/doltProfile";
 import type { SqlCompletionObject, SqlCompletionTable, SqlStatementKind } from "@/lib/sql/sqlCompletion";
-import type { ConnectionConfig, QueryTab, TableNameFilter, TreeNodeType } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, QueryTab, TableNameFilter, TreeNodeType } from "@/types/database";
 
 export type DriverProfileObjectTreeProfile = {
   cacheKey: string;
@@ -21,6 +22,13 @@ export type DriverProfileSqlCompletionContext = {
 };
 
 export type DriverProfileCompletionTableMetadata = Pick<SqlCompletionTable, "detail" | "boost">;
+
+/** Cursor context passed to profile-specific contextual keyword hooks. */
+export type DriverProfileKeywordContext = {
+  beforeCursor: string;
+  beforeToken: string;
+  databaseType?: DatabaseType;
+};
 
 export type DriverProfileWorkspaceTarget = {
   database: string;
@@ -48,11 +56,19 @@ export type DriverProfileExtensionDefinition = {
   completionObjects?: (context: DriverProfileSqlCompletionContext) => SqlCompletionObject[];
   completionTables?: (context: DriverProfileSqlCompletionContext) => SqlCompletionTable[];
   sqlBuiltinTerms?: () => string;
+  /** 叠加到方言关键字表上，用于 profile 专有语法（例如 CockroachDB 的 FAMILY）。 */
+  sqlKeywords?: () => readonly string[];
+  /** 叠加到方言函数表上，用于 profile 专有函数。 */
+  functionSignatures?: () => Map<string, string[]>;
+  /** 上下文相关的优先关键字（例如 CRDB 的 AS OF SYSTEM TIME 续写）。 */
+  completionContextKeywords?: (context: DriverProfileKeywordContext) => readonly string[];
+  /** profile 专有的数据类型关键字，追加到 DATA_TYPE_KEYWORDS。 */
+  completionDataTypes?: () => readonly string[];
   routineSignatures?: () => Map<string, string[]>;
   databaseWorkspace?: DriverProfileDatabaseWorkspace;
 };
 
-export const DRIVER_PROFILE_EXTENSIONS = [DOLT_DRIVER_PROFILE_EXTENSION] as const satisfies readonly DriverProfileExtensionDefinition[];
+export const DRIVER_PROFILE_EXTENSIONS = [DOLT_DRIVER_PROFILE_EXTENSION, COCKROACHDB_DRIVER_PROFILE_EXTENSION] as const satisfies readonly DriverProfileExtensionDefinition[];
 
 export function driverProfileExtension(driverProfile?: string): DriverProfileExtensionDefinition | undefined {
   const normalized = driverProfile?.trim().toLowerCase();
@@ -84,6 +100,22 @@ export function driverProfileHasCompletionCandidates(driverProfile: string | und
 
 export function driverProfileSqlBuiltinTerms(driverProfile?: string): string {
   return driverProfileExtension(driverProfile)?.sqlBuiltinTerms?.() ?? "";
+}
+
+export function driverProfileSqlKeywords(driverProfile?: string): readonly string[] {
+  return driverProfileExtension(driverProfile)?.sqlKeywords?.() ?? [];
+}
+
+export function driverProfileFunctionSignatures(driverProfile?: string): Map<string, string[]> {
+  return driverProfileExtension(driverProfile)?.functionSignatures?.() ?? new Map();
+}
+
+export function driverProfileContextKeywords(driverProfile: string | undefined, context: DriverProfileKeywordContext): readonly string[] {
+  return driverProfileExtension(driverProfile)?.completionContextKeywords?.(context) ?? [];
+}
+
+export function driverProfileDataTypes(driverProfile?: string): readonly string[] {
+  return driverProfileExtension(driverProfile)?.completionDataTypes?.() ?? [];
 }
 
 export function driverProfileRoutineSignatures(driverProfile?: string): Map<string, string[]> {

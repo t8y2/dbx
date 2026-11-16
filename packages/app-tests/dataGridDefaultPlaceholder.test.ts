@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { resolveDataGridColumnsByResultIndex } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnMetadata.ts";
 import { resolveDataGridNewRowCellPlaceholder } from "../../apps/desktop/src/lib/dataGrid/dataGridDefaultPlaceholder.ts";
@@ -49,16 +48,4 @@ test("existing nulls, explicit values, and unmapped new columns do not show sche
   assert.equal(resolveDataGridNewRowCellPlaceholder({ row: { data: ["manual"], isNew: true }, columnIndex: 0, column: mappedColumn, draftFallback: "New" }), null);
   assert.equal(resolveDataGridNewRowCellPlaceholder({ row: { data: [null], isNew: true }, columnIndex: 0, column: undefined, draftFallback: "New" }), null);
   assert.equal(resolveDataGridNewRowCellPlaceholder({ row: { data: [null], isNew: false, isDraft: true }, columnIndex: 0, column: undefined, draftFallback: "New" }), "New");
-});
-
-test("DOM and canvas paths consume the same per-cell placeholder resolver", () => {
-  const dataGridSource = readFileSync(new URL("../../apps/desktop/src/components/grid/DataGrid.vue", import.meta.url), "utf8");
-  const canvasSource = readFileSync(new URL("../../apps/desktop/src/lib/dataGrid/canvasDataGridRenderer.ts", import.meta.url), "utf8");
-
-  assert.match(dataGridSource, /function newRowCellPlaceholder\(item: RowItem \| undefined, columnIndex: number\)/);
-  assert.match(dataGridSource, /newRowCellPlaceholder,\n\s+isRowActive/);
-  assert.match(dataGridSource, /newRowCellPlaceholder\(displayItems\[cell\.recordIndex\], cell\.valueIndex\)/);
-  assert.match(dataGridSource, /newRowCellPlaceholder\(item, col\.actualColIdx\)/);
-  assert.match(canvasSource, /newRowCellPlaceholder\?: \(row: CanvasDataGridRow, columnIndex: number\) => string \| null/);
-  assert.match(canvasSource, /newRowCellPlaceholder\?\.\(item, actualColIdx\)/);
 });

@@ -31,6 +31,9 @@ public final class DatabendAgent extends ConfiguredJdbcAgent {
         true,
         false,
         false,
+        false,
+        // databend 的 getSearchStringEscape() 返回 '\'，但 getTables/getProcedures 把 _ 当字面量且忽略转义，
+        // 对含 _ 的库名（如 my_db）转义后返回 0 行（#8114），故关闭 schema 通配符转义。
         false
     );
 

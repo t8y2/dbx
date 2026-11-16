@@ -3,9 +3,11 @@ import type { ColumnInfo } from "@/types/database";
 import type { DiagramPosition, DiagramTable } from "./erDiagram";
 import { isLiveTable, needsDiagramSync } from "./erDiagram";
 import type { DiagramLayer } from "@/types/diagram";
+import { diagramIdentityKey } from "./diagramMetadataLoader";
 
 export interface LiveTablePatch {
   tableName: string;
+  schema?: string;
   pendingColumns: ColumnInfo[];
   droppedColumnNames?: string[];
   pendingDrop?: boolean;
@@ -123,6 +125,7 @@ export function loadLiveTablePatches(connectionId: string, database: string, sch
       const droppedColumnNames = sanitizeStringList(patch.droppedColumnNames);
       const next: LiveTablePatch = {
         tableName: patch.tableName,
+        schema: patch.schema,
         pendingColumns: pendingColumns.map((col) => ({ ...col })),
       };
       if (droppedColumnNames.length) next.droppedColumnNames = droppedColumnNames;
@@ -134,6 +137,10 @@ export function loadLiveTablePatches(connectionId: string, database: string, sch
 export function saveLiveTablePatches(tables: DiagramTable[], connectionId: string, database: string, schema: string): void {
   if (!connectionId || !database) return;
   const key = storageKey("live-patches", connectionId, database, schema);
+  safeLocalStorageSet(key, JSON.stringify(liveTablePatches(tables)));
+}
+
+function liveTablePatches(tables: DiagramTable[]): LiveTablePatch[] {
   const patches: LiveTablePatch[] = [];
   for (const table of tables) {
     if (!isLiveTable(table) || !needsDiagramSync(table)) continue;
@@ -143,22 +150,58 @@ export function saveLiveTablePatches(tables: DiagramTable[], connectionId: strin
     if (pendingColumns.length === 0 && droppedColumnNames.length === 0 && !table.pendingDrop) continue;
     const patch: LiveTablePatch = {
       tableName: table.name,
+      schema: table.schema,
       pendingColumns: pendingColumns.map((col) => ({ ...col })),
     };
     if (droppedColumnNames.length) patch.droppedColumnNames = droppedColumnNames;
     if (table.pendingDrop) patch.pendingDrop = true;
     patches.push(patch);
   }
-  safeLocalStorageSet(key, JSON.stringify(patches));
+  return patches;
+}
+
+/** Persist only edits since the last applied snapshot, never the absent part of a focused schema. */
+export function saveFocusedDiagramState(tables: DiagramTable[], previousTables: DiagramTable[], positions: Record<string, DiagramPosition>, layers: DiagramLayer[], connectionId: string, database: string, schema: string, legacySchema = schema): void {
+  if (!connectionId || !database) return;
+  const previous = new Map(previousTables.map((table) => [diagramIdentityKey(table), table]));
+  const current = new Map(tables.map((table) => [diagramIdentityKey(table), table]));
+  const changed = new Set([...previous.keys(), ...current.keys()].filter((key) => JSON.stringify(previous.get(key)) !== JSON.stringify(current.get(key))));
+  if (changed.size) {
+    const drafts = loadDraftTables(connectionId, database, schema).filter((table) => !changed.has(diagramIdentityKey(table)));
+    saveDraftTables([...drafts, ...tables.filter((table) => changed.has(diagramIdentityKey(table)))], connectionId, database, schema);
+    const oldPatches = loadLiveTablePatches(connectionId, database, schema).filter(
+      (patch) =>
+        ![...changed].some((key) => {
+          const table = current.get(key) ?? previous.get(key)!;
+          return patch.tableName === table.name && (patch.schema === table.schema || (patch.schema === undefined && (!table.schema || table.schema === legacySchema)));
+        }),
+    );
+    const newPatches = liveTablePatches(tables.filter((table) => changed.has(diagramIdentityKey(table))));
+    safeLocalStorageSet(storageKey("live-patches", connectionId, database, schema), JSON.stringify([...oldPatches, ...newPatches]));
+  }
+  const loadedNames = new Set([...previousTables, ...tables].flatMap((table) => (!table.schema || table.schema === legacySchema ? [table.name, table.schema ? `${table.schema}.${table.name}` : table.name] : [`${table.schema}.${table.name}`])));
+  const scopedPositions = Object.fromEntries(Object.entries(positions).filter(([name]) => loadedNames.has(name)));
+  savePersistedPositions({ ...loadPersistedPositions(connectionId, database, schema), ...scopedPositions }, connectionId, database, schema);
+  const mergedLayers = layers.map((layer) => ({ ...layer, tableNames: [...layer.tableNames] }));
+  for (const stored of loadPersistedLayers(connectionId, database, schema)) {
+    const unloadedMembers = stored.tableNames.filter((name) => !loadedNames.has(name));
+    const next = mergedLayers.find((layer) => layer.id === stored.id);
+    if (next) next.tableNames = [...new Set([...next.tableNames, ...unloadedMembers])];
+    else if (unloadedMembers.length || stored.tableNames.length === 0) mergedLayers.push({ ...stored, tableNames: unloadedMembers });
+  }
+  savePersistedLayers(mergedLayers, connectionId, database, schema);
 }
 
 /** Merge saved pending adds/drops onto live tables loaded from DB metadata. */
-export function applyLiveTablePatches(tables: DiagramTable[], patches: LiveTablePatch[]): DiagramTable[] {
+export function applyLiveTablePatches(tables: DiagramTable[], patches: LiveTablePatch[], legacySchema?: string): DiagramTable[] {
   if (patches.length === 0) return tables;
-  const byName = new Map(patches.map((p) => [p.tableName, p]));
+  const byName = new Map(patches.map((p) => [diagramIdentityKey({ name: p.tableName, schema: p.schema ?? legacySchema }), p]));
+  const nameCounts = new Map<string, number>();
+  for (const table of tables) nameCounts.set(table.name, (nameCounts.get(table.name) ?? 0) + 1);
   return tables.map((table) => {
     if (!isLiveTable(table)) return table;
-    const patch = byName.get(table.name);
+    const unambiguous = nameCounts.get(table.name) === 1;
+    const patch = byName.get(diagramIdentityKey(table)) ?? (unambiguous ? byName.get(diagramIdentityKey({ name: table.name })) : undefined);
     if (!patch) return table;
 
     const existing = new Set(table.columns.map((c) => c.name.toLowerCase()));

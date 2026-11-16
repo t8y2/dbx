@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -72,7 +73,7 @@ func (s *etcdSession) connect(params map[string]json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	nextClient, err := buildClient(connection)
+	nextClient, authUsername, err := buildClient(connection)
 	if err != nil {
 		return nil, err
 	}
@@ -81,10 +82,13 @@ func (s *etcdSession) connect(params map[string]json.RawMessage) (any, error) {
 		_ = nextClient.Close()
 		return nil, err
 	}
+	authEnabled := detectAuthEnabled(nextClient, authUsername)
 	s.close()
 	s.clientMu.Lock()
 	s.client = nextClient
 	s.connectedEndpoints = endpointList
+	s.username = authUsername
+	s.authEnabled = authEnabled
 	s.clientMu.Unlock()
 	return map[string]bool{"ok": true}, nil
 }
@@ -127,6 +131,9 @@ func (s *etcdSession) close() error {
 	client := s.client
 	s.client = nil
 	s.connectedEndpoints = nil
+	s.username = ""
+	s.authEnabled = false
+	s.readAccess = nil
 	s.clientMu.Unlock()
 	if client != nil {
 		_ = client.Close()
@@ -134,8 +141,9 @@ func (s *etcdSession) close() error {
 	return nil
 }
 
-func buildClient(connection connectionParams) (*clientv3.Client, error) {
+func buildClient(connection connectionParams) (*clientv3.Client, string, error) {
 	endpoints := connectionEndpoints(connection)
+	authUsername := strings.TrimSpace(connection.Username)
 	config := clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: time.Duration(connectTimeoutSeconds(connection)) * time.Second,
@@ -151,11 +159,62 @@ func buildClient(connection connectionParams) (*clientv3.Client, error) {
 	if connection.SSL {
 		tlsConfig, err := tlsConfigFor(connection)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		config.TLS = tlsConfig
+		if authUsername == "" {
+			authUsername = clientCertificateUsername(tlsConfig)
+		}
 	}
-	return clientv3.New(config)
+	client, err := clientv3.New(config)
+	return client, authUsername, err
+}
+
+func detectAuthEnabled(client *clientv3.Client, authUsername string) bool {
+	enabled, err := probeAuthEnabled(client)
+	if err == nil {
+		return enabled
+	}
+	// AuthStatus was added after the first v3 releases. For an older server,
+	// configured credentials or a certificate identity are the safest signal.
+	return authUsername != ""
+}
+
+func probeAuthEnabled(client *clientv3.Client) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeoutSeconds*time.Second)
+	defer cancel()
+	statusResponse, err := client.Auth.AuthStatus(ctx)
+	if err != nil {
+		return false, err
+	}
+	return statusResponse.Enabled, nil
+}
+
+// refreshAuthEnabled keeps long-lived sessions in sync when an administrator
+// enables or disables etcd Auth after DBX connected. A failed compatibility
+// probe retains the last known state instead of flipping privileges.
+func (s *etcdSession) refreshAuthEnabled(client *clientv3.Client) bool {
+	enabled, err := probeAuthEnabled(client)
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	if err == nil && s.client == client {
+		if s.authEnabled != enabled {
+			s.readAccess = nil
+		}
+		s.authEnabled = enabled
+	}
+	return s.authEnabled
+}
+
+func isAuthenticationNotEnabled(err error) bool {
+	return errors.Is(err, rpctypes.ErrAuthNotEnabled)
+}
+
+func (s *etcdSession) disableAuth() {
+	s.clientMu.Lock()
+	s.authEnabled = false
+	s.readAccess = nil
+	s.clientMu.Unlock()
 }
 
 func connectTimeoutSeconds(connection connectionParams) int {
@@ -234,9 +293,22 @@ func tlsConfigFor(connection connectionParams) (*tls.Config, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(pair.Certificate) > 0 {
+			pair.Leaf, err = x509.ParseCertificate(pair.Certificate[0])
+			if err != nil {
+				return nil, err
+			}
+		}
 		tlsConfig.Certificates = []tls.Certificate{pair}
 	}
 	return tlsConfig, nil
+}
+
+func clientCertificateUsername(config *tls.Config) string {
+	if config == nil || len(config.Certificates) == 0 || config.Certificates[0].Leaf == nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Certificates[0].Leaf.Subject.CommonName)
 }
 
 func probeClient(client *clientv3.Client, endpoints []string) (map[string]any, error) {

@@ -8,8 +8,9 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
-import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
+import { clearSqlParameterHistory, loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
 import { substituteSqlParameters, type SqlParameterDescriptor, type SqlParameterInput, type SqlParameterSyntax, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
+import { useDialogEditorFocusRestore } from "@/composables/useDialogEditorFocusRestore";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -37,14 +38,18 @@ const histories = ref<Record<string, SqlParameterInput[]>>({});
 const activeHistoryName = ref("");
 let closeHistoryTimer: ReturnType<typeof setTimeout> | undefined;
 
+const { onCloseAutoFocus: onSqlParameterDialogCloseAutoFocus } = useDialogEditorFocusRestore(open);
+
 const parameterKinds: SqlParameterValueKind[] = ["string", "number", "boolean", "null", "raw"];
 
 const syntaxLabels: Record<SqlParameterSyntax, string> = {
   positional: "?",
   named: ":name",
   shell: "${name}",
+  "bracketed-shell": "[${name}]",
   mybatis: "#{name}",
   sqlserver: "@name",
+  substitution: "&name",
 };
 
 function syntaxLabel(parameter: SqlParameterDescriptor): string {
@@ -96,6 +101,18 @@ function clearParameterValues() {
   values.value = next;
 }
 
+/** Drop every remembered parameter value, in storage and in this dialog's copy (#14894). */
+function clearParameterHistory() {
+  clearSqlParameterHistory();
+  histories.value = {};
+  activeHistoryName.value = "";
+}
+
+function ignoreParameters() {
+  open.value = false;
+  emit("execute", props.sql);
+}
+
 function updateValue(name: string, value: string) {
   const matchedHistory = histories.value[name]?.find((entry) => entry.value === value);
   values.value[name] = { ...(values.value[name] ?? { kind: "string" }), ...(matchedHistory ? { kind: matchedHistory.kind } : {}), value };
@@ -145,7 +162,7 @@ async function copyResolvedSql() {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[86vh] border border-border !bg-background text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]">
+    <DialogContent class="max-h-[86vh] border border-border !bg-background-solid text-foreground shadow-2xl !backdrop-blur-none sm:max-w-[720px]" @close-auto-focus="onSqlParameterDialogCloseAutoFocus">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <Braces class="h-5 w-5 text-primary" />
@@ -158,6 +175,9 @@ async function copyResolvedSql() {
           <p class="min-w-0 flex-1 text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
           <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-values" @click="clearParameterValues">
             {{ t("sqlParameters.clearValues") }}
+          </Button>
+          <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-history" @click="clearParameterHistory">
+            {{ t("sqlParameters.clearHistory") }}
           </Button>
           <Button type="button" size="sm" variant="outline" class="ml-auto shrink-0" data-testid="sql-parameters-use-raw-all" @click="setAllParametersToRaw">
             {{ t("sqlParameters.useRawForAll") }}
@@ -226,6 +246,9 @@ async function copyResolvedSql() {
       </div>
 
       <DialogFooter>
+        <Button type="button" variant="outline" data-testid="sql-parameters-ignore" @click="ignoreParameters">
+          {{ t("sqlParameters.ignore") }}
+        </Button>
         <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button variant="outline" @click="copyResolvedSql">
           <Copy class="mr-1.5 h-4 w-4" />

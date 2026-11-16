@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,33 +101,37 @@ type completionAssistantResponse struct {
 }
 
 type queryResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
+	Columns         []string       `json:"columns"`
+	ColumnTypes     []string       `json:"column_types"`
+	Rows            [][]any        `json:"rows"`
+	AffectedRows    int64          `json:"affected_rows"`
+	ExecutionTimeMS int64          `json:"execution_time_ms"`
+	Truncated       bool           `json:"truncated"`
+	Messages        []queryMessage `json:"messages,omitempty"`
 }
 
 type queryPageResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
-	SessionID       *string  `json:"session_id"`
-	HasMore         bool     `json:"has_more"`
+	Columns         []string       `json:"columns"`
+	ColumnTypes     []string       `json:"column_types"`
+	Rows            [][]any        `json:"rows"`
+	AffectedRows    int64          `json:"affected_rows"`
+	ExecutionTimeMS int64          `json:"execution_time_ms"`
+	Truncated       bool           `json:"truncated"`
+	SessionID       *string        `json:"session_id"`
+	HasMore         bool           `json:"has_more"`
+	Messages        []queryMessage `json:"messages,omitempty"`
 }
 
 type querySession struct {
-	rows        *sql.Rows
-	conn        *sql.Conn
-	columns     []string
-	columnTypes []string
-	pending     []any
-	remaining   int
-	cancel      context.CancelFunc
+	rows            *sql.Rows
+	conn            *sql.Conn
+	columns         []string
+	columnTypes     []string
+	pending         []any
+	remaining       int
+	messages        *queryMessageBuffer
+	restoreMessages func()
+	cancel          context.CancelFunc
 }
 
 type server struct {
@@ -137,11 +143,15 @@ type server struct {
 	usePgViewDefinition             bool
 	usePgFunctionDefinition         bool
 	useLegacyRoutineDefinition      bool
+	routineKindUnsupported          bool
+	routineIdentityFallback         int
 	catalogIdentityUnsupported      bool
+	catalogGeneratedUnsupported     bool
 	catalogOIDUnsupported           bool
 	infoColumnTypeUnsupported       bool
 	infoUdtNameUnsupported          bool
 	indexOrdinalityUnsupported      bool
+	indexKeyCountUnsupported        bool
 	triggerPrettyUnsupported        bool
 	triggerInternalUnsupported      bool
 	constraintDefinitionUnsupported bool
@@ -153,6 +163,13 @@ type server struct {
 	nextSessionID                   uint64
 	activeCancelMu                  sync.Mutex
 	activeCancel                    context.CancelFunc
+	// manualConn pins the physical connection that carries an interactive
+	// transaction. The agent gives every protocol session one connection, so
+	// pinning it keeps BEGIN, the following statements and COMMIT on the same
+	// session instead of letting the pool hand out another one. manualTxOpen
+	// tracks whether an explicit transaction is currently open on it.
+	manualConn   *sql.Conn
+	manualTxOpen bool
 }
 
 type agentSession struct {
@@ -417,10 +434,22 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		result, err := s.getObjectSourceForRelation(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"))
+		var signature *string
+		if raw, ok := params["signature"]; ok {
+			if err := json.Unmarshal(raw, &signature); err != nil {
+				return nil, false, fmt.Errorf("invalid routine signature: %w", err)
+			}
+		}
+		result, err := s.getObjectSourceWithSignature(stringParam(params, "schema"), stringParam(params, "name"), stringParam(params, "object_type"), stringParam(params, "relation_name"), signature)
 		return result, false, err
 	case "get_type_details":
 		result, err := s.getTypeDetails(stringParam(params, "schema"), stringParam(params, "name"))
+		return result, false, err
+	case "get_table_partition_status":
+		result, err := s.getTablePartitionStatus(stringParam(params, "schema"), stringParam(params, "table"))
+		return result, false, err
+	case "get_table_partitioning":
+		result, err := s.getTablePartitioning(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_table_ddl":
 		result, err := s.getTableDDL(stringParam(params, "schema"), stringParam(params, "table"))
@@ -446,10 +475,17 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.fetchQueryPage(stringParam(params, "sessionId"), intParam(params, "pageSize"))
 		return result, false, err
 	case "close_query_session", "close_table_read_session":
-		return s.closeQuerySession(stringParam(params, "sessionId")), false, nil
+		closed, _ := s.closeQuerySession(stringParam(params, "sessionId"))
+		return closed, false, nil
 	case "execute_transaction":
 		result, err := s.executeTransaction(params)
 		return result, false, err
+	case "begin_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
+	case "commit_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
+	case "rollback_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.rollbackManualTransaction()
 	case "execute_batch":
 		result, err := s.executeBatch(params)
 		return result, false, err
@@ -476,11 +512,15 @@ func (s *server) connect(cp connectParams) error {
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -501,9 +541,17 @@ func (s *server) testConnection(cp connectParams) error {
 type kingbaseDBOpener func(connectParams, string) (*sql.DB, error)
 
 func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpener) (*sql.DB, error) {
+	if endpoints := clusterConnectEndpoints(cp); len(endpoints) > 1 {
+		return openAndPingClusterEndpoints(cp, timeout, endpoints, opener)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return pingDBWithSSLModes(ctx, cp, opener)
+}
 
+// pingDBWithSSLModes runs the historical sslmode attempt sequence
+// ("prefer" degrades to require then disable) for one set of fields.
+func pingDBWithSSLModes(ctx context.Context, cp connectParams, opener kingbaseDBOpener) (*sql.DB, error) {
 	sslMode := effectiveSSLMode(cp)
 	attempts := []string{sslMode}
 	if sslMode == "prefer" {
@@ -526,6 +574,111 @@ func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpe
 		return nil, err
 	}
 	return nil, errors.New("kingbase connection failed")
+}
+
+type kingbaseEndpoint struct {
+	host string
+	port int
+}
+
+// clusterConnectEndpoints splits the host field into ordered endpoints for
+// cluster (multi-IP) configurations. DBX stores cluster hosts as
+// comma-separated entries, each optionally embedding its own `:port`
+// (mirroring the vastbase/openGauss driver semantics); semicolons are also
+// accepted because Kingbase deployments paste both separators. A native
+// connection_string builds its own DSN, so the host field is only split for
+// the field-based path, and a host without any separator yields a single
+// endpoint which keeps the legacy single-host flow untouched.
+func clusterConnectEndpoints(cp connectParams) []kingbaseEndpoint {
+	if value := strings.TrimSpace(cp.ConnectionString); value != "" && !isKingbaseJDBCURL(value) {
+		return nil
+	}
+	defaultPort := cp.Port
+	if defaultPort <= 0 {
+		defaultPort = 54321
+	}
+	return splitHostEndpoints(cp.Host, defaultPort)
+}
+
+// splitHostEndpoints parses `host1[:port1][,;]host2[:port2]...`. Entries
+// without an embedded port use fallbackPort; bracketed IPv6 literals may
+// carry a port after the closing bracket.
+func splitHostEndpoints(rawHost string, fallbackPort int) []kingbaseEndpoint {
+	parts := strings.FieldsFunc(rawHost, func(r rune) bool { return r == ',' || r == ';' })
+	endpoints := make([]kingbaseEndpoint, 0, len(parts))
+	for _, part := range parts {
+		host, port, ok := parseHostEndpoint(strings.TrimSpace(part), fallbackPort)
+		if !ok {
+			continue
+		}
+		endpoints = append(endpoints, kingbaseEndpoint{host: host, port: port})
+	}
+	return endpoints
+}
+
+func parseHostEndpoint(entry string, fallbackPort int) (string, int, bool) {
+	if entry == "" {
+		return "", 0, false
+	}
+	if strings.HasPrefix(entry, "[") {
+		if close := strings.Index(entry, "]"); close > 0 {
+			host := entry[1:close]
+			suffix := entry[close+1:]
+			portText, hasPort := strings.CutPrefix(suffix, ":")
+			if !hasPort && suffix == "" {
+				return host, fallbackPort, true
+			}
+			if hasPort {
+				if port, err := strconv.Atoi(portText); err == nil && validEndpointPort(port) {
+					return host, port, true
+				}
+			}
+			// Malformed bracketed entries such as `[::1]x` keep their raw
+			// text so the eventual dial error stays honest.
+			return entry, fallbackPort, true
+		}
+	}
+	if strings.Count(entry, ":") == 1 {
+		if host, rawPort, ok := strings.Cut(entry, ":"); ok && host != "" {
+			if port, err := strconv.Atoi(rawPort); err == nil && validEndpointPort(port) {
+				return host, port, true
+			}
+		}
+	}
+	// Bare IPv6 literals and hostnames (including entries with a non-numeric
+	// port suffix) are forwarded verbatim, exactly like the single-host path.
+	return entry, fallbackPort, true
+}
+
+func validEndpointPort(port int) bool {
+	return port > 0 && port <= 65535
+}
+
+// openAndPingClusterEndpoints tries each configured endpoint in order and
+// keeps the first connection that completes the sslmode sequence, matching
+// the failover behavior the openGauss-family drivers implement natively.
+// Following libpq semantics, every endpoint gets its own full timeout
+// budget so one unreachable node cannot starve the remaining candidates.
+func openAndPingClusterEndpoints(
+	cp connectParams,
+	timeout time.Duration,
+	endpoints []kingbaseEndpoint,
+	opener kingbaseDBOpener,
+) (*sql.DB, error) {
+	failures := make([]error, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		endpointParams := cp
+		endpointParams.Host = endpoint.host
+		endpointParams.Port = endpoint.port
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		db, err := pingDBWithSSLModes(ctx, endpointParams, opener)
+		cancel()
+		if err == nil {
+			return db, nil
+		}
+		failures = append(failures, fmt.Errorf("%s:%d: %w", endpoint.host, endpoint.port, err))
+	}
+	return nil, fmt.Errorf("kingbase connection failed after trying %d endpoints: %w", len(endpoints), errors.Join(failures...))
 }
 
 func shouldRetryKingbaseWithoutSSL(err error) bool {
@@ -559,15 +712,20 @@ func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {
 func (s *server) disconnect() error {
 	s.cancelActiveQuery()
 	s.closeAllQuerySessions()
+	s.rollbackManualTransactionQuiet()
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
 	s.useLegacyRoutineDefinition = false
+	s.routineKindUnsupported = false
+	s.routineIdentityFallback = 0
 	s.catalogIdentityUnsupported = false
+	s.catalogGeneratedUnsupported = false
 	s.catalogOIDUnsupported = false
 	s.infoColumnTypeUnsupported = false
 	s.infoUdtNameUnsupported = false
 	s.indexOrdinalityUnsupported = false
+	s.indexKeyCountUnsupported = false
 	s.triggerPrettyUnsupported = false
 	s.triggerInternalUnsupported = false
 	s.constraintDefinitionUnsupported = false
@@ -584,12 +742,19 @@ func (s *server) disconnect() error {
 }
 
 func (s *server) validateConnection() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// The pool holds a single connection (SetMaxOpenConns(1)) and the open
+	// interactive transaction pinned it, so it is the only connection this
+	// session can use — and the only one that can be pinged without waiting
+	// for the pool.
+	if s.manualConn != nil {
+		return s.manualConn.PingContext(ctx)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
 	return db.PingContext(ctx)
 }
 
@@ -630,24 +795,32 @@ func (s *server) cancelActiveQuery() {
 	}
 }
 
-func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
+func (s *server) executeQuery(opts queryOptions) (result queryResult, resultErr error) {
 	start := time.Now()
 	sqlText := trimStatementSQL(opts.SQL)
 	if isQuerySQL(sqlText) {
-		rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
+		rows, conn, cancel, messages, restore, err := s.queryRowsWithMessages(sqlText, opts.Schema, opts.TimeoutSecs)
 		if err != nil {
 			return queryResult{}, err
 		}
 		defer func() {
-			_ = rows.Close()
-			_ = conn.Close()
+			// gokb surfaces errors raised after the first result set (e.g. a
+			// stored procedure that selects, then fails) only while draining
+			// the remaining protocol messages during Close, so the close error
+			// must replace an otherwise successful read.
+			if closeErr := rows.Close(); resultErr == nil && closeErr != nil {
+				resultErr = closeErr
+			}
+			result.Messages = messages.drain()
+			restore()
+			s.releaseConn(conn)
 			s.endOperation(cancel)
 		}()
 		maxRows := opts.MaxRows
 		if maxRows <= 0 {
 			maxRows = defaultMaxRows
 		}
-		result, err := readRows(rows, maxRows)
+		result, err = readRows(rows, maxRows)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -655,8 +828,16 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
+	messages, restore, err := captureQueryMessages(conn)
+	if err != nil {
+		s.releaseConn(conn)
+		s.endOperation(cancel)
+		return queryResult{}, err
+	}
 	defer func() {
-		_ = conn.Close()
+		result.Messages = messages.drain()
+		restore()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 	}()
 	execResult, err := conn.ExecContext(ctx, sqlText)
@@ -674,11 +855,32 @@ func (s *server) queryRows(sqlText string, schema string, timeoutSecs int) (*sql
 	}
 	rows, err := conn.QueryContext(ctx, sqlText)
 	if err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return nil, nil, nil, err
 	}
 	return rows, conn, cancel, nil
+}
+
+func (s *server) queryRowsWithMessages(sqlText string, schema string, timeoutSecs int) (*sql.Rows, *sql.Conn, context.CancelFunc, *queryMessageBuffer, func(), error) {
+	conn, ctx, cancel, err := s.operationConn(schema, timeoutSecs)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	messages, restore, err := captureQueryMessages(conn)
+	if err != nil {
+		s.releaseConn(conn)
+		s.endOperation(cancel)
+		return nil, nil, nil, nil, nil, err
+	}
+	rows, err := conn.QueryContext(ctx, sqlText)
+	if err != nil {
+		restore()
+		s.releaseConn(conn)
+		s.endOperation(cancel)
+		return nil, nil, nil, nil, nil, err
+	}
+	return rows, conn, cancel, messages, restore, nil
 }
 
 func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageResult, error) {
@@ -686,30 +888,32 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	sqlText := trimStatementSQL(opts.SQL)
 	if !isQuerySQL(sqlText) {
 		result, err := s.executeQuery(opts)
-		return queryPageResult{Columns: result.Columns, ColumnTypes: result.ColumnTypes, Rows: result.Rows, AffectedRows: result.AffectedRows, ExecutionTimeMS: result.ExecutionTimeMS, Truncated: result.Truncated}, err
+		return queryPageResult{Columns: result.Columns, ColumnTypes: result.ColumnTypes, Rows: result.Rows, AffectedRows: result.AffectedRows, ExecutionTimeMS: result.ExecutionTimeMS, Truncated: result.Truncated, Messages: result.Messages}, err
 	}
-	rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
+	rows, conn, cancel, messages, restore, err := s.queryRowsWithMessages(sqlText, opts.Schema, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
-	columns, err := rows.Columns()
+	columns, err := advanceToResultSetColumns(rows)
 	if err != nil {
 		_ = rows.Close()
-		_ = conn.Close()
+		restore()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
-	columns = nonNilStrings(columns)
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
 	}
-	session := &querySession{rows: rows, conn: conn, columns: columns, columnTypes: columnTypeNames(rows), remaining: maxRows, cancel: cancel}
+	session := &querySession{rows: rows, conn: conn, columns: columns, columnTypes: columnTypeNames(rows), remaining: maxRows, cancel: cancel, messages: messages, restoreMessages: restore}
 	result, err := readQuerySessionPage(session, pageSize)
+	result.Messages = messages.drain()
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
 		_ = rows.Close()
-		_ = conn.Close()
+		restore()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
@@ -719,9 +923,13 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		s.sessions[id] = session
 		result.SessionID = &id
 	} else {
-		_ = rows.Close()
-		_ = conn.Close()
+		closeErr := rows.Close()
+		restore()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
+		if closeErr != nil {
+			return queryPageResult{}, closeErr
+		}
 	}
 	return result, nil
 }
@@ -732,6 +940,9 @@ func (s *server) fetchQueryPage(id string, pageSize int) (queryPageResult, error
 		return queryPageResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}}, nil
 	}
 	result, err := readQuerySessionPage(session, pageSize)
+	if session.messages != nil {
+		result.Messages = session.messages.drain()
+	}
 	if err != nil {
 		s.closeQuerySession(id)
 		return queryPageResult{}, err
@@ -739,25 +950,32 @@ func (s *server) fetchQueryPage(id string, pageSize int) (queryPageResult, error
 	if result.HasMore {
 		result.SessionID = &id
 	} else {
-		s.closeQuerySession(id)
+		if _, closeErr := s.closeQuerySession(id); closeErr != nil {
+			return queryPageResult{}, closeErr
+		}
 	}
 	return result, nil
 }
 
-func (s *server) closeQuerySession(id string) bool {
+func (s *server) closeQuerySession(id string) (bool, error) {
 	session := s.sessions[id]
 	if session == nil {
-		return false
+		return false, nil
 	}
-	_ = session.rows.Close()
+	// Close drains the remaining protocol messages; errors raised after the
+	// rows already delivered (procedure selects, then fails) surface here.
+	closeErr := session.rows.Close()
+	if session.restoreMessages != nil {
+		session.restoreMessages()
+	}
 	if session.conn != nil {
-		_ = session.conn.Close()
+		s.releaseConn(session.conn)
 	}
 	if session.cancel != nil {
 		s.endOperation(session.cancel)
 	}
 	delete(s.sessions, id)
-	return true
+	return true, closeErr
 }
 
 func (s *server) closeAllQuerySessions() {
@@ -766,12 +984,31 @@ func (s *server) closeAllQuerySessions() {
 	}
 }
 
+// minInt/maxInt replace the Go 1.21 builtins so the module stays go 1.20
+// compatible for the Windows 7 toolchain build.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult, error) {
 	if pageSize <= 0 {
 		pageSize = 100
 	}
-	capacity := min(pageSize, session.remaining)
+	capacity := minInt(pageSize, session.remaining)
 	result := queryPageResult{Columns: session.columns, ColumnTypes: session.columnTypes, Rows: make([][]any, 0, capacity)}
+	if len(session.columns) == 0 {
+		return result, session.rows.Err()
+	}
 	for len(result.Rows) < pageSize && session.remaining > 0 {
 		if session.pending != nil {
 			result.Rows = append(result.Rows, session.pending)
@@ -804,14 +1041,30 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 	return result, session.rows.Err()
 }
 
-func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
+func advanceToResultSetColumns(rows *sql.Rows) ([]string, error) {
 	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	for len(columns) == 0 && rows.NextResultSet() {
+		columns, err = rows.Columns()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return nonNilStrings(columns), nil
+}
+
+func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
+	columns, err := advanceToResultSetColumns(rows)
 	if err != nil {
 		return queryResult{}, err
 	}
-	columns = nonNilStrings(columns)
 	columnTypes := columnTypeNames(rows)
-	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: make([][]any, 0, min(maxRows, 1024))}
+	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: make([][]any, 0, minInt(maxRows, 1024))}
+	if len(columns) == 0 {
+		return result, rows.Err()
+	}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
@@ -861,14 +1114,28 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) executeTransaction(params map[string]json.RawMessage) (queryResult, error) {
+func (s *server) executeTransaction(params map[string]json.RawMessage) (result queryResult, resultErr error) {
+	if s.manualTxOpen {
+		// The one-shot transaction would open a second transaction on the
+		// pinned connection, and its COMMIT would end the interactive
+		// transaction the SQL editor is driving.
+		return queryResult{}, errors.New("cannot start a one-shot transaction while a manual transaction is open")
+	}
 	statements := stringSliceParam(params, "statements")
 	conn, ctx, cancel, err := s.operationConn(stringParam(params, "schema"), intParam(params, "timeoutSecs"))
 	if err != nil {
 		return queryResult{}, err
 	}
+	messages, restore, err := captureQueryMessages(conn)
+	if err != nil {
+		s.releaseConn(conn)
+		s.endOperation(cancel)
+		return queryResult{}, err
+	}
 	defer func() {
-		_ = conn.Close()
+		result.Messages = messages.drain()
+		restore()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 	}()
 	start := time.Now()
@@ -895,14 +1162,18 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 func (s *server) executeBatch(params map[string]json.RawMessage) (queryResult, error) {
 	start := time.Now()
 	var affected int64
+	messages := &queryMessageBuffer{}
 	for _, statement := range stringSliceParam(params, "statements") {
 		result, err := s.executeQuery(queryOptions{SQL: statement, Schema: stringParam(params, "schema")})
 		if err != nil {
 			return queryResult{}, err
 		}
 		affected += result.AffectedRows
+		for _, message := range result.Messages {
+			messages.addMessage(message)
+		}
 	}
-	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
+	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds(), Messages: messages.drain()}, nil
 }
 
 func (s *server) operationConn(schema string, timeoutSecs int) (*sql.Conn, context.Context, context.CancelFunc, error) {
@@ -916,19 +1187,40 @@ func (s *server) operationConn(schema string, timeoutSecs int) (*sql.Conn, conte
 }
 
 func (s *server) schemaConn(ctx context.Context, schema string) (*sql.Conn, error) {
-	db, err := s.requireDB()
-	if err != nil {
-		return nil, err
-	}
-	conn, err := db.Conn(ctx)
+	conn, err := s.acquireConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.setSchema(ctx, conn, schema); err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		return nil, err
 	}
 	return conn, nil
+}
+
+// acquireConn returns the connection one operation must run on. While an
+// interactive transaction is open, every statement has to run on the pinned
+// connection: another connection would not see the open transaction and the
+// statement would silently commit on its own instead.
+func (s *server) acquireConn(ctx context.Context) (*sql.Conn, error) {
+	if s.manualConn != nil {
+		return s.manualConn, nil
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	return db.Conn(ctx)
+}
+
+// releaseConn returns an operation's connection to the pool. The pinned
+// manual-transaction connection belongs to the transaction, so it has to
+// survive the statement that used it.
+func (s *server) releaseConn(conn *sql.Conn) {
+	if conn == nil || conn == s.manualConn {
+		return
+	}
+	_ = conn.Close()
 }
 
 func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) error {
@@ -950,6 +1242,113 @@ func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) e
 	s.currentSchema = schema
 	s.schemaSet = schema != ""
 	return nil
+}
+
+// beginManualTransaction pins the session connection and opens an interactive
+// transaction on it. The SQL editor drives the transaction statement by
+// statement, so BEGIN, the following statements and COMMIT have to share one
+// physical connection: the agent gives every protocol session a single
+// connection, and pinning it keeps the transaction on that session.
+func (s *server) beginManualTransaction(schema string) error {
+	if s.manualTxOpen {
+		return errors.New("manual transaction already open")
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("reserve connection for manual transaction: %w", err)
+	}
+	if err := s.setSchema(context.Background(), conn, schema); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		// The server may have started the transaction even though the client
+		// never got the response, so the connection must not go back to the
+		// pool with an open transaction on it.
+		discardConn(conn)
+		return fmt.Errorf("begin manual transaction: %w", err)
+	}
+	s.manualConn = conn
+	s.manualTxOpen = true
+	return nil
+}
+
+// commitManualTransaction commits the interactive transaction and releases the
+// pinned connection.
+func (s *server) commitManualTransaction() error {
+	conn := s.manualConn
+	if !s.manualTxOpen || conn == nil {
+		return errors.New("no manual transaction open")
+	}
+	_, err := conn.ExecContext(context.Background(), "COMMIT")
+	if err != nil {
+		// A failed COMMIT leaves the transaction open. Roll it back before the
+		// connection goes back to the pool, otherwise the pooled connection
+		// would carry that transaction into unrelated statements.
+		if _, rollbackErr := conn.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+			// The rollback failed too, so the server may still hold an open
+			// transaction on this connection. Drop the connection instead of
+			// handing it to the next statement.
+			discardConn(conn)
+		}
+	}
+	s.releaseManualTransaction(conn)
+	return err
+}
+
+// rollbackManualTransaction rolls the interactive transaction back and releases
+// the pinned connection.
+func (s *server) rollbackManualTransaction() error {
+	conn := s.manualConn
+	if !s.manualTxOpen || conn == nil {
+		return errors.New("no manual transaction open")
+	}
+	_, err := conn.ExecContext(context.Background(), "ROLLBACK")
+	if err != nil {
+		// The rollback failed, so the connection may still carry an open
+		// transaction. Drop it instead of returning it to the pool.
+		discardConn(conn)
+	}
+	s.releaseManualTransaction(conn)
+	return err
+}
+
+// rollbackManualTransactionQuiet ends an unfinished interactive transaction
+// without reporting an error. It runs when the session is closed, so a
+// transaction the user never committed never reaches the server.
+func (s *server) rollbackManualTransactionQuiet() {
+	conn := s.manualConn
+	if !s.manualTxOpen || conn == nil {
+		return
+	}
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		discardConn(conn)
+	}
+	s.releaseManualTransaction(conn)
+}
+
+// discardConn marks a pooled connection as broken so database/sql drops it
+// instead of handing it to the next statement.
+func discardConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+}
+
+// releaseManualTransaction drops the pinned connection after the transaction
+// ended.
+func (s *server) releaseManualTransaction(conn *sql.Conn) {
+	s.manualConn = nil
+	s.manualTxOpen = false
+	if conn == nil {
+		return
+	}
+	_ = conn.Close()
 }
 
 func buildDSN(cp connectParams) string {
@@ -1201,7 +1600,13 @@ func isNativeDSNSpace(value byte) bool {
 }
 
 func isKingbaseJDBCURL(value string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "jdbc:kingbase8://")
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, prefix := range []string{"jdbc:kingbase://", "jdbc:kingbase8://", "jdbc:kingbase83://", "jdbc:kingbase86://"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteDSNValue(value string) string {
@@ -1495,6 +1900,12 @@ func normalizeValue(value any, columnTypeName string) any {
 		}
 		return map[string]string{"$binary": base64.StdEncoding.EncodeToString(typed)}
 	case time.Time:
+		// A "time" column holds a time of day and no date. gokb decodes one into a
+		// time.Time on Go's zero date, so formatting a date part shows every time of
+		// day as 0000-01-01T<time> (issue #12188).
+		if isKingbaseTimeOnlyType(columnTypeName) {
+			return typed.Format("15:04:05.999999999")
+		}
 		// KingBase "timestamp"/"date" columns are wall-clock values with no timezone
 		// meaning; the gokb driver decodes them into a time.Time labeled with the
 		// process-local zone, which is not a real UTC instant. Formatting those with
@@ -1517,13 +1928,27 @@ func normalizeValue(value any, columnTypeName string) any {
 }
 
 func isKingbaseTimezoneLessDateTime(columnTypeName string) bool {
-	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
-	switch normalized {
-	case "DATE", "TIMESTAMP", "TIME":
+	switch normalizedKingbaseColumnType(columnTypeName) {
+	case "DATE", "TIMESTAMP":
 		return true
 	default:
 		return false
 	}
+}
+
+// isKingbaseTimeOnlyType matches the type names a "time" column can carry: the
+// driver's own name (`DatabaseTypeName`) and the information_schema spelling.
+func isKingbaseTimeOnlyType(columnTypeName string) bool {
+	switch normalizedKingbaseColumnType(columnTypeName) {
+	case "TIME", "TIMEWITHOUTTIMEZONE":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizedKingbaseColumnType(columnTypeName string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
 }
 
 func isTextBytes(value []byte) bool {
@@ -1598,7 +2023,7 @@ func isQuerySQL(sqlText string) bool {
 		keyword = terminal
 		next = terminalEnd
 	}
-	if keyword == "select" || keyword == "show" || keyword == "explain" || keyword == "values" || keyword == "table" {
+	if keyword == "select" || keyword == "show" || keyword == "explain" || keyword == "values" || keyword == "table" || keyword == "call" || keyword == "exec" || keyword == "execute" {
 		return true
 	}
 	return isDMLKeyword(keyword) && hasTopLevelSQLKeyword(sqlText, next, "returning")
@@ -1700,7 +2125,7 @@ func hasTopLevelSQLKeyword(sqlText string, index int, target string) bool {
 		case '(':
 			depth++
 		case ')':
-			depth = max(depth-1, 0)
+			depth = maxInt(depth-1, 0)
 		default:
 			if depth == 0 && isSQLWordStartByte(sqlText[index]) {
 				keyword, next := sqlKeywordAt(sqlText, index)

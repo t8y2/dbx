@@ -25,9 +25,11 @@ fn concurrent_index(columns: Vec<&str>) -> EditableStructureIndex {
         filter: String::new(),
         index_type: String::new(),
         included_columns: Vec::new(),
+        column_opclasses: Vec::new(),
         comment: String::new(),
         concurrently: true,
         original: None,
+        oracle_original_missing: false,
         marked_for_drop: false,
     }
 }
@@ -51,6 +53,7 @@ async fn live_postgres_concurrent_index_builds_valid_index() {
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
         schema: Some(schema.clone()),
         table_name: "users".to_string(),
         columns: Vec::new(),
@@ -60,8 +63,16 @@ async fn live_postgres_concurrent_index_builds_valid_index() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        mysql_auto_increment_value: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
+        primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     });
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(
@@ -182,6 +193,7 @@ async fn live_postgres_partitioned_parent_concurrent_request_rejected() {
     idx.id = "idx_events_id".to_string();
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::Postgres),
+        driver_profile: None,
         schema: Some(schema.clone()),
         table_name: "events".to_string(),
         columns: Vec::new(),
@@ -191,8 +203,16 @@ async fn live_postgres_partitioned_parent_concurrent_request_rejected() {
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        mysql_auto_increment_value: None,
+        transwarp_create: None,
         partitioned: true,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
+        primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     });
     assert_eq!(
         result.warnings,

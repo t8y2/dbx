@@ -277,7 +277,8 @@ describe("MongoDB sidebar mutation runtime", () => {
     activeNode.value = mongoCollectionNode();
     expect(feature.canDropMongoCollection.value).toBe(true);
     expect(feature.canDropAllMongoIndexes.value).toBe(false);
-    expect(feature.canRenameMongoCollection.value).toBe(false);
+    // The Legacy Agent supports renameCollection (capability-gated in the backend).
+    expect(feature.canRenameMongoCollection.value).toBe(true);
     expect(feature.canCloneMongoCollection.value).toBe(true);
     expect(feature.canCreateMongoIndex.value).toBe(false);
     activeNode.value = mongoIndexesGroupNode();
@@ -373,6 +374,11 @@ describe("MongoDB sidebar mutation runtime", () => {
       ],
       unique: true,
       sparse: false,
+      expireAfterSeconds: "",
+      partialFilterExpression: "",
+      background: false,
+      bucketSize: "",
+      hidden: false,
     };
     await feature.confirmCreateMongoIndex();
 
@@ -394,6 +400,7 @@ describe("MongoDB sidebar mutation runtime", () => {
       partialFilterExpression: '{"active":true}',
       background: true,
       bucketSize: "32",
+      hidden: true,
     };
     mongoCreateIndexError.value = "previous failure";
 
@@ -931,7 +938,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmDropMongoIndex();
 
     expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
-    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), 5000);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), { persistent: true });
   });
 
   it("reports partial index deletion after forcing a metadata refresh", async () => {
@@ -947,7 +954,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmDropAllMongoIndexes();
 
     expect(mocks.loadIndexes).toHaveBeenCalledOnce();
-    expect(mocks.toast).toHaveBeenCalledWith('contextMenu.dropIndexesPartialFailure:{"success":1,"failed":1}', 5000);
+    expect(mocks.toast).toHaveBeenCalledWith('contextMenu.dropIndexesPartialFailure:{"success":1,"failed":1}', { persistent: true });
   });
 
   it("executes Legacy delete operations and refreshes their MongoDB metadata", async () => {
@@ -992,8 +999,8 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(showDropMongoCollectionConfirm.value).toBe(false);
     expect(mocks.removeTreeNode).toHaveBeenCalledWith(node.id);
     expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.dropCollectionSuccess"), 3000);
-    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.objectDropRefreshFailed"), 5000);
-    expect(mocks.toast).not.toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), 5000);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.objectDropRefreshFailed"), { persistent: true });
+    expect(mocks.toast).not.toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), { persistent: true });
   });
 
   it("does not send a default _id_ index deletion request", async () => {
@@ -1023,7 +1030,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmCreateMongoIndex();
 
     expect(mocks.mongoCreateIndex).toHaveBeenCalledOnce();
-    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.mongoIndexRefreshFailed"), 5000);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.mongoIndexRefreshFailed"), { persistent: true });
   });
 
   it("does not issue a create request when production confirmation is cancelled", async () => {

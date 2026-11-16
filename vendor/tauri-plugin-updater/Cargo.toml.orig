@@ -1,0 +1,74 @@
+[package]
+name = "tauri-plugin-updater"
+version = "2.10.1"
+description = "In-app updates for Tauri applications."
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+repository = { workspace = true }
+links = "tauri-plugin-updater"
+
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["zip"]
+
+[package.metadata.platforms.support]
+windows = { level = "full", notes = "" }
+linux = { level = "full", notes = "" }
+macos = { level = "full", notes = "" }
+android = { level = "none", notes = "" }
+ios = { level = "none", notes = "" }
+
+[build-dependencies]
+tauri-plugin = { workspace = true, features = ["build"] }
+
+[dependencies]
+tauri = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+tokio = "1"
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "stream",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+], optional = true }
+url = { workspace = true }
+http = "1"
+minisign-verify = "0.2"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+base64 = "0.22"
+semver = { version = "1", features = ["serde"] }
+futures-util = "0.3"
+tempfile = "3.20"
+infer = "0.19"
+percent-encoding = "2.3"
+
+[target."cfg(target_os = \"windows\")".dependencies]
+zip = { version = "4", default-features = false, optional = true }
+windows-sys = { version = "0.60.0", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+] }
+
+[target."cfg(target_os = \"linux\")".dependencies]
+dirs = "6"
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+tar = "0.4"
+flate2 = "1"
+osakit = { version = "0.3", features = ["full"] }
+
+[features]
+default = ["rustls-tls", "zip"]
+zip = ["dep:zip", "dep:tar", "dep:flate2"]
+native-tls = ["reqwest/native-tls"]
+native-tls-vendored = ["reqwest/native-tls-vendored"]
+rustls-tls = ["reqwest/rustls-no-provider", "dep:rustls"]

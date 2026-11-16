@@ -20,8 +20,10 @@ import {
   isNacosConfigDeleteSnapshotInScope,
   mergeNacosNamespacePermissionAssignments,
   nacosConfigFileExtension,
+  nacosMetadataTableRows,
   nacosMetricsCandidates,
   normalizeNacosMetricsUrl,
+  normalizeNacosConsoleUrl,
   parseNacosManagedNamespaces,
   parseNacosRawBody,
   parseNacosRawQuery,
@@ -29,9 +31,9 @@ import {
   resolveRNacosOpenApiFallback,
   resolveNacosConfigCopyText,
   resolveNacosConfigSaveCompletion,
+  resolveNacosConsoleUrl,
   sanitizeNacosConfigFileNameSegment,
   splitNacosContentLiteralMatches,
-  summarizeNacosConfigDiff,
 } from "@/lib/nacos/nacosAdmin";
 
 describe("nacosAdmin helpers", () => {
@@ -90,6 +92,26 @@ describe("nacosAdmin helpers", () => {
     expect(() => normalizeNacosMetricsUrl("http://user:secret@localhost/metrics")).toThrow(/credentials/);
     expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#fragment")).toThrow(/fragment/);
     expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#")).toThrow(/fragment/);
+  });
+
+  it("formats instance metadata for a readable table without flattening nested values", () => {
+    expect(nacosMetadataTableRows({ role: "manual-test", source: "dbx-ui", ports: [8080, 8848], nested: { enabled: true } })).toEqual([
+      { key: "role", value: "manual-test" },
+      { key: "source", value: "dbx-ui" },
+      { key: "ports", value: "[8080,8848]" },
+      { key: "nested", value: '{"enabled":true}' },
+    ]);
+    expect(nacosMetadataTableRows(["legacy-value"])).toEqual([{ key: "0", value: "legacy-value" }]);
+  });
+
+  it("resolves browser console URLs without inferring Nacos 3 ports", () => {
+    expect(resolveNacosConsoleUrl({ implementation: "nacos", versionMode: "v2", serverAddr: "https://nacos.example:8848", contextPath: "/gateway/nacos", consoleUrl: "https://stale.example" })).toBe("https://nacos.example:8848/gateway/nacos");
+    expect(resolveNacosConsoleUrl({ implementation: "nacos", versionMode: "v3", serverAddr: "https://nacos.example:11003", contextPath: "/nacos" })).toBeUndefined();
+    expect(resolveNacosConsoleUrl({ implementation: "nacos", versionMode: "v3", serverAddr: "https://nacos.example:11003", consoleUrl: "https://nacos.example:11004/next/" })).toBe("https://nacos.example:11004/next");
+    expect(resolveNacosConsoleUrl({ implementation: "nacos", versionMode: "v3", apiPlane: "console", serverAddr: "https://nacos.example:11004", contextPath: "/next", consoleUrl: "https://stale.example" })).toBe("https://nacos.example:11004/next");
+    expect(resolveNacosConsoleUrl({ implementation: "rnacos", serverAddr: "https://rnacos.example:8848", rnacosConsoleAddr: "https://rnacos.example:10848/" })).toBe("https://rnacos.example:10848");
+    expect(resolveNacosConsoleUrl({ serverAddr: "https://rnacos.example:8848", rnacosConsoleAddr: "https://rnacos.example:10848/" })).toBe("https://rnacos.example:10848");
+    expect(() => normalizeNacosConsoleUrl("https://user:secret@nacos.example")).toThrow(/credentials/i);
   });
 
   it("parses raw query and body text", () => {
@@ -162,21 +184,6 @@ describe("nacosAdmin helpers", () => {
       contextPath: "/nacos",
     });
     expect(resolveRNacosOpenApiFallback("http://rnacos.example:8848", "/nacos")).toBeNull();
-  });
-
-  it("summarizes config diffs", () => {
-    const diff = summarizeNacosConfigDiff("a\nb", "a\nc\nd");
-    expect(diff.changed).toBe(true);
-    expect(diff.removedLines).toBe(1);
-    expect(diff.addedLines).toBe(2);
-    expect(diff.preview).toContain("- b");
-    expect(diff.preview).toContain("+ c");
-  });
-
-  it("uses the same terminal newline semantics for diff summaries", () => {
-    expect(summarizeNacosConfigDiff("aa", "aa\nbb")).toMatchObject({ changed: true, addedLines: 1, removedLines: 0 });
-    expect(summarizeNacosConfigDiff("aa", "aa\n")).toEqual({ changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." });
-    expect(summarizeNacosConfigDiff("aa\r\n", "aa\n")).toEqual({ changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." });
   });
 
   it("builds side-by-side config diff rows with inline segments", () => {

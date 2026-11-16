@@ -198,7 +198,7 @@ describe("ConsulServices interactions", () => {
     expect(catalogRow!.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("keeps local service cards interactive while explaining read-only Agent actions", async () => {
+  it("keeps local service cards interactive and deregistration disabled when the Agent target is missing", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const app = createApp(ConsulServices, { connectionId: "connection-1" });
@@ -207,8 +207,13 @@ describe("ConsulServices interactions", () => {
     await settle();
 
     expect(host.textContent).toContain("consul.ui.agentReadOnly");
-    expect(host.textContent).toContain("consul.ui.agentWriteDisabledHint");
+    expect(host.textContent).toContain("consul.ui.agentWriteBlocked.targetRequired");
     expect(host.textContent).not.toContain("consul.ui.enableMaintenance");
+
+    const deregisterButton = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "consul.ui.deregister");
+    expect(deregisterButton).toBeTruthy();
+    expect(deregisterButton!.disabled).toBe(true);
+    expect(deregisterButton!.title).toBe("consul.ui.agentWriteBlocked.targetRequired");
 
     const localServiceButton = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.includes("dbx-demo-api-1"));
     expect(localServiceButton).toBeTruthy();

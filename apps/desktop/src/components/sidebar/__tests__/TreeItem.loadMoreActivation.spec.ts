@@ -503,3 +503,25 @@ describe("TreeItem searched connection activation", () => {
     expect(host.handleRowDoubleClick).toHaveBeenCalledWith(node, expect.any(MouseEvent));
   });
 });
+
+describe("TreeItem etcd workspace activation", () => {
+  it.each([
+    ["etcd-root", 1],
+    ["etcd-access-control", 2],
+    ["etcd-dashboard", 3],
+  ] as const)("activates %s with click detail %i even in double-click mode", async (type, detail) => {
+    settingsStore.editorSettings.sidebarActivation = "double";
+    const node: TreeNode = {
+      id: `connection-1:${type}`,
+      label: type,
+      type,
+      connectionId: "connection-1",
+    };
+    const { row, host } = await mountTreeItem(node);
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail }));
+
+    expect(host.handleRowClick).toHaveBeenCalledWith(node, detail);
+    expect(host.handleRowDoubleClick).not.toHaveBeenCalled();
+  });
+});

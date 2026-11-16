@@ -8,13 +8,31 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
+use crate::captcha::CAPTCHA_TTL;
 use crate::state::WebState;
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub password: String,
+    /// Challenge id returned by `GET /auth/captcha`. Optional at the type level
+    /// so `auth::setup` can reuse this body; `auth::login` rejects a missing or
+    /// stale pair with `captcha_invalid`.
+    #[serde(default)]
+    pub captcha_id: Option<String>,
+    #[serde(default)]
+    pub captcha_code: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CaptchaResponse {
+    pub id: String,
+    /// `data:image/png;base64,...` so the client needs no second request and
+    /// the challenge cannot be cached by an intermediary.
+    pub image: String,
+    pub expires_in: u64,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +55,18 @@ fn session_cookie_path(state: &WebState) -> &str {
     state.public_base_path.as_str()
 }
 
+/// `Secure` is opt-in: LAN/HTTP deployments would otherwise never receive the
+/// session cookie back. Reverse-proxy TLS deployments set DBX_WEB_COOKIE_SECURE=1.
+fn cookie_secure_enabled() -> bool {
+    static SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SECURE.get_or_init(|| matches!(std::env::var("DBX_WEB_COOKIE_SECURE").ok().as_deref(), Some("1") | Some("true")))
+}
+
+pub(crate) fn session_cookie(state: &WebState, token: &str) -> String {
+    let secure = if cookie_secure_enabled() { "; Secure" } else { "" };
+    format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax{secure}", session_cookie_path(state))
+}
+
 fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
     if let Some(suffix) = path.strip_prefix("/api/") {
         return Some(suffix);
@@ -48,7 +78,7 @@ fn api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str>
     path.strip_prefix(base)?.strip_prefix("/api/")
 }
 
-fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
+pub(crate) fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Option<&'a str> {
     if let Some(suffix) = api_path_suffix(path, public_base_path) {
         return Some(suffix);
     }
@@ -61,15 +91,57 @@ fn middleware_api_path_suffix<'a>(path: &'a str, public_base_path: &str) -> Opti
     path.strip_prefix('/').filter(|suffix| !suffix.is_empty())
 }
 
+/// Issue a login challenge. Unauthenticated by design (it is the pre-login
+/// handshake), but bounded: `CaptchaStore` caps pending entries and expires
+/// them, so this endpoint cannot be turned into a memory sink.
+pub async fn captcha(State(state): State<Arc<WebState>>) -> Response {
+    // `auto` only asks for a challenge once an attempt has failed, and `off`
+    // never does, so the form decides from this response whether to show the
+    // field at all.
+    let failed_attempts = state.login_rate_limit.lock().await.fail_count;
+    let mode = *state.captcha_mode.read().await;
+    if !mode.requires_challenge(failed_attempts) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let (id, png) = state.captchas.issue();
+    let image = format!("data:image/png;base64,{}", BASE64.encode(&png));
+    (
+        StatusCode::OK,
+        [("cache-control", "no-store")],
+        Json(CaptchaResponse { id, image, expires_in: CAPTCHA_TTL.as_secs() }),
+    )
+        .into_response()
+}
+
 pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
     let hash_guard = state.password_hash.read().await;
     let hash_str = match hash_guard.as_deref() {
+        // No password configured: nothing to authenticate against. Answer
+        // explicitly instead of an ok:true that reads as "authenticated" —
+        // the API remains locked by the middleware until setup completes.
         Some(h) => h.to_string(),
         None => {
-            return Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response());
+            return Ok((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "setup_required"}))).into_response());
         }
     };
     drop(hash_guard);
+
+    // Captcha gate, when the configured mode demands one. It runs before the
+    // rate-limit bookkeeping and the argon2 verification on purpose: a wrong or
+    // missing challenge must not consume the password lockout budget (otherwise
+    // five bogus captchas would lock the administrator out), and a bot must not
+    // be able to spend our hashing CPU without solving an image first. `verify`
+    // consumes the challenge either way, so the same image can never be
+    // replayed.
+    let failed_attempts = state.login_rate_limit.lock().await.fail_count;
+    if state.captcha_mode.read().await.requires_challenge(failed_attempts) {
+        let captcha_ok = state
+            .captchas
+            .verify(body.captcha_id.as_deref().unwrap_or_default(), body.captcha_code.as_deref().unwrap_or_default());
+        if !captcha_ok {
+            return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "captcha_invalid"}))).into_response());
+        }
+    }
 
     // Check rate limit
     {
@@ -108,7 +180,7 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     let token = uuid::Uuid::new_v4().to_string();
     state.sessions.write().await.insert(token.clone());
 
-    let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
+    let cookie = session_cookie(&state, &token);
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
@@ -137,12 +209,17 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
 
     // Update in-memory state
     *state.password_hash.write().await = Some(hash);
+    if state.migration_ready.load(std::sync::atomic::Ordering::Acquire) {
+        if let Err(error) = state.web_mcp.reload(&state.app.storage, true).await {
+            log::error!("Web MCP remained disabled after password setup: {error}");
+        }
+    }
 
     // Auto-login: create session
     let token = uuid::Uuid::new_v4().to_string();
     state.sessions.write().await.insert(token.clone());
 
-    let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
+    let cookie = session_cookie(&state, &token);
     Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
 }
 
@@ -163,8 +240,20 @@ pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::
 
 pub async fn change_password(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ChangePasswordRequest>,
 ) -> Result<Response, StatusCode> {
+    // Session-bound: this endpoint used to sit outside the auth middleware,
+    // giving unauthenticated callers an unlimited online guess at the admin
+    // password with none of login's lockout. It now requires a live session
+    // (defense in depth — the middleware gates it too) and, after a successful
+    // change, revokes every OTHER session so a stolen old cookie cannot survive
+    // a credential rotation.
+    let current_token = session_token_from_headers(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    if !state.sessions.read().await.contains(&current_token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let hash_guard = state.password_hash.read().await;
     let hash_str = match hash_guard.as_deref() {
         Some(h) => h.to_string(),
@@ -190,12 +279,25 @@ pub async fn change_password(
     state.app.storage.save_password_hash(&new_hash).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     *state.password_hash.write().await = Some(new_hash);
 
+    // Rotation revokes sibling sessions; only the caller stays logged in.
+    {
+        let mut sessions = state.sessions.write().await;
+        for token in sessions.iter().filter(|token| **token != current_token) {
+            dbx_core::query::pl_debug::pl_debug_revoke_web_owner_core(&state.app, token);
+        }
+        sessions.retain(|token| *token == current_token);
+    }
+
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response())
 }
 
 pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Response {
     if let Some(token) = extract_session_token(&req) {
-        state.sessions.write().await.remove(&token);
+        {
+            let mut sessions = state.sessions.write().await;
+            sessions.remove(&token);
+            dbx_core::query::pl_debug::pl_debug_revoke_web_owner_core(&state.app, &token);
+        }
         // 登出只清除当前登录会话的临时密码，不影响其他会话与桌面端凭据。
         state.app.session_credentials.clear_owner(&token);
     }
@@ -225,9 +327,11 @@ pub async fn auth_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Auth endpoints are always accessible.
+    // Only the bootstrap auth endpoints are reachable without a session —
+    // login/setup/check. change-password and logout require one: change-password
+    // must not be an unauthenticated password oracle.
     let api_suffix = middleware_api_path_suffix(req.uri().path(), &state.public_base_path);
-    if api_suffix.is_some_and(|suffix| suffix.starts_with("auth/")) {
+    if api_suffix.is_some_and(|suffix| matches!(suffix, "auth/login" | "auth/setup" | "auth/check" | "auth/captcha")) {
         return next.run(req).await;
     }
 
@@ -281,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn middleware_api_path_suffix_handles_nested_router_paths() {
+    pub(crate) fn middleware_api_path_suffix_handles_nested_router_paths() {
         assert_eq!(middleware_api_path_suffix("/auth/check", "/"), Some("auth/check"));
         assert_eq!(middleware_api_path_suffix("/connection/list", "/"), Some("connection/list"));
         assert_eq!(middleware_api_path_suffix("/api/connection/list", "/"), Some("connection/list"));

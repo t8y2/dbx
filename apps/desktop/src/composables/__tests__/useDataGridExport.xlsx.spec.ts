@@ -4,11 +4,17 @@ import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import type { QueryResult } from "@/types/database";
+import { useExportTracker } from "@/composables/useExportTracker";
 
 const mocks = vi.hoisted(() => ({
+  native: false,
   exportQueryResultsXlsx: vi.fn(),
+  startQueryResultExport: vi.fn().mockResolvedValue({ exportId: "export-1", tableName: "Query Result", rowsExported: 1, totalRows: 1, status: "Done" }),
+  startTableExport: vi.fn().mockResolvedValue({ exportId: "export-2", tableName: "users", rowsExported: 1, totalRows: 1, status: "Done" }),
   toast: vi.fn(),
 }));
+
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => mocks.native }));
 
 vi.mock("@/components/export/XlsxHeaderDialog.vue", () => ({
   default: {
@@ -44,16 +50,6 @@ vi.mock("@/composables/useDataGridExtractor", () => ({
   }),
 }));
 
-vi.mock("@/composables/useExportTracker", () => ({
-  useExportTracker: () => ({
-    addTask: vi.fn(),
-    updateTableExportTask: vi.fn(),
-    registerTaskCancelHandler: vi.fn(),
-    unregisterTaskCancelHandler: vi.fn(),
-    removeTask: vi.fn(),
-  }),
-}));
-
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
     editorSettings: {
@@ -65,6 +61,10 @@ vi.mock("@/stores/settingsStore", () => ({
 
 vi.mock("@/lib/backend/api", () => ({
   exportQueryResultsXlsx: mocks.exportQueryResultsXlsx,
+  startQueryResultExport: mocks.startQueryResultExport,
+  cancelQueryResultExport: vi.fn(),
+  startTableExport: mocks.startTableExport,
+  cancelTableExport: vi.fn(),
 }));
 
 function queryResult(columns: string[], rows: QueryResult["rows"]): QueryResult {
@@ -77,7 +77,7 @@ function queryResult(columns: string[], rows: QueryResult["rows"]): QueryResult 
   };
 }
 
-function createOptions(): UseDataGridExportOptions {
+function createOptions(overrides: Partial<UseDataGridExportOptions> = {}): UseDataGridExportOptions {
   return {
     columns: computed(() => ["id"]),
     displayItems: computed(() => []),
@@ -112,12 +112,30 @@ function createOptions(): UseDataGridExportOptions {
       { sheetName: "Ids", result: queryResult(["id"], [[1]]) },
       { sheetName: "Names", result: queryResult(["name"], [["Ada"]]) },
     ]),
+    ...overrides,
   };
 }
 
 describe("useDataGridExport XLSX headers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const tracker = useExportTracker();
+    for (const task of tracker.tasks.value) tracker.removeTask(task.exportId);
+  });
+
+  it("projects a grid column subset onto the backend table export with aligned header comments (issue #14732)", async () => {
+    const state = useDataGridExport(
+      createOptions({
+        context: computed(() => "table-data"),
+        columns: computed(() => ["id", "name"]),
+        sourceColumns: computed(() => ["id", "name"]),
+        columnTypes: computed(() => ["int", "varchar"]),
+      }),
+    );
+
+    await state.exportXlsx({ columnIndexes: [1] });
+
+    expect(mocks.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", tableName: "users", columns: ["name"], columnTypes: ["varchar"], columnComments: ["name (Display name)"] }), expect.any(Function));
   });
 
   it("maps combined headers independently for every result sheet", async () => {
@@ -129,6 +147,7 @@ describe("useDataGridExport XLSX headers", () => {
       expect.any(String),
       expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Identifier)"], autoFilter: false }), expect.objectContaining({ sheetName: "Names", columnComments: ["name (Display name)"], autoFilter: false })]),
       false,
+      undefined,
     );
   });
 
@@ -141,6 +160,111 @@ describe("useDataGridExport XLSX headers", () => {
 
     await state.exportAllResultsXlsx();
 
-    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false);
+    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false, undefined);
+  });
+
+  it("passes exportColumnTypes for backend full xlsx query result export", async () => {
+    const options = createOptions();
+    options.allColumns = computed(() => ["id", "amount"]);
+    options.allColumnTypes = computed(() => ["int", "decimal(18, 3)"]);
+    options.queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "conn",
+      database: "dbx",
+      databaseType: "duckdb",
+      sql: "SELECT id, amount FROM tab1",
+      queryBaseSql: "SELECT id, amount FROM tab1",
+      useAgentCursor: false,
+      pageSize: 1000,
+      keysetOptimizationEnabled: true,
+    }));
+    const state = useDataGridExport(options);
+
+    await state.exportXlsx();
+
+    expect(mocks.startQueryResultExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: "xlsx",
+        exportColumnTypes: ["int", "decimal(18, 3)"],
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it("passes DuckDB computed column types for backend full xlsx query result export (#12364)", async () => {
+    const options = createOptions();
+    options.allColumns = computed(() => ["金额"]);
+    options.allColumnTypes = computed(() => ["DECIMAL(18, 2)"]);
+    options.queryResultExportRequest = vi.fn(async (request) => ({
+      ...request,
+      connectionId: "conn",
+      database: "dbx",
+      databaseType: "duckdb",
+      sql: "SELECT (val + 1.10) AS 金额 FROM tab",
+      queryBaseSql: "SELECT (val + 1.10) AS 金额 FROM tab",
+      useAgentCursor: false,
+      pageSize: 1000,
+      keysetOptimizationEnabled: true,
+    }));
+    const state = useDataGridExport(options);
+
+    await state.exportXlsx();
+
+    expect(mocks.startQueryResultExport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        format: "xlsx",
+        exportColumnTypes: ["DECIMAL(18, 2)"],
+      }),
+      expect.any(Function),
+    );
+  });
+});
+
+describe("useDataGridExport paged multi-result full export completion", () => {
+  beforeEach(() => {
+    mocks.native = false;
+    vi.clearAllMocks();
+    const tracker = useExportTracker();
+    for (const task of tracker.tasks.value) tracker.removeTask(task.exportId);
+  });
+
+  function pagedOptions() {
+    const options = createOptions();
+    const active = queryResult(["id"], [[1]]);
+    options.allExportResults = computed(() => [
+      { sheetName: "Ids", result: active },
+      { sheetName: "Names", result: queryResult(["name"], [["Ada"]]) },
+    ]);
+    options.snapshotResult = computed(() => active);
+    options.hasCompleteLocalResult = computed(() => false);
+    options.fullExportResult = vi.fn(async () => {
+      throw new Error("full result fetch failed");
+    });
+    return options;
+  }
+
+  it("aborts the workbook export when the completion fetch fails instead of writing the current page (memory path)", async () => {
+    mocks.native = true;
+    const options = pagedOptions();
+    const state = useDataGridExport(options);
+
+    await state.exportAllResultsXlsx();
+
+    expect(options.fullExportResult).toHaveBeenCalledOnce();
+    expect(mocks.startQueryResultExport).not.toHaveBeenCalled();
+    expect(mocks.exportQueryResultsXlsx).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("grid.exportFailed", 5000);
+  });
+
+  it("aborts the export when the completion fetch fails instead of writing the current page (web fallback)", async () => {
+    mocks.native = false;
+    const options = pagedOptions();
+    const state = useDataGridExport(options);
+
+    await state.exportAllResultsXlsx();
+
+    expect(options.fullExportResult).toHaveBeenCalledOnce();
+    expect(mocks.exportQueryResultsXlsx).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("grid.exportFailed", 5000);
   });
 });

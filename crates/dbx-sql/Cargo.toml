@@ -1,0 +1,18 @@
+[package]
+name = "dbx-sql"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+duckdb-sidecar = ["dbx-sql-schema/duckdb-sidecar"]
+openapi = ["dbx-sql-data/openapi", "dbx-types/openapi"]
+
+[dependencies]
+dbx-sql-core = { path = "../dbx-sql-core" }
+dbx-sql-data = { path = "../dbx-sql-data" }
+dbx-sql-dialect = { path = "../dbx-sql-dialect" }
+dbx-sql-schema = { path = "../dbx-sql-schema" }
+dbx-types = { path = "../dbx-types", default-features = false }

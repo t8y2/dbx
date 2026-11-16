@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 550
 dbType: informix
+compareModes: [schema, data]
 rustVariant: Informix
 label: IBM Informix
 dialect: Informix

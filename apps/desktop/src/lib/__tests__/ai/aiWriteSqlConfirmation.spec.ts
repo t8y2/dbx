@@ -140,6 +140,12 @@ describe("shouldGrantWriteSqlOnShortAffirmative (manual-typing confirmation)", (
     expect(shouldGrantWriteSqlOnShortAffirmative(params())).toBe(true);
   });
 
+  it("does not grant execution for a truncated reply or fall back to an older proposal", () => {
+    const truncated = { ...writeProposal, kind: "outputTruncated" as const };
+    expect(isActionableWriteProposalMessage(truncated)).toBe(false);
+    expect(shouldGrantWriteSqlOnShortAffirmative(params({ messages: [writeProposal, truncated] }))).toBe(false);
+  });
+
   it("grants when user types yes and assistant asked to run INSERT", () => {
     expect(shouldGrantWriteSqlOnShortAffirmative(params({ userText: "yes", messages: [{ role: "user", content: "帮我插入" }, insertProposal] }))).toBe(true);
   });

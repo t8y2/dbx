@@ -38,6 +38,7 @@ fn editable_column(column: &ColumnInfo, index: usize) -> EditableStructureColumn
 fn change_options(table_name: &str, columns: Vec<EditableStructureColumn>) -> TableStructureSqlOptions {
     TableStructureSqlOptions {
         database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
         schema: None,
         table_name: table_name.to_string(),
         columns,
@@ -47,8 +48,16 @@ fn change_options(table_name: &str, columns: Vec<EditableStructureColumn>) -> Ta
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        mysql_auto_increment_value: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
+        primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     }
 }
 

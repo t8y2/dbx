@@ -1,0 +1,2800 @@
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
+use sqlparser::ast::{
+    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
+    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
+    TableWithJoins,
+};
+use sqlparser::dialect::{
+    ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    SparkSqlDialect,
+};
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::{Parser, ParserError};
+use sqlparser::tokenizer::{Span, Token, TokenWithSpan, Tokenizer};
+
+use crate::models::connection::DatabaseType;
+use crate::sql::{
+    starts_with_duckdb_result_sql_keyword, starts_with_executable_sql_keyword, statement_ranges_for_database,
+};
+
+static CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(ANY|ALL|SEMI|ANTI|ASOF)\s+(LEFT|RIGHT|FULL|INNER|CROSS)(\s+OUTER)?\s+JOIN\b")
+        .expect("valid ClickHouse join strictness regex")
+});
+static POSTGRES_DEFAULT_PRIVILEGES_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*ALTER\s+DEFAULT\s+PRIVILEGES\b").expect("valid PostgreSQL default privileges regex")
+});
+
+/// PostgreSQL's `DROP INDEX CONCURRENTLY [IF EXISTS] name`: sqlparser 0.62's generic
+/// `parse_drop` has no `CONCURRENTLY` slot for `INDEX`, so `CONCURRENTLY` is consumed
+/// as the index name and the trailing `IF EXISTS ...` starts a second statement whose
+/// parse fails at `IF` — a bogus syntax error for a statement PostgreSQL (and the
+/// PG-compatible engines DBX routes through the postgres dialect, e.g. Kingbase) runs
+/// fine (issue #14829).
+static POSTGRES_DROP_INDEX_CONCURRENTLY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*DROP\s+INDEX\s+CONCURRENTLY\b").expect("valid PostgreSQL DROP INDEX CONCURRENTLY regex")
+});
+
+/// Oracle administrative DDL that sqlparser has no grammar for: Oracle and the
+/// Oracle-compatible engines (OceanBase Oracle mode, Dameng) accept these statements, but
+/// the analyzer routes them through sqlparser's generic dialect, which reports a bogus
+/// `sql parser error` on statements the server happily runs (issue #9104).
+static ORACLE_ADMIN_DDL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?is)^\s*(?:(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:public\s+)?(?:user|tablespace|profile|directory|synonym|role|session|system)\b|(?:grant|revoke)\b)",
+    )
+    .expect("valid Oracle administrative DDL regex")
+});
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlReferenceAnalysis {
+    pub tables: Vec<SqlTableReference>,
+    pub columns: Vec<SqlColumnReference>,
+    pub scopes: Vec<SqlReferenceScope>,
+    /// SELECT projection columns that are neither aggregated nor listed in GROUP BY.
+    #[serde(default)]
+    pub group_by_violations: Vec<SqlGroupByViolation>,
+    /// Two-part qualifiers (`alias.column`) that name no table or alias visible
+    /// in the reference scope.
+    #[serde(default)]
+    pub unknown_qualifiers: Vec<SqlUnknownQualifier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlTableReference {
+    pub name: String,
+    /// Database part of a three-part name such as SQL Server's `db.dbo.orders`.
+    /// Without it the editor looked the table up in the current database and
+    /// flagged cross-database references as unknown (#13947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub alias: Option<String>,
+    pub span: SqlTextSpan,
+    pub scope_id: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlColumnReference {
+    pub name: String,
+    pub qualifier: Option<String>,
+    pub span: SqlTextSpan,
+    pub scope_id: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlGroupByViolation {
+    pub span: SqlTextSpan,
+    pub column: String,
+    pub qualifier: Option<String>,
+}
+
+/// A two-part column qualifier that matches neither a table nor an alias
+/// visible in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+/// The span covers the qualifier token itself (quotes included when the
+/// identifier is quoted), not the whole reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlUnknownQualifier {
+    pub qualifier: String,
+    pub span: SqlTextSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlReferenceScope {
+    pub id: usize,
+    pub parent_id: Option<usize>,
+}
+
+/// A two-part qualified column reference (`alias.column`) captured for the
+/// unknown-qualifier check. Only the qualifier is kept: the column name and
+/// its own span are already recorded as a column reference.
+#[derive(Clone)]
+struct QualifiedColumnRef {
+    qualifier: String,
+    span: SqlTextSpan,
+    scope_id: usize,
+}
+
+/// 1-based line and column range in SQL text.
+/// Both `start_column` and `end_column` are 1-based and inclusive.
+/// For example, a 1-character token at line 1, column 5 has
+/// `start_line: 1, start_column: 5, end_line: 1, end_column: 5`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlTextSpan {
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+impl From<Span> for SqlTextSpan {
+    fn from(span: Span) -> Self {
+        let start_line = span.start.line as usize;
+        let start_column = span.start.column as usize;
+        let end_line = span.end.line as usize;
+        // sqlparser's `Span.end.column` is 1-based exclusive. Convert to 1-based
+        // inclusive so that downstream consumers (both in Rust and TypeScript)
+        // receive precise token bounds that do not overshoot into trailing
+        // delimiters (e.g. commas or semicolons).
+        let end_column = if span.end.column > 0 {
+            if end_line == start_line && start_column > 0 {
+                (span.end.column as usize).saturating_sub(1).max(start_column)
+            } else {
+                (span.end.column as usize).saturating_sub(1)
+            }
+        } else {
+            0
+        };
+        Self { start_line, start_column, end_line, end_column }
+    }
+}
+
+/// One SELECT projection item: the columns it references plus its output alias.
+/// Columns are flagged `aggregated` when they sit inside an aggregate call or a
+/// window function, which exempts them from the GROUP BY membership check.
+#[derive(Default)]
+struct ProjectionItemAcc {
+    alias: Option<String>,
+    columns: Vec<ProjectionColumnRef>,
+}
+
+#[derive(Clone)]
+struct ProjectionColumnRef {
+    name: String,
+    qualifier: Option<String>,
+    span: SqlTextSpan,
+    aggregated: bool,
+}
+
+/// GROUP BY context of the SELECT currently being analyzed. Plain identifier
+/// groups are recorded for membership matching; any other shape (ordinals,
+/// computed expressions, `GROUP BY ALL`, rollups) marks the whole statement
+/// unresolved so the conservative check skips it entirely.
+#[derive(Default)]
+struct GroupByContext {
+    bare: HashSet<String>,
+    qualified: HashSet<String>,
+    unresolved: bool,
+}
+
+#[derive(Default)]
+struct Analyzer {
+    tables: Vec<SqlTableReference>,
+    columns: Vec<SqlColumnReference>,
+    scopes: Vec<SqlReferenceScope>,
+    scope_stack: Vec<usize>,
+    cte_scope_stack: Vec<HashSet<String>>,
+    next_scope_id: usize,
+    is_mysql: bool,
+    is_sqlserver: bool,
+    is_spark: bool,
+    group_by_violations: Vec<SqlGroupByViolation>,
+    /// Two-part column references, kept for the unknown-qualifier check.
+    qualified_columns: Vec<QualifiedColumnRef>,
+    /// Relation names of the current scope that are not physical tables: CTE
+    /// names and their aliases, derived-table aliases, the alias of a
+    /// parenthesized join. A qualifier may name any of them, so the
+    /// unknown-qualifier check resolves against them too.
+    relation_names: Vec<(usize, String)>,
+    /// Scopes holding a relation the analyzer cannot even name (table
+    /// functions, `UNNEST`, `PIVOT`, ...). A qualifier that does not resolve
+    /// there would be a guess, so the unknown-qualifier check skips those
+    /// scopes.
+    non_plain_scopes: HashSet<usize>,
+    projection_items: Vec<ProjectionItemAcc>,
+    current_projection_item: Option<ProjectionItemAcc>,
+    aggregate_depth: usize,
+    window_depth: usize,
+    group_by: Option<GroupByContext>,
+}
+
+pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
+    let normalized_dialect = normalize_dialect(dialect);
+    if normalized_dialect.id == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
+        return Ok(SqlReferenceAnalysis {
+            tables: vec![],
+            columns: vec![],
+            scopes: vec![],
+            group_by_violations: vec![],
+            unknown_qualifiers: vec![],
+        });
+    }
+    if normalized_dialect.id == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
+        return Ok(SqlReferenceAnalysis {
+            tables: vec![],
+            columns: vec![],
+            scopes: vec![],
+            group_by_violations: vec![],
+            unknown_qualifiers: vec![],
+        });
+    }
+    let parser_sql = if normalized_dialect.id == "clickhouse" {
+        normalize_clickhouse_join_order_for_parser(sql)
+    } else {
+        sql.to_string()
+    };
+
+    let parsed_statements = match normalized_dialect.id {
+        "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
+        "mysql" => parse_mysql(&parser_sql),
+        "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
+        "sqlserver" => parse_sqlserver(&parser_sql),
+        "clickhouse" => Parser::parse_sql(&ClickHouseDialect {}, &parser_sql),
+        "duckdb" => Parser::parse_sql(&DuckDbDialect {}, &parser_sql),
+        "spark" => parse_spark_sql(&parser_sql),
+        _ => Parser::parse_sql(&GenericDialect {}, &parser_sql),
+    };
+    let statements = match parsed_statements {
+        Ok(statements) => {
+            if normalized_dialect.id == "postgres" && postgres_create_procedure_is_missing_body(&parser_sql) {
+                return Err("Expected: procedure body after AS, found: EOF".to_string());
+            }
+            statements
+        }
+        Err(error)
+            if normalized_dialect.id == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
+        {
+            return Ok(SqlReferenceAnalysis {
+                tables: vec![],
+                columns: vec![],
+                scopes: vec![],
+                group_by_violations: vec![],
+                unknown_qualifiers: vec![],
+            });
+        }
+        Err(error) => match oracle_admin_ddl_gap_statements(dialect, &parser_sql) {
+            Some(statements) => statements,
+            None => return Err(error.to_string()),
+        },
+    };
+
+    let mut analyzer = Analyzer {
+        is_mysql: normalized_dialect.id == "mysql",
+        is_sqlserver: normalized_dialect.id == "sqlserver",
+        is_spark: normalized_dialect.id == "spark",
+        ..Analyzer::default()
+    };
+    for statement in statements {
+        analyzer.visit_statement(&statement);
+    }
+
+    // Oracle-family dialects may resolve a qualifier as a schema name, so the
+    // check only runs where the FROM scope is authoritative.
+    let unknown_qualifiers =
+        if normalized_dialect.scopes_qualifiers { analyzer.unknown_qualifiers() } else { Vec::new() };
+    let mut analysis = SqlReferenceAnalysis {
+        tables: analyzer.tables,
+        columns: analyzer.columns,
+        scopes: analyzer.scopes,
+        group_by_violations: analyzer.group_by_violations,
+        unknown_qualifiers,
+    };
+    // Engines that do not enforce strict GROUP BY semantics (MySQL, SQLite,
+    // DuckDB, ClickHouse, Spark) accept ungrouped projection columns — MySQL
+    // enforces ONLY_FULL_GROUP_BY by default since 5.7 but the frontend has no
+    // access to the connection's sql_mode, so skipping is the conservative
+    // choice — flagging them there would be noise.
+    if matches!(normalized_dialect.id, "mysql" | "sqlite" | "duckdb" | "clickhouse" | "spark") {
+        analysis.group_by_violations.clear();
+    }
+    Ok(analysis)
+}
+
+/// sqlparser 0.62 does not implement MySQL's ALTER TABLE COMMENT table option.
+/// Validate only that complete statement form, then leave all other statements
+/// to the normal parser. Original token spans (including later statements) survive.
+fn parse_mysql(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = MySqlDialect {};
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(statements) => Ok(statements),
+        Err(original_error) => {
+            let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+            let mut remaining = Vec::with_capacity(tokens.len());
+            let mut start = 0;
+            let mut changed = false;
+            for end in 0..=tokens.len() {
+                if end < tokens.len() && !matches!(tokens[end].token, Token::SemiColon | Token::EOF) {
+                    continue;
+                }
+                let statement = &tokens[start..end];
+                if let Some(stripped) = strip_mysql_table_comment_if_parseable(statement) {
+                    remaining.extend(stripped);
+                    changed = true;
+                } else if is_mysql_table_comment(statement) {
+                    changed = true;
+                } else {
+                    remaining.extend_from_slice(statement);
+                }
+                if end < tokens.len() {
+                    remaining.push(tokens[end].clone());
+                }
+                start = end + 1;
+            }
+            if !changed {
+                return Err(original_error);
+            }
+            Parser::new(&dialect).with_tokens_with_locations(remaining).parse_statements()
+        }
+    }
+}
+
+fn strip_mysql_table_comment_if_parseable(tokens: &[TokenWithSpan]) -> Option<Vec<TokenWithSpan>> {
+    let dialect = MySqlDialect {};
+    let alter_index = next_significant_token_index(tokens, 0)?;
+    if unquoted_token_keyword(&tokens[alter_index]) != Some(Keyword::ALTER) {
+        return None;
+    }
+    let table_index = next_significant_token_index(tokens, alter_index + 1)?;
+    if unquoted_token_keyword(&tokens[table_index]) != Some(Keyword::TABLE) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for index in table_index + 1..tokens.len() {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::COMMENT) => {
+                let mut value_index = next_significant_token_index(tokens, index + 1)?;
+                if matches!(tokens[value_index].token, Token::Eq) {
+                    value_index = next_significant_token_index(tokens, value_index + 1)?;
+                }
+                if !matches!(tokens[value_index].token, Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)) {
+                    continue;
+                }
+
+                if mysql_alter_table_options_are_valid(tokens) {
+                    return Some(Vec::new());
+                }
+
+                let next_index = next_significant_token_index(tokens, value_index + 1);
+                if next_index.is_some_and(|index| !matches!(tokens[index].token, Token::Comma)) {
+                    continue;
+                }
+
+                let previous_index =
+                    (0..index).rev().find(|index| !matches!(tokens[*index].token, Token::Whitespace(_)));
+                let (range_start, range_end) =
+                    if previous_index.is_some_and(|index| matches!(tokens[index].token, Token::Comma)) {
+                        (previous_index.expect("checked above"), value_index)
+                    } else if next_index.is_some() {
+                        (index, next_index.expect("checked above"))
+                    } else {
+                        (index, value_index)
+                    };
+
+                let mut stripped = tokens.to_vec();
+                stripped.drain(range_start..=range_end);
+                if Parser::new(&dialect).with_tokens_with_locations(stripped.clone()).parse_statements().is_ok() {
+                    return Some(stripped);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn mysql_alter_table_options_are_valid(tokens: &[TokenWithSpan]) -> bool {
+    let dialect = MySqlDialect {};
+    let mut parser = Parser::new(&dialect).with_tokens_with_locations(tokens.to_vec());
+    if !parser.parse_keywords(&[Keyword::ALTER, Keyword::TABLE]) {
+        return false;
+    }
+    if parser.parse_object_name(false).is_err() {
+        return false;
+    }
+    let option_start = parser.peek_token_ref().span;
+    let Some(mut index) = tokens.iter().position(|token| token.span == option_start) else {
+        return false;
+    };
+    let mut saw_comment = false;
+    let mut saw_option = false;
+
+    while let Some(current) = next_significant_token_index(tokens, index) {
+        let keyword = unquoted_token_keyword(&tokens[current]);
+        if keyword == Some(Keyword::COMMENT) {
+            if saw_comment {
+                return false;
+            }
+            saw_comment = true;
+        }
+        if matches!(tokens[current].token, Token::Comma) {
+            if !saw_option {
+                return false;
+            }
+            let Some(next) = next_significant_token_index(tokens, current + 1) else {
+                return false;
+            };
+            if matches!(tokens[next].token, Token::Comma) {
+                return false;
+            }
+            index = next;
+            continue;
+        }
+
+        let Some(next_index) = mysql_table_option_value_start(tokens, current, keyword) else {
+            return false;
+        };
+        saw_option = true;
+        index = next_index + 1;
+    }
+
+    saw_option && saw_comment
+}
+
+fn mysql_table_option_value_start(
+    tokens: &[TokenWithSpan],
+    key_index: usize,
+    keyword: Option<Keyword>,
+) -> Option<usize> {
+    let mut value_index = key_index + 1;
+    match keyword {
+        Some(Keyword::DEFAULT) => {
+            let modifier = next_significant_token_index(tokens, value_index)?;
+            if !matches!(unquoted_token_keyword(&tokens[modifier]), Some(Keyword::CHARSET | Keyword::CHARACTER)) {
+                return None;
+            }
+            value_index = modifier + 1;
+            if unquoted_token_keyword(&tokens[modifier]) == Some(Keyword::CHARACTER) {
+                let set_index = next_significant_token_index(tokens, value_index)?;
+                if unquoted_token_keyword(&tokens[set_index]) != Some(Keyword::SET) {
+                    return None;
+                }
+                value_index = set_index + 1;
+            }
+        }
+        Some(Keyword::CHARACTER) => {
+            let set_index = next_significant_token_index(tokens, value_index)?;
+            if unquoted_token_keyword(&tokens[set_index]) != Some(Keyword::SET) {
+                return None;
+            }
+            value_index = set_index + 1;
+        }
+        Some(
+            Keyword::AUTO_INCREMENT
+            | Keyword::CHARSET
+            | Keyword::COLLATE
+            | Keyword::COMMENT
+            | Keyword::COMPRESSION
+            | Keyword::CONNECTION
+            | Keyword::ENGINE
+            | Keyword::ENCRYPTION
+            | Keyword::INSERT_METHOD
+            | Keyword::KEY_BLOCK_SIZE
+            | Keyword::MAX_ROWS
+            | Keyword::MIN_ROWS
+            | Keyword::PACK_KEYS
+            | Keyword::PASSWORD
+            | Keyword::ROW_FORMAT
+            | Keyword::STATS_AUTO_RECALC
+            | Keyword::STATS_PERSISTENT
+            | Keyword::STATS_SAMPLE_PAGES
+            | Keyword::TABLESPACE,
+        ) => {}
+        _ => return None,
+    }
+
+    let separator = next_significant_token_index(tokens, value_index)?;
+    let value_index = if matches!(tokens[separator].token, Token::Eq) {
+        next_significant_token_index(tokens, separator + 1)?
+    } else {
+        separator
+    };
+    matches!(
+        tokens[value_index].token,
+        Token::Word(_) | Token::Number(_, _) | Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)
+    )
+    .then_some(value_index)
+}
+
+fn is_mysql_table_comment(tokens: &[TokenWithSpan]) -> bool {
+    let dialect = MySqlDialect {};
+    let mut parser = Parser::new(&dialect).with_tokens_with_locations(tokens.to_vec());
+    if !parser.parse_keywords(&[Keyword::ALTER, Keyword::TABLE]) {
+        return false;
+    }
+    let Ok(name) = parser.parse_object_name(false) else { return false };
+    if name.0.len() > 2 || !parser.parse_keyword(Keyword::COMMENT) {
+        return false;
+    }
+    let _ = parser.consume_token(&Token::Eq);
+    if !matches!(parser.next_token().token, Token::SingleQuotedString(_) | Token::DoubleQuotedString(_)) {
+        return false;
+    }
+    matches!(parser.next_token().token, Token::EOF)
+}
+
+fn parse_sqlserver(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = MsSqlDialect {};
+    let mut tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+    normalize_sqlserver_create_proc_tokens(&mut tokens);
+    match Parser::new(&dialect).with_tokens_with_locations(tokens).parse_statements() {
+        Ok(statements) => Ok(statements),
+        Err(error) => {
+            let mut fallback_tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+            normalize_sqlserver_create_proc_tokens(&mut fallback_tokens);
+            let mut changed = normalize_sqlserver_cursor_tokens(&mut fallback_tokens);
+            changed |= normalize_sqlserver_alter_table_add_tokens(&mut fallback_tokens);
+            changed |= remove_sqlserver_query_hint_tokens(&mut fallback_tokens);
+            if changed {
+                if let Ok(statements) =
+                    Parser::new(&dialect).with_tokens_with_locations(fallback_tokens).parse_statements()
+                {
+                    return Ok(statements);
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn parse_spark_sql(sql: &str) -> Result<Vec<Statement>, ParserError> {
+    let dialect = SparkSqlDialect {};
+    let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location()?;
+    let mut fallback_tokens = tokens.clone();
+    let fallback_changed = normalize_spark_datasource_create_table_tokens(&mut fallback_tokens)?;
+    match Parser::new(&dialect).with_tokens_with_locations(tokens).parse_statements() {
+        Ok(statements) => Ok(statements),
+        Err(error) => {
+            // sqlparser 0.62 accepts Spark's USING clause but expects later datasource clauses in Hive order.
+            // The fallback removes only clauses parsed independently from the same located token stream.
+            if fallback_changed {
+                if let Ok(statements) =
+                    Parser::new(&dialect).with_tokens_with_locations(fallback_tokens).parse_statements()
+                {
+                    return Ok(statements);
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn normalize_spark_datasource_create_table_tokens(tokens: &mut Vec<TokenWithSpan>) -> Result<bool, ParserError> {
+    let dialect = SparkSqlDialect {};
+    let mut removals = Vec::new();
+    let mut index = 0usize;
+
+    while let Some(statement_start) = next_significant_token_index(tokens, index) {
+        if matches!(tokens[statement_start].token, Token::EOF) {
+            break;
+        }
+        if matches!(tokens[statement_start].token, Token::SemiColon) {
+            index = statement_start + 1;
+            continue;
+        }
+
+        let statement_end = sql_statement_end_index(tokens, statement_start);
+        let significant_indexes = tokens
+            .iter()
+            .enumerate()
+            .take(statement_end)
+            .skip(statement_start)
+            .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+            .collect::<Vec<_>>();
+        removals.extend(spark_datasource_clause_removals(tokens, &significant_indexes, &dialect)?);
+        index = statement_end.saturating_add(1);
+    }
+
+    removals.sort_unstable();
+    removals.dedup();
+    let changed = !removals.is_empty();
+    for index in removals.into_iter().rev() {
+        tokens.remove(index);
+    }
+    Ok(changed)
+}
+
+fn spark_datasource_clause_removals(
+    tokens: &[TokenWithSpan],
+    indexes: &[usize],
+    dialect: &SparkSqlDialect,
+) -> Result<Vec<usize>, ParserError> {
+    let Some(using_position) = spark_create_table_using_position(tokens, indexes) else {
+        return Ok(vec![]);
+    };
+    let Some(provider_index) = indexes.get(using_position + 1).copied() else {
+        return Ok(vec![]);
+    };
+    if !matches!(tokens[provider_index].token, Token::Word(_)) {
+        return Parser::new(dialect).expected("data source identifier", tokens[provider_index].clone());
+    }
+
+    let mut removals = Vec::new();
+    let mut seen_options = false;
+    let mut seen_partitioning = false;
+    let mut seen_comment = false;
+    let mut seen_table_properties = false;
+    let mut position = using_position + 2;
+    while position < indexes.len() {
+        let token = &tokens[indexes[position]];
+        match unquoted_token_keyword(token) {
+            Some(Keyword::OPTIONS) | Some(Keyword::TBLPROPERTIES) => {
+                let keyword = unquoted_token_keyword(token).expect("matched option keyword");
+                let (seen, clause_name) = match keyword {
+                    Keyword::OPTIONS => (&mut seen_options, "OPTIONS"),
+                    Keyword::TBLPROPERTIES => (&mut seen_table_properties, "TBLPROPERTIES"),
+                    _ => unreachable!("matched option keyword"),
+                };
+                if *seen {
+                    return Parser::new(dialect).expected(&format!("at most one {clause_name} clause"), token.clone());
+                }
+                *seen = true;
+                let Some(open_index) = indexes.get(position + 1).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[open_index].token, Token::LParen) {
+                    return Ok(vec![]);
+                }
+                let Some(close_index) = matching_parenthesis_index(tokens, open_index) else {
+                    return Ok(vec![]);
+                };
+                let Some(close_position) = indexes.iter().position(|index| *index == close_index) else {
+                    return Ok(vec![]);
+                };
+                if !spark_tokens_parse_options(tokens, &indexes[position..=close_position], keyword, dialect) {
+                    return Ok(vec![]);
+                }
+                removals.extend_from_slice(&indexes[position..=close_position]);
+                position = close_position + 1;
+            }
+            Some(Keyword::PARTITIONED) => {
+                if seen_partitioning {
+                    return Parser::new(dialect).expected("at most one PARTITIONED BY clause", token.clone());
+                }
+                seen_partitioning = true;
+                if indexes.get(position + 1).and_then(|index| unquoted_token_keyword(&tokens[*index]))
+                    != Some(Keyword::BY)
+                {
+                    return Ok(vec![]);
+                }
+                let Some(open_index) = indexes.get(position + 2).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[open_index].token, Token::LParen) {
+                    return Ok(vec![]);
+                }
+                let Some(close_index) = matching_parenthesis_index(tokens, open_index) else {
+                    return Ok(vec![]);
+                };
+                let Some(close_position) = indexes.iter().position(|index| *index == close_index) else {
+                    return Ok(vec![]);
+                };
+                if !spark_tokens_parse_partitioning(tokens, &indexes[position..=close_position], dialect) {
+                    return Ok(vec![]);
+                }
+                removals.extend_from_slice(&indexes[position..=close_position]);
+                position = close_position + 1;
+            }
+            Some(Keyword::COMMENT) => {
+                if seen_comment {
+                    return Parser::new(dialect).expected("at most one COMMENT clause", token.clone());
+                }
+                seen_comment = true;
+                let Some(comment_index) = indexes.get(position + 1).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[comment_index].token, Token::SingleQuotedString(_)) {
+                    return Ok(vec![]);
+                }
+                removals.extend_from_slice(&indexes[position..=position + 1]);
+                position += 2;
+            }
+            Some(Keyword::LOCATION) => {
+                let Some(location_index) = indexes.get(position + 1).copied() else {
+                    return Ok(vec![]);
+                };
+                if !matches!(tokens[location_index].token, Token::SingleQuotedString(_)) {
+                    return Ok(vec![]);
+                }
+                position += 2;
+            }
+            Some(Keyword::AS) => break,
+            _ => return Ok(vec![]),
+        }
+    }
+    Ok(removals)
+}
+
+fn spark_create_table_using_position(tokens: &[TokenWithSpan], indexes: &[usize]) -> Option<usize> {
+    if indexes.first().and_then(|index| unquoted_token_keyword(&tokens[*index])) != Some(Keyword::CREATE) {
+        return None;
+    }
+    let mut position = 1usize;
+    if indexes.get(position).and_then(|index| unquoted_token_keyword(&tokens[*index])) == Some(Keyword::OR)
+        && indexes.get(position + 1).and_then(|index| unquoted_token_keyword(&tokens[*index])) == Some(Keyword::REPLACE)
+    {
+        position += 2;
+    }
+    while indexes.get(position).is_some_and(|index| {
+        ["GLOBAL", "LOCAL", "TEMP", "TEMPORARY", "EXTERNAL"]
+            .iter()
+            .any(|modifier| unquoted_token_word_eq(&tokens[*index], modifier))
+    }) {
+        position += 1;
+    }
+    if indexes.get(position).and_then(|index| unquoted_token_keyword(&tokens[*index])) != Some(Keyword::TABLE) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (position, index) in indexes.iter().copied().enumerate().skip(position + 1) {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::AS) => return None,
+            _ if depth == 0 && unquoted_token_keyword(&tokens[index]) == Some(Keyword::USING) => {
+                return Some(position);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn spark_tokens_parse_options(
+    tokens: &[TokenWithSpan],
+    indexes: &[usize],
+    keyword: Keyword,
+    dialect: &SparkSqlDialect,
+) -> bool {
+    let clause_tokens = indexes.iter().map(|index| tokens[*index].clone()).collect();
+    let mut parser = Parser::new(dialect).with_tokens_with_locations(clause_tokens);
+    parser.parse_options(keyword).is_ok() && matches!(parser.peek_token_ref().token, Token::EOF)
+}
+
+fn spark_tokens_parse_partitioning(tokens: &[TokenWithSpan], indexes: &[usize], dialect: &SparkSqlDialect) -> bool {
+    let clause_tokens = indexes.iter().map(|index| tokens[*index].clone()).collect();
+    let mut parser = Parser::new(dialect).with_tokens_with_locations(clause_tokens);
+    if parser.expect_keywords(&[Keyword::PARTITIONED, Keyword::BY]).is_err()
+        || parser.expect_token(&Token::LParen).is_err()
+    {
+        return false;
+    }
+    let Ok(expressions) = parser.parse_comma_separated(Parser::parse_expr) else {
+        return false;
+    };
+    !expressions.is_empty()
+        && parser.expect_token(&Token::RParen).is_ok()
+        && matches!(parser.peek_token_ref().token, Token::EOF)
+}
+
+fn normalize_sqlserver_cursor_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
+    let mut removals = Vec::new();
+    let mut index = 0usize;
+
+    while let Some(statement_start) = next_significant_token_index(tokens, index) {
+        if matches!(tokens[statement_start].token, Token::EOF) {
+            break;
+        }
+        if matches!(tokens[statement_start].token, Token::SemiColon) {
+            index = statement_start + 1;
+            continue;
+        }
+
+        let statement_end = sql_statement_end_index(tokens, statement_start);
+        let significant_indexes = tokens
+            .iter()
+            .enumerate()
+            .take(statement_end)
+            .skip(statement_start)
+            .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+            .collect::<Vec<_>>();
+
+        if let Some(removal) = sqlserver_cursor_option_removal(tokens, &significant_indexes) {
+            removals.push(removal);
+        }
+
+        index = statement_end.saturating_add(1);
+    }
+
+    let changed = !removals.is_empty();
+    for removal in removals.into_iter().rev() {
+        tokens.drain(removal);
+    }
+    changed
+}
+
+fn sqlserver_cursor_option_removal(tokens: &[TokenWithSpan], indexes: &[usize]) -> Option<std::ops::Range<usize>> {
+    if indexes.len() < 4
+        || !unquoted_token_word_eq(&tokens[indexes[0]], "DECLARE")
+        || !is_sqlserver_named_cursor(&tokens[indexes[1]])
+        || !unquoted_token_word_eq(&tokens[indexes[2]], "CURSOR")
+    {
+        return None;
+    }
+
+    let mut position = 3usize;
+    if indexes.get(position).is_some_and(|index| {
+        unquoted_token_word_eq(&tokens[*index], "LOCAL") || unquoted_token_word_eq(&tokens[*index], "GLOBAL")
+    }) {
+        position += 1;
+    }
+    if indexes.get(position).is_some_and(|index| unquoted_token_word_eq(&tokens[*index], "FAST_FORWARD")) {
+        position += 1;
+    }
+    if position == 3 || !indexes.get(position).is_some_and(|index| unquoted_token_word_eq(&tokens[*index], "FOR")) {
+        return None;
+    }
+
+    let query_position = position + 1;
+    let query_start = *indexes.get(query_position)?;
+    if (!unquoted_token_word_eq(&tokens[query_start], "SELECT")
+        && !unquoted_token_word_eq(&tokens[query_start], "WITH"))
+        || sqlserver_cursor_query_has_forbidden_clause(tokens, &indexes[query_position..])
+    {
+        return None;
+    }
+
+    Some(indexes[3]..indexes[position])
+}
+
+fn is_sqlserver_named_cursor(token: &TokenWithSpan) -> bool {
+    let Token::Word(word) = &token.token else {
+        return false;
+    };
+    !word.value.starts_with('@') && (word.quote_style.is_some() || word.keyword == Keyword::NoKeyword)
+}
+
+fn sqlserver_cursor_query_has_forbidden_clause(tokens: &[TokenWithSpan], indexes: &[usize]) -> bool {
+    let mut depth = 0usize;
+    for (position, index) in indexes.iter().copied().enumerate() {
+        match tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0
+                && (unquoted_token_word_eq(&tokens[index], "INTO")
+                    || unquoted_token_word_eq(&tokens[index], "COMPUTE")
+                    || unquoted_token_word_eq(&tokens[index], "FOR")
+                        && indexes
+                            .get(position + 1)
+                            .is_some_and(|index| unquoted_token_word_eq(&tokens[*index], "BROWSE"))) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn unquoted_token_word_eq(token: &TokenWithSpan, expected: &str) -> bool {
+    matches!(&token.token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected))
+}
+
+fn normalize_sqlserver_alter_table_add_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
+    let mut insertions = Vec::new();
+    let mut index = 0usize;
+
+    while index < tokens.len() {
+        if unquoted_token_keyword(&tokens[index]) != Some(Keyword::ALTER) {
+            index += 1;
+            continue;
+        }
+        let Some(table_index) = next_significant_token_index(tokens, index + 1) else {
+            break;
+        };
+        if unquoted_token_keyword(&tokens[table_index]) != Some(Keyword::TABLE) {
+            index += 1;
+            continue;
+        }
+
+        let statement_end = sql_statement_end_index(tokens, table_index + 1);
+        let Some(add_index) = sqlserver_alter_table_add_index(tokens, table_index + 1, statement_end) else {
+            index = statement_end.saturating_add(1);
+            continue;
+        };
+        let add_token = tokens[add_index].clone();
+        let mut depth = 0usize;
+        for token_index in add_index + 1..statement_end {
+            match tokens[token_index].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Comma if depth == 0 => {
+                    let Some(next_index) = next_significant_token_index(tokens, token_index + 1) else {
+                        continue;
+                    };
+                    if next_index >= statement_end {
+                        continue;
+                    }
+                    if is_sqlserver_alter_table_operation_starter(&tokens[next_index]) {
+                        break;
+                    }
+                    insertions.push((next_index, add_token.clone()));
+                }
+                _ => {}
+            }
+        }
+        index = statement_end.saturating_add(1);
+    }
+
+    let changed = !insertions.is_empty();
+    for (index, token) in insertions.into_iter().rev() {
+        tokens.insert(index, token);
+    }
+    changed
+}
+
+fn sql_statement_end_index(tokens: &[TokenWithSpan], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        match token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::SemiColon | Token::EOF if depth == 0 => return index,
+            _ => {}
+        }
+    }
+    tokens.len()
+}
+
+fn sqlserver_alter_table_add_index(tokens: &[TokenWithSpan], start: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ if depth == 0 && unquoted_token_keyword(token) == Some(Keyword::ADD) => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_sqlserver_alter_table_operation_starter(token: &TokenWithSpan) -> bool {
+    let Token::Word(word) = &token.token else {
+        return false;
+    };
+    if word.quote_style.is_some() {
+        return false;
+    }
+
+    matches!(
+        word.value.to_ascii_uppercase().as_str(),
+        "ADD"
+            | "ALTER"
+            | "DISABLE"
+            | "DROP"
+            | "ENABLE"
+            | "NOCHECK"
+            | "PARTITION"
+            | "REBUILD"
+            | "RENAME"
+            | "REPLICA"
+            | "SET"
+            | "SWAP"
+            | "SWITCH"
+    )
+}
+
+fn remove_sqlserver_query_hint_tokens(tokens: &mut Vec<TokenWithSpan>) -> bool {
+    let mut depth = 0usize;
+    let mut ranges = Vec::new();
+
+    for index in 0..tokens.len() {
+        match &tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth = depth.saturating_sub(1),
+            Token::Word(word)
+                if depth == 0 && word.quote_style.is_none() && word.value.eq_ignore_ascii_case("OPTION") =>
+            {
+                if let Some(range) = sqlserver_query_hint_range(tokens, index) {
+                    if sqlserver_query_hint_removal_parses_statement(tokens, range) {
+                        ranges.push(range);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let removed = !ranges.is_empty();
+    for (start, end) in ranges.into_iter().rev() {
+        tokens.drain(start..=end);
+    }
+    removed
+}
+
+fn sqlserver_query_hint_removal_parses_statement(tokens: &[TokenWithSpan], range: (usize, usize)) -> bool {
+    let statement_start = tokens[..range.0]
+        .iter()
+        .rposition(|token| matches!(token.token, Token::SemiColon))
+        .map_or(0, |index| index + 1);
+    let statement_end = next_significant_token_index(tokens, range.1 + 1).unwrap_or(tokens.len() - 1);
+    let mut statement_tokens = tokens[statement_start..=statement_end].to_vec();
+
+    if parse_sqlserver_tokens(statement_tokens.clone()).is_ok() {
+        return false;
+    }
+
+    statement_tokens.drain(range.0 - statement_start..=range.1 - statement_start);
+    parse_sqlserver_tokens(statement_tokens).is_ok()
+}
+
+fn parse_sqlserver_tokens(tokens: Vec<TokenWithSpan>) -> Result<Vec<Statement>, ParserError> {
+    Parser::new(&MsSqlDialect {}).with_tokens_with_locations(tokens).parse_statements()
+}
+
+fn sqlserver_query_hint_range(tokens: &[TokenWithSpan], option_index: usize) -> Option<(usize, usize)> {
+    let open_index = next_significant_token_index(tokens, option_index + 1)?;
+    if !matches!(tokens[open_index].token, Token::LParen) {
+        return None;
+    }
+
+    let close_index = matching_parenthesis_index(tokens, open_index)?;
+    let hint_index = next_significant_token_index(tokens, open_index + 1)?;
+    if hint_index >= close_index || !is_sqlserver_query_hint_starter(&tokens[hint_index]) {
+        return None;
+    }
+
+    if let Some(next_index) = next_significant_token_index(tokens, close_index + 1) {
+        if !matches!(tokens[next_index].token, Token::SemiColon | Token::EOF) {
+            return None;
+        }
+    }
+
+    Some((option_index, close_index))
+}
+
+fn next_significant_token_index(tokens: &[TokenWithSpan], mut index: usize) -> Option<usize> {
+    while index < tokens.len() {
+        if !matches!(tokens[index].token, Token::Whitespace(_)) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn matching_parenthesis_index(tokens: &[TokenWithSpan], open_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open_index) {
+        match token.token {
+            Token::LParen => depth += 1,
+            Token::RParen => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_sqlserver_query_hint_starter(token: &TokenWithSpan) -> bool {
+    let Token::Word(word) = &token.token else {
+        return false;
+    };
+    if word.quote_style.is_some() {
+        return false;
+    }
+
+    matches!(
+        word.value.to_ascii_uppercase().as_str(),
+        "CONCAT"
+            | "DISABLE"
+            | "DISABLE_OPTIMIZED_PLAN_FORCING"
+            | "EXPAND"
+            | "FAST"
+            | "FOR"
+            | "FORCE"
+            | "HASH"
+            | "IGNORE_NONCLUSTERED_COLUMNSTORE_INDEX"
+            | "KEEP"
+            | "KEEPFIXED"
+            | "LABEL"
+            | "LOOP"
+            | "MAX_GRANT_PERCENT"
+            | "MAXDOP"
+            | "MAXRECURSION"
+            | "MERGE"
+            | "MIN_GRANT_PERCENT"
+            | "NO_PERFORMANCE_SPOOL"
+            | "OPTIMIZE"
+            | "ORDER"
+            | "PARAMETERIZATION"
+            | "QUERYTRACEON"
+            | "RECOMPILE"
+            | "ROBUST"
+            | "TABLE"
+            | "USE"
+    )
+}
+
+fn normalize_sqlserver_create_proc_tokens(tokens: &mut [TokenWithSpan]) {
+    let significant_indexes: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect();
+
+    for (position, index) in significant_indexes.iter().copied().enumerate() {
+        if token_keyword(&tokens[index]) != Some(Keyword::CREATE) {
+            continue;
+        }
+
+        let mut proc_position = position + 1;
+        if significant_indexes.get(proc_position).and_then(|index| token_keyword(&tokens[*index])) == Some(Keyword::OR)
+        {
+            proc_position += 1;
+            if significant_indexes.get(proc_position).and_then(|index| token_keyword(&tokens[*index]))
+                != Some(Keyword::ALTER)
+            {
+                continue;
+            }
+            proc_position += 1;
+        }
+
+        let Some(proc_index) = significant_indexes.get(proc_position).copied() else {
+            continue;
+        };
+        let Token::Word(word) = &mut tokens[proc_index].token else {
+            continue;
+        };
+        // SQL Server documents PROC as a contextual synonym for PROCEDURE after CREATE.
+        if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("proc") {
+            word.keyword = Keyword::PROCEDURE;
+        }
+    }
+}
+
+fn token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
+    match &token.token {
+        Token::Word(word) => Some(word.keyword),
+        _ => None,
+    }
+}
+
+fn unquoted_token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
+    match &token.token {
+        Token::Word(word) if word.quote_style.is_none() => Some(word.keyword),
+        _ => None,
+    }
+}
+
+fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
+    starts_with_duckdb_result_sql_keyword(sql)
+        && starts_with_executable_sql_keyword(sql, &["FROM", "SUMMARIZE", "SUMMARISE", "PIVOT", "UNPIVOT"])
+}
+
+/// Oracle-compatible dialects whose statements the analyzer parses with sqlparser's
+/// generic dialect. Oracle connections report the PL/SQL formatter id (`oracle`) as
+/// their analysis dialect, and Dameng follows the same Oracle-compatible grammar.
+fn is_oracle_compatible_analysis_dialect(dialect: Option<&str>) -> bool {
+    let Some(name) = dialect else {
+        return false;
+    };
+    let name = name.trim().to_ascii_lowercase();
+    matches!(name.as_str(), "oracle" | "dameng")
+}
+
+/// Re-parses `sql` with every Oracle administrative DDL statement blanked out, so the
+/// statements around it keep their diagnostics instead of the whole script failing on a
+/// false syntax error. Returns `None` when nothing matched or when the rest of the script
+/// still does not parse, in which case the caller keeps the original parser error.
+fn oracle_admin_ddl_gap_statements(dialect: Option<&str>, sql: &str) -> Option<Vec<Statement>> {
+    if !is_oracle_compatible_analysis_dialect(dialect) {
+        return None;
+    }
+    let mut masked: Option<String> = None;
+    for range in statement_ranges_for_database(sql, DatabaseType::Oracle) {
+        if !ORACLE_ADMIN_DDL_RE.is_match(&range.text) {
+            continue;
+        }
+        let target = masked.get_or_insert_with(|| sql.to_string());
+        let blanked = blank_out_statement_text(target.get(range.start..range.end)?);
+        target.replace_range(range.start..range.end, &blanked);
+    }
+    Parser::parse_sql(&GenericDialect {}, masked.as_deref()?).ok()
+}
+
+/// Replaces every character of a statement with a space while keeping line breaks and the
+/// original byte length, so token positions of the statements that follow stay exact.
+fn blank_out_statement_text(statement: &str) -> String {
+    let mut blanked = String::with_capacity(statement.len());
+    for character in statement.chars() {
+        if character == '\n' || character == '\r' {
+            blanked.push(character);
+        } else {
+            for _ in 0..character.len_utf8() {
+                blanked.push(' ');
+            }
+        }
+    }
+    blanked
+}
+
+fn starts_with_postgres_parser_gap_sql(sql: &str) -> bool {
+    POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql) || POSTGRES_DROP_INDEX_CONCURRENTLY_RE.is_match(sql)
+}
+
+struct PostgresCreateProcedureLayout {
+    tokens: Vec<TokenWithSpan>,
+    significant_indexes: Vec<usize>,
+    or_replace_indexes: Option<[usize; 2]>,
+    parameters_open_position: usize,
+    parameters_close_position: usize,
+}
+
+fn postgres_create_procedure_layout(sql: &str) -> Option<PostgresCreateProcedureLayout> {
+    let dialect = PostgreSqlDialect {};
+    let tokens = Tokenizer::new(&dialect, sql).tokenize_with_location().ok()?;
+    let significant_indexes: Vec<usize> = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token.token, Token::Whitespace(_))).then_some(index))
+        .collect();
+    let mut position = 0;
+
+    if significant_indexes.get(position).and_then(|index| token_keyword(&tokens[*index])) != Some(Keyword::CREATE) {
+        return None;
+    }
+    position += 1;
+
+    let or_replace_indexes = if significant_indexes.get(position).and_then(|index| token_keyword(&tokens[*index]))
+        == Some(Keyword::OR)
+        && significant_indexes.get(position + 1).and_then(|index| token_keyword(&tokens[*index]))
+            == Some(Keyword::REPLACE)
+    {
+        let indexes = [significant_indexes[position], significant_indexes[position + 1]];
+        position += 2;
+        Some(indexes)
+    } else {
+        None
+    };
+
+    if significant_indexes.get(position).and_then(|index| token_keyword(&tokens[*index])) != Some(Keyword::PROCEDURE) {
+        return None;
+    }
+    position += 1;
+
+    if !matches!(tokens[significant_indexes.get(position).copied()?].token, Token::Word(_)) {
+        return None;
+    }
+    position += 1;
+    while matches!(significant_indexes.get(position).map(|index| &tokens[*index].token), Some(Token::Period)) {
+        position += 1;
+        if !matches!(tokens[significant_indexes.get(position).copied()?].token, Token::Word(_)) {
+            return None;
+        }
+        position += 1;
+    }
+
+    let parameters_open_index = significant_indexes.get(position).copied()?;
+    if !matches!(tokens[parameters_open_index].token, Token::LParen) {
+        return None;
+    }
+    let parameters_close_index = matching_parenthesis_index(&tokens, parameters_open_index)?;
+    let parameters_close_position = significant_indexes.iter().position(|index| *index == parameters_close_index)?;
+    if !postgres_procedure_parameters_are_nonempty(&tokens, &significant_indexes, position, parameters_close_position) {
+        return None;
+    }
+
+    Some(PostgresCreateProcedureLayout {
+        tokens,
+        significant_indexes,
+        or_replace_indexes,
+        parameters_open_position: position,
+        parameters_close_position,
+    })
+}
+
+fn postgres_procedure_parameters_are_nonempty(
+    tokens: &[TokenWithSpan],
+    significant_indexes: &[usize],
+    open_position: usize,
+    close_position: usize,
+) -> bool {
+    if close_position == open_position + 1 {
+        return true;
+    }
+
+    let mut depth = 1;
+    let mut parameter_has_tokens = false;
+    for index in significant_indexes.iter().take(close_position).skip(open_position + 1).copied() {
+        match tokens[index].token {
+            Token::LParen => {
+                depth += 1;
+                parameter_has_tokens = true;
+            }
+            Token::RParen => depth -= 1,
+            Token::Comma if depth == 1 => {
+                if !parameter_has_tokens {
+                    return false;
+                }
+                parameter_has_tokens = false;
+            }
+            _ if depth == 1 => parameter_has_tokens = true,
+            _ => {}
+        }
+    }
+    parameter_has_tokens
+}
+
+fn postgres_create_procedure_is_missing_body(sql: &str) -> bool {
+    let Some(layout) = postgres_create_procedure_layout(sql) else {
+        return false;
+    };
+    let mut tail = &layout.significant_indexes[layout.parameters_close_position + 1..];
+    while let Some(index) = tail.last() {
+        if matches!(layout.tokens[*index].token, Token::SemiColon) {
+            tail = &tail[..tail.len() - 1];
+        } else {
+            break;
+        }
+    }
+    tail.last().and_then(|index| token_keyword(&layout.tokens[*index])) == Some(Keyword::AS)
+}
+
+fn is_postgres_create_procedure_parser_gap(sql: &str, error: &ParserError) -> bool {
+    let Some(mut layout) = postgres_create_procedure_layout(sql) else {
+        return false;
+    };
+    let Some(body_position) =
+        (layout.parameters_close_position + 1..layout.significant_indexes.len()).find(|position| {
+            matches!(layout.tokens[layout.significant_indexes[*position]].token, Token::DollarQuotedString(_))
+        })
+    else {
+        return false;
+    };
+    let as_index = layout.significant_indexes[body_position - 1];
+    if token_keyword(&layout.tokens[as_index]) != Some(Keyword::AS) {
+        return false;
+    }
+    let trailing = &layout.significant_indexes[body_position + 1..];
+    if !(trailing.is_empty() || trailing.len() == 1 && matches!(layout.tokens[trailing[0]].token, Token::SemiColon)) {
+        return false;
+    }
+
+    let ParserError::ParserError(message) = error else {
+        return false;
+    };
+    let error_matches_gap = if layout.or_replace_indexes.is_some() {
+        message.starts_with(
+            "Expected: [EXTERNAL] TABLE or [MATERIALIZED] VIEW or FUNCTION after CREATE OR REPLACE, found: PROCEDURE at ",
+        )
+    } else {
+        message.starts_with(&format!(
+            "Expected: an SQL statement, found: {} at ",
+            layout.tokens[layout.significant_indexes[body_position]]
+        ))
+    };
+    if !error_matches_gap {
+        return false;
+    }
+
+    let mut depth = 1;
+    for position in layout.parameters_open_position + 1..layout.parameters_close_position {
+        let index = layout.significant_indexes[position];
+        match layout.tokens[index].token {
+            Token::LParen => depth += 1,
+            Token::RParen => depth -= 1,
+            _ if depth == 1 && token_keyword(&layout.tokens[index]) == Some(Keyword::DEFAULT) => {
+                layout.tokens[index].token = Token::Eq;
+            }
+            _ => {}
+        }
+    }
+
+    let dialect = PostgreSqlDialect {};
+    let body_index = layout.significant_indexes[body_position];
+    let replacement = match Tokenizer::new(&dialect, "BEGIN SELECT 1; END").tokenize_with_location() {
+        Ok(tokens) => tokens,
+        Err(_) => return false,
+    };
+    layout.tokens.splice(body_index..=body_index, replacement);
+    if let Some([or_index, replace_index]) = layout.or_replace_indexes {
+        layout.tokens.remove(replace_index);
+        layout.tokens.remove(or_index);
+    }
+
+    Parser::new(&dialect).with_tokens_with_locations(layout.tokens).parse_statements().is_ok()
+}
+
+fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
+    CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE
+        .replace_all(sql, |captures: &regex::Captures<'_>| {
+            let matched_len = captures.get(0).map(|value| value.as_str().len()).unwrap_or(0);
+            let strictness = captures.get(1).map(|value| value.as_str()).unwrap_or("");
+            let join_type = captures.get(2).map(|value| value.as_str()).unwrap_or("");
+            let outer = captures.get(3).map(|value| value.as_str()).unwrap_or("");
+            let mut normalized = match strictness.to_ascii_uppercase().as_str() {
+                "SEMI" | "ANTI" => format!("{join_type}{outer} {strictness} JOIN"),
+                _ => format!("{join_type}{outer} JOIN"),
+            };
+            if normalized.len() < matched_len {
+                normalized.push_str(&" ".repeat(matched_len - normalized.len()));
+            }
+            normalized
+        })
+        .into_owned()
+}
+
+/// A dialect the analyzer knows by name, plus whether its FROM scope is
+/// authoritative for a two-part qualifier (`alias.column`).
+///
+/// Oracle-family dialects resolve a qualifier as a schema name
+/// (`SELECT emp.no FROM dual`), so the qualifier is legitimately absent from
+/// the scope there and the unknown-alias check must not run. Every dialect the
+/// analyzer only knows generically is treated the same way — it may well be an
+/// Oracle-compatible engine.
+///
+/// Both properties live together on purpose: adding a dialect to
+/// `normalize_dialect` forces a decision here instead of silently leaving the
+/// check off for it.
+struct NormalizedDialect {
+    id: &'static str,
+    scopes_qualifiers: bool,
+}
+
+impl NormalizedDialect {
+    /// The FROM scope owns the qualifier: `alias.column` has to resolve to a
+    /// table or an alias of the statement's scope.
+    const fn scoped(id: &'static str) -> Self {
+        Self { id, scopes_qualifiers: true }
+    }
+
+    /// The qualifier may name something outside the scope (a schema), so the
+    /// unknown-alias check does not apply.
+    const fn opaque(id: &'static str) -> Self {
+        Self { id, scopes_qualifiers: false }
+    }
+}
+
+fn normalize_dialect(dialect: Option<&str>) -> NormalizedDialect {
+    match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
+            NormalizedDialect::scoped("postgres")
+        }
+        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => {
+            NormalizedDialect::scoped("mysql")
+        }
+        "sqlite" => NormalizedDialect::scoped("sqlite"),
+        "sqlserver" | "mssql" => NormalizedDialect::scoped("sqlserver"),
+        "clickhouse" => NormalizedDialect::scoped("clickhouse"),
+        "duckdb" => NormalizedDialect::scoped("duckdb"),
+        "spark" | "sparksql" => NormalizedDialect::scoped("spark"),
+        _ => NormalizedDialect::opaque("generic"),
+    }
+}
+
+impl Analyzer {
+    fn visit_statement(&mut self, statement: &Statement) {
+        match statement {
+            Statement::Query(query) => self.visit_query_in_new_scope(query, None),
+            Statement::CreateTable(create_table) if self.is_spark => {
+                if let Some(query) = &create_table.query {
+                    self.visit_query_in_new_scope(query, None);
+                }
+            }
+            Statement::Declare { stmts } if self.is_sqlserver => {
+                for declaration in stmts {
+                    if let Some(query) = &declaration.for_query {
+                        self.visit_query_in_new_scope(query, None);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_query_in_new_scope(&mut self, query: &Query, parent_id: Option<usize>) {
+        let scope_id = self.next_scope_id;
+        self.next_scope_id += 1;
+        self.scopes.push(SqlReferenceScope { id: scope_id, parent_id });
+        self.scope_stack.push(scope_id);
+        self.cte_scope_stack.push(HashSet::new());
+        self.visit_query(query);
+        self.cte_scope_stack.pop();
+        self.scope_stack.pop();
+    }
+
+    fn visit_child_query(&mut self, query: &Query) {
+        self.visit_query_in_new_scope(query, self.current_scope_id());
+    }
+
+    fn current_scope_id(&self) -> Option<usize> {
+        self.scope_stack.last().copied()
+    }
+
+    fn add_visible_cte(&mut self, ident: &Ident) {
+        let key = self.cte_name_key(ident);
+        if let Some(visible_ctes) = self.cte_scope_stack.last_mut() {
+            visible_ctes.insert(key);
+        }
+    }
+
+    fn is_visible_cte(&self, name: &ObjectName) -> bool {
+        if name.0.len() != 1 {
+            return false;
+        }
+        let Some(ident) = name.0.first().and_then(ObjectNamePart::as_ident) else {
+            return false;
+        };
+        let key = self.cte_name_key(ident);
+        self.cte_scope_stack.iter().rev().any(|visible_ctes| visible_ctes.contains(&key))
+    }
+
+    fn cte_name_key(&self, ident: &Ident) -> String {
+        if self.is_sqlserver || ident.quote_style.is_none() {
+            ident.value.to_ascii_lowercase()
+        } else {
+            ident.value.clone()
+        }
+    }
+
+    fn visit_query(&mut self, query: &Query) {
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                // Add each name before its body: recursive/self and earlier CTEs are visible, later CTEs are not.
+                self.add_visible_cte(&cte.alias.name);
+                self.visit_child_query(&cte.query);
+            }
+        }
+        self.visit_set_expr(&query.body);
+        if let Some(order_by) = &query.order_by {
+            if let OrderByKind::Expressions(exprs) = &order_by.kind {
+                for expr in exprs {
+                    self.visit_expr(&expr.expr);
+                }
+            }
+        }
+    }
+
+    fn visit_set_expr(&mut self, set_expr: &SetExpr) {
+        match set_expr {
+            SetExpr::Select(select) => self.visit_select(select),
+            SetExpr::Query(query) => self.visit_child_query(query),
+            SetExpr::SetOperation { left, right, .. } => {
+                self.visit_set_expr_in_child_scope(left);
+                self.visit_set_expr_in_child_scope(right);
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_set_expr_in_child_scope(&mut self, set_expr: &SetExpr) {
+        let scope_id = self.next_scope_id;
+        self.next_scope_id += 1;
+        self.scopes.push(SqlReferenceScope { id: scope_id, parent_id: self.current_scope_id() });
+        self.scope_stack.push(scope_id);
+        self.visit_set_expr(set_expr);
+        self.scope_stack.pop();
+    }
+
+    fn visit_select(&mut self, select: &Select) {
+        // Nested selects (subqueries, derived tables, CTE bodies) run their own
+        // projection/group-by collection; save the outer context so their columns
+        // and violations never mix with this statement's.
+        let outer_projection_items = std::mem::take(&mut self.projection_items);
+        let outer_projection_item = self.current_projection_item.take();
+        let outer_group_by = self.group_by.take();
+
+        for table in &select.from {
+            self.visit_table_with_joins(table);
+        }
+
+        for item in &select.projection {
+            match item {
+                SelectItem::UnnamedExpr(expr) => self.visit_projection_item(expr, None),
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    self.visit_projection_item(expr, Some(alias.value.clone()))
+                }
+                SelectItem::ExprWithAliases { expr, .. } => self.visit_projection_item(expr, None),
+                _ => {}
+            }
+        }
+
+        if let Some(expr) = &select.prewhere {
+            self.visit_expr(expr);
+        }
+        if let Some(expr) = &select.selection {
+            self.visit_expr(expr);
+        }
+        let mut group_by_context = GroupByContext::default();
+        if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
+            for expr in exprs {
+                match plain_identifier_parts(expr) {
+                    Some((qualifier, name)) => {
+                        if let Some(qualifier) = qualifier {
+                            group_by_context.qualified.insert(format!(
+                                "{}.{}",
+                                qualifier.to_ascii_lowercase(),
+                                name.to_ascii_lowercase()
+                            ));
+                        } else {
+                            group_by_context.bare.insert(name.to_ascii_lowercase());
+                        }
+                    }
+                    None => group_by_context.unresolved = true,
+                }
+                self.visit_expr(expr);
+            }
+        } else if matches!(select.group_by, GroupByExpr::All(_)) {
+            // GROUP BY ALL / rollup-style grouping has no explicit membership to match.
+            group_by_context.unresolved = true;
+        }
+        self.group_by = Some(group_by_context);
+
+        for expr in &select.cluster_by {
+            self.visit_expr(expr);
+        }
+        for expr in &select.distribute_by {
+            self.visit_expr(expr);
+        }
+        for expr in &select.sort_by {
+            self.visit_expr(&expr.expr);
+        }
+        if let Some(expr) = &select.having {
+            self.visit_expr(expr);
+        }
+        if let Some(expr) = &select.qualify {
+            self.visit_expr(expr);
+        }
+
+        self.finish_group_by_check();
+        self.projection_items = outer_projection_items;
+        self.current_projection_item = outer_projection_item;
+        self.group_by = outer_group_by;
+    }
+
+    fn visit_projection_item(&mut self, expr: &Expr, alias: Option<String>) {
+        self.current_projection_item = Some(ProjectionItemAcc { alias, ..ProjectionItemAcc::default() });
+        self.visit_expr(expr);
+        if let Some(item) = self.current_projection_item.take() {
+            self.projection_items.push(item);
+        }
+    }
+
+    /// Flag SELECT projection columns that are neither aggregated nor part of the
+    /// statement's GROUP BY. Conservative by design: unresolved GROUP BY shapes
+    /// skip the check entirely, alias-based coverage covers `GROUP BY <alias>`.
+    fn finish_group_by_check(&mut self) {
+        let Some(context) = self.group_by.as_ref() else {
+            return;
+        };
+        if context.unresolved || (context.bare.is_empty() && context.qualified.is_empty()) {
+            return;
+        }
+        // Columns of projection items whose alias is what GROUP BY references
+        // (`SELECT a AS x ... GROUP BY x`) count as grouped for identical column
+        // names elsewhere in the projection.
+        let mut alias_grouped_columns: HashSet<String> = HashSet::new();
+        for item in &self.projection_items {
+            let Some(alias) = item.alias.as_ref() else { continue };
+            if !context.bare.contains(&alias.to_ascii_lowercase()) {
+                continue;
+            }
+            for column in &item.columns {
+                alias_grouped_columns.insert(column.name.to_ascii_lowercase());
+            }
+        }
+        // Qualifier asymmetry: `u.name` in the projection and `users.name` in
+        // GROUP BY refer to the same table when one side is the other's alias,
+        // so normalize every qualifier to the underlying table name before
+        // comparing.
+        let qualifier_table_names: HashMap<String, String> = self
+            .tables
+            .iter()
+            .filter_map(|table| {
+                table.alias.as_ref().map(|alias| (alias.to_ascii_lowercase(), table.name.to_ascii_lowercase()))
+            })
+            .collect();
+        let normalize_qualifier = |qualifier: &str| -> String {
+            qualifier_table_names
+                .get(&qualifier.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_else(|| qualifier.to_ascii_lowercase())
+        };
+        let grouped_qualified: HashSet<String> = context
+            .qualified
+            .iter()
+            .map(|entry| match entry.split_once('.') {
+                Some((qualifier, name)) => format!("{}.{}", normalize_qualifier(qualifier), name),
+                None => entry.clone(),
+            })
+            .collect();
+        let mut violations: Vec<SqlGroupByViolation> = Vec::new();
+        for item in &self.projection_items {
+            let item_alias_grouped =
+                item.alias.as_ref().map(|alias| context.bare.contains(&alias.to_ascii_lowercase())).unwrap_or(false);
+            for column in &item.columns {
+                if column.aggregated || item_alias_grouped {
+                    continue;
+                }
+                let name = column.name.to_ascii_lowercase();
+                if context.bare.contains(&name) {
+                    continue;
+                }
+                if let Some(qualifier) = &column.qualifier {
+                    if grouped_qualified.contains(&format!("{}.{}", normalize_qualifier(qualifier), name)) {
+                        continue;
+                    }
+                }
+                if alias_grouped_columns.contains(&name) {
+                    continue;
+                }
+                violations.push(SqlGroupByViolation {
+                    span: column.span,
+                    column: column.name.clone(),
+                    qualifier: column.qualifier.clone(),
+                });
+            }
+        }
+        self.group_by_violations.extend(violations);
+    }
+
+    fn visit_table_with_joins(&mut self, table: &TableWithJoins) {
+        self.visit_table_factor(&table.relation);
+        for join in &table.joins {
+            self.visit_table_factor(&join.relation);
+            self.visit_join_operator(&join.join_operator);
+        }
+    }
+
+    fn visit_join_operator(&mut self, operator: &JoinOperator) {
+        match operator {
+            JoinOperator::Join(constraint)
+            | JoinOperator::Inner(constraint)
+            | JoinOperator::Left(constraint)
+            | JoinOperator::LeftOuter(constraint)
+            | JoinOperator::Right(constraint)
+            | JoinOperator::RightOuter(constraint)
+            | JoinOperator::FullOuter(constraint)
+            | JoinOperator::CrossJoin(constraint)
+            | JoinOperator::Semi(constraint)
+            | JoinOperator::LeftSemi(constraint)
+            | JoinOperator::RightSemi(constraint)
+            | JoinOperator::Anti(constraint)
+            | JoinOperator::LeftAnti(constraint)
+            | JoinOperator::RightAnti(constraint)
+            | JoinOperator::StraightJoin(constraint) => self.visit_join_constraint(constraint),
+            JoinOperator::AsOf { match_condition, constraint } => {
+                self.visit_expr(match_condition);
+                self.visit_join_constraint(constraint);
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_join_constraint(&mut self, constraint: &JoinConstraint) {
+        match constraint {
+            JoinConstraint::On(expr) => self.visit_expr(expr),
+            JoinConstraint::Using(names) => {
+                for name in names {
+                    if let Some(ident) = object_name_last_ident(name) {
+                        self.push_column(None, ident);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_table_factor(&mut self, factor: &TableFactor) {
+        match factor {
+            TableFactor::Table { name, alias, args, .. } => {
+                // Qualified names remain physical objects even when their final component matches a visible CTE.
+                if args.is_none() && !self.is_visible_cte(name) {
+                    match table_reference_from_name(
+                        name,
+                        alias.as_ref().map(|a| a.name.value.clone()),
+                        self.current_scope_id(),
+                    ) {
+                        Some(table) => self.tables.push(table),
+                        // Not a plain object name, so it cannot become a table
+                        // reference. Its alias is still a name a qualifier may
+                        // use; without one the scope stays unexplained.
+                        None => {
+                            if !self.record_alias(alias.as_ref()) {
+                                self.mark_scope_non_plain();
+                            }
+                        }
+                    }
+                } else if args.is_none() {
+                    // A CTE reference. `is_visible_cte` only accepts a
+                    // single-part identifier, so the CTE name is always
+                    // readable here; the alias, when present, is the other
+                    // name a qualifier may use.
+                    match object_name_last_ident(name) {
+                        Some(ident) => {
+                            self.record_relation_name(ident);
+                        }
+                        None => self.mark_scope_non_plain(),
+                    }
+                    self.record_alias(alias.as_ref());
+                } else {
+                    // A table-valued function. Its relation name is engine
+                    // specific, so the scope stays unexplained for now.
+                    self.mark_scope_non_plain();
+                }
+            }
+            TableFactor::Derived { subquery, alias, .. } => {
+                self.record_alias(alias.as_ref());
+                self.visit_child_query(subquery);
+            }
+            TableFactor::NestedJoin { table_with_joins, alias, .. } => {
+                // The parenthesized join may carry its own alias; the aliases
+                // inside it are recorded by the recursion below.
+                self.record_alias(alias.as_ref());
+                self.visit_table_with_joins(table_with_joins);
+            }
+            TableFactor::TableFunction { expr, .. } => {
+                self.mark_scope_non_plain();
+                self.visit_expr(expr);
+            }
+            TableFactor::Function { args, .. } => {
+                self.mark_scope_non_plain();
+                for arg in args {
+                    self.visit_function_arg(arg);
+                }
+            }
+            TableFactor::UNNEST { array_exprs, .. } => {
+                self.mark_scope_non_plain();
+                for expr in array_exprs {
+                    self.visit_expr(expr);
+                }
+            }
+            _ => self.mark_scope_non_plain(),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Identifier(ident) => self.push_column(None, ident),
+            Expr::CompoundIdentifier(idents) => {
+                if idents.len() >= 2 {
+                    let column = idents.last().expect("checked length");
+                    let qualifier = idents.get(idents.len() - 2).map(|ident| ident.value.clone());
+                    self.push_column(qualifier, column);
+                    // Only a two-part reference can name a table alias; longer
+                    // chains are qualified object names (`db.schema.table.col`).
+                    if idents.len() == 2 {
+                        self.record_qualified_column(&idents[0]);
+                    }
+                }
+            }
+            Expr::CompoundFieldAccess { root, .. } | Expr::JsonAccess { value: root, .. } => self.visit_expr(root),
+            Expr::IsFalse(expr)
+            | Expr::IsNotFalse(expr)
+            | Expr::IsTrue(expr)
+            | Expr::IsNotTrue(expr)
+            | Expr::IsNull(expr)
+            | Expr::IsNotNull(expr)
+            | Expr::IsUnknown(expr)
+            | Expr::IsNotUnknown(expr)
+            | Expr::UnaryOp { expr, .. }
+            | Expr::Nested(expr) => self.visit_expr(expr),
+            Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right)
+            | Expr::BinaryOp { left, right, .. }
+            | Expr::AnyOp { left, right, .. }
+            | Expr::AllOp { left, right, .. } => {
+                self.visit_expr(left);
+                self.visit_expr(right);
+            }
+            Expr::InList { expr, list, .. } => {
+                self.visit_expr(expr);
+                for item in list {
+                    self.visit_expr(item);
+                }
+            }
+            Expr::InSubquery { expr, subquery, .. } => {
+                self.visit_expr(expr);
+                self.visit_child_query(subquery);
+            }
+            Expr::InUnnest { expr, array_expr, .. } => {
+                self.visit_expr(expr);
+                self.visit_expr(array_expr);
+            }
+            Expr::Between { expr, low, high, .. } => {
+                self.visit_expr(expr);
+                self.visit_expr(low);
+                self.visit_expr(high);
+            }
+            Expr::Like { expr, pattern, .. }
+            | Expr::ILike { expr, pattern, .. }
+            | Expr::SimilarTo { expr, pattern, .. }
+            | Expr::RLike { expr, pattern, .. } => {
+                self.visit_expr(expr);
+                self.visit_expr(pattern);
+            }
+            Expr::Cast { expr, .. }
+            | Expr::Extract { expr, .. }
+            | Expr::Ceil { expr, .. }
+            | Expr::Floor { expr, .. } => self.visit_expr(expr),
+            Expr::AtTimeZone { timestamp, time_zone } => {
+                self.visit_expr(timestamp);
+                self.visit_expr(time_zone);
+            }
+            Expr::Position { expr, r#in } => {
+                self.visit_expr(expr);
+                self.visit_expr(r#in);
+            }
+            Expr::Function(function) => {
+                // Columns wrapped in an aggregate call or a window function are
+                // exempt from the GROUP BY membership check.
+                let function_name =
+                    object_name_last_ident(&function.name).map(|ident| ident.value.to_ascii_lowercase());
+                let is_aggregate = function_name.as_deref().map(is_aggregate_function_name).unwrap_or(false);
+                let has_window = function.over.is_some();
+                if is_aggregate {
+                    self.aggregate_depth += 1;
+                }
+                if has_window {
+                    self.window_depth += 1;
+                }
+                self.visit_function_args(&function.parameters);
+                self.visit_function_call_args(&function.name, &function.args);
+                if let Some(filter) = &function.filter {
+                    self.visit_expr(filter);
+                }
+                for order in &function.within_group {
+                    self.visit_expr(&order.expr);
+                }
+                if is_aggregate {
+                    self.aggregate_depth -= 1;
+                }
+                if has_window {
+                    self.window_depth -= 1;
+                }
+            }
+            Expr::Case { operand, conditions, else_result, .. } => {
+                if let Some(operand) = operand {
+                    self.visit_expr(operand);
+                }
+                for condition in conditions {
+                    self.visit_expr(&condition.condition);
+                    self.visit_expr(&condition.result);
+                }
+                if let Some(else_result) = else_result {
+                    self.visit_expr(else_result);
+                }
+            }
+            Expr::Subquery(query) | Expr::Exists { subquery: query, .. } => self.visit_child_query(query),
+            _ => {}
+        }
+    }
+
+    fn visit_function_args(&mut self, args: &FunctionArguments) {
+        self.visit_function_args_skipping(args, |_, _| false);
+    }
+
+    fn visit_function_call_args(&mut self, name: &ObjectName, args: &FunctionArguments) {
+        let sqlserver_datepart_function = self.is_sqlserver.then(|| sqlserver_datepart_function_name(name)).flatten();
+        let mysql_timestamp_function = self.is_mysql && is_mysql_timestamp_function(name);
+        self.visit_function_args_skipping(args, |index, arg| {
+            index == 0
+                && ((mysql_timestamp_function && is_mysql_timestamp_unit(arg))
+                    || sqlserver_datepart_function
+                        .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg)))
+        });
+    }
+
+    fn visit_function_args_skipping(
+        &mut self,
+        args: &FunctionArguments,
+        mut should_skip: impl FnMut(usize, &FunctionArg) -> bool,
+    ) {
+        match args {
+            FunctionArguments::Subquery(query) => self.visit_child_query(query),
+            FunctionArguments::List(list) => {
+                for (index, arg) in list.args.iter().enumerate() {
+                    if !should_skip(index, arg) {
+                        self.visit_function_arg(arg);
+                    }
+                }
+                for clause in &list.clauses {
+                    if let sqlparser::ast::FunctionArgumentClause::OrderBy(items) = clause {
+                        for item in items {
+                            self.visit_expr(&item.expr);
+                        }
+                    }
+                }
+            }
+            FunctionArguments::None => {}
+        }
+    }
+
+    fn visit_function_arg(&mut self, arg: &FunctionArg) {
+        match arg {
+            FunctionArg::Named { arg, .. } | FunctionArg::ExprNamed { arg, .. } | FunctionArg::Unnamed(arg) => {
+                if let FunctionArgExpr::Expr(expr) = arg {
+                    self.visit_expr(expr);
+                }
+            }
+        }
+    }
+
+    fn push_column(&mut self, qualifier: Option<String>, ident: &Ident) {
+        let span: SqlTextSpan = ident.span.into();
+        if let Some(scope_id) = self.current_scope_id() {
+            self.columns.push(SqlColumnReference {
+                name: ident.value.clone(),
+                qualifier: qualifier.clone(),
+                span,
+                scope_id,
+            });
+        }
+        // Projection collection: the accumulator is Some exclusively while a
+        // SELECT projection expression is being visited (nested selects swap it
+        // in visit_select), so subquery columns never leak into outer items.
+        if let Some(item) = self.current_projection_item.as_mut() {
+            item.columns.push(ProjectionColumnRef {
+                name: ident.value.clone(),
+                qualifier,
+                span,
+                aggregated: self.aggregate_depth > 0 || self.window_depth > 0,
+            });
+        }
+    }
+
+    /// Remember a two-part qualifier so the unknown-qualifier check can tell
+    /// `b.id` (no such alias) from `a.id` (alias `a`).
+    fn record_qualified_column(&mut self, qualifier: &Ident) {
+        let Some(scope_id) = self.current_scope_id() else {
+            return;
+        };
+        self.qualified_columns.push(QualifiedColumnRef {
+            qualifier: qualifier.value.clone(),
+            span: qualifier.span.into(),
+            scope_id,
+        });
+    }
+
+    /// Remember a relation name of the current scope that is not a physical
+    /// table, so the unknown-qualifier check can resolve it. Returns whether a
+    /// name was recorded.
+    fn record_relation_name(&mut self, ident: &Ident) -> bool {
+        let Some(scope_id) = self.current_scope_id() else {
+            return false;
+        };
+        self.relation_names.push((scope_id, ident.value.to_ascii_lowercase()));
+        true
+    }
+
+    /// Record the alias of a non-physical relation. Returns whether the factor
+    /// carried one.
+    fn record_alias(&mut self, alias: Option<&TableAlias>) -> bool {
+        match alias {
+            Some(alias) => self.record_relation_name(&alias.name),
+            None => false,
+        }
+    }
+
+    /// Mark the current scope as holding a relation whose name the analyzer
+    /// cannot model, so the unknown-qualifier check skips it.
+    fn mark_scope_non_plain(&mut self) {
+        if let Some(scope_id) = self.current_scope_id() {
+            self.non_plain_scopes.insert(scope_id);
+        }
+    }
+
+    /// Two-part qualifiers that name neither a table nor an alias visible in
+    /// the reference scope.
+    ///
+    /// A qualifier resolves against the relations of its own scope and of every
+    /// enclosing scope, so a correlated subquery can still refer to an outer
+    /// alias. Relations cover physical tables, CTE names and their aliases,
+    /// derived-table aliases and the alias of a parenthesized join. Scopes
+    /// holding a relation the analyzer cannot even name (table functions,
+    /// `UNNEST`, `PIVOT`, ...) are skipped: an unresolved qualifier would be a
+    /// guess there.
+    fn unknown_qualifiers(&self) -> Vec<SqlUnknownQualifier> {
+        let mut scope_parents: HashMap<usize, Option<usize>> = HashMap::new();
+        for scope in &self.scopes {
+            scope_parents.insert(scope.id, scope.parent_id);
+        }
+        let mut names_by_scope: HashMap<usize, HashSet<String>> = HashMap::new();
+        for table in &self.tables {
+            let names = names_by_scope.entry(table.scope_id).or_default();
+            names.insert(table.name.to_ascii_lowercase());
+            if let Some(alias) = &table.alias {
+                names.insert(alias.to_ascii_lowercase());
+            }
+        }
+        for (scope_id, name) in &self.relation_names {
+            names_by_scope.entry(*scope_id).or_default().insert(name.clone());
+        }
+
+        let mut unknown = Vec::new();
+        for column in &self.qualified_columns {
+            let mut scope_id = Some(column.scope_id);
+            let mut visible_names: HashSet<String> = HashSet::new();
+            let mut resolvable = true;
+            while let Some(id) = scope_id {
+                if self.non_plain_scopes.contains(&id) {
+                    resolvable = false;
+                    break;
+                }
+                if let Some(names) = names_by_scope.get(&id) {
+                    visible_names.extend(names.iter().cloned());
+                }
+                scope_id = scope_parents.get(&id).copied().flatten();
+            }
+            if !resolvable {
+                continue;
+            }
+            if visible_names.contains(&column.qualifier.to_ascii_lowercase()) {
+                continue;
+            }
+            unknown.push(SqlUnknownQualifier { qualifier: column.qualifier.clone(), span: column.span });
+        }
+        unknown
+    }
+}
+
+/// Split a GROUP BY expression into its `(qualifier, name)` parts when it is a
+/// plain (possibly qualified) identifier — the only shape the conservative
+/// membership check can match against.
+fn plain_identifier_parts(expr: &Expr) -> Option<(Option<String>, String)> {
+    match expr {
+        Expr::Identifier(ident) => Some((None, ident.value.clone())),
+        Expr::CompoundIdentifier(idents) => {
+            let column = idents.last()?;
+            let qualifier =
+                if idents.len() >= 2 { idents.get(idents.len() - 2).map(|ident| ident.value.clone()) } else { None };
+            Some((qualifier, column.value.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn is_aggregate_function_name(name: &str) -> bool {
+    const AGGREGATE_FUNCTION_NAMES: &[&str] = &[
+        "sum",
+        "count",
+        "count_big",
+        "avg",
+        "min",
+        "max",
+        "total",
+        "group_concat",
+        "string_agg",
+        "array_agg",
+        "listagg",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "bool_and",
+        "bool_or",
+        "every",
+        "median",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "stdev",
+        "stdevp",
+        "variance",
+        "var_pop",
+        "var_samp",
+        "varp",
+        "json_agg",
+        "jsonb_agg",
+        "json_group_array",
+        "xmlagg",
+        "wm_concat",
+        "approx_count_distinct",
+        "checksum_agg",
+    ];
+    AGGREGATE_FUNCTION_NAMES.contains(&name)
+}
+
+fn table_reference_from_name(
+    name: &ObjectName,
+    alias: Option<String>,
+    scope_id: Option<usize>,
+) -> Option<SqlTableReference> {
+    let parts: Vec<&Ident> = name.0.iter().filter_map(ObjectNamePart::as_ident).collect();
+    let table = parts.last()?;
+    let schema = if parts.len() >= 2 { parts.get(parts.len() - 2).map(|ident| ident.value.clone()) } else { None };
+    let database = if parts.len() >= 3 { parts.get(parts.len() - 3).map(|ident| ident.value.clone()) } else { None };
+
+    Some(SqlTableReference {
+        name: table.value.clone(),
+        database,
+        schema,
+        alias,
+        span: table.span.into(),
+        scope_id: scope_id?,
+    })
+}
+
+fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
+    name.0.iter().rev().find_map(ObjectNamePart::as_ident)
+}
+
+fn is_mysql_timestamp_function(name: &ObjectName) -> bool {
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    part.as_ident().is_some_and(|ident| {
+        ident.quote_style.is_none()
+            && (ident.value.eq_ignore_ascii_case("TIMESTAMPADD") || ident.value.eq_ignore_ascii_case("TIMESTAMPDIFF"))
+    })
+}
+
+fn is_mysql_timestamp_unit(arg: &FunctionArg) -> bool {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) = arg else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+
+    // MySQL treats the first argument as a unit keyword, including ODBC SQL_TSI_ aliases.
+    let unit = ident.value.to_ascii_uppercase();
+    let unit = unit.strip_prefix("SQL_TSI_").unwrap_or(&unit);
+    matches!(unit, "MICROSECOND" | "SECOND" | "MINUTE" | "HOUR" | "DAY" | "WEEK" | "MONTH" | "QUARTER" | "YEAR")
+}
+
+fn sqlserver_datepart_function_name(name: &ObjectName) -> Option<&str> {
+    if name.0.len() != 1 {
+        return None;
+    }
+
+    let ident = name.0.first()?.as_ident()?;
+    ["DATEADD", "DATEDIFF", "DATEDIFF_BIG", "DATEPART", "DATENAME"]
+        .iter()
+        .copied()
+        .find(|function_name| ident.value.eq_ignore_ascii_case(function_name))
+}
+
+fn is_sqlserver_datepart_argument(function_name: &str, arg: &FunctionArg) -> bool {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) = arg else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+
+    // SQL Server parses datepart tokens as identifiers, but these built-ins treat the first token as grammar, not a column.
+    let datepart = ident.value.as_str();
+    let common_datepart = is_datepart(
+        datepart,
+        &[
+            "year",
+            "yy",
+            "yyyy",
+            "quarter",
+            "qq",
+            "q",
+            "month",
+            "mm",
+            "m",
+            "dayofyear",
+            "dy",
+            "y",
+            "day",
+            "dd",
+            "d",
+            "week",
+            "wk",
+            "ww",
+            "hour",
+            "hh",
+            "minute",
+            "mi",
+            "n",
+            "second",
+            "ss",
+            "s",
+            "millisecond",
+            "ms",
+            "microsecond",
+            "mcs",
+            "nanosecond",
+            "ns",
+        ],
+    );
+    let weekday_datepart = is_datepart(datepart, &["weekday", "dw", "w"]);
+    let extended_datepart = is_datepart(datepart, &["tzoffset", "tz", "iso_week", "isowk", "isoww"]);
+
+    match function_name {
+        "DATEADD" | "DATEDIFF" | "DATEDIFF_BIG" => common_datepart || weekday_datepart,
+        "DATEPART" => common_datepart || weekday_datepart || extended_datepart,
+        "DATENAME" => common_datepart || weekday_datepart || extended_datepart,
+        _ => false,
+    }
+}
+
+fn is_datepart(value: &str, valid_dateparts: &[&str]) -> bool {
+    valid_dateparts.iter().any(|datepart| value.eq_ignore_ascii_case(datepart))
+}
+
+#[cfg(test)]
+mod group_by_violation_tests {
+    use super::*;
+
+    fn violations(sql: &str, dialect: Option<&str>) -> Vec<SqlGroupByViolation> {
+        analyze_sql_references(sql, dialect)
+            .unwrap_or_else(|error| panic!("parse failed for {sql:?}: {error}"))
+            .group_by_violations
+    }
+
+    #[test]
+    fn flags_ungrouped_projection_column() {
+        let result = violations("SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "USER_ID");
+        assert_eq!(result[0].qualifier, None);
+    }
+
+    #[test]
+    fn grouped_column_passes() {
+        assert!(violations("SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_ID", None).is_empty());
+        assert!(violations("SELECT dept_name, COUNT(*) FROM emp GROUP BY dept_name", None).is_empty());
+    }
+
+    #[test]
+    fn aggregate_wrapped_columns_pass() {
+        assert!(violations("SELECT COUNT(a) FROM t GROUP BY b", None).is_empty());
+        assert!(violations("SELECT a, SUM(b) FROM t GROUP BY a", None).is_empty());
+    }
+
+    #[test]
+    fn alias_grouped_query_passes() {
+        assert!(violations("SELECT a AS x FROM t GROUP BY x", None).is_empty());
+        // `SELECT a, a AS b ... GROUP BY b` groups the same source column twice.
+        assert!(violations("SELECT a, a AS b FROM t GROUP BY b", None).is_empty());
+    }
+
+    #[test]
+    fn unresolved_group_by_shapes_skip_the_check() {
+        assert!(violations("SELECT a FROM t GROUP BY 1", None).is_empty());
+        assert!(violations("SELECT a + b FROM t GROUP BY a + b", None).is_empty());
+    }
+
+    #[test]
+    fn computed_projection_flags_ungrouped_member() {
+        let result = violations("SELECT a + b FROM t GROUP BY a", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "b");
+    }
+
+    #[test]
+    fn window_function_columns_pass() {
+        assert!(violations("SELECT dept, SUM(sal) OVER (PARTITION BY dept) FROM emp GROUP BY dept", None).is_empty());
+    }
+
+    #[test]
+    fn subquery_columns_do_not_leak() {
+        assert!(violations("SELECT (SELECT max(v) FROM t2) AS m, uid FROM t1 GROUP BY uid", None).is_empty());
+    }
+
+    #[test]
+    fn qualified_references_match_by_qualifier() {
+        let result = violations("SELECT u.id, u.name FROM users u GROUP BY u.id", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "name");
+        assert_eq!(result[0].qualifier.as_deref(), Some("u"));
+        assert!(violations("SELECT u.id, u.name FROM users u GROUP BY u.id, u.name", None).is_empty());
+    }
+
+    #[test]
+    fn qualifier_asymmetry_resolves_alias_and_table_name() {
+        // Projection qualifier (alias) vs GROUP BY qualifier (table name) refers
+        // to the same table, so the grouped column itself must pass...
+        assert!(violations("SELECT u.id FROM users u GROUP BY users.id", None).is_empty());
+        // ...and the reverse direction.
+        assert!(violations("SELECT users.id FROM users u GROUP BY u.id", None).is_empty());
+        // Columns that are genuinely ungrouped stay flagged under either spelling.
+        let result = violations("SELECT u.id, u.name FROM users u GROUP BY users.id", None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column, "name");
+    }
+
+    #[test]
+    fn missing_group_by_passes() {
+        assert!(violations("SELECT a, SUM(b) FROM t", None).is_empty());
+    }
+
+    #[test]
+    fn lenient_engines_skip_the_check() {
+        for dialect in ["mysql", "sqlite", "duckdb", "clickhouse", "spark"] {
+            assert!(
+                violations("SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME", Some(dialect)).is_empty(),
+                "dialect {dialect}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sql_text_span_tests {
+    use super::*;
+    use sqlparser::tokenizer::Location;
+
+    #[test]
+    fn span_conversion_produces_inclusive_end_column() {
+        // sqlparser's exclusive column 15 for 7-char token starting at 8 maps to inclusive 14.
+        let span = Span { start: Location { line: 1, column: 8 }, end: Location { line: 1, column: 15 } };
+        let text_span: SqlTextSpan = span.into();
+        assert_eq!(text_span, SqlTextSpan { start_line: 1, start_column: 8, end_line: 1, end_column: 14 });
+
+        // 1-character token at column 5: start 5, exclusive end 6 maps to inclusive 5.
+        let single_char = Span { start: Location { line: 1, column: 5 }, end: Location { line: 1, column: 6 } };
+        let single_span: SqlTextSpan = single_char.into();
+        assert_eq!(single_span, SqlTextSpan { start_line: 1, start_column: 5, end_line: 1, end_column: 5 });
+
+        // Multi-line span: end column 10 maps to inclusive 9 on line 2.
+        let multiline = Span { start: Location { line: 1, column: 1 }, end: Location { line: 2, column: 10 } };
+        let multiline_span: SqlTextSpan = multiline.into();
+        assert_eq!(multiline_span, SqlTextSpan { start_line: 1, start_column: 1, end_line: 2, end_column: 9 });
+
+        // Empty span stays zeroed.
+        let empty_span: SqlTextSpan = Span::empty().into();
+        assert_eq!(empty_span, SqlTextSpan { start_line: 0, start_column: 0, end_line: 0, end_column: 0 });
+    }
+
+    #[test]
+    fn reference_analysis_emits_inclusive_spans_before_semicolon() {
+        let sql = "SELECT id, name AS user_name FROM users GROUP BY user_name;";
+        let analysis = analyze_sql_references(sql, Some("generic")).expect("query should analyze");
+
+        // "users" starts at 1-based column 35, length 5 ("users" -> 35..=39).
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 1);
+        assert_eq!(analysis.tables[0].span.start_column, 35);
+        assert_eq!(analysis.tables[0].span.end_line, 1);
+        assert_eq!(analysis.tables[0].span.end_column, 39);
+
+        // "id" at col 8..=9 (length 2).
+        let id_col = analysis.columns.iter().find(|col| col.name == "id").unwrap();
+        assert_eq!(id_col.span.start_column, 8);
+        assert_eq!(id_col.span.end_column, 9);
+
+        // "name" at col 12..=15 (length 4).
+        let name_col = analysis.columns.iter().find(|col| col.name == "name").unwrap();
+        assert_eq!(name_col.span.start_column, 12);
+        assert_eq!(name_col.span.end_column, 15);
+
+        // The GROUP BY column reference "user_name" directly before ';' at column 60:
+        // "user_name" starts at column 50, length 9 (50..=58).
+        // It must NOT overshoot to column 59 (which is ';').
+        let group_col = analysis.columns.iter().rfind(|col| col.name == "user_name").unwrap();
+        assert_eq!(group_col.span.start_column, 50);
+        assert_eq!(group_col.span.end_column, 58);
+    }
+
+    #[test]
+    fn group_by_violations_emit_inclusive_spans() {
+        let sql = "SELECT USER_ID, SUM(MONEY) FROM users GROUP BY USER_NAME;";
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("query should analyze");
+        assert_eq!(analysis.group_by_violations.len(), 1);
+        let violation = &analysis.group_by_violations[0];
+        assert_eq!(violation.column, "USER_ID");
+        // "USER_ID" starts at column 8, length 7 (8..=14).
+        // Must NOT overshoot to column 15 (which is the comma ',').
+        assert_eq!(violation.span.start_line, 1);
+        assert_eq!(violation.span.start_column, 8);
+        assert_eq!(violation.span.end_line, 1);
+        assert_eq!(violation.span.end_column, 14);
+    }
+}
+
+#[cfg(test)]
+mod mysql_table_comment_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_mysql_table_comment_options() {
+        for sql in [
+            "ALTER TABLE yrisk_source COMMENT '风险源定义';",
+            "ALTER TABLE t COMMENT = \"double quoted\";",
+            "ALTER TABLE t COMMENT 'it\\'s escaped';",
+            "CREATE TABLE t (id INT COMMENT 'column') COMMENT='table';",
+            "SELECT 'ALTER TABLE t COMMENT' AS text;",
+            "ALTER TABLE `db`.`table` COMMENT = 'it''s a table';",
+            "/* before */ alter table t comment /* between */ = ''; -- after",
+            "ALTER TABLE t COMMENT 'semi;colon'; SELECT u.id FROM users u;",
+            "ALTER TABLE t COMMENT='x', ADD COLUMN c INT; SELECT * FROM users",
+            "ALTER TABLE t ADD COLUMN c INT, COMMENT='x'; SELECT * FROM users",
+            "ALTER TABLE t ENGINE=InnoDB COMMENT='x'; SELECT * FROM users",
+            "ALTER TABLE t COMMENT='x' ROW_FORMAT=DYNAMIC; SELECT * FROM users",
+            "ALTER TABLE t DEFAULT CHARACTER SET=utf8mb4 COMMENT='x'; SELECT * FROM users",
+        ] {
+            assert!(analyze_sql_references(sql, Some("mysql")).is_ok(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn keeps_mysql_comment_errors_and_other_statements_visible() {
+        for sql in [
+            "ALTER TABLE t COMMENT;",
+            "ALTER TABLE t COMMENT =;",
+            "ALTER TABLE t COMMENT 123;",
+            "ALTER TABLE t COMMENT NULL;",
+            "ALTER TABLE t COMMENT 'x' COMMENT 'y';",
+            "ALTER TABLE t COMMENT 'x'; SELECT * FROM;",
+            "SELECT FROM; ALTER TABLE t COMMENT 'x';",
+            "ALTER TABLE t COMMENT 'x' garbage;",
+            "ALTER TABLE t COMMENT 'unterminated",
+            "ALTER TABLE t COMMENT 'x'; SELECT FROM;",
+            "ALTER TABLE t COMMENT 'x', ADD COLUMN;",
+            "ALTER TABLE t COMMENT='x' ADD COLUMN c INT;",
+            "ALTER TABLE t COMMENT='x' COMMENT='y';",
+            "ALTER TABLE t COMMENT='x',",
+        ] {
+            assert!(analyze_sql_references(sql, Some("mysql")).is_err(), "{sql}");
+        }
+        assert!(analyze_sql_references("ALTER TABLE t COMMENT 'x'", Some("postgres")).is_err());
+    }
+
+    #[test]
+    fn preserves_reference_spans_after_mysql_comment() {
+        let sql = "ALTER TABLE t COMMENT '注释';\nSELECT u.id FROM users u";
+        let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+        assert_eq!(analysis.tables[0].name, "users");
+        assert_eq!(analysis.tables[0].span.start_line, 2);
+        assert_eq!(analysis.columns[0].name, "id");
+        assert_eq!(analysis.columns[0].span.start_line, 2);
+    }
+}
+
+#[cfg(test)]
+mod table_reference_qualifier_tests {
+    use super::*;
+
+    fn table<'a>(analysis: &'a SqlReferenceAnalysis, name: &str) -> &'a SqlTableReference {
+        analysis
+            .tables
+            .iter()
+            .find(|table| table.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("{name} must be reported as a table reference"))
+    }
+
+    #[test]
+    fn sqlserver_three_part_name_keeps_the_database_qualifier() {
+        // #13947 / #13959: dropping `mk_passport_api` made the editor look the table
+        // up in the current database and flag a valid cross-database query as unknown.
+        let analysis = analyze_sql_references(
+            "select top 10 * from mk_passport_api.dbo.orders order by id desc",
+            Some("sqlserver"),
+        )
+        .unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database.as_deref(), Some("mk_passport_api"));
+        assert_eq!(orders.schema.as_deref(), Some("dbo"));
+    }
+
+    #[test]
+    fn two_part_name_has_no_database_qualifier() {
+        // MySQL reads `db.table` as database.table, so the middle qualifier stays in
+        // the schema slot and nothing may be lifted into `database`.
+        let analysis = analyze_sql_references("select * from shop.orders", Some("mysql")).unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database, None);
+        assert_eq!(orders.schema.as_deref(), Some("shop"));
+    }
+}
+
+#[cfg(test)]
+mod unknown_qualifier_tests {
+    use super::*;
+
+    fn qualifiers(sql: &str, dialect: Option<&str>) -> Vec<String> {
+        let analysis = analyze_sql_references(sql, dialect).expect("query should analyze");
+        analysis.unknown_qualifiers.into_iter().map(|unknown| unknown.qualifier).collect()
+    }
+
+    fn span_text<'a>(sql: &'a str, span: &SqlTextSpan) -> &'a str {
+        let line = sql.lines().nth(span.start_line - 1).expect("line in range");
+        &line[span.start_column - 1..span.end_column]
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_table_or_alias() {
+        let sql = "SELECT a.id, a.v, b.id FROM t_tx_demo a JOIN t_tx_demo qb on a.id = b.id";
+        let analysis = analyze_sql_references(sql, Some("mysql")).expect("query should analyze");
+
+        // The projection and the join condition both reference the missing alias.
+        assert_eq!(analysis.unknown_qualifiers.len(), 2);
+        assert!(analysis.unknown_qualifiers.iter().all(|unknown| unknown.qualifier == "b"));
+        // The span covers the qualifier, not the whole `b.id` reference.
+        for unknown in &analysis.unknown_qualifiers {
+            assert_eq!(span_text(sql, &unknown.span), "b");
+        }
+    }
+
+    #[test]
+    fn accepts_declared_aliases_and_table_names() {
+        assert!(qualifiers("SELECT a.id FROM t a", Some("mysql")).is_empty());
+        assert!(qualifiers("SELECT t.id FROM t", Some("mysql")).is_empty());
+        assert!(qualifiers("SELECT a.id FROM t a JOIN u b ON a.id = b.id", Some("mysql")).is_empty());
+        // Aliases are compared case-insensitively.
+        assert!(qualifiers("SELECT A.id FROM t a", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn ignores_qualified_object_names() {
+        // Three or more parts are qualified object names, never table aliases.
+        assert!(qualifiers("SELECT db.t.id FROM t", Some("mysql")).is_empty());
+        assert!(qualifiers("SELECT db.s.t.c FROM db.s.t", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn accepts_derived_table_and_cte_aliases() {
+        // The alias of a derived table is a relation name of the scope.
+        assert!(qualifiers("SELECT x.id FROM (SELECT id FROM t) x", Some("mysql")).is_empty());
+        // The same holds for a CTE: both the CTE name and the alias of its
+        // reference resolve.
+        assert!(qualifiers("WITH demo AS (SELECT id FROM t) SELECT demo.id FROM demo", Some("mysql")).is_empty());
+        assert!(qualifiers("WITH c AS (SELECT id FROM t) SELECT ro.id FROM c ro", Some("mysql")).is_empty());
+        assert!(qualifiers("WITH demo AS (SELECT id, v FROM t) SELECT d.id FROM demo d", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_cte_or_derived_alias() {
+        assert_eq!(
+            qualifiers("WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+        assert_eq!(qualifiers("SELECT zz.id FROM (SELECT id FROM t) AS x", Some("mysql")), vec!["zz".to_string()]);
+    }
+
+    #[test]
+    fn reports_a_qualifier_inside_a_cte_body() {
+        // The body is its own scope, so an alias that no relation declares
+        // there is reported even though it sits inside a WITH clause.
+        assert_eq!(
+            qualifiers("WITH c AS (SELECT zz.y FROM t) SELECT c.id FROM c", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_parenthesized_join_alias() {
+        // The alias of the parenthesized join and the aliases inside it all
+        // resolve; anything else in that scope is an error. Keeping the inner
+        // aliases resolvable next to the join alias is the same conservative
+        // choice the physical-table path makes (`FROM t x` accepts both `t` and
+        // `x`), so a dialect that hides them once the join is aliased is
+        // under-reported rather than mis-reported.
+        let legit = "SELECT ab.id, a.id, b.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab";
+        assert!(qualifiers(legit, Some("postgres")).is_empty());
+        assert_eq!(
+            qualifiers("SELECT zz.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab", Some("postgres")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn does_not_resolve_a_derived_table_source_in_the_outer_scope() {
+        // `t` belongs to the derived table's own scope, so the outer query
+        // cannot qualify a column with it.
+        assert_eq!(qualifiers("SELECT t.id FROM (SELECT * FROM t) x", Some("mysql")), vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn skips_scopes_with_relations_it_cannot_name() {
+        // Table-valued functions, UNNEST and PIVOT expose names the analyzer
+        // does not model, so the scope stays unexplained instead of guessed.
+        assert!(qualifiers("SELECT zz.id FROM generate_series(1, 10) g", Some("postgres")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM UNNEST([1, 2]) AS numbers", Some("duckdb")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM t PIVOT(sum(v) FOR k IN ('a')) p", Some("duckdb")).is_empty());
+        // MSSQL's `FROM t (NOLOCK)` parses as a table with arguments, so it
+        // shares the table-function branch.
+        assert!(qualifiers("SELECT zz.id FROM t (NOLOCK)", Some("sqlserver")).is_empty());
+    }
+
+    #[test]
+    fn accepts_an_outer_alias_in_a_correlated_subquery() {
+        assert!(qualifiers(
+            "SELECT aa.id FROM t aa WHERE EXISTS (SELECT 1 FROM u u2 WHERE u2.id = aa.id)",
+            Some("mysql")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn reports_a_qualifier_without_any_from_clause() {
+        let sql = "SELECT b.id";
+        let analysis = analyze_sql_references(sql, Some("mysql")).expect("query should analyze");
+
+        assert_eq!(analysis.unknown_qualifiers.len(), 1);
+        assert_eq!(analysis.unknown_qualifiers[0].qualifier, "b");
+        assert_eq!(span_text(sql, &analysis.unknown_qualifiers[0].span), "b");
+    }
+
+    #[test]
+    fn skips_dialects_where_a_qualifier_may_name_a_schema() {
+        // `SELECT emp.no FROM dual` resolves `emp` as a schema in Oracle, so the
+        // qualifier is legitimately absent from the FROM scope.
+        for dialect in ["oracle", "dameng", "snowflake", "generic"] {
+            assert!(qualifiers("SELECT emp.no FROM dual", Some(dialect)).is_empty(), "{dialect}");
+        }
+        assert!(qualifiers("SELECT emp.no FROM dual", None).is_empty());
+        // The same shape is invalid where the FROM scope is authoritative.
+        assert_eq!(qualifiers("SELECT emp.no FROM dual", Some("mysql")), vec!["emp".to_string()]);
+    }
+
+    #[test]
+    fn reports_unknown_qualifiers_for_every_scoped_dialect() {
+        // Every dialect whose FROM scope is authoritative has to run the check.
+        // Narrowing that list would otherwise keep this suite green.
+        for dialect in ["mysql", "postgres", "sqlite", "sqlserver", "clickhouse", "duckdb", "spark"] {
+            assert_eq!(qualifiers("SELECT b.id FROM t a", Some(dialect)), vec!["b".to_string()], "{dialect}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod postgres_parser_gap_tests {
+    use super::*;
+
+    /// #14829: `DROP INDEX CONCURRENTLY [IF EXISTS] name` is valid PostgreSQL (and
+    /// Kingbase) that sqlparser 0.62 cannot parse — the generic `parse_drop` consumes
+    /// `CONCURRENTLY` as the index name and the trailing `IF EXISTS ...` becomes a
+    /// second statement whose parse fails at `IF`. The gap has to route the statement
+    /// to an empty analysis instead of a bogus syntax error.
+    #[test]
+    fn drop_index_concurrently_is_documented_as_a_postgres_parser_gap() {
+        let sql = "DROP INDEX CONCURRENTLY IF EXISTS yxy_bchd_db.idx_x;";
+        assert!(
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).is_err(),
+            "sqlparser 0.62 must still fail to parse it, otherwise the gap hides a real fix upstream"
+        );
+        assert!(starts_with_postgres_parser_gap_sql(sql), "the gap must cover the statement");
+
+        let analysis = analyze_sql_references(sql, Some("postgres"))
+            .expect("the gap must return an empty analysis instead of a parse error");
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn drop_index_without_concurrently_still_parses_and_analyzes() {
+        // `DROP INDEX [IF EXISTS] name` is fully supported by sqlparser: no gap, and
+        // the statement analyzes without a bogus parse error. DROP statements carry no
+        // FROM clause, so the reference analysis is legitimately empty — the property
+        // under test is "no parse error", not the reference set.
+        let sql = "DROP INDEX IF EXISTS yxy_bchd_db.idx_x;";
+        assert!(!starts_with_postgres_parser_gap_sql(sql), "no gap for statements sqlparser already parses");
+
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("plain DROP INDEX should analyze");
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn drop_index_gap_does_not_over_match() {
+        // The gap is word-boundary anchored: only statements that actually spell
+        // `DROP INDEX CONCURRENTLY` skip the analyzer. A plain `DROP INDEX` with an
+        // index literally named "concurrently" parses into the same shape — that is
+        // sqlparser's own reading, not the gap's business.
+        assert!(starts_with_postgres_parser_gap_sql("drop index concurrently if exists t.idx"));
+        assert!(!starts_with_postgres_parser_gap_sql("drop index if exists concurrently_idx"));
+        assert!(!starts_with_postgres_parser_gap_sql("DROP INDEX CONCURRENTLYXY"));
+        assert!(!starts_with_postgres_parser_gap_sql("select 1"));
+    }
+}

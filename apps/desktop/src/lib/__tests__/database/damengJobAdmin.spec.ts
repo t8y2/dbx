@@ -1,5 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { damengCreateJobSql, damengEnableJobSql, damengJobHistoriesSql, damengJobListSql, damengJobStepsSql, damengRunJobSql, isDamengJobEnvironmentMissingError, parseDamengJobEnvironmentReady, parseDamengJobs, quoteDamengString } from "@/lib/database/damengJobAdmin";
+import {
+  DAMENG_JOB_ENVIRONMENT_SQL,
+  damengCreateJobSql,
+  damengEnableJobSql,
+  damengJobHistoriesSql,
+  damengJobListSql,
+  damengJobStepsSql,
+  damengRunJobSql,
+  isDamengJobAlreadyInitializedError,
+  isDamengJobEnvironmentMissingError,
+  parseDamengJobEnvironmentReady,
+  parseDamengJobs,
+  quoteDamengString,
+} from "@/lib/database/damengJobAdmin";
 import type { QueryResult } from "@/types/database";
 
 describe("damengJobAdmin", () => {
@@ -88,5 +101,21 @@ describe("damengJobAdmin", () => {
   it("detects missing SYSJOB schema errors", () => {
     expect(isDamengJobEnvironmentMissingError("无效的模式名[SYSJOB]")).toBe(true);
     expect(isDamengJobEnvironmentMissingError("invalid schema name SYSJOB")).toBe(true);
+  });
+
+  it("probes the job environment through SYSJOBS instead of a build-dependent view", () => {
+    // DM8 8.1.3.12 初始化后只有 DBA_JOBS / DBA_JOBS_RUNNING / USER_JOBS 三个视图；
+    // USER_JOBS_VIEW 到 8.1.3.62 才出现，用它判定会让旧构建永远显示“未初始化”。
+    expect(DAMENG_JOB_ENVIRONMENT_SQL).toContain("OWNER = 'SYSJOB'");
+    expect(DAMENG_JOB_ENVIRONMENT_SQL).toContain("OBJECT_NAME = 'SYSJOBS'");
+    expect(DAMENG_JOB_ENVIRONMENT_SQL).not.toContain("USER_JOBS_VIEW");
+  });
+
+  it("reads SP_INIT_JOB_SYS object-exists failure as an already initialized environment", () => {
+    expect(isDamengJobAlreadyInitializedError("-2124 对象[SYSMAILINFO]已存在\n-2124: anonymous block line 826")).toBe(true);
+    expect(isDamengJobAlreadyInitializedError("-2124 对象[SYSMAILINFO]已存在\n-2124: anonymous block line 969")).toBe(true);
+    expect(isDamengJobAlreadyInitializedError("object [SYSMAILINFO] already exists")).toBe(true);
+    expect(isDamengJobAlreadyInitializedError("-5598 没有执行权限")).toBe(false);
+    expect(isDamengJobAlreadyInitializedError("-2501 用户名或密码错误")).toBe(false);
   });
 });

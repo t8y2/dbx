@@ -13,6 +13,8 @@ interface RetryCompletionAcceptanceOptions {
   maxWaitMs: number;
   onUnavailable: () => void;
   onSettled?: () => void;
+  /** Called before each retry; when an IME composition started while waiting, the queued acceptance must be dropped instead of fighting the IME. */
+  isComposing?: () => boolean;
 }
 
 interface CompletionAcceptanceAttempt {
@@ -29,7 +31,11 @@ export function acceptSelectedOrFirstCompletion(view: EditorView, acceptCompleti
 }
 
 export function acceptSelectedCompletionWithRetry(view: EditorView, options: RetryCompletionAcceptanceOptions): CompletionAcceptanceAttempt {
-  if (options.completionStatus(view.state) !== "active") return { handled: false };
+  // A "pending" status (results still computing, e.g. columns loading from the
+  // database) must also enter the retry loop: bailing out immediately would turn
+  // Enter into a newline while the suggestion popup is about to open. Only a
+  // null status (no completion requested at all) is left to the caller.
+  if (options.completionStatus(view.state) == null) return { handled: false };
   if (acceptSelectedOrFirstCompletion(view, options.acceptCompletion, options.selectedCompletionIndex, options.selectFirstCompletion)) return { handled: true };
 
   const initialDoc = view.state.doc;
@@ -51,6 +57,11 @@ export function acceptSelectedCompletionWithRetry(view: EditorView, options: Ret
   const retry = () => {
     timer = null;
     if (settled) return;
+
+    if (options.isComposing?.()) {
+      settle();
+      return;
+    }
 
     const selectionRanges = view.state.selection.ranges;
     if (view.state.doc !== initialDoc || selectionRanges.length !== initialSelectionRanges.length || selectionRanges.some((range, index) => range.anchor !== initialSelectionRanges[index]?.anchor || range.head !== initialSelectionRanges[index]?.head)) {

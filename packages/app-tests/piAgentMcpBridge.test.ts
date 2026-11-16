@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const bridgePath = resolve("crates/dbx-core/assets/pi-mcp-bridge.mjs");
+const bridgePath = resolve("crates/dbx-ai-provider/assets/pi-mcp-bridge.mjs");
 const envNames = ["DBX_PI_MCP_PROGRAM", "DBX_PI_MCP_ARGS", "DBX_PI_ENABLED_TOOLS", "DBX_PI_BRIDGE_READY_FILE"] as const;
 const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
 

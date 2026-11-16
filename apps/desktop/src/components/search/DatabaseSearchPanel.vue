@@ -1,0 +1,691 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { uuid } from "@/lib/common/utils";
+import { useI18n } from "vue-i18n";
+import { AlertCircle, Loader2, Search, Square, Table2 } from "@lucide/vue";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useConnectionStore } from "@/stores/connectionStore";
+import * as api from "@/lib/backend/api";
+import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/database/databaseSearch";
+import { databaseSearchBatchRange, databaseSearchNextBatchSize } from "@/lib/database/databaseSearchBatch";
+import { fetchDatabaseSearchColumns, findSearchColumns, type DatabaseSearchColumnLite, type SearchColumnsByTable } from "@/lib/database/databaseSearchColumns";
+import { nextProbeChunkEnd, probeTables } from "@/lib/database/databaseSearchProbe";
+import { supportsBulkDatabaseSearch } from "@/lib/database/databaseSearchCapabilities";
+import type { ColumnInfo, DatabaseSearchResultItem, DatabaseSearchScope, DatabaseSearchTableTask, DatabaseSearchTabState, DatabaseType, TableInfo } from "@/types/database";
+import { buildDatabaseStructureSearchSql, effectiveDatabaseSearchScope, runDatabaseStructureSearch, structureHitPreview, supportsDatabaseStructureSearchFromManifest } from "@/lib/database/databaseStructureSearch";
+import { usesDocumentStructureSearch, usesSqlCatalogStructureSearch } from "@/lib/database/databaseStructureSearchCapabilities";
+import type { NavigationTarget } from "@/composables/useNavigationTargets";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+
+const props = withDefaults(
+  defineProps<{
+    connectionId: string;
+    database: string;
+    schema?: string;
+    initialState?: DatabaseSearchTabState;
+    inDialog?: boolean;
+  }>(),
+  {
+    schema: undefined,
+    initialState: undefined,
+    inDialog: false,
+  },
+);
+
+const emit = defineEmits<{
+  "update:state": [state: DatabaseSearchTabState];
+  "open-target": [value: NavigationTarget];
+  "open-in-tab": [];
+}>();
+
+const { t } = useI18n();
+const connectionStore = useConnectionStore();
+
+const SYSTEM_SCHEMAS = new Set(["information_schema", "pg_catalog", "sys", "system", "mysql", "performance_schema", "xdb", "outln", "dbsnmp"]);
+
+const keywordInputRef = ref<any>(null);
+
+const keyword = ref(props.initialState?.keyword ?? "");
+const searchScope = ref<DatabaseSearchScope>(props.initialState?.searchScope ?? "data");
+const perTableLimit = ref(props.initialState?.perTableLimit ?? 20);
+const running = ref(false);
+const cancelled = ref(false);
+const loadingTables = ref(false);
+const progressDone = ref(props.initialState?.progressDone ?? 0);
+const progressTotal = ref(props.initialState?.progressTotal ?? 0);
+const results = ref<DatabaseSearchResultItem[]>(props.initialState?.results ? [...props.initialState.results] : []);
+const tableErrors = ref<Array<{ tableName: string; message: string }>>(props.initialState?.tableErrors ? [...props.initialState.tableErrors] : []);
+const generalError = ref(props.initialState?.generalError ?? "");
+const currentExecutionId = ref("");
+const tableTasks = ref<DatabaseSearchTableTask[]>(props.initialState?.tableTasks ? [...props.initialState.tableTasks] : []);
+const nextTableIndex = ref(props.initialState?.nextTableIndex ?? 0);
+// 批量取列结果(键小写)。不进持久化 tab state:组件存活期间复用,重建后为空走逐表回退。
+const columnsByTable = ref<SearchColumnsByTable>(new Map());
+const activeKeyword = ref(props.initialState?.activeKeyword ?? "");
+const activePerTableLimit = ref(props.initialState?.activePerTableLimit ?? 20);
+let runId = 0;
+
+const connection = computed(() => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined));
+const scopeLabel = computed(() => [connection.value?.name, props.database, props.schema].filter(Boolean).join(" / "));
+const canSearch = computed(() => Boolean(props.connectionId && props.database && keyword.value.trim() && !running.value));
+const structureSearchAvailable = computed(() => supportsDatabaseStructureSearchFromManifest(connection.value?.db_type, connection.value?.driver_profile));
+const effectiveSearchScope = computed(() => effectiveDatabaseSearchScope(searchScope.value, connection.value?.db_type, connection.value?.driver_profile));
+const isStructureMode = computed(() => effectiveSearchScope.value === "structure");
+const progressLabel = computed(() => t("databaseSearch.progress", { done: progressDone.value, total: progressTotal.value }));
+const remainingTableCount = computed(() => Math.max(0, tableTasks.value.length - nextTableIndex.value));
+const nextBatchSize = computed(() => databaseSearchNextBatchSize(nextTableIndex.value, tableTasks.value.length));
+const canContinueSearch = computed(() => !running.value && !loadingTables.value && remainingTableCount.value > 0);
+
+function getCurrentState(): DatabaseSearchTabState {
+  return {
+    keyword: keyword.value,
+    searchScope: searchScope.value,
+    perTableLimit: perTableLimit.value,
+    results: results.value,
+    tableErrors: tableErrors.value,
+    generalError: generalError.value,
+    tableTasks: tableTasks.value,
+    nextTableIndex: nextTableIndex.value,
+    activeKeyword: activeKeyword.value,
+    activePerTableLimit: activePerTableLimit.value,
+    progressDone: progressDone.value,
+    progressTotal: progressTotal.value,
+  };
+}
+
+function emitState() {
+  emit("update:state", getCurrentState());
+}
+
+watch([keyword, searchScope, perTableLimit], () => {
+  emitState();
+});
+
+watch(
+  () => props.initialState,
+  (incoming) => {
+    if (!incoming || running.value) return;
+    if (incoming.keyword !== undefined && incoming.keyword !== keyword.value) keyword.value = incoming.keyword;
+    if (incoming.searchScope !== undefined && incoming.searchScope !== searchScope.value) searchScope.value = incoming.searchScope;
+    if (incoming.perTableLimit !== undefined && incoming.perTableLimit !== perTableLimit.value) perTableLimit.value = incoming.perTableLimit;
+    if (incoming.results) results.value = [...incoming.results];
+    if (incoming.tableErrors) tableErrors.value = [...incoming.tableErrors];
+    if (incoming.generalError !== undefined) generalError.value = incoming.generalError;
+    if (incoming.tableTasks) tableTasks.value = [...incoming.tableTasks];
+    if (incoming.nextTableIndex !== undefined) nextTableIndex.value = incoming.nextTableIndex;
+    if (incoming.activeKeyword !== undefined) activeKeyword.value = incoming.activeKeyword;
+    if (incoming.activePerTableLimit !== undefined) activePerTableLimit.value = incoming.activePerTableLimit;
+    if (incoming.progressDone !== undefined) progressDone.value = incoming.progressDone;
+    if (incoming.progressTotal !== undefined) progressTotal.value = incoming.progressTotal;
+  },
+  { deep: true },
+);
+
+function resetSearchState() {
+  running.value = false;
+  cancelled.value = false;
+  loadingTables.value = false;
+  progressDone.value = 0;
+  progressTotal.value = 0;
+  results.value = [];
+  tableErrors.value = [];
+  generalError.value = "";
+  currentExecutionId.value = "";
+  tableTasks.value = [];
+  nextTableIndex.value = 0;
+  columnsByTable.value = new Map();
+  activeKeyword.value = "";
+  activePerTableLimit.value = 20;
+  emitState();
+}
+
+function isSearchableTable(table: TableInfo): boolean {
+  const type = table.table_type.toUpperCase();
+  return type.includes("TABLE") && !type.includes("VIEW");
+}
+
+function filterSearchSchemas(schemas: string[]): string[] {
+  return schemas.filter((schema) => !SYSTEM_SCHEMAS.has(schema.toLowerCase()));
+}
+
+function makeExecutionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return `database-search-${uuid()}`;
+  return `database-search-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function valuePreview(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  const text = String(value).replace(/\s+/g, " ").trim();
+  return text.length > 90 ? `${text.slice(0, 90)}...` : text;
+}
+
+function rowPreview(columns: string[], row: unknown[], matchedColumns: string[]): string {
+  const matched = matchedColumns
+    .slice(0, 3)
+    .map((column) => {
+      const index = columns.findIndex((name) => name.toLowerCase() === column.toLowerCase());
+      return index >= 0 ? `${column}: ${valuePreview(row[index])}` : "";
+    })
+    .filter(Boolean);
+
+  if (matched.length) return matched.join(" · ");
+
+  return columns
+    .slice(0, 3)
+    .map((column, index) => `${column}: ${valuePreview(row[index])}`)
+    .join(" · ");
+}
+
+async function listSearchTables(): Promise<DatabaseSearchTableTask[]> {
+  if (!connection.value || !props.connectionId || !props.database) return [];
+  const databaseType = connection.value.db_type;
+  const schemaNames = props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [props.database];
+
+  const tasks: DatabaseSearchTableTask[] = [];
+  for (const schema of schemaNames) {
+    const tables = await api.listTables(props.connectionId, props.database, schema);
+    for (const table of tables.filter(isSearchableTable)) {
+      tasks.push({ schema, table });
+    }
+  }
+
+  return tasks;
+}
+
+async function startSearch() {
+  if (!canSearch.value || !connection.value) return;
+  const currentRun = ++runId;
+  resetSearchState();
+  running.value = true;
+  loadingTables.value = true;
+  activeKeyword.value = keyword.value.trim();
+  activePerTableLimit.value = Math.min(500, Math.max(1, Math.trunc(Number(perTableLimit.value) || 20)));
+  emitState();
+
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+    if (isStructureMode.value) {
+      const databaseType = connection.value.db_type;
+      let useStructurePath = usesDocumentStructureSearch(databaseType);
+      if (!useStructurePath && usesSqlCatalogStructureSearch(databaseType)) {
+        const catalogSql = await buildDatabaseStructureSearchSql({
+          databaseType,
+          driverProfile: connection.value.driver_profile,
+          database: props.database,
+          schema: props.schema,
+          term: activeKeyword.value,
+          limit: activePerTableLimit.value,
+        });
+        useStructurePath = Boolean(catalogSql?.sql);
+      }
+      if (useStructurePath) {
+        await runStructureSearch(currentRun);
+        return;
+      }
+    }
+    tableTasks.value = await listSearchTables();
+    if (currentRun !== runId || cancelled.value) return;
+    progressTotal.value = tableTasks.value.length;
+    loadingTables.value = false;
+    emitState();
+    await loadBulkColumns(currentRun);
+    if (currentRun !== runId || cancelled.value) return;
+    // 首轮默认扫完全部表：仍按 DATABASE_SEARCH_TABLE_BATCH_SIZE 分批推进，
+    // 批间让出事件循环，保证进度实时刷新且“停止”按钮可响应。
+    while (currentRun === runId && !cancelled.value && nextTableIndex.value < tableTasks.value.length) {
+      await scanTableRange(currentRun, false);
+      if (nextTableIndex.value < tableTasks.value.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+  } catch (error: any) {
+    if (currentRun === runId && !cancelled.value) {
+      generalError.value = error?.message || String(error);
+      emitState();
+    }
+  } finally {
+    if (currentRun === runId) {
+      running.value = false;
+      loadingTables.value = false;
+      currentExecutionId.value = "";
+      emitState();
+    }
+  }
+}
+
+async function continueSearch(scanAllRemaining: boolean) {
+  if (!canContinueSearch.value || !connection.value) return;
+  const currentRun = ++runId;
+  cancelled.value = false;
+  running.value = true;
+  generalError.value = "";
+  emitState();
+
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+    await scanTableRange(currentRun, scanAllRemaining);
+  } catch (error: any) {
+    if (currentRun === runId && !cancelled.value) {
+      generalError.value = error?.message || String(error);
+      emitState();
+    }
+  } finally {
+    if (currentRun === runId) {
+      running.value = false;
+      currentExecutionId.value = "";
+      emitState();
+    }
+  }
+}
+
+async function runStructureSearch(currentRun: number) {
+  const databaseType = connection.value!.db_type;
+  progressTotal.value = 1;
+  progressDone.value = 0;
+  loadingTables.value = false;
+  emitState();
+  const executionId = makeExecutionId();
+  currentExecutionId.value = executionId;
+  try {
+    const schemaNames = props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [undefined];
+    const limit = Math.min(5000, Math.max(1, activePerTableLimit.value * 10));
+    const merged: DatabaseSearchResultItem[] = [];
+    const tableTypeByName = new Map<string, string>();
+    for (const schema of schemaNames) {
+      if (currentRun !== runId || cancelled.value) return;
+      const resolvedSchema = schema ?? props.database;
+      const catalogTables = await api.listTables(props.connectionId, props.database, resolvedSchema);
+      for (const table of catalogTables) {
+        tableTypeByName.set(table.name, table.table_type);
+      }
+      const hits = await runDatabaseStructureSearch({
+        connectionId: props.connectionId,
+        databaseType,
+        driverProfile: connection.value?.driver_profile,
+        database: props.database,
+        schema,
+        term: activeKeyword.value,
+        limit,
+        executionId,
+        shouldAbort: () => currentRun !== runId || cancelled.value,
+        listTables: async (taskSchema) => {
+          const listSchema = taskSchema || props.database;
+          const tables = await api.listTables(props.connectionId, props.database, listSchema);
+          return tables.filter(isSearchableTable);
+        },
+        getColumns: (taskSchema, tableName) => api.getColumns(props.connectionId, props.database, taskSchema, tableName),
+        executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
+      });
+      for (const [index, hit] of hits.entries()) {
+        // 表注释命中没有列名，用固定占位符保证结果行 id 唯一。
+        const columnKey = hit.columnName ?? "__table__";
+        merged.push({
+          id: `${hit.schema ? `${hit.schema}.` : ""}${hit.tableName}:${columnKey}:${index}`,
+          schema: hit.schema ?? schema,
+          tableName: hit.tableName,
+          tableType: hit.tableType ?? tableTypeByName.get(hit.tableName) ?? "UNKNOWN",
+          matchedColumns: hit.columnName ? [hit.columnName] : [],
+          preview: structureHitPreview(hit),
+          whereInput: "",
+          searchScope: "structure",
+          columnName: hit.columnName,
+          columnComment: hit.columnComment,
+          structureMatchIn: hit.matchedIn,
+        });
+      }
+    }
+    if (currentRun === runId && !cancelled.value) {
+      results.value = merged;
+      progressDone.value = 1;
+      emitState();
+    }
+  } finally {
+    if (currentExecutionId.value === executionId) currentExecutionId.value = "";
+  }
+}
+
+/** 批量取列:按任务表涉及的 schema 各发一条目录查询,失败静默(空 Map → 逐表回退)。 */
+async function loadBulkColumns(currentRun: number) {
+  const databaseType = connection.value?.db_type;
+  if (!databaseType || !supportsBulkDatabaseSearch(databaseType)) return;
+  const schemas = [...new Set(tableTasks.value.map((task) => task.schema))];
+  const merged: SearchColumnsByTable = new Map();
+  for (const schema of schemas) {
+    if (currentRun !== runId || cancelled.value) return;
+    const executionId = makeExecutionId();
+    currentExecutionId.value = executionId;
+    const partial = await fetchDatabaseSearchColumns({
+      databaseType,
+      database: props.database,
+      schema,
+      executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
+      executionId,
+    });
+    if (currentExecutionId.value === executionId) currentExecutionId.value = "";
+    if (currentRun !== runId || cancelled.value) return;
+    partial.forEach((columns, key) => merged.set(key, columns));
+  }
+  columnsByTable.value = merged;
+}
+
+async function scanTableRange(currentRun: number, scanAllRemaining: boolean) {
+  const range = databaseSearchBatchRange(nextTableIndex.value, tableTasks.value.length, scanAllRemaining);
+  const databaseType = connection.value!.db_type;
+  const probeReady = supportsBulkDatabaseSearch(databaseType) && columnsByTable.value.size > 0;
+  // 每张任务的预取列(可能为 undefined——该表无目录信息,批内走逐表回退)
+  const taskColumns = tableTasks.value.map((task) => findSearchColumns(columnsByTable.value, task.schema, props.database, task.table.name));
+
+  while (nextTableIndex.value < range.end) {
+    if (currentRun !== runId || cancelled.value) break;
+    const chunkStart = nextTableIndex.value;
+    const chunkEnd = probeReady ? nextProbeChunkEnd(chunkStart, range.end, taskColumns, activeKeyword.value) : Math.min(chunkStart + 1, range.end);
+    const chunk = tableTasks.value.slice(chunkStart, chunkEnd);
+    if (!chunk.length) break;
+
+    let hitChunkIndexes: Set<number> | undefined;
+    if (probeReady) {
+      hitChunkIndexes = await probeChunk(chunk, taskColumns.slice(chunkStart, chunkEnd), databaseType, currentRun);
+    }
+    if (currentRun !== runId || cancelled.value) break;
+
+    for (let offset = 0; offset < chunk.length; offset++) {
+      if (currentRun !== runId || cancelled.value) break;
+      const taskIndex = chunkStart + offset;
+      const task = chunk[offset];
+      const prefetched = taskColumns[taskIndex];
+      // 探测路径下:未命中的表跳过取数;无目录信息的表恒走逐表
+      if (hitChunkIndexes && prefetched && !hitChunkIndexes.has(taskIndex)) {
+        // skip: 探测未命中
+      } else {
+        await searchTable(task, databaseType, currentRun, prefetched);
+      }
+      nextTableIndex.value = taskIndex + 1;
+      progressDone.value = nextTableIndex.value;
+      emitState();
+    }
+  }
+}
+
+/** 对一个探测批执行多表探测,返回命中表的全局下标集合;语句失败整批回退(全部视为待取数)。 */
+async function probeChunk(chunk: DatabaseSearchTableTask[], chunkColumns: Array<DatabaseSearchColumnLite[] | undefined>, databaseType: DatabaseType, currentRun: number): Promise<Set<number>> {
+  const chunkStart = nextTableIndex.value;
+  const probeable: number[] = [];
+  chunkColumns.forEach((columns, offset) => {
+    if (columns?.length) probeable.push(offset);
+  });
+
+  if (!probeable.length) return new Set();
+
+  const executionId = makeExecutionId();
+  currentExecutionId.value = executionId;
+  let hitProbeIndexes: Set<number>;
+  try {
+    hitProbeIndexes = await probeTables({
+      databaseType,
+      driverProfile: connection.value?.driver_profile,
+      term: activeKeyword.value,
+      limit: activePerTableLimit.value,
+      tables: probeable.map((offset) => ({
+        schema: chunk[offset].schema,
+        tableName: chunk[offset].table.name,
+        columns: chunkColumns[offset]!,
+      })),
+      executeQuery: (sql, runExecutionId) => api.executeQuery(props.connectionId, props.database, sql, undefined, runExecutionId),
+      executionId,
+    });
+  } catch {
+    // 探测批失败(单表权限/中途 DDL 等):整批回退逐表,错误重新隔离到单表
+    hitProbeIndexes = new Set(probeable.map((_, index) => index));
+  }
+  if (currentExecutionId.value === executionId) currentExecutionId.value = "";
+  if (currentRun !== runId || cancelled.value) return new Set();
+
+  const hitTaskIndexes = new Set<number>();
+  hitProbeIndexes.forEach((probeIndex) => {
+    const offset = probeable[probeIndex];
+    if (offset !== undefined) hitTaskIndexes.add(chunkStart + offset);
+  });
+  return hitTaskIndexes;
+}
+
+async function searchTable(task: DatabaseSearchTableTask, databaseType: DatabaseType, currentRun: number, prefetchedColumns?: DatabaseSearchColumnLite[]) {
+  const tableLabel = task.schema ? `${task.schema}.${task.table.name}` : task.table.name;
+  try {
+    const schema = task.schema || props.database;
+    // 批量取列命中时跳过逐表 getColumns;数据搜索单表查询只消费这三个字段
+    const columns: ColumnInfo[] = prefetchedColumns?.length
+      ? prefetchedColumns.map((column) => ({
+          name: column.name,
+          data_type: column.data_type,
+          is_primary_key: column.is_primary_key,
+          is_nullable: false,
+          column_default: null,
+          extra: null,
+        }))
+      : await api.getColumns(props.connectionId, props.database, schema, task.table.name);
+    const query = await buildDatabaseSearchSql({
+      databaseType,
+      driverProfile: connection.value?.driver_profile,
+      schema: task.schema,
+      tableName: task.table.name,
+      columns,
+      term: activeKeyword.value,
+      limit: activePerTableLimit.value,
+    });
+    if (!query || currentRun !== runId || cancelled.value) return;
+
+    const executionId = makeExecutionId();
+    currentExecutionId.value = executionId;
+    const result = await api.executeQuery(props.connectionId, props.database, query.sql, undefined, executionId);
+    if (currentExecutionId.value === executionId) currentExecutionId.value = "";
+    if (currentRun !== runId || cancelled.value) return;
+
+    const tableResults: DatabaseSearchResultItem[] = [];
+    for (const [rowIndex, row] of result.rows.entries()) {
+      const matchedColumns = findMatchedSearchColumns(result.columns, row, columns, activeKeyword.value);
+      const whereInput = await buildSearchResultWhere({
+        databaseType,
+        columns,
+        resultColumns: result.columns,
+        row,
+        matchedColumns,
+      });
+      if (currentRun !== runId || cancelled.value) return;
+      tableResults.push({
+        id: `${tableLabel}:${rowIndex}`,
+        schema: task.schema,
+        tableName: task.table.name,
+        tableType: task.table.table_type,
+        matchedColumns,
+        preview: rowPreview(result.columns, row, matchedColumns),
+        whereInput,
+      });
+    }
+    if (currentRun === runId && !cancelled.value) {
+      results.value.push(...tableResults);
+      emitState();
+    }
+  } catch (error: any) {
+    if (currentRun === runId && !cancelled.value) {
+      tableErrors.value.push({ tableName: tableLabel, message: error?.message || String(error) });
+      emitState();
+    }
+  }
+}
+
+async function stopSearch() {
+  cancelled.value = true;
+  runId++;
+  running.value = false;
+  loadingTables.value = false;
+  const executionId = currentExecutionId.value;
+  currentExecutionId.value = "";
+  emitState();
+  if (executionId) {
+    try {
+      await api.cancelQuery(executionId);
+    } catch {
+      // Best effort; some drivers may finish before cancellation arrives.
+    }
+  }
+}
+
+function openResult(item: DatabaseSearchResultItem) {
+  emit("open-target", {
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: item.schema,
+    tableName: item.tableName,
+    tableType: item.tableType,
+    whereInput: item.whereInput,
+    columnName: item.columnName,
+    searchScope: item.searchScope ?? "data",
+  });
+}
+
+function focusSearch(): boolean {
+  if (keywordInputRef.value) {
+    const el = "$el" in keywordInputRef.value ? keywordInputRef.value.$el : keywordInputRef.value;
+    el?.focus?.();
+    return true;
+  }
+  return false;
+}
+
+onMounted(() => {
+  emitState();
+});
+
+onBeforeUnmount(() => {
+  if (running.value) {
+    void stopSearch();
+  }
+  emitState();
+});
+
+defineExpose({
+  focusSearch,
+  stopSearch,
+  resetSearchState,
+  startSearch,
+  continueSearch,
+  getCurrentState,
+});
+</script>
+
+<template>
+  <div :class="['flex min-h-0 flex-col', inDialog ? 'space-y-4' : 'h-full bg-background']">
+    <!-- Header for standalone Tab mode -->
+    <div v-if="!inDialog" class="flex shrink-0 items-center justify-between border-b px-5 py-3 bg-muted/10">
+      <div class="flex items-center gap-2">
+        <Search class="h-5 w-5 text-muted-foreground" />
+        <span class="font-medium text-sm">{{ t("databaseSearch.title") }}</span>
+        <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground ml-3">
+          <span>{{ scopeLabel }}</span>
+          <Badge v-if="props.schema" variant="secondary">{{ props.schema }}</Badge>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <Badge v-if="results.length" variant="outline">{{ t("databaseSearch.resultCount", { count: results.length }) }}</Badge>
+      </div>
+    </div>
+
+    <!-- Main search container -->
+    <div :class="['min-h-0 flex-1 flex flex-col overflow-y-auto space-y-4', inDialog ? '' : 'p-5']">
+      <div class="grid gap-3 md:grid-cols-[1fr_9rem_auto] shrink-0">
+        <div class="space-y-1.5">
+          <Label class="text-xs">{{ t("databaseSearch.keyword") }}</Label>
+          <Input ref="keywordInputRef" v-model="keyword" class="h-9" :placeholder="t('databaseSearch.keywordPlaceholder')" :disabled="running" @keydown.enter.prevent="startSearch" />
+        </div>
+        <div v-if="structureSearchAvailable" class="space-y-1.5">
+          <Label class="text-xs">{{ t("databaseSearch.scope") }}</Label>
+          <Select v-model="searchScope" :disabled="running">
+            <SelectTrigger class="h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="data">{{ t("databaseSearch.scopeData") }}</SelectItem>
+              <SelectItem value="structure">{{ t("databaseSearch.scopeStructure") }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div class="space-y-1.5">
+          <Label class="text-xs">{{ isStructureMode ? t("databaseSearch.limitStructure") : t("databaseSearch.limitPerTable") }}</Label>
+          <Input v-model.number="perTableLimit" class="h-9" type="number" min="1" :max="isStructureMode ? 500 : 100" :disabled="running" />
+        </div>
+        <div class="flex items-end gap-2">
+          <Button class="h-9" :disabled="!canSearch" @click="startSearch">
+            <Loader2 v-if="running" class="h-4 w-4 animate-spin" />
+            <Search v-else class="h-4 w-4" />
+            {{ running ? t("databaseSearch.searching") : t("databaseSearch.search") }}
+          </Button>
+          <Button v-if="running" variant="destructive" class="h-9" @click="stopSearch">
+            <Square class="h-4 w-4 fill-current" />
+            {{ t("databaseSearch.stop") }}
+          </Button>
+        </div>
+      </div>
+
+      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground shrink-0">
+        {{ isStructureMode ? t("databaseSearch.hintStructure") : t("databaseSearch.hint") }}
+      </div>
+
+      <div v-if="running || progressTotal" class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground shrink-0">
+        <span class="tabular-nums">{{ loadingTables ? t("databaseSearch.loadingTables") : isStructureMode ? t("databaseSearch.progressStructure") : progressLabel }}</span>
+        <span class="tabular-nums">{{ t("databaseSearch.resultCount", { count: results.length }) }}</span>
+        <div v-if="canContinueSearch && !isStructureMode" class="ml-auto flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" class="h-7 text-xs" @click="continueSearch(false)">
+            {{ t("databaseSearch.continueNextBatch", { count: nextBatchSize }) }}
+          </Button>
+          <Button variant="secondary" size="sm" class="h-7 text-xs" @click="continueSearch(true)">
+            {{ t("databaseSearch.scanAllRemaining", { count: remainingTableCount }) }}
+          </Button>
+        </div>
+      </div>
+
+      <div v-if="generalError" class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive shrink-0">
+        <AlertCircle class="mt-0.5 h-4 w-4" />
+        <span>{{ generalError }}</span>
+      </div>
+
+      <div :class="['space-y-2 flex flex-col', inDialog ? '' : 'flex-1 min-h-0']">
+        <div class="flex items-center justify-between shrink-0">
+          <div class="text-sm font-medium">{{ t("databaseSearch.results") }}</div>
+          <Badge variant="outline">{{ results.length }}</Badge>
+        </div>
+        <div v-if="results.length" :class="['space-y-2 overflow-y-auto pr-1', inDialog ? 'max-h-[360px]' : 'flex-1 min-h-0']">
+          <button v-for="item in results" :key="item.id" class="flex w-full items-start gap-3 rounded-md border bg-background px-3 py-2 text-left hover:bg-muted/40 transition-colors" @click="openResult(item)">
+            <Table2 class="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <div class="min-w-0 flex-1">
+              <div class="flex min-w-0 flex-wrap items-center gap-2">
+                <span class="truncate font-medium">{{ item.schema ? `${item.schema}.${item.tableName}` : item.tableName }}</span>
+                <Badge v-for="column in item.matchedColumns" :key="column" variant="secondary">{{ column }}</Badge>
+              </div>
+              <div class="mt-1 truncate text-xs text-muted-foreground">{{ item.preview }}</div>
+            </div>
+            <span class="shrink-0 text-xs text-primary font-medium">{{ t("databaseSearch.openResult") }}</span>
+          </button>
+        </div>
+        <div v-else class="rounded-md border border-dashed py-10 text-center text-sm text-muted-foreground">
+          {{ running ? t("databaseSearch.waiting") : t("databaseSearch.noResults") }}
+        </div>
+      </div>
+
+      <div v-if="tableErrors.length" class="space-y-2 shrink-0">
+        <div class="text-sm font-medium text-muted-foreground">
+          {{ t("databaseSearch.errors") }}
+        </div>
+        <div class="max-h-24 space-y-1 overflow-auto rounded-md border bg-muted/20 p-2 text-xs text-muted-foreground">
+          <div v-for="error in tableErrors" :key="`${error.tableName}:${error.message}`">
+            <span class="font-medium text-foreground">{{ error.tableName }}</span
+            >: {{ error.message }}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>

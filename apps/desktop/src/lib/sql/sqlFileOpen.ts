@@ -1,5 +1,65 @@
+import type { QueryTab } from "@/types/database";
+
+/** File identity comes from the query tab, never its editable display title. */
+export function queryTabExternalFilePath(tab: QueryTab | undefined | null): string | undefined {
+  return tab?.mode === "query" && tab.externalSqlPath?.trim() ? tab.externalSqlPath : undefined;
+}
+
 export function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path.trim());
+}
+
+export function isDdlFilePath(path: string): boolean {
+  return /\.ddl$/i.test(path.trim());
+}
+
+export function isScriptFilePath(path: string): boolean {
+  return /\.(sql|js)$/i.test(path.trim());
+}
+
+/**
+ * Extensions the SQL file panel, quick-open and startup restore treat as
+ * editable scripts instead of handing them to the OS default application.
+ * Beyond `.sql`/`.ddl` this covers the per-engine suffixes commonly used in
+ * version-controlled database repos (#14204): PostgreSQL `.psql`/`.plpgsql`/`.sqlpg`,
+ * Oracle `.prc`/`.fnc`/`.pkb`/`.pks`/`.pck`/`.pls`/`.plsql`/`.tps`/`.tpb`/`.trg`,
+ * SQL Server `.tsql`/`.spc`, MySQL/MariaDB `.trg`/`.rout`, plus JS/Mongo scripts.
+ * Keep in sync with `DEFAULT_FILE_FILTER` in src-tauri `list_sql_files.rs`.
+ */
+export function isSqlOrScriptFilePath(path: string): boolean {
+  return /\.(sql|ddl|psql|plpgsql|sqlpg|prc|fnc|pkb|pks|pck|pls|plsql|tps|tpb|trg|tsql|spc|rout|js|mjs)$/i.test(path.trim());
+}
+
+export function isSpreadsheetFilePath(path: string): boolean {
+  return /\.(xlsx|xls|csv|tsv)$/i.test(path.trim());
+}
+
+export interface QueryEditorFileDialogFilter {
+  name: string;
+  extensions: string[];
+}
+
+export function queryEditorOpenFileFilters(databaseType?: string): QueryEditorFileDialogFilter[] {
+  if (databaseType === "mongodb") {
+    return [
+      { name: "MongoDB Script", extensions: ["js"] },
+      { name: "SQL", extensions: ["sql"] },
+      { name: "All Files", extensions: ["*"] },
+    ];
+  }
+  return [{ name: "SQL", extensions: ["sql"] }];
+}
+
+export function queryEditorOpenFileAccept(databaseType?: string): string {
+  return databaseType === "mongodb" ? ".js,.sql" : ".sql";
+}
+
+export function defaultSavedQueryFileName(title: string, databaseType?: string): string {
+  const defaultExt = databaseType === "mongodb" ? "js" : "sql";
+  const trimmed = title.trim() || "query";
+  const normalized = trimmed.replace(/\s+/g, "_");
+  const extSuffix = `.${defaultExt}`;
+  return normalized.toLowerCase().endsWith(extSuffix) ? normalized : `${normalized}${extSuffix}`;
 }
 
 export function sqlFileTitleFromPath(path: string): string {
@@ -14,6 +74,16 @@ export function normalizeExternalSqlPath(path: string): string {
     .replace(/\\/g, "/")
     .replace(/\/{2,}/g, "/");
   return normalized.length > 1 ? normalized.replace(/\/$/, "") : normalized;
+}
+
+export function relocateExternalSqlPathWithinFolder(path: string, previousFolderPath: string, nextFolderPath: string): string | null {
+  const normalizedPath = normalizeExternalSqlPath(path);
+  const previous = normalizeExternalSqlPath(previousFolderPath);
+  const next = normalizeExternalSqlPath(nextFolderPath);
+  if (!normalizedPath || !previous || !next || (normalizedPath !== previous && !normalizedPath.startsWith(`${previous}/`))) return null;
+  const nextPrefix = nextFolderPath.trim().replace(/[\\/]+$/, "");
+  if (!nextPrefix) return null;
+  return `${nextPrefix}${normalizedPath.slice(previous.length)}`;
 }
 
 export function externalSqlFileDisplayTitles(paths: string[]): string[] {
@@ -49,6 +119,25 @@ export function externalSqlFilePaths(paths: string[]): string[] {
 
 export const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES = 64 * 1024 * 1024;
 
+export const MIN_EXTERNAL_SQL_EDITOR_FILE_MB = 1;
+export const MAX_EXTERNAL_SQL_EDITOR_FILE_MB = 4096;
+
+export function normalizeExternalSqlEditorMaxMb(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES / (1024 * 1024);
+  return Math.min(MAX_EXTERNAL_SQL_EDITOR_FILE_MB, Math.max(MIN_EXTERNAL_SQL_EDITOR_FILE_MB, Math.round(parsed)));
+}
+
+export function externalSqlEditorMaxBytes(maxMb: number): number {
+  return Math.round(maxMb * 1024 * 1024);
+}
+
+export function clampExternalSqlEditorMaxMbInput(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return MIN_EXTERNAL_SQL_EDITOR_FILE_MB;
+  return Math.min(MAX_EXTERNAL_SQL_EDITOR_FILE_MB, Math.max(MIN_EXTERNAL_SQL_EDITOR_FILE_MB, Math.round(parsed)));
+}
+
 export class ExternalSqlFileTooLargeError extends Error {
   constructor(
     readonly sizeBytes: number,
@@ -63,9 +152,9 @@ export function isExternalSqlFileTooLargeError(error: unknown): error is Externa
   return error instanceof ExternalSqlFileTooLargeError;
 }
 
-export function readBrowserSqlFile(file: Blob): Promise<string> {
-  if (file.size > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES) {
-    return Promise.reject(new ExternalSqlFileTooLargeError(file.size, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES));
+export function readBrowserSqlFile(file: Blob, maxSizeBytes = MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES): Promise<string> {
+  if (file.size > maxSizeBytes) {
+    return Promise.reject(new ExternalSqlFileTooLargeError(file.size, maxSizeBytes));
   }
 
   return new Promise((resolve, reject) => {

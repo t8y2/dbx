@@ -265,6 +265,47 @@ func rawParams(values map[string]any) map[string]json.RawMessage {
 	return result
 }
 
+func TestApplySchemaContextUsesEngineIdentifierQuote(t *testing.T) {
+	tests := []struct {
+		name          string
+		databaseType  string
+		configuration map[string]string
+		expected      string
+	}{
+		{
+			name:          "Kyuubi Trino",
+			databaseType:  "kyuubi",
+			configuration: map[string]string{"set:hivevar:kyuubi.engine.type": "TRINO"},
+			expected:      `USE "sales""daily"`,
+		},
+		{
+			name:          "Hive",
+			databaseType:  "hive",
+			configuration: map[string]string{"set:hivevar:kyuubi.engine.type": "TRINO"},
+			expected:      "USE `sales\"daily`",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			behavior := &scriptedBehavior{exec: func(context.Context, string) (driver.Result, error) {
+				return driver.RowsAffected(0), nil
+			}}
+			server := newScriptedServer(t, behavior)
+			server.config.DatabaseType = test.databaseType
+			server.config.HiveConfiguration = test.configuration
+
+			if err := server.applySchemaContext(context.Background(), server.connection, `sales"daily`); err != nil {
+				t.Fatal(err)
+			}
+			_, executions, _, _ := behavior.snapshot()
+			if !reflect.DeepEqual(executions, []string{test.expected}) {
+				t.Fatalf("unexpected schema switch SQL: %#v", executions)
+			}
+		})
+	}
+}
+
 func TestExecuteQueryUsesHiveServerResultSetSignal(t *testing.T) {
 	behavior := &scriptedBehavior{}
 	behavior.query = func(ctx context.Context, query string) (driver.Rows, error) {
@@ -536,31 +577,24 @@ func TestRuntimeSessionsRemainIsolated(t *testing.T) {
 	}
 }
 
-func TestTransactionFallbackDoesNotReplayFailedStatements(t *testing.T) {
+func TestTransactionRejectsUnsupportedDriverBeforeStatementsRun(t *testing.T) {
 	behavior := &scriptedBehavior{}
 	behavior.exec = func(_ context.Context, query string) (driver.Result, error) {
-		if strings.Contains(query, "second") {
-			return nil, io.EOF
-		}
-		return driver.RowsAffected(1), nil
+		return nil, fmt.Errorf("must not execute %q", query)
 	}
 	server := newScriptedServer(t, behavior)
 	_, err := server.executeStatements(rawParams(map[string]any{
 		"statements": []string{"INSERT first", "INSERT second", "INSERT third"},
 	}), true)
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("expected connection failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "does not support rollbackable transactions") {
+		t.Fatalf("expected unsupported transaction error, got %v", err)
 	}
 	_, executions, beginCalls, _ := behavior.snapshot()
-	if !reflect.DeepEqual(executions, []string{"INSERT first", "INSERT second"}) {
-		t.Fatalf("failed transaction was replayed or continued: %v", executions)
+	if len(executions) != 0 {
+		t.Fatalf("unsupported transaction executed statements: %v", executions)
 	}
 	if beginCalls == 0 {
-		t.Fatal("transaction capability was not attempted before fallback")
-	}
-	rpcErr := classifyRPCError("execute_transaction", "session-a", err)
-	if rpcErr.Data.Category != "connection" || rpcErr.Data.SessionDisposition != "quarantine" {
-		t.Fatalf("unexpected connection failure classification: %#v", rpcErr)
+		t.Fatal("transaction capability was not checked")
 	}
 }
 

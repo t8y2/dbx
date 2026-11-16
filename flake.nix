@@ -75,10 +75,16 @@
           ]
         );
 
+        # Match the package manager version declared by package.json.
+        pnpmTool = pkgs.pnpm_10.override {
+          version = "10.34.7";
+          hash = "sha512-upirxYVTmTM3W1lx9LxtbHOhtLftxKh559EC/lQj0eAjCdZ8YKEfBJVQk6luUhrZw7E4zdZUylvlY/N4s65IvQ==";
+        };
+
         # Node / frontend tooling
         nodeDeps = with pkgs; [
           nodejs_22
-          pnpm
+          pnpmTool
           # Optional: for building native node addons (better-sqlite3 etc.)
           python3
           gnumake
@@ -184,7 +190,7 @@
         # ------------------------------------------------------------------ #
         packages.dbx-desktop = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "dbx-desktop";
-          version = "0.6.2";
+          version = "0.6.62";
 
           src = pkgs.lib.cleanSource ./.;
 
@@ -193,11 +199,11 @@
           # a content-addressed store path so the build sandbox has no network. #
           pnpmDeps = pkgs.fetchPnpmDeps {
             inherit (finalAttrs) pname version src;
-            # `fetcherVersion = 4` is supported for `pnpm_11`
+            pnpm = pnpmTool;
             fetcherVersion = 4;
             # Update with the hash reported by a failed fixed-output build:
             #   nix build .#dbx-pnpm-deps 2>&1 | grep 'got:'
-            hash = "sha256-VYG+rEeTTcf3B4avT6UIAdwIymrrioAUtUP2MBYi6s0=";
+            hash = "sha256-HWK12OkC+BBoK1NKFm4pVkqBRn4+lQu3oeFZyreSA2U=";
           };
 
           # ── Step 2: vendor Cargo dependencies ───────────────────────────── #
@@ -211,8 +217,8 @@
                 "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
               "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec" =
                 "sha256-tMFvmypIBh1GHg3cLFWmLf6N1wrwKPlzx2G/MHwtlFM=";
-              "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6" =
-                "sha256-HRbYVSD7iIwG3m1tOGoIZy0xAZwALWIpTtakVSYPIYI=";
+              "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" =
+                "sha256-NkSST+xuE8NCVobwmX5j87WY+zXU6aWHMSR0LFjn8UA=";
             };
           };
 
@@ -221,7 +227,7 @@
             [
               rustToolchain
               pkgs.nodejs_22
-              pkgs.pnpm
+              pnpmTool
               pkgs.pkg-config
               pkgs.perl
               pkgs.jq                         # used by preConfigure to strip packageManager
@@ -252,7 +258,7 @@
             icon = "dbx";
             desktopName = "DBX";
             genericName = "Database Management Tool";
-            comment = "Open-source database management tool for 90+ databases";
+            comment = "Open-source database management tool for 100+ databases";
             categories = [ "Development" "Database" ];
             keywords = [
               "database"
@@ -414,7 +420,7 @@
           meta = with pkgs.lib; {
             description = "DBX desktop — open-source database management tool (Tauri 2)";
             longDescription = ''
-              DBX is a lightweight (~15 MB) database management tool supporting 90+
+              DBX is a lightweight (~15 MB) database management tool supporting 100+
               databases. Built with Tauri 2, Vue 3, and Rust. No Java, no Chromium.
             '';
             license = licenses.asl20;

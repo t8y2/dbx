@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 610
 dbType: ignite
+compareModes: [schema, data]
 rustVariant: Ignite
 label: Apache Ignite
 runtimeMode: agent

@@ -61,8 +61,10 @@ const structureCapabilities = computed(() => getTableStructureCapabilities(props
 const selectedTable = computed(() => {
   const target = props.target;
   if (target?.kind !== "table") return null;
-  return props.tables.find((t) => t.name === target.tableName) ?? null;
+  return props.tables.find((t) => t.name === target.tableName || (t.schema && `${t.schema}.${t.name}` === target.tableName)) ?? null;
 });
+
+const selectedTableIdentifier = computed(() => (props.target?.kind === "table" ? props.target.tableName : (selectedTable.value?.name ?? "")));
 
 const selectedEdge = computed(() => {
   const target = props.target;
@@ -253,7 +255,7 @@ function confirmDeleteLiveTable() {
   const table = selectedTable.value;
   if (!table || isDraftTable(table)) return;
   confirmingDropTable.value = false;
-  emit("delete-live-table", table.name);
+  emit("delete-live-table", selectedTableIdentifier.value);
 }
 
 function cancelDeleteLiveTable() {
@@ -554,7 +556,7 @@ const dataTypeOptionsForColumn = computed(() => {
           </template>
         </template>
 
-        <Button v-if="editable" type="button" variant="destructive" size="sm" class="w-full h-8 text-xs" @click="emit('delete-draft-table', selectedTable.name)">
+        <Button v-if="editable" type="button" variant="destructive" size="sm" class="w-full h-8 text-xs" @click="emit('delete-draft-table', selectedTableIdentifier)">
           {{ t("diagram.deleteDraftTable") }}
         </Button>
 

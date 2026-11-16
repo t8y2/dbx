@@ -144,8 +144,13 @@ function loadGitHubPrivateKey(config: GitHubIssueConfig): Uint8Array {
   return pem.label === "RSA PRIVATE KEY" ? wrapPkcs1AsPkcs8(pem.bytes) : pem.bytes;
 }
 
+/**
+ * The GitHub repository is maintained in English and Chinese, so a draft is
+ * written in one of those two regardless of which locale the reader used. Any
+ * other site language (Turkish included) drafts in English.
+ */
 export function normalizeIssueLanguage(value: FormDataEntryValue | null): IssueLanguage {
-  return value === "en" ? "en" : "cn";
+  return value === "cn" ? "cn" : "en";
 }
 
 export function normalizeIssueType(value: unknown): IssueType {
@@ -333,7 +338,9 @@ export async function createIssuePreview(
       body: JSON.stringify({
         model,
         temperature: 0.2,
-        max_tokens: 1800,
+        // Reasoning models spend the budget on reasoning_content before content,
+        // so keep generous headroom to avoid truncated (unparseable) drafts.
+        max_tokens: 6000,
         messages: [
           { role: "system", content: issuePrompt(language) },
           { role: "user", content: userContent },

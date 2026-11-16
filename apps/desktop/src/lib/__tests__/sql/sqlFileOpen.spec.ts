@@ -1,16 +1,93 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from "vitest";
-import { ExternalSqlFileTooLargeError, externalSqlFileDisplayTitles, externalSqlFileOpenErrorMessage, formatSqlFileSize, isSqlFilePath, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES, normalizeExternalSqlPath, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
+import {
+  defaultSavedQueryFileName,
+  ExternalSqlFileTooLargeError,
+  clampExternalSqlEditorMaxMbInput,
+  externalSqlEditorMaxBytes,
+  externalSqlFileDisplayTitles,
+  externalSqlFileOpenErrorMessage,
+  formatSqlFileSize,
+  isDdlFilePath,
+  isScriptFilePath,
+  isSqlFilePath,
+  isSqlOrScriptFilePath,
+  isSpreadsheetFilePath,
+  MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+  MAX_EXTERNAL_SQL_EDITOR_FILE_MB,
+  MIN_EXTERNAL_SQL_EDITOR_FILE_MB,
+  normalizeExternalSqlEditorMaxMb,
+  normalizeExternalSqlPath,
+  queryEditorOpenFileAccept,
+  queryEditorOpenFileFilters,
+  readBrowserSqlFile,
+  relocateExternalSqlPathWithinFolder,
+} from "@/lib/sql/sqlFileOpen";
 
 describe("external SQL file paths", () => {
   it("normalizes Windows separators for identity checks", () => {
     expect(normalizeExternalSqlPath(" C:\\work\\demo.sql ")).toBe("C:/work/demo.sql");
   });
 
+  it("preserves the backend UNC prefix when relocating a folder path", () => {
+    expect(relocateExternalSqlPathWithinFolder("\\\\server\\share\\old\\nested\\query.sql", "\\\\server\\share\\old", "\\\\server\\share\\renamed")).toBe("\\\\server\\share\\renamed/nested/query.sql");
+  });
+
   it("distinguishes SQL files from other filtered text files", () => {
     expect(isSqlFilePath("C:\\work\\demo.SQL")).toBe(true);
     expect(isSqlFilePath("/work/script.py")).toBe(false);
+  });
+
+  it("distinguishes script files (.sql and .js) from unsupported files", () => {
+    expect(isScriptFilePath("C:\\work\\demo.SQL")).toBe(true);
+    expect(isScriptFilePath("/work/mongo_query.js")).toBe(true);
+    expect(isScriptFilePath("/work/script.py")).toBe(false);
+  });
+
+  it("identifies DDL files correctly", () => {
+    expect(isDdlFilePath("schema.ddl")).toBe(true);
+    expect(isDdlFilePath("C:\\work\\SCHEMA.DDL")).toBe(true);
+    expect(isDdlFilePath("query.sql")).toBe(false);
+    expect(isDdlFilePath("data.xlsx")).toBe(false);
+  });
+
+  it("identifies SQL and script files (.sql, .ddl, .js) for in-editor opening", () => {
+    expect(isSqlOrScriptFilePath("query.sql")).toBe(true);
+    expect(isSqlOrScriptFilePath("SCHEMA.DDL")).toBe(true);
+    expect(isSqlOrScriptFilePath("/app/script.js")).toBe(true);
+    expect(isSqlOrScriptFilePath("C:\\work\\financial_data.xlsx")).toBe(false);
+    expect(isSqlOrScriptFilePath("/docs/readme.pdf")).toBe(false);
+    expect(isSqlOrScriptFilePath("memo.docx")).toBe(false);
+  });
+
+  it("treats per-engine database script extensions as editable scripts (#14204)", () => {
+    expect(isSqlOrScriptFilePath("schema_dump.psql")).toBe(true);
+    expect(isSqlOrScriptFilePath("report.PLPGSQL")).toBe(true);
+    expect(isSqlOrScriptFilePath("migration.sqlpg")).toBe(true);
+    expect(isSqlOrScriptFilePath("add_salary.prc")).toBe(true);
+    expect(isSqlOrScriptFilePath("calc_bonus.fnc")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg_header.pks")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg_body.pkb")).toBe(true);
+    expect(isSqlOrScriptFilePath("types.pck")).toBe(true);
+    expect(isSqlOrScriptFilePath("lib.pls")).toBe(true);
+    expect(isSqlOrScriptFilePath("procedures.plsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("audit_trg.trg")).toBe(true);
+    expect(isSqlOrScriptFilePath("batch.tsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("proc.spc")).toBe(true);
+    expect(isSqlOrScriptFilePath("sync.rout")).toBe(true);
+    expect(isSqlOrScriptFilePath("mongosh.mjs")).toBe(true);
+    expect(isSqlOrScriptFilePath("archive.zip")).toBe(false);
+    expect(isSqlOrScriptFilePath("notes.txt")).toBe(false);
+  });
+
+  it("identifies spreadsheet files for dedicated icon rendering", () => {
+    expect(isSpreadsheetFilePath("data.xlsx")).toBe(true);
+    expect(isSpreadsheetFilePath("legacy.XLS")).toBe(true);
+    expect(isSpreadsheetFilePath("/export/result.csv")).toBe(true);
+    expect(isSpreadsheetFilePath("dump.tsv")).toBe(true);
+    expect(isSpreadsheetFilePath("query.sql")).toBe(false);
+    expect(isSpreadsheetFilePath("doc.pdf")).toBe(false);
   });
 
   it("uses the shortest unique parent path for duplicate filenames", () => {
@@ -19,6 +96,33 @@ describe("external SQL file paths", () => {
 
   it("adds more parent segments when immediate parents also collide", () => {
     expect(externalSqlFileDisplayTitles(["/one/sql/create.sql", "/two/sql/create.sql"])).toEqual(["one/sql/create.sql", "two/sql/create.sql"]);
+  });
+});
+
+describe("query editor script file filters and names", () => {
+  it("provides MongoDB script filters for MongoDB database type", () => {
+    const filters = queryEditorOpenFileFilters("mongodb");
+    expect(filters).toEqual([
+      { name: "MongoDB Script", extensions: ["js"] },
+      { name: "SQL", extensions: ["sql"] },
+      { name: "All Files", extensions: ["*"] },
+    ]);
+    expect(queryEditorOpenFileAccept("mongodb")).toBe(".js,.sql");
+  });
+
+  it("keeps non-MongoDB pickers SQL-only", () => {
+    expect(queryEditorOpenFileFilters("postgres")).toEqual([{ name: "SQL", extensions: ["sql"] }]);
+    expect(queryEditorOpenFileFilters(undefined)).toEqual([{ name: "SQL", extensions: ["sql"] }]);
+    expect(queryEditorOpenFileAccept("postgres")).toBe(".sql");
+    expect(queryEditorOpenFileAccept(undefined)).toBe(".sql");
+  });
+
+  it("generates correct default save file names for MongoDB vs SQL", () => {
+    expect(defaultSavedQueryFileName("query_1", "mongodb")).toBe("query_1.js");
+    expect(defaultSavedQueryFileName("users list", "mongodb")).toBe("users_list.js");
+    expect(defaultSavedQueryFileName("existing.js", "mongodb")).toBe("existing.js");
+    expect(defaultSavedQueryFileName("query_1", "mysql")).toBe("query_1.sql");
+    expect(defaultSavedQueryFileName("query_1")).toBe("query_1.sql");
   });
 });
 
@@ -39,6 +143,36 @@ describe("external SQL file editor limit", () => {
       sizeBytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1,
       maxSizeBytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
     });
+  });
+
+  it("honors a custom browser editor limit", async () => {
+    const file = new Blob(["select 1;"]);
+    Object.defineProperty(file, "size", { value: 8 });
+
+    await expect(readBrowserSqlFile(file, 4)).rejects.toMatchObject({
+      name: "ExternalSqlFileTooLargeError",
+      sizeBytes: 8,
+      maxSizeBytes: 4,
+    });
+  });
+
+  it("normalizes the configurable editor size limit in MB", () => {
+    expect(normalizeExternalSqlEditorMaxMb(undefined)).toBe(64);
+    expect(normalizeExternalSqlEditorMaxMb(0)).toBe(MIN_EXTERNAL_SQL_EDITOR_FILE_MB);
+    expect(normalizeExternalSqlEditorMaxMb(128)).toBe(128);
+    expect(normalizeExternalSqlEditorMaxMb(99999)).toBe(MAX_EXTERNAL_SQL_EDITOR_FILE_MB);
+    expect(normalizeExternalSqlEditorMaxMb(12.6)).toBe(13);
+  });
+
+  it("clamps the editor size limit input", () => {
+    expect(clampExternalSqlEditorMaxMbInput("abc")).toBe(MIN_EXTERNAL_SQL_EDITOR_FILE_MB);
+    expect(clampExternalSqlEditorMaxMbInput(0)).toBe(MIN_EXTERNAL_SQL_EDITOR_FILE_MB);
+    expect(clampExternalSqlEditorMaxMbInput(256)).toBe(256);
+    expect(clampExternalSqlEditorMaxMbInput(99999)).toBe(MAX_EXTERNAL_SQL_EDITOR_FILE_MB);
+  });
+
+  it("converts the editor size limit to bytes", () => {
+    expect(externalSqlEditorMaxBytes(64)).toBe(64 * 1024 * 1024);
   });
 
   it("formats large file sizes", () => {

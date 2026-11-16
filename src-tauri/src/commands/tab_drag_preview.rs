@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(target_os = "windows")]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 
 pub const TAB_DRAG_PREVIEW_RELEASE_EVENT: &str = "dbx:tab-drag-preview-release";
 

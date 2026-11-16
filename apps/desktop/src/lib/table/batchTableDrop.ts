@@ -25,7 +25,8 @@ interface RunBatchTableDropOptions<T> {
 }
 
 function batchDropError(result: QueryResult): Error {
-  return new Error(String(result.rows[0]?.[0] ?? "Batch drop failed"));
+  const message = result.error?.detail || result.rows[0]?.[0];
+  return new Error(String(message ?? "Batch drop failed"));
 }
 
 function isAtomicIndexlessBatch(databaseType: DatabaseType | undefined): boolean {
@@ -33,6 +34,10 @@ function isAtomicIndexlessBatch(databaseType: DatabaseType | undefined): boolean
 }
 
 export async function runBatchTableDrop<T>({ databaseType, plan, executeStatement, executeBatch, onProgress }: RunBatchTableDropOptions<T>): Promise<BatchTableDropResult<T>> {
+  if (plan.length === 0) {
+    return { succeeded: [] };
+  }
+
   if (databaseType === "sqlserver") {
     const succeeded: T[] = [];
     for (let index = 0; index < plan.length; index += 1) {
@@ -50,16 +55,30 @@ export async function runBatchTableDrop<T>({ databaseType, plan, executeStatemen
 
   const results = await executeBatch(plan.map(({ sql }) => sql).join(";\n"), onProgress);
   const failedResult = results.find((result) => result.execution_error === true);
+
+  const hasStatementIndexes = results.some((result) => Number.isInteger(result.statement_index));
+  if (hasStatementIndexes) {
+    const succeededIndexes = new Set(results.filter((result) => result.execution_error !== true && Number.isInteger(result.statement_index)).map((result) => result.statement_index!));
+    const succeeded = plan.filter((_, index) => succeededIndexes.has(index)).map(({ target }) => target);
+    if (failedResult) return { succeeded, failed: batchDropError(failedResult) };
+    if (succeeded.length !== plan.length) {
+      return { succeeded, failed: new Error("Batch drop did not report a result for every statement") };
+    }
+    return { succeeded };
+  }
+
   if (!failedResult && isAtomicIndexlessBatch(databaseType) && results.every((result) => !Number.isInteger(result.statement_index))) {
     onProgress({ completed: plan.length, total: plan.length, success: true });
     return { succeeded: plan.map(({ target }) => target) };
   }
 
-  const succeededIndexes = new Set(results.filter((result) => result.execution_error !== true && Number.isInteger(result.statement_index)).map((result) => result.statement_index!));
-  const succeeded = plan.filter((_, index) => succeededIndexes.has(index)).map(({ target }) => target);
-  if (failedResult) return { succeeded, failed: batchDropError(failedResult) };
-  if (succeeded.length !== plan.length) {
-    return { succeeded, failed: new Error("Batch drop did not report a result for every statement") };
+  if (results.length === plan.length) {
+    const succeeded = plan.filter((_, index) => results[index] && results[index]!.execution_error !== true).map(({ target }) => target);
+    if (failedResult) return { succeeded, failed: batchDropError(failedResult) };
+    onProgress({ completed: plan.length, total: plan.length, success: true });
+    return { succeeded };
   }
-  return { succeeded };
+
+  if (failedResult) return { succeeded: [], failed: batchDropError(failedResult) };
+  return { succeeded: [], failed: new Error("Batch drop did not report a result for every statement") };
 }

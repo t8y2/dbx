@@ -50,4 +50,22 @@ describe("RoutineMetadataPanel", () => {
     expect(host.querySelector("[data-routine-return-type]")?.textContent).toContain("INTEGER");
     expect(host.querySelectorAll("[data-routine-parameter]")).toHaveLength(0);
   });
+
+  it("renders known JDBC nullability without changing legacy parameter rows", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(RoutineMetadataPanel, {
+      parameters: [
+        { name: "required_id", dataType: "BIGINT", mode: "IN", ordinal: 1, nullable: false },
+        { name: "optional_note", dataType: "VARCHAR(64)", mode: "OUT", ordinal: 2, nullable: true },
+        { name: "unknown", dataType: "OTHER", mode: "UNKNOWN", ordinal: 3, nullable: null },
+      ],
+    });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+
+    const nullability = [...host.querySelectorAll("[data-routine-nullable]")].map((cell) => cell.textContent?.trim());
+    expect(nullability).toEqual(["Not null", "Nullable", "-"]);
+  });
 });

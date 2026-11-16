@@ -72,7 +72,7 @@ func (s *etcdSession) status(params map[string]json.RawMessage) (any, error) {
 		statusRequests[index] = channel
 		go func(endpoint string, channel chan *statusResult) {
 			started := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), rpcTimeoutSeconds*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), statusProbeSeconds*time.Second)
 			response, err := client.Maintenance.Status(ctx, endpoint)
 			cancel()
 			channel <- &statusResult{response: response, err: err, started: started}
@@ -128,6 +128,11 @@ func (s *etcdSession) status(params map[string]json.RawMessage) (any, error) {
 		row["learner"] = memberStatus.IsLearner
 		row["reachable"] = true
 		row["latencyMs"] = time.Since(result.started).Milliseconds()
+		// KvStatusMember.errors is a required field in the desktop protocol.
+		// Successful probes must therefore return an explicit empty list rather
+		// than omitting the field, otherwise the host cannot deserialize the
+		// complete status response.
+		row["errors"] = []string{}
 		memberIDKey := unsignedLongString(int64(memberID))
 		if _, seen := observedMemberIDs[memberIDKey]; seen {
 			continue

@@ -4,13 +4,14 @@ import { useI18n } from "vue-i18n";
 import { Plus, Trash2, Eye, EyeOff, ChevronDown, ChevronRight, Edit3, Check, X, CheckSquare, Square, Lock, Unlock } from "@lucide/vue";
 import { useLayerStore } from "@/lib/diagram/layer-store";
 import type { DiagramTable } from "@/lib/diagram/erDiagram";
-import { filterAssignableDiagramTables } from "@/lib/diagram/erDiagram";
-import type { LayerLayoutMode } from "@/types/diagram";
+import { diagramTableId, filterAssignableDiagramTables } from "@/lib/diagram/erDiagram";
+import type { DiagramLayer, LayerLayoutMode } from "@/types/diagram";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{
   tables: DiagramTable[];
   recordHistory?: () => void;
+  isMultiSchema?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -94,28 +95,37 @@ function isTableSelected(layerId: string, tableName: string): boolean {
   return getSelectedTables(layerId).has(tableName);
 }
 
+function tableKey(table: DiagramTable): string {
+  return diagramTableId(table, props.isMultiSchema ?? false);
+}
+
+function findLayerForTable(table: DiagramTable, excludeLayerId?: string): DiagramLayer | undefined {
+  const key = tableKey(table);
+  return store.layers.find((l) => (!excludeLayerId || l.id !== excludeLayerId) && (l.tableNames.includes(key) || l.tableNames.includes(table.name)));
+}
+
 const assignableTables = computed(() => filterAssignableDiagramTables(props.tables));
 
 const availableTables = computed(() => {
-  return assignableTables.value.filter((table) => !store.getLayerByTable(table.name));
+  return assignableTables.value.filter((table) => !findLayerForTable(table));
 });
 
-function matchesAddTableFilter(name: string): boolean {
+function matchesAddTableFilter(table: DiagramTable): boolean {
   const q = addTableFilter.value.trim().toLowerCase();
   if (!q) return true;
-  return name.toLowerCase().includes(q);
+  return table.name.toLowerCase().includes(q) || (table.schema?.toLowerCase().includes(q) ?? false) || tableKey(table).toLowerCase().includes(q);
 }
 
 const filteredAvailableTables = computed(() => {
-  return availableTables.value.filter((table) => matchesAddTableFilter(table.name));
+  return availableTables.value.filter(matchesAddTableFilter);
 });
 
 function getOtherLayerTables(excludeLayerId: string): DiagramTable[] {
-  return assignableTables.value.filter((table) => getOtherLayerForTable(table.name, excludeLayerId));
+  return assignableTables.value.filter((table) => !!findLayerForTable(table, excludeLayerId));
 }
 
 function getFilteredOtherLayerTables(excludeLayerId: string): DiagramTable[] {
-  return getOtherLayerTables(excludeLayerId).filter((table) => matchesAddTableFilter(table.name));
+  return getOtherLayerTables(excludeLayerId).filter(matchesAddTableFilter);
 }
 
 function isOtherLayersExpanded(layerId: string): boolean {
@@ -132,9 +142,8 @@ function toggleOtherLayersExpanded(layerId: string) {
   otherLayersExpandedByLayer.value = next;
 }
 
-function getOtherLayerForTable(tableName: string, excludeLayerId: string): string | null {
-  const layer = store.layers.find((l) => l.id !== excludeLayerId && l.tableNames.includes(tableName));
-  return layer?.name || null;
+function getOtherLayerForTable(table: DiagramTable, excludeLayerId: string): string | null {
+  return findLayerForTable(table, excludeLayerId)?.name || null;
 }
 
 function handleAddSelectedTables(layerId: string) {
@@ -142,12 +151,15 @@ function handleAddSelectedTables(layerId: string) {
   if (selected.size === 0) return;
 
   beforeMutate();
-  selected.forEach((tableName) => {
-    const currentLayer = store.getLayerByTable(tableName);
-    if (currentLayer) {
-      store.removeTableFromLayer(currentLayer.id, tableName);
+  selected.forEach((tableId) => {
+    const table = props.tables.find((t) => tableKey(t) === tableId || t.name === tableId);
+    const key = table ? tableKey(table) : tableId;
+    const raw = table?.name;
+    for (const l of store.layers) {
+      if (l.tableNames.includes(key)) store.removeTableFromLayer(l.id, key);
+      if (raw && l.tableNames.includes(raw)) store.removeTableFromLayer(l.id, raw);
     }
-    store.addTableToLayer(layerId, tableName);
+    store.addTableToLayer(layerId, key);
   });
 
   selectedTableNames.value.delete(layerId);
@@ -159,14 +171,14 @@ function handleAddSelectedTables(layerId: string) {
 }
 
 function selectAllAvailableTables(layerId: string) {
-  const all = new Set(filteredAvailableTables.value.map((t) => t.name));
+  const all = new Set(filteredAvailableTables.value.map((t) => tableKey(t)));
   selectedTableNames.value.set(layerId, all);
 }
 
 function selectAllTablesFromOtherLayers(layerId: string) {
   const selected = getSelectedTables(layerId);
   getFilteredOtherLayerTables(layerId).forEach((table) => {
-    selected.add(table.name);
+    selected.add(tableKey(table));
   });
   selectedTableNames.value.set(layerId, selected);
 }
@@ -255,7 +267,12 @@ async function startRename(layerId: string) {
 
 function handleRemoveTable(layerId: string, tableName: string) {
   beforeMutate();
+  const table = props.tables.find((t) => t.name === tableName || tableKey(t) === tableName);
   store.removeTableFromLayer(layerId, tableName);
+  if (table) {
+    store.removeTableFromLayer(layerId, tableKey(table));
+    store.removeTableFromLayer(layerId, table.name);
+  }
   emit("layer-changed");
 }
 
@@ -292,7 +309,7 @@ function handleSetActiveLayer(layerId: string) {
 function getLayerTables(layerId: string): DiagramTable[] {
   const layer = store.layers.find((l) => l.id === layerId);
   if (!layer) return [];
-  return assignableTables.value.filter((table) => layer.tableNames.includes(table.name));
+  return assignableTables.value.filter((table) => layer.tableNames.includes(tableKey(table)) || layer.tableNames.includes(table.name));
 }
 
 function getLayerColor(layerId: string): string {
@@ -353,12 +370,12 @@ function getLayerColor(layerId: string): string {
 
         <div v-if="!layer.collapsed" class="px-2 pb-2">
           <div class="space-y-0.5">
-            <div v-for="table in getLayerTables(layer.id)" :key="table.name" class="flex items-center gap-1 px-2 py-1 rounded text-xs bg-muted/50">
-              <span class="flex-1 min-w-0 truncate">{{ table.name }}</span>
-              <button type="button" class="p-0.5 rounded hover:bg-background transition-colors" @click.stop="handleRemoveTable(layer.id, table.name)" :title="t('diagram.removeFromLayer')">
+            <div v-for="table in getLayerTables(layer.id)" :key="tableKey(table)" class="flex items-center gap-1 px-2 py-1 rounded text-xs bg-muted/50">
+              <span class="flex-1 min-w-0 truncate" :title="tableKey(table)">{{ tableKey(table) }}</span>
+              <button type="button" class="p-0.5 rounded hover:bg-background transition-colors" @click.stop="handleRemoveTable(layer.id, tableKey(table))" :title="t('diagram.removeFromLayer')">
                 <X class="h-3 w-3 text-muted-foreground" />
               </button>
-              <button type="button" class="p-0.5 rounded hover:bg-background transition-colors" @click.stop="handleDeleteTable(table.name)" :title="t('diagram.deleteLiveTable')">
+              <button type="button" class="p-0.5 rounded hover:bg-background transition-colors" @click.stop="handleDeleteTable(tableKey(table))" :title="t('diagram.deleteLiveTable')">
                 <Trash2 class="h-3 w-3 text-red-500" />
               </button>
             </div>
@@ -387,10 +404,10 @@ function getLayerColor(layerId: string): string {
               <input v-model="addTableFilter" type="search" class="w-full h-7 text-[11px] bg-background border border-border rounded px-2 outline-none focus:border-primary" :placeholder="t('diagram.filterTables')" @click.stop />
 
               <div class="space-y-0.5 max-h-48 overflow-y-auto border border-border rounded">
-                <div v-for="table in filteredAvailableTables" :key="table.name" class="flex items-center gap-1.5 px-2 py-1 text-xs hover:bg-muted/50 cursor-pointer" @click.stop="toggleSelectedTable(layer.id, table.name)">
-                  <CheckSquare v-if="isTableSelected(layer.id, table.name)" class="h-3 w-3 text-primary shrink-0" />
+                <div v-for="table in filteredAvailableTables" :key="tableKey(table)" class="flex items-center gap-1.5 px-2 py-1 text-xs hover:bg-muted/50 cursor-pointer" @click.stop="toggleSelectedTable(layer.id, tableKey(table))">
+                  <CheckSquare v-if="isTableSelected(layer.id, tableKey(table))" class="h-3 w-3 text-primary shrink-0" />
                   <Square v-else class="h-3 w-3 text-muted-foreground shrink-0" />
-                  <span class="flex-1 min-w-0 truncate">{{ table.name }}</span>
+                  <span class="flex-1 min-w-0 truncate" :title="tableKey(table)">{{ tableKey(table) }}</span>
                 </div>
                 <div v-if="filteredAvailableTables.length === 0" class="px-2 py-2 text-[10px] text-muted-foreground text-center">
                   {{ t("diagram.noMatchingTables") }}
@@ -409,15 +426,15 @@ function getLayerColor(layerId: string): string {
                   </button>
                 </div>
                 <div v-if="isOtherLayersExpanded(layer.id)" class="space-y-0.5 max-h-32 overflow-y-auto border border-border rounded bg-muted/20">
-                  <div v-for="table in getFilteredOtherLayerTables(layer.id)" :key="table.name" class="flex items-center gap-1.5 px-2 py-1 text-xs hover:bg-muted/50 cursor-pointer" @click.stop="toggleSelectedTable(layer.id, table.name)">
+                  <div v-for="table in getFilteredOtherLayerTables(layer.id)" :key="tableKey(table)" class="flex items-center gap-1.5 px-2 py-1 text-xs hover:bg-muted/50 cursor-pointer" @click.stop="toggleSelectedTable(layer.id, tableKey(table))">
                     <div class="relative shrink-0">
-                      <CheckSquare v-if="isTableSelected(layer.id, table.name)" class="h-3 w-3 text-primary" />
+                      <CheckSquare v-if="isTableSelected(layer.id, tableKey(table))" class="h-3 w-3 text-primary" />
                       <Square v-else class="h-3 w-3 text-muted-foreground" />
-                      <div class="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full border border-background" :style="{ backgroundColor: getLayerColor(store.layers.find((l) => l.id !== layer.id && l.tableNames.includes(table.name))?.id || '') }" />
+                      <div class="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full border border-background" :style="{ backgroundColor: getLayerColor(findLayerForTable(table, layer.id)?.id || '') }" />
                     </div>
-                    <span class="flex-1 min-w-0 truncate opacity-70">{{ table.name }}</span>
+                    <span class="flex-1 min-w-0 truncate opacity-70" :title="tableKey(table)">{{ tableKey(table) }}</span>
                     <span class="text-[9px] px-1 py-0.5 rounded bg-muted-foreground/10 text-muted-foreground shrink-0">
-                      {{ getOtherLayerForTable(table.name, layer.id) }}
+                      {{ getOtherLayerForTable(table, layer.id) }}
                     </span>
                   </div>
                   <div v-if="getFilteredOtherLayerTables(layer.id).length === 0" class="px-2 py-2 text-[10px] text-muted-foreground text-center">

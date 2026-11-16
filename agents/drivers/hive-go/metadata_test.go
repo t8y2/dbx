@@ -36,6 +36,7 @@ func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
 	}
 	server := newScriptedServer(t, behavior)
 	server.params.DatabaseType = "kyuubi"
+	server.config.DatabaseType = "kyuubi"
 	server.config.Username = "fallback"
 
 	info, err := server.connectionInfo()
@@ -48,6 +49,9 @@ func TestKyuubiConnectionInfoReportsNativeIdentity(t *testing.T) {
 	databaseInfo, ok := info["databaseInfo"].(map[string]string)
 	if !ok || databaseInfo["productName"] != "Apache Kyuubi" || databaseInfo["driverName"] != "DBX Kyuubi Go Agent" {
 		t.Fatalf("unexpected Kyuubi database identity: %#v", info["databaseInfo"])
+	}
+	if info["identifierQuote"] != defaultHiveIdentifierQuote {
+		t.Fatalf("non-Trino Kyuubi identifier quote changed: %#v", info["identifierQuote"])
 	}
 }
 
@@ -89,6 +93,66 @@ func TestGetObjectSourceReturnsProtocolObject(t *testing.T) {
 	expected := "CREATE VIEW dbx_kyuubi_demo.high_value_orders\nAS SELECT id, customer, amount FROM dbx_kyuubi_demo.orders WHERE amount >= 50\n"
 	if source.Source != expected {
 		t.Fatalf("unexpected object source DDL: %q", source.Source)
+	}
+}
+
+func TestKyuubiTrinoUsesDoubleQuotesForMetadataFallbacksAndDDL(t *testing.T) {
+	behavior := &scriptedBehavior{
+		getTables: func(context.Context, string, string, []string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		getColumns: func(context.Context, string, string, string) (gohive.MetadataResult, error) {
+			return gohive.MetadataResult{}, errors.New("metadata unsupported")
+		},
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case "SELECT VERSION()":
+				return newScriptedRows(ctx, []string{"version"}, []string{"STRING"}, [][]driver.Value{{"1.10.0"}}), nil
+			case "SELECT CURRENT_USER()":
+				return newScriptedRows(ctx, []string{"current_user"}, []string{"STRING"}, [][]driver.Value{{"dbx"}}), nil
+			case `SHOW TABLES IN "analytics"`:
+				return newScriptedRows(ctx, []string{"table_name"}, []string{"STRING"}, [][]driver.Value{{`event"log`}}), nil
+			case `DESCRIBE "analytics"."event""log"`:
+				return newScriptedRows(ctx, []string{"col_name", "data_type", "comment"}, []string{"STRING", "STRING", "STRING"}, [][]driver.Value{{"id", "bigint", ""}}), nil
+			case `SHOW CREATE TABLE "analytics"."event""log"`:
+				return newScriptedRows(ctx, []string{"create_table"}, []string{"STRING"}, [][]driver.Value{{`CREATE TABLE "analytics"."event""log" ("id" bigint)`}}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "kyuubi"
+	server.config.DatabaseType = "kyuubi"
+	server.config.HiveConfiguration = map[string]string{"set:hivevar:kyuubi.engine.type": "TRINO"}
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["identifierQuote"] != trinoIdentifierQuote {
+		t.Fatalf("unexpected Trino identifier quote: %#v", info["identifierQuote"])
+	}
+	tables, err := server.listTables("analytics", metadataListConstraints{ObjectTypes: []string{"TABLE"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(tables, []tableInfo{{Name: `event"log`, TableType: "TABLE"}}) {
+		t.Fatalf("unexpected fallback tables: %#v", tables)
+	}
+	columns, err := server.getColumns("analytics", `event"log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 || columns[0].Name != "id" {
+		t.Fatalf("unexpected fallback columns: %#v", columns)
+	}
+	ddl, err := server.getTableDDL("analytics", `event"log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ddl != "CREATE TABLE \"analytics\".\"event\"\"log\" (\"id\" bigint)\n" {
+		t.Fatalf("unexpected Trino DDL: %q", ddl)
 	}
 }
 

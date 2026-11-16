@@ -10,6 +10,43 @@ const tables: TableInfo[] = [
 ];
 
 describe("schemaDiffTableFilter", () => {
+  it("excludes tables matching any comma-separated rule on both sides", () => {
+    const names = ["im_users", "ib_orders", "audit_log", "users", "catalog"];
+    const input = names.map((name) => ({ name, table_type: "BASE TABLE" }));
+    const options = { ...DEFAULT_MYSQL_OPTIONS, tableExcludePattern: " ^im_, ^ib_, log$ " };
+    const result = filterSchemaDiffTables(input, input, compileSchemaDiffTableFilter(options), options);
+    expect(result.sourceTables.map((table) => table.name)).toEqual(["users"]);
+    expect(result.targetTables.map((table) => table.name)).toEqual(["users"]);
+  });
+
+  it.each([
+    ["^a{2,3}$, ^ib_", ["aa", "aaa", "ib_orders"], ["a", "aaaa", "users"]],
+    ["^[a,b]+$, ^ib_", ["a,b", "ib_orders"], ["c", "users"]],
+    ["^(a,b)$, ^ib_", ["a,b", "ib_orders"], ["a", "b", "users"]],
+    [String.raw`^a\,b$, ^ib_`, ["a,b", "ib_orders"], ["a", "b", "users"]],
+    [String.raw`^(a)\1$, ^(b)\1$`, ["aa", "bb"], ["ab", "ba"]],
+  ])("preserves regex syntax and independent backreferences in %s", (pattern, excluded, kept) => {
+    const options = { ...DEFAULT_MYSQL_OPTIONS, tableExcludePattern: pattern };
+    const input = [...excluded, ...kept].map((name) => ({ name, table_type: "BASE TABLE" }));
+    expect(filterSchemaDiffTables(input, [], compileSchemaDiffTableFilter(options), options).sourceTables.map((table) => table.name)).toEqual(kept);
+  });
+
+  it("ignores empty rules without matching every table", () => {
+    const options = { ...DEFAULT_MYSQL_OPTIONS, tableExcludePattern: " , , " };
+    expect(filterSchemaDiffTables(tables, tables, compileSchemaDiffTableFilter(options), options).sourceTables).toEqual(tables);
+  });
+
+  it("keeps include priority when a table matches any exclude rule", () => {
+    const options = { ...DEFAULT_MYSQL_OPTIONS, tableIncludePattern: "^users$", tableExcludePattern: "^im_, users$", tableFilterPriority: "include" as const };
+    expect(filterSchemaDiffTables(tables, [], compileSchemaDiffTableFilter(options), options).sourceTables.map((table) => table.name)).toEqual(["users"]);
+    const excludePriority = { ...options, tableFilterPriority: "exclude" as const };
+    expect(filterSchemaDiffTables(tables, [], compileSchemaDiffTableFilter(excludePriority), excludePriority).sourceTables).toEqual([]);
+  });
+
+  it("rejects an invalid rule even if other rules are valid", () => {
+    expect(() => compileSchemaDiffTableFilter({ ...DEFAULT_MYSQL_OPTIONS, tableExcludePattern: "^im_, [" })).toThrow(/Invalid exclude table name regex/);
+  });
+
   it("recognizes regular and materialized views", () => {
     expect(isSchemaDiffView(tables[0])).toBe(false);
     expect(isSchemaDiffView(tables[1])).toBe(true);
@@ -95,6 +132,17 @@ describe("schemaDiffTableFilter", () => {
     const result = filterSchemaDiffTables(sourceOnly, targetPartly, compileSchemaDiffTableFilter(baseOptions), baseOptions, ["a", "b", "c"]);
     expect(result.sourceTables.map((t) => t.name)).toEqual(["a", "b", "c"]);
     expect(result.targetTables.map((t) => t.name)).toEqual(["a", "c"]);
+  });
+
+  it("loads a unique case-insensitive target for explicitly selected tables", () => {
+    const options = { ...baseOptions, ignoreTableNameCase: true };
+    const source: TableInfo[] = [{ name: "USER_INFO", table_type: "BASE TABLE" }];
+    const target: TableInfo[] = [
+      { name: "user_info", table_type: "BASE TABLE" },
+      { name: "other", table_type: "BASE TABLE" },
+    ];
+    const result = filterSchemaDiffTables(source, target, compileSchemaDiffTableFilter(options), options, ["USER_INFO"]);
+    expect(result.targetTables.map((table) => table.name)).toEqual(["user_info"]);
   });
 
   it("does not include unselected target tables that would otherwise look like drops", () => {

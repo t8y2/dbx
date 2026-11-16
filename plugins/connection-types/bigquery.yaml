@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 580
 dbType: bigquery
+compareModes: [schema, data]
 rustVariant: Bigquery
 label: Google BigQuery
 runtimeMode: agent

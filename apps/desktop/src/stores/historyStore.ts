@@ -209,10 +209,11 @@ export const useHistoryStore = defineStore("history", () => {
     void loadConnectionOptions().catch(() => {});
   }
 
-  async function clear() {
+  async function clear(source?: string) {
     beginDestructiveMutation();
     try {
-      await api.clearHistory();
+      if (source) await api.clearHistoryBySource(source);
+      else await api.clearHistory();
     } finally {
       endDestructiveMutation();
     }
@@ -220,6 +221,7 @@ export const useHistoryStore = defineStore("history", () => {
     connectionOptions.value = [];
     total.value = 0;
     nextCursor.value = null;
+    if (source) void loadConnectionOptions().catch(() => {});
   }
 
   return {

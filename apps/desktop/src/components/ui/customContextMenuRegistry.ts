@@ -1,6 +1,8 @@
 import type { Component } from "vue";
 
 export interface ContextMenuItem {
+  /** Stable built-in action key used by the sidebar's saved menu preferences. */
+  sidebarActionId?: string;
   label: string;
   action?: () => void;
   disabled?: boolean | (() => boolean);
@@ -10,6 +12,10 @@ export interface ContextMenuItem {
   title?: string;
   indentLevel?: number;
   checked?: boolean;
+  closeOnSelect?: boolean;
+  /** Refresh an open menu after a non-closing action, using the accepted target. */
+  refreshItems?: () => ContextMenuItem[];
+  checkedStyle?: "check" | "switch";
   // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
   shortcut?: string;
   variant?: "default" | "destructive";

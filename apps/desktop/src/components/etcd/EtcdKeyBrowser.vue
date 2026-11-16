@@ -12,7 +12,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isKeyInKvExportScope, kvExportFilenameStem, kvValueByteIdentity, type KvExportScopeKind, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { detectKvValueFormat } from "@/lib/kv/kvValueFormat";
@@ -95,6 +97,23 @@ const TRANSFER_PREVIEW_PAGE_SIZE = 100;
 const TARGET_LOOKUP_CONCURRENCY = 8;
 
 const props = defineProps<{ connectionId: string }>();
+interface EtcdTabUiState {
+  mode?: WorkbenchMode;
+  activeOperation?: "maintenance" | "watch" | "lease";
+  searchQuery?: string;
+  searchPrefix?: string;
+  searchScope?: SearchScope;
+  transferOpen?: boolean;
+  transferMode?: "import" | "sync";
+  targetConnectionId?: string;
+  transferKeyFilter?: string;
+  syncPrefix?: string;
+  syncScope?: EtcdSyncScope;
+  transferConflictPolicy?: EtcdConflictPolicy;
+  transferCurrentPage?: number;
+  syncConfigurationExpanded?: boolean;
+}
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<EtcdTabUiState>({}, "EtcdKeyBrowser");
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
@@ -106,11 +125,11 @@ const ttlCapabilityRefreshIntervalMs = 5000;
 let ttlCapabilityRequest = 0;
 let ttlCapabilityInFlightConnection: string | null = null;
 let ttlCapabilityRefreshTimer: ReturnType<typeof setInterval> | null = null;
-const mode = ref<WorkbenchMode>("keys");
+const mode = ref<WorkbenchMode>(restoredUiState.mode ?? "keys");
 const operationsStatus = ref<api.KvStatusResponse | null>(null);
 const operationsLoading = ref(false);
 const watchPreset = ref<EtcdWatchPreset | null>(null);
-const activeOperation = ref<"maintenance" | "watch" | "lease">("maintenance");
+const activeOperation = ref<"maintenance" | "watch" | "lease">(restoredUiState.activeOperation ?? "maintenance");
 const isOperationsMode = computed(() => mode.value === "maintenance" || mode.value === "watch" || mode.value === "lease");
 const keyBytesByDisplay = new Map<string, Map<string, api.KvValue>>();
 const keySuggestionVersion = ref(0);
@@ -123,9 +142,9 @@ const selectedTreeKeys = ref<EtcdMultiSelection[]>([]);
 const batchDeleteOpen = ref(false);
 const batchDeleting = ref(false);
 
-const searchQuery = ref("");
-const searchPrefix = ref("");
-const searchScope = ref<SearchScope>("all");
+const searchQuery = ref(restoredUiState.searchQuery ?? "");
+const searchPrefix = ref(restoredUiState.searchPrefix ?? "");
+const searchScope = ref<SearchScope>(restoredUiState.searchScope ?? "all");
 const searchResults = ref<SearchResult[]>([]);
 const searchRunning = ref(false);
 const searchScanned = ref(0);
@@ -137,28 +156,59 @@ const searchError = ref("");
 let searchCancelled = false;
 let transferPreviewGeneration = 0;
 
-const transferOpen = ref(false);
-const transferMode = ref<"import" | "sync">("import");
+const transferOpen = ref(restoredUiState.transferOpen ?? false);
+const transferMode = ref<"import" | "sync">(restoredUiState.transferMode ?? "import");
 const transferBundle = ref<EtcdBundle | null>(null);
-const targetConnectionId = ref("");
+const targetConnectionId = ref(restoredUiState.targetConnectionId ?? "");
 const transferRows = ref<TransferRow[]>([]);
 const transferLoading = ref(false);
 const transferApplying = ref(false);
 const transferError = ref("");
-const transferKeyFilter = ref("");
-const syncPrefix = ref("");
-const syncScope = ref<EtcdSyncScope>("prefix");
-const transferConflictPolicy = ref<EtcdConflictPolicy>("ABORT");
-const transferCurrentPage = ref(1);
+const transferKeyFilter = ref(restoredUiState.transferKeyFilter ?? "");
+const syncPrefix = ref(restoredUiState.syncPrefix ?? "");
+const syncScope = ref<EtcdSyncScope>(restoredUiState.syncScope ?? "prefix");
+const transferConflictPolicy = ref<EtcdConflictPolicy>(restoredUiState.transferConflictPolicy ?? "ABORT");
+const transferCurrentPage = ref(restoredUiState.transferCurrentPage ?? 1);
 const transferLoadingDetail = ref("");
 const transferPreviewLoaded = ref(false);
-const syncConfigurationExpanded = ref(true);
+const syncConfigurationExpanded = ref(restoredUiState.syncConfigurationExpanded ?? true);
 
-const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
+trackUiState(() => ({
+  mode: mode.value,
+  activeOperation: activeOperation.value,
+  searchQuery: searchQuery.value,
+  searchPrefix: searchPrefix.value,
+  searchScope: searchScope.value,
+  transferOpen: transferOpen.value,
+  transferMode: transferMode.value,
+  targetConnectionId: targetConnectionId.value,
+  transferKeyFilter: transferKeyFilter.value,
+  syncPrefix: syncPrefix.value,
+  syncScope: syncScope.value,
+  transferConflictPolicy: transferConflictPolicy.value,
+  transferCurrentPage: transferCurrentPage.value,
+  syncConfigurationExpanded: syncConfigurationExpanded.value,
+}));
+
+const etcdAccess = computed(() => connectionStore.getEtcdAccessCapabilities(props.connectionId));
+const canManageEtcd = computed(() => etcdAccess.value.admin);
+const canWriteEtcdKeys = computed(() => etcdAccess.value.writable);
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)) || !canWriteEtcdKeys.value);
+function canWriteConnectionKey(connectionId: string, key: string, keyBytes?: api.KvValue | null): boolean {
+  const config = connectionStore.getConfig(connectionId);
+  return config?.db_type === "etcd" && !connectionIsEffectivelyReadOnly(config) && connectionStore.canWriteEtcdKey(connectionId, key, keyBytes);
+}
+function canWriteCurrentKey(route: { key: string; keyBytes?: api.KvValue | null }): boolean {
+  return canWriteConnectionKey(props.connectionId, route.key, route.keyBytes);
+}
+function permissionDenied(): Error {
+  return new Error("ETCD_PERMISSION_DENIED: The current etcd user is not authorized to write this Key");
+}
 // etcd 2.x connections speak the v2 API: no key history, no leases, no maintenance.
 const isV2Api = computed(() => connectionStore.getConfig(props.connectionId)?.driver_profile === "etcd-v2");
 const etcdConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "etcd"));
-const targetReadOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(targetConnectionId.value)));
+const targetReadOnly = computed(() => !targetConnectionId.value || connectionIsEffectivelyReadOnly(connectionStore.getConfig(targetConnectionId.value)) || !connectionStore.getEtcdAccessCapabilities(targetConnectionId.value).writable);
+const selectedTreeKeysWritable = computed(() => selectedTreeKeys.value.length > 0 && selectedTreeKeys.value.every((item) => canWriteCurrentKey(item)));
 const selectedTransferRows = computed(() => transferRows.value.filter((row) => row.selected && isTransferRowSelectable(row)));
 const selectableTransferRows = computed(() => transferRows.value.filter(isTransferRowSelectable));
 const filteredTransferRows = computed(() => {
@@ -274,13 +324,23 @@ const etcdApi = computed(() => ({
     return { ...result, key: shown, keyIdentity: identity };
   },
   getMetadata: (connectionId: string, key: string, options?: api.KvGetOptions | null) => api.etcdGet(connectionId, key, { ...keyOptions(key), ...options, metadataOnly: true }),
-  put: (connectionId: string, key: string, value: api.KvValue, options?: api.KvPutOptions | null) =>
-    api.etcdPut(connectionId, key, value, {
+  put: (connectionId: string, key: string, value: api.KvValue, options?: api.KvPutOptions | null) => {
+    const keyBytes = options?.keyBytes ?? (options?.expectedCreateRevision === "0" ? undefined : keyOptions(key).keyBytes);
+    if (!canWriteConnectionKey(connectionId, key, keyBytes)) throw permissionDenied();
+    return api.etcdPut(connectionId, key, value, {
       ...options,
-      keyBytes: options?.keyBytes ?? (options?.expectedCreateRevision === "0" ? undefined : keyOptions(key).keyBytes),
-    }),
-  deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => api.etcdDelete(connectionId, key, { ...options, keyBytes: options?.keyBytes ?? keyOptions(key).keyBytes }),
-  rename: api.etcdRename,
+      keyBytes,
+    });
+  },
+  deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => {
+    const keyBytes = options?.keyBytes ?? keyOptions(key).keyBytes;
+    if (!canWriteConnectionKey(connectionId, key, keyBytes)) throw permissionDenied();
+    return api.etcdDelete(connectionId, key, { ...options, keyBytes });
+  },
+  rename: (connectionId: string, request: { key: string; keyBytes?: api.KvValue | null; newKey: string; expectedModRevision?: api.KvInt64 | null }) => {
+    if (!canWriteConnectionKey(connectionId, request.key, request.keyBytes) || !canWriteConnectionKey(connectionId, request.newKey)) throw permissionDenied();
+    return api.etcdRename(connectionId, request);
+  },
   // The v2 API has no event history; hiding the entry keeps KvKeyBrowser from
   // offering restore/compare actions it cannot fulfill.
   history: isV2Api.value ? undefined : api.etcdHistory,
@@ -344,6 +404,11 @@ const labels = computed(() => ({
 }));
 
 async function refreshTtlCapability() {
+  if (!canManageEtcd.value) {
+    supportsTtl.value = false;
+    ttlCapabilityKnown.value = true;
+    return;
+  }
   const connectionId = props.connectionId;
   if (ttlCapabilityInFlightConnection === connectionId) return;
   const request = ++ttlCapabilityRequest;
@@ -373,8 +438,16 @@ function stopTtlCapabilityRefresh() {
 
 function startTtlCapabilityRefresh() {
   stopTtlCapabilityRefresh();
-  void refreshTtlCapability();
-  ttlCapabilityRefreshTimer = setInterval(() => void refreshTtlCapability(), ttlCapabilityRefreshIntervalMs);
+  const refreshAccessAndTtl = async () => {
+    try {
+      await connectionStore.ensureEtcdAccessCapabilities(props.connectionId, { force: true, verifyHealth: false });
+    } catch {
+      // The Key browser surfaces connection failures through its own requests.
+    }
+    await refreshTtlCapability();
+  };
+  void refreshAccessAndTtl();
+  ttlCapabilityRefreshTimer = setInterval(() => void refreshAccessAndTtl(), ttlCapabilityRefreshIntervalMs);
 }
 
 watch(
@@ -400,6 +473,7 @@ function normalizedLease(metadata?: api.KvKeyMetadata | null) {
 
 function isTransferRowSelectable(row: TransferRow): boolean {
   if (["unchanged", "skipped", "applied"].includes(row.operation)) return false;
+  if (!row.source || !canWriteConnectionKey(targetConnectionId.value, row.displayKey, row.source.key)) return false;
   if (transferMode.value !== "sync" || row.operation !== "update") return true;
   return transferConflictPolicy.value === "OVERWRITE";
 }
@@ -523,7 +597,7 @@ async function exportTreeSelection(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -533,7 +607,7 @@ function selectedTreeKeyDetails(): string {
 
 async function deleteSelectedTreeKeys() {
   const selected = [...selectedTreeKeys.value];
-  if (!selected.length || readOnly.value) return;
+  if (!selected.length || readOnly.value || !selected.every((item) => canWriteCurrentKey(item))) return;
   batchDeleting.value = true;
   const completed: EtcdMultiSelection[] = [];
   let deleted = 0;
@@ -550,7 +624,7 @@ async function deleteSelectedTreeKeys() {
     toast(t("etcd.batchDeleteSuccess", { count: deleted }), 3000);
   } catch (error) {
     failed = true;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     toast(t("etcd.batchDeletePartial", { count: deleted, error: message }), 5000);
   } finally {
     if (failed) browserRef.value?.clearMultiSelection();
@@ -638,7 +712,7 @@ async function exportAll(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: scan.entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -671,7 +745,7 @@ async function exportEtcdNodeScope(connectionId: string, request: KvExportScopeR
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -703,11 +777,12 @@ async function onImportFile(event: Event) {
     transferOpen.value = true;
     await previewTransfer();
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
 async function openSync() {
+  if (readOnly.value) return;
   transferMode.value = "sync";
   targetConnectionId.value = etcdConnections.value.find((connection) => connection.id !== props.connectionId)?.id || "";
   transferKeyFilter.value = "";
@@ -751,7 +826,7 @@ async function loadSyncPreview() {
     transferBundle.value = bundleFromSummaries(scan.entries, prefix, scan.revision);
     await previewTransfer();
   } catch (error) {
-    transferError.value = error instanceof Error ? error.message : String(error);
+    transferError.value = formatError(error);
   } finally {
     transferLoading.value = false;
     transferLoadingDetail.value = "";
@@ -768,11 +843,16 @@ async function previewTransfer() {
   transferError.value = "";
   transferPreviewLoaded.value = false;
   try {
+    await connectionStore.ensureEtcdAccessCapabilities(targetId, { force: true, verifyHealth: false });
+    if (generation !== transferPreviewGeneration) return;
     let compared = 0;
     const sourceRows = await mapWithConcurrency(bundle.entries, TARGET_LOOKUP_CONCURRENCY, async (source) => {
       const shown = displayKey(source.key);
       if (normalizedLease(source.metadata) !== "0") {
         return { id: `source:${kvValueByteIdentity(source.key)}`, displayKey: shown, source, operation: "skipped" as const, reason: "Leased keys are skipped by default.", selected: false };
+      }
+      if (!canWriteConnectionKey(targetId, shown, source.key)) {
+        return { id: `source:${kvValueByteIdentity(source.key)}`, displayKey: shown, source, operation: "skipped" as const, reason: t("etcd.targetKeyWriteDenied"), selected: false };
       }
       const target = await api.etcdGet(targetId, shown, { keyBytes: source.key });
       if (generation !== transferPreviewGeneration) throw new Error("同步预览已被新的请求替换。");
@@ -791,7 +871,7 @@ async function previewTransfer() {
     if (transferMode.value === "sync") syncConfigurationExpanded.value = false;
   } catch (error) {
     if (generation !== transferPreviewGeneration) return;
-    transferError.value = error instanceof Error ? error.message : String(error);
+    transferError.value = formatError(error);
     transferPreviewLoaded.value = false;
   } finally {
     if (generation === transferPreviewGeneration) {
@@ -809,6 +889,10 @@ async function applyTransfer() {
   const targetId = targetConnectionId.value;
   const rows = [...selectedTransferRows.value];
   if (!targetId || rows.length === 0) return;
+  if (!rows.every((row) => row.source && canWriteConnectionKey(targetId, row.displayKey, row.source.key))) {
+    transferError.value = t("etcd.selectedKeysWriteDenied");
+    return;
+  }
   // Invalidate any preview that is still resolving before writes begin.
   transferPreviewGeneration++;
   transferApplying.value = true;
@@ -832,7 +916,7 @@ async function applyTransfer() {
     transferOpen.value = false;
     if (targetId === props.connectionId) browserRef.value?.refresh();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     // Rebuild the preview so an ambiguous network failure or a successful
     // prefix of the batch is reflected before the user retries.
     let previewError = "";
@@ -949,7 +1033,7 @@ async function runSearch() {
       return { id: `${identity}:${summary.modRevision || ""}`, displayKey: shown, keyIdentity: identity, summary: { ...summary, key: shown, keyBytes: bytes, keyIdentity: identity }, matchesKey, matchesValue, selected: true };
     });
   } catch (error) {
-    searchError.value = error instanceof Error ? error.message : String(error);
+    searchError.value = formatError(error);
   } finally {
     searchRunning.value = false;
   }
@@ -966,13 +1050,21 @@ async function openSearchResult(result: SearchResult) {
 }
 
 async function openOperations(nextMode: Extract<WorkbenchMode, "maintenance" | "watch" | "lease">) {
+  if ((nextMode === "maintenance" || nextMode === "lease") && !canManageEtcd.value) return;
   activeOperation.value = nextMode;
   mode.value = nextMode;
+  operationsStatus.value = null;
+  // A watch is scoped to the Key/prefix supplied by the user. Do not probe
+  // cluster status first: ordinary etcd users normally lack that privilege.
+  if (nextMode === "watch") {
+    operationsLoading.value = false;
+    return;
+  }
   operationsLoading.value = true;
   try {
     operationsStatus.value = await api.etcdStatus(props.connectionId);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 5000);
+    toast(formatError(error), 5000);
   } finally {
     operationsLoading.value = false;
   }
@@ -988,10 +1080,11 @@ function openWatchWorkspaceAfterCreate() {
 }
 
 async function refreshLeaseOptions() {
+  if (!canManageEtcd.value) return;
   try {
     leaseOptions.value = (await api.etcdLeaseList(props.connectionId)).leases;
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -1007,7 +1100,7 @@ async function exportSearchResults(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: selected.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -1034,7 +1127,7 @@ defineExpose({ focusSearch, refresh });
         <Button size="sm" :variant="mode === 'keys' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-3 text-sm" @click="mode = 'keys'"><KeyRound class="h-4 w-4" /> {{ t("etcd.key") }}</Button>
         <Button size="sm" :variant="mode === 'search' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-3 text-sm" @click="mode = 'search'"><Search class="h-4 w-4" /> {{ t("etcd.globalSearch") }}</Button>
       </div>
-      <Button v-if="!isV2Api" size="sm" :variant="mode === 'maintenance' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('maintenance')"><Wrench class="h-4 w-4" />{{ t("etcd.admin.maintenance") }}</Button>
+      <Button v-if="!isV2Api && canManageEtcd" size="sm" :variant="mode === 'maintenance' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('maintenance')"><Wrench class="h-4 w-4" />{{ t("etcd.admin.maintenance") }}</Button>
       <Button
         size="sm"
         :variant="mode === 'watch' ? 'secondary' : 'ghost'"
@@ -1045,7 +1138,7 @@ defineExpose({ focusSearch, refresh });
         "
         ><Activity class="h-4 w-4" />{{ t("etcd.admin.watch") }}</Button
       >
-      <Button v-if="!isV2Api" size="sm" :variant="mode === 'lease' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('lease')"><KeyRound class="h-4 w-4" />{{ t("etcd.admin.lease") }}</Button>
+      <Button v-if="!isV2Api && canManageEtcd" size="sm" :variant="mode === 'lease' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('lease')"><KeyRound class="h-4 w-4" />{{ t("etcd.admin.lease") }}</Button>
       <div class="flex-1" />
       <Badge v-if="readOnly" variant="outline">{{ t("connection.readOnly") }}</Badge>
       <DropdownMenu>
@@ -1064,9 +1157,9 @@ defineExpose({ focusSearch, refresh });
           </template>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="readOnly || selectedTreeKeys.length === 0 || batchDeleting" @click="batchDeleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("etcd.delete") }}</Button>
+      <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="readOnly || !selectedTreeKeysWritable || batchDeleting" @click="batchDeleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("etcd.delete") }}</Button>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" @click="fileInput?.click()"><Upload class="h-3.5 w-3.5" /> {{ t("etcd.import") }}</Button>
-      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="etcdConnections.length < 2" @click="openSync"><ArrowRightLeft class="h-3.5 w-3.5" /> {{ t("etcd.sync") }}</Button>
+      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly || etcdConnections.length < 2" @click="openSync"><ArrowRightLeft class="h-3.5 w-3.5" /> {{ t("etcd.sync") }}</Button>
       <input ref="fileInput" type="file" accept="application/json,.json" class="hidden" @change="onImportFile" />
     </div>
 
@@ -1077,13 +1170,14 @@ defineExpose({ focusSearch, refresh });
       :connection-id="props.connectionId"
       :api="etcdApi"
       :labels="labels"
-      :supports-ttl="supportsTtl"
-      :supports-lease-binding="!isV2Api"
+      :supports-ttl="supportsTtl && canManageEtcd"
+      :supports-lease-binding="!isV2Api && canManageEtcd"
       :ttl-capability-known="ttlCapabilityKnown"
       :enable-node-actions="true"
       :safe-write="true"
       :allow-binary-edit="true"
       :read-only="readOnly"
+      :can-write-key="canWriteCurrentKey"
       :enable-multi-select="true"
       :on-watch-key="openWatchForKey"
       export-format="dbx-etcd-bundle"
@@ -1164,10 +1258,10 @@ defineExpose({ focusSearch, refresh });
         <div v-else class="flex h-52 items-center justify-center px-6 text-center text-sm text-muted-foreground">输入关键词后开始搜索。可使用 Prefix 限定扫描范围。</div>
       </div>
     </div>
-    <div v-if="operationsStatus || operationsLoading || watchPreset" v-show="isOperationsMode" class="min-h-0 flex-1 overflow-auto p-4">
+    <div v-if="isOperationsMode" class="min-h-0 flex-1 overflow-auto p-4">
       <div v-if="operationsLoading && !operationsStatus" class="flex h-32 items-center justify-center text-sm text-muted-foreground"><Loader2 class="mr-2 h-4 w-4 animate-spin" />加载集群状态...</div>
       <EtcdAdminConsole
-        v-else-if="operationsStatus || watchPreset"
+        v-else-if="operationsStatus || activeOperation === 'watch'"
         :connection-id="connectionId"
         :status="operationsStatus"
         :sections="[activeOperation]"

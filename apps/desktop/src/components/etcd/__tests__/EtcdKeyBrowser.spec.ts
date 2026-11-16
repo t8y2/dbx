@@ -11,9 +11,14 @@ const backend = vi.hoisted(() => ({
   etcdDelete: vi.fn(),
   etcdRename: vi.fn(),
   etcdHistory: vi.fn(),
+  etcdStatus: vi.fn(),
   etcdGetCalls: [] as unknown[][],
   capturedKvBrowserApi: null as any,
+  capturedCanWriteKey: null as any,
+  canWriteEtcdKey: vi.fn(),
+  ensureEtcdAccessCapabilities: vi.fn(),
   selectKeyCalls: [] as unknown[],
+  access: { admin: true, writable: true },
 }));
 
 vi.mock("vue-i18n", () => ({
@@ -27,13 +32,17 @@ vi.mock("@/lib/backend/api", () => ({
   etcdDelete: backend.etcdDelete,
   etcdRename: backend.etcdRename,
   etcdHistory: backend.etcdHistory,
+  etcdStatus: backend.etcdStatus,
   etcdSupportsTtl: backend.etcdSupportsTtl,
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     connections: [],
-    getConfig: () => undefined,
+    getConfig: () => ({ id: "etcd-1", db_type: "etcd" }),
+    getEtcdAccessCapabilities: () => backend.access,
+    ensureEtcdAccessCapabilities: backend.ensureEtcdAccessCapabilities,
+    canWriteEtcdKey: backend.canWriteEtcdKey,
   }),
 }));
 
@@ -45,11 +54,15 @@ vi.mock("@/components/kv/KvKeyBrowser.vue", () => ({
       api: { type: Object, required: true },
       connectionId: { type: String, required: true },
       supportsTtl: { type: Boolean, default: false },
+      supportsLeaseBinding: { type: Boolean, default: false },
       ttlCapabilityKnown: { type: Boolean, default: true },
+      readOnly: { type: Boolean, default: false },
+      canWriteKey: { type: Function, default: undefined },
     },
     emits: ["refreshRequested", "selectionChange"],
     setup(props, { emit, expose }) {
       backend.capturedKvBrowserApi = props.api;
+      backend.capturedCanWriteKey = props.canWriteKey;
       expose({
         focusSearch: () => true,
         selectKey: (route: unknown) => {
@@ -73,7 +86,9 @@ vi.mock("@/components/kv/KvKeyBrowser.vue", () => ({
             {
               id: "kv-browser-stub",
               "data-supports-ttl": String(props.supportsTtl),
+              "data-supports-lease-binding": String(props.supportsLeaseBinding),
               "data-capability-known": String(props.ttlCapabilityKnown),
+              "data-read-only": String(props.readOnly),
               onClick: () => emit("refreshRequested"),
             },
             "refresh",
@@ -108,6 +123,15 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({
     emits: ["confirm", "update:open"],
     setup(props, { emit }) {
       return () => (props.open ? h("button", { id: "confirm-batch-delete", onClick: () => emit("confirm") }, "confirm") : null);
+    },
+  }),
+}));
+
+vi.mock("@/components/etcd/EtcdAdminConsole.vue", () => ({
+  default: defineComponent({
+    name: "EtcdAdminConsoleStub",
+    setup() {
+      return () => h("div", { id: "etcd-admin-console-stub" });
     },
   }),
 }));
@@ -175,10 +199,16 @@ beforeEach(() => {
   backend.etcdDelete.mockReset();
   backend.etcdRename.mockReset();
   backend.etcdHistory.mockReset();
+  backend.etcdStatus.mockReset();
   backend.etcdListPrefix.mockResolvedValue({ keys: [], continuation: null, revision: "1" });
   backend.etcdGetCalls.length = 0;
   backend.capturedKvBrowserApi = null;
+  backend.capturedCanWriteKey = null;
+  backend.canWriteEtcdKey.mockReset().mockReturnValue(true);
+  backend.ensureEtcdAccessCapabilities.mockReset().mockImplementation(async () => backend.access);
   backend.selectKeyCalls.length = 0;
+  backend.access.admin = true;
+  backend.access.writable = true;
 });
 
 afterEach(() => {
@@ -233,6 +263,37 @@ describe("EtcdKeyBrowser TTL capability recovery", () => {
     expect(backend.etcdSupportsTtl).toHaveBeenCalledTimes(2);
     expect(browser.dataset.supportsTtl).toBe("true");
     expect(browser.dataset.capabilityKnown).toBe("true");
+  });
+});
+
+describe("EtcdKeyBrowser restricted etcd access", () => {
+  it("loads access capabilities when a restored tab mounts without sidebar expansion", async () => {
+    await mountBrowser();
+
+    await vi.waitFor(() =>
+      expect(backend.ensureEtcdAccessCapabilities).toHaveBeenCalledWith("etcd-1", {
+        force: true,
+        verifyHealth: false,
+      }),
+    );
+  });
+
+  it("hides cluster controls and opens a Key watch without reading cluster status", async () => {
+    backend.access.admin = false;
+    backend.access.writable = false;
+
+    const browser = await mountBrowser();
+    expect(browser.dataset.readOnly).toBe("true");
+    expect(browser.dataset.supportsLeaseBinding).toBe("false");
+    expect(root!.textContent).not.toContain("etcd.admin.maintenance");
+    expect(root!.textContent).not.toContain("etcd.admin.lease");
+
+    const watch = [...root!.querySelectorAll("button")].find((button) => button.textContent?.includes("etcd.admin.watch"));
+    watch?.click();
+    await flushUi();
+
+    expect(root!.querySelector("#etcd-admin-console-stub")).toBeTruthy();
+    expect(backend.etcdStatus).not.toHaveBeenCalled();
   });
 });
 
@@ -455,5 +516,19 @@ describe("EtcdKeyBrowser tree batch operations", () => {
 
     const selectedExports = [...root!.querySelectorAll("button")].filter((button) => button.textContent?.includes("etcd.exportSelection"));
     expect(selectedExports).toHaveLength(0);
+  });
+
+  it("blocks a selected Key outside the user's write ranges before any delete", async () => {
+    backend.canWriteEtcdKey.mockImplementation((_connectionId, _key, keyBytes) => keyBytes?.data !== "/w==");
+
+    await mountBrowser();
+    root!.querySelector<HTMLButtonElement>("#emit-tree-selection")!.click();
+    await flushUi();
+
+    const batchDelete = [...root!.querySelectorAll("button")].find((button) => button.textContent?.includes("etcd.delete")) as HTMLButtonElement;
+    expect(batchDelete.disabled).toBe(true);
+    expect(() => backend.capturedKvBrowserApi.deleteKey("etcd-1", "[base64:/w==]", { keyBytes: { encoding: "base64", data: "/w==" } })).toThrow("ETCD_PERMISSION_DENIED");
+    expect(backend.etcdDelete).not.toHaveBeenCalled();
+    expect(backend.capturedCanWriteKey({ key: "[base64:/w==]", keyBytes: { encoding: "base64", data: "/w==" } })).toBe(false);
   });
 });

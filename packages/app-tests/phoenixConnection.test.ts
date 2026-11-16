@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { test, vi } from "vitest";
 import {
   isPhoenixRuntimePath,
@@ -164,6 +162,26 @@ test("defines mode-specific Phoenix Maven runtimes", () => {
   assert.equal(jdbcProductRuntimeSelectionId(PHOENIX_JDBC_PRODUCT_PROFILE, "direct"), "phoenix:direct");
 });
 
+test("accepts legacy distribution Phoenix Direct client jar names", () => {
+  assert.equal(isPhoenixRuntimePath("D:\\apps\\DBX\\plugins\\jdbc\\drivers\\phoenix-5.0.0-HBase-2.0-client.jar", "direct"), true);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-4.14.3-HBase-1.3-client.jar", "direct"), true);
+  assert.equal(isPhoenixRuntimePath("/opt/PHOENIX-5.1.3-hbase-2.4-CLIENT.JAR", "direct"), true);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-5.0.0-HBase-2.0-thin-client.jar", "direct"), false);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-5.0.0-HBase-2.0-server.jar", "direct"), false);
+  assert.equal(isPhoenixRuntimePath("/opt/phoenix-5.0.0-HBase-2.0-client.jar", "query-server"), false);
+});
+
+test("keeps a manually selected legacy Phoenix Direct client runtime", async () => {
+  const config = phoenixConfig();
+  config.jdbc_driver_paths = ["D:\\apps\\DBX\\plugins\\jdbc\\drivers\\phoenix-5.0.0-HBase-2.0-client.jar", "D:\\hbase\\conf"];
+  const runtime = runtimeApi();
+
+  const result = await ensureJdbcProductRuntimeDrivers(PHOENIX_JDBC_PRODUCT_PROFILE, config, runtime.api);
+
+  assert.deepEqual(result?.paths, config.jdbc_driver_paths);
+  assert.equal(result?.runtimeSelectionId, undefined);
+});
+
 test("builds one complete selector runtime for each installed Phoenix mode", () => {
   const direct = mavenBundle(PHOENIX_DIRECT_MAVEN_COORDINATE);
   const logging = mavenBundle(PHOENIX_DIRECT_LOGGING_MAVEN_COORDINATE);
@@ -244,15 +262,4 @@ test("does not provision Phoenix runtimes for another JDBC profile", async () =>
   assert.equal(await ensureJdbcProductRuntimeDrivers(PHOENIX_JDBC_PRODUCT_PROFILE, config, runtime.api), undefined);
   assert.equal(runtime.jdbcPluginStatus.mock.calls.length, 0);
   assert.equal(runtime.listJdbcMavenBundles.mock.calls.length, 0);
-});
-
-test("registers Apache Phoenix as a declarative JDBC picker profile with both modes", () => {
-  const profileSource = readFileSync(path.resolve("apps/desktop/src/lib/database/phoenixConnection.ts"), "utf8");
-  const registrySource = readFileSync(path.resolve("apps/desktop/src/lib/database/jdbcProductProfiles.ts"), "utf8");
-
-  assert.match(profileSource, /id:\s*PHOENIX_DRIVER_PROFILE/);
-  assert.match(profileSource, /match:\s*\{\s*dbType:\s*"jdbc",\s*driverProfile:\s*PHOENIX_DRIVER_PROFILE\s*\}/);
-  assert.match(profileSource, /id:\s*"direct"/);
-  assert.match(profileSource, /id:\s*"query-server"/);
-  assert.match(registrySource, /JDBC_PRODUCT_PROFILES\s*=\s*\[PHOENIX_JDBC_PRODUCT_PROFILE\]/);
 });

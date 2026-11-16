@@ -6,6 +6,7 @@ import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import type { DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface QueryCursorTableCandidate {
+  catalog?: string;
   connectionId: string;
   database: string;
   schema?: string;
@@ -21,10 +22,11 @@ export interface QueryTableCandidateAtPositionInput {
   position: number;
 }
 
-export type QueryContextObjectAction = "view-data" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
+export type QueryContextObjectAction = "view-data" | "peek-table-structure" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
 
 export type QueryContextObjectRoute =
   | { event: "viewTableData"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "peekTableStructure"; payload: [target: SqlObjectNavigationTarget] }
   | { event: "editTableStructure"; payload: [target: SqlObjectNavigationTarget] }
   | { event: "openObjectSource"; payload: [target: SqlObjectNavigationTarget, initialEditing: boolean] }
   | { event: "viewTableDdl"; payload: [target: SqlObjectNavigationTarget] };
@@ -43,7 +45,7 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
   if (!tab || tab.mode !== "query" || !tab.connectionId || !tab.database) return null;
 
   const cursor = tab.editorSelection?.head ?? tab.editorSelection?.anchor ?? tab.sql.length;
-  return queryTableCandidateAtSqlPosition({
+  const candidate = queryTableCandidateAtSqlPosition({
     connectionId: tab.connectionId,
     database: tab.database,
     schema: tab.schema,
@@ -51,6 +53,7 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
     sql: tab.sql,
     position: cursor,
   });
+  return candidate && tab.catalog ? { ...candidate, catalog: tab.catalog } : candidate;
 }
 
 export function queryTableCandidateAtSqlPosition(input: QueryTableCandidateAtPositionInput): QueryCursorTableCandidate | null {
@@ -97,9 +100,18 @@ export function resolveQueryContextCandidateDatabase(candidate: QueryCursorTable
   return database && database !== candidate.database ? { ...candidate, database } : candidate;
 }
 
-export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[]): SqlObjectNavigationTarget {
+export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[], preferredSchema?: string): SqlObjectNavigationTarget {
   const nameMatches = tables.filter((table) => sameIdentifier(table.name, candidate.tableName));
-  const match = candidate.schema ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema)) : nameMatches[0];
+  // An unqualified name is ambiguous across schemas. When the SQL did not name a
+  // schema, prefer the query tab's schema (or the connection default) instead of
+  // the first cache entry: otherwise a view in the current schema can be resolved
+  // as a same-named table in another schema (#12865). An explicit schema in the
+  // SQL still wins.
+  const match = candidate.schema
+    ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema))
+    : preferredSchema
+      ? (nameMatches.find((table) => sameIdentifier(table.schema, preferredSchema)) ?? nameMatches.find((table) => !table.schema) ?? nameMatches[0])
+      : nameMatches[0];
   return sqlObjectNavigationTarget({
     name: match?.name ?? candidate.tableName,
     database: candidate.database,
@@ -110,16 +122,18 @@ export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandi
 
 export function queryContextObjectActions(type?: SqlObjectNavigationType): QueryContextObjectAction[] {
   if (type === "view" || type === "materialized_view") {
-    return ["view-data", "edit-view", "view-source", "view-ddl"];
+    return ["view-data", "peek-table-structure", "edit-view", "view-source", "view-ddl"];
   }
   // Unknown metadata preserves the historical table actions instead of disabling existing entry points.
-  return ["view-data", "edit-table-structure", "view-ddl"];
+  return ["view-data", "peek-table-structure", "edit-table-structure", "view-ddl"];
 }
 
 export function queryContextObjectRoute(action: QueryContextObjectAction, target: SqlObjectNavigationTarget): QueryContextObjectRoute {
   switch (action) {
     case "view-data":
       return { event: "viewTableData", payload: [target] };
+    case "peek-table-structure":
+      return { event: "peekTableStructure", payload: [target] };
     case "edit-table-structure":
       return { event: "editTableStructure", payload: [target] };
     case "edit-view":
@@ -155,8 +169,9 @@ function sameIdentifier(left: string | undefined, right: string | undefined): bo
 function nodeMatchesCandidate(node: TreeNode, candidate: QueryCursorTableCandidate): boolean {
   if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
   if (node.connectionId !== candidate.connectionId) return false;
+  if ((node.catalog || undefined) !== (candidate.catalog || undefined)) return false;
   if (!sameIdentifier(node.database, candidate.database)) return false;
-  if (candidate.schema && !sameIdentifier(node.schema, candidate.schema)) return false;
+  if (candidate.schema && !sameIdentifier(node.schema || node.database, candidate.schema)) return false;
   return sameIdentifier(node.label, candidate.tableName);
 }
 
@@ -167,6 +182,7 @@ export function findLoadedTableTargetForCandidate(nodes: readonly TreeNode[], ca
         type: "table",
         connectionId: candidate.connectionId,
         database: node.database || candidate.database,
+        ...(node.catalog ? { catalog: node.catalog } : {}),
         schema: node.schema || candidate.schema,
         tableName: node.label,
       };

@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 515
 dbType: argo
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Argo
 label: 星环Argo
 runtimeMode: agent

@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 730
 dbType: iotdb
+compareModes: [schema, data]
 rustVariant: Iotdb
 label: Apache IoTDB
 runtimeMode: agent

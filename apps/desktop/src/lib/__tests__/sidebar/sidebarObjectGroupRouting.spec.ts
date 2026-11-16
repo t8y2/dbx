@@ -25,10 +25,11 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
-function objectGroup(type: "group-triggers" | "group-synonyms" | "group-types", id: string): TreeNode {
+function objectGroup(type: "group-triggers" | "group-synonyms" | "group-types" | "group-columns", id: string): TreeNode {
+  const label = type === "group-triggers" ? "tree.triggers" : type === "group-synonyms" ? "tree.synonyms" : type === "group-types" ? "tree.types" : "tree.columns";
   return {
     id,
-    label: type === "group-triggers" ? "tree.triggers" : type === "group-synonyms" ? "tree.synonyms" : "tree.types",
+    label,
     type,
     connectionId: "mysql-1",
     database: "app",
@@ -38,7 +39,7 @@ function objectGroup(type: "group-triggers" | "group-synonyms" | "group-types", 
   };
 }
 
-async function createStore({ listObjects, listTriggers }: { listObjects: ReturnType<typeof vi.fn>; listTriggers: ReturnType<typeof vi.fn> }) {
+async function createStore({ listObjects, listTriggers, connection = mysqlConnection() }: { listObjects: ReturnType<typeof vi.fn>; listTriggers: ReturnType<typeof vi.fn>; connection?: ConnectionConfig }) {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
@@ -55,7 +56,6 @@ async function createStore({ listObjects, listTriggers }: { listObjects: ReturnT
   const { useConnectionStore } = await import("@/stores/connectionStore");
   const { useSettingsStore } = await import("@/stores/settingsStore");
   const store = useConnectionStore();
-  const connection = mysqlConnection();
   store.connections = [connection];
   store.connectedIds.add(connection.id);
   useSettingsStore().desktopSettings.sidebar_table_page_size = 10;
@@ -130,6 +130,76 @@ describe("sidebar object-group routing", () => {
     });
   });
 
+  it("refreshes table trigger groups using listTriggers instead of loading database objects", async () => {
+    const listObjects = vi.fn<() => Promise<ObjectInfo[]>>().mockResolvedValue([]);
+    const listTriggers = vi.fn<() => Promise<TriggerInfo[]>>().mockResolvedValue([
+      {
+        name: "trg_orders_audit",
+        timing: "AFTER",
+        event: "UPDATE",
+      },
+    ]);
+    const { connection, store } = await createStore({ listObjects, listTriggers });
+    const tableTriggerGroup: TreeNode = {
+      ...objectGroup("group-triggers", `${connection.id}:app:app:orders:__triggers`),
+      tableName: "orders",
+    };
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tableTriggerGroup] }];
+    const storedTriggerGroup = store.treeNodes[0].children![0];
+
+    await store.refreshTreeNode(storedTriggerGroup);
+
+    expect(listTriggers).toHaveBeenCalledWith(connection.id, "app", "app", "orders", undefined);
+    expect(listObjects).not.toHaveBeenCalled();
+    expect(storedTriggerGroup.children).toHaveLength(1);
+    expect(storedTriggerGroup.children![0]).toMatchObject({
+      label: "trg_orders_audit (AFTER UPDATE)",
+      objectName: "trg_orders_audit",
+      tableName: "orders",
+      type: "trigger",
+    });
+  });
+
+  it("preserves SQL Server table trigger status metadata across refreshes", async () => {
+    const listObjects = vi.fn<() => Promise<ObjectInfo[]>>().mockResolvedValue([]);
+    const listTriggers = vi.fn<() => Promise<TriggerInfo[]>>();
+    const { connection, store } = await createStore({
+      listObjects,
+      listTriggers,
+      connection: { ...mysqlConnection(), id: "sqlserver-1", name: "SQL Server", db_type: "sqlserver", port: 1433 },
+    });
+    const tableTriggerGroup: TreeNode = {
+      ...objectGroup("group-triggers", `${connection.id}:app:dbo:orders:__triggers`),
+      connectionId: connection.id,
+      schema: "dbo",
+      tableName: "orders",
+    };
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tableTriggerGroup] }];
+    const storedTriggerGroup = store.treeNodes[0].children![0];
+
+    for (const enabled of [false, true, undefined, null, false]) {
+      const trigger: TriggerInfo = { name: "trg_orders_audit", timing: "AFTER", event: "UPDATE", enabled };
+      listTriggers.mockResolvedValueOnce([trigger]);
+      await loadSidebarObjectGroup(storedTriggerGroup, store);
+
+      expect(storedTriggerGroup.children).toHaveLength(1);
+      expect(storedTriggerGroup.children![0]).toMatchObject({
+        id: `${tableTriggerGroup.id}:trg_orders_audit`,
+        label: "trg_orders_audit (AFTER UPDATE)",
+        objectName: trigger.name,
+        type: "trigger",
+        tableName: "orders",
+        meta: trigger,
+      });
+      expect((storedTriggerGroup.children![0].meta as TriggerInfo).enabled).toBe(enabled);
+      expect(storedTriggerGroup.children![0].valid).toBeUndefined();
+    }
+
+    expect(listTriggers).toHaveBeenCalledTimes(5);
+    expect(listTriggers).toHaveBeenLastCalledWith(connection.id, "app", "dbo", "orders", undefined);
+    expect(listObjects).not.toHaveBeenCalled();
+  });
+
   it("propagates rejected schema-level metadata while clearing the loading state", async () => {
     const listObjects = vi.fn<() => Promise<ObjectInfo[]>>().mockRejectedValue(new Error("metadata access denied"));
     const listTriggers = vi.fn<() => Promise<never[]>>().mockResolvedValue([]);
@@ -143,5 +213,24 @@ describe("sidebar object-group routing", () => {
     expect(listObjects).toHaveBeenCalledWith(connection.id, "app", "app", ["TRIGGER"], undefined, 11, 0);
     expect(listTriggers).not.toHaveBeenCalled();
     expect(storedTriggerGroup).toMatchObject({ isExpanded: false, isLoading: false, children: [] });
+  });
+
+  it("keeps table-level non-trigger structure groups off the object-group loader", async () => {
+    const listObjects = vi.fn<() => Promise<ObjectInfo[]>>().mockResolvedValue([]);
+    const listTriggers = vi.fn<() => Promise<never[]>>().mockResolvedValue([]);
+    const { connection, store } = await createStore({ listObjects, listTriggers });
+    const tableColumnsGroup: TreeNode = {
+      ...objectGroup("group-columns", `${connection.id}:app:app:orders:__columns`),
+      tableName: "orders",
+    };
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: [tableColumnsGroup] }];
+    const storedColumnsGroup = store.treeNodes[0].children![0];
+
+    const handled = await loadSidebarObjectGroup(storedColumnsGroup, store);
+
+    expect(handled).toBe(false);
+    expect(listObjects).not.toHaveBeenCalled();
+    expect(listTriggers).not.toHaveBeenCalled();
+    expect(storedColumnsGroup).toMatchObject({ isExpanded: false, children: [] });
   });
 });

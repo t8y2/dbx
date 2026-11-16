@@ -28,3 +28,18 @@ export function redisDatabaseLabel(database: string | number, aliases?: RedisDat
   const name = alias ? `db${key} · ${alias}` : `db${key}`;
   return totalKeyCount == null ? name : `${name} (${totalKeyCount})`;
 }
+
+// Default kept large enough that connections with a typical (or even a few
+// hundred) configured databases render exactly as before #1236 — only a
+// connection with an unusually large `databases` count hits the cap and gets
+// a "load more" node instead of a wall of sidebar rows.
+export const REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT = 1000;
+export const REDIS_DATABASE_DISPLAY_LIMIT_MIN = 10;
+export const REDIS_DATABASE_DISPLAY_LIMIT_MAX = 100_000;
+export const REDIS_DATABASE_DISPLAY_LIMIT_OPTIONS = [50, 100, 200, 500, 1000, 2000, 5000] as const;
+
+export function limitRedisDatabaseList<T>(items: T[], limit: number | undefined): { visible: T[]; hasMore: boolean } {
+  const effectiveLimit = typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT;
+  if (items.length <= effectiveLimit) return { visible: items, hasMore: false };
+  return { visible: items.slice(0, effectiveLimit), hasMore: true };
+}

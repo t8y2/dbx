@@ -67,7 +67,7 @@ function installBackend(initialConnections: ConnectionConfig[], initialLayout: S
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
-    if (url === "/api/connection/list") return json(state.connections);
+    if (url.split("?")[0] === "/api/connection/list") return json(state.connections);
     if (url === "/api/layout/sidebar") {
       if (init?.method === "POST") {
         state.layout = JSON.parse(String(init.body ?? "null"));
@@ -76,7 +76,8 @@ function installBackend(initialConnections: ConnectionConfig[], initialLayout: S
       return json(state.layout);
     }
     if (url === "/api/connection/save") {
-      state.connections = JSON.parse(String(init?.body ?? "[]"));
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      state.connections = Array.isArray(body) ? body : body.configs;
       return json(null);
     }
     if (url === "/api/tunnel-profiles/list") return json(state.profiles);
@@ -464,6 +465,53 @@ test("encrypted export fails closed when Web Crypto is unavailable", async () =>
     Object.defineProperty(globalThis, "crypto", { configurable: true, value: originalCrypto });
     storage.restore();
     capture.restore();
+    backend.restore();
+  }
+});
+
+test("RDM imports preserve credentials and selected groups without changing existing connections", async () => {
+  const existing = conn("existing", "Existing", 3306);
+  const backend = installBackend([existing], null);
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    const existingSnapshot = JSON.parse(JSON.stringify(store.connections[0]));
+    const content = JSON.stringify({
+      format: "rdm-import",
+      content: JSON.stringify([
+        {
+          type: "group",
+          name: "Redis",
+          connections: [
+            { host: "cache.example.test", name: "Selected", auth: " password ", username: "acl-user", ssl: true, ssl_ca_cert_path: "/ca.pem", ssh_host: "jump.example.test", ssh_user: "operator", ssh_password: "ssh-password" },
+            { host: "unselected.example.test", name: "Unselected" },
+          ],
+        },
+      ]),
+    });
+    const preview = await store.parseConnectionsImport(content, null);
+    assert.equal(store.connections.length, 1);
+    assert.equal(preview.connections.length, 2);
+    const selected = preview.connections.find((item) => item.name === "Selected")!;
+    const result = await store.applyConnectionsImport(preview, [selected.id]);
+    assert.equal(result.count, 1);
+    if (result.layout) store.applySidebarLayout(result.layout);
+    assert.equal(store.connections.length, 2);
+    assert.deepEqual(JSON.parse(JSON.stringify(store.connections.find((item) => item.id === existing.id))), existingSnapshot);
+    const imported = store.connections.find((item) => item.name === "Selected")!;
+    assert.equal(imported.password, " password ");
+    assert.equal(imported.username, "acl-user");
+    assert.equal(imported.ca_cert_path, "/ca.pem");
+    assert.equal(imported.transport_layers?.[0]?.type, "ssh");
+    assert.equal(backend.state.connections.find((item) => item.id === imported.id)?.password, " password ");
+    assert.ok(!JSON.stringify(result.layout).includes(preview.connections.find((item) => item.name === "Unselected")!.id));
+    assert.ok(outline(store.treeNodes).includes("Redis/Selected"));
+    await assert.rejects(store.parseConnectionsImport(JSON.stringify({ format: "rdm-import", content: "[{}]" }), null), /RedisDesktopManager/);
+    assert.equal(store.connections.length, 2);
+  } finally {
+    storage.restore();
     backend.restore();
   }
 });

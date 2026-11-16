@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport } from "../../apps/desktop/src/lib/sql/semantic/diagnostics.ts";
+import { buildSqlParserErrorDiagnostic, buildSqlSemanticDiagnostics, areSqlSemanticDiagnosticsEqual, isSqlSemanticDiagnosticInputContext, shouldRunSqlSemanticDiagnostics, sqlSemanticDiagnosticRangesForViewport, sqlServerRoutineDefinitionRangesForViewport } from "../../apps/desktop/src/lib/sql/semantic/diagnostics.ts";
 import { sqlReferenceAnalysisDialectFor } from "../../apps/desktop/src/lib/sql/semantic/dialect.ts";
 import type { SqlReferenceAnalysis } from "../../apps/desktop/src/types/database.ts";
 
@@ -49,6 +49,31 @@ test("flags confirmed missing tables", () => {
     ["Unknown table t_19991"],
   );
   assert.equal(diagnostics[0]?.severity, "error");
+});
+
+test("flags a table alias that names no relation in scope", () => {
+  const sql = "SELECT a.id, b.id FROM t_tx_demo a";
+  const aliasStart = sql.indexOf("b.id");
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "t_tx_demo", alias: "a", span: span(sql.indexOf("t_tx_demo") + 1, sql.indexOf("t_tx_demo") + "t_tx_demo".length) }],
+    columns: [{ name: "id", qualifier: "b", span: span(aliasStart + 2, aliasStart + 4) }],
+    unknown_qualifiers: [{ qualifier: "b", span: span(aliasStart + 1, aliasStart + 1) }],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [{ name: "t_tx_demo", type: "table" }],
+    columnsByTable: new Map([["t_tx_demo", [{ name: "id", table: "t_tx_demo" }]]]),
+    sql,
+    databaseType: "mysql",
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Unknown table alias b"],
+  );
+  assert.equal(diagnostics[0]?.severity, "error");
+  // The span covers the alias itself, not the whole `b.id` reference.
+  assert.deepEqual(diagnostics[0]?.span, span(aliasStart + 1, aliasStart + 1));
 });
 
 test("does not flag MySQL DUAL as a missing physical table", () => {
@@ -619,4 +644,74 @@ test("uses executable soft statement ranges for viewport diagnostics", () => {
     ranges.map((range) => range.sql),
     ["SELECT missing_field FROM second"],
   );
+});
+
+const PROCEDURE_SQL = `ALTER PROCEDURE [COMMON].[TEST]
+@BeginTime varchar(100)=null
+AS
+BEGIN
+  SET NOCOUNT ON;
+  DECLARE @temp_nums = 2;
+END`;
+
+test("recovers SQL Server routine batches for routine-only syntax rules", () => {
+  const ranges = sqlServerRoutineDefinitionRangesForViewport(PROCEDURE_SQL, [{ from: 0, to: PROCEDURE_SQL.length }]);
+
+  assert.deepEqual(
+    ranges.map((range) => ({ from: range.from, to: range.to })),
+    [{ from: 0, to: PROCEDURE_SQL.length }],
+  );
+  assert.equal(ranges[0]?.sql, PROCEDURE_SQL);
+  assert.deepEqual(sqlSemanticDiagnosticRangesForViewport(PROCEDURE_SQL, [{ from: 0, to: PROCEDURE_SQL.length }], "sqlserver"), []);
+});
+
+test("keeps SQL Server routine batches separated by GO, but skips leading query batches", () => {
+  const sql = `SELECT 1;
+GO
+CREATE OR ALTER PROCEDURE dbo.refresh_users AS
+BEGIN
+  DECLARE @temp_nums = 2;
+END
+GO
+ALTER FUNCTION [COMMON].[uf_answer]()
+RETURNS int
+AS
+BEGIN
+  RETURN 42;
+END`;
+
+  const ranges = sqlServerRoutineDefinitionRangesForViewport(sql, [{ from: 0, to: sql.length }]);
+
+  assert.deepEqual(
+    ranges.map((range) => range.sql),
+    [
+      "CREATE OR ALTER PROCEDURE dbo.refresh_users AS\nBEGIN\n  DECLARE @temp_nums = 2;\nEND\n",
+      "ALTER FUNCTION [COMMON].[uf_answer]()\nRETURNS int\nAS\nBEGIN\n  RETURN 42;\nEND",
+    ],
+  );
+});
+
+test("only reports SQL Server routine batches that intersect the viewport", () => {
+  const sql = `CREATE PROCEDURE dbo.p_test AS
+BEGIN
+  DECLARE @temp_nums = 2;
+END
+GO
+SELECT missing_field FROM dbo.users;`;
+
+  const visibleFrom = sql.indexOf("SELECT missing_field");
+  const ranges = sqlServerRoutineDefinitionRangesForViewport(sql, [{ from: visibleFrom, to: sql.length }]);
+  assert.deepEqual(ranges, []);
+
+  const procedureFrom = sql.indexOf("CREATE PROCEDURE");
+  const visibleProcedure = sqlServerRoutineDefinitionRangesForViewport(sql, [{ from: procedureFrom, to: procedureFrom + 10 }]);
+  assert.equal(visibleProcedure.length, 1);
+  assert.equal(visibleProcedure[0]?.from, procedureFrom);
+});
+
+test("ignores SQL Server non-routine batches and empty viewports", () => {
+  const sql = "SELECT missing_field FROM dbo.users;\nGO\nUPDATE dbo.users SET name = 'x';";
+
+  assert.deepEqual(sqlServerRoutineDefinitionRangesForViewport(sql, [{ from: 0, to: sql.length }]), []);
+  assert.deepEqual(sqlServerRoutineDefinitionRangesForViewport(PROCEDURE_SQL, []), []);
 });

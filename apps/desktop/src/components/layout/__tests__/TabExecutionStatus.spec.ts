@@ -10,7 +10,7 @@ vi.mock("vue-i18n", () => ({
 
 const mountedApps: ReturnType<typeof createApp>[] = [];
 
-function mountStatus(initial: { mode: "query" | "data"; isExecuting: boolean; isCancelling?: boolean }, withFallback = false) {
+function mountStatus(initial: { mode: "query" | "data"; isExecuting: boolean; isCancelling?: boolean; sourceLoad?: { startedAt: number; error?: string; request: { name: string; objectType: string } } }, withFallback = false) {
   const state = reactive(initial);
   const root = document.createElement("div");
   document.body.appendChild(root);
@@ -81,5 +81,32 @@ describe("TabExecutionStatus", () => {
 
     expect(idle.root.querySelector("[data-tab-execution-status]")).toBeNull();
     expect(data.root.querySelector("[data-tab-execution-status]")).toBeNull();
+  });
+
+  // issue #9035：源码 tab 先出现再加载，加载中的等待必须有反馈。
+  it("shows the loading indicator while an object source tab is still loading", async () => {
+    const { root, state } = mountStatus({ mode: "query", isExecuting: false, sourceLoad: { startedAt: Date.now(), request: { name: "v_orders", objectType: "VIEW" } } }, true);
+    await nextTick();
+
+    const status = root.querySelector<HTMLElement>("[data-tab-execution-status]");
+    expect(status).not.toBeNull();
+    expect(status?.getAttribute("aria-label")).toBe("common.loading");
+    expect(status?.className).toContain("text-blue-600");
+    // 加载态占用图标位，与查询执行中的表现一致
+    expect(root.querySelector("[data-tab-icon]")).toBeNull();
+
+    state.sourceLoad = undefined;
+    await nextTick();
+    expect(root.querySelector("[data-tab-execution-status]")).toBeNull();
+    expect(root.querySelector("[data-tab-icon]")).not.toBeNull();
+  });
+
+  it("stops the loading indicator once the object source load failed", async () => {
+    const { root } = mountStatus({ mode: "query", isExecuting: false, sourceLoad: { startedAt: Date.now(), error: "ORA-00942", request: { name: "v_orders", objectType: "VIEW" } } }, true);
+    await nextTick();
+
+    // 失败态由 tab 内容区的错误 + Retry 表达，tab 栏不应继续转圈
+    expect(root.querySelector("[data-tab-execution-status]")).toBeNull();
+    expect(root.querySelector("[data-tab-icon]")).not.toBeNull();
   });
 });

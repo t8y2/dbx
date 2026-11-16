@@ -5,6 +5,8 @@ description: 安装 DBX JDBC 插件、导入数据库厂商驱动 JAR，并创�
 
 DBX 默认使用 Rust 原生数据库驱动。JDBC 是可选能力：当你需要连接 DBX 暂未内置支持的数据库，或希望使用数据库厂商提供的 JDBC 驱动时，可以安装 JDBC 插件。
 
+<Callout type="info">本页介绍的是 JDBC 插件和厂商 Driver JAR。若你要开发 SSH、SFTP、文件管理器或其他 DBX 扩展，并提交官方插件商店，请阅读[开发和提交 DBX 插件](/cn/docs/plugin-development)。</Callout>
+
 <Callout type="info">JDBC 插件不会打包进 DBX 主应用，也不包含任何数据库厂商的 JDBC 驱动。你需要先安装 DBX JDBC 插件，再导入对应数据库的 JDBC driver JAR。</Callout>
 
 <Callout type="warn">“JDBC 能连接”不等于拥有原生 DBX profile 的全部能力。表树、对象源码、结构编辑、导入、传输和管理视图取决于 JDBC 元数据、识别出的实际数据库类型和驱动能力清单；未知数据库会按通用 JDBC 能力运行。</Callout>

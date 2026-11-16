@@ -43,10 +43,15 @@ describe("singleClickRowAction", () => {
     expect(singleClickRowAction(row(type, "programmable_test"), "xugu")).toBe("open-source");
   });
 
-  it("only Xugu TYPE rows open source", () => {
+  it("routes Oracle-family TYPE to details and TYPE_BODY to read-only source", () => {
     expect(singleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
     expect(doubleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
     expect(singleClickRowAction(row("TYPE_BODY", "app_status"), "xugu")).toBe("open-source");
+    for (const dbType of ["oracle", "oceanbase-oracle", "dameng"] as const) {
+      expect(singleClickRowAction(row("TYPE", "app_status"), dbType), dbType).toBe("type-info");
+      expect(doubleClickRowAction(row("TYPE", "app_status"), dbType), dbType).toBe("type-info");
+      expect(singleClickRowAction(row("TYPE_BODY", "app_status"), dbType), dbType).toBe("open-source");
+    }
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
       // Verified PG-family TYPE rows open the read-only details panel.
       expect(singleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("type-info");
@@ -76,12 +81,31 @@ describe("doubleClickRowAction", () => {
     expect(doubleClickRowAction(row("TABLE", "orders"))).toBe("open-table");
   });
 
-  it("returns open-source for VIEW", () => {
-    expect(doubleClickRowAction(row("VIEW", "v_orders"))).toBe("open-source");
+  it.each(["VIEW", "MATERIALIZED_VIEW"] as const)("returns open-table for %s like the sidebar data nodes", (type) => {
+    expect(doubleClickRowAction(row(type, "v_orders"))).toBe("open-table");
   });
 
-  it("returns open-source for PROCEDURE", () => {
-    expect(doubleClickRowAction(row("PROCEDURE", "sp_run"))).toBe("open-source");
+  it.each(["PROCEDURE", "FUNCTION"] as const)("returns open-source-tab for %s (editable source tab, not the side panel)", (type) => {
+    expect(doubleClickRowAction(row(type, "sp_run"))).toBe("open-source-tab");
+  });
+
+  it("keeps routines on the source tab across database types", () => {
+    for (const dbType of ["mysql", "postgres", "oracle", "xugu"] as const) {
+      expect(doubleClickRowAction(row("PROCEDURE", "sp_run"), dbType), String(dbType)).toBe("open-source-tab");
+      expect(doubleClickRowAction(row("FUNCTION", "fn_run"), dbType), String(dbType)).toBe("open-source-tab");
+    }
+  });
+
+  it("leaves the other source-backed types on the side panel", () => {
+    expect(doubleClickRowAction(row("EVENT", "ev_nightly"))).toBe("open-source");
+    expect(doubleClickRowAction(row("SEQUENCE", "seq_test"))).toBe("open-source");
+    expect(doubleClickRowAction(row("PACKAGE", "pkg_test"))).toBe("open-source");
+    expect(doubleClickRowAction(row("PACKAGE_BODY", "pkg_body_test"))).toBe("open-source");
+    expect(doubleClickRowAction(row("TRIGGER", "trg_test"), "xugu")).toBe("open-source");
+    expect(doubleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
+    expect(doubleClickRowAction(row("TYPE_BODY", "app_status"), "xugu")).toBe("open-source");
+    expect(doubleClickRowAction(row("VIEW", "v_users"))).toBe("open-table");
+    expect(doubleClickRowAction(row("MATERIALIZED_VIEW", "mv_users"))).toBe("open-table");
   });
 
   it("returns none for null/undefined", () => {
@@ -123,10 +147,16 @@ describe("resolveRowClickAction", () => {
       expect(result.isDouble).toBe(false);
     });
 
-    it("double click on VIEW returns open-source", () => {
+    it("double click on VIEW returns open-table", () => {
       const result = resolveRowClickAction(viewRow, 2, "single");
-      expect(result.action).toBe("open-source");
+      expect(result.action).toBe("open-table");
       expect(result.isDouble).toBe(true);
+    });
+
+    it.each(["PROCEDURE", "FUNCTION"] as const)("single click on %s returns open-source, double click returns open-source-tab", (type) => {
+      const routineRow = row(type, "sp_run");
+      expect(resolveRowClickAction(routineRow, 1, "single")).toEqual({ action: "open-source", isDouble: false });
+      expect(resolveRowClickAction(routineRow, 2, "single")).toEqual({ action: "open-source-tab", isDouble: true });
     });
   });
 
@@ -149,10 +179,16 @@ describe("resolveRowClickAction", () => {
       expect(result.isDouble).toBe(true);
     });
 
-    it("double click on VIEW returns open-source", () => {
+    it("double click on VIEW returns open-table", () => {
       const result = resolveRowClickAction(viewRow, 2, "double");
-      expect(result.action).toBe("open-source");
+      expect(result.action).toBe("open-table");
       expect(result.isDouble).toBe(true);
+    });
+
+    it.each(["PROCEDURE", "FUNCTION"] as const)("single click on %s returns open-source, double click returns open-source-tab", (type) => {
+      const routineRow = row(type, "sp_run");
+      expect(resolveRowClickAction(routineRow, 1, "double")).toEqual({ action: "open-source", isDouble: false });
+      expect(resolveRowClickAction(routineRow, 2, "double")).toEqual({ action: "open-source-tab", isDouble: true });
     });
   });
 });
@@ -165,8 +201,19 @@ describe("shouldDeferSingleClick", () => {
     expect(shouldDeferSingleClick(tableRow, "table-info")).toBe(true);
   });
 
-  it("does not defer VIEW open-source (same single/double action)", () => {
-    expect(shouldDeferSingleClick(viewRow, "open-source")).toBe(false);
+  it("defers VIEW open-source (distinct single/double actions)", () => {
+    expect(shouldDeferSingleClick(viewRow, "open-source")).toBe(true);
+  });
+
+  it.each(["PROCEDURE", "FUNCTION"] as const)("defers %s open-source so a second click can cancel the side panel", (type) => {
+    // single → open-source, double → open-source-tab: the 250ms deferral is what
+    // keeps a fast double click from also opening the side panel (issue #10202).
+    expect(shouldDeferSingleClick(row(type, "sp_run"), "open-source")).toBe(true);
+    expect(shouldDeferSingleClick(row(type, "sp_run"), "open-source-tab")).toBe(false);
+  });
+
+  it("does not defer SEQUENCE open-source (same single/double action)", () => {
+    expect(shouldDeferSingleClick(row("SEQUENCE", "seq_run"), "open-source")).toBe(false);
   });
 
   it("does not defer none action", () => {

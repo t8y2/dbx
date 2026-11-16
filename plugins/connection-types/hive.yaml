@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 510
 dbType: hive
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Hive
 label: Apache Hive
 runtimeMode: agent

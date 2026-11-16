@@ -222,7 +222,7 @@ describe("DBeaver folder import", () => {
     expect(connection?.database).toBeUndefined();
   });
 
-  it("keeps the default database empty for DB2 connections (fallback to JDBC) without database configured", async () => {
+  it("maps DB2 connections to DBX's native db2 type instead of falling back to generic JDBC", async () => {
     const [connection] = await parseDbeaverConnections(
       payload({
         connections: {
@@ -243,11 +243,54 @@ describe("DBeaver folder import", () => {
 
     expect(connection).toMatchObject({
       name: "DB2",
-      db_type: "jdbc",
+      db_type: "db2",
+      driver_profile: "db2",
       host: "192.168.10.60",
       port: 50000,
     });
     expect(connection?.database).toBeUndefined();
+    expect(connection?.jdbc_driver_class).toBeUndefined();
+  });
+
+  it("does not pass DBeaver's short driver id through as a JDBC driver class for unmapped drivers", async () => {
+    const [connection] = await parseDbeaverConnections(
+      payload({
+        connections: {
+          vertica: {
+            id: "vertica",
+            name: "Vertica",
+            provider: "vertica",
+            driver: "vertica",
+            configuration: {
+              url: "jdbc:vertica://192.168.10.61:5433/vdb",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(connection).toMatchObject({ name: "Vertica", db_type: "jdbc" });
+    expect(connection?.jdbc_driver_class).toBeUndefined();
+  });
+
+  it("still trusts a package-qualified DBeaver driver id as the JDBC driver class", async () => {
+    const [connection] = await parseDbeaverConnections(
+      payload({
+        connections: {
+          opaque: {
+            id: "opaque",
+            name: "Custom Driver",
+            provider: "generic",
+            driver: "com.example.Driver",
+            configuration: {
+              url: "jdbc:example:db.example.com:1234",
+            },
+          },
+        },
+      }),
+    );
+
+    expect(connection).toMatchObject({ db_type: "jdbc", jdbc_driver_class: "com.example.Driver" });
   });
 
   it("does not treat an opaque JDBC host and port as the database", async () => {

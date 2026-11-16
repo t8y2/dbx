@@ -1,22 +1,34 @@
 import { createPinia, setActivePinia } from "pinia";
+import { effectScope, nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { clearDataGridStructuredFilterStates, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridSortBuilderMemoryCache, useDataGridSortBuilder } from "@/composables/useDataGridSortBuilder";
+import { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
+import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
+import type { TableColumnsLoadResult } from "@/lib/metadata/tableMetadataCache";
+import { analyzeEditableQueryEditability } from "@/lib/sql/sqlAnalysis";
 
 const mocks = vi.hoisted(() => ({
+  analyzeEditableQueryEditability: vi.fn(),
   buildTableSelectSql: vi.fn(),
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
   executeMulti: vi.fn(),
   getConnectionConfig: vi.fn(),
   saveOpenTabsState: vi.fn(),
+  loadTableColumns: vi.fn(),
   loadTableMetadata: vi.fn(),
+  prepareQueryPaginationExecutionPlan: vi.fn(),
   metadataGeneration: 0,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
+  analyzeEditableQueryEditability: mocks.analyzeEditableQueryEditability,
   buildTableSelectSql: mocks.buildTableSelectSql,
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
   executeMulti: mocks.executeMulti,
+  prepareQueryPaginationExecutionPlan: mocks.prepareQueryPaginationExecutionPlan,
   saveOpenTabsState: mocks.saveOpenTabsState,
 }));
 
@@ -33,6 +45,7 @@ vi.mock("@/lib/metadata/tableMetadataCache", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/metadata/tableMetadataCache")>();
   return {
     ...actual,
+    loadTableColumns: mocks.loadTableColumns,
     loadTableMetadata: mocks.loadTableMetadata,
   };
 });
@@ -57,8 +70,13 @@ describe("queryStore table data refresh", () => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
     installLocalStorage();
+    clearDataGridStructuredFilterStates();
+    clearDataGridSortBuilderMemoryCache();
+    resetRowIdLocatorStateForTests();
     setActivePinia(createPinia());
     mocks.metadataGeneration = 0;
+    mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ useAgentResultSession: false });
     mocks.getConnectionConfig.mockReturnValue({
       id: "pg-1",
       name: "Postgres",
@@ -75,6 +93,199 @@ describe("queryStore table data refresh", () => {
         execution_time_ms: 1,
       },
     ]);
+  });
+
+  it.each([
+    { offset: 0, returnedRows: 55, hasMore: false },
+    { offset: 0, returnedRows: 56, hasMore: true },
+    { offset: 55, returnedRows: 55, hasMore: false },
+  ])("probes MySQL data pages without publishing the extra row: %j", async ({ offset, returnedRows, hasMore }) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("mysql-1", "app", "apis", "data");
+    const baseSql = "SELECT id FROM apis WHERE id > 0 ORDER BY id";
+    const sql = `${baseSql} LIMIT 55${offset ? ` OFFSET ${offset}` : ""};`;
+    const probeSql = `${baseSql} LIMIT 56 OFFSET ${offset};`;
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ pageProbeSql: probeSql, useAgentResultSession: false });
+    mocks.executeMulti.mockResolvedValue([
+      {
+        columns: ["id"],
+        rows: Array.from({ length: returnedRows }, (_, index) => [offset + index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        has_more: false,
+      },
+    ]);
+
+    await store.executeTabSql(id, sql, { pagination: { limit: 55, offset } });
+
+    expect(mocks.prepareQueryPaginationExecutionPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sql: baseSql,
+        queryBaseSql: sql,
+        pagination: { limit: 55, offset },
+        useAgentCursor: false,
+      }),
+    );
+    expect(mocks.executeMulti.mock.calls[0]?.[2]).toBe(probeSql);
+    const tab = store.tabs.find((candidate) => candidate.id === id)!;
+    expect(tab.result?.rows).toHaveLength(55);
+    expect(tab.result?.rows[0]).toEqual([offset + 1]);
+    expect(tab.result?.page_has_more).toBe(hasMore);
+    expect(tab.resultPageLimit).toBe(55);
+    expect(tab.resultPageOffset).toBe(offset);
+    expect(tab.resultTotalRowCount).toBe(hasMore ? undefined : offset + 55);
+  });
+
+  it.each(["query", "data"] as const)("keeps MySQL %s pages bounded when no lookahead is offered (#13211)", async (mode) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("mysql-1", "app", "dates", mode);
+    const baseSql = "SELECT * FROM table1 a, table2 b WHERE a.id = b.id AND REPLACE(SUBSTR(b.ymd, 1, 7), '-', '') < a.ym";
+    let returnedRows = 1000;
+    let offset = 0;
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async () => ({
+      sqlToExecute: `${baseSql} LIMIT 1000${offset ? ` OFFSET ${offset}` : ""};`,
+      pageSql: `${baseSql} LIMIT 1000${offset ? ` OFFSET ${offset}` : ""};`,
+      pageLimit: 1000,
+      pageOffset: offset,
+      useAgentResultSession: false,
+    }));
+    mocks.executeMulti.mockImplementation(async () => [
+      {
+        columns: ["id"],
+        rows: Array.from({ length: returnedRows }, (_, index) => [offset + index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 1,
+        has_more: false,
+      },
+    ]);
+
+    await store.executeTabSql(id, mode === "data" ? `${baseSql} LIMIT 1000;` : baseSql, { pagination: { limit: 1000, offset } });
+
+    expect(mocks.executeMulti).toHaveBeenLastCalledWith("mysql-1", "app", `${baseSql} LIMIT 1000;`, undefined, expect.any(String), expect.objectContaining({ maxRows: 1000 }));
+    const tab = store.tabs.find((candidate) => candidate.id === id)!;
+    expect(tab.result?.rows).toHaveLength(1000);
+    expect(tab.result?.page_has_more).toBeUndefined();
+    expect(tab.resultTotalRowCount).toBeUndefined();
+    expect(canGoNextDataGridPage({ rowCount: tab.result!.rows.length, pageSize: 1000, pageHasMore: tab.result?.page_has_more, totalRowCount: tab.resultTotalRowCount })).toBe(true);
+
+    offset = 1000;
+    returnedRows = 0;
+    await store.executeTabSql(id, mode === "data" ? `${baseSql} LIMIT 1000 OFFSET 1000;` : baseSql, { pagination: { limit: 1000, offset } });
+
+    expect(mocks.executeMulti.mock.calls[1]?.[2]).toBe(`${baseSql} LIMIT 1000 OFFSET 1000;`);
+    expect(tab.result?.rows).toHaveLength(0);
+    expect(canGoNextDataGridPage({ rowCount: tab.result!.rows.length, pageSize: 1000, pageOffset: offset, pageHasMore: tab.result?.page_has_more, totalRowCount: tab.resultTotalRowCount })).toBe(false);
+  });
+
+  it("loads a duplicated data tab with its filter, database sort and page without sharing results", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(id, {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const original = store.tabs.find((tab) => tab.id === id)!;
+    original.whereInput = "status = 'ACTIVE'";
+    original.orderByInput = "id DESC";
+    original.resultSortColumn = "id";
+    original.resultSortDirection = "desc";
+    original.resultSortMode = "database";
+    original.resultPageLimit = 25;
+    original.resultPageOffset = 50;
+    original.result = { columns: ["id"], rows: [[99]], affected_rows: 0, execution_time_ms: 1 };
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[42]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    store.duplicateTab(id);
+    const copy = store.tabs[1];
+    await vi.waitFor(() => expect(copy.result?.rows).toEqual([[42]]));
+
+    expect(copy.id).not.toBe(id);
+    expect(copy.mode).toBe("data");
+    expect(copy.connectionId).toBe("pg-1");
+    expect(copy.database).toBe("app");
+    expect(copy.schema).toBe("public");
+    expect(store.activeTabId).toBe(copy.id);
+    expect(store.groups[0].tabIds).toEqual([id, copy.id]);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        whereInput: "status = 'ACTIVE'",
+        orderBy: "id DESC",
+        limit: 25,
+        offset: 50,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(original.result?.rows).toEqual([[99]]);
+    expect(copy.result).not.toBe(original.result);
+  });
+
+  it.each(["filter", "sort"] as const)("duplicates the %s builder state separately from manual SQL inputs (#11609)", async (kind) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(id, {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const original = store.tabs.find((tab) => tab.id === id)!;
+    original.whereInput = "(status = 'ACTIVE') AND (id > 10) AND (status <> 'DELETED')";
+    original.orderByInput = "status ASC";
+    original.structuredOrderByInput = "id DESC";
+    const filterState = {
+      scopeKey: "filter-scope",
+      manualWhereInput: "status = 'ACTIVE'",
+      appliedWhereInput: "id > 10",
+      rules: [{ id: "filter-1", columnName: "id", mode: "greater-than" as const, rawValue: "10", rawEndValue: "", conjunction: "AND" as const }],
+      serverColumnFilters: { 1: { condition: "status <> 'DELETED'", keys: ["active"], labels: ["ACTIVE"] } },
+    };
+    saveDataGridStructuredFilterState(id, filterState);
+    const scope = effectScope();
+    try {
+      const source = scope.run(() => useDataGridSortBuilder({ columns: ["id", "status"], cacheKey: id, scopeKey: "sort-scope" }))!;
+      source.setOpen(true);
+      source.updateRule(source.rules.value[0].id, { columnName: "id", direction: "desc" });
+      source.addRule();
+      source.updateRule(source.rules.value[1].id, { columnName: "status", direction: "asc", disabled: true });
+      source.markApplied("id DESC");
+      await nextTick();
+      store.duplicateTab(id);
+      const copy = store.tabs[1];
+      await vi.waitFor(() => expect(copy.result).toBeDefined());
+      expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ whereInput: original.whereInput, orderBy: "status ASC, id DESC" }));
+      if (kind === "filter") {
+        const copied = loadDataGridStructuredFilterState(copy.id, "filter-scope");
+        expect(copied).toEqual(filterState);
+        copied!.rules[0].rawValue = "100";
+        copied!.serverColumnFilters[1].labels.push("CHANGED");
+        saveDataGridStructuredFilterState(copy.id, copied!);
+        expect(loadDataGridStructuredFilterState(id, "filter-scope")).toEqual(filterState);
+      } else {
+        const target = scope.run(() => useDataGridSortBuilder({ columns: ["id", "status"], cacheKey: copy.id, scopeKey: "sort-scope" }))!;
+        expect(target.rules.value).toEqual(source.rules.value);
+        expect(target.appliedOrderByInput.value).toBe("id DESC");
+        target.updateRule(target.rules.value[0].id, { direction: "asc" });
+        await nextTick();
+        expect(source.rules.value[0].direction).toBe("desc");
+      }
+    } finally {
+      scope.stop();
+    }
   });
 
   it("refreshes only matching data tabs after a table mutation", async () => {
@@ -131,6 +342,7 @@ describe("queryStore table data refresh", () => {
       largeValuePreviewSize: 8192,
       includeRowId: false,
       whereInput: "status = 'ACTIVE'",
+      injectDefaultTimeSeriesWhere: true,
       orderBy: "created_at DESC",
       limit: 25,
       offset: 50,
@@ -138,6 +350,87 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(store.tabs.find((tab) => tab.id === publicTabId)?.result?.rows).toEqual([]);
     expect(store.tabs.find((tab) => tab.id === archiveTabId)?.result).toBeUndefined();
+  });
+
+  it("does not build batch INSERT metadata while data-tab metadata is pending", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const result = {
+      columns: ["id"],
+      rows: [[1]],
+      sourceStatement: "SELECT * FROM public.users",
+    };
+    tab.tableMeta = {
+      database: "app",
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [],
+      primaryKeys: [],
+    };
+    tab.tableMetaPending = true;
+    tab.result = result;
+    tab.results = [result];
+
+    await expect(store.resolveResultMetadataForBatch(tabId, tab.result!)).resolves.toBeUndefined();
+  });
+
+  it("maps active aliased query results to their source columns", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query", "query");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const result = {
+      columns: ["id"],
+      rows: [["root"]],
+      sourceStatement: "SELECT name AS id FROM users",
+    };
+    tab.tableMeta = {
+      database: "app",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "name", data_type: "text", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    };
+    tab.result = result;
+    tab.results = [result];
+
+    const metadata = await store.resolveResultMetadataForBatch(tabId, tab.result!);
+
+    expect(metadata?.queryAnalysis?.selectStar).toBe(false);
+    expect(metadata?.querySourceColumns).toEqual(["name"]);
+  });
+
+  it("waits for an active query result's table metadata before batch INSERT mapping", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query");
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    const sourceStatement = "SELECT name AS label FROM users";
+    tab.results = [{ columns: ["label"], rows: [["Ada"]], sourceStatement }];
+    const columns = [{ name: "name", data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null }];
+    const tableMetadata = { columns, tableName: "users", tableType: "TABLE", cachedAt: Date.now() };
+    let resolveColumns!: (metadata: TableColumnsLoadResult) => void;
+    mocks.loadTableColumns.mockReturnValueOnce(new Promise<TableColumnsLoadResult>((resolve) => (resolveColumns = resolve)));
+    mocks.loadTableMetadata.mockResolvedValueOnce({ metadata: { ...tableMetadata, indexes: [], primaryKeys: [] }, cacheStatus: "miss", ageMs: 0 });
+    mocks.analyzeEditableQueryEditability.mockResolvedValueOnce(analyzeEditableQueryEditability(sourceStatement));
+
+    store.setActiveResultIndex(tabId, 0);
+    await vi.waitFor(() => expect(mocks.loadTableColumns).toHaveBeenCalled());
+    expect(tab.tableMeta).toBeUndefined();
+    const batchMetadata = store.resolveResultMetadataForBatch(tabId, tab.result!);
+    resolveColumns({ ...tableMetadata, cacheStatus: "miss", ageMs: 0 });
+
+    await expect(batchMetadata).resolves.toMatchObject({
+      tableMeta: { database: "app", tableName: "users", primaryKeys: [] },
+      querySourceColumns: ["name"],
+    });
   });
 
   it("uses JDBC ResultSet offset pagination for Caché data tabs", async () => {
@@ -178,6 +471,348 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledWith("cache-1", "USER", 'SELECT * FROM "SS"."SS_User" ORDER BY "ID" ASC', undefined, expect.any(String), expect.objectContaining({ maxRows: 100, fetchSize: 100, rowOffset: 100 }));
   });
 
+  it("uses JDBC ResultSet offset pagination for dialects that cannot paginate in SQL", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "sybase-1",
+      name: "Sybase ASE 16",
+      db_type: "jdbc",
+      database: "app",
+      connection_string: "jdbc:sybase:Tds:db.example.com:5000/app",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM dbo.users ORDER BY id ASC");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sybase-1", "app", "users", "data", "dbo");
+    store.setTableMeta(tabId, {
+      schema: "dbo",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.orderByInput = "id ASC";
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 100;
+
+    await store.refreshDataTab(tabId);
+
+    // Generic JDBC emits a bare SELECT, so the agent has to skip the offset;
+    // otherwise page 2 re-renders page 1 (#9015).
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "jdbc",
+        limit: 100,
+        offset: 100,
+        useDriverRowOffset: true,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledWith("sybase-1", "app", "SELECT * FROM dbo.users ORDER BY id ASC", undefined, expect.any(String), expect.objectContaining({ maxRows: 100, fetchSize: 100, rowOffset: 100 }));
+  });
+
+  it("keeps YashanDB JDBC tabs on server-side pagination", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "yasdb-1",
+      name: "YashanDB",
+      db_type: "jdbc",
+      database: "app",
+      connection_string: "jdbc:yasdb://localhost:1688/app",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM app.users");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("yasdb-1", "app", "users", "data");
+    store.setTableMeta(tabId, {
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 100;
+
+    await store.refreshDataTab(tabId);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.not.objectContaining({ useDriverRowOffset: true }));
+    expect(mocks.executeMulti).toHaveBeenCalledWith("yasdb-1", "app", "SELECT * FROM app.users", undefined, expect.any(String), expect.not.objectContaining({ rowOffset: expect.anything() }));
+  });
+
+  it("continues and restarts Cassandra table cursors without duplicating page one", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "cassandra-1",
+      name: "Cassandra",
+      db_type: "cassandra",
+      database: "app",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-1", has_more: true }])
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[3], [4]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-1", has_more: true }])
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-2", has_more: true }])
+      .mockResolvedValueOnce([{ columns: ["id"], rows: [[3], [4]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-2", has_more: true }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const sql = 'SELECT * FROM "paged_rows";';
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 0 } });
+    let tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[1], [2]]);
+    expect(tab.resultSessionId).toBe("cursor-1");
+    expect(tab.resultClientSessionId).toBe(tabId);
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { limit: 2, offset: 2, sessionId: "cursor-1", clientSessionId: tab.resultClientSessionId },
+    });
+    tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[3], [4]]);
+    expect(mocks.closeQuerySession).not.toHaveBeenCalled();
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 0 } });
+    tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[1], [2]]);
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "cursor-1", tabId);
+
+    await store.executeTabSql(tabId, sql, {
+      pagination: { limit: 2, offset: 2, sessionId: "cursor-2", clientSessionId: tab.resultClientSessionId },
+    });
+    expect(store.tabs.find((candidate) => candidate.id === tabId)?.result?.rows).toEqual([[3], [4]]);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5])).toEqual([
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: undefined, clientSessionId: tabId }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: "cursor-1", clientSessionId: tabId }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: undefined, clientSessionId: tabId }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 2, pageSize: 2, resultSessionId: "cursor-2", clientSessionId: tabId }),
+    ]);
+  });
+
+  it("replays Cassandra table cursors to direct, last, and exact-boundary pages", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    const page = (rows: number[], sessionId?: string) => ({
+      columns: ["id"],
+      rows: rows.map((value) => [value]),
+      affected_rows: 0,
+      execution_time_ms: rows.length,
+      session_id: sessionId,
+      has_more: !!sessionId,
+      query_timings_ms: { agent_total: rows.length },
+    });
+    mocks.executeMulti
+      .mockResolvedValueOnce([page([1, 2], "cursor-last")])
+      .mockResolvedValueOnce([page([3, 4], "cursor-last")])
+      .mockResolvedValueOnce([page([5])]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const sql = 'SELECT * FROM "paged_rows";';
+
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 4 } });
+
+    let tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[5]]);
+    expect(tab.result?.execution_time_ms).toBe(5);
+    expect(tab.result?.timing_page_count).toBe(3);
+    expect(tab.resultPageOffset).toBe(4);
+    expect(tab.resultTotalRowCount).toBe(5);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.resultSessionId)).toEqual([undefined, "cursor-last", "cursor-last"]);
+
+    mocks.executeMulti.mockReset();
+    mocks.executeMulti.mockResolvedValueOnce([page([1, 2], "cursor-boundary")]).mockResolvedValueOnce([page([3, 4])]);
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 4 } });
+
+    tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([]);
+    expect(tab.result?.has_more).toBe(false);
+    expect(tab.resultPageOffset).toBe(4);
+    expect(tab.resultTotalRowCount).toBeUndefined();
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["before offset", "at offset"])("advances through empty Cassandra cursor pages %s", async (emptyPagePosition) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    const page = (rows: number[]) => ({ columns: ["id"], rows: rows.map((id) => [id]), affected_rows: 0, execution_time_ms: 1, session_id: "cursor-empty", has_more: true });
+    const pages = emptyPagePosition === "before offset" ? [[], [1, 2], [3, 4]] : [[1, 2], [], [3, 4]];
+    for (const rows of pages) mocks.executeMulti.mockResolvedValueOnce([page(rows)]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, 'SELECT * FROM "paged_rows";', { pagination: { limit: 2, offset: 2 } });
+
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.rows).toEqual([[3], [4]]);
+    expect(tab.result?.timing_page_count).toBe(3);
+    expect(tab.resultPageOffset).toBe(2);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5]?.resultSessionId)).toEqual([undefined, "cursor-empty", "cursor-empty"]);
+    expect(mocks.closeQuerySession).not.toHaveBeenCalled();
+  });
+
+  it("closes a Cassandra replay cursor when a later page fails", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-lost", has_more: true }]).mockRejectedValueOnce(new Error("query session not found: cursor-lost"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+
+    await store.executeTabSql(tabId, 'SELECT * FROM "paged_rows";', { pagination: { limit: 2, offset: 2 } });
+
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    expect(tab.result?.execution_error).toBe(true);
+    expect(tab.resultSessionId).toBeUndefined();
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "cursor-lost", tabId, undefined);
+  });
+
+  it.each(["cancellation", "supersession"] as const)("does not dispatch another Cassandra replay page after %s", async (interruption) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    mocks.executeMulti.mockImplementationOnce(async () => {
+      const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+      if (interruption === "cancellation") {
+        tab.isCancelling = true;
+        tab.cancelRequestCount = (tab.cancelRequestCount ?? 0) + 1;
+      } else {
+        tab.executionId = "replacement-execution";
+      }
+      return [{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, session_id: "cursor-cancel", has_more: true }];
+    });
+
+    await store.executeTabSql(tabId, 'SELECT * FROM "paged_rows";', { pagination: { limit: 2, offset: 4 } });
+
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "cursor-cancel", tabId, undefined);
+  });
+
+  it("exports Cassandra table data by advancing one Agent cursor", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 2, session_id: "export-cursor", has_more: true }]).mockResolvedValueOnce([{ columns: ["id"], rows: [[3]], affected_rows: 0, execution_time_ms: 1, has_more: false }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 2 };
+
+    const exported = await store.fetchTabResultForExport(tabId);
+
+    expect(exported?.rows).toEqual([[1], [2], [3]]);
+    expect(exported?.execution_time_ms).toBe(3);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(2);
+    expect(mocks.executeMulti.mock.calls.map((call) => call[5])).toEqual([
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 10_000, pageSize: 10_000, resultSessionId: undefined, clientSessionId: `${tabId}:export` }),
+      expect.objectContaining({ maxRows: 2_147_483_647, fetchSize: 10_000, pageSize: 10_000, resultSessionId: "export-cursor", clientSessionId: `${tabId}:export` }),
+    ]);
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", `${tabId}:export`);
+  });
+
+  it("stops Cassandra table export when continuation has no session", async () => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1, has_more: true }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 };
+
+    await expect(store.fetchTabResultForExport(tabId)).rejects.toThrow("Result session ended before table export completed");
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", `${tabId}:export`);
+  });
+
+  it.each([{ has_more: undefined }, { has_more: false, truncated: true }, { has_more: true, session_id: " " }])("rejects incomplete Cassandra export continuation %j and cleans its active cursor", async (malformed) => {
+    mocks.getConnectionConfig.mockReturnValue({ id: "cassandra-1", name: "Cassandra", db_type: "cassandra", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT * FROM "paged_rows";');
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, session_id: "active-cursor", has_more: true }]).mockResolvedValueOnce([{ columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1, ...malformed }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("cassandra-1", "app", "paged_rows", "data");
+    store.setTableMeta(tabId, {
+      tableName: "paged_rows",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    await expect(store.fetchTabResultForExport(tabId)).rejects.toThrow(/export/);
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(2);
+    expect(mocks.closeQuerySession).toHaveBeenCalledWith("cassandra-1", "app", "active-cursor", `${tabId}:export`, undefined);
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledWith("cassandra-1", "app", `${tabId}:export`);
+  });
+
+  it("executes Doris external catalog data tabs against the catalog database, not the connection default database", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "doris-1",
+      name: "Doris",
+      db_type: "doris",
+      database: "yunye",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("doris-1", "mydb", "tt2", "data", undefined, undefined, "ice");
+    store.setTableMeta(tabId, {
+      catalog: "ice",
+      tableName: "tt2",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+      primaryKeys: [],
+    });
+
+    await store.refreshDataTab(tabId);
+
+    // The backend switches catalog first and then runs USE <database>, so the
+    // connection's internal default database ("yunye") would fail with 1049.
+    expect(mocks.executeMulti).toHaveBeenCalledWith("doris-1", "mydb", "SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100", undefined, expect.any(String), expect.objectContaining({ catalog: "ice" }));
+  });
+
   it("refreshes one targeted tab while preserving its query context", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -216,6 +851,31 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(store.tabs.find((tab) => tab.id === firstTabId)?.result?.rows).toEqual([]);
     expect(store.tabs.find((tab) => tab.id === secondTabId)?.result).toBeUndefined();
+  });
+
+  it("rebuilds the structured sort from persisted tab state on refresh", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        { name: "created_at", data_type: "timestamp", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["id"],
+    });
+    const tab = store.tabs.find((tab) => tab.id === tabId)!;
+    tab.orderByInput = '"status" ASC';
+    tab.structuredOrderByInput = '"created_at" DESC';
+
+    const refreshed = await store.refreshDataTab(tabId);
+
+    expect(refreshed).toBe(true);
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"status" ASC, "created_at" DESC' }));
   });
 
   it("keeps the configured MySQL page size when results contain large-value previews", async () => {
@@ -270,6 +930,59 @@ describe("queryStore table data refresh", () => {
     );
   });
 
+  it("enables bounded DB2 BLOB previews for table refreshes", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "db2-1",
+      name: "DB2",
+      db_type: "db2",
+      database: "MAXIMO",
+      query_timeout_secs: 60,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT "MAFAPPDATAID", SUBSTR("APP", 1, 8193) AS "APP" FROM "MAXIMO"."MAFAPPDATA";');
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("db2-1", "MAXIMO", "MAFAPPDATA", "data", "MAXIMO");
+    store.setTableMeta(tabId, {
+      database: "MAXIMO",
+      schema: "MAXIMO",
+      tableName: "MAFAPPDATA",
+      tableType: "TABLE",
+      columns: [
+        { name: "MAFAPPDATAID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+        { name: "APP", data_type: "BLOB", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      ],
+      primaryKeys: ["MAFAPPDATAID"],
+    });
+    const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.resultPageLimit = 100;
+    tab.resultPageOffset = 0;
+
+    await expect(store.refreshDataTab(tabId)).resolves.toBe(true);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        databaseType: "db2",
+        columnTypes: ["BIGINT", "BLOB"],
+        largeValuePreviewSize: 8 * 1024,
+      }),
+    );
+    expect(mocks.executeMulti).toHaveBeenCalledWith(
+      "db2-1",
+      "MAXIMO",
+      expect.any(String),
+      undefined,
+      expect.any(String),
+      expect.objectContaining({
+        maxRows: 100,
+        fetchSize: 100,
+        maxResultBytes: 32 * 1024 * 1024,
+        resultKeyColumns: ["MAFAPPDATAID"],
+        tableDataPreview: true,
+        timeoutSecs: 60,
+      }),
+    );
+  });
+
   it("keeps a MySQL table refresh unqualified in the selected database context", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "mysql-1",
@@ -314,6 +1027,7 @@ describe("queryStore table data refresh", () => {
     const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
     tab.whereInput = "id > 0";
     tab.orderByInput = '"old_name" ASC';
+    tab.structuredOrderByInput = '"old_name" DESC';
     tab.resultSortColumn = "old_name";
     tab.resultSortColumnIndex = 1;
     tab.resultSortDirection = "asc";
@@ -347,6 +1061,7 @@ describe("queryStore table data refresh", () => {
     expect(tab.resultLocalSortOriginalMongoDocuments).toBeUndefined();
     expect(tab.resultLocalSortOriginalMongoCopyDocuments).toBeUndefined();
     expect(tab.orderByInput).toBeUndefined();
+    expect(tab.structuredOrderByInput).toBeUndefined();
     expect(tab.whereInput).toBe("id > 0");
     expect(tab.resultPageLimit).toBe(25);
     expect(tab.resultPageOffset).toBe(50);
@@ -527,6 +1242,52 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["new execution", "closed tab"] as const)("abandons a pending row-id fallback after the tab is owned by a %s", async (supersedingAction) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "users", "data", "public");
+    store.setTableMeta(tabId, {
+      schema: "public",
+      tableName: "users",
+      tableType: "TABLE",
+      columns: [{ name: "value", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+      primaryKeys: [],
+    });
+    const locatorSql = 'SELECT tableoid::text AS "__DBX_ROWID", * FROM public.users';
+    const fallbackSql = "SELECT * FROM public.users";
+    let releaseFallbackSql!: (sql: string) => void;
+    mocks.buildTableSelectSql.mockResolvedValueOnce(locatorSql).mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseFallbackSql = resolve;
+      }),
+    );
+    mocks.executeMulti.mockRejectedValueOnce(new Error("column tableoid does not exist"));
+
+    const refresh = store.refreshDataTab(tabId);
+    await vi.waitFor(() => expect(mocks.buildTableSelectSql).toHaveBeenCalledTimes(2));
+
+    if (supersedingAction === "new execution") {
+      store.updateSql(tabId, "SELECT 'newer'");
+      mocks.executeMulti.mockResolvedValueOnce([{ columns: ["newer"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+      await store.executeTabSql(tabId, "SELECT 'newer'");
+    } else {
+      store.closeTab(tabId, { force: true });
+    }
+
+    releaseFallbackSql(fallbackSql);
+    await expect(refresh).resolves.toBe(false);
+
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(supersedingAction === "new execution" ? 2 : 1);
+    if (supersedingAction === "new execution") {
+      const tab = store.tabs.find((candidate) => candidate.id === tabId)!;
+      expect(tab.sql).toBe("SELECT 'newer'");
+      expect(tab.result?.columns).toEqual(["newer"]);
+    } else {
+      expect(store.tabs.some((candidate) => candidate.id === tabId)).toBe(false);
+    }
+    expect(rowIdLocatorUnsupported("pg-1")).toBe(false);
+  });
+
   it("returns false for SQL build failures, stores an error result, and clears the busy state", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -578,6 +1339,39 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
     expect(tab.isExecuting).toBe(false);
     expect(tab.executionId).toBeUndefined();
+  });
+
+  it.each([{ pendingDataChangeCount: 1 }, { hasPendingDataEditorDraft: true }])("preserves unsaved edits during an import refresh: %j", async (pending) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT id FROM users LIMIT 100");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }]);
+    const createDataTab = (database: string) => {
+      const id = store.createTab("mysql-1", database, "users", "data", undefined, undefined, undefined, { forceNew: true });
+      store.setTableMeta(id, {
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        primaryKeys: ["id"],
+      });
+      const tab = store.tabs.find((candidate) => candidate.id === id)!;
+      tab.result = { columns: ["id"], rows: [], affected_rows: 0, execution_time_ms: 1 };
+      tab.resultTotalRowCount = 0;
+      return tab;
+    };
+    const edited = createDataTab("app");
+    Object.assign(edited, pending);
+    const clean = createDataTab("app");
+    const unrelated = createDataTab("other");
+
+    await expect(store.refreshDataTabsForTable({ connectionId: "mysql-1", database: "app", schema: "app", schemaCandidates: [undefined, "app"], name: "users" }, { skipPendingChanges: true })).resolves.toBe(1);
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(clean.result?.rows).toEqual([[1], [2]]);
+    expect(clean.resultTotalRowCount).toBe(2);
+    expect(edited.result?.rows).toEqual([]);
+    expect(edited).toMatchObject(pending);
+    expect(unrelated.result?.rows).toEqual([]);
   });
 
   it("keeps bulk SQL build failures observable to callers", async () => {

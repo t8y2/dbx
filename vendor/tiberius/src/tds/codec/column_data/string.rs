@@ -21,12 +21,9 @@ where
         // Codepages other than UTF
         (Some(buf), BigChar) | (Some(buf), BigVarChar) => {
             let collation = collation.as_ref().unwrap();
-            let encoder = collation.encoding()?;
-
-            let s = encoder
-                .decode_without_bom_handling_and_without_replacement(buf.as_ref())
-                .ok_or_else(|| Error::Encoding("invalid sequence".into()))?
-                .to_string();
+            // Lossy: a row holding bytes that are invalid in its declared
+            // collation must stay readable instead of failing the result set.
+            let (s, _) = collation.codec()?.decode_lossy(buf.as_ref());
 
             Ok(Some(s.into()))
         }

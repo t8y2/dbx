@@ -27,11 +27,31 @@ impl ExtensionCatalog {
     }
 }
 
+pub(super) fn object_statistics_query_plan(schema: &str) -> Vec<super::ObjectStatisticsAttempt> {
+    vec![
+        ("catalog", object_statistics_sql(schema), true),
+        // Some V8 servers lack sys_total_relation_size(oid). Page statistics
+        // are an estimate, may be stale, and exclude indexes and TOAST storage.
+        (
+            "estimated-pages",
+            object_statistics_size_sql(
+                schema,
+                "CAST(c.relpages AS BIGINT) * CAST(current_setting('block_size') AS BIGINT)",
+            ),
+            true,
+        ),
+    ]
+}
+
 pub(super) fn object_statistics_sql(schema: &str) -> String {
+    object_statistics_size_sql(schema, "sys_total_relation_size(c.oid)")
+}
+
+fn object_statistics_size_sql(schema: &str, size_expression: &str) -> String {
     format!(
         "SELECT c.relname, n.nspname, \
                 CAST(CASE WHEN c.reltuples < 0 THEN 0 ELSE c.reltuples END AS BIGINT) AS estimated_rows, \
-                CAST(sys_total_relation_size(c.oid) AS BIGINT) AS total_bytes \
+                CAST({size_expression} AS BIGINT) AS total_bytes \
          FROM sys_catalog.sys_class c \
          JOIN sys_catalog.sys_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = {} AND c.relkind IN ('r','m','f','p') \
@@ -138,6 +158,67 @@ pub(super) async fn list_available_extensions(
     Ok(extension_infos_from_query_result(result, false))
 }
 
+/// Lists event triggers over a Kingbase agent connection. KingbaseES ships
+/// `pg_event_trigger`, so the same catalog query works; the sys/pg catalog
+/// fallback mirrors `list_extensions`. `tags`/`source` are not fetched over the
+/// agent path (text[] marshalling + `pg_get_eventtriggerdef` availability vary),
+/// so the details dialog's field-driven DDL rebuild covers them.
+pub(super) async fn list_event_triggers(
+    client: Arc<db::agent_driver::PooledAgentClient>,
+    database: &str,
+    timeout_duration: Option<Duration>,
+) -> Result<Vec<db::EventTriggerInfo>, String> {
+    let result = query_result_with_catalog_fallback(
+        client,
+        database,
+        event_triggers_sql(ExtensionCatalog::Sys),
+        event_triggers_sql(ExtensionCatalog::Pg),
+        10_000,
+        timeout_duration,
+    )
+    .await?;
+    Ok(event_trigger_infos_from_query_result(result))
+}
+
+fn event_triggers_sql(catalog: ExtensionCatalog) -> String {
+    let cat = catalog.catalog_name();
+    format!(
+        "SELECT e.evtname, \
+         e.evtevent, \
+         COALESCE(r.rolname, '') AS owner, \
+         COALESCE(format('%I.%I(%s)', pn.nspname, p.proname, pg_get_function_arguments(p.oid)), '') AS function, \
+         e.evtenabled::text AS enabled, \
+         NULL::text AS tags, \
+         obj_description(e.oid, 'pg_event_trigger') AS comment, \
+         NULL::text AS source \
+         FROM {cat}.pg_event_trigger e \
+         LEFT JOIN {cat}.pg_roles r ON r.oid = e.evtowner \
+         LEFT JOIN {cat}.pg_proc p ON p.oid = e.evtfoid \
+         LEFT JOIN {cat}.pg_namespace pn ON pn.oid = p.pronamespace \
+         ORDER BY e.evtname"
+    )
+}
+
+fn event_trigger_infos_from_query_result(result: db::QueryResult) -> Vec<db::EventTriggerInfo> {
+    result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = query_result_cell_string(&row, 0)?;
+            Some(db::EventTriggerInfo {
+                name,
+                event: query_result_cell_string(&row, 1).unwrap_or_default(),
+                owner: query_result_cell_string(&row, 2).filter(|s| !s.is_empty()),
+                function: query_result_cell_string(&row, 3).filter(|s| !s.is_empty()),
+                enabled: query_result_cell_string(&row, 4).filter(|s| !s.is_empty()),
+                tags: None,
+                comment: query_result_cell_string(&row, 6).filter(|s| !s.is_empty()),
+                source: None,
+            })
+        })
+        .collect()
+}
+
 fn extension_infos_from_query_result(result: db::QueryResult, include_schema: bool) -> Vec<db::ExtensionInfo> {
     result
         .rows
@@ -194,8 +275,10 @@ mod tests {
                 "nspname".to_string(),
             ],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("kdb_utils"),
@@ -205,6 +288,8 @@ mod tests {
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
+            query_timings_ms: None,
             truncated: false,
             session_id: None,
             has_more: false,

@@ -1,6 +1,16 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, findSidebarNodeForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import {
+  activeTabSidebarTarget,
+  expandSidebarLocatePath,
+  findNodePathForTarget,
+  findSidebarConnectionNode,
+  findSidebarNodeForActiveTab,
+  findSidebarNodeForTarget,
+  scrollTopForSidebarNode,
+  shouldScrollActiveSidebarSelection,
+  ActiveTabSidebarRevealTracker,
+} from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
 import { buildTreeNodesFromLayout, expandGroups } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
 import { flattenTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
@@ -615,12 +625,13 @@ test("locate under collapsed connection groups resolves the path, expands the gr
 
   const collapsedTree = buildTreeNodesFromLayout(layout, connections, new Set());
   const nodePath = findNodePathForTarget(target, collapsedTree);
-  assert.deepEqual(nodePath?.map((node) => node.id), ["group-outer", "group-inner", "conn-grouped"]);
+  assert.deepEqual(
+    nodePath?.map((node) => node.id),
+    ["group-outer", "group-inner", "conn-grouped"],
+  );
   assert.equal(findSidebarNodeForTarget(target, flattenTree(collapsedTree)), null);
 
-  const collapsedGroupIds = nodePath!
-    .filter((node) => node.type === "connection-group" && !node.isExpanded)
-    .map((node) => node.id);
+  const collapsedGroupIds = nodePath!.filter((node) => node.type === "connection-group" && !node.isExpanded).map((node) => node.id);
   assert.deepEqual(collapsedGroupIds, ["group-outer", "group-inner"]);
 
   const expandedLayout = expandGroups(layout, collapsedGroupIds);
@@ -635,4 +646,171 @@ test("locate under collapsed connection groups resolves the path, expands the gr
 
   const rebuiltTree = buildTreeNodesFromLayout(expandedLayout, connections, new Set());
   assert.equal(findSidebarNodeForTarget(target, flattenTree(rebuiltTree))?.id, "conn-grouped");
+});
+
+test("auto-select reveals target from collapsed loaded ancestors when tab switches", () => {
+  const tree: TreeNode[] = [
+    {
+      id: "conn-1",
+      label: "MySQL Local",
+      type: "connection",
+      connectionId: "conn-1",
+      isExpanded: false,
+      children: [
+        {
+          id: "conn-1:app",
+          label: "app",
+          type: "database",
+          connectionId: "conn-1",
+          database: "app",
+          isExpanded: false,
+          children: [
+            {
+              id: "conn-1:app:__tables",
+              label: "Tables",
+              type: "group-tables",
+              connectionId: "conn-1",
+              database: "app",
+              isExpanded: false,
+              children: [
+                {
+                  id: "conn-1:app:__tables:users",
+                  label: "users",
+                  type: "table",
+                  connectionId: "conn-1",
+                  database: "app",
+                  isExpanded: false,
+                  children: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const tab: QueryTab = {
+    id: "tab-users",
+    title: "users",
+    mode: "data",
+    connectionId: "conn-1",
+    database: "app",
+    sql: "SELECT * FROM users",
+  };
+
+  // Initially, because ancestors are collapsed, flatNodes doesn't contain the table.
+  assert.equal(findSidebarNodeForActiveTab(tab, flattenTree(tree)), null);
+
+  // Resolving path and expanding loaded ancestors reveals it in the flat tree.
+  const target = activeTabSidebarTarget(tab);
+  assert.ok(target);
+  const nodePath = findNodePathForTarget(target, tree);
+  assert.ok(nodePath);
+  assert.deepEqual(
+    nodePath.map((n) => n.id),
+    ["conn-1", "conn-1:app", "conn-1:app:__tables", "conn-1:app:__tables:users"],
+  );
+
+  expandSidebarLocatePath(nodePath, () => true);
+
+  // Now flattened tree reveals the table node
+  const match = findSidebarNodeForActiveTab(tab, flattenTree(tree));
+  assert.ok(match);
+  assert.equal(match.id, "conn-1:app:__tables:users");
+});
+
+test("sidebar selection synchronization replaces previous selection set and multiSelect flag", () => {
+  // Simulates TreeItem rowSelected computation:
+  // rowSelected = selectedTreeNodeIds.length > 0 ? multiSelected : selected
+  const store = {
+    selectedTreeNodeId: "previous-db-id" as string | null,
+    selectedTreeNodeIds: ["previous-db-id"],
+    treeSelectionAnchorId: "previous-db-id" as string | null,
+    connectionMultiSelectActive: true,
+  };
+
+  const isRowSelected = (nodeId: string) => {
+    const selected = store.selectedTreeNodeId === nodeId;
+    const multiSelected = store.selectedTreeNodeIds.includes(nodeId);
+    return store.selectedTreeNodeIds.length > 0 ? multiSelected : selected;
+  };
+
+  // Before fix: only selectedTreeNodeId was set, selectedTreeNodeIds stayed ["previous-db-id"].
+  // As a result, isRowSelected("table-users") was FALSE, and "previous-db-id" was TRUE!
+  assert.equal(isRowSelected("previous-db-id"), true);
+  assert.equal(isRowSelected("conn-1:app:__tables:users"), false);
+
+  // With the fix: auto-select synchronizes selectedTreeNodeIds, treeSelectionAnchorId, and clears multiSelect.
+  const matchId = "conn-1:app:__tables:users";
+  store.selectedTreeNodeId = matchId;
+  store.selectedTreeNodeIds = [matchId];
+  store.treeSelectionAnchorId = matchId;
+  store.connectionMultiSelectActive = false;
+
+  assert.equal(isRowSelected("previous-db-id"), false);
+  assert.equal(isRowSelected("conn-1:app:__tables:users"), true);
+  assert.equal(store.connectionMultiSelectActive, false);
+});
+
+// Issues #13839/#13849: re-running the auto-select reveal on every flatNodes change
+// re-expanded whatever the user had just collapsed. The reveal must settle after it
+// lands; flatNodes-only changes afterwards must not re-trigger it.
+test("ActiveTabSidebarRevealTracker settles after the reveal lands", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+
+  // Tab switch starts a pending reveal with scroll intent.
+  const first = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: null, autoSelectEnabled: true, previousAutoSelectEnabled: undefined });
+  assert.deepEqual(first, { run: true, scroll: true });
+
+  // Same-tab flatNodes changes before it settles keep retrying with the same scroll intent.
+  const retry = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  assert.deepEqual(retry, { run: true, scroll: true });
+
+  // Once found, flatNodes-only changes (user collapse, unrelated loads) must not re-run it.
+  tracker.onSettled(true, "tab-1");
+  const afterSettled = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  assert.deepEqual(afterSettled, { run: false, scroll: false });
+});
+
+test("ActiveTabSidebarRevealTracker keeps retrying while the target is missing", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: null, autoSelectEnabled: true, previousAutoSelectEnabled: undefined });
+  tracker.onSettled(false, "tab-1"); // async children not loaded yet — still pending
+
+  const retry = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  assert.deepEqual(retry, { run: true, scroll: true });
+});
+
+test("ActiveTabSidebarRevealTracker keeps the repo's scroll semantics for setting toggles", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  // shouldScrollActiveSidebarSelection scrolls when the setting is toggled ON (previous === false).
+  const toggle = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: false });
+  assert.deepEqual(toggle, { run: true, scroll: true });
+  tracker.onSettled(true, "tab-1");
+  const settled = tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: "tab-1", autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  assert.deepEqual(settled, { run: false, scroll: false });
+});
+
+test("an older tab reveal cannot settle the new tab's pending reveal", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  tracker.onWatchTrigger({ activeTabId: "tab-a", previousActiveTabId: null, autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-a", autoSelectEnabled: true, previousAutoSelectEnabled: true });
+  tracker.onSettled(true, "tab-a");
+  assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-b", autoSelectEnabled: true, previousAutoSelectEnabled: true }), { run: true, scroll: true });
+  tracker.onSettled(true, "tab-b");
+  assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-b", previousActiveTabId: "tab-b", autoSelectEnabled: true, previousAutoSelectEnabled: true }), { run: false, scroll: false });
+});
+
+test("the first tree update can reveal an already active tab", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  const input = { activeTabId: "restored", previousActiveTabId: "restored", autoSelectEnabled: true, previousAutoSelectEnabled: true };
+  assert.deepEqual(tracker.onWatchTrigger(input), { run: true, scroll: false });
+  tracker.onSettled(true, "restored");
+  assert.deepEqual(tracker.onWatchTrigger(input), { run: false, scroll: false });
+});
+
+test("a disabled preference does not start a reveal", () => {
+  const tracker = new ActiveTabSidebarRevealTracker();
+  assert.deepEqual(tracker.onWatchTrigger({ activeTabId: "tab-1", previousActiveTabId: null, autoSelectEnabled: false, previousAutoSelectEnabled: false }), { run: false, scroll: false });
 });

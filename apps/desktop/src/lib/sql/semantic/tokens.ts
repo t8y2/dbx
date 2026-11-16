@@ -1,7 +1,10 @@
 import type { SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
+import { isFullwidthParenthesis, isSqlIdentifierPart, isSqlIdentifierStart } from "@/lib/sql/sqlIdentifierCharacters";
 
-const WORD_START = /[A-Za-z_@$#]/;
-const WORD_PART = /[A-Za-z0-9_@$#]/;
+function characterAt(input: string, index: number): string {
+  const codePoint = input.codePointAt(index);
+  return codePoint === undefined ? "" : String.fromCodePoint(codePoint);
+}
 
 function token(kind: SqlSemanticToken["kind"], text: string, start: number, end: number, depth: number, quote?: string, closed?: boolean): SqlSemanticToken {
   return {
@@ -98,17 +101,25 @@ export function matchDollarQuoteTag(input: string, index: number): string | unde
  * decides string-vs-identifier per token position instead of per dialect (see that function's doc
  * comment) -- but the option stays available as a general tokenizer capability.
  */
-export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?: { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean }): SqlSemanticToken[] {
+export function tokenizeSqlSemantic(
+  input: string,
+  dialectId = "mysql",
+  options?: { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean; squareBracketsAsDelimiters?: boolean; fullwidthParenthesesAsDelimiters?: boolean },
+): SqlSemanticToken[] {
   const tokens: SqlSemanticToken[] = [];
   const mysqlDashCommentRequiresWhitespace = !!options?.mysqlDashCommentRequiresWhitespace;
   const mysqlBackslashEscape = !!options?.mysqlBackslashEscape;
   const mysqlDoubleQuoteIsString = !!options?.mysqlDoubleQuoteIsString;
+  // MySQL names can contain （）. Only INSERT hint expressions opt back into IME
+  // tolerance; other dialects retain their existing delimiter behavior.
+  const fullwidthParenthesesAsDelimiters = options?.fullwidthParenthesesAsDelimiters ?? dialectId !== "mysql";
+  const identifierDialectId = fullwidthParenthesesAsDelimiters ? "generic" : dialectId;
   let index = 0;
   let depth = 0;
 
   while (index < input.length) {
     const start = index;
-    const ch = input[index] ?? "";
+    const ch = characterAt(input, index);
     const next = input[index + 1] ?? "";
 
     if (/\s/.test(ch)) {
@@ -123,7 +134,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if (ch === "#" && dialectId === "mysql") {
+    if (ch === "#" && (dialectId === "mysql" || dialectId === "doris")) {
       index += 1;
       while (index < input.length && input[index] !== "\n" && input[index] !== "\r") index += 1;
       tokens.push(token("comment", input.slice(start, index), start, index, depth));
@@ -141,6 +152,16 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       while (index < input.length && !(input[index] === "*" && input[index + 1] === "/")) index += 1;
       index = Math.min(input.length, index + (index < input.length ? 2 : 0));
       tokens.push(token("comment", input.slice(start, index), start, index, depth));
+      continue;
+    }
+
+    const oracleQuoteStart = (ch === "n" || ch === "N") && (next === "q" || next === "Q") ? index + 1 : index;
+    if (dialectId === "oracle" && (input[oracleQuoteStart] === "q" || input[oracleQuoteStart] === "Q") && input[oracleQuoteStart + 1] === "'" && input[oracleQuoteStart + 2]) {
+      const opener = characterAt(input, oracleQuoteStart + 2);
+      const closer = ({ "[": "]", "{": "}", "(": ")", "<": ">" } as Record<string, string>)[opener] ?? opener;
+      const end = input.indexOf(closer + "'", oracleQuoteStart + 2 + opener.length);
+      index = end < 0 ? input.length : end + closer.length + 1;
+      tokens.push(token("string", input.slice(start, index), start, index, depth, oracleQuoteStart === start ? "q'" : "nq'", end >= 0));
       continue;
     }
 
@@ -182,7 +203,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if (ch === "[") {
+    if (ch === "[" && !options?.squareBracketsAsDelimiters) {
       const quoted = readQuoted(input, start, "[", "]");
       index = quoted.end;
       tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, "[", quoted.closed));
@@ -190,8 +211,12 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
     }
 
     if (ch === ":" || ch === "?") {
-      index += 1;
-      while (index < input.length && WORD_PART.test(input[index] ?? "")) index += 1;
+      index += ch.length;
+      while (index < input.length) {
+        const part = characterAt(input, index);
+        if (!isSqlIdentifierPart(part)) break;
+        index += part.length;
+      }
       tokens.push(token("parameter", input.slice(start, index), start, index, depth));
       continue;
     }
@@ -203,22 +228,26 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if (WORD_START.test(ch)) {
-      index += 1;
-      while (index < input.length && WORD_PART.test(input[index] ?? "") && !(dialectId === "postgres" && input[index] === "#")) index += 1;
+    if (isSqlIdentifierStart(ch, identifierDialectId)) {
+      index += ch.length;
+      while (index < input.length) {
+        const part = characterAt(input, index);
+        if (!isSqlIdentifierPart(part, identifierDialectId) || (dialectId === "postgres" && part === "#")) break;
+        index += part.length;
+      }
       tokens.push(token("word", input.slice(start, index), start, index, depth));
       continue;
     }
 
-    if ("(),.;*".includes(ch)) {
-      if (ch === ")") depth = Math.max(0, depth - 1);
-      tokens.push(token("punctuation", ch, start, start + 1, depth));
-      if (ch === "(") depth += 1;
-      index += 1;
+    if ("(),.;*".includes(ch) || (fullwidthParenthesesAsDelimiters && isFullwidthParenthesis(ch)) || (options?.squareBracketsAsDelimiters && (ch === "[" || ch === "]"))) {
+      if (ch === ")" || ch === "\uFF09" || ch === "]") depth = Math.max(0, depth - 1);
+      tokens.push(token("punctuation", ch, start, start + ch.length, depth));
+      if (ch === "(" || ch === "\uFF08" || ch === "[") depth += 1;
+      index += ch.length;
       continue;
     }
 
-    index += 1;
+    index += ch.length;
     tokens.push(token("operator", ch, start, index, depth));
   }
 

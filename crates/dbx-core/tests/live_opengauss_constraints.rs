@@ -67,8 +67,8 @@ async fn opengauss_constraints_report_structural_metadata() {
     let primary = find_constraint(&constraints, "child_pkey");
     assert_eq!(primary.constraint_type, "PRIMARY KEY");
     assert_eq!(primary.columns, vec!["id"]);
-    assert!(primary.enabled);
-    assert!(primary.valid);
+    assert_eq!(primary.enabled, Some(true));
+    assert_eq!(primary.valid, Some(true));
 
     let foreign_key = find_constraint(&constraints, "child_parent_fk");
     assert_eq!(foreign_key.constraint_type, "FOREIGN KEY");
@@ -79,8 +79,8 @@ async fn opengauss_constraints_report_structural_metadata() {
     assert_eq!(foreign_key.on_delete.as_deref(), Some("CASCADE"));
     assert_eq!(foreign_key.on_update.as_deref(), Some("NO ACTION"));
     assert_eq!(foreign_key.match_type.as_deref(), Some("SIMPLE"));
-    assert!(foreign_key.deferrable);
-    assert!(foreign_key.initially_deferred);
+    assert_eq!(foreign_key.deferrable, Some(true));
+    assert_eq!(foreign_key.initially_deferred, Some(true));
 
     let unique = find_constraint(&constraints, "child_code_unique");
     assert_eq!(unique.constraint_type, "UNIQUE");

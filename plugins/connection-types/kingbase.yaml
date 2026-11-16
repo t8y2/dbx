@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 270
 dbType: kingbase
+compareModes: [schema, data]
+transferSupportLevel: family-compatible
+transferObjectFamily: postgres
 rustVariant: Kingbase
 label: 金仓KingbaseES
 dialect: Kingbase

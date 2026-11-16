@@ -1756,6 +1756,8 @@ export default withEnglishFallback({
     hiveTicketCacheFallback: "设置 useSubjectCredsOnly=false",
     hiveJvmOptions: "JVM 参数",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
+    cnosdbTenant: "CnosDB 租户",
+    cnosdbTenantHint: "多租户隔离空间，不是登录用户名。可留空，开源部署默认使用 cnosdb。",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "必须与服务端 DBSERVERNAME 或 DBSERVERALIASES 一致。",
     gbaseServerMismatch: "GBase 8s 连接失败：GBASEDBTSERVER 与服务端 DBSERVERNAME 或 DBSERVERALIASES 不匹配。请在连接配置中填写实际服务名。",

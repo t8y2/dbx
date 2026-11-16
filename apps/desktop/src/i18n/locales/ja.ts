@@ -1475,6 +1475,8 @@ export default withEnglishFallback({
     spannerHostHint: "Google Cloud に接続する場合はホストを空にします。ローカルエミュレータではホストに localhost、ポートに 9010 を指定するだけでよく、ループバックホストでは平文 gRPC が自動的に有効になります。",
     spannerCredentialsHint: "認証には Application Default Credentials を使用します。サービスアカウントキーファイルを使う場合は、URL パラメーターに credentials=/path/key.json を追加してください。",
     spannerFieldsRequired: "Cloud Spanner のプロジェクト、インスタンス、データベースは必須です。",
+    cnosdbTenant: "CnosDB テナント",
+    cnosdbTenantHint: "マルチテナントの分離名前空間であり、ログインユーザー名ではありません。省略可。オープンソース環境では既定値は cnosdb です。",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "サーバー側の DBSERVERNAME または DBSERVERALIASES と一致させる必要があります。",
     gbaseServerMismatch: "GBase 8s の接続に失敗しました。GBASEDBTSERVER がサーバー側の DBSERVERNAME または DBSERVERALIASES と一致していません。接続設定に実際のサーバー名を入力してください。",

@@ -1478,6 +1478,8 @@ export default withEnglishFallback({
     hiveTicketCacheFallback: "Задайте useSubjectCredsOnly=false",
     hiveJvmOptions: "Параметры JVM",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
+    cnosdbTenant: "Тенант CnosDB",
+    cnosdbTenantHint: "Пространство изоляции мультитенантности, а не имя пользователя для входа. Можно оставить пустым; в open-source развёртываниях по умолчанию используется cnosdb.",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "Должно совпадать с DBSERVERNAME или DBSERVERALIASES сервера.",
     gbaseServerMismatch: "Не удалось подключиться к GBase 8s, поскольку GBASEDBTSERVER не совпадает с DBSERVERNAME или DBSERVERALIASES сервера. Укажите в GBASEDBTSERVER фактическое имя сервера.",

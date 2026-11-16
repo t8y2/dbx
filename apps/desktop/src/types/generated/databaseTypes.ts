@@ -84,6 +84,7 @@ export const DATABASE_TYPES = [
   "influxdb",
   "influxdb3",
   "victoriametrics",
+  "cnosdb",
   "jdbc",
   "spark",
   "plugin",

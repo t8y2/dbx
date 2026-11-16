@@ -1460,6 +1460,8 @@ export default withEnglishFallback({
     spannerHostHint: "連線 Google Cloud 時主機留空。使用本機 emulator 時，主機填 localhost、連接埠填 9010 即可，回環位址會自動啟用明文 gRPC。",
     spannerCredentialsHint: "驗證使用 Application Default Credentials。若要使用服務帳號金鑰檔案，請在 URL 參數中加入 credentials=/path/key.json。",
     spannerFieldsRequired: "必須填寫 Cloud Spanner 的 project、instance 和 database。",
+    cnosdbTenant: "CnosDB 租戶",
+    cnosdbTenantHint: "多租戶隔離空間，不是登入使用者名稱。可留空，開源部署預設使用 cnosdb。",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "必須與服務端 DBSERVERNAME 或 DBSERVERALIASES 一致。",
     gbaseServerMismatch: "GBase 8s 連線失敗：GBASEDBTSERVER 與服務端 DBSERVERNAME 或 DBSERVERALIASES 不匹配。請在連線設定中填寫實際服務名。",

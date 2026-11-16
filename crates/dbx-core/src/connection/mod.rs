@@ -435,6 +435,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Sundb
             | DatabaseType::Oscar
             | DatabaseType::Tdengine
+            | DatabaseType::Cnosdb
             | DatabaseType::Xugu
             | DatabaseType::Iotdb
             | DatabaseType::Etcd

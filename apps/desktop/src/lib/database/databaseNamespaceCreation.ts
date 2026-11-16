@@ -93,6 +93,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   sundb: { deferred: "creation semantics not verified for first pass" },
   oscar: { database: "schema" },
   tdengine: { connection: "database" },
+  cnosdb: { connection: "database" },
   xugu: { database: "schema" },
   iotdb: { deferred: "storage group/database semantics need dedicated IoTDB handling" },
   etcd: { deferred: "key-value namespaces are not databases" },

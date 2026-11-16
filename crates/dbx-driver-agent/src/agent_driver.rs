@@ -1501,11 +1501,11 @@ impl AgentCapability {
         Self::NativeJobLegacyV1,
         Self::NativeJobSessionV1,
         Self::ExactMetadataIdentityV1,
+        Self::DatapumpV1,
         Self::MultiSession,
         Self::StructuredErrorV1,
         Self::BlobBindStatementsV1,
         Self::NativeJobLegacyObV1,
-        Self::DatapumpV1,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -6795,7 +6795,8 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::NativeJobSessionV1.as_str(), "native_job_session_v1");
         assert_eq!(AgentCapability::NativeJobLegacyObV1.as_str(), "native_job_legacy_ob_v1");
         assert_eq!(AgentCapability::ExactMetadataIdentityV1.as_str(), "exact_metadata_identity_v1");
-        assert_eq!(AgentCapability::ALL.len(), 34);
+        assert_eq!(AgentCapability::DatapumpV1.as_str(), "datapump_v1");
+        assert_eq!(AgentCapability::ALL.len(), 35);
     }
 
     #[test]

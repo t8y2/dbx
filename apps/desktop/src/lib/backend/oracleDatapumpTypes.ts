@@ -37,6 +37,8 @@ export interface OracleDatapumpProgress {
   state: string;
   jobState?: string | null;
   percent?: number | null;
+  /** KU$_JOB_STATUS1020 阶段码（1 定义 / 2 执行 / 3 收尾）。 */
+  phaseCode?: number | null;
   errorCount?: number | null;
   errorText?: string | null;
   elapsedMs?: number | null;

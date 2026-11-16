@@ -70,7 +70,7 @@ function restore(taskId: string) {
         <Button variant="ghost" size="icon-sm" :aria-label="t('oracleDatapump.restore')" :title="t('oracleDatapump.restore')" @click="restoreIdle">
           <Maximize2 class="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="dpTask.formMinimized = false">
+        <Button variant="ghost" size="icon-sm" :aria-label="t('common.close')" :title="t('common.close')" @click="dpTask.formMinimized.value = false">
           <X class="h-4 w-4" />
         </Button>
       </div>

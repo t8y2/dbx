@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, ArrowLeft, CheckCircle2, DatabaseBackup, FolderCog, Loader2, Maximize2, ChevronDown, ChevronUp, Minimize2, Play, Plus, Server, Square, Trash2, X } from "@lucide/vue";
+import { ArrowLeft, DatabaseBackup, FolderCog, Loader2, ChevronDown, ChevronUp, Minimize2, Play, Plus, Server, Square, Trash2, X } from "@lucide/vue";
 import { Dialog, DialogFooter, DialogHeader, DialogScrollContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -354,7 +354,7 @@ const elapsedSeconds = computed(() => (progress.value?.elapsedMs != null ? `${(p
     :open="open"
     @update:open="
       (value) => {
-        if (!value) open.value = false;
+        if (!value) open = false;
       }
     "
   >

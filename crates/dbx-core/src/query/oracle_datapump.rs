@@ -67,6 +67,9 @@ pub struct OracleDatapumpProgress {
     pub job_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percent: Option<f64>,
+    /// KU$_JOB_STATUS1020 的阶段码（1 定义 / 2 执行 / 3 收尾）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_code: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_count: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,6 +137,7 @@ fn snapshot_progress(task_id: &str, status: Value) -> Option<OracleDatapumpProgr
         state,
         job_state: status["jobState"].as_str().map(str::to_string),
         percent: status["percent"].as_f64(),
+        phase_code: status["phaseCode"].as_f64(),
         error_count: status["errorCount"].as_f64(),
         error_text: status["errorText"].as_str().map(str::to_string),
         elapsed_ms: status["elapsedMs"].as_u64(),
@@ -153,6 +157,7 @@ fn failed_progress(task_id: &str, tag: &str, detail: String) -> OracleDatapumpPr
         state: "failed".into(),
         job_state: None,
         percent: None,
+        phase_code: None,
         error_count: None,
         error_text: None,
         elapsed_ms: None,
@@ -303,6 +308,7 @@ pub async fn run_oracle_datapump_task(
         state: "running".into(),
         job_state: None,
         percent: Some(0.0),
+        phase_code: None,
         error_count: None,
         error_text: None,
         elapsed_ms: Some(0),
@@ -328,6 +334,7 @@ pub async fn run_oracle_datapump_task(
                 state: "cancelled".into(),
                 job_state: None,
                 percent: None,
+                phase_code: None,
                 error_count: None,
                 error_text: None,
                 elapsed_ms: None,

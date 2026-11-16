@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const listeners = new Map<string, (event: { payload: unknown }) => void>();
 const unlisten = vi.fn();
 const reloadFromDisk = vi.fn();
+const focusMocks = vi.hoisted(() => ({ isFocused: vi.fn(async () => true) }));
 let listenerRegistrationBarrier: Promise<void> | null = null;
 const listen = vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
   await listenerRegistrationBarrier;
@@ -12,6 +13,10 @@ const listen = vi.fn(async (event: string, handler: (event: { payload: unknown }
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen,
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ isFocused: focusMocks.isFocused }),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -31,6 +36,7 @@ describe("useTauriEvents", () => {
     unlisten.mockClear();
     reloadFromDisk.mockClear();
     listenerRegistrationBarrier = null;
+    focusMocks.isFocused.mockResolvedValue(true);
   });
 
   it("resolves setup only after every native listener is registered", async () => {
@@ -78,11 +84,30 @@ describe("useTauriEvents", () => {
     });
 
     await events.setupTauriListeners();
-    listeners.get("dbx-close-active-tab")!({ payload: undefined });
+    await listeners.get("dbx-close-active-tab")!({ payload: undefined });
 
     expect(closeActiveSurface).toHaveBeenCalledOnce();
     events.cleanupTauriListeners();
     expect(unlisten).toHaveBeenCalled();
+  });
+
+  it("does not close a background window when macOS broadcasts Cmd+W", async () => {
+    focusMocks.isFocused.mockResolvedValue(false);
+    const closeActiveSurface = vi.fn();
+    const events = useTauriEvents({
+      openTableTarget: vi.fn(),
+      openSqlFilePath: vi.fn(),
+      openDbFilePath: vi.fn(),
+      openConnectionDeepLink: vi.fn(),
+      openAiConfigDeepLink: vi.fn(),
+      openPluginInstallDeepLink: vi.fn(),
+      closeActiveSurface,
+      refreshPluginWorkbenches: vi.fn(),
+    });
+    await events.setupTauriListeners();
+    await listeners.get("dbx-close-active-tab")!({ payload: undefined });
+    expect(closeActiveSurface).not.toHaveBeenCalled();
+    events.cleanupTauriListeners();
   });
 
   it("forwards replaced plugin runtimes to the workbench refresh hook", async () => {

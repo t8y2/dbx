@@ -6,6 +6,7 @@ const invoke = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn(async () => {}) }));
 
 async function loadAppearance() {
   vi.resetModules();

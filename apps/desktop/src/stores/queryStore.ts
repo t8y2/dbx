@@ -56,6 +56,7 @@ import {
 } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
 import { isDetachedTabWindow } from "@/lib/tabs/tabWindowTransfer";
+import { loadWorkspaceWindow, saveWorkspaceWindow, listWorkspaceWindows } from "@/lib/app/workspaceWindows";
 import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, planOpenTabSqlSpill, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type OpenTabsStatePayload, type SavedOpenTab } from "@/lib/app/openTabsPersistence";
 import { writeOpenTabSqlRecovery } from "@/lib/app/openTabsRecovery";
 import {
@@ -1065,7 +1066,7 @@ let contentRevealSeq = 0;
 let gridRevealColumnSeq = 0;
 
 async function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
-  if (isDetachedTabWindow() || isDetachedWindow()) return;
+  if (isDetachedWindow()) return;
   const { savedTabs, spills } = planOpenTabSqlSpill(tabs);
   if (spills.length > 0) {
     // Oversized SQL bodies must not be inlined into the session snapshot, or the
@@ -1092,7 +1093,12 @@ async function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?
         }
       : {}),
   };
-  saveTabsQueue = saveTabsQueue.catch(() => undefined).then(() => api.saveOpenTabsState(payload));
+  saveTabsQueue = saveTabsQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (isTauriRuntime()) await saveWorkspaceWindow(payload);
+      if (!isTauriRuntime() || !isDetachedTabWindow()) await api.saveOpenTabsState(payload);
+    });
   return saveTabsQueue;
 }
 
@@ -1110,9 +1116,9 @@ function clearLegacySavedTabs() {
 
 function restoreSavedTabsFromPayload(
   payload: { tabs?: unknown; activeTabId?: unknown; groups?: unknown; focusedGroupId?: unknown; orientation?: unknown; sizes?: unknown } | null | undefined,
-  options: { validConnectionIds?: Iterable<string> } = {},
+  options: { validConnectionIds?: Iterable<string>; restoreWorkspace?: boolean } = {},
 ): { tabs: QueryTab[]; activeTabId: string | null; workspace?: unknown } {
-  const restoreMode = safeLocalStorageGet(UPDATE_RESTORE_KEY) === "1" ? "all" : useSettingsStore().editorSettings.openTabsRestoreMode;
+  const restoreMode = options.restoreWorkspace || safeLocalStorageGet(UPDATE_RESTORE_KEY) === "1" ? "all" : useSettingsStore().editorSettings.openTabsRestoreMode;
   const restored = restoreOpenTabsPayload(payload, {
     filter: restoreMode === "none" ? "recovery" : restoreMode === "pinned" ? "pinned" : "all",
     validConnectionIds: options.validConnectionIds,
@@ -2903,6 +2909,16 @@ export const useQueryStore = defineStore("query", () => {
     return savedTab;
   }
 
+  function importTransferredTabs(entries: readonly { tab: SavedOpenTab; liveTab?: QueryTab }[], activeId?: string): boolean {
+    // Validate the entire group before registering any of its tabs.
+    if (!entries.length || entries.some(({ tab }) => !tabs.value.some((current) => current.id === tab.id) && !restoreOpenTabsPayload({ tabs: [tab], activeTabId: tab.id }).tabs.length)) return false;
+    for (const entry of entries) {
+      importTransferredTab(entry.tab, entry.liveTab);
+    }
+    activateTab(entries.some((entry) => entry.tab.id === activeId) ? activeId! : entries[0].tab.id);
+    return entries.every((entry) => tabs.value.some((tab) => tab.id === entry.tab.id));
+  }
+
   async function recoverDetachedTabsToMain(options: { validConnectionIds?: Iterable<string> } = {}) {
     if (!isTauriRuntime() || useSettingsStore().editorSettings.openTabsRestoreMode === "none") return;
     const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
@@ -2926,7 +2942,14 @@ export const useQueryStore = defineStore("query", () => {
       const liveKeys = tabs.value.flatMap((tab) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]).filter((key): key is string => !!key);
       void pruneTabResultSnapshots(liveKeys).catch((error) => console.warn("[DBX][result-cache:maintenance:error]", error));
     };
-    if (typeof requestIdleCallback !== "undefined") requestIdleCallback(maintain, { timeout: 5000 });
+    if (isTauriRuntime()) {
+      void listWorkspaceWindows()
+        .then((windows) => {
+          // A single-window sweep cannot discard another workspace's result cache.
+          if (!windows.some((window) => window.windowLabel !== "main")) maintain();
+        })
+        .catch(() => {});
+    } else if (typeof requestIdleCallback !== "undefined") requestIdleCallback(maintain, { timeout: 5000 });
     else if (typeof window !== "undefined") window.setTimeout(maintain, 0);
     else setTimeout(maintain, 0);
   }
@@ -2951,22 +2974,23 @@ export const useQueryStore = defineStore("query", () => {
     if (isOpenTabsLoaded.value) return;
     if (options.skipRestore) {
       isOpenTabsLoaded.value = true;
-      scheduleResultCacheMaintenance();
       return;
     }
-    const saved = await api.loadOpenTabsState().catch(() => null);
+    const ownSaved = isTauriRuntime() ? await loadWorkspaceWindow() : null;
+    const saved = ownSaved ?? (isDetachedTabWindow() ? null : await api.loadOpenTabsState().catch(() => null));
     if (saved?.tabs && Array.isArray(saved.tabs)) {
-      const restored = restoreSavedTabsFromPayload(saved, options);
+      const restoreWorkspace = !!ownSaved && isDetachedTabWindow();
+      const restored = restoreSavedTabsFromPayload(saved, { ...options, restoreWorkspace });
       applyRestoredOpenTabs(restored);
       notifyTruncatedRestoredTabs(restored.tabs);
-      if (safeLocalStorageGet(UPDATE_RESTORE_KEY) !== "1" && useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
+      if (!restoreWorkspace && safeLocalStorageGet(UPDATE_RESTORE_KEY) !== "1" && useSettingsStore().editorSettings.openTabsRestoreMode === "none") {
         // Restore is explicitly disabled, so stale saved payloads should not
         // reappear if the user later changes the setting.
         clearLegacySavedTabs();
         await saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value }).catch(() => undefined);
       }
       await recoverDetachedTabsToMain(options);
-      await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
+      await saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value }).catch(() => undefined);
       safeLocalStorageRemove(UPDATE_RESTORE_KEY);
       isOpenTabsLoaded.value = true;
       scheduleResultCacheMaintenance();
@@ -2997,7 +3021,7 @@ export const useQueryStore = defineStore("query", () => {
       }
     }
     await recoverDetachedTabsToMain(options);
-    await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
+    await saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value }).catch(() => undefined);
     isOpenTabsLoaded.value = true;
     scheduleResultCacheMaintenance();
   }
@@ -3076,6 +3100,7 @@ export const useQueryStore = defineStore("query", () => {
     [_persistSnapshot, activeTabId, groups, focusedGroupId, orientation, sizes],
     () => {
       if (storePersistGeneration !== persistGeneration) return;
+      if (isTauriRuntime() && !isOpenTabsLoaded.value) return;
       if (persistTimer) clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
         if (isDetachedWindow()) {
@@ -12202,6 +12227,7 @@ export const useQueryStore = defineStore("query", () => {
     cancelClosePendingTab,
     flushPendingPersist,
     importTransferredTab,
+    importTransferredTabs,
     detachTabForTransfer,
     persistTypeManagementDraft,
     saveAndClosePendingTab,

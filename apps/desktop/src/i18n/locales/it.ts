@@ -888,6 +888,7 @@ export default withEnglishFallback({
     logoutConfirm: "Sei sicuro di voler uscire?",
   },
   toolbar: {
+    independentWindow: "Finestra indipendente",
     fileEncoding: "Codifica del file",
     encodingAuto: "Automatica",
     immediateSync: "Sincronizza ora",
@@ -4830,6 +4831,8 @@ export default withEnglishFallback({
     duplicateTab: "Duplica Scheda",
     openTabInNewWindow: "Apri scheda in una nuova finestra",
     moveTabToAnotherWindow: "Sposta scheda in un'altra finestra",
+    openTabGroupInNewWindow: "Apri gruppo in una nuova finestra",
+    moveTabGroupToAnotherWindow: "Sposta gruppo in un'altra finestra",
     mainWindow: "Finestra principale",
     detachedWindow: "Finestra {number}",
     splitRight: "Dividi a destra",

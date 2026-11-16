@@ -11,23 +11,25 @@ export interface AppCloseRequestOptions {
   requireCloseActionChoice?: boolean;
 }
 
-type AppCloseRequestEventPayload = AppCloseRequestTarget | { target?: AppCloseRequestTarget; windowLabel?: string };
+type AppCloseRequestEventPayload = AppCloseRequestTarget | { target?: AppCloseRequestTarget; windowLabel?: string; quitRequestId?: string };
 
 interface AppCloseRequestPayload {
   payload?: AppCloseRequestEventPayload;
 }
 
-function parseCloseRequestPayload(payload: AppCloseRequestEventPayload | undefined): { target: AppCloseRequestTarget; windowLabel?: string } {
+function parseCloseRequestPayload(payload: AppCloseRequestEventPayload | undefined): { target: AppCloseRequestTarget; windowLabel?: string; quitRequestId?: string } {
   if (typeof payload === "object" && payload) {
     const target = payload.target === "quit" || payload.target === "window" ? payload.target : "settings";
-    return { target, windowLabel: typeof payload.windowLabel === "string" ? payload.windowLabel : undefined };
+    return { target, windowLabel: typeof payload.windowLabel === "string" ? payload.windowLabel : undefined, quitRequestId: payload.quitRequestId };
   }
   return { target: payload === "quit" || payload === "window" ? payload : "settings" };
 }
 
-export function useCloseActionPrompt(options: { requestClose: (action: AppCloseAction, requestOptions?: AppCloseRequestOptions) => void }) {
+export function useCloseActionPrompt(options: { requestClose: (action: AppCloseAction, requestOptions?: AppCloseRequestOptions) => void; onQuitCancelled?: () => void }) {
   const settingsStore = useSettingsStore();
   const showCloseActionPrompt = ref(false);
+  const isQuitPrepared = ref(false);
+  let quitRequestId: string | undefined;
   const unlistenHandles: Array<() => void> = [];
 
   function actionForRequest(target: AppCloseRequestTarget): AppCloseAction {
@@ -41,7 +43,18 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
       await api.completeWindowClose();
       return;
     }
-    await api.completeAppClose(action);
+    try {
+      await api.completeAppClose(action, action === "quit" ? quitRequestId : undefined);
+    } catch (error) {
+      if (action === "quit") cancelAppQuit();
+      throw error;
+    }
+  }
+
+  function cancelAppQuit() {
+    isQuitPrepared.value = false;
+    void invoke("cancel_app_quit", { quitRequestId }).catch(() => {});
+    quitRequestId = undefined;
   }
 
   function handleCloseRequest(target: AppCloseRequestTarget = "settings") {
@@ -86,7 +99,18 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
         .listen<AppCloseRequestEventPayload>("dbx-app-close-requested", (event: AppCloseRequestPayload) => {
           const request = parseCloseRequestPayload(event.payload);
           if (request.windowLabel && request.windowLabel !== currentWindow.label) return;
+          if (request.target === "quit") quitRequestId = request.quitRequestId;
           handleCloseRequest(request.target);
+        })
+        .then((unlisten) => {
+          unlistenHandles.push(unlisten);
+          return import("@tauri-apps/api/event").then(({ listen }) =>
+            listen("dbx-app-quit-cancelled", () => {
+              isQuitPrepared.value = false;
+              quitRequestId = undefined;
+              options.onQuitCancelled?.();
+            }),
+          );
         })
         .then((unlisten) => {
           unlistenHandles.push(unlisten);
@@ -104,6 +128,8 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
 
   return {
     showCloseActionPrompt,
+    isQuitPrepared,
+    cancelAppQuit,
     chooseQuit,
     chooseMinimize,
     cancelCloseActionPrompt,

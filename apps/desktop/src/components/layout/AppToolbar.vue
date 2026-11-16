@@ -30,6 +30,8 @@ import {
   CalendarClock,
   Waypoints,
   RefreshCw,
+  AppWindow,
+  PanelsTopLeft,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -61,6 +63,8 @@ const GithubIcon = {
 const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
+  workspaceWindowLabel?: string;
+  activeTabTitle?: string;
   showSidebarExpand?: boolean;
   showAiPanel: boolean;
   activeAiRunCount: number;
@@ -131,6 +135,13 @@ watch(orderedToolbarKeys, scheduleToolbarLayout, { deep: true });
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
+const workspaceWindowCaption = computed(() => {
+  if (!isDesktop) return "";
+  if (props.workspaceWindowLabel === "main") return settingsStore.editorSettings.crossWindowTabDragPreviewEnabled ? t("contextMenu.mainWindow") : "";
+  if (props.workspaceWindowLabel?.startsWith("dbx-tab-") && !props.workspaceWindowLabel.startsWith("dbx-tab-drag-preview")) return t("toolbar.independentWindow");
+  return "";
+});
+const workspaceWindowTitle = computed(() => ["DBX", workspaceWindowCaption.value, props.activeTabTitle].filter(Boolean).join(" · "));
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the
 // window is actually pinned even with the setting off, so turning the setting
@@ -766,7 +777,15 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
       />
     </template>
 
-    <div class="flex-1" data-tauri-drag-region />
+    <div class="flex min-w-0 flex-1 items-center justify-center overflow-hidden px-2" data-tauri-drag-region>
+      <div v-if="workspaceWindowCaption" data-workspace-window-identity class="flex min-w-0 max-w-64 items-center gap-2 overflow-hidden text-xs text-muted-foreground" :title="workspaceWindowTitle" data-tauri-drag-region>
+        <span class="pointer-events-none inline-flex h-5 shrink-0 items-center gap-1 rounded border px-1.5" :class="workspaceWindowLabel === 'main' ? 'border-transparent bg-muted/60' : 'border-border/70 bg-background/70 text-foreground/80'">
+          <component :is="workspaceWindowLabel === 'main' ? AppWindow : PanelsTopLeft" class="h-3 w-3 shrink-0" />
+          <span class="whitespace-nowrap">{{ workspaceWindowCaption }}</span>
+        </span>
+        <span v-if="activeTabTitle" data-workspace-window-title class="pointer-events-none min-w-0 truncate">{{ activeTabTitle }}</span>
+      </div>
+    </div>
 
     <!-- Right-side items wrapped in overflow-aware container -->
     <div ref="rightWrapper" class="flex min-w-0 items-center gap-1 overflow-hidden">

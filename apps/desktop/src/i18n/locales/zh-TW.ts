@@ -874,6 +874,7 @@ export default withEnglishFallback({
     logoutConfirm: "確定要登出嗎？",
   },
   toolbar: {
+    independentWindow: "獨立視窗",
     fileEncoding: "檔案編碼",
     encodingAuto: "自動",
     commitOutcomeUnknown: "提交結果未知，交易工作階段已不存在。請核對資料後再決定是否重新執行 SQL。",
@@ -4805,6 +4806,8 @@ export default withEnglishFallback({
     duplicateTab: "複製分頁",
     openTabInNewWindow: "在新視窗中開啟標籤頁",
     moveTabToAnotherWindow: "將標籤頁移至另一視窗",
+    openTabGroupInNewWindow: "在新視窗中開啟群組",
+    moveTabGroupToAnotherWindow: "將群組移至另一視窗",
     mainWindow: "主視窗",
     detachedWindow: "視窗 {number}",
     splitRight: "拆分並右移",

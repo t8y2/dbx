@@ -1133,8 +1133,8 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
-  return invoke("save_editor_settings", { settings });
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  return invoke("save_editor_settings", { settings, ...(patch ? { patch } : {}) });
 }
 
 export interface GlobalSearchSettings {
@@ -1215,8 +1215,8 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   return invoke("save_transfer_task_library", { library });
 }
 
-export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
-  return invoke("complete_app_close", { action });
+export async function completeAppClose(action: "quit" | "hide", quitRequestId?: string): Promise<void> {
+  return invoke("complete_app_close", { action, ...(quitRequestId ? { quitRequestId } : {}) });
 }
 
 export async function completeWindowClose(): Promise<void> {

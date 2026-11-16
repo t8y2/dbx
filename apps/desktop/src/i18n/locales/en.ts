@@ -1099,6 +1099,7 @@ export default {
     logoutConfirm: "Are you sure you want to log out?",
   },
   toolbar: {
+    independentWindow: "Separate Window",
     fileEncoding: "File encoding",
     encodingAuto: "Auto",
     immediateSync: "Sync now",
@@ -5283,6 +5284,8 @@ export default {
     duplicateTab: "Duplicate Tab",
     openTabInNewWindow: "Open Tab in New Window",
     moveTabToAnotherWindow: "Move Tab to Another Window",
+    openTabGroupInNewWindow: "Open Group in New Window",
+    moveTabGroupToAnotherWindow: "Move Group to Another Window",
     mainWindow: "Main Window",
     detachedWindow: "Window {number}",
     splitRight: "Split Right",

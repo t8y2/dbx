@@ -104,6 +104,25 @@ describe("queryStore editor groups", () => {
     expect(store.tabs.some((tab) => tab.id === firstId)).toBe(false);
   });
 
+  it("imports a whole window group in order, preserves selection, and accepts retries", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Existing 1");
+    store.createTab("pg-1", "app", "Existing 2");
+    store.splitTabRight(firstId);
+    const targetGroupId = store.focusedGroupId;
+    const entries = ["incoming-1", "incoming-2", "incoming-3"].map((id) => ({
+      tab: { id, title: id, connectionId: "pg-1", database: "app", sql: "SELECT 42;" },
+    }));
+
+    expect(store.importTransferredTabs(entries, "incoming-2")).toBe(true);
+    expect(store.groups.find((group) => group.id === targetGroupId)?.tabIds).toEqual([firstId, ...entries.map((entry) => entry.tab.id)]);
+    expect(store.activeTabId).toBe("incoming-2");
+    expect(store.importTransferredTabs(entries, "incoming-2")).toBe(true);
+    expect(store.tabs.filter((tab) => tab.id.startsWith("incoming"))).toHaveLength(3);
+    expect(store.importTransferredTabs([])).toBe(false);
+  });
+
   it("unsplits a secondary group tab back to the main group", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

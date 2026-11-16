@@ -1035,6 +1035,7 @@ export default withEnglishFallback({
     logoutConfirm: "确定要退出登录吗？",
   },
   toolbar: {
+    independentWindow: "独立窗口",
     fileEncoding: "文件编码",
     encodingAuto: "自动",
     immediateSync: "立即同步",
@@ -5207,6 +5208,8 @@ export default withEnglishFallback({
     duplicateTab: "复制标签页",
     openTabInNewWindow: "在新窗口中打开标签页",
     moveTabToAnotherWindow: "将标签页移动至另一窗口",
+    openTabGroupInNewWindow: "在新窗口中打开分组",
+    moveTabGroupToAnotherWindow: "将分组移动至另一窗口",
     mainWindow: "主窗口",
     detachedWindow: "窗口 {number}",
     splitRight: "拆分并右移",

@@ -889,6 +889,7 @@ export default withEnglishFallback({
     logoutConfirm: "Tem certeza de que deseja sair?",
   },
   toolbar: {
+    independentWindow: "Janela independente",
     fileEncoding: "Codificação do arquivo",
     encodingAuto: "Automática",
     immediateSync: "Sincronizar agora",
@@ -4828,6 +4829,8 @@ export default withEnglishFallback({
     duplicateTab: "Duplicar Aba",
     openTabInNewWindow: "Abrir aba em uma nova janela",
     moveTabToAnotherWindow: "Mover aba para outra janela",
+    openTabGroupInNewWindow: "Abrir grupo em uma nova janela",
+    moveTabGroupToAnotherWindow: "Mover grupo para outra janela",
     mainWindow: "Janela principal",
     detachedWindow: "Janela {number}",
     splitRight: "Dividir à direita",

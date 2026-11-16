@@ -208,4 +208,17 @@ describe("AppToolbar web branding (#8703, #11053)", () => {
 
     unmount();
   });
+
+  it("hides the main-window marker when multi-window tabs are disabled", async () => {
+    mockIsTauriRuntime = true;
+    const settings = useSettingsStore();
+    settings.editorSettings.crossWindowTabDragPreviewEnabled = true;
+    const { host, unmount } = mount({ workspaceWindowLabel: "main" });
+    await nextTick();
+    expect(host.querySelector("[data-workspace-window-identity]")).not.toBeNull();
+    settings.editorSettings.crossWindowTabDragPreviewEnabled = false;
+    await nextTick();
+    expect(host.querySelector("[data-workspace-window-identity]")).toBeNull();
+    unmount();
+  });
 });

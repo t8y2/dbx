@@ -1022,9 +1022,28 @@ function selectTabOrganizationItem(value: string) {
   else if (section === "maxwidth") updateTabMaxWidth(Number(option));
 }
 
+function getTabGroupWindowMenuItems(tabIds: readonly string[]): ContextMenuItem[] {
+  const tabs = [...new Set(tabIds)].map((id) => props.tabs.find((tab) => tab.id === id)).filter((tab): tab is QueryTab => !!tab);
+  const enabled = !!props.canDetachTabs && !!tabWindowTransfer && tabs.length > 0;
+  return [
+    { label: t("contextMenu.openTabGroupInNewWindow"), action: () => void tabWindowTransfer?.openTabsInNewWindow(tabs), icon: ExternalLink, visible: enabled },
+    {
+      label: t("contextMenu.moveTabGroupToAnotherWindow"),
+      icon: ExternalLink,
+      visible: enabled && !!tabWindowTransfer?.otherTabWindows.value.length,
+      children: tabWindowTransfer?.otherTabWindows.value.map((window) => ({
+        label: tabWindowTransfer.tabWindowTargetLabel(window),
+        action: () => void tabWindowTransfer.moveTabsToWindow(tabs, window.label),
+      })),
+    },
+    { label: "", separator: true, visible: enabled },
+  ];
+}
+
 function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
   const customization = tabGroupCustomization(tab);
   return [
+    ...getTabGroupWindowMenuItems(tabsInSemanticGroup(tab).map((member) => member.id)),
     {
       label: t("contextMenu.editTabGroup"),
       action: () => openTabGroupEditor(tab),
@@ -1071,6 +1090,7 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
         ]
       : [];
   return [
+    ...getTabGroupWindowMenuItems(entry.tabIds),
     ...customizationItems,
     { label: t("contextMenu.collapseAll"), action: collapseAllTabGroups, icon: ChevronsDownUp },
     { label: t("contextMenu.expandAll"), action: () => expandAllTabGroups(), icon: ChevronsUpDown },
@@ -1079,9 +1099,12 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
   ];
 }
 
-function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+async function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
   event.preventDefault();
+  event.stopPropagation();
   document.getSelection()?.removeAllRanges();
+  await tabWindowTransfer?.refreshOtherTabWindows();
+  await nextTick();
   open(event);
 }
 
@@ -1318,6 +1341,7 @@ const twoRowTabEntries = computed<StripEntry[]>(() => {
 function getTwoRowGroupMenuItems(group: TwoRowGroupItem): ContextMenuItem[] {
   const customization = group.key ? tabGroupCustomization(group.tab) : undefined;
   return [
+    ...getTabGroupWindowMenuItems(group.tabIds),
     { label: t("contextMenu.editTabGroup"), action: () => openTabGroupEditor(group.tab), icon: Pencil, visible: !!group.key },
     { label: t("contextMenu.resetTabGroup"), action: () => resetTabGroupCustomization(group.tab), icon: RotateCcw, visible: !!group.key && !!(customization?.name || customization?.color) },
     { label: "", separator: true, visible: !!group.key },
@@ -1705,7 +1729,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     {
       label: t("tabs.openInNewWindow"),
       action: () => (tabWindowTransfer ? void tabWindowTransfer.openTabInNewWindow(tab) : emit("detach-tab", tab)),
-      icon: Maximize2,
+      icon: ExternalLink,
       visible: !!props.canDetachTabs && isDetachableTab(tab),
     },
     {

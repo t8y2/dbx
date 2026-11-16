@@ -889,6 +889,7 @@ export default withEnglishFallback({
     logoutConfirm: "ログアウトしてもよろしいですか？",
   },
   toolbar: {
+    independentWindow: "独立ウィンドウ",
     fileEncoding: "ファイルの文字コード",
     encodingAuto: "自動",
     immediateSync: "今すぐ同期",
@@ -4849,6 +4850,8 @@ export default withEnglishFallback({
     duplicateTab: "タブを複製",
     openTabInNewWindow: "新しいウィンドウでタブを開く",
     moveTabToAnotherWindow: "タブを別のウィンドウに移動",
+    openTabGroupInNewWindow: "新しいウィンドウでグループを開く",
+    moveTabGroupToAnotherWindow: "グループを別のウィンドウに移動",
     mainWindow: "メインウィンドウ",
     detachedWindow: "ウィンドウ {number}",
     splitRight: "右に分割",

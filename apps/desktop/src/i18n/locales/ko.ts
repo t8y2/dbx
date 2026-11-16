@@ -896,6 +896,7 @@ export default withEnglishFallback({
     logoutConfirm: "로그아웃하시겠습니까?",
   },
   toolbar: {
+    independentWindow: "별도 창",
     fileEncoding: "파일 인코딩",
     encodingAuto: "자동",
     immediateSync: "지금 동기화",
@@ -4778,6 +4779,8 @@ export default withEnglishFallback({
     duplicateTab: "탭 복제",
     openTabInNewWindow: "새 창에서 탭 열기",
     moveTabToAnotherWindow: "탭을 다른 창으로 이동",
+    openTabGroupInNewWindow: "새 창에서 그룹 열기",
+    moveTabGroupToAnotherWindow: "그룹을 다른 창으로 이동",
     mainWindow: "기본 창",
     detachedWindow: "창 {number}",
     splitRight: "오른쪽으로 분할",

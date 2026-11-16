@@ -12,6 +12,7 @@ import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FON
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
@@ -2625,6 +2626,7 @@ export const useSettingsStore = defineStore("settings", () => {
   let editorSettingsOperationQueue: Promise<void> | null = null;
   let editorSettingsPatchRevision = 0;
   const editorSettingsFieldRevisions = new Map<keyof EditorSettings, number>();
+  const pendingSharedSettingsFields = new Map<keyof EditorSettings, number>();
   const customColumnFormatterDeleteVersions = new Map<string, number>();
   let pendingAiChatSelection: AiChatSelectionState | null = null;
   let aiChatSelectionSaveRunning = false;
@@ -2665,7 +2667,18 @@ export const useSettingsStore = defineStore("settings", () => {
 
   async function persistCurrentEditorSettings(): Promise<void> {
     const snapshot = editorSettingsSnapshot(editorSettings.value);
-    await api.saveEditorSettings(snapshot);
+    const fields = new Map(pendingSharedSettingsFields);
+    const patch = Object.fromEntries([...fields.keys()].map((key) => [key, snapshot[key]]));
+    const saved = isTauriRuntime() && fields.size ? await api.saveEditorSettings(snapshot, patch) : await api.saveEditorSettings(snapshot);
+    for (const [key, revision] of fields) {
+      if (pendingSharedSettingsFields.get(key) === revision) pendingSharedSettingsFields.delete(key);
+    }
+    // Older development binaries return no canonical value. Keep their open
+    // windows synchronized while the updated native host is being built.
+    if (isTauriRuntime() && saved == null) {
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("dbx:editor-settings-changed", snapshot);
+    }
     const visible = snapshot.toolbarItems.alwaysOnTop;
     if (visible !== persistedAlwaysOnTopToolbarVisibility) {
       persistedAlwaysOnTopToolbarVisibility = visible;
@@ -2684,7 +2697,10 @@ export const useSettingsStore = defineStore("settings", () => {
   function markEditorSettingsPatch(partial: Partial<EditorSettings>): number {
     const revision = ++editorSettingsPatchRevision;
     for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
-      if (partial[key] !== undefined) editorSettingsFieldRevisions.set(key, revision);
+      if (partial[key] !== undefined) {
+        editorSettingsFieldRevisions.set(key, revision);
+        pendingSharedSettingsFields.set(key, revision);
+      }
     }
     return revision;
   }
@@ -2796,6 +2812,21 @@ export const useSettingsStore = defineStore("settings", () => {
     isDesktopSettingsLoaded.value = true;
   }
 
+  function applySharedEditorSettings(raw: Partial<EditorSettings>) {
+    const next = normalizeEditorSettings(raw);
+    for (const key of pendingSharedSettingsFields.keys()) {
+      (next as unknown as Record<string, unknown>)[key] = editorSettings.value[key];
+    }
+    editorSettings.value = next;
+    persistedAlwaysOnTopToolbarVisibility = next.toolbarItems.alwaysOnTop;
+  }
+
+  function applySharedDesktopSettings(raw: DesktopSettings) {
+    desktopSettings.value = normalizeDesktopSettings(raw);
+    setDebugLoggingEnabled(desktopSettings.value.debug_logging_enabled);
+    configureMetadataRuntimeCache(desktopSettings.value.metadata_cache_max_memory_mb);
+  }
+
   async function updateDesktopSettings(partial: Partial<DesktopSettings>) {
     const previous = desktopSettings.value;
     const next = {
@@ -2807,6 +2838,10 @@ export const useSettingsStore = defineStore("settings", () => {
     configureMetadataRuntimeCache(desktopSettings.value.metadata_cache_max_memory_mb);
     try {
       await api.saveDesktopSettings(desktopSettings.value);
+      if (isTauriRuntime()) {
+        const { emit } = await import("@tauri-apps/api/event");
+        await emit("dbx:desktop-settings-changed", desktopSettings.value);
+      }
     } catch (error) {
       desktopSettings.value = previous;
       setDebugLoggingEnabled(previous.debug_logging_enabled);
@@ -3701,6 +3736,8 @@ export const useSettingsStore = defineStore("settings", () => {
     desktopSettings,
     mcpGlobalPolicy,
     initEditorSettings,
+    applySharedEditorSettings,
+    applySharedDesktopSettings,
     syncAlwaysOnTopToolbarVisibility,
     updateEditorSettings,
     updateEditorSettingsAndPersist,

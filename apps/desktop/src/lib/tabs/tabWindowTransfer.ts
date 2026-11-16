@@ -31,12 +31,17 @@ function isTransferableTabWindowLabel(label: string): boolean {
   return label === "main" || (label.startsWith("dbx-tab-") && !label.startsWith(TAB_DRAG_PREVIEW_WINDOW_PREFIX));
 }
 
-export interface TabWindowTransferPayload {
-  transferId: string;
-  sourceWindowLabel: string;
+export interface TabWindowTransferEntry {
   tab: SavedOpenTab;
   /** Live state is kept separately from persisted tab state so results and editor context survive a move. */
   liveTab?: QueryTab;
+}
+
+export interface TabWindowTransferPayload extends TabWindowTransferEntry {
+  transferId: string;
+  sourceWindowLabel: string;
+  additionalTabs?: TabWindowTransferEntry[];
+  activeTabId?: string;
   /** Physical release position used by the destination tab strip to preserve insertion order. */
   dropCursorPhysical?: { x: number; y: number };
 }
@@ -106,7 +111,8 @@ function activeTransferStorageValue(transferId: string): string {
 
 export function isDetachedTabWindow(): boolean {
   if (typeof window === "undefined") return false;
-  if (new URLSearchParams(window.location?.search).has(DETACHED_TAB_QUERY)) return true;
+  const search = new URLSearchParams(window.location?.search);
+  if (search.has(DETACHED_TAB_QUERY) || search.has("dbxWorkspaceWindow")) return true;
   try {
     return window.sessionStorage.getItem(DETACHED_TAB_WINDOW_SESSION_KEY) === "1";
   } catch {
@@ -126,6 +132,22 @@ export function createTabWindowTransfer(tab: QueryTab, sourceWindowLabel: string
     tab: serializeOpenTabs([tab])[0]!,
     liveTab: JSON.parse(JSON.stringify(tab, jsonSafeReplacer)) as QueryTab,
   };
+}
+
+export function createTabWindowGroupTransfer(tabs: readonly QueryTab[], sourceWindowLabel: string, activeTabId?: string | null): TabWindowTransferPayload | null {
+  const uniqueTabs = [...new Map(tabs.map((tab) => [tab.id, tab])).values()];
+  if (!uniqueTabs.length) return null;
+  const payload = createTabWindowTransfer(uniqueTabs[0], sourceWindowLabel);
+  payload.additionalTabs = uniqueTabs.slice(1).map((tab) => ({
+    tab: serializeOpenTabs([tab])[0]!,
+    liveTab: JSON.parse(JSON.stringify(tab, jsonSafeReplacer)) as QueryTab,
+  }));
+  payload.activeTabId = uniqueTabs.some((tab) => tab.id === activeTabId) ? activeTabId! : payload.tab.id;
+  return payload;
+}
+
+export function tabWindowTransferEntries(payload: TabWindowTransferPayload): TabWindowTransferEntry[] {
+  return [{ tab: payload.tab, liveTab: payload.liveTab }, ...(payload.additionalTabs ?? [])];
 }
 
 export function encodeTabWindowTransfer(payload: TabWindowTransferPayload): string {
@@ -148,6 +170,12 @@ export function decodeTabWindowTransfer(value: string | null | undefined): TabWi
     const parsed = JSON.parse(value) as Partial<TabWindowTransferPayload>;
     if (!parsed.transferId || !parsed.sourceWindowLabel || !parsed.tab || typeof parsed.tab.id !== "string") return null;
     if (parsed.liveTab !== undefined && (!parsed.liveTab || typeof parsed.liveTab.id !== "string")) return null;
+    if (parsed.additionalTabs !== undefined) {
+      if (!Array.isArray(parsed.additionalTabs)) return null;
+      if (parsed.additionalTabs.some((entry) => !entry?.tab || typeof entry.tab.id !== "string" || (entry.liveTab !== undefined && (!entry.liveTab || entry.liveTab.id !== entry.tab.id)))) return null;
+      const ids = [parsed.tab.id, ...parsed.additionalTabs.map((entry) => entry.tab.id)];
+      if (new Set(ids).size !== ids.length || (parsed.activeTabId !== undefined && !ids.includes(parsed.activeTabId))) return null;
+    }
     return parsed as TabWindowTransferPayload;
   } catch {
     return null;

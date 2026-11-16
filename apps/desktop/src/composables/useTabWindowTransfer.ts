@@ -5,6 +5,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { tabDisplayTitle } from "@/lib/tabs/tabPresentation";
 import { uuid } from "@/lib/common/utils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { requestAppClose } from "@/lib/backend/api";
 import type { QueryTab } from "@/types/database";
 import { invoke } from "@tauri-apps/api/core";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
@@ -13,6 +14,8 @@ import { pointOutsideRect, tabDragPreviewRect, tabWindowPreviewRect } from "@/li
 import {
   createDetachedTabWindow,
   createTabWindowTransfer,
+  createTabWindowGroupTransfer,
+  tabWindowTransferEntries,
   currentTabWindowLabel,
   listOtherTabWindows,
   listenForTabWindowInfoRequest,
@@ -44,7 +47,7 @@ import {
 export const TAB_WINDOW_TRANSFER: InjectionKey<ReturnType<typeof useTabWindowTransfer>> = Symbol("tab-window-transfer");
 
 /** One coordinator per workspace; all split tab bars share its native drag session. */
-export function useTabWindowTransfer() {
+export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => boolean } = {}) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
@@ -59,6 +62,8 @@ export function useTabWindowTransfer() {
   const currentWindowLabel = ref(`dbx-webview-${Math.random().toString(36).slice(2)}`);
   const nativeTabDrag = ref<{ payload: TabWindowTransferPayload } | null>(null);
   const otherTabWindows = ref<TabWindowTarget[]>([]);
+  const geometryUnlisteners: (() => void)[] = [];
+  let geometryPersistTimer: number | undefined;
   let nativeTabDragPreviewTransferId: string | null = null;
   let removeTabWindowTransferListener: (() => void) | null = null;
   let removeTabWindowInfoRequestListener: (() => void) | null = null;
@@ -103,6 +108,8 @@ export function useTabWindowTransfer() {
   const visibleTabWindowPreview = computed(() => remoteTabWindowPreview.value?.rect);
   const visibleTabWindowPreviewTitle = computed(() => remoteTabWindowPreview.value?.title ?? "");
   onUnmounted(() => {
+    if (geometryPersistTimer !== undefined) window.clearTimeout(geometryPersistTimer);
+    geometryUnlisteners.forEach((unlisten) => unlisten());
     tabWindowTransferListenerUnmounted = true;
     tabWindowInfoListenerUnmounted = true;
     tabWindowDragPreviewListenerUnmounted = true;
@@ -129,6 +136,26 @@ export function useTabWindowTransfer() {
     clearRemoteTabWindowPreview();
   });
   onMounted(() => {
+    if (isTauriRuntime()) {
+      const persistGeometry = () => {
+        if (geometryPersistTimer !== undefined) window.clearTimeout(geometryPersistTimer);
+        geometryPersistTimer = window.setTimeout(() => {
+          if (queryStore.isOpenTabsLoaded) void queryStore.flushPendingPersist().catch((error) => console.warn("[DBX][workspace:geometry-save]", error));
+        }, 300);
+      };
+      void (async () => {
+        try {
+          const current = getCurrentWindow();
+          for (const subscribe of [() => current.onMoved(persistGeometry), () => current.onResized(persistGeometry)]) {
+            const unlisten = await subscribe();
+            if (tabWindowTransferListenerUnmounted) unlisten();
+            else geometryUnlisteners.push(unlisten);
+          }
+        } catch {
+          /* Window events are unavailable in a browser preview. */
+        }
+      })();
+    }
     tabWindowTransferListenerUnmounted = false;
     tabWindowInfoListenerUnmounted = false;
     tabWindowDragPreviewListenerUnmounted = false;
@@ -466,14 +493,13 @@ export function useTabWindowTransfer() {
     if (payload.sourceWindowLabel === currentWindowLabel.value) return false;
     const dropTarget = await targetTabDropFromTransfer(payload);
     if (payload.dropCursorPhysical && !dropTarget) return false;
-    const importedTabId = queryStore.importTransferredTab(payload.tab, payload.liveTab);
-    if (!importedTabId) {
-      // A retried native event can arrive after the first delivery succeeded.
-      // Treat the existing tab as an acknowledged idempotent move.
-      if (!queryStore.tabs.some((tab) => tab.id === payload.tab.id)) return false;
-      queryStore.switchTab(payload.tab.id);
+    const entries = tabWindowTransferEntries(payload);
+    if (!queryStore.importTransferredTabs(entries, payload.activeTabId)) return false;
+    if (dropTarget) {
+      entries.forEach((entry, index) => queryStore.moveTabToGroup(entry.tab.id, dropTarget.groupId, dropTarget.index === undefined ? undefined : dropTarget.index + index));
+      queryStore.activateTab(payload.activeTabId ?? payload.tab.id);
     }
-    if (importedTabId && dropTarget) queryStore.moveTabToGroup(importedTabId, dropTarget.groupId, dropTarget.index);
+    await queryStore.flushPendingPersist();
     // The actual destination tab is now rendered, so any optimistic drag chip
     // in this WebView must disappear even if its final hide event was delayed.
     clearRemoteTabWindowPreview(payload.transferId);
@@ -483,7 +509,7 @@ export function useTabWindowTransfer() {
   }
 
   function handleIncomingTabWindowTransfer(payload: TabWindowTransferPayload) {
-    void acceptTabWindowTransfer(payload);
+    void acceptTabWindowTransfer(payload).catch((error) => console.warn("[DBX][workspace:receive-error]", error));
   }
 
   function activeTabWindowTitle(): string {
@@ -517,8 +543,7 @@ export function useTabWindowTransfer() {
       const deliveredPayload = cursor ? { ...payload, dropCursorPhysical: { x: cursor.x, y: cursor.y } } : payload;
       const delivered = await sendTabWindowTransfer(targetWindowLabel, deliveredPayload);
       if (delivered && (await waitForTabWindowTransferAccepted(payload.transferId))) {
-        queryStore.detachTabForTransfer(payload.tab.id);
-        clearTabWindowTransfer(payload.transferId);
+        await finishSourceTransfer(payload);
         return;
       }
       // The pointer was inside a DBX window. Preserve the source tab rather than
@@ -532,14 +557,31 @@ export function useTabWindowTransfer() {
     }
 
     const created = await createDetachedTabWindow(payload, placement);
-    if (created && (await waitForTabWindowTransferAccepted(payload.transferId, 10_000))) queryStore.detachTabForTransfer(payload.tab.id);
+    if (created && (await waitForTabWindowTransferAccepted(payload.transferId, 10_000))) await finishSourceTransfer(payload);
+  }
+
+  async function finishSourceTransfer(payload: TabWindowTransferPayload) {
+    for (const entry of tabWindowTransferEntries(payload)) queryStore.detachTabForTransfer(entry.tab.id);
+    await queryStore.flushPendingPersist();
+    clearTabWindowTransfer(payload.transferId);
+    if (queryStore.tabs.length || !payload.sourceWindowLabel.startsWith("dbx-tab-") || options.canCloseEmptyWindow?.() === false) return;
+    // Reuse the normal close request: Rust checks for remaining workspaces and
+    // the frontend retains its close guards if this became the last window.
+    await requestAppClose().catch((error) => console.warn("[DBX][tab-window-transfer:close-empty:error]", error));
   }
 
   async function openTabInNewWindow(tab: QueryTab) {
+    await openTabsInNewWindow([tab]);
+  }
+
+  async function openTabsInNewWindow(tabs: readonly QueryTab[]) {
     if (!isTauriRuntime()) return;
-    const payload = createTabWindowTransfer(tab, currentWindowLabel.value);
+    const payload = createTabWindowGroupTransfer(tabs, currentWindowLabel.value, queryStore.activeTabId);
+    if (!payload) return;
     const created = await createDetachedTabWindow(payload);
-    if (created && (await waitForTabWindowTransferAccepted(payload.transferId, 10_000))) queryStore.detachTabForTransfer(tab.id);
+    if (created && (await waitForTabWindowTransferAccepted(payload.transferId, 10_000))) {
+      await finishSourceTransfer(payload);
+    }
   }
 
   function tabWindowTargetLabel(window: TabWindowTarget): string {
@@ -579,10 +621,16 @@ export function useTabWindowTransfer() {
     });
   }
   async function moveTabToWindow(tab: QueryTab, targetWindowLabel: string) {
-    const payload = createTabWindowTransfer(tab, currentWindowLabel.value);
+    await moveTabsToWindow([tab], targetWindowLabel);
+  }
+
+  async function moveTabsToWindow(tabs: readonly QueryTab[], targetWindowLabel: string) {
+    if (!isTauriRuntime()) return;
+    const payload = createTabWindowGroupTransfer(tabs, currentWindowLabel.value, queryStore.activeTabId);
+    if (!payload) return;
     const delivered = await sendTabWindowTransfer(targetWindowLabel, payload);
-    if (delivered && (await waitForTabWindowTransferAccepted(payload.transferId))) {
-      queryStore.detachTabForTransfer(tab.id);
+    if (delivered && (await waitForTabWindowTransferAccepted(payload.transferId, 2000))) {
+      await finishSourceTransfer(payload);
     }
     clearTabWindowTransfer(payload.transferId);
   }
@@ -612,5 +660,5 @@ export function useTabWindowTransfer() {
     cleanupSourceDrag = undefined;
   }
 
-  return { move, end, cancel, otherTabWindows, refreshOtherTabWindows, openTabInNewWindow, moveTabToWindow, tabWindowTargetLabel, visibleTabWindowPreview, visibleTabWindowPreviewTitle };
+  return { currentWindowLabel, move, end, cancel, otherTabWindows, refreshOtherTabWindows, openTabInNewWindow, openTabsInNewWindow, moveTabToWindow, moveTabsToWindow, tabWindowTargetLabel, visibleTabWindowPreview, visibleTabWindowPreviewTitle };
 }

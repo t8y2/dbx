@@ -33,6 +33,7 @@ mod windows_appcompat;
 mod windows_appcompat;
 #[cfg(any(target_os = "windows", test))]
 mod windows_appcompat_state;
+mod workspace_session;
 
 use commands::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
@@ -896,7 +897,8 @@ pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHand
 }
 
 pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
-    let frontend_ready = app.try_state::<CloseBehaviorState>().is_some_and(|state| state.is_frontend_ready());
+    let frontend_ready =
+        app.try_state::<workspace_session::WorkspaceSessionState>().is_some_and(|state| state.any_ready());
     if should_fallback_to_native_quit(target, frontend_ready) {
         // A missing WebView2 runtime can prevent the frontend listener from ever
         // loading. Only the explicit tray Quit fallback bypasses the prompt.
@@ -911,6 +913,17 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
     let Some(window_label) = logical_primary_window_label(app) else {
         return;
     };
+    if target == "quit" {
+        let sessions = app.state::<workspace_session::WorkspaceSessionState>();
+        let preferred = if sessions.is_ready(&window_label) {
+            window_label
+        } else {
+            app.webview_windows().into_keys().find(|label| sessions.is_ready(label)).unwrap_or(window_label)
+        };
+        let (id, label) = sessions.begin(&preferred);
+        workspace_session::send_quit_request(app, &id, &label);
+        return;
+    }
     let _ = app.emit_to(
         EventTarget::webview_window(window_label.as_str()),
         APP_CLOSE_REQUESTED_EVENT,
@@ -2161,6 +2174,7 @@ pub fn run() {
     builder
         .manage(CloseBehaviorState::new())
         .manage(WindowOwnershipState::new())
+        .manage(workspace_session::WorkspaceSessionState::default())
         .manage(commands::tab_drag_preview::TabDragPreviewState::default())
         .manage(commands::plugin_file::PluginFileState::new())
         .manage(commands::plugin_media::PluginMediaState::new())
@@ -2171,8 +2185,10 @@ pub fn run() {
         .manage(promoted_build::PromotedBuildState::new())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started && is_workspace_window_label(webview.label()) {
+                let sessions = webview.app_handle().state::<workspace_session::WorkspaceSessionState>();
+                sessions.set_ready(webview.label(), false);
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
-                    state.set_frontend_ready(false);
+                    state.set_frontend_ready(sessions.any_ready());
                 }
             }
         })
@@ -2468,6 +2484,10 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::Destroyed = event {
+                window
+                    .app_handle()
+                    .state::<workspace_session::WorkspaceSessionState>()
+                    .set_ready(window.label(), false);
                 // A webview that no longer exists must not leave drop grants
                 // behind for a future renderer to claim.
                 if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
@@ -2587,6 +2607,7 @@ pub fn run() {
             commands::app_settings::set_app_locale,
             commands::app_settings::set_promoted_build,
             commands::app_settings::complete_app_close,
+            commands::app_settings::cancel_app_quit,
             commands::app_settings::complete_window_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,

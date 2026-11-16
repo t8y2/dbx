@@ -894,6 +894,7 @@ export default withEnglishFallback({
     logoutConfirm: "¿Seguro que deseas cerrar sesión?",
   },
   toolbar: {
+    independentWindow: "Ventana independiente",
     fileEncoding: "Codificación del archivo",
     encodingAuto: "Automática",
     immediateSync: "Sincronizar ahora",
@@ -5003,6 +5004,8 @@ export default withEnglishFallback({
     duplicateTab: "Duplicar pestaña",
     openTabInNewWindow: "Abrir pestaña en una nueva ventana",
     moveTabToAnotherWindow: "Mover pestaña a otra ventana",
+    openTabGroupInNewWindow: "Abrir grupo en una nueva ventana",
+    moveTabGroupToAnotherWindow: "Mover grupo a otra ventana",
     mainWindow: "Ventana principal",
     detachedWindow: "Ventana {number}",
     splitRight: "Dividir a la derecha",

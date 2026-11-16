@@ -4271,6 +4271,8 @@ export default withEnglishFallback({
     selectImportTitle: "Выберите подключения для импорта",
     selectAll: "Выбрать все",
     deselectAll: "Снять выбор со всех",
+    searchPlaceholder: "Поиск групп или подключений",
+    searchNoResults: "Нет подходящих групп или подключений",
     selectedCount: "{selected} / {total}",
     next: "Далее",
     importSelected: "Импортировать ({count})",

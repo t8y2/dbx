@@ -4192,6 +4192,8 @@ export default withEnglishFallback({
     selectImportTitle: "インポートする接続を選択",
     selectAll: "すべて選択",
     deselectAll: "すべて解除",
+    searchPlaceholder: "グループまたは接続を検索",
+    searchNoResults: "一致するグループまたは接続がありません",
     selectedCount: "{selected} / {total}",
     next: "次へ",
     importSelected: "{count}件をインポート",

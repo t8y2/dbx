@@ -3239,6 +3239,8 @@ export default withEnglishFallback({
     selectImportTitle: "İçe aktarılacak bağlantıları seçin",
     selectAll: "Tümünü seç",
     deselectAll: "Tüm seçimleri kaldır",
+    searchPlaceholder: "Grupları veya bağlantıları ara",
+    searchNoResults: "Eşleşen grup veya bağlantı yok",
     selectedCount: "{selected} / {total}",
     next: "İleri",
     importSelected: "{count} tanesini içe aktar",

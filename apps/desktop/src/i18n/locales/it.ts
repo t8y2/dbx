@@ -4171,6 +4171,8 @@ export default withEnglishFallback({
     selectImportTitle: "Seleziona le connessioni da importare",
     selectAll: "Seleziona tutto",
     deselectAll: "Deseleziona tutto",
+    searchPlaceholder: "Cerca gruppi o connessioni",
+    searchNoResults: "Nessun gruppo o connessione corrispondente",
     selectedCount: "{selected} / {total}",
     next: "Avanti",
     importSelected: "Importa {count}",

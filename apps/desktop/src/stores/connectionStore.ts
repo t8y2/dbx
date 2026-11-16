@@ -295,6 +295,16 @@ function mysqlTableListSourceChanged(config: ConnectionConfig, databaseInfo: Dat
   return config.db_type === "mysql" && usesProxyLogicalTables(config.database_info) !== usesProxyLogicalTables(databaseInfo);
 }
 
+// A MySQL server version change means the connection is talking to a different
+// server (e.g. the deployment was swapped from 5.7 to 8.0 between disconnect
+// and reconnect), so the database list cached from the old server is stale
+// even though the table enumeration source did not change.
+function mysqlServerVersionChanged(config: ConnectionConfig, databaseInfo: DatabaseConnectionInfo): boolean {
+  const previousVersion = config.database_info?.productVersion;
+  const nextVersion = databaseInfo.productVersion;
+  return config.db_type === "mysql" && !!previousVersion && !!nextVersion && previousVersion !== nextVersion;
+}
+
 function normalizeTableNameFilter(filter: Partial<TableNameFilter> | undefined | null): TableNameFilter {
   const normalizePatterns = (patterns: unknown): string[] => (Array.isArray(patterns) ? patterns.map((pattern) => (typeof pattern === "string" ? pattern.trim() : "")).filter(Boolean) : []);
   return {
@@ -5117,6 +5127,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (expectedConfigFingerprint && connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
     if (JSON.stringify(current.database_info) === JSON.stringify(normalized)) return;
     const tableListSourceChanged = mysqlTableListSourceChanged(current, normalized);
+    const serverVersionChanged = mysqlServerVersionChanged(current, normalized);
     const jobEngine = nativeJobAdminEngine(current);
 
     await api.saveConnectionDatabaseInfo(connectionId, normalized);
@@ -5133,9 +5144,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const connectionNode = findConnectionNode(connectionId);
       if (connectionNode) connectionNode.children = withConnectionUtilityNodes(connectionId, connectionNode.children ?? [], connectionNode);
     }
-    if (tableListSourceChanged) {
-      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES.
-      // Discard physical-table metadata that may have loaded before background version detection completed.
+    if (tableListSourceChanged || serverVersionChanged) {
+      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES,
+      // and a server version change means a different server answers now. Either way,
+      // discard metadata that may have loaded before background version detection completed.
       bumpTableListSourceRevision(connectionId);
       treeNodeLoads.cancelPrefix(connectionId);
       invalidateCompletionCache(connectionId);
@@ -5151,7 +5163,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     // Other database info is reactive connection metadata, not tree structure. Keep
     // navigator node identities stable so an in-flight first expansion can apply
-    // its loaded children after this background refresh completes.
+    // its loaded children after this background refresh completes. (A MySQL server
+    // version change is the exception: it is handled above, because the database
+    // list itself belongs to the server that reported the old version.)
   }
 
   async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig, expectedConfigFingerprint: string, isCurrent: () => boolean): Promise<void> {

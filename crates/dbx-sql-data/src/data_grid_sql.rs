@@ -4968,14 +4968,15 @@ enum DataGridLikeTemplate {
 /// filter keeps the same meaning as those patterns.
 const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
 
-/// TDengine rejects `LIKE ... ESCAPE` outright, and ClickHouse only added the
-/// clause in 26.6 (upstream issue #99599) — see
-/// `database_structure_search_sql`, which already omits it for ClickHouse. Their
-/// patterns stay unescaped: declaring the escape character would be a syntax
-/// error, and escaping without the clause would look for literal `~` text.
-/// Every other SQL target accepts the clause.
-fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool {
-    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse))
+/// Doris 2.1 uses backslash as the default LIKE escape and cannot parse an
+/// explicit ESCAPE clause. TDengine and ClickHouse keep their raw patterns
+/// because the clause is also unsupported by their older parsers.
+fn data_grid_like_escape_char(database_type: Option<DatabaseType>) -> Option<char> {
+    match database_type {
+        Some(DatabaseType::Doris) => Some('\\'),
+        Some(DatabaseType::Tdengine | DatabaseType::ClickHouse) => None,
+        _ => Some(DATA_GRID_LIKE_ESCAPE_CHAR),
+    }
 }
 
 /// Build the LIKE pattern for a user-typed filter value.
@@ -4989,7 +4990,10 @@ fn data_grid_like_pattern(
     database_type: Option<DatabaseType>,
 ) -> String {
     let raw = value_to_filter_text(value);
-    let body = if data_grid_like_escape_supported(database_type) { escape_data_grid_like_literal(&raw) } else { raw };
+    let body = match data_grid_like_escape_char(database_type) {
+        Some(escape_char) => escape_data_grid_like_literal(&raw, escape_char),
+        None => raw,
+    };
     match template {
         DataGridLikeTemplate::Contains => format!("%{body}%"),
         DataGridLikeTemplate::StartsWith => format!("{body}%"),
@@ -4997,11 +5001,11 @@ fn data_grid_like_pattern(
     }
 }
 
-fn escape_data_grid_like_literal(value: &str) -> String {
+fn escape_data_grid_like_literal(value: &str, escape_char: char) -> String {
     let mut escaped = String::with_capacity(value.len() + 8);
     for ch in value.chars() {
-        if ch == DATA_GRID_LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
-            escaped.push(DATA_GRID_LIKE_ESCAPE_CHAR);
+        if ch == escape_char || ch == '%' || ch == '_' {
+            escaped.push(escape_char);
         }
         escaped.push(ch);
     }
@@ -5017,7 +5021,7 @@ fn data_grid_like_condition(
     database_type: Option<DatabaseType>,
 ) -> String {
     let literal = format_grid_sql_literal(&Value::String(pattern), database_type, None);
-    if data_grid_like_escape_supported(database_type) {
+    if data_grid_like_escape_char(database_type) == Some(DATA_GRID_LIKE_ESCAPE_CHAR) {
         format!("{like_column} {operator} {literal} ESCAPE '{DATA_GRID_LIKE_ESCAPE_CHAR}'")
     } else {
         format!("{like_column} {operator} {literal}")

@@ -6,7 +6,7 @@
 | 日期 | 2026-11-15 |
 | 范围 | Web 形态（`dbx-web`）的多用户认证、会话、身份供给与管理；桌面（Tauri）形态维持本地单用户模型，仅在差异处说明 |
 | 关联文档 | `docs/content/docs/web-api.mdx`（对外 API 文档）、`crates/ARCHITECTURE.md`（crate 分层）、`scripts/core-architecture.test.mjs`（分层守护）、`README.md` "Multi-user & SSO login" |
-| 本文性质 | 第 2–10 章梳理当前工作树**已实现**的架构（含未提交改动）；第 11–13 章为安全分析与**待讨论决策点**，是本次评审重点 |
+| 本文性质 | 第 2–10 章梳理当前工作树**已实现**的架构（对应提交 `da5f0531b`）；第 11–13 章为安全分析与**待讨论决策点**，是本次评审重点 |
 
 ---
 

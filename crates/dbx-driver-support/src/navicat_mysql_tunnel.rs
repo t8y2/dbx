@@ -53,9 +53,6 @@ impl NavicatMysqlEndpoint {
         if host.trim().is_empty() || port == 0 {
             return Err("Navicat tunnel requires a MySQL target host and port".to_string());
         }
-        if username.is_empty() {
-            return Err("Navicat tunnel requires a MySQL username".to_string());
-        }
         Ok(Self {
             url,
             host: host.to_string(),
@@ -287,6 +284,7 @@ fn validate_stateless_query(sql: &str) -> Result<(), String> {
                 || (word_is(first, "START") && word_is(statement.get(1), "TRANSACTION"))
                 || (word_is(first, "RELEASE") && word_is(statement.get(1), "SAVEPOINT"))
                 || (word_is(first, "SET")
+                    && !enables_stateless_autocommit(statement)
                     && statement.iter().any(|token| {
                         word_is(Some(token), "AUTOCOMMIT")
                             || word_is(Some(token), "@@AUTOCOMMIT")
@@ -294,12 +292,33 @@ fn validate_stateless_query(sql: &str) -> Result<(), String> {
                     }));
         if transaction {
             return Err(
-                "Transactions, autocommit settings, and consistent snapshots are not supported by the stateless Navicat HTTP tunnel; use the DBX TCP HTTP tunnel (dbx_tunnel.php) for a fixed database session"
+                "Transactions, disabling autocommit, and consistent snapshots are not supported by the stateless Navicat HTTP tunnel; use the DBX TCP HTTP tunnel (dbx_tunnel.php) for a fixed database session"
                     .to_string(),
             );
         }
     }
     Ok(())
+}
+
+fn enables_stateless_autocommit(statement: &[Token]) -> bool {
+    let word_is = |token: Option<&Token>, expected: &str| matches!(token, Some(Token::Word(word)) if word.value.eq_ignore_ascii_case(expected));
+    if !word_is(statement.first(), "SET") {
+        return false;
+    }
+    let assignment = if word_is(statement.get(1), "SESSION") || word_is(statement.get(1), "LOCAL") {
+        &statement[2..]
+    } else {
+        &statement[1..]
+    };
+    // Native MySQL pools initialize with SET SESSION autocommit = 1. This does
+    // not require a persistent session and must reach the PHP script normally.
+    // Accept only a single literal assignment, never expressions or GLOBAL.
+    assignment.len() == 3
+        && word_is(assignment.first(), "AUTOCOMMIT")
+        && assignment[1] == Token::Eq
+        && (matches!(&assignment[2], Token::Number(value, _) if value == "1")
+            || word_is(assignment.get(2), "ON")
+            || word_is(assignment.get(2), "TRUE"))
 }
 
 fn stateless_query_tokens(sql: &str, output: &mut Vec<Token>) -> Result<(), String> {
@@ -628,6 +647,65 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn pool_autocommit_initialization_reaches_tunnel_with_empty_username() {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ntunnel_mysql.php", listener.local_addr().unwrap());
+        let endpoint = NavicatMysqlEndpoint::new(&url, "localhost", 3306, "", "", None, 5).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= header_end + 4 + content_length {
+                        let body = String::from_utf8_lossy(&request[header_end + 4..]).into_owned();
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
+                        stream.write_all(&[0, 0, 4, 87, 0, 206, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).await.unwrap();
+                        return body;
+                    }
+                }
+            }
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let bridge = tokio::spawn(super::serve(listener, endpoint));
+        read_packet(&mut client).await.unwrap();
+        let mut handshake = [0; 32];
+        handshake[..4].copy_from_slice(&CLIENT_PROTOCOL_41.to_le_bytes());
+        write_packet(&mut client, 1, &handshake).await.unwrap();
+        assert_eq!(read_packet(&mut client).await.unwrap().1[0], 0);
+
+        let setup_sql = "SET SESSION autocommit = 1";
+        let response = send_test_command(&mut client, 0x03, setup_sql.as_bytes()).await;
+        assert_eq!(response[0], 0, "pool initialization must return OK: {response:?}");
+        let body = server.await.unwrap();
+        assert!(body.split('&').any(|field| field == "login="), "{body}");
+        assert!(body.split('&').any(|field| field == "password="), "{body}");
+        let request_url = reqwest::Url::parse(&format!("http://localhost/?{body}")).unwrap();
+        let query = request_url.query_pairs().find_map(|(key, value)| (key == "q[]").then_some(value)).unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(query.as_bytes()).unwrap(), setup_sql.as_bytes());
+        bridge.abort();
+    }
+
     #[test]
     fn parses_navicat_query_response() {
         let mut body = Vec::from([0, 0, 4, 87, 0, 204, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -716,6 +794,11 @@ mod tests {
             "/*M! SET autocommit=0 */",
             "START /*!40100 TRANSACTION */",
             "SELECT 1; BEGIN",
+            "SET SESSION autocommit = 1; BEGIN",
+            "SET SESSION autocommit = 1; SET autocommit = 0",
+            "SET autocommit = 1, autocommit = 0",
+            "SET GLOBAL autocommit = 1",
+            "SET autocommit = 1 - 1",
         ] {
             assert!(validate_stateless_query(sql).is_err(), "{sql}");
         }
@@ -726,6 +809,11 @@ mod tests {
             "SET NAMES utf8mb4",
             "SET SESSION group_concat_max_len = 1048576",
             "SET @note = 'autocommit'",
+            "SET SESSION autocommit = 1",
+            "SET autocommit = ON;",
+            "SET LOCAL `autocommit` = TRUE",
+            "SET /* pool initialization */ SESSION autocommit = 1",
+            "/*!40101 SET SESSION AUTOCOMMIT=1 */",
             "USE information_schema",
         ] {
             assert!(validate_stateless_query(sql).is_ok(), "{sql}");

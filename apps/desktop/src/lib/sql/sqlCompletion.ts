@@ -2902,6 +2902,75 @@ export function getSqlCompletionResultValidFor(sql: string, cursor: number): Reg
   return undefined;
 }
 
+export function getSqlProcedureCall(sql: string, options: SqlSemanticBuildOptions, truncatedPrefix = false) {
+  if (!/\bcall\b/i.test(sql)) return null;
+  const dialect = resolveSqlDialectId(options);
+  const databaseType = options.databaseType;
+  const tokens = tokenizeSqlSemantic(sql, dialect, {
+    mysqlDashCommentRequiresWhitespace: !!databaseType && MYSQL_DASH_COMMENT_DIALECTS.has(databaseType),
+    mysqlBackslashEscape: !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType),
+    squareBracketsAsDelimiters: dialect === "postgres",
+  }).filter((token) => token.kind !== "comment");
+  let depth = 0;
+  let activeParameter = 0;
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index];
+    if (token.kind !== "punctuation") continue;
+    if (token.text === ";") return null;
+    if ([")", "]", "）"].includes(token.text)) depth++;
+    if (["(", "[", "（"].includes(token.text)) {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      if (token.text === "[") return null;
+      const parts = [];
+      let beforeName = index - 1;
+      while (beforeName >= 0) {
+        const part = tokens[beforeName];
+        if (part.kind !== "word" && (part.kind !== "quoted_identifier" || !part.closed)) break;
+        parts.unshift(part);
+        beforeName--;
+        if (tokens[beforeName]?.text !== ".") break;
+        beforeName--;
+      }
+      const call = tokens[beforeName];
+      const name = parts.pop();
+      if (!name || call?.kind !== "word" || call.normalized !== "call" || (truncatedPrefix && call.span.start === 0)) return null;
+      const identifier = (part: typeof name) => {
+        if (part.kind !== "quoted_identifier") return part.text;
+        const quote = part.quote === "[" ? "]" : (part.quote ?? '"');
+        return part.text.slice(1, -1).replaceAll(quote + quote, quote);
+      };
+      return {
+        name: sql.slice(parts[0]?.span.start ?? name.span.start, name.span.end),
+        nameEnd: name.span.end,
+        prefix: identifier(name),
+        prefixQuoted: name.kind === "quoted_identifier",
+        qualifierParts: parts.map(identifier),
+        qualifierQuoted: parts.map((part) => part.kind === "quoted_identifier"),
+        activeParameter,
+      };
+    }
+    if (token.text === "," && depth === 0) activeParameter++;
+  }
+  return null;
+}
+
+export function buildSqlProcedureSignatureHelp(call: NonNullable<ReturnType<typeof getSqlProcedureCall>>, signatures: string[]): SqlFunctionSignatureHelp | null {
+  const overloads = signatures
+    .map(splitRoutineSignatureParameters)
+    .filter((parameters) => parameters.length > 0)
+    .sort((left, right) => Number(call.activeParameter < right.length) - Number(call.activeParameter < left.length))
+    .map((parameters) => ({
+      signature: `${call.name}(${parameters.join(", ")})`,
+      parameterGroups: [parameters],
+      activeGroup: 0,
+      activeParameter: call.activeParameter,
+    }));
+  return overloads.length ? { name: call.name, overloads, activeOverload: 0 } : null;
+}
+
 export function getSqlFunctionSignatureHelp(sql: string, cursor: number, databaseType?: DatabaseType, driverProfile?: string, options?: { truncatedPrefix?: boolean }): SqlFunctionSignatureHelp | null {
   const beforeCursor = sql.slice(0, cursor);
   const call = findActiveFunctionCall(beforeCursor, options?.truncatedPrefix === true);

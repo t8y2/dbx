@@ -3692,6 +3692,7 @@ export default withEnglishFallback({
     queryWhileSaving: "As alterações do conjunto de resultados estão sendo salvas. Aguarde a conclusão do salvamento antes de executar a consulta.",
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condição",
+    rowJsonPreview: "Pré-visualização JSON",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",
@@ -4169,6 +4170,8 @@ export default withEnglishFallback({
     selectImportTitle: "Selecionar conexões para importar",
     selectAll: "Selecionar tudo",
     deselectAll: "Desmarcar tudo",
+    searchPlaceholder: "Pesquisar grupos ou conexões",
+    searchNoResults: "Nenhum grupo ou conexão correspondente",
     selectedCount: "{selected} / {total}",
     next: "Próximo",
     importSelected: "Importar {count}",
@@ -5221,6 +5224,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "Por padrão, segue a configuração da sessão. Quando desativado, executa com SET FOREIGN_KEY_CHECKS = 0, permitindo processar as tabelas referenciadas em qualquer ordem; após a execução, o valor original é restaurado.",
     createSequence: "Nova sequência",
     viewPostgresRowLevelSecurity: "Ver políticas de segurança em nível de linha",
+    copyGeneratedSql: "Copiar SQL gerado",
   },
   visibleDatabases: {
     title: "Bancos de dados visíveis",

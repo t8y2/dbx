@@ -1,7 +1,21 @@
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridDisplayText, mongoDocumentGridExternalValue, mongoDocumentGridValue } from "@/lib/mongo/mongoDocumentValues";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { describe, expect, it } from "vitest";
-import { buildDataGridCellDetail, buildDataGridColumnDetail, buildDataGridRowDetail, buildDeleteRowConfirmDetails, dataGridColumnDetailJson, dataGridColumnDetailTsv, dataGridRowDetailJson, dataGridRowDetailTsv, type DataGridColumnDetail, type DataGridRowDetail } from "../dataGridDetail";
+import {
+  buildDataGridCellDetail,
+  buildDataGridColumnDetail,
+  buildDataGridJsonPreviewLines,
+  buildDataGridRowDetail,
+  buildDeleteRowConfirmDetails,
+  dataGridColumnDetailJson,
+  dataGridColumnDetailTsv,
+  dataGridRowDetailJson,
+  dataGridRowDetailPreviewFields,
+  dataGridRowDetailTsv,
+  DATA_GRID_JSON_COMMENT_GAP,
+  type DataGridColumnDetail,
+  type DataGridRowDetail,
+} from "../dataGridDetail";
 
 type TestRow = string[];
 
@@ -169,6 +183,59 @@ describe("data grid detail TSV", () => {
 
     expect(dataGridRowDetailTsv(rowDetail)).toBe("\tNULL");
     expect(dataGridColumnDetailTsv(columnDetail)).toBe("\nNULL");
+  });
+});
+
+describe("data grid JSON preview lines", () => {
+  function rowDetailFor(value: string) {
+    return buildDataGridRowDetail({
+      rowIndex: 0,
+      rowId: 1,
+      row: [value, "active"],
+      columns: ["payload", "status"],
+      columnIndexes: [0, 1],
+      displayValue: String,
+      commentByColumn: new Map([["payload", "nested payload"]]),
+    });
+  }
+
+  it("renders nested JSON with physical line numbers and four-space comments", () => {
+    const fields = dataGridRowDetailPreviewFields(rowDetailFor('{"user":{"name":"Alice","roles":["admin","reader"]}}'));
+    const lines = buildDataGridJsonPreviewLines(fields);
+
+    expect(DATA_GRID_JSON_COMMENT_GAP).toBe("    ");
+    expect(lines.map((line) => line.lineNumber)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(lines.map((line) => line.text)).toEqual(["{", '  "payload": {', '    "user": {', '      "name": "Alice",', '      "roles": [', '        "admin",', '        "reader"', "      ]", "    }", "  },", '  "status": "active"', "}"]);
+    expect(lines[1]?.comment).toBe("nested payload");
+    expect(lines[1]?.togglePath).toBe("/0");
+    expect(lines[1]?.expanded).toBe(true);
+  });
+
+  it("hides descendants when a container path is collapsed and keeps following line numbers contiguous", () => {
+    const fields = dataGridRowDetailPreviewFields(rowDetailFor('{"user":{"name":"Alice","roles":["admin","reader"]}}'));
+    const lines = buildDataGridJsonPreviewLines(fields, new Set(["/0"]));
+
+    expect(lines.map((line) => line.text)).toEqual(["{", '  "payload": {…},', '  "status": "active"', "}"]);
+    expect(lines.map((line) => line.lineNumber)).toEqual([1, 2, 3, 4]);
+    expect(lines[1]?.expanded).toBe(false);
+  });
+
+  it("keeps a truncated multiline field as visible text without making it expandable", () => {
+    const field = {
+      columnIndex: 0,
+      column: "payload",
+      value: { nested: true },
+      text: '  "payload": {\n    "nested": true\n  }…',
+      comment: "payload comment",
+      previewLength: 24,
+      isTruncated: true,
+    };
+    const lines = buildDataGridJsonPreviewLines([field]);
+
+    expect(lines.map((line) => line.lineNumber)).toEqual([1, 2, 3, 4, 5]);
+    expect(lines[1]?.togglePath).toBeUndefined();
+    expect(lines[3]?.comment).toBe("payload comment");
+    expect(lines[3]?.previewLength).toBe(24);
   });
 });
 

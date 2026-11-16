@@ -3954,6 +3954,7 @@ export default withEnglishFallback({
     queryWhileSaving: "กำลังบันทึกการแก้ไขชุดผลลัพธ์ โปรดรอให้การบันทึกเสร็จสิ้นก่อนเรียกใช้คิวรี",
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
+    rowJsonPreview: "ตัวอย่าง JSON",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",
@@ -4455,6 +4456,8 @@ export default withEnglishFallback({
     selectImportTitle: "เลือกการเชื่อมต่อเพื่อนำเข้า",
     selectAll: "เลือกทั้งหมด",
     deselectAll: "ยกเลิกการเลือกทั้งหมด",
+    searchPlaceholder: "ค้นหากลุ่มหรือการเชื่อมต่อ",
+    searchNoResults: "ไม่พบกลุ่มหรือการเชื่อมต่อที่ตรงกัน",
     selectedCount: "{selected} / {total}",
     next: "ถัดไป",
     importSelected: "นำเข้า {count}",
@@ -5517,6 +5520,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "โดยค่าเริ่มต้นจะใช้การตั้งค่าของเซสชัน เมื่อปิดใช้งาน จะดำเนินการด้วย SET FOREIGN_KEY_CHECKS = 0 และสามารถจัดการตารางที่ถูกอ้างอิงในลำดับใดก็ได้ หลังจากดำเนินการแล้วจะคืนค่าเดิม",
     createSequence: "สร้างซีเควนซ์",
     viewPostgresRowLevelSecurity: "ดูนโยบายความปลอดภัยระดับแถว",
+    copyGeneratedSql: "คัดลอก SQL ที่สร้างขึ้น",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

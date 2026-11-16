@@ -3777,6 +3777,7 @@ export default withEnglishFallback({
     queryWhileSaving: "Сохранение изменений в наборе результатов выполняется. Дождитесь завершения сохранения, прежде чем выполнять запрос.",
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
+    rowJsonPreview: "Предпросмотр JSON",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",
@@ -4271,6 +4272,8 @@ export default withEnglishFallback({
     selectImportTitle: "Выберите подключения для импорта",
     selectAll: "Выбрать все",
     deselectAll: "Снять выбор со всех",
+    searchPlaceholder: "Поиск групп или подключений",
+    searchNoResults: "Нет подходящих групп или подключений",
     selectedCount: "{selected} / {total}",
     next: "Далее",
     importSelected: "Импортировать ({count})",
@@ -5342,6 +5345,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "По умолчанию используется параметр сеанса. При отключении выполняется с SET FOREIGN_KEY_CHECKS = 0, что позволяет обрабатывать таблицы, на которые есть ссылки, в любом порядке; после выполнения исходное значение восстанавливается.",
     createSequence: "Создать последовательность",
     viewPostgresRowLevelSecurity: "Просмотреть политики безопасности на уровне строк",
+    copyGeneratedSql: "Копировать сгенерированный SQL",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

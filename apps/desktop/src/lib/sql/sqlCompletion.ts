@@ -2905,6 +2905,75 @@ export function getSqlCompletionResultValidFor(sql: string, cursor: number): Reg
   return undefined;
 }
 
+export function getSqlProcedureCall(sql: string, options: SqlSemanticBuildOptions, truncatedPrefix = false) {
+  if (!/\bcall\b/i.test(sql)) return null;
+  const dialect = resolveSqlDialectId(options);
+  const databaseType = options.databaseType;
+  const tokens = tokenizeSqlSemantic(sql, dialect, {
+    mysqlDashCommentRequiresWhitespace: !!databaseType && MYSQL_DASH_COMMENT_DIALECTS.has(databaseType),
+    mysqlBackslashEscape: !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType),
+    squareBracketsAsDelimiters: dialect === "postgres",
+  }).filter((token) => token.kind !== "comment");
+  let depth = 0;
+  let activeParameter = 0;
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index];
+    if (token.kind !== "punctuation") continue;
+    if (token.text === ";") return null;
+    if ([")", "]", "）"].includes(token.text)) depth++;
+    if (["(", "[", "（"].includes(token.text)) {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      if (token.text === "[") return null;
+      const parts = [];
+      let beforeName = index - 1;
+      while (beforeName >= 0) {
+        const part = tokens[beforeName];
+        if (part.kind !== "word" && (part.kind !== "quoted_identifier" || !part.closed)) break;
+        parts.unshift(part);
+        beforeName--;
+        if (tokens[beforeName]?.text !== ".") break;
+        beforeName--;
+      }
+      const call = tokens[beforeName];
+      const name = parts.pop();
+      if (!name || call?.kind !== "word" || call.normalized !== "call" || (truncatedPrefix && call.span.start === 0)) return null;
+      const identifier = (part: typeof name) => {
+        if (part.kind !== "quoted_identifier") return part.text;
+        const quote = part.quote === "[" ? "]" : (part.quote ?? '"');
+        return part.text.slice(1, -1).replaceAll(quote + quote, quote);
+      };
+      return {
+        name: sql.slice(parts[0]?.span.start ?? name.span.start, name.span.end),
+        nameEnd: name.span.end,
+        prefix: identifier(name),
+        prefixQuoted: name.kind === "quoted_identifier",
+        qualifierParts: parts.map(identifier),
+        qualifierQuoted: parts.map((part) => part.kind === "quoted_identifier"),
+        activeParameter,
+      };
+    }
+    if (token.text === "," && depth === 0) activeParameter++;
+  }
+  return null;
+}
+
+export function buildSqlProcedureSignatureHelp(call: NonNullable<ReturnType<typeof getSqlProcedureCall>>, signatures: string[]): SqlFunctionSignatureHelp | null {
+  const overloads = signatures
+    .map(splitRoutineSignatureParameters)
+    .filter((parameters) => parameters.length > 0)
+    .sort((left, right) => Number(call.activeParameter < right.length) - Number(call.activeParameter < left.length))
+    .map((parameters) => ({
+      signature: `${call.name}(${parameters.join(", ")})`,
+      parameterGroups: [parameters],
+      activeGroup: 0,
+      activeParameter: call.activeParameter,
+    }));
+  return overloads.length ? { name: call.name, overloads, activeOverload: 0 } : null;
+}
+
 export function getSqlFunctionSignatureHelp(sql: string, cursor: number, databaseType?: DatabaseType, driverProfile?: string, options?: { truncatedPrefix?: boolean }): SqlFunctionSignatureHelp | null {
   const beforeCursor = sql.slice(0, cursor);
   const call = findActiveFunctionCall(beforeCursor, options?.truncatedPrefix === true);
@@ -5050,7 +5119,13 @@ function extractReferencedTablesInBody(sql: string, knownCtes?: readonly Scanned
   return refs;
 }
 
-function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType, normalizedDialect?: SqlSemanticDialectAdapter, projection?: CompletionProjection): string[] {
+// Guards the subquery-reference recursion below on pathological inputs. Real statements
+// stay far below this depth; the cap only exists so a hostile/degenerate document cannot
+// turn completion into unbounded work.
+const MAX_COMPLETION_SUBQUERY_DEPTH = 64;
+
+function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType, normalizedDialect?: SqlSemanticDialectAdapter, projection?: CompletionProjection, depth = 0): string[] {
+  if (depth > MAX_COMPLETION_SUBQUERY_DEPTH) return [];
   const expressions = normalizedDialect ? completionProjectionExpressions(sql, normalizedDialect) : splitTopLevel(extractSelectList(sql) ?? "", ",");
   if (!expressions.length) {
     if (projection) projection.widthKnown = false;
@@ -5098,7 +5173,7 @@ function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDe
                 columns = [];
               } else {
                 sourceProjection = { slots: [], widthKnown: true };
-                columns = extractSelectColumnNames(sql.slice(tokens[open].span.end, tokens[close].span.start), knownCtes, databaseType, normalizedDialect, sourceProjection);
+                columns = extractSelectColumnNames(sql.slice(tokens[open].span.end, tokens[close].span.start), knownCtes, databaseType, normalizedDialect, sourceProjection, depth + 1);
               }
             }
             const aliasTokens = source.aliasSpan ? tokens.filter((token) => token.span.start >= source.aliasSpan!.end && token.span.end <= source.sourceSpan.end && (token.kind === "word" || token.kind === "quoted_identifier")) : [];
@@ -5113,7 +5188,7 @@ function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDe
         return referencedInBody;
       }
       referencedInBody = extractReferencedTablesInBody(sql, knownCtes, databaseType);
-      const subqueryRefs = extractSubqueryReferences(sql, knownCtes, databaseType);
+      const subqueryRefs = extractSubqueryReferences(sql, knownCtes, databaseType, depth);
       for (const sq of subqueryRefs) {
         if (sq.alias && sq.columns?.length) {
           const sqAlias = sq.alias.toLowerCase();
@@ -5391,12 +5466,11 @@ function keepOnlyCteBody(statement: string, cte: ScannedCteDefinition): string {
   return `${" ".repeat(cte.bodyStart + 1)}${statement.slice(cte.bodyStart + 1, cte.bodyEnd)}${" ".repeat(Math.max(0, statement.length - cte.bodyEnd))}`;
 }
 
-function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
+function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType, depth = 0): SqlCompletionReferencedTable[] {
   const refs: SqlCompletionReferencedTable[] = [];
-  const pattern = /\b(?:from|join)\s*\(/gi;
+  if (depth > MAX_COMPLETION_SUBQUERY_DEPTH) return refs;
 
-  for (const match of sql.matchAll(pattern)) {
-    const openParen = match.index! + match[0].length - 1;
+  for (const openParen of topLevelSubqueryOpenParens(sql)) {
     const closeParen = findMatchingParen(sql, openParen);
     if (closeParen === -1) continue;
 
@@ -5414,12 +5488,71 @@ function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteD
 
     // Extract SELECT columns from subquery body
     const body = sql.slice(openParen + 1, closeParen);
-    const columns = extractSelectColumnNames(body, knownCtes, databaseType);
+    const columns = extractSelectColumnNames(body, knownCtes, databaseType, undefined, undefined, depth + 1);
 
     refs.push({ name: alias, alias, columns });
   }
 
   return refs;
+}
+
+/**
+ * Open-paren positions of `FROM (` / `JOIN (` at the *top level* of `sql`.
+ *
+ * Depth matters here: `extractSelectColumnNames` expands `alias.*` by recursing into each
+ * body it sees, so scanning every nesting level from every level re-analyzed the whole
+ * descendant subtree once per ancestor. A chain of N `SELECT p.* FROM ( ... ) p` wrappers --
+ * the shape generated by a stack of derived tables -- then cost O(2^N) and hung the editor
+ * on completion (reported as a paste freeze). Each level now only yields its own subqueries;
+ * deeper ones are reached exactly once, from their parent body.
+ */
+function topLevelSubqueryOpenParens(sql: string): number[] {
+  const opens: number[] = [];
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+  let inBracket = false;
+  let lastWord = "";
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (inBracket) {
+      if (ch === "]") inBracket = false;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      lastWord = "";
+      continue;
+    }
+    if (ch === "[") {
+      inBracket = true;
+      lastWord = "";
+      continue;
+    }
+    if (ch === "(") {
+      if (depth === 0 && (lastWord === "from" || lastWord === "join")) opens.push(i);
+      depth += 1;
+      lastWord = "";
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      lastWord = "";
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let end = i + 1;
+      while (end < sql.length && /[\w$]/.test(sql[end]!)) end++;
+      lastWord = sql.slice(i, end).toLowerCase();
+      i = end - 1;
+      continue;
+    }
+    if (!/\s/.test(ch)) lastWord = "";
+  }
+  return opens;
 }
 
 const ALIAS_BLACKLIST_FOR_REF = new Set(["where", "group", "order", "having", "limit", "offset", "union", "intersect", "except", "and", "or", "not", "is", "like", "in", "between", "exists", "select", "on", "set", "left", "right", "inner", "outer", "cross", "full", "natural", "join"]);

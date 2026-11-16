@@ -26,4 +26,12 @@ export interface PluginConnectionSummary {
   providerId?: string;
   connectionType?: string;
   workbenchTitles?: string[];
+  /**
+   * Sidebar group of the connection's owning group (t8y2/dbx#15002), filled only
+   * by the provider-scoped `host.listConnections` branch; `null` when ungrouped.
+   * Plugins feature-detect the key instead of a host_api version.
+   */
+  groupId?: string | null;
+  /** Display name of the owning group, follows `renameConnectionGroup`. */
+  groupName?: string | null;
 }

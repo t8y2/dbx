@@ -46,6 +46,13 @@ vi.mock("@/stores/connectionStore", () => ({
       { id: "conn-sample", name: "Sample Connection", db_type: "plugin", plugin_connection_provider: "sample.provider", plugin_connection_type: "sample", read_only: true },
     ],
     connectedIds: new Set(["conn-mysql"]),
+    sidebarLayout: {
+      groups: [{ id: "grp-prod", name: "Prod", collapsed: false }],
+      order: [
+        { type: "group", id: "grp-prod", children: [{ type: "connection", id: "conn-sample" }] },
+        { type: "connection", id: "conn-mysql" },
+      ],
+    },
   }),
 }));
 vi.mock("@/stores/queryStore", () => ({
@@ -444,6 +451,52 @@ describe("PluginWorkbenchHost initialization", () => {
           type: "response",
           id: "conn-req-1",
           result: expect.arrayContaining([expect.objectContaining({ id: "conn-mysql", name: "Prod MySQL", dbType: "mysql", dialect: "mysql", connected: true, isConnected: true }), expect.objectContaining({ id: "conn-sample", name: "Sample Connection", connected: false, isConnected: false })]),
+        }),
+        "*",
+      ),
+    );
+  });
+
+  it("serves scoped connections with sidebar group fields to plugins without host.connections:read", async () => {
+    const pluginScoped: InstalledPlugin = {
+      manifest: {
+        id: "sample",
+        name: "Sample",
+        version: "1.0.0",
+        permissions: ["host.workbench"],
+        drivers: [],
+        contributions: [
+          { type: "connection-provider", id: "sample.provider", label: "Sample", database_type: "sample", fields: [] },
+          { type: "workbench", id: "sample.main", label: "Sample" },
+        ] as InstalledPlugin["manifest"]["contributions"],
+      },
+      compatibility: { compatible: true },
+    };
+    app = createApp(PluginWorkbenchHost, { plugin: pluginScoped, contribution, context: { connectionId: "connection" } });
+    app.mount(root);
+    await flushWorkbenchLoad();
+    const frame = root.querySelector("iframe")!;
+    const target = frame.contentWindow!;
+    const postMessage = vi.spyOn(target, "postMessage").mockImplementation(() => {});
+    window.dispatchEvent(new MessageEvent("message", { source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } }));
+    await vi.waitFor(() => expect(mocks.repushPluginConnection).toHaveBeenCalled());
+    postMessage.mockClear();
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "request", id: "scoped-req-1", method: "host.listConnections", params: {} },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "dbx-host",
+          type: "response",
+          id: "scoped-req-1",
+          // The scoped branch filters by the plugin's own providers, so only the
+          // sample connection is served — and it carries its sidebar group (t8y2/dbx#15002).
+          result: expect.arrayContaining([expect.objectContaining({ id: "conn-sample", providerId: "sample.provider", groupId: "grp-prod", groupName: "Prod" })]),
         }),
         "*",
       ),

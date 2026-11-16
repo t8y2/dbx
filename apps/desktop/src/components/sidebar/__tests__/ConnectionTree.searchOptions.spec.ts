@@ -149,7 +149,8 @@ it("filters globally indexed names exactly while retaining regex comment matchin
   const searchMatchMode = ref("exact");
   const globalTableSearchScopes = ref([{ entries: [{ name: "Orders" }, { name: "orders_backup" }, { name: "customers", comment: "orders" }] }]);
   const mergeSidebarRegexIndexScopes = vi.fn((_nodes, scopes) => scopes);
-  const bindings = { regexMode, searchMatchMode, globalTableSearchScopes, mergeSidebarRegexIndexScopes, createSidebarLabelMatcher, deferredSearchQuery: ref("orders") };
+  const store = { resolveSidebarSearchDetailTable: (node: unknown) => node };
+  const bindings = { store, regexMode, searchMatchMode, globalTableSearchScopes, mergeSidebarRegexIndexScopes, createSidebarLabelMatcher, deferredSearchQuery: ref("orders") };
   const filter = new Function(...Object.keys(bindings), `${compiledFilter}; return filterGloballyIndexedTables;`)(...Object.values(bindings));
   expect(filter([])[0].entries.map((entry: { name: string }) => entry.name)).toEqual(["Orders"]);
   regexMode.value = true;

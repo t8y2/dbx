@@ -22,6 +22,8 @@ For a backup that should run only once, use **Back up now** in Settings instead 
 | Table scope | All, include by pattern, or exclude by pattern |
 | Retention | Keep a configured number of recent successful backup files |
 
+PostgreSQL and openGauss backups traverse only non-system schemas on which the current account has `USAGE`, including owned schemas and schemas accessible through grants. Tables and objects within those schemas still require the appropriate read permissions; a read failure fails the backup. For a complete database backup, use an account that can read every target schema and object.
+
 ## Run a One-time Backup
 
 <Steps>

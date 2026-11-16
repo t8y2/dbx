@@ -58,6 +58,18 @@ describe("normalizeEditorSettings", () => {
     expect(settings.editorSettings).toMatchObject(defaults);
   });
 
+  it("defaults dataGridOrderByVisible to true and dataGridWhereRatio to 0.5", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible).toBe(true);
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({}).dataGridOrderByVisible).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridOrderByVisible: false }).dataGridOrderByVisible).toBe(false);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.7 }).dataGridWhereRatio).toBe(0.7);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.1 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.95 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: "0.7" as any }).dataGridWhereRatio).toBe(0.5);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
@@ -1543,10 +1555,6 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],

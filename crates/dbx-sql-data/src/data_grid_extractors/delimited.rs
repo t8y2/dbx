@@ -39,29 +39,34 @@ pub(super) fn write_dsv(
         }
         write_dsv_data_row(
             output,
-            context.selected_source_indexes.iter().zip(&context.selected_columns).map(|(source_index, column)| {
-                let value = &row[*source_index];
-                if value.is_null() {
-                    DsvCell::Null
-                } else {
-                    let is_numeric_string =
-                        value.as_str().is_some_and(|text| !text.is_empty() && text.parse::<f64>().is_ok());
-                    let numeric_type = is_numeric_type(column.data_type.as_deref());
-                    let mut text = format_array_value(
-                        value_text(value).into_owned(),
-                        value,
-                        column.data_type.as_deref(),
-                        options.array_format,
-                    );
-                    text = replace_line_feeds(text, &options.line_feed_escape_string);
-                    let is_numeric =
-                        value.is_number() || (numeric_type && text.parse::<f64>().is_ok()) || is_numeric_string;
-                    if options.escape_formulas && starts_formula(&text) && !is_numeric {
-                        text.insert(0, '\'');
+            context.selected_source_indexes.iter().zip(&context.selected_columns).enumerate().map(
+                |(column_offset, (source_index, column))| {
+                    if !context.is_selected(row_index, column_offset) {
+                        return DsvCell::Text(Cow::Borrowed(""), false, false);
                     }
-                    DsvCell::Text(Cow::Owned(text), numeric_type, is_numeric_string)
-                }
-            }),
+                    let value = &row[*source_index];
+                    if value.is_null() {
+                        DsvCell::Null
+                    } else {
+                        let is_numeric_string =
+                            value.as_str().is_some_and(|text| !text.is_empty() && text.parse::<f64>().is_ok());
+                        let numeric_type = is_numeric_type(column.data_type.as_deref());
+                        let mut text = format_array_value(
+                            value_text(value).into_owned(),
+                            value,
+                            column.data_type.as_deref(),
+                            options.array_format,
+                        );
+                        text = replace_line_feeds(text, &options.line_feed_escape_string);
+                        let is_numeric =
+                            value.is_number() || (numeric_type && text.parse::<f64>().is_ok()) || is_numeric_string;
+                        if options.escape_formulas && starts_formula(&text) && !is_numeric {
+                            text.insert(0, '\'');
+                        }
+                        DsvCell::Text(Cow::Owned(text), numeric_type, is_numeric_string)
+                    }
+                },
+            ),
             options,
             options.include_row_header.then(|| (row_index + 1).to_string()),
             quote_char_triggers_quoting,
@@ -393,13 +398,17 @@ pub(super) fn write_one_row(context: &ExtractContext<'_>, output: &mut dyn Write
     let options = DataGridDsvOptions { column_separator: ",".to_string(), ..context.request.options.dsv.clone() };
     validate_dsv_options(&options, false)?;
     let mut first = true;
-    for row in &context.request.rows {
-        for (source_index, column) in context.selected_source_indexes.iter().zip(&context.selected_columns) {
+    for (row_index, row) in context.request.rows.iter().enumerate() {
+        for (column_offset, (source_index, column)) in
+            context.selected_source_indexes.iter().zip(&context.selected_columns).enumerate()
+        {
             if !first {
                 write_bytes(output, options.column_separator.as_bytes())?;
             }
             let value = &row[*source_index];
-            let cell = if value.is_null() {
+            let cell = if !context.is_selected(row_index, column_offset) {
+                DsvCell::Text(Cow::Borrowed(""), false, false)
+            } else if value.is_null() {
                 DsvCell::Null
             } else {
                 let numeric_string = value.as_str().is_some_and(|text| !text.is_empty() && text.parse::<f64>().is_ok());

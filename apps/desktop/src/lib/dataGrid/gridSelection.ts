@@ -22,6 +22,11 @@ export interface CellSelectionMatrix extends SelectionData {
   columnIndexes: number[];
 }
 
+export interface CellSelectionClipboardMatrix extends CellSelectionMatrix {
+  /** True for selected cells; false for empty placeholders inserted to keep clipboard rows rectangular. */
+  selectedMask: boolean[][];
+}
+
 export interface SelectionSummary {
   cellCount: number;
   rowCount: number;

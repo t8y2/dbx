@@ -9,10 +9,15 @@ pub(super) fn write_markdown(context: &ExtractContext<'_>, output: &mut dyn Writ
         output,
         format!("| {} |", context.selected_columns.iter().map(|_| "---").collect::<Vec<_>>().join(" | ")).as_bytes(),
     )?;
-    for row in &context.request.rows {
+    for (row_index, row) in context.request.rows.iter().enumerate() {
         write_bytes(output, b"\n")?;
-        let values =
-            context.selected_source_indexes.iter().map(|source_index| markdown_text(&value_text(&row[*source_index])));
+        let values = context.selected_source_indexes.iter().enumerate().map(|(column_offset, source_index)| {
+            if context.is_selected(row_index, column_offset) {
+                markdown_text(&value_text(&row[*source_index]))
+            } else {
+                String::new()
+            }
+        });
         write_bytes(output, format!("| {} |", values.collect::<Vec<_>>().join(" | ")).as_bytes())?;
     }
     Ok(())
@@ -24,11 +29,15 @@ pub(super) fn write_html(context: &ExtractContext<'_>, output: &mut dyn Write) -
         write_bytes(output, format!("<th>{}</th>", html_text(&column.display_name)).as_bytes())?;
     }
     write_bytes(output, b"</tr></thead>\n  <tbody>")?;
-    for row in &context.request.rows {
+    for (row_index, row) in context.request.rows.iter().enumerate() {
         write_bytes(output, b"\n    <tr>")?;
-        for source_index in &context.selected_source_indexes {
-            let value = &row[*source_index];
-            write_bytes(output, format!("<td>{}</td>", html_text(&value_text(value))).as_bytes())?;
+        for (column_offset, source_index) in context.selected_source_indexes.iter().enumerate() {
+            let value = if context.is_selected(row_index, column_offset) {
+                value_text(&row[*source_index]).into_owned()
+            } else {
+                String::new()
+            };
+            write_bytes(output, format!("<td>{}</td>", html_text(&value)).as_bytes())?;
         }
         write_bytes(output, b"</tr>")?;
     }
@@ -37,9 +46,14 @@ pub(super) fn write_html(context: &ExtractContext<'_>, output: &mut dyn Write) -
 
 pub(super) fn write_xml(context: &ExtractContext<'_>, output: &mut dyn Write) -> Result<(), DataGridExtractError> {
     write_bytes(output, b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rows>")?;
-    for row in &context.request.rows {
+    for (row_index, row) in context.request.rows.iter().enumerate() {
         write_bytes(output, b"\n  <row>")?;
-        for (column, source_index) in context.selected_columns.iter().zip(&context.selected_source_indexes) {
+        for (column_offset, (column, source_index)) in
+            context.selected_columns.iter().zip(&context.selected_source_indexes).enumerate()
+        {
+            if !context.is_selected(row_index, column_offset) {
+                continue;
+            }
             let value = &row[*source_index];
             let name = html_text(&column.display_name);
             if value.is_null() {
@@ -66,18 +80,28 @@ pub(super) fn write_pretty(context: &ExtractContext<'_>, output: &mut dyn Write)
                 .request
                 .rows
                 .iter()
-                .map(|row| value_text(&row[context.selected_source_indexes[index]]).replace(['\r', '\n'], " ").width())
+                .enumerate()
+                .map(|(row_index, row)| {
+                    if context.is_selected(row_index, index) {
+                        value_text(&row[context.selected_source_indexes[index]]).replace(['\r', '\n'], " ").width()
+                    } else {
+                        0
+                    }
+                })
                 .fold(column.display_name.width(), usize::max)
         })
         .collect::<Vec<_>>();
     write_pretty_border(output, &widths)?;
     write_pretty_row(output, context.selected_columns.iter().map(|column| column.display_name.as_str()), &widths)?;
     write_pretty_border(output, &widths)?;
-    for row in &context.request.rows {
-        let values = context
-            .selected_source_indexes
-            .iter()
-            .map(|source_index| value_text(&row[*source_index]).replace(['\r', '\n'], " "));
+    for (row_index, row) in context.request.rows.iter().enumerate() {
+        let values = context.selected_source_indexes.iter().enumerate().map(|(column_offset, source_index)| {
+            if context.is_selected(row_index, column_offset) {
+                value_text(&row[*source_index]).replace(['\r', '\n'], " ")
+            } else {
+                String::new()
+            }
+        });
         write_pretty_owned_row(output, values, &widths)?;
     }
     write_pretty_border(output, &widths)

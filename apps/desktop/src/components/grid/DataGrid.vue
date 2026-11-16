@@ -6659,6 +6659,7 @@ const selection = useDataGridSelection({
   cellFromClientPoint: dataGridCellFromClientPoint,
   rowFromClientPoint: dataGridRowFromClientPoint,
   onUserCellSelection: invalidateContextMenuTarget,
+  onDraggedCellSelectionChange: scheduleCanvasDraw,
   // Canvas schedules its draw before the document-level mousemove handler runs,
   // so its row state must be current before that frame is painted.
   shouldUpdateDraggedRowsImmediately: () => useCanvasGridRows.value,
@@ -6674,6 +6675,7 @@ const {
   selectedCells,
   selectedCellKeys,
   selectedCellMatrix,
+  selectedCellClipboardMatrix,
   selectedCellCount,
   hasCellSelection,
   clearCellSelection,
@@ -9956,8 +9958,10 @@ const {
   copyAllWithPreference,
   copyWithExtractor,
   copyWithPreference,
+  previewWithExtractor,
   previewWithPreference,
   canCopyWithExtractor,
+  canCopyWithPreference,
   exportWithExtractor,
   exportCsv,
   exportCurrentPageCsv,
@@ -10051,6 +10055,7 @@ const {
   hasColumnSelection,
   selectedCells,
   selectedCellMatrix,
+  selectedCellClipboardMatrix,
   selectedRange,
   contextCell: exportContextCell,
   contextSelectionIsSynthetic,
@@ -10200,7 +10205,7 @@ async function copyAdvancedFormat(preference: DataGridCopyPreference, extractorO
   const binding = advancedCopyBinding;
   const isValid = () => !!binding && isAdvancedCopySessionValid(session, binding);
   if (!isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
-  const copied = await copyWithPreference(preference, extractorOptions, isValid);
+  const copied = await (preference === "smart" ? copyWithPreference(preference, extractorOptions, isValid) : copyWithExtractor(preference, extractorOptions, isValid));
   if (!copied && !isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
   return copied;
 }
@@ -10210,7 +10215,7 @@ async function previewAdvancedCopy(preference: DataGridCopyPreference, extractor
   const binding = advancedCopyBinding;
   const isValid = () => !!binding && isAdvancedCopySessionValid(session, binding);
   if (!isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
-  const preview = await previewWithPreference(preference, extractorOptions);
+  const preview = await (preference === "smart" ? previewWithPreference(preference, extractorOptions) : previewWithExtractor(preference, extractorOptions));
   if (!isValid()) throw new Error(t("grid.copyExtractorSelectionChanged"));
   return preview;
 }
@@ -10218,20 +10223,34 @@ async function previewAdvancedCopy(preference: DataGridCopyPreference, extractor
 const copyPreferenceMenuItems = computed(() =>
   DATA_GRID_DEFAULT_COPY_PREFERENCES.map((preference) => {
     const extractor = preference === "smart" ? undefined : preference;
+    const sparseValueDelete = extractor === "sql-deletes" && hasCellSelection.value && selectedCellMatrix.value === null;
     return {
       value: preference,
       label: copyPreferenceLabel(preference),
-      disabled: extractor ? extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length) : false,
+      disabled: extractor ? extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || (extractor === "sql-deletes" && !sparseValueDelete) || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length) : false,
       separatorBefore: extractor ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].separatorBefore : false,
     };
   }),
 );
+const advancedCopyMenuItems = computed(() =>
+  copyPreferenceMenuItems.value.map((item) => {
+    if (item.disabled || canCopyAdvancedFormat(item.value)) return item;
+    return {
+      ...item,
+      disabled: true,
+      disabledReason: t("grid.copyExtractorUnsupportedSelection"),
+    };
+  }),
+);
 const visibleCopyExtractorItems = computed(() =>
-  DATA_GRID_COPY_EXTRACTOR_IDS.map((extractor) => ({
-    value: extractor,
-    label: copyExtractorLabel(extractor),
-    disabled: extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length),
-  })),
+  DATA_GRID_COPY_EXTRACTOR_IDS.map((extractor) => {
+    const sparseValueDelete = extractor === "sql-deletes" && hasCellSelection.value && selectedCellMatrix.value === null;
+    return {
+      value: extractor,
+      label: copyExtractorLabel(extractor),
+      disabled: extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || (extractor === "sql-deletes" && !sparseValueDelete) || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length),
+    };
+  }),
 );
 function openExtractorConfiguration() {
   extractorConfigOpen.value = true;
@@ -15088,7 +15107,7 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
 function defaultCopyPreferenceContextItem(): ContextMenuItem {
   const preference = selectedCopyPreference.value;
   const extractorOptions = preference === "sql-inserts" ? sqlInsertExtractorOptions(settingsStore.editorSettings.dataGridExtractorOptions.sql.primaryKeyMode) : undefined;
-  const disabled = preference === "smart" ? !canCopyWithExtractor("raw", extractorOptions) && !canCopyWithExtractor("tsv", extractorOptions) : !canCopyWithExtractor(preference, extractorOptions);
+  const disabled = !canCopyWithPreference(preference, extractorOptions);
   return {
     label: defaultCopyPreferenceLabel.value,
     action: () => void copyWithPreference(preference, extractorOptions),
@@ -17939,7 +17958,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :source-table-name="props.tableMeta?.tableName"
       :visible-copy-extractors="settingsStore.editorSettings.dataGridVisibleCopyExtractors"
       :options="settingsStore.editorSettings.dataGridExtractorOptions"
-      :items="copyPreferenceMenuItems"
+      :items="advancedCopyMenuItems"
       :visible-items="visibleCopyExtractorItems"
       :preview="previewAdvancedCopy"
       :preview-session-key="advancedCopyGeneration"

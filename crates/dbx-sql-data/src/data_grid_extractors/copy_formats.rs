@@ -17,28 +17,44 @@ pub(super) fn write_dbunit(context: &ExtractContext<'_>, output: &mut dyn Write)
         .unwrap_or(&options.table_name);
     let table_name = if options.upper_case_table_name { raw_name.to_uppercase() } else { raw_name.to_string() };
     validate_xml_name(&table_name, "table")?;
+    let selected_columns = (0..context.selected_columns.len())
+        .map(|column_offset| {
+            (0..context.request.rows.len()).any(|row_index| context.is_selected(row_index, column_offset))
+        })
+        .collect::<Vec<_>>();
     let columns = context
         .selected_columns
         .iter()
-        .map(|column| {
+        .enumerate()
+        .map(|(column_offset, column)| {
             let name = if options.upper_case_column_names {
                 column.display_name.to_uppercase()
             } else {
                 column.display_name.clone()
             };
-            validate_xml_name(&name, "column")?;
+            if selected_columns[column_offset] {
+                validate_xml_name(&name, "column")?;
+            }
             Ok(name)
         })
         .collect::<Result<Vec<_>, DataGridExtractError>>()?;
     let mut names = std::collections::HashSet::new();
-    for name in &columns {
+    for (column_offset, name) in columns.iter().enumerate() {
+        if !selected_columns[column_offset] {
+            continue;
+        }
         if !names.insert(name) {
             return Err(invalid_format(format!("DbUnit column names collide after case conversion: '{name}'.")));
         }
     }
     if options.include_null_values {
-        for row in &context.request.rows {
-            for (column, index) in context.selected_columns.iter().zip(&context.selected_source_indexes) {
+        for (row_index, row) in context.request.rows.iter().enumerate() {
+            for (column_offset, (column, index)) in
+                context.selected_columns.iter().zip(&context.selected_source_indexes).enumerate()
+            {
+                if !context.is_selected(row_index, column_offset) {
+                    continue;
+                }
                 let value = &row[*index];
                 if !value.is_null()
                     && dbunit_value_text(value, is_binary_type(column.data_type.as_deref()))?
@@ -52,11 +68,17 @@ pub(super) fn write_dbunit(context: &ExtractContext<'_>, output: &mut dyn Write)
         }
     }
     write_bytes(output, b"<dataset>\n")?;
-    for row in &context.request.rows {
+    for (row_index, row) in context.request.rows.iter().enumerate() {
+        if !context.row_has_selection(row_index) {
+            continue;
+        }
         write_bytes(output, format!("  <{table_name}").as_bytes())?;
-        for ((column, name), index) in
-            context.selected_columns.iter().zip(&columns).zip(&context.selected_source_indexes)
+        for (column_offset, ((column, name), index)) in
+            context.selected_columns.iter().zip(&columns).zip(&context.selected_source_indexes).enumerate()
         {
+            if !context.is_selected(row_index, column_offset) {
+                continue;
+            }
             let value = &row[*index];
             if value.is_null() && !options.include_null_values {
                 continue;
@@ -110,12 +132,17 @@ pub(super) fn write_php(
     for (row_index, row) in context.request.rows.iter().enumerate() {
         write_bytes(output, b"    ")?;
         write_bytes(output, open.as_bytes())?;
+        let mut wrote_column = false;
         for (column_position, (column, source_index)) in
             context.selected_columns.iter().zip(&context.selected_source_indexes).enumerate()
         {
-            if column_position > 0 {
+            if !context.is_selected(row_index, column_position) {
+                continue;
+            }
+            if wrote_column {
                 write_bytes(output, b", ")?;
             }
+            wrote_column = true;
             write_php_string(output, &column.display_name, options.quote_char)?;
             write_bytes(output, b" => ")?;
             let value = &row[*source_index];

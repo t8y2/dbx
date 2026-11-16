@@ -29,7 +29,7 @@ const props = defineProps<{
   options: DataGridExtractorOptions;
   mode?: "configure" | "copy";
   previewSessionKey?: number;
-  items: Array<{ value: DataGridCopyPreference; label: string; disabled?: boolean }>;
+  items: Array<{ value: DataGridCopyPreference; label: string; disabled?: boolean; disabledReason?: string }>;
   visibleItems: Array<{ value: DataGridCopyExtractorId; label: string; disabled?: boolean }>;
   preview: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => Promise<DataGridExtractPreview>;
   canCopy?: (preference: DataGridCopyPreference, options: DataGridExtractorOptions) => boolean;
@@ -130,7 +130,7 @@ async function refreshPreview() {
     const result = await props.preview(selectedFormat.value, normalizeDataGridExtractorOptions(draftOptions.value));
     if (sequence === previewSequence) {
       previewText.value = result.text;
-      previewWarnings.value = (result.warnings ?? []).map((warning) => warningText(warning.code, result.omittedColumns));
+      previewWarnings.value = (result.warnings ?? []).map((warning) => warningText(warning.code, result.omittedColumns, warning.message));
       previewTruncatedRows.value = result.truncated ? result.sourceRowCount : 0;
     }
   } catch (error: unknown) {
@@ -143,9 +143,10 @@ async function refreshPreview() {
   }
 }
 
-function warningText(code: DataGridExtractWarningCode, omittedColumns: string[] | undefined): string {
+function warningText(code: DataGridExtractWarningCode, omittedColumns: string[] | undefined, message?: string): string {
   if (code === "omitted-columns") return t("grid.copyExtractorWarningOmittedColumns", { columns: omittedColumns?.join(", ") || "-" });
   if (code === "php-date-not-iso") return t("grid.copyExtractorWarningPhpDateNotIso");
+  if (code === "sparse-rows-skipped") return message ?? "";
   return t("grid.copyExtractorWarningDuplicateJsonColumns");
 }
 
@@ -291,7 +292,7 @@ function handleFormatKeydown(event: KeyboardEvent, itemIndex: number) {
           <div class="min-h-0 flex-1 overflow-y-auto pr-1">
             <Label class="mb-1.5 block">{{ t("grid.copyExtractorFormatList") }}</Label>
             <div role="radiogroup" :aria-label="t('grid.copyExtractorFormatList')" class="space-y-1">
-              <label v-for="(item, index) in items" :key="item.value" class="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50">
+              <label v-for="(item, index) in items" :key="item.value" class="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50">
                 <input
                   :id="`${formatRadioGroupName}-${item.value}`"
                   v-model="selectedFormat"
@@ -299,10 +300,13 @@ function handleFormatKeydown(event: KeyboardEvent, itemIndex: number) {
                   :name="formatRadioGroupName"
                   :value="item.value"
                   :disabled="item.disabled"
-                  class="accent-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  class="mt-0.5 accent-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   @keydown="handleFormatKeydown($event, index)"
                 />
-                <span>{{ item.label }}</span>
+                <span class="min-w-0">
+                  <span class="block">{{ item.label }}</span>
+                  <span v-if="item.disabledReason" class="mt-0.5 block text-xs leading-4 text-muted-foreground">{{ item.disabledReason }}</span>
+                </span>
               </label>
             </div>
           </div>

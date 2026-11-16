@@ -12,13 +12,20 @@ pub(super) fn write_json(
 ) -> Result<Vec<DataGridExtractWarning>, DataGridExtractError> {
     // Values-only output is only well-defined for a single-column selection;
     // anything else keeps the object form so no column is silently dropped.
-    if context.request.options.json.values_only && context.selected_source_indexes.len() == 1 {
+    if context.request.options.json.values_only
+        && context.selected_source_indexes.len() == 1
+        && context.request.selected_mask.is_none()
+    {
         return write_json_values(context, output);
     }
     let (names, warnings) =
         unique_json_names(&context.selected_columns, context.request.options.json.camel_case_field_names);
-    let rows =
-        JsonRows { names: &names, source_indexes: &context.selected_source_indexes, rows: &context.request.rows };
+    let rows = JsonRows {
+        names: &names,
+        source_indexes: &context.selected_source_indexes,
+        rows: &context.request.rows,
+        masks: context.request.selected_mask.as_deref(),
+    };
     let result = if context.request.options.json.pretty {
         serde_json::to_writer_pretty(output, &rows)
     } else {
@@ -64,7 +71,12 @@ pub(super) fn write_json_lines(
         }
         serde_json::to_writer(
             &mut *output,
-            &JsonRow { names: &names, source_indexes: &context.selected_source_indexes, values: row },
+            &JsonRow {
+                names: &names,
+                source_indexes: &context.selected_source_indexes,
+                values: row,
+                mask: context.request.selected_mask.as_ref().and_then(|rows| rows.get(index)).map(Vec::as_slice),
+            },
         )
         .map_err(|error| {
             DataGridExtractError::new(
@@ -80,6 +92,7 @@ struct JsonRows<'a, 'value> {
     names: &'a [String],
     source_indexes: &'a [usize],
     rows: &'value [Vec<serde_json::Value>],
+    masks: Option<&'value [Vec<bool>]>,
 }
 
 impl Serialize for JsonRows<'_, '_> {
@@ -88,11 +101,12 @@ impl Serialize for JsonRows<'_, '_> {
         S: Serializer,
     {
         let mut sequence = serializer.serialize_seq(Some(self.rows.len()))?;
-        for row in self.rows {
+        for (row_index, row) in self.rows.iter().enumerate() {
             sequence.serialize_element(&JsonRow {
                 names: self.names,
                 source_indexes: self.source_indexes,
                 values: row,
+                mask: self.masks.and_then(|rows| rows.get(row_index)).map(Vec::as_slice),
             })?;
         }
         sequence.end()
@@ -121,6 +135,7 @@ struct JsonRow<'a, 'value> {
     names: &'a [String],
     source_indexes: &'a [usize],
     values: &'value [serde_json::Value],
+    mask: Option<&'value [bool]>,
 }
 
 impl Serialize for JsonRow<'_, '_> {
@@ -129,7 +144,10 @@ impl Serialize for JsonRow<'_, '_> {
         S: Serializer,
     {
         let mut map = serializer.serialize_map(Some(self.names.len()))?;
-        for (name, source_index) in self.names.iter().zip(self.source_indexes) {
+        for (column_offset, (name, source_index)) in self.names.iter().zip(self.source_indexes).enumerate() {
+            if self.mask.and_then(|mask| mask.get(column_offset)).is_some_and(|selected| !selected) {
+                continue;
+            }
             map.serialize_entry(name, &self.values[*source_index])?;
         }
         map.end()

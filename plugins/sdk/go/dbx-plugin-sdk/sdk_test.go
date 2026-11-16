@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -61,34 +62,62 @@ func TestServerInitializesAndDispatches(t *testing.T) {
 	}
 }
 
-// A plugin built without capabilities must answer plugin/initialize with an
-// empty array, not JSON null (#14972): the host rejects null where it
-// expects a sequence, which fails the whole plugin initialization.
-func TestServerInitializesWithNilCapabilities(t *testing.T) {
-	input := bytes.NewBufferString(
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plugin/initialize\",\"params\":{\"host\":{\"protocolVersions\":[1]}}}\n",
-	)
-	var output bytes.Buffer
-	server := NewServer(
-		Metadata{ID: "sample.plugin", Version: "1.0.0"},
-		HandlerFunc(func(_ RequestContext, _ string, _ json.RawMessage, _ *Emitter) (any, *PluginError) {
-			return nil, nil
-		}),
-	).WithIO(input, &output, &bytes.Buffer{})
-	if err := server.Serve(); err != nil {
-		t.Fatal(err)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
-		t.Fatal(err)
-	}
-	initialize := response["result"].(map[string]any)
-	capabilities, ok := initialize["capabilities"].([]any)
-	if !ok || capabilities == nil {
-		t.Fatalf("expected capabilities to encode as an empty array, got %#v", initialize["capabilities"])
-	}
-	if len(capabilities) != 0 {
-		t.Fatalf("expected no capabilities, got %#v", capabilities)
+func TestServerInitializeCapabilities(t *testing.T) {
+	for _, transport := range []struct {
+		name  string
+		value Transport
+	}{{"jsonl", TransportJSONLines}, {"framed", TransportFramed}} {
+		for _, test := range []struct {
+			name         string
+			capabilities []string
+			want         []string
+		}{
+			{"nil", nil, []string{}},
+			{"empty", []string{}, []string{}},
+			{"populated", []string{"commands", "events"}, []string{"commands", "events"}},
+		} {
+			t.Run(transport.name+"/"+test.name, func(t *testing.T) {
+				request := []byte(`{"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"host":{"protocolVersions":[1]}}}`)
+				var input, output, diagnostics bytes.Buffer
+				if transport.value == TransportFramed {
+					input.WriteByte(frameKindJSON)
+					_ = binary.Write(&input, binary.BigEndian, uint32(len(request)))
+					input.Write(request)
+				} else {
+					input.Write(append(request, '\n'))
+				}
+				server := NewServer(
+					Metadata{ID: "sample.plugin", Version: "1.0.0", Capabilities: test.capabilities},
+					HandlerFunc(func(_ RequestContext, method string, _ json.RawMessage, _ *Emitter) (any, *PluginError) {
+						return nil, MethodNotFound(method)
+					}),
+				).WithTransport(transport.value).WithIO(&input, &output, &diagnostics)
+				if err := server.Serve(); err != nil {
+					t.Fatal(err)
+				}
+				if diagnostics.Len() != 0 {
+					t.Fatalf("unexpected diagnostics: %s", diagnostics.String())
+				}
+				payload := output.Bytes()
+				if transport.value == TransportFramed {
+					if len(payload) < frameHeaderBytes || payload[0] != frameKindJSON || int(binary.BigEndian.Uint32(payload[1:5])) != len(payload)-frameHeaderBytes {
+						t.Fatalf("invalid JSON response frame: %q", payload)
+					}
+					payload = payload[frameHeaderBytes:]
+				}
+				var response struct {
+					Result struct {
+						Capabilities []string `json:"capabilities"`
+					} `json:"result"`
+				}
+				if err := json.Unmarshal(payload, &response); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(response.Result.Capabilities, test.want) {
+					t.Fatalf("capabilities = %#v, want %#v; response: %s", response.Result.Capabilities, test.want, payload)
+				}
+			})
+		}
 	}
 }
 

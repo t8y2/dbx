@@ -1202,16 +1202,7 @@ describe("MCP capability tab plugin list on web", () => {
     const loadMcpPluginScopeContext = vi.fn(async () => {});
     const ensureMcpToolCatalog = vi.fn(async () => {});
     const loadMcpPluginViews = vi.fn(async () => {});
-    const run = new Function(
-      "watch",
-      "mcpManagementTab",
-      "isWeb",
-      "loadMcpPluginScopeContext",
-      "ensureMcpToolCatalog",
-      "loadMcpPluginViews",
-      "mcpPluginViews",
-      managementTabWatcher(),
-    );
+    const run = new Function("watch", "mcpManagementTab", "isWeb", "loadMcpPluginScopeContext", "ensureMcpToolCatalog", "loadMcpPluginViews", "mcpPluginViews", managementTabWatcher());
     run(watch, mcpManagementTab, context.isWeb, loadMcpPluginScopeContext, ensureMcpToolCatalog, loadMcpPluginViews, mcpPluginViews);
     return { mcpManagementTab, mcpPluginViews, loadMcpPluginScopeContext, ensureMcpToolCatalog, loadMcpPluginViews };
   }

@@ -5168,6 +5168,7 @@ export default withEnglishFallback({
     newInsert: "新建新增",
     newSql: "新建 SQL",
     generateSql: "生成 SQL",
+    copyGeneratedSql: "复制生成的 SQL",
     insertRowsDialogTitle: "生成多行 INSERT",
     insertRowsDialogDescription: "为选中的每张表生成指定行数的 INSERT 模板，多行时占位值将按行号区分。",
     insertRowsDialogCountLabel: "行数",

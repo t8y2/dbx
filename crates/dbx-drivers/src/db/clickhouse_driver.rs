@@ -279,9 +279,10 @@ fn process_stream_buffer(
     while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
         let line_bytes: Vec<u8> = buffer.drain(..=newline).collect();
         let line_bytes = &line_bytes[..line_bytes.len().saturating_sub(1)];
-        let line =
-            std::str::from_utf8(line_bytes).map_err(|e| format!("ClickHouse stream contains invalid UTF-8: {e}"))?;
-        if let Some(item) = parser.parse_line(line)? {
+        // String 列可以存任意字节，JSONCompactEachRow* 不校验 UTF-8 就原样输出；
+        // 与 JSONCompact 一样把非法字节换成 U+FFFD，而不是让整个查询失败。
+        let line = String::from_utf8_lossy(line_bytes);
+        if let Some(item) = parser.parse_line(&line)? {
             on_item(item)?;
         }
     }
@@ -294,8 +295,8 @@ fn process_stream_remainder(
     on_item: &mut impl FnMut(ClickHouseQueryStreamItem) -> Result<(), String>,
 ) -> Result<(), String> {
     if !buffer.is_empty() {
-        let line = std::str::from_utf8(buffer).map_err(|e| format!("ClickHouse stream contains invalid UTF-8: {e}"))?;
-        if let Some(item) = parser.parse_line(line)? {
+        let line = String::from_utf8_lossy(buffer);
+        if let Some(item) = parser.parse_line(&line)? {
             on_item(item)?;
         }
         buffer.clear();
@@ -1458,6 +1459,37 @@ mod tests {
                 },
                 ClickHouseQueryStreamItem::Row(vec![serde_json::json!(1), serde_json::json!("Ada")]),
                 ClickHouseQueryStreamItem::Row(vec![serde_json::json!(2), serde_json::json!("Linus")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_parser_replaces_invalid_utf8_in_string_values() {
+        // String 列里的 Latin-1 "café" 走整行路径，GBK "中文" 走末尾无换行的余量路径
+        let mut buffer =
+            b"[\"id\",\"name\"]\n[\"UInt64\",\"String\"]\n[1,\"caf\xe9\"]\n[2,\"\xd6\xd0\xce\xc4\"]".to_vec();
+        let mut parser = ClickHouseStreamParser::default();
+        let mut items = Vec::new();
+
+        process_stream_buffer(&mut buffer, &mut parser, &mut |item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+        process_stream_remainder(&mut buffer, &mut parser, &mut |item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            items[1..],
+            [
+                ClickHouseQueryStreamItem::Row(vec![serde_json::json!(1), serde_json::json!("caf\u{FFFD}")]),
+                ClickHouseQueryStreamItem::Row(vec![
+                    serde_json::json!(2),
+                    serde_json::json!("\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}")
+                ]),
             ]
         );
     }

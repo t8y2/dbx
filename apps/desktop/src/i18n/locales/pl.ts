@@ -3637,6 +3637,8 @@ export default withEnglishFallback({
     selectImportTitle: "Wybierz połączenia do importu",
     selectAll: "Zaznacz wszystko",
     deselectAll: "Odznacz wszystko",
+    searchPlaceholder: "Szukaj grup lub połączeń",
+    searchNoResults: "Brak pasujących grup lub połączeń",
     selectedCount: "Wybrano: {selected} / {total}",
     next: "Dalej",
     importSelected: "Importuj {count}",

@@ -21,6 +21,7 @@ const store = reactive({
 });
 
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => store }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sidebarConnectionSortMode: "manual" } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 import { useDialogSources } from "@/composables/useDialogSources";

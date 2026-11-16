@@ -2860,6 +2860,7 @@ export default withEnglishFallback({
     expandCellDetailMetadata: "Perluas metadata sel",
     openCellDetailsDialog: "Buka Detail Sel",
     rowDetails: "Detail Baris",
+    rowJsonPreview: "Pratinjau JSON",
     rowDetailsFor: "Detail Baris {row}",
     openRowDetailsDialog: "Buka Detail Baris",
     openColumnDetailsDialog: "Buka Detail Kolom",

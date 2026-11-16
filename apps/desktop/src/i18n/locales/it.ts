@@ -3694,6 +3694,7 @@ export default withEnglishFallback({
     queryWhileSaving: "Salvataggio delle modifiche al set di risultati in corso. Attendi il completamento del salvataggio prima di eseguire la query.",
     filterActive: "Filtro applicato",
     structuredFiltersActive: "{count} filtri condizione",
+    rowJsonPreview: "Anteprima JSON",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

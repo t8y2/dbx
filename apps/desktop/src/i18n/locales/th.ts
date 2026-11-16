@@ -3954,6 +3954,7 @@ export default withEnglishFallback({
     queryWhileSaving: "กำลังบันทึกการแก้ไขชุดผลลัพธ์ โปรดรอให้การบันทึกเสร็จสิ้นก่อนเรียกใช้คิวรี",
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
+    rowJsonPreview: "ตัวอย่าง JSON",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

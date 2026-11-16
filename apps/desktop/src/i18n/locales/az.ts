@@ -2559,6 +2559,7 @@ export default withEnglishFallback({
     expandCellDetailMetadata: "Xananın metaverilənlərini genişləndir",
     openCellDetailsDialog: "Xananın təfərrüatlarını aç",
     rowDetails: "Sətrin təfərrüatları",
+    rowJsonPreview: "JSON önizləməsi",
     rowDetailsFor: "{row} nömrəli sətrin təfərrüatları",
     openRowDetailsDialog: "Sətrin təfərrüatlarını aç",
     openColumnDetailsDialog: "Sütunun təfərrüatlarını aç",

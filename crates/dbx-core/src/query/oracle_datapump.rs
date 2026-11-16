@@ -205,7 +205,7 @@ pub async fn run_oracle_datapump_task(
 ) {
     let task_id = request.task_id.clone();
     // 只读连接直接拒绝（导出也会建 master table，一律拦）。
-    if crate::query::connection_readonly_name(state, &request.connection_id).await.is_some() {
+    if connection_readonly_name(state, &request.connection_id).await.is_some() {
         emit(failed_progress(&task_id, READONLY_TAG, "connection is read-only".into()));
         return;
     }
@@ -456,7 +456,7 @@ pub async fn create_oracle_datapump_directory(
     if !valid_directory_path(path) {
         return Err("[oracleDatapumpDirectoryPathInvalid] server path is invalid".into());
     }
-    if crate::query::connection_readonly_name(state, connection_id).await.is_some() {
+    if connection_readonly_name(state, connection_id).await.is_some() {
         return Err(format!("[{READONLY_TAG}] connection is read-only"));
     }
     let client = oracle_agent_client(state, connection_id, database).await?;
@@ -482,7 +482,7 @@ pub async fn drop_oracle_datapump_directory(
     if !valid_directory_name(name) {
         return Err("[oracleDatapumpDirectoryNameInvalid] directory name is invalid".into());
     }
-    if crate::query::connection_readonly_name(state, connection_id).await.is_some() {
+    if connection_readonly_name(state, connection_id).await.is_some() {
         return Err(format!("[{READONLY_TAG}] connection is read-only"));
     }
     let client = oracle_agent_client(state, connection_id, database).await?;

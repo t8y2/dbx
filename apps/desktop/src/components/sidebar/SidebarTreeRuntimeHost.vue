@@ -955,6 +955,13 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
   const isEtcdNavigation = node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control";
   await connectionStore.ensureConnected(node.connectionId, isNacosNavigation || isEtcdNavigation ? { verifyHealth: false } : undefined);
   if (!isCurrentNavigationRequest(requestId)) return;
+  if (node.type === "redis-db" && node.database !== undefined) {
+    const alias = connectionStore.getRedisDatabaseAlias(node.connectionId, node.database);
+    const databaseLabel = alias ? `db${node.database} · ${alias}` : `db${node.database}`;
+    const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:${databaseLabel}`;
+    queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
+    return;
+  }
   if ((node.type === "etcd-dashboard" || node.type === "etcd-access-control") && !connectionStore.getEtcdAccessCapabilities(node.connectionId).admin) return;
   const connectionName = connectionStore.getConfig(node.connectionId)?.name || (isNacosNavigation ? "Nacos" : isEtcdNavigation ? "etcd" : "Consul");
   if (node.type === "consul-root") {
@@ -1011,7 +1018,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     connectionStore.activeConnectionId = node.connectionId;
   }
   const treeLoadSearchOptions = sidebarTreeContext?.getTreeLoadSearchOptions?.(node);
-  if (isDirectNavigationTreeNode(node.type)) {
+  if (node.type === "redis-db" || isDirectNavigationTreeNode(node.type)) {
     try {
       await openDirectNavigationNode(node, requestId);
     } catch (e: any) {
@@ -1240,12 +1247,6 @@ async function toggle(requestId = beginNavigationRequest()) {
       node.isExpanded = true;
       const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node));
       if (liveNode) liveNode.isExpanded = true;
-    } else if (node.type === "redis-db" && node.connectionId && node.database) {
-      await connectionStore.ensureConnected(node.connectionId);
-      const alias = connectionStore.getRedisDatabaseAlias(node.connectionId, node.database);
-      const databaseLabel = alias ? `db${node.database} · ${alias}` : `db${node.database}`;
-      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:${databaseLabel}`;
-      queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
     } else if (node.type === "mq-tenant" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openMqAdmin(node.connectionId, { tenant: node.mqTenant || node.label, initialTab: node.mqInitialTab });
@@ -9383,6 +9384,13 @@ function requestPaste(node: TreeNode): boolean {
 
 function toggleNode(node: TreeNode) {
   activateRuntimeNode(node);
+  if (node.type === "redis-db" && node.children?.length) {
+    // The chevron and arrow keys open the saved queries. Activating the row
+    // itself still opens the Redis key browser.
+    emit("search-toggle", node);
+    emitNodeToggled(node, !!node.isExpanded);
+    return;
+  }
   void toggle(beginNavigationRequest());
 }
 

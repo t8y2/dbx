@@ -12,6 +12,7 @@ import {
   buildPostgresSequenceLiteralCompletionItems,
   getSqlCompletionContext,
   getSqlCompletionResultValidFor,
+  getSqlProcedureCall,
   isSqlLikeCompletionStatement,
   normalizeIdentifierPart,
   prepareSqlCompletionReplacement,
@@ -1688,6 +1689,25 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return ["routine"];
   }
 
+  async function loadProcedureSignatures(call: NonNullable<ReturnType<typeof getSqlProcedureCall>>, source: string): Promise<string[] | null> {
+    if (!props.connectionId || props.database == null || !connectionStore.connectedIds.has(props.connectionId)) return null;
+    const scope = { database: props.database, schema: props.schema, catalog: props.catalog };
+    const context: SqlCompletionContext = {
+      ...getSqlCompletionContext(source, call.nameEnd, sqlCompletionDialectOptions()),
+      contextKind: "exec",
+      prefix: call.prefix,
+      prefixQuoted: call.prefixQuoted,
+      qualifier: call.qualifierParts.join(".") || undefined,
+      qualifierParts: call.qualifierParts,
+      qualifierQuoted: call.qualifierQuoted,
+    };
+    const objects = usesLocalOnlyCompletionMetadata() ? lookupLocalCompletionObjectsForContext(context, scope) : await listCompletionObjectsForContext(context, scope);
+    const matches = objects.filter((object) => object.type === "procedure" && (call.prefixQuoted ? object.name === call.prefix : object.name.toLowerCase() === call.prefix.toLowerCase()));
+    const owners = new Set(matches.map(({ schema, parentName, parentSchema }) => JSON.stringify([schema, parentName, parentSchema])));
+    if (owners.size > 1) return [];
+    return [...new Set(matches.flatMap((object) => (object.signature?.trim() ? [object.signature.trim()] : [])))];
+  }
+
   function insertCompletionTable(context: ReturnType<typeof getSqlCompletionContext>) {
     return { name: context.insertTable!, database: context.insertDatabase, schema: context.insertSchema, nameQuoted: context.insertTableQuoted, schemaQuoted: context.insertSchemaQuoted };
   }
@@ -2021,6 +2041,8 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     shouldTriggerSqlCompletionForPosition,
     scheduleSqlCompletionStart,
     provideSqlCompletions,
+    getProcedureCall: (source: string, truncatedPrefix: boolean) => getSqlProcedureCall(source, sqlCompletionDialectOptions(), truncatedPrefix),
+    loadProcedureSignatures,
     consumeSqlCompletionAutoStartSuppression,
     scheduleDeferredCompletionTrigger,
     clearDeferredCompletionTrigger,

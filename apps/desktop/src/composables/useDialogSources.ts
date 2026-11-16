@@ -3,11 +3,13 @@ import type { DatabaseExportSelectedObject, SqlFilePreview } from "@/lib/backend
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
 import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
+import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 
 const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
@@ -45,6 +47,7 @@ const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
 const configConnectionSelectList = ref<ConnectionConfig[]>([]);
 const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
+const configConnectionSelectSortMode = ref<ConnectionListSortMode>("manual");
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
 const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis">("dbx");
@@ -165,6 +168,7 @@ export function openDataGenerateSession(sessionId: string, target: { connectionI
 export function useDialogSources() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
   const { toast } = useToast();
 
   // Watchers for store source triggers (register only once)
@@ -433,6 +437,7 @@ export function useDialogSources() {
     pendingImportSource.value = "dbx";
     configConnectionSelectList.value = [];
     configConnectionSelectLayout.value = null;
+    configConnectionSelectSortMode.value = "manual";
     configPassphraseError.value = "";
   }
 
@@ -440,13 +445,15 @@ export function useDialogSources() {
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
     configConnectionSelectLayout.value = null;
+    configConnectionSelectSortMode.value = "manual";
     configPassphraseError.value = "";
   }
 
-  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null) {
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null, sortMode: ConnectionListSortMode = "manual") {
     configConnectionSelectMode.value = mode;
     configConnectionSelectList.value = connections;
     configConnectionSelectLayout.value = layout ?? null;
+    configConnectionSelectSortMode.value = sortMode;
     showConfigConnectionSelectDialog.value = true;
   }
 
@@ -477,7 +484,7 @@ export function useDialogSources() {
   // Config export/import helpers
   function onExportClick() {
     clearPendingExportState();
-    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout);
+    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout, settingsStore.editorSettings.sidebarConnectionSortMode);
   }
 
   function onExportConnectionsSelected(connectionIds: string[]) {
@@ -659,6 +666,7 @@ export function useDialogSources() {
     configConnectionSelectMode,
     configConnectionSelectList,
     configConnectionSelectLayout,
+    configConnectionSelectSortMode,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,

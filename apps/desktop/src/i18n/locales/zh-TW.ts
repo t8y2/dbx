@@ -4149,6 +4149,8 @@ export default withEnglishFallback({
     selectImportTitle: "選擇要匯入的連線",
     selectAll: "全選",
     deselectAll: "取消全選",
+    searchPlaceholder: "搜尋目錄或連線名稱",
+    searchNoResults: "沒有符合的目錄或連線",
     selectedCount: "{selected} / {total}",
     next: "下一步",
     importSelected: "匯入 {count} 個",

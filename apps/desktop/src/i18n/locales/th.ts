@@ -4455,6 +4455,8 @@ export default withEnglishFallback({
     selectImportTitle: "เลือกการเชื่อมต่อเพื่อนำเข้า",
     selectAll: "เลือกทั้งหมด",
     deselectAll: "ยกเลิกการเลือกทั้งหมด",
+    searchPlaceholder: "ค้นหากลุ่มหรือการเชื่อมต่อ",
+    searchNoResults: "ไม่พบกลุ่มหรือการเชื่อมต่อที่ตรงกัน",
     selectedCount: "{selected} / {total}",
     next: "ถัดไป",
     importSelected: "นำเข้า {count}",

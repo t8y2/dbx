@@ -3265,6 +3265,8 @@ export default withEnglishFallback({
     selectImportTitle: "İdxal ediləcək əlaqələri seçin",
     selectAll: "Hamısını seç",
     deselectAll: "Hamısının seçimini ləğv et",
+    searchPlaceholder: "Qrupları və ya əlaqələri axtarın",
+    searchNoResults: "Uyğun qrup və ya əlaqə yoxdur",
     selectedCount: "{selected} / {total}",
     next: "Növbəti",
     importSelected: "{count} əlaqəni idxal et",

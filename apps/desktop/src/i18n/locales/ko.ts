@@ -4121,6 +4121,8 @@ export default withEnglishFallback({
     selectImportTitle: "가져올 연결 선택",
     selectAll: "모두 선택",
     deselectAll: "모두 해제",
+    searchPlaceholder: "그룹 또는 연결 검색",
+    searchNoResults: "일치하는 그룹 또는 연결이 없습니다",
     selectedCount: "{selected} / {total}",
     next: "다음",
     importSelected: "{count}개 가져오기",

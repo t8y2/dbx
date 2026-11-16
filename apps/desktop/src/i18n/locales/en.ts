@@ -4615,6 +4615,8 @@ export default {
     selectImportTitle: "Select connections to import",
     selectAll: "Select all",
     deselectAll: "Deselect all",
+    searchPlaceholder: "Search groups or connections",
+    searchNoResults: "No matching groups or connections",
     selectedCount: "{selected} / {total}",
     next: "Next",
     importSelected: "Import {count}",

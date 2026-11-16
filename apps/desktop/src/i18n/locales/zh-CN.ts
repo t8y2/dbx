@@ -4541,6 +4541,8 @@ export default withEnglishFallback({
     selectImportTitle: "选择要导入的连接",
     selectAll: "全选",
     deselectAll: "取消全选",
+    searchPlaceholder: "搜索目录或连接名称",
+    searchNoResults: "没有匹配的目录或连接",
     selectedCount: "{selected} / {total}",
     next: "下一步",
     importSelected: "导入 {count} 个",

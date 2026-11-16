@@ -3587,6 +3587,8 @@ export default withEnglishFallback({
     selectImportTitle: "Pilih koneksi untuk diimpor",
     selectAll: "Pilih semua",
     deselectAll: "Batalkan pilihan semua",
+    searchPlaceholder: "Cari grup atau koneksi",
+    searchNoResults: "Tidak ada grup atau koneksi yang cocok",
     selectedCount: "{selected} / {total}",
     next: "Berikutnya",
     importSelected: "Impor {count}",

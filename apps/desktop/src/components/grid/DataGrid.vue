@@ -65,7 +65,7 @@ import {
   Highlighter,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -122,7 +122,7 @@ import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/
 import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
-import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, normalizeWhereInput, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { dataGridExecutedQueryConditions } from "@/lib/dataGrid/dataGridExecutedQuery";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
@@ -333,7 +333,7 @@ import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGr
 import { continuousQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { allNullColumnIndexes, identicalValueColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems, type DataGridColumnLookupMatchMode } from "@/lib/dataGrid/dataGridColumnLookup";
-import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
+import { columnNamesInIndexOrder, moveDisplayableColumnIndex, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { createPendingSelectionSummary, formatSelectionAggregate, formatSelectionAverage, summarizeSelection, type SelectionSummaryOptions } from "@/lib/dataGrid/gridSelection";
 import { captureDataGridSelection, restoreDataGridSelection, type CaptureDataGridSelectionOptions, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
@@ -518,6 +518,7 @@ const columnHeaderLabels = computed(() => ({
   regularIndex: t("grid.columnRegularIndex"),
   formatterActive: t("grid.columnFormatterActive"),
   highlightActive: t("grid.highlightActive"),
+  filterActive: t("grid.filterActive"),
   sort: t("grid.sort"),
   columnActions: t("grid.columnActions"),
 }));
@@ -1606,6 +1607,17 @@ const isPersistentFilterView = computed(() => filterEditorView.value === "condit
 // do not use it as a lock: the toolbar toggle must always be able to close them.
 filterBuilderOpen.value = isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
+// Column names with an active structured rule (#14969): the header funnel must
+// track exactly the same completeness rule as the toolbar count badge.
+const structuredFilteredColumnNames = computed(() => {
+  const names = new Set<string>();
+  for (const rule of structuredFilterRules.value) {
+    if (!rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)) {
+      names.add(rule.columnName);
+    }
+  }
+  return names;
+});
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
   keyDataType?: string;
@@ -2531,21 +2543,20 @@ const goToColumnTooltip = computed(() => formatShortcutTooltip(t("grid.goToColum
 const goToColumnPanelPinned = computed(() => settingsStore.editorSettings.goToColumnPanelPinned);
 const GO_TO_COLUMN_PANEL_WIDTH = 280;
 const columnOrderKeys = computed(() => uniqueDataGridColumnOrderKeys(props.result.columns, props.sourceColumns));
-const resolvedColumnLayoutScopeKey = computed(
-  () =>
-    props.columnLayoutScopeKey ??
-    dataGridColumnLayoutScopeKey({
-      connectionId: props.connectionId,
-      database: props.database,
-      schema: props.schema,
-      context: props.context,
-      tableSchema: props.tableMeta?.schema,
-      tableName: props.tableMeta?.tableName,
-      sql: props.sql,
-      columns: props.result.columns,
-      sourceColumns: props.sourceColumns,
-    }),
-);
+const columnLayoutScope = computed(() => ({
+  connectionId: props.connectionId,
+  database: props.database,
+  schema: props.schema,
+  context: props.context,
+  tableSchema: props.tableMeta?.schema,
+  tableName: props.tableMeta?.tableName,
+  sql: props.sql,
+  databaseType: resolvedDatabaseType.value,
+  columns: props.result.columns,
+  sourceColumns: props.sourceColumns,
+}));
+const resolvedColumnLayoutScopeKey = computed(() => props.columnLayoutScopeKey ?? dataGridColumnLayoutScopeKey(columnLayoutScope.value));
+const legacyColumnLayoutScopeKey = computed(() => (props.columnLayoutScopeKey ? undefined : dataGridColumnLayoutScopeKey(columnLayoutScope.value, true)));
 const tableColumnOrderScopeKey = computed(() => {
   if (props.context !== "table-data" || !props.connectionId || !props.database || !props.tableMeta?.tableName) return "";
   return tableDataGridColumnOrderScopeKey({
@@ -2584,7 +2595,6 @@ const {
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
-  moveDisplayableColumn: moveDisplayableColumnInLayout,
   resetColumnOrder: resetColumnOrderInLayout,
   toggleAllNullColumns,
   resetColumnVisibility,
@@ -2605,6 +2615,7 @@ const {
   hideEmptyColumns,
   columnOrderKeys,
   layoutScopeKey: resolvedColumnLayoutScopeKey,
+  legacyLayoutScopeKey: legacyColumnLayoutScopeKey,
   tableScopeKey: tableColumnOrderScopeKey,
   // Existing tab snapshots may still carry this field; new changes persist in the internal layout store.
   initialHiddenColumnKeys: computed(() => props.result.local_hidden_column_keys),
@@ -2613,6 +2624,23 @@ const {
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
+const quickBuilderColumns = computed(() => {
+  if (!hasCustomColumnOrder.value) return undefined;
+  const columns = filterBuilderColumnOptions.value;
+  const available = new Set(columns);
+  const ordered = new Set(orderedDisplayableColumnIndexes.value.map((index) => props.result.columns[index]).filter((name) => available.has(name)));
+  // A field can be filterable even when it is absent from the current result.
+  for (const name of columns) ordered.add(name);
+  return [...ordered];
+});
+// The WHERE field dropdown follows the grid's custom column order instead of the
+// stored result order, so it matches what the user sees after reordering columns
+// (#14836). Falls back to the table/result columns when nothing is displayable yet.
+const whereFilterColumns = computed<string[]>(() => {
+  const ordered = columnNamesInIndexOrder(props.result.columns, orderedDisplayableColumnIndexes.value);
+  return ordered.length ? ordered : (props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns);
+});
+
 // The go-to-column list mirrors the column filter panel, so both follow the
 // user's local column order instead of the database order.
 const goToColumnItems = computed(() =>
@@ -3019,12 +3047,42 @@ function onSynchronizedTableDataGridColumnOrderChanged(event: Event) {
   applyColumnOrderChange(() => onTableDataGridColumnOrderChanged(event));
 }
 
-function persistDraggedColumnOrder(indexes: number[]) {
-  applyColumnOrderChange(() => persistColumnOrder(indexes));
+const pendingColumnOrder = shallowRef<{ scope: string; keys: string[]; current: number[]; next: number[] } | null>(null);
+const confirmColumnOrderOpen = computed({
+  get: () => pendingColumnOrder.value !== null,
+  set: (open: boolean) => {
+    if (!open) pendingColumnOrder.value = null;
+  },
+});
+
+function requestColumnOrderPersistence(indexes: number[]) {
+  const current = orderedDisplayableColumnIndexes.value;
+  if (current.every((index, position) => index === indexes[position])) return;
+  if (props.context !== "table-data") {
+    applyColumnOrderChange(() => persistColumnOrder(indexes));
+    return;
+  }
+  pendingColumnOrder.value = { scope: tableColumnOrderScopeKey.value, keys: [...columnOrderKeys.value], current: [...current], next: indexes };
 }
 
 function moveDisplayableColumn(fromDisplayableIndex: number, toDisplayableIndex: number) {
-  applyColumnOrderChange(() => moveDisplayableColumnInLayout(fromDisplayableIndex, toDisplayableIndex));
+  const next = moveDisplayableColumnIndex({
+    orderedIndexes: orderedDisplayableColumnIndexes.value,
+    fromDisplayableIndex,
+    toDisplayableIndex,
+  });
+  requestColumnOrderPersistence(next);
+}
+
+function confirmColumnOrder() {
+  const pending = pendingColumnOrder.value;
+  pendingColumnOrder.value = null;
+  if (!pending || props.context !== "table-data" || pending.scope !== tableColumnOrderScopeKey.value) return;
+  const keys = columnOrderKeys.value;
+  const order = orderedDisplayableColumnIndexes.value;
+  if (keys.length !== pending.keys.length || !keys.every((key, index) => key === pending.keys[index])) return;
+  if (order.length !== pending.current.length || !order.every((column, index) => column === pending.current[index])) return;
+  applyColumnOrderChange(() => persistColumnOrder(pending.next));
 }
 
 function resetColumnOrder() {
@@ -3208,7 +3266,7 @@ const {
     if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
   },
   onRefreshMetrics: scheduleColumnLayoutRefresh,
-  onPersistColumnOrder: persistDraggedColumnOrder,
+  onPersistColumnOrder: requestColumnOrderPersistence,
   frozenColumnCount,
   columnReferenceDrag: columnHeaderReferenceDragController,
 });
@@ -6358,6 +6416,10 @@ const nullHighlightKeys = computed(() => columnHighlightMatches.value.nullKeys);
 
 function columnHasHighlight(colIdx: number): boolean {
   return hasColumnHighlight(columnHighlightRules.value, colIdx);
+}
+
+function columnHasStructuredFilter(column: string): boolean {
+  return structuredFilteredColumnNames.value.has(column);
 }
 
 function cellIsDuplicateHighlight(displayRow: number, col: number): boolean {
@@ -9795,12 +9857,25 @@ function sqlWithDisplayDatabaseName(sql: string): string {
   });
 }
 
+// Columns the copied table SQL should select once some columns are hidden
+// through the column-visibility menu, in display order. Undefined when nothing is
+// hidden, or when a visible column cannot be mapped back to a table column (the
+// SQL then stays `SELECT *`, as before).
+function visibleSelectColumns(): string[] | undefined {
+  if (props.context !== "table-data" || hiddenColumnCount.value === 0 || visibleColumnIndexes.value.length === 0) return undefined;
+  const sourceColumns = props.sourceColumns?.length === props.result.columns.length ? props.sourceColumns : undefined;
+  const names = visibleColumnIndexes.value.map((index) => (sourceColumns ? sourceColumns[index] : props.result.columns[index]));
+  if (!names.every((name): name is string => !!name)) return undefined;
+  return new Set(names.map((name) => name.toLocaleLowerCase())).size === names.length ? names : undefined;
+}
+
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
   const executionSql = (props.result.sqlPage?.sql || props.pageSql || props.result.sourceStatement || props.sql)?.trim() ?? "";
   const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
   const hasPreviewProjection = executionSql.includes("__DBX_LARGE_VALUE_BYTES_");
-  const shouldRebuildSql = hasPreviewProjection || includeDatabaseName;
+  const projectedColumns = visibleSelectColumns();
+  const shouldRebuildSql = hasPreviewProjection || includeDatabaseName || !!projectedColumns;
   if (props.context !== "table-data" || !shouldRebuildSql) {
     userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
     return;
@@ -9836,6 +9911,7 @@ async function syncUserFacingSql() {
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
+      ...(projectedColumns ? { columns: projectedColumns, projectColumns: true } : {}),
       injectDefaultTimeSeriesWhere: true,
       whereInput: conditions.whereInput,
       orderBy: conditions.orderBy,
@@ -9849,7 +9925,22 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.pageSql, props.result, props.result.sqlPage, props.result.sourceStatement, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [
+    props.sql,
+    props.pageSql,
+    props.result,
+    props.result.sqlPage,
+    props.result.sourceStatement,
+    props.context,
+    props.tableMeta,
+    props.pageLimit,
+    props.pageOffset,
+    props.executedPageLimit,
+    props.executedPageOffset,
+    settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    visibleColumnIndexes.value,
+    hiddenColumnCount.value,
+  ],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -11132,7 +11223,8 @@ async function previewConditionalBulkEditMatchCount() {
   conditionalBulkEditMatchCountLoading.value = true;
   try {
     const whereInput = await currentConditionalBulkEditWhere();
-    if (!whereInput) {
+    if (requestId !== conditionalBulkEditMatchCountRequestId) return;
+    if (!normalizeWhereInput(whereInput)) {
       conditionalBulkEditMatchCountError.value = t("grid.conditionalBulkEditConditionRequired");
       return;
     }
@@ -11145,6 +11237,7 @@ async function previewConditionalBulkEditMatchCount() {
       tableName: props.tableMeta.tableName,
       whereInput,
     });
+    if (requestId !== conditionalBulkEditMatchCountRequestId) return;
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
     const count = sumGridCountValues(result.rows?.[0]);
     if (count === undefined || count < 0) throw new Error("Invalid row count returned by the database");
@@ -11167,7 +11260,7 @@ async function applyBulkEditValue() {
     }
     try {
       const whereInput = await currentConditionalBulkEditWhere();
-      if (!whereInput) {
+      if (!normalizeWhereInput(whereInput)) {
         toast(t("grid.conditionalBulkEditConditionRequired"), 5000);
         return;
       }
@@ -14526,6 +14619,7 @@ onActivated(() => {
 });
 onDeactivated(() => {
   gridClipboardActive = false;
+  pendingColumnOrder.value = null;
   gridClipboardLifecycle++;
   rowPreparationController?.abort();
   autoRefresh.stop();
@@ -15577,7 +15671,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :filter-editor-view="filterEditorView"
                   :show-order-by="dataGridOrderByVisible"
                   :where-pane-ratio="dataGridWhereRatio"
-                  :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :columns="whereFilterColumns"
+                  :quick-builder-columns="quickBuilderColumns"
                   :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
                   :identifier-quote="conditionIdentifierQuote"
@@ -16305,6 +16400,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :formatter-label="columnHeaderLabels.formatterActive"
                     :highlight-active="columnHasHighlight(col.actualColIdx)"
                     :highlight-label="columnHeaderLabels.highlightActive"
+                    :filter-active="columnHasStructuredFilter(col.name)"
+                    :filter-label="columnHeaderLabels.filterActive"
                     @pointerdown="startColumnHeaderDrag(col.visibleColIdx, $event)"
                     @click-capture="onHeaderClickCapture"
                     @click="onHeaderClick(col.visibleColIdx, $event)"
@@ -17851,6 +17948,19 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     <DataGridCopyColumnNamesDialog v-if="copyColumnNamesDialogMounted" v-model:open="copyColumnNamesDialogOpen" :column-names="copyColumnNamesDialogColumns" :database-type="resolvedDatabaseType" :column-comments="columnCommentMap" @copy="copyText" />
     <GridSnapshotDialog v-model:open="gridSnapshotOpen" :source="gridSnapshotSource" />
     <DataGridFilterModeOrderDialog v-model:open="filterModeOrderDialogOpen" :database-type="resolvedDatabaseType" :options="supportedFilterModeOptions" @saved="onFilterModeOrderSaved" />
+
+    <Dialog v-model:open="confirmColumnOrderOpen">
+      <DialogContent class="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("grid.confirmColumnOrderTitle") }}</DialogTitle>
+          <DialogDescription>{{ t("grid.confirmColumnOrderDescription") }}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" @click="confirmColumnOrderOpen = false">{{ t("common.cancel") }}</Button>
+          <Button @click="confirmColumnOrder">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog v-model:open="esDeepPageJumpConfirmOpen">
       <DialogContent class="sm:max-w-[480px]">

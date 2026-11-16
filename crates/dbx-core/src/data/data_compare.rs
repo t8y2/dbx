@@ -1287,6 +1287,19 @@ fn build_data_compare_select_sql(
                 "WITH {page_alias} AS (SELECT {select_columns}, ROW_NUMBER() OVER (ORDER BY {order_expression}) AS {row_number_alias} FROM {table}) SELECT {select_columns} FROM {page_alias} WHERE {row_number_alias} > {offset} AND {row_number_alias} <= {end} ORDER BY {row_number_alias}"
             )
         }
+        TablePaginationStrategy::TeradataTop => {
+            if offset == 0 {
+                return format!("SELECT TOP {row_limit} {select_columns} FROM {table}{order_by}");
+            }
+            // The window specification needs an ORDER BY. Compares select key columns
+            // before paging, so `order_by` is normally ` ORDER BY ...`; `ORDER BY 1`
+            // keeps the SQL valid if a keyless compare ever reaches this arm.
+            let window = if order_by.is_empty() { "ORDER BY 1" } else { order_by.trim() };
+            let end = offset + row_limit;
+            format!(
+                "SELECT * FROM (SELECT {select_columns}, ROW_NUMBER() OVER ({window}) AS \"__dbx_row_num\" FROM {table}) \"dbx_page\" WHERE \"__dbx_row_num\" > {offset} AND \"__dbx_row_num\" <= {end} ORDER BY \"__dbx_row_num\""
+            )
+        }
         TablePaginationStrategy::IrisTop => {
             build_iris_table_select_sql(&select_columns, &table, "", &order_by, row_limit, offset as u64)
         }
@@ -3442,6 +3455,36 @@ mod tests {
                 0,
             ),
             "SELECT TOP (50) [id], [name] FROM [dbo].[users] ORDER BY [id] ASC"
+        );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_teradata_top_and_row_number_pages() {
+        // #14604: Teradata rejects `LIMIT`; bounded reads cap with `TOP n` and page
+        // past the first batch through a `ROW_NUMBER()` derived table.
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Teradata,
+                "sales",
+                "orders",
+                &["id".to_string(), "name".to_string()],
+                &["id".to_string()],
+                500,
+                0,
+            ),
+            "SELECT TOP 500 \"id\", \"name\" FROM \"sales\".\"orders\" ORDER BY \"id\" ASC"
+        );
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Teradata,
+                "sales",
+                "orders",
+                &["id".to_string(), "name".to_string()],
+                &["id".to_string()],
+                500,
+                500,
+            ),
+            "SELECT * FROM (SELECT \"id\", \"name\", ROW_NUMBER() OVER (ORDER BY \"id\" ASC) AS \"__dbx_row_num\" FROM \"sales\".\"orders\") \"dbx_page\" WHERE \"__dbx_row_num\" > 500 AND \"__dbx_row_num\" <= 1000 ORDER BY \"__dbx_row_num\""
         );
     }
 

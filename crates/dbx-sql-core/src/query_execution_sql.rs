@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -1206,21 +1206,25 @@ pub(crate) fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
 /// is reported as "not an opener" so the caller falls back to the historical
 /// cleanup instead of keeping a transaction open by accident.
 pub fn mysql_statement_opens_explicit_transaction(sql: &str) -> bool {
-    let cleaned = strip_sql_comments(sql);
-    let mut parts = cleaned.split(';');
-    let statement = parts.next().unwrap_or_default().trim();
-    if statement.is_empty() || parts.any(|part| !part.trim().is_empty()) {
+    if !crate::sql::starts_with_executable_sql_keyword_for_database(sql, &["BEGIN", "START"], DatabaseType::Mysql) {
         return false;
     }
-    let upper = statement.to_ascii_uppercase();
-    let mut tokens = upper.split_whitespace();
-    match tokens.next() {
-        Some("BEGIN") => matches!(tokens.next(), None | Some("WORK")),
+    let Ok(tokens) = Tokenizer::new(&MySqlDialect {}, sql).tokenize() else { return false };
+    let mut tokens: Vec<_> = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect();
+    while tokens.last() == Some(&Token::SemiColon) {
+        tokens.pop();
+    }
+    if tokens.iter().any(|token| matches!(token, Token::SemiColon)) {
+        return false;
+    }
+    let word_is = |index: usize, expected: &str| matches!(tokens.get(index), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected));
+    if word_is(0, "BEGIN") {
+        tokens.len() == 1 || (tokens.len() == 2 && word_is(1, "WORK"))
+    } else {
         // Modifiers (`READ ONLY`, `READ WRITE`, `WITH CONSISTENT SNAPSHOT`) are
         // optional and are verified by the server; a malformed one fails the
         // statement, so no transaction is left open for this execution.
-        Some("START") => tokens.next() == Some("TRANSACTION"),
-        _ => false,
+        word_is(0, "START") && word_is(1, "TRANSACTION")
     }
 }
 
@@ -3499,6 +3503,8 @@ mod tests {
             "BEGIN WORK",
             "BEGIN WORK;",
             "-- open a transaction\nBEGIN",
+            "# open a transaction\nBEGIN WORK;",
+            "START/* start */TRANSACTION;",
             "/* keep */ START TRANSACTION",
             "START TRANSACTION",
             "start transaction;",
@@ -3522,6 +3528,11 @@ mod tests {
             "BEGIN;\nUPDATE t SET a = 1;",
             "BEGIN\nDECLARE x INT;\nEND",
             "BEGIN END",
+            "BEGIN WORK SELECT 1",
+            "CREATE PROCEDURE p() BEGIN SELECT 'START TRANSACTION'; END",
+            "SELECT 'COMMIT; BEGIN'",
+            "/* START TRANSACTION */ SELECT 1",
+            "ROLLBACK TO SAVEPOINT s",
             "START REPLICA",
             "SET autocommit = 0",
             "SELECT 'BEGIN' FROM t",

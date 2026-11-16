@@ -17,6 +17,7 @@ import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColu
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import type { DatabaseType } from "@/types/database";
 import { clampSearchSplitWidth, MIN_SEARCH_SPLIT_PANE_WIDTH } from "@/lib/dataGrid/dataGridSearchSplit";
+import { filterModeHasCompleteValue, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 
 type LocalFilterSummary = {
   columnIndex: number;
@@ -25,11 +26,19 @@ type LocalFilterSummary = {
   hiddenValueCount: number;
 };
 
+type StructuredFilterSummary = {
+  id: string;
+  columnName: string;
+  modeLabel: string;
+  valueText: string;
+};
+
 const props = withDefaults(
   defineProps<{
     whereInput: string;
     orderByInput: string;
     columns: readonly string[];
+    quickBuilderColumns?: readonly string[];
     commentByColumn?: ReadonlyMap<string, string>;
     conditionColumns: readonly DataGridConditionColumnOption[];
     identifierQuote?: string;
@@ -104,9 +113,30 @@ const emit = defineEmits<{
   applySortRules: [];
 }>();
 
+const quickFilteredColumns = computed(() => {
+  if (!props.quickBuilderColumns) return props.filteredColumns;
+  const matching = new Set(props.filteredColumns);
+  return props.quickBuilderColumns.filter((column) => matching.has(column));
+});
+
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement>();
 const whereEditorRef = ref<InstanceType<typeof DataGridConditionEditor>>();
+
+// Structured rules at a glance (#14969): the collapsed count badge cannot tell
+// the user which fields are filtered; this block shows field + condition and
+// lets each field be dropped on its own, mirroring the local-filter summary.
+const structuredFilterSummaries = computed<StructuredFilterSummary[]>(() => {
+  const modeLabelByValue = new Map(props.modeOptions.map((option) => [option.value, t(option.labelKey)] as const));
+  return props.rules
+    .filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue))
+    .map((rule) => ({
+      id: rule.id,
+      columnName: rule.columnName,
+      modeLabel: modeLabelByValue.get(rule.mode) ?? rule.mode,
+      valueText: filterModeUsesRange(rule.mode) ? `${rule.rawValue} ~ ${rule.rawEndValue}` : rule.rawValue,
+    }));
+});
 
 function focusWhere(): boolean {
   if (!props.canUseWhereSearch || !whereEditorRef.value) return false;
@@ -255,6 +285,19 @@ onUnmounted(onResizeEnd);
               <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
             </div>
 
+            <div v-if="structuredFilterSummaries.length" class="space-y-1.5 rounded-md border border-sky-500/30 bg-sky-500/5 px-2 py-1.5">
+              <div class="flex items-center gap-2 text-xs font-medium text-sky-600 dark:text-sky-400">
+                <Filter class="h-3.5 w-3.5 shrink-0" /><span class="truncate">{{ t("grid.structuredFiltersActive", { count: structuredFilterSummaries.length }) }}</span>
+              </div>
+              <div class="space-y-0.5">
+                <div v-for="summary in structuredFilterSummaries" :key="summary.id" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-1.5 rounded border border-sky-500/10 bg-background/70 px-2 py-0.5 text-xs">
+                  <span class="truncate font-medium text-foreground" :title="summary.columnName">{{ summary.columnName }}</span>
+                  <span class="min-w-0 truncate font-mono text-muted-foreground" :title="`${summary.modeLabel} ${summary.valueText}`">{{ summary.modeLabel }} {{ summary.valueText }}</span>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" :aria-label="t('grid.clearFilter')" @click="emit('removeRule', summary.id)"><X class="h-3.5 w-3.5" /></Button>
+                </div>
+              </div>
+            </div>
+
             <div v-if="hasLocalColumnFilters" class="space-y-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-1.5">
               <div class="flex items-center justify-between gap-2">
                 <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
@@ -281,8 +324,8 @@ onUnmounted(onResizeEnd);
               :rules="rules"
               :show-apply-only="true"
               :apply-only-busy="applyOnlyBusy"
-              :columns="[...columns]"
-              :filtered-columns="filteredColumns"
+              :columns="[...(quickBuilderColumns ?? columns)]"
+              :filtered-columns="quickFilteredColumns"
               :mode-options="modeOptions"
               :column-search="columnSearch"
               :disabled="!canUseWhereSearch"
@@ -369,7 +412,7 @@ onUnmounted(onResizeEnd);
           <PopoverContent data-sort-rules-scroll align="start" :collision-padding="8" class="max-h-[var(--reka-popover-content-available-height)] w-fit max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain p-2.5">
             <DataGridSortBuilder
               :rules="sortRules ?? []"
-              :columns="columns"
+              :columns="quickBuilderColumns ?? columns"
               :comment-by-column="commentByColumn"
               :busy="sortBuilderBusy"
               :apply-only-busy="sortApplyOnlyBusy"

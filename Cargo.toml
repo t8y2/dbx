@@ -36,12 +36,12 @@ pageant = { path = "vendor/pageant" }
 # (MicrosoftEdge/WebView2Feedback#5650, see
 # vendor/wry/src/webview2/clipboard_history.rs).
 wry = { path = "vendor/wry" }
-tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
-postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
-postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
+tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" }
+postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" }
+postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" }
 # Temporary compatibility patches for deprecated sha256_password accounts and
 # rustls dangerous-mode connections to legacy certificates. Remove after upstream support lands.
-mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "d45e6e196bb06cf9a4f1f7ed023d98225df2aeeb" }
+mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "4cd84d86bb86b060320ce3459561e8093e4422fa" }
 # Preserve readable SQL Server result sets when a row contains an unpaired
 # UTF-16 surrogate, or varchar/text bytes that are invalid in the column's
 # collation (replaced with U+FFFD, no BOM sniffing). Remove after the behavior

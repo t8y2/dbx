@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   listDatabases: vi.fn(),
   listDatabaseMetadata: vi.fn(),
   editorSettings: {
+    shortcuts: { newQuery: "Mod+T" },
     objectBrowserViewMode: "list" as "list" | "grid" | "compact",
     objectBrowserCompactWidth: 160,
   },
@@ -318,8 +319,8 @@ describe("DatabaseBrowser scroll position preservation (#12432)", () => {
     const scroller = host.querySelector<HTMLElement>(".overflow-auto");
     expect(scroller?.scrollTop).toBe(240);
 
-    // Click sort header button
-    const sortBtn = host.querySelector<HTMLButtonElement>("button.gap-1");
+    // Click sort header button (gap-1 + truncate; the toolbar Copy button also has gap-1)
+    const sortBtn = host.querySelector<HTMLButtonElement>("button.gap-1.truncate");
     expect(sortBtn).not.toBeNull();
     sortBtn!.click();
 

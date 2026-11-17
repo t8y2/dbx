@@ -16,6 +16,8 @@ const appBuildScript = readFileSync(resolve(process.cwd(), "src-tauri/build.rs")
 const wryWebView2Source = readFileSync(resolve(process.cwd(), "vendor/wry/src/webview2/mod.rs"), "utf8");
 const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
+const fixedRuntimeConfig = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
+const clientConfig = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8"));
 
 describe("Windows offline installer template", () => {
   it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
@@ -26,18 +28,26 @@ describe("Windows offline installer template", () => {
     expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != ""');
     expect(template).not.toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
     expect(template).toContain("${If} ${IsWin7}");
+    expect(template).toContain("${OrIf} ${IsWin2008R2}");
     expect(template).toContain("${OrIf} ${IsWin2012R2}");
     expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
-    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}");
+    expect(template).toContain('${GetParent} "$EXEPATH" $0');
+    // The fixed-runtime build says which systems it targets in the installer
+    // title; productName must stay path-safe ("/" is rejected by Tauri).
+    expect(template).toContain('!define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2+"');
+    expect(clientConfig.productName).toBe("DBX");
+    expect(fixedRuntimeConfig.productName).toBeUndefined();
+    expect(template).toContain("DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}");
+    expect(template).not.toContain("win7-server2012r2-offline-setup.exe");
     expect(template).toContain("SetErrorLevel 1633");
     expect(template).toContain("${OrIf} $PassiveMode = 1");
   });
 
   it("localizes the Windows 7 package guidance in every installer language", () => {
     expect(template.match(/LangString dbxWin7InstallerRequired/g)).toHaveLength(3);
-    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2012 R2.");
-    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2012 R2。");
-    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。");
+    expect(template).toContain("For Windows 7 or Windows Server 2008 R2 and later, use the dedicated Windows 7 / Server 2008 R2+ package.");
+    expect(template).toContain("Windows 7 与 Windows Server 2008 R2 及以上请使用 Windows 7 / Server 2008 R2+ 专用包。");
+    expect(template).toContain("Windows 7 與 Windows Server 2008 R2 及以上請改用 Windows 7 / Server 2008 R2+ 專用套件。");
   });
 
   it.each([

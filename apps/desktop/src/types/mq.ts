@@ -371,6 +371,10 @@ export interface PeekMessagesOptions {
   startPosition?: "latest" | "earliest" | "offset" | "timestamp";
   /** Epoch milliseconds; Kafka resolves the first record batch at or after this time per partition. */
   timestamp?: number;
+  /** Epoch milliseconds; optional inclusive upper bound for a timestamp read. */
+  endTimestamp?: number;
+  /** 仅 timestamp 窗口模式生效：newest 让 agent 从截止时间一侧倒序回扫读取。 */
+  sortOrder?: string;
   partition?: number;
   offset?: number;
 }

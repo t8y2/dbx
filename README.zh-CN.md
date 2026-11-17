@@ -82,28 +82,6 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="docs/public/sponsors/rainyun-card.png" alt="雨云" width="175" />
-      </a>
-    </td>
-    <td>
-      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
-        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Jalapeño Cloud 是 AI 基础设施与 Token 算力平台，通过 DBX 专属入口可享新用户免费额度与充值加赠。
-      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">访问 Jalapeño Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.aicodemirror.ai/register?invitecode=9A50BU" target="_blank">
         <img src="docs/public/sponsors/aicodemirror-card.png" alt="AICodeMirror" width="175" />
       </a>
@@ -115,13 +93,24 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <img src="docs/public/sponsors/rainyun-card.png" alt="雨云" width="175" />
+      </a>
+    </td>
+    <td>
+      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://dbx.hualong.online/" target="_blank">
         <img src="docs/public/sponsors/hualong-card.png" alt="HuaLongAI" width="175" />
       </a>
     </td>
     <td>
       HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。
-      <a href="https://api.hualong.online/register?promo=DBX%26HUALONG" target="_blank">访问 HuaLongAI</a>
+      <a href="https://dbx.hualong.online/" target="_blank">访问 HuaLongAI</a>
     </td>
   </tr>
   <tr>
@@ -178,17 +167,6 @@
     <td>
       由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
       <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">访问 Atlas Cloud</a>
     </td>
   </tr>
   <tr>

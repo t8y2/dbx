@@ -1140,7 +1140,7 @@ public final class DbxJdbcPlugin {
 
         ClassLoader loader = urls.isEmpty()
             ? Thread.currentThread().getContextClassLoader()
-            : new URLClassLoader(urls.toArray(URL[]::new), DbxJdbcPlugin.class.getClassLoader());
+            : new URLClassLoader(urls.toArray(URL[]::new), ClassLoader.getPlatformClassLoader());
         Thread.currentThread().setContextClassLoader(loader);
         registeredDriverClassLoader = loader;
 

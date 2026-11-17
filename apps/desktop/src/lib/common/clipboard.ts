@@ -30,12 +30,21 @@ interface ClipboardContainer {
   removeChild(node: unknown): unknown;
 }
 
+interface ClipboardFocusTarget {
+  closest?(selector: string): ClipboardContainer | null;
+  focus?(options?: FocusOptions): void;
+  readonly isConnected?: boolean;
+  readonly selectionStart?: number | null;
+  readonly selectionEnd?: number | null;
+  readonly selectionDirection?: "forward" | "backward" | "none" | null;
+  setSelectionRange?(start: number, end: number, direction?: "forward" | "backward" | "none"): void;
+}
+
 interface ClipboardDocument {
   body?: ClipboardContainer;
-  activeElement?: {
-    closest?(selector: string): ClipboardContainer | null;
-  };
+  activeElement?: ClipboardFocusTarget;
   createElement(tagName: "textarea"): ClipboardTextarea;
+  getSelection?(): Selection | null;
   execCommand?(command: string): boolean;
 }
 
@@ -101,6 +110,43 @@ function recordClipboardWrite(): void {
 
 function legacyClipboardContainer(document: ClipboardDocument): ClipboardContainer | undefined {
   return document.activeElement?.closest?.("[role='dialog']") ?? document.body;
+}
+
+function preserveLegacyClipboardFocus(document: ClipboardDocument): () => void {
+  const activeElement = document.activeElement;
+  const inputSelection = typeof activeElement?.selectionStart === "number" && typeof activeElement.selectionEnd === "number" ? { start: activeElement.selectionStart, end: activeElement.selectionEnd, direction: activeElement.selectionDirection ?? undefined } : undefined;
+  const selection = document.getSelection?.();
+  const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
+  const anchorNode = selection?.anchorNode;
+  const anchorOffset = selection?.anchorOffset ?? 0;
+  const focusNode = selection?.focusNode;
+  const focusOffset = selection?.focusOffset ?? 0;
+
+  return () => {
+    try {
+      if (selection) {
+        selection.removeAllRanges();
+        if (ranges.length === 1 && anchorNode?.isConnected && focusNode?.isConnected && selection.setBaseAndExtent) {
+          selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+        } else {
+          for (const range of ranges) {
+            if (range.commonAncestorContainer.isConnected) selection.addRange(range);
+          }
+        }
+      }
+    } catch {
+      // A removed editor must not turn a successful clipboard write into an error.
+    }
+    try {
+      // Restoring a contenteditable selection may itself move browser focus.
+      if (activeElement?.isConnected !== false) {
+        activeElement?.focus?.({ preventScroll: true });
+        if (inputSelection) activeElement?.setSelectionRange?.(inputSelection.start, inputSelection.end, inputSelection.direction);
+      }
+    } catch {
+      // Focus handlers may have replaced the original input during copying.
+    }
+  };
 }
 
 function closestElement(target: unknown, selector: string): unknown {
@@ -238,6 +284,9 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   textarea.style.left = "-9999px";
   textarea.style.opacity = "0";
 
+  // Capture only when the synchronous fallback starts: a pending Web Clipboard
+  // request may have allowed the user to move focus to another editor.
+  const restoreFocus = preserveLegacyClipboardFocus(document);
   container.appendChild(textarea);
   try {
     textarea.focus?.();
@@ -248,7 +297,11 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
     }
     recordClipboardWrite();
   } finally {
-    container.removeChild(textarea);
+    try {
+      container.removeChild(textarea);
+    } finally {
+      restoreFocus();
+    }
   }
 }
 

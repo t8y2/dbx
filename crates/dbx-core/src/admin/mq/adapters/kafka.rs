@@ -744,6 +744,12 @@ fn peek_messages_params(
     if let Some(timestamp) = options.timestamp {
         params["timestamp"] = serde_json::json!(timestamp);
     }
+    if let Some(end_timestamp) = options.end_timestamp {
+        params["endTimestamp"] = serde_json::json!(end_timestamp);
+    }
+    if let Some(sort_order) = options.sort_order.as_deref() {
+        params["sortOrder"] = serde_json::json!(sort_order);
+    }
     params
 }
 
@@ -991,6 +997,8 @@ mod tests {
                 partition: Some(2),
                 offset: Some(17),
                 timestamp: None,
+                end_timestamp: None,
+                sort_order: None,
             },
         );
 
@@ -999,6 +1007,30 @@ mod tests {
         assert_eq!(params.get("startPosition").and_then(|value| value.as_str()), Some("offset"));
         assert_eq!(params.get("partition").and_then(|value| value.as_i64()), Some(2));
         assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
+        assert!(params.get("sortOrder").is_none());
+    }
+
+    #[test]
+    fn peek_message_params_forward_the_timestamp_window() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions {
+                start_position: Some(PeekStartPosition::Timestamp),
+                partition: None,
+                offset: None,
+                timestamp: Some(1_700_000_000_000),
+                end_timestamp: Some(1_700_000_060_000),
+                sort_order: Some("newest".to_string()),
+            },
+        );
+
+        assert_eq!(params.get("startPosition").and_then(|value| value.as_str()), Some("timestamp"));
+        assert_eq!(params.get("timestamp").and_then(|value| value.as_i64()), Some(1_700_000_000_000));
+        assert_eq!(params.get("endTimestamp").and_then(|value| value.as_i64()), Some(1_700_000_060_000));
+        assert_eq!(params.get("sortOrder").and_then(|value| value.as_str()), Some("newest"));
     }
 
     #[test]
@@ -1072,7 +1104,14 @@ mod tests {
             &cfg,
             &topic_ref(),
             20,
-            PeekMessagesOptions { start_position: None, partition: None, offset: Some(17), timestamp: None },
+            PeekMessagesOptions {
+                start_position: None,
+                partition: None,
+                offset: Some(17),
+                timestamp: None,
+                end_timestamp: None,
+                sort_order: None,
+            },
         );
 
         assert!(params.get("startPosition").is_none());

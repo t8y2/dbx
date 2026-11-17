@@ -389,6 +389,9 @@ fn collection_stats_field(result: &Document, key: &str) -> serde_json::Value {
     result.get(key).map(bson_to_json).unwrap_or(serde_json::Value::Null)
 }
 
+/// Lists databases visible to the account. `listDatabases` rejects accounts that only hold
+/// database-scoped roles with `Unauthorized`, so fall back to the databases those accounts are
+/// authorized for instead of failing the whole list.
 pub async fn list_databases(client: &Client) -> Result<Vec<String>, String> {
     match client.list_database_names().await {
         Ok(databases) => Ok(databases),
@@ -397,17 +400,32 @@ pub async fn list_databases(client: &Client) -> Result<Vec<String>, String> {
                 .database("admin")
                 .run_command(doc! { "listDatabases": 1, "nameOnly": true })
                 .selection_criteria(list_databases_secondary_selection())
-                .await
-                .map_err(|fallback| fallback.to_string())?;
-            let databases = result
-                .get_array("databases")
-                .map_err(|error| format!("MongoDB listDatabases response is invalid: {error}"))?
-                .iter()
-                .filter_map(|database| database.as_document()?.get_str("name").ok().map(str::to_string))
-                .collect();
-            Ok(databases)
+                .await;
+            match result {
+                Ok(result) => database_names_from_list_databases_result(&result),
+                // The replay fails with `Unauthorized` for the same restricted accounts, so keep
+                // falling back to the databases they are authorized for instead of failing here.
+                Err(replay) if list_databases_requires_authorized_fallback(&replay.kind) => {
+                    authorized_databases_or_error(client, &replay).await
+                }
+                Err(replay) => Err(replay.to_string()),
+            }
+        }
+        Err(error) if list_databases_requires_authorized_fallback(&error.kind) => {
+            authorized_databases_or_error(client, &error).await
         }
         Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Lists the databases the account is authorized for, returning `error` itself when none can be
+/// derived — the Java agent rethrows the original error in the same case.
+async fn authorized_databases_or_error(client: &Client, error: &mongodb::error::Error) -> Result<Vec<String>, String> {
+    let databases = list_authorized_databases(client).await;
+    if databases.is_empty() {
+        Err(error.to_string())
+    } else {
+        Ok(databases)
     }
 }
 
@@ -422,6 +440,71 @@ fn list_databases_requires_secondary_fallback(error: &str) -> bool {
         || error.contains("notmaster")
         || error.contains("notwritableprimary")
         || error.contains("slaveok=false")
+}
+
+/// Database-scoped accounts receive `Unauthorized` (code 13) for `listDatabases` even though they
+/// can read the databases their roles grant. Mirrors the Java agent's detection.
+fn list_databases_requires_authorized_fallback(kind: &mongodb::error::ErrorKind) -> bool {
+    matches!(
+        kind,
+        mongodb::error::ErrorKind::Command(error)
+            if error.code == 13 || error.code_name.eq_ignore_ascii_case("unauthorized")
+    )
+}
+
+/// Lists the databases the account is authorized for after `listDatabases` was rejected.
+/// MongoDB 4.0.5+ can scope `listDatabases` to those databases, so try that first; older servers
+/// reject the option, so derive the names from the account's resolved privileges instead — the
+/// same `connectionStatus` fallback `MongoAgent.listDatabases` uses on the Java side.
+async fn list_authorized_databases(client: &Client) -> Vec<String> {
+    match client.list_database_names().authorized_databases(true).await {
+        Ok(databases) if !databases.is_empty() => return databases,
+        Ok(_) => {}
+        Err(error) => {
+            log::debug!("[mongo][list-databases:authorized-fallback] authorizedDatabases retry failed: {error}");
+        }
+    }
+
+    match client.database("admin").run_command(doc! { "connectionStatus": 1, "showPrivileges": true }).await {
+        Ok(status) => database_names_from_connection_status(&status),
+        Err(error) => {
+            log::debug!("[mongo][list-databases:authorized-fallback] connectionStatus failed: {error}");
+            Vec::new()
+        }
+    }
+}
+
+fn database_names_from_list_databases_result(result: &Document) -> Result<Vec<String>, String> {
+    let databases =
+        result.get_array("databases").map_err(|error| format!("MongoDB listDatabases response is invalid: {error}"))?;
+    Ok(databases
+        .iter()
+        .filter_map(|database| database.as_document()?.get_str("name").ok().map(str::to_string))
+        .collect())
+}
+
+/// Reads the databases an authenticated account is authorized for from a `connectionStatus`
+/// response. Only the account's own resolved privileges are used, so a database is reported when
+/// the account really holds a privilege on it, regardless of where the granting role is defined.
+fn database_names_from_connection_status(status: &Document) -> Vec<String> {
+    let privileges = status
+        .get_document("authInfo")
+        .ok()
+        .and_then(|auth_info| auth_info.get_array("authenticatedUserPrivileges").ok());
+    let Some(privileges) = privileges else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = privileges
+        .iter()
+        .filter_map(|privilege| privilege.as_document())
+        .filter_map(|privilege| privilege.get_document("resource").ok())
+        .filter_map(|resource| resource.get_str("db").ok())
+        .filter(|database| !database.is_empty())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// MongoDB collection kind from `listCollections` (not GridFS buckets).
@@ -3559,14 +3642,14 @@ mod tests {
 
     /// `CommandError` is `#[non_exhaustive]` with a private field, so tests build it through the
     /// driver's derived `Deserialize`.
-    fn count_command_error(code: i32, code_name: &str) -> mongodb::error::CommandError {
-        serde_json::from_str(&format!(r#"{{"code": {code}, "codeName": "{code_name}", "errmsg": "count failed"}}"#))
+    fn command_error(code: i32, code_name: &str) -> mongodb::error::CommandError {
+        serde_json::from_str(&format!(r#"{{"code": {code}, "codeName": "{code_name}", "errmsg": "command failed"}}"#))
             .unwrap()
     }
 
     #[test]
     fn maps_mongo_namespace_not_found_count_errors_to_zero() {
-        let kind = mongodb::error::ErrorKind::Command(count_command_error(26, "NamespaceNotFound"));
+        let kind = mongodb::error::ErrorKind::Command(command_error(26, "NamespaceNotFound"));
 
         assert_eq!(parse_count_command_error(&kind), Some(0));
     }
@@ -3574,7 +3657,7 @@ mod tests {
     #[test]
     fn propagates_mongo_count_errors_other_than_namespace_not_found() {
         for (code, code_name) in [(13, "Unauthorized"), (17405, "CommandNotFound")] {
-            let kind = mongodb::error::ErrorKind::Command(count_command_error(code, code_name));
+            let kind = mongodb::error::ErrorKind::Command(command_error(code, code_name));
 
             assert_eq!(parse_count_command_error(&kind), None, "code {code} should propagate");
         }
@@ -3594,6 +3677,59 @@ mod tests {
             list_databases_secondary_selection(),
             SelectionCriteria::ReadPreference(ReadPreference::SecondaryPreferred { .. })
         ));
+    }
+
+    #[test]
+    fn detects_mongo_unauthorized_list_databases_errors() {
+        for code_name in ["Unauthorized", "unauthorized"] {
+            let kind = mongodb::error::ErrorKind::Command(command_error(13, code_name));
+            assert!(list_databases_requires_authorized_fallback(&kind), "codeName {code_name} should fall back");
+        }
+        assert!(!list_databases_requires_authorized_fallback(&mongodb::error::ErrorKind::Command(command_error(
+            26,
+            "NamespaceNotFound"
+        ))));
+        assert!(!list_databases_requires_authorized_fallback(&mongodb::error::ErrorKind::Shutdown));
+    }
+
+    #[test]
+    fn parses_database_names_from_list_databases_result() {
+        let result = doc! {
+            "databases": [
+                { "name": "shopdb", "sizeOnDisk": 1024_i64, "empty": false },
+                { "name": "reports" },
+            ],
+            "ok": 1.0,
+        };
+
+        assert_eq!(
+            database_names_from_list_databases_result(&result),
+            Ok(vec!["shopdb".to_string(), "reports".to_string()])
+        );
+        assert!(database_names_from_list_databases_result(&doc! { "ok": 1.0 }).is_err());
+    }
+
+    #[test]
+    fn reads_authorized_database_names_from_connection_status() {
+        let status = doc! {
+            "ok": 1.0,
+            "authInfo": {
+                "authenticatedUserPrivileges": [
+                    { "resource": { "db": "shopdb", "collection": "" }, "actions": ["find", "insert"] },
+                    { "resource": { "db": "shopdb", "collection": "system.js" }, "actions": ["find"] },
+                    { "resource": { "db": "reports", "collection": "" }, "actions": ["find"] },
+                    { "resource": { "db": "" }, "actions": ["find"] },
+                    { "resource": { "anyResource": true }, "actions": ["listDatabases"] },
+                ],
+            },
+        };
+
+        assert_eq!(database_names_from_connection_status(&status), vec!["reports".to_string(), "shopdb".to_string()]);
+        assert!(database_names_from_connection_status(&doc! { "ok": 1.0 }).is_empty());
+        assert!(database_names_from_connection_status(&doc! {
+            "authInfo": { "authenticatedUserPrivileges": [] },
+        })
+        .is_empty());
     }
 
     #[test]

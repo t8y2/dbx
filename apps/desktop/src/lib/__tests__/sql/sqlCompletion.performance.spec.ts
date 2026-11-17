@@ -61,6 +61,25 @@ describe("SQL completion with long string literals", () => {
     expect(elapsed).toBeLessThan(1_000);
   });
 
+  it("does not re-scan every nesting level when expanding deep derived tables", () => {
+    // `SELECT p.* FROM ( ... ) p` wrappers: expanding `p.*` needs the referenced row
+    // sources of each body, so the analyzer walks the nesting. This used to scan every
+    // descendant level from every level (O(2^depth)) and froze the editor after pasting
+    // a real report query with three dozen derived tables.
+    let inner = "SELECT id, name FROM users";
+    for (let level = 0; level < 32; level++) inner = `SELECT p.* FROM (${inner}) p`;
+    const document = `${inner};`;
+    const cursor = document.length - 1;
+    const engine = new SqlCompletionAnalysisEngine();
+    const start = performance.now();
+    const result = engine.analyze({ sql: document, cursor, databaseType: "mysql", dialect: "mysql", semanticCompletionEnabled: true, syntaxDialect: "mysql" });
+    const elapsed = performance.now() - start;
+
+    expect(result.completionContext.referencedTables.some((table) => table.name === "users")).toBe(true);
+    // Was unbounded (minutes) before the depth-scoped subquery scan.
+    expect(elapsed).toBeLessThan(2_000);
+  });
+
   it.each([
     { sql: "SELECT 中文_name", databaseType: "postgres" as const, prefix: "中文_name" },
     { sql: "SELECT 𐐀name", databaseType: "postgres" as const, prefix: "𐐀name" },

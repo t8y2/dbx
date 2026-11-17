@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COLUMN_NAME_COPY_SEPARATOR_OPTIONS, columnNamesForCopy, formatColumnNamesForCopy, isColumnNameCopySeparator, loadColumnNameCopySeparator, saveColumnNameCopySeparator, supportsColumnNameQuoting } from "@/lib/dataGrid/dataGridColumnNameCopy";
+import type { DatabaseType } from "@/types/database";
 
 describe("dataGridColumnNameCopy", () => {
   afterEach(() => {
@@ -80,5 +81,29 @@ describe("dataGridColumnNameCopy", () => {
     expect(loadColumnNameCopySeparator()).toBe("comma-newline");
     store.set("dbx-copy-column-names-separator", "bogus");
     expect(loadColumnNameCopySeparator()).toBe("tab");
+  });
+
+  it("formats a comma list of single-quoted literals for IN (...) lists (#14495)", () => {
+    expect(formatColumnNamesForCopy(["id", "user_name"], { separator: "comma", quote: true, quoteStyle: "single" })).toBe("'id','user_name'");
+    // Escapes a quote instead of producing broken SQL, and needs no identifier-quote support.
+    expect(formatColumnNamesForCopy(["o'brien"], { separator: "comma", quote: true, quoteStyle: "single", databaseType: "jdbc" })).toBe("'o''brien'");
+    // The default style is still the database identifier quote.
+    expect(formatColumnNamesForCopy(["type"], { separator: "comma", quote: true, databaseType: "mysql" })).toBe("`type`");
+  });
+
+  it("escapes backslashes for dialects where a backslash escapes the next character (#14495)", () => {
+    const single = (names: string[], databaseType?: DatabaseType) => formatColumnNamesForCopy(names, { separator: "comma", quote: true, quoteStyle: "single", databaseType });
+    for (const databaseType of ["mysql", "doris", "starrocks", "hive", "argo", "transwarp", "impala", "spark", "databend"] as const) {
+      // \t and \Z would otherwise be read as a tab and as ctrl-Z.
+      expect(single(["C:\\tmp", "\\Z"], databaseType)).toBe("'C:\\\\tmp','\\\\Z'");
+      // A backslash before the quote must not shift the string boundary.
+      expect(single(["a\\'b"], databaseType)).toBe("'a\\\\''b'");
+    }
+    // Standard-conforming dialects keep the backslash literal, so only quotes double.
+    for (const databaseType of ["postgres", "oracle", "sqlserver", "sqlite", "clickhouse"] as const) {
+      expect(single(["C:\\tmp", "a\\'b"], databaseType)).toBe("'C:\\tmp','a\\''b'");
+    }
+    // Without a known dialect the safer text is preserved verbatim.
+    expect(single(["C:\\tmp"])).toBe("'C:\\tmp'");
   });
 });

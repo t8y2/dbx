@@ -12,7 +12,8 @@ use tauri::{AppHandle, Manager, State, Window};
 use super::connection::AppState;
 use crate::{
     apply_debug_log_level, apply_desktop_settings, clear_startup_probe_after_frontend_ready,
-    hide_main_window_for_close, refresh_native_menus, request_app_close, AppLocaleState, CloseBehaviorState,
+    hide_main_window_for_close, promoted_build::PromotedBuildState, refresh_native_menus, request_app_close,
+    AppLocaleState, CloseBehaviorState,
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
@@ -116,6 +117,42 @@ pub async fn set_app_locale(
     let refresh = refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"));
     persistence?;
     refresh
+}
+
+/// Display-only: records the beta build the renderer recognised as promoted,
+/// mirroring how `set_app_locale` feeds the native menus. Persisted next to the
+/// other app state because the renderer's localStorage is not reliable across
+/// macOS restarts and the About panel is built before the webview runs. Must
+/// stay callable while the data migration gate is closed, so the panel is right
+/// for migration users too.
+#[tauri::command]
+pub async fn set_promoted_build(
+    app: AppHandle,
+    promoted_build: State<'_, PromotedBuildState>,
+    build_version: String,
+) -> Result<(), String> {
+    let normalize = dbx_platform::version::normalize_version;
+    let build_version = normalize(&build_version);
+    // A report about some other build says nothing about this one: the renderer
+    // can still hold a marker from before an upgrade. Ignore it rather than
+    // overwrite the value seeded from storage.
+    if build_version.is_empty() || build_version != normalize(env!("CARGO_PKG_VERSION")) {
+        return Ok(());
+    }
+    if !promoted_build.replace(Some(build_version.clone())) {
+        return Ok(());
+    }
+    // `AppState` only exists once setup reaches storage; the renderer may call
+    // this while startup is still running (that is why the migration gate lets
+    // the command through), and the marker is re-reported on the next launch.
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        if let Err(error) = state.storage.save_promoted_build(&build_version).await {
+            log::warn!("[ABOUT] failed to persist the promoted build: {error}");
+        }
+    }
+    // Runs once per process at most: the check above returns early unless the
+    // marker actually changed.
+    refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"))
 }
 
 #[tauri::command]

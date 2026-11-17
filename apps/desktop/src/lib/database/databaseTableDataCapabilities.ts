@@ -161,7 +161,11 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
   },
   jdbc: {
     tableData: {
-      insert: false,
+      // Generic JDBC connections already allow grid updates and deletes (with a
+      // primary key), and inserts ride the same executeBatch save path — the
+      // driver surfaces any DML the backend rejects. Hiding only the insert
+      // affordance left JDBC tabs unable to add rows at all (issue #14715).
+      insert: true,
       updateRequiresPrimaryKey: true,
       deleteRequiresPrimaryKey: true,
       requiresTransactionalTableForExistingRows: false,

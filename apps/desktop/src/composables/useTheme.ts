@@ -172,10 +172,10 @@ function applyTheme() {
   }
 }
 
-function setThemeMode(mode: AppThemeMode) {
+function setThemeMode(mode: AppThemeMode, options: { persist?: boolean } = {}) {
   themeMode.value = mode;
   safeLocalStorageSet(APP_THEME_STORAGE_KEY, mode);
-  persistAppAppearancePatch({ themeMode: mode });
+  if (options.persist !== false) persistAppAppearancePatch({ themeMode: mode });
   applyTheme();
 }
 

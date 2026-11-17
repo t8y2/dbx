@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, UserAttentionType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -1758,9 +1758,9 @@ async fn ensure_mcp_sql_allowed_with_approval(
     ensure_database_in_mcp_scope(&policy, &config.id, database)?;
     if let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == config.id) {
         if rule.database_scope == McpDatabaseScope::Selected
-            && dbx_core::production_safety::sql_references_disallowed_database(
+            && dbx_core::production_safety::sql_references_disallowed_database_for_connection(
                 sql,
-                &config.db_type,
+                config,
                 database,
                 &rule.allowed_databases,
             )
@@ -1900,6 +1900,21 @@ async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str,
             sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
             respond_error(stream, "503 Service Unavailable", "DBX approval window unavailable").await;
             return;
+        }
+        let app_handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let Some(window) = app_handle.get_webview_window("main") else {
+                return;
+            };
+            if window.is_focused().unwrap_or(false) {
+                return;
+            }
+            if let Err(error) = window.request_user_attention(Some(UserAttentionType::Informational)) {
+                log::debug!("MCP SQL approval window attention request failed: {error}");
+            }
+            crate::show_main_window(&app_handle);
+        }) {
+            log::debug!("MCP SQL approval window could not be brought forward: {error}");
         }
         let answer = tokio::time::timeout(Duration::from_secs(90), receiver).await;
         sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));

@@ -1,9 +1,48 @@
 import { describe, expect, it } from "vitest";
 import { orderItemsByPinnedTreeNodeOrder, removePinnedTreeNodesFromOrder, treeNodePinIdentity, treeNodePinKey } from "@/lib/app/pinnedItems";
-import { buildMongoObjectBrowserRows, buildObjectBrowserRows, canonicalizeObjectBrowserPinnedTreeNodeIdentity, objectBrowserRowLegacyPinnedTreeNodeIds, objectBrowserRowMatchesPinnedTreeNode, sortObjectBrowserRows, type ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
+import {
+  buildMongoObjectBrowserRows,
+  buildObjectBrowserRows,
+  canonicalizeObjectBrowserPinnedTreeNodeIdentity,
+  formatObjectBrowserAutoIncrement,
+  initialObjectBrowserSortDirection,
+  objectBrowserRowLegacyPinnedTreeNodeIds,
+  objectBrowserRowMatchesPinnedTreeNode,
+  sortObjectBrowserRows,
+  type ObjectBrowserRow,
+} from "@/lib/table/objectBrowserRows";
 import type { TreeNode } from "@/types/database";
 
 describe("buildObjectBrowserRows", () => {
+  /**
+   * #14717 review: PostgreSQL rejects `DROP TABLE` on a foreign table. The row
+   * type cannot carry that: `normalizeObjectBrowserType` folds "FOREIGN TABLE"
+   * into "TABLE", so the identity has to survive on its own field or the drop
+   * statement falls back to `DROP TABLE` and the server refuses it.
+   */
+  it("keeps the foreign-table identity even though the row type is normalized to TABLE", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "remote_users", object_type: "FOREIGN TABLE", schema: "public" },
+        { name: "local_users", object_type: "TABLE", schema: "public" },
+      ],
+      database: "app",
+      fallbackSchema: "public",
+    });
+
+    const byName = new Map(rows.map((row) => [row.name, row]));
+    expect(byName.get("remote_users")?.type).toBe("TABLE");
+    expect(byName.get("remote_users")?.foreignTable).toBe(true);
+    expect(byName.get("local_users")?.foreignTable).toBeUndefined();
+  });
+
+  it("recognizes the spaced, hyphenated and underscored spellings of a foreign table", () => {
+    for (const objectType of ["FOREIGN TABLE", "foreign-table", "FOREIGN_TABLE"]) {
+      const rows = buildObjectBrowserRows({ objects: [{ name: "ft", object_type: objectType }], database: "app", fallbackSchema: "public" });
+      expect(rows[0]?.foreignTable, objectType).toBe(true);
+    }
+  });
+
   it("keeps a schema index distinct from a table and preserves its exact parent identity", () => {
     const rows = buildObjectBrowserRows({
       objects: [{ name: " Ix (a) ", object_type: "INDEX", schema: "Index Owner", parent_schema: "Table Owner", parent_name: " T(a) " }],
@@ -204,5 +243,51 @@ describe("buildMongoObjectBrowserRows", () => {
 
     expect(rows.map((row) => row.name)).toEqual([" users ", "users", " "]);
     expect(new Set(rows.map((row) => row.id))).toHaveLength(3);
+  });
+});
+
+describe("Object Browser auto-increment column (#13830)", () => {
+  const rows: ObjectBrowserRow[] = [
+    { id: "small", name: "small", displayName: "small", type: "TABLE", autoIncrement: "9" },
+    { id: "mid", name: "mid", displayName: "mid", type: "TABLE", autoIncrement: "100" },
+    { id: "big", name: "big", displayName: "big", type: "TABLE", autoIncrement: "18446744073709551615" },
+    { id: "none", name: "none", displayName: "none", type: "TABLE", autoIncrement: null },
+    { id: "view", name: "view", displayName: "view", type: "VIEW" },
+  ];
+
+  it("sorts by numeric value, keeping tables without a counter last", () => {
+    expect(sortObjectBrowserRows(rows, "autoIncrement", "asc").map((row) => row.id)).toEqual(["small", "mid", "big", "none", "view"]);
+    expect(sortObjectBrowserRows(rows, "autoIncrement", "desc").map((row) => row.id)).toEqual(["big", "mid", "small", "none", "view"]);
+    expect(rows.map((row) => row.id)).toEqual(["small", "mid", "big", "none", "view"]);
+  });
+
+  it("starts with the largest counters first", () => {
+    expect(initialObjectBrowserSortDirection("autoIncrement")).toBe("desc");
+  });
+
+  it("formats the value with digit grouping without losing precision past 2^53", () => {
+    const format = new Intl.NumberFormat();
+    expect(formatObjectBrowserAutoIncrement("1234567")).toBe(format.format(1234567));
+    expect(formatObjectBrowserAutoIncrement("18446744073709551615")).toBe(format.format(BigInt("18446744073709551615")));
+    expect(formatObjectBrowserAutoIncrement(" 42 ")).toBe(format.format(42));
+    expect(formatObjectBrowserAutoIncrement("not a number")).toBe("not a number");
+    expect(formatObjectBrowserAutoIncrement(null)).toBe("");
+    expect(formatObjectBrowserAutoIncrement(undefined)).toBe("");
+    expect(formatObjectBrowserAutoIncrement("")).toBe("");
+  });
+});
+
+describe("Object Browser table charset sorting", () => {
+  const rows: ObjectBrowserRow[] = [
+    { id: "utf8-bin", name: "utf8_bin", displayName: "utf8_bin", type: "TABLE", characterSet: "utf8mb4", collation: "utf8mb4_bin" },
+    { id: "utf8-ci", name: "utf8_ci", displayName: "utf8_ci", type: "TABLE", characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" },
+    { id: "latin", name: "latin", displayName: "latin", type: "TABLE", characterSet: "latin1", collation: "latin1_swedish_ci" },
+    { id: "view", name: "view", displayName: "view", type: "VIEW" },
+  ];
+
+  it.each(["characterSet", "collation"] as const)("sorts %s while keeping absent table metadata last", (key) => {
+    expect(sortObjectBrowserRows(rows, key, "asc").map((row) => row.id)).toEqual(key === "characterSet" ? ["latin", "utf8-bin", "utf8-ci", "view"] : ["latin", "utf8-ci", "utf8-bin", "view"]);
+    expect(sortObjectBrowserRows(rows, key, "desc").map((row) => row.id)).toEqual(["utf8-bin", "utf8-ci", "latin", "view"]);
+    expect(rows.map((row) => row.id)).toEqual(["utf8-bin", "utf8-ci", "latin", "view"]);
   });
 });

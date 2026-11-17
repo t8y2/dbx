@@ -88,9 +88,11 @@ interface UseDataGridExtractorOptions {
   contextCell: ComputedRef<{ rowId: number; rowIndex: number; col: number } | null> | Ref<{ rowId: number; rowIndex: number; col: number } | null>;
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string) => Promise<boolean>;
+  onCopied?: (result: DataGridExtractResult) => void;
   displayValue?: (value: CellValue, columnIndex: number) => string;
   editValue?: (value: CellValue, columnIndex: number) => string;
   hasColumnFormatter?: (columnIndex: number) => boolean;
+  hasBinaryColumnFormatter?: (columnIndex: number) => boolean;
   applyColumnFormattersOnExport?: ComputedRef<boolean>;
   externalCellValue?: (value: unknown, columnIndex: number) => unknown;
   /** Present when the grid cannot guarantee the whole result set is loaded; drives the partial-copy hint. */
@@ -155,6 +157,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const external = options.externalCellValue?.(normalized, columnIndex);
       return external === undefined ? normalized : external;
     }
+    const resolvedSourceIndex = sourceIndex ?? columnIndex;
+    if (presentBinaryText && value !== null && value !== undefined && options.hasBinaryColumnFormatter?.(resolvedSourceIndex) && shouldApplyColumnFormatter(resolvedSourceIndex)) {
+      return options.displayValue?.(value as CellValue, resolvedSourceIndex) ?? value;
+    }
     if (presentBinaryText) {
       const text = binaryCellClipboardText(value, columnType, options.databaseType.value);
       if (text !== null) return text;
@@ -162,7 +168,6 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const normalized = normalizeValues ? normalizeCellValue(value, columnType, keepUnsafeJsonText) : value;
     const externalValue = options.externalCellValue?.(normalized, columnIndex);
     const resolvedValue = externalValue === undefined ? normalized : externalValue;
-    const resolvedSourceIndex = sourceIndex ?? columnIndex;
     const shouldFormat = isOracleTemporal(columnType) || shouldApplyColumnFormatter(resolvedSourceIndex);
     if (presentBinaryText && resolvedValue !== null && resolvedValue !== undefined && options.displayValue && shouldFormat) {
       return options.displayValue(resolvedValue as CellValue, resolvedSourceIndex);
@@ -576,6 +581,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       if (isSessionValid && !isSessionValid()) return false;
       const copied = await options.copyText(result.text, gridCopy, extractor === "html" ? result.text : undefined);
       if (!copied) return false;
+      options.onCopied?.(result);
       showWarnings(result.warnings, result.omittedColumns);
       const partialLoadInfo = options.partialLoadInfo?.value;
       if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {

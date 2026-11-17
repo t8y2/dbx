@@ -455,6 +455,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: Some(format!("-- SQL for {name}")),
         }
     }

@@ -5217,6 +5217,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "将标签页移动至另一窗口",
     openTabGroupInNewWindow: "在新窗口中打开分组",
     moveTabGroupToAnotherWindow: "将分组移动至另一窗口",
+    consolidateWorkspaceWindows: "合并所有副窗口",
     mainWindow: "主窗口",
     detachedWindow: "窗口 {number}",
     splitRight: "拆分并右移",

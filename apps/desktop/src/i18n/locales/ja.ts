@@ -4858,6 +4858,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "タブを別のウィンドウに移動",
     openTabGroupInNewWindow: "新しいウィンドウでグループを開く",
     moveTabGroupToAnotherWindow: "グループを別のウィンドウに移動",
+    consolidateWorkspaceWindows: "すべての副ウィンドウを統合",
     mainWindow: "メインウィンドウ",
     detachedWindow: "ウィンドウ {number}",
     splitRight: "右に分割",

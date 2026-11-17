@@ -4787,6 +4787,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "탭을 다른 창으로 이동",
     openTabGroupInNewWindow: "새 창에서 그룹 열기",
     moveTabGroupToAnotherWindow: "그룹을 다른 창으로 이동",
+    consolidateWorkspaceWindows: "모든 보조 창 병합",
     mainWindow: "기본 창",
     detachedWindow: "창 {number}",
     splitRight: "오른쪽으로 분할",

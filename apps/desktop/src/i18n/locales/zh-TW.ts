@@ -4815,6 +4815,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "將標籤頁移至另一視窗",
     openTabGroupInNewWindow: "在新視窗中開啟群組",
     moveTabGroupToAnotherWindow: "將群組移至另一視窗",
+    consolidateWorkspaceWindows: "合併所有副視窗",
     mainWindow: "主視窗",
     detachedWindow: "視窗 {number}",
     splitRight: "拆分並右移",

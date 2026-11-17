@@ -5271,7 +5271,7 @@ async function handleWebLogout() {
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
-  const detachedTransfer = consumeDetachedTabTransfer();
+  const detachedTransfer = await consumeDetachedTabTransfer();
   const savedSqlInitialization = Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
     .then(() => {
       console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
@@ -5307,7 +5307,7 @@ async function initApp() {
     await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id), skipRestore: !!detachedTransfer });
     if (detachedTransfer && queryStore.importTransferredTabs(tabWindowTransferEntries(detachedTransfer), detachedTransfer.activeTabId)) {
       await queryStore.flushPendingPersist();
-      markTabWindowTransferAccepted(detachedTransfer.transferId);
+      await markTabWindowTransferAccepted(detachedTransfer.transferId);
     }
     if (isDesktop) {
       await queryStore.flushPendingPersist();
@@ -5728,6 +5728,7 @@ onUnmounted(() => {
           @open-mcp-settings="openSettings('mcp')"
           @focus-workspace-window="tabWindowTransfer.focusWorkspaceWindow"
           @refresh-workspace-windows="tabWindowTransfer.refreshOtherTabWindows"
+          @consolidate-workspace-windows="tabWindowTransfer.consolidateWorkspaceWindows"
           @logout="handleWebLogout"
         />
 

@@ -4837,6 +4837,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "Mover aba para outra janela",
     openTabGroupInNewWindow: "Abrir grupo em uma nova janela",
     moveTabGroupToAnotherWindow: "Mover grupo para outra janela",
+    consolidateWorkspaceWindows: "Mesclar todas as janelas secundárias",
     mainWindow: "Janela principal",
     detachedWindow: "Janela {number}",
     splitRight: "Dividir à direita",

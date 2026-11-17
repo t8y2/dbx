@@ -4839,6 +4839,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "Sposta scheda in un'altra finestra",
     openTabGroupInNewWindow: "Apri gruppo in una nuova finestra",
     moveTabGroupToAnotherWindow: "Sposta gruppo in un'altra finestra",
+    consolidateWorkspaceWindows: "Unisci tutte le finestre secondarie",
     mainWindow: "Finestra principale",
     detachedWindow: "Finestra {number}",
     splitRight: "Dividi a destra",

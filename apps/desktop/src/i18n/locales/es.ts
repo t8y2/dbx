@@ -5012,6 +5012,7 @@ export default withEnglishFallback({
     moveTabToAnotherWindow: "Mover pestaña a otra ventana",
     openTabGroupInNewWindow: "Abrir grupo en una nueva ventana",
     moveTabGroupToAnotherWindow: "Mover grupo a otra ventana",
+    consolidateWorkspaceWindows: "Combinar todas las ventanas secundarias",
     mainWindow: "Ventana principal",
     detachedWindow: "Ventana {number}",
     splitRight: "Dividir a la derecha",

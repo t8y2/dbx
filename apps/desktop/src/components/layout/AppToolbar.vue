@@ -120,6 +120,7 @@ const emit = defineEmits<{
   "open-mcp-settings": [];
   "focus-workspace-window": [label: string];
   "refresh-workspace-windows": [];
+  "consolidate-workspace-windows": [];
   "immediate-sync": [];
   logout: [];
 }>();
@@ -128,6 +129,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 
 const settingsStore = useSettingsStore();
+const CONSOLIDATE_WORKSPACE_WINDOWS = "__consolidate-workspace-windows__";
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const orderedToolbarKeys = computed(() => ({
   primary: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "primary"),
@@ -160,7 +162,7 @@ const workspaceWindowItems = computed<LightDropdownItem[]>(() => {
     .filter((window) => window.label !== "main")
     .map((window) => window.label)
     .sort();
-  return windows.map((window) => {
+  const items: LightDropdownItem[] = windows.map((window) => {
     const label = window.label === "main" ? t("contextMenu.mainWindow") : t("contextMenu.detachedWindow", { number: detachedLabels.indexOf(window.label) + 1 });
     return {
       label,
@@ -170,7 +172,21 @@ const workspaceWindowItems = computed<LightDropdownItem[]>(() => {
       disabled: window.label === props.workspaceWindowLabel,
     };
   });
+  if (props.workspaceWindowLabel === "main" && detachedLabels.length > 0) {
+    items.push({
+      label: t("contextMenu.consolidateWorkspaceWindows"),
+      value: CONSOLIDATE_WORKSPACE_WINDOWS,
+      title: t("contextMenu.consolidateWorkspaceWindows"),
+      icon: PanelsTopLeft,
+      separatorBefore: true,
+    });
+  }
+  return items;
 });
+function handleWorkspaceWindowSelection(value: string) {
+  if (value === CONSOLIDATE_WORKSPACE_WINDOWS) emit("consolidate-workspace-windows");
+  else emit("focus-workspace-window", value);
+}
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the
 // window is actually pinned even with the setting off, so turning the setting
@@ -891,7 +907,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
           check-position="none"
           :match-trigger-width="false"
           @click="emit('refresh-workspace-windows')"
-          @update:model-value="emit('focus-workspace-window', $event)"
+          @update:model-value="handleWorkspaceWindowSelection"
         />
       </span>
     </div>

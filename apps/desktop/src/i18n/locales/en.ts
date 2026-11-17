@@ -5293,6 +5293,7 @@ export default {
     moveTabToAnotherWindow: "Move Tab to Another Window",
     openTabGroupInNewWindow: "Open Group in New Window",
     moveTabGroupToAnotherWindow: "Move Group to Another Window",
+    consolidateWorkspaceWindows: "Merge All Secondary Windows",
     mainWindow: "Main Window",
     detachedWindow: "Window {number}",
     splitRight: "Split Right",

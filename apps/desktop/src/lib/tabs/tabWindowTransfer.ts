@@ -13,6 +13,7 @@ export const TAB_WINDOW_DRAG_PREVIEW_EVENT = "dbx:tab-window-drag-preview";
 export const TAB_NATIVE_DRAG_PREVIEW_RELEASE_EVENT = "dbx:tab-drag-preview-release";
 export const TAB_WINDOW_INFO_REQUEST_EVENT = "dbx:tab-window-info-request";
 export const TAB_WINDOW_INFO_RESPONSE_EVENT = "dbx:tab-window-info-response";
+export const TAB_WINDOW_CONSOLIDATE_REQUEST_EVENT = "dbx:tab-window-consolidate-request";
 export const TAB_DRAG_PREVIEW_WINDOW_PREFIX = "dbx-tab-drag-preview";
 export const TAB_DRAG_PREVIEW_WEBVIEW_LABEL = "dbx-tab-drag-preview";
 export const TAB_DRAG_PREVIEW_CONTENT_EVENT = "dbx:tab-drag-preview-content";
@@ -20,6 +21,8 @@ const DETACHED_TAB_QUERY = "dbxTransfer";
 const DETACHED_TAB_WINDOW_SESSION_KEY = "dbx-detached-tab-window";
 const TRANSFER_STORAGE_PREFIX = "dbx-tab-window-transfer:";
 const ACCEPTED_STORAGE_PREFIX = "dbx-tab-window-transfer-accepted:";
+const SHARED_TRANSFER_PREFIX = "dbx-tab-window-transfer:";
+const SHARED_ACCEPTED_PREFIX = "dbx-tab-window-transfer-accepted:";
 const ACTIVE_TRANSFER_STORAGE_KEY = "dbx-active-tab-window-transfer";
 const ACTIVE_TRANSFER_MAX_AGE_MS = 20_000;
 let tabDragPreviewWebviewCreationPending = false;
@@ -91,6 +94,10 @@ export interface TabWindowInfoResponse {
   requestId: string;
   windowLabel: string;
   activeTabTitle: string;
+}
+
+export interface TabWindowConsolidateRequest {
+  targetWindowLabel: string;
 }
 
 function jsonSafeReplacer(_key: string, value: unknown): unknown {
@@ -182,12 +189,33 @@ export function decodeTabWindowTransfer(value: string | null | undefined): TabWi
   }
 }
 
-export function storeDetachedTabTransfer(payload: TabWindowTransferPayload): void {
+async function saveSharedTransfer(key: string, value: unknown): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("save_detached_tab_handoff", { tabId: key, handoff: value });
+  } catch {
+    // localStorage remains the browser fallback for development and web.
+  }
+}
+
+async function consumeSharedTransfer<T>(key: string): Promise<T | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return (await invoke<T | null>("load_detached_tab_handoff", { tabId: key })) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function storeDetachedTabTransfer(payload: TabWindowTransferPayload): Promise<void> {
   safeLocalStorageSet(transferStorageKey(payload.transferId), encodeTabWindowTransfer(payload));
   // Chromium does not consistently expose drag DataTransfer data to a separate
   // WebView during `dragover`. Publish the active transfer so every DBX window
   // can still recognize the drop before the browser reveals `getData()`.
   safeLocalStorageSet(ACTIVE_TRANSFER_STORAGE_KEY, activeTransferStorageValue(payload.transferId));
+  await saveSharedTransfer(`${SHARED_TRANSFER_PREFIX}${payload.transferId}`, payload);
 }
 
 export function readTabWindowTransfer(transferId: string): TabWindowTransferPayload | null {
@@ -220,9 +248,10 @@ export function clearTabWindowTransfer(transferId: string): void {
   } catch {
     safeLocalStorageRemove(ACTIVE_TRANSFER_STORAGE_KEY);
   }
+  void consumeSharedTransfer(`${SHARED_TRANSFER_PREFIX}${transferId}`);
 }
 
-export function consumeDetachedTabTransfer(): TabWindowTransferPayload | null {
+export async function consumeDetachedTabTransfer(): Promise<TabWindowTransferPayload | null> {
   const token = detachedTabTransferToken();
   if (!token) return null;
   // The transfer token is intentionally removed from the URL after startup.
@@ -233,7 +262,7 @@ export function consumeDetachedTabTransfer(): TabWindowTransferPayload | null {
   } catch {
     // The URL token remains sufficient for this startup if session storage is unavailable.
   }
-  const payload = readTabWindowTransfer(token);
+  const payload = readTabWindowTransfer(token) ?? (await consumeSharedTransfer<TabWindowTransferPayload>(`${SHARED_TRANSFER_PREFIX}${token}`));
   clearTabWindowTransfer(token);
   if (typeof window !== "undefined") {
     const url = new URL(window.location.href);
@@ -243,21 +272,24 @@ export function consumeDetachedTabTransfer(): TabWindowTransferPayload | null {
   return payload;
 }
 
-export function markTabWindowTransferAccepted(transferId: string): void {
+export async function markTabWindowTransferAccepted(transferId: string): Promise<void> {
   safeLocalStorageSet(acceptedStorageKey(transferId), String(Date.now()));
+  await saveSharedTransfer(`${SHARED_ACCEPTED_PREFIX}${transferId}`, { acceptedAt: Date.now() });
 }
 
-export function consumeTabWindowTransferAccepted(transferId: string): boolean {
+export async function consumeTabWindowTransferAccepted(transferId: string): Promise<boolean> {
   const key = acceptedStorageKey(transferId);
-  const accepted = safeLocalStorageGet(key) !== null;
-  if (accepted) safeLocalStorageRemove(key);
-  return accepted;
+  if (safeLocalStorageGet(key) !== null) {
+    safeLocalStorageRemove(key);
+    return true;
+  }
+  return (await consumeSharedTransfer(`${SHARED_ACCEPTED_PREFIX}${transferId}`)) !== null;
 }
 
 export async function waitForTabWindowTransferAccepted(transferId: string, timeoutMs = 350): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (consumeTabWindowTransferAccepted(transferId)) return true;
+    if (await consumeTabWindowTransferAccepted(transferId)) return true;
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
   return consumeTabWindowTransferAccepted(transferId);
@@ -384,6 +416,17 @@ export async function sendTabWindowInfoResponse(targetWindowLabel: string, paylo
   }
 }
 
+export async function requestTabWindowConsolidation(targetWindowLabel: string, payload: TabWindowConsolidateRequest): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { emitTo } = await import("@tauri-apps/api/event");
+    await emitTo({ kind: "WebviewWindow", label: targetWindowLabel }, TAB_WINDOW_CONSOLIDATE_REQUEST_EVENT, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function listenForTabWindowTransfer(handler: (payload: TabWindowTransferPayload) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => {};
   const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
@@ -400,6 +443,12 @@ export async function listenForTabWindowInfoResponse(handler: (payload: TabWindo
   if (!isTauriRuntime()) return () => {};
   const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   return getCurrentWebviewWindow().listen<TabWindowInfoResponse>(TAB_WINDOW_INFO_RESPONSE_EVENT, (event) => handler(event.payload));
+}
+
+export async function listenForTabWindowConsolidation(handler: (payload: TabWindowConsolidateRequest) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  return getCurrentWebviewWindow().listen<TabWindowConsolidateRequest>(TAB_WINDOW_CONSOLIDATE_REQUEST_EVENT, (event) => handler(event.payload));
 }
 
 export async function emitTabWindowDragPreview(payload: TabWindowDragPreviewPayload): Promise<void> {
@@ -519,7 +568,7 @@ export async function currentTabWindowLabel(): Promise<string> {
 
 export async function createDetachedTabWindow(payload: TabWindowTransferPayload, placement?: TabWindowPlacement): Promise<boolean> {
   if (!isTauriRuntime()) return false;
-  storeDetachedTabTransfer(payload);
+  await storeDetachedTabTransfer(payload);
 
   const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   const url = new URL(window.location.href);

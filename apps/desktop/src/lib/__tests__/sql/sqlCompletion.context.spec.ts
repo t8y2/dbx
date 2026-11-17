@@ -2802,7 +2802,8 @@ describe("line block statement boundary", () => {
     const cursor = sql.length;
     const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
 
-    expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
+    expect(context.referencedTables.map((table) => table.alias ?? table.name)).toEqual(["x"]);
+    expect(context.referencedTables[0].columns).toContain("id");
   });
 
   it("keeps WITH clause in scope when cursor is in the following top-level main query", () => {

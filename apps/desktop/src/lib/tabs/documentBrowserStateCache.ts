@@ -27,6 +27,8 @@ export interface DocumentBrowserStateSnapshot {
   filterInput: string;
   /** Whether manual and structured query filters are applied; defaults to true. */
   filterEnabled?: boolean;
+  /** Applied Elasticsearch text search for this index tab. */
+  elasticsearchTextSearch?: string;
   /** Manual JSON sort text from the collection sort input. */
   sortInput: string;
   /** Structured-filter contribution applied on top of the manual filter. */

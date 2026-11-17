@@ -3196,6 +3196,115 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti.mock.calls[2]?.[2]).toBe("SELECT * FROM test_no_pk");
   });
 
+  it("replays the original SQL once when a single-statement execution rejects the hidden locator, per table (#15071)", async () => {
+    const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      { name: "b", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([
+      { name: "test_no_pk", type: "table", schema: "public" },
+      { name: "other_no_pk", type: "table", schema: "public" },
+    ]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    // The backend throws single-statement rejections (external tables on a server
+    // whose regular tables accept the system columns) instead of returning an
+    // error result, so the #12647 replay path never saw them.
+    let rejected = false;
+    executeMulti.mockImplementation(async (_connectionId: string, _database: string, sql: string) => {
+      if (sql.includes("tableoid") && !rejected) {
+        rejected = true;
+        throw new Error('System column "xmin" is not supported for crunchy_lake_analytics table "dim_zip3"');
+      }
+      return [{ columns: ["a", "b"], rows: [[1, "same"]], affected_rows: 0, execution_time_ms: 1 }];
+    });
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, true);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+
+    // The locator rewrite was rejected, the original SQL was replayed once, and
+    // the data landed without an error or hidden-column result.
+    expect(executeMulti.mock.calls[0]?.[2]).toContain("tableoid");
+    await vi.waitFor(() => expect(executeMulti.mock.calls[1]?.[2]).toBe("SELECT * FROM test_no_pk"));
+    await vi.waitFor(() => expect(tab.result?.columns).toEqual(["a", "b"]));
+    expect(tab.error).toBeUndefined();
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+
+    // Per-table memory: the rejected table never gets the locator again...
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+    expect(executeMulti).toHaveBeenCalledTimes(3);
+    expect(executeMulti.mock.calls[2]?.[2]).toBe("SELECT * FROM test_no_pk");
+
+    // ...while another keyless table on the same connection keeps it.
+    await store.executeTabSql(tabId, "SELECT * FROM other_no_pk");
+    expect(executeMulti).toHaveBeenCalledTimes(4);
+    expect(executeMulti.mock.calls[3]?.[2]).toContain("tableoid");
+  }, 10_000);
+
+  it("does not replay the locator rewrite when the user cancelled the execution", async () => {
+    const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "test_no_pk", type: "table", schema: "public" }]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, true);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    executeMulti.mockImplementation(async () => {
+      tab.cancelRequestCount = (tab.cancelRequestCount ?? 0) + 1;
+      throw new Error('System column "xmin" is not supported for crunchy_lake_analytics table "dim_zip3"');
+    });
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+    // Give the deferred scheduler every chance to misfire: a cancel bump must
+    // keep the replay from being scheduled at all.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(executeMulti).toHaveBeenCalledTimes(1);
+    expect(tab.isExecuting).toBe(false);
+  }, 10_000);
+
+  it("does not replay the locator rewrite inside a manual transaction", async () => {
+    const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "test_no_pk", type: "table", schema: "public" }]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    executeInManualTransaction.mockRejectedValueOnce(new Error('System column "xmin" is not supported for crunchy_lake_analytics table "dim_zip3"'));
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, false);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // No replay: the manual-transaction statement failure surfaces as an error result.
+    expect(executeInManualTransaction).toHaveBeenCalledTimes(1);
+    expect(executeMulti).not.toHaveBeenCalled();
+    expect(tab.isExecuting).toBe(false);
+    expect(tab.result?.execution_error).toBe(true);
+  }, 10_000);
+
   it("keeps a keyless PostgreSQL view with an unknown type on the keyless whole-row fallback", async () => {
     const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
     resetRowIdLocatorStateForTests();

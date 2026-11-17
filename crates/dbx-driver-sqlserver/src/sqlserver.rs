@@ -2858,10 +2858,11 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
             .unwrap_or_default();
         let object_visibility = sqlserver_visible_object_predicate();
         queries.push(format!(
-            "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
+            "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, ep.value AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
              FROM sys.columns c \
              JOIN sys.objects o ON o.object_id = c.object_id \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ('U','V') AND {object_visibility} {schema_filter} {parent_table_filter} {column_like} ORDER BY c.column_id"
         ));
     }
@@ -6505,7 +6506,9 @@ mod tests {
         assert!(sql.contains("FROM sys.columns c"));
         assert!(sql.contains("o.name = 'Users'"));
         assert!(sql.contains("LOWER(c.name) LIKE LOWER('%id%') ESCAPE '\\'"));
-        assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS object_comment"));
+        assert!(sql.contains("ep.value AS object_comment"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id"));
+        assert!(sql.contains("ep.name = N'MS_Description'"));
         assert!(sql.contains("ORDER BY c.column_id"));
         assert!(!sql.contains("AS dbx_completion ORDER BY name"));
     }

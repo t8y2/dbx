@@ -187,7 +187,7 @@ import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilit
 import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
-import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, supportsDatabaseSavedSqlTree, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { formatMongoIndexKeyPattern, inferMongoCompletionFields, type MongoCompletionField, type MongoCompletionIndex } from "@/lib/mongo/mongoCompletion";
 import type { SoqlCompletionField, SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
@@ -293,6 +293,16 @@ function usesProxyLogicalTables(databaseInfo: DatabaseConnectionInfo | undefined
 
 function mysqlTableListSourceChanged(config: ConnectionConfig, databaseInfo: DatabaseConnectionInfo): boolean {
   return config.db_type === "mysql" && usesProxyLogicalTables(config.database_info) !== usesProxyLogicalTables(databaseInfo);
+}
+
+// A MySQL server version change means the connection is talking to a different
+// server (e.g. the deployment was swapped from 5.7 to 8.0 between disconnect
+// and reconnect), so the database list cached from the old server is stale
+// even though the table enumeration source did not change.
+function mysqlServerVersionChanged(config: ConnectionConfig, databaseInfo: DatabaseConnectionInfo): boolean {
+  const previousVersion = config.database_info?.productVersion;
+  const nextVersion = databaseInfo.productVersion;
+  return config.db_type === "mysql" && !!previousVersion && !!nextVersion && previousVersion !== nextVersion;
 }
 
 function normalizeTableNameFilter(filter: Partial<TableNameFilter> | undefined | null): TableNameFilter {
@@ -564,7 +574,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const etcdAccessCapabilities = ref<Record<string, EtcdAccessCapabilities>>({});
   const etcdAccessCapabilityGenerations = new Map<string, number>();
   const etcdAccessCapabilityLoads = new Map<string, Promise<EtcdAccessCapabilities>>();
-  const identifierQuotes = ref<Record<string, string>>({});
+  const identifierQuotes = ref(new Map<string, string>());
+  const identifierQuoteLoads = new Map<string, Promise<string | undefined>>();
   /** Per-database compatibility mode (key `${connectionId}\u0000${database}`),
    * decoupled from sidebar tree-node lifecycle so editor parsing and sidebar
    * capabilities stay correct before/independent of database-tree rendering. */
@@ -979,11 +990,41 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  function connectionIdentifierQuote(connectionId?: string): string | undefined {
+  function identifierQuoteKey(connectionId: string, database?: string): string {
+    return `${connectionId}\u0000${database ?? ""}`;
+  }
+
+  function connectionIdentifierQuote(connectionId?: string, database?: string): string | undefined {
     if (!connectionId) return undefined;
     const override = gaussdbIdentifierQuoteOverride(getConfig(connectionId));
     if (override != null) return override;
-    return identifierQuotes.value[connectionId];
+    return identifierQuotes.value.get(identifierQuoteKey(connectionId, database));
+  }
+
+  async function ensureConnectionIdentifierQuote(connectionId: string, database?: string, config = getConfig(connectionId)): Promise<string | undefined> {
+    const cached = connectionIdentifierQuote(connectionId, database);
+    if (cached !== undefined || !connectionShouldLoadIdentifierQuote(config)) return cached;
+
+    const key = identifierQuoteKey(connectionId, database);
+    const existing = identifierQuoteLoads.get(key);
+    if (existing) return existing;
+
+    const revision = connectionStateRevision(connectionId);
+    const request = database ? api.connectionIdentifierQuote(connectionId, database) : api.connectionIdentifierQuote(connectionId);
+    const load = withMetadataLoadTimeout(connectionId, request, "identifier quote")
+      .catch(() => undefined)
+      .then((quote) => {
+        if (identifierQuoteLoads.get(key) !== load || !isCurrentConnectionStateRevision(connectionId, revision)) {
+          return connectionIdentifierQuote(connectionId, database);
+        }
+        if (quote !== undefined) identifierQuotes.value.set(key, quote);
+        return quote;
+      })
+      .finally(() => {
+        if (identifierQuoteLoads.get(key) === load) identifierQuoteLoads.delete(key);
+      });
+    identifierQuoteLoads.set(key, load);
+    return load;
   }
 
   function databaseCompatibilityKey(connectionId: string, database: string): string {
@@ -1096,10 +1137,13 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function clearConnectionIdentifierQuote(connectionId: string) {
     clearConnectionDatabaseModes(connectionId);
-    if (!(connectionId in identifierQuotes.value)) return;
-    const next = { ...identifierQuotes.value };
-    delete next[connectionId];
-    identifierQuotes.value = next;
+    const prefix = identifierQuoteKey(connectionId);
+    for (const key of identifierQuotes.value.keys()) {
+      if (key.startsWith(prefix)) identifierQuotes.value.delete(key);
+    }
+    for (const key of identifierQuoteLoads.keys()) {
+      if (key.startsWith(prefix)) identifierQuoteLoads.delete(key);
+    }
   }
 
   function clearConnectionDatabaseModes(connectionId: string) {
@@ -1112,9 +1156,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshConnectionIdentifierQuote(connectionId: string, config: ConnectionConfig) {
     clearConnectionIdentifierQuote(connectionId);
-    if (!connectionShouldLoadIdentifierQuote(config)) return;
-    const quote = await api.connectionIdentifierQuote(connectionId).catch(() => undefined);
-    if (quote != null) identifierQuotes.value = { ...identifierQuotes.value, [connectionId]: quote };
+    await ensureConnectionIdentifierQuote(connectionId, undefined, config);
   }
 
   function connectionErrorMessage(error: unknown): string {
@@ -2192,7 +2234,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children, options?.trustEmptyConnectionChildren === true);
     children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
-    if (parent.type === "database") {
+    if (supportsDatabaseSavedSqlTree(parent.type)) {
       children = withDatabaseSavedSqlRoot(parent, children, savedSqlFilesByDatabase);
     }
     if (parent.type === "schema" && parent.connectionId && parent.schema && getConfig(parent.connectionId)?.db_type === "postgres") {
@@ -2502,7 +2544,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function refreshDatabaseSavedSqlTrees(nodes: TreeNode[] = treeNodes.value) {
     for (const node of nodes) {
-      if (node.type === "database") {
+      if (supportsDatabaseSavedSqlTree(node.type)) {
         node.children = withDatabaseSavedSqlRoot(node, node.children || [], savedSqlFilesByDatabase);
       }
       if (node.children) refreshDatabaseSavedSqlTrees(node.children);
@@ -5117,6 +5159,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (expectedConfigFingerprint && connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
     if (JSON.stringify(current.database_info) === JSON.stringify(normalized)) return;
     const tableListSourceChanged = mysqlTableListSourceChanged(current, normalized);
+    const serverVersionChanged = mysqlServerVersionChanged(current, normalized);
     const jobEngine = nativeJobAdminEngine(current);
 
     await api.saveConnectionDatabaseInfo(connectionId, normalized);
@@ -5133,9 +5176,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const connectionNode = findConnectionNode(connectionId);
       if (connectionNode) connectionNode.children = withConnectionUtilityNodes(connectionId, connectionNode.children ?? [], connectionNode);
     }
-    if (tableListSourceChanged) {
-      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES.
-      // Discard physical-table metadata that may have loaded before background version detection completed.
+    if (tableListSourceChanged || serverVersionChanged) {
+      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES,
+      // and a server version change means a different server answers now. Either way,
+      // discard metadata that may have loaded before background version detection completed.
       bumpTableListSourceRevision(connectionId);
       treeNodeLoads.cancelPrefix(connectionId);
       invalidateCompletionCache(connectionId);
@@ -5151,7 +5195,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     // Other database info is reactive connection metadata, not tree structure. Keep
     // navigator node identities stable so an in-flight first expansion can apply
-    // its loaded children after this background refresh completes.
+    // its loaded children after this background refresh completes. (A MySQL server
+    // version change is the exception: it is handled above, because the database
+    // list itself belongs to the server that reported the old version.)
   }
 
   async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig, expectedConfigFingerprint: string, isCurrent: () => boolean): Promise<void> {
@@ -5993,6 +6039,9 @@ export const useConnectionStore = defineStore("connection", () => {
     cancelObjectDdlLoadsForDatabase(connectionId, database);
     cancelObjectMetadataLoadsForDatabase(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
+    const quoteKey = identifierQuoteKey(connectionId, database);
+    identifierQuotes.value.delete(quoteKey);
+    identifierQuoteLoads.delete(quoteKey);
     clearMetadataRuntimeCacheForDatabase(connectionId, database);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
@@ -12111,6 +12160,7 @@ export const useConnectionStore = defineStore("connection", () => {
     ensureEtcdAccessCapabilities,
     canWriteEtcdKey,
     connectionIdentifierQuote,
+    ensureConnectionIdentifierQuote,
     databaseCompatibilityMode,
     ensureDatabaseCompatibilityMode,
     databaseCompatibilityModes,

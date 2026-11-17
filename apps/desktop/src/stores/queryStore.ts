@@ -91,7 +91,7 @@ import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
-import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { isPostgresTupleLocatorRejection, markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -7338,7 +7338,9 @@ export const useQueryStore = defineStore("query", () => {
    * hidden PostgreSQL locator projection was rejected by the server (#12647).
    * Keyed by executionId: only the still-current execution may consume it.
    */
-  const pendingQueryLocatorRetries = new Map<string, { connectionId: string; originalSql: string; publicationOptions?: Parameters<typeof executeTabSql>[2] }>();
+  const pendingQueryLocatorRetries = new Map<string, { connectionId: string; originalSql: string; tableKey: string }>();
+  // External tables can reject system columns on a server whose regular tables support them.
+  const queryTablesWithoutTupleLocator = new Set<string>();
 
   /**
    * Registers the original SQL behind a locator-bearing query rewrite so the
@@ -7346,9 +7348,9 @@ export const useQueryStore = defineStore("query", () => {
    * rewrite (#12647). Keyed by executionId; consumed or dropped when that
    * execution finishes.
    */
-  function registerEditableQueryLocatorRetry(tab: QueryTab, originalSql: string) {
+  function registerEditableQueryLocatorRetry(tab: QueryTab, originalSql: string, tableKey: string) {
     if (!tab.executionId) return;
-    pendingQueryLocatorRetries.set(tab.executionId, { connectionId: tab.connectionId!, originalSql });
+    pendingQueryLocatorRetries.set(tab.executionId, { connectionId: tab.connectionId!, originalSql, tableKey });
   }
 
   /**
@@ -7358,8 +7360,11 @@ export const useQueryStore = defineStore("query", () => {
    * ordinary query execution, so its own publication path stays untouched.
    */
   function scheduleQueryLocatorRetry(tab: QueryTab, originalSql: string, options: Parameters<typeof executeTabSql>[2]) {
+    const epoch = manualTransactionTargetEpoch(tab);
+    const cancelRequestCount = tab.cancelRequestCount;
     setTimeout(() => {
-      if (tabs.value.includes(tab) || findExecutionTab(tab.id) === tab) void executeTabSql(tab.id, originalSql, { ...options, resultBaseSql: originalSql }).catch(() => undefined);
+      if (tab.executionId || tab.cancelRequestCount !== cancelRequestCount || manualTransactionTargetEpoch(tab) !== epoch || findExecutionTab(tab.id) !== tab) return;
+      void executeTabSql(tab.id, originalSql, { ...options, resultBaseSql: originalSql }).catch(() => undefined);
     }, 0);
   }
 
@@ -7832,7 +7837,9 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId);
+      const { connectionId, database, schema, catalog, tableName } = target.request;
+      const tableKey = JSON.stringify([connectionId, database, schema || "public", catalog, tableName]);
+      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId) && !queryTablesWithoutTupleLocator.has(tableKey);
       const syntheticRowId = postgresCtidRowId || ((databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType));
       // Base tables without a natural identifier use the same physical row locator
       // as table-data tabs (Oracle, OceanBase Oracle, Xugu, and PostgreSQL). Confirm
@@ -7848,7 +7855,7 @@ export const useQueryStore = defineStore("query", () => {
         // original SQL now: when this execution lands as an error result, the publication
         // path replays it once and marks the connection, and the next execution skips the
         // locator up front (rowIdLocatorUnsupported above).
-        registerEditableQueryLocatorRetry(tab, sql);
+        registerEditableQueryLocatorRetry(tab, sql, tableKey);
       }
       return preparation;
     } catch (error) {
@@ -10208,6 +10215,24 @@ export const useQueryStore = defineStore("query", () => {
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
+      // The backend throws single-statement errors rather than returning an error result.
+      // Retry only an explicit rejection of a locator DBX added to this auto-commit SELECT.
+      const pendingLocatorRetry = pendingQueryLocatorRetries.get(executionId);
+      if (
+        executionDispatched &&
+        !tab.isCancelling &&
+        (tab.cancelRequestCount ?? 0) === cancelRequestCountAtStart &&
+        tab.autoCommit !== false &&
+        !tab.autoCommitOpenTransaction &&
+        pendingLocatorRetry?.connectionId === executionConnectionId &&
+        pendingLocatorRetry?.originalSql.trim() === queryBaseSql.trim() &&
+        isPostgresTupleLocatorRejection(normalizeBackendError(e)?.detail ?? String(e?.message ?? e))
+      ) {
+        queryTablesWithoutTupleLocator.add(pendingLocatorRetry.tableKey);
+        queryExecutionLog("info", "query-locator-retry:original-sql", { traceId, elapsed: elapsed() });
+        scheduleQueryLocatorRetry(tab, pendingLocatorRetry.originalSql, options);
+        return false;
+      }
       if (String(e?.message ?? e).includes("MYSQL_CLIENT_SESSION_LOST")) clearAutoCommitOpenTransaction(tab);
       // Handle manual transaction auto-rollback (idle timeout only for the banner;
       // other statement failures still clear the session without the 5-minute notice).

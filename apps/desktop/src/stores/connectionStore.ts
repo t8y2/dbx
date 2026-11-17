@@ -150,6 +150,7 @@ import { invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex }
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
+import { notifyConnectionStateChanged } from "@/lib/connection/connectionStateEvents";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/lib/connection/timeoutInheritanceBackup";
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
@@ -802,6 +803,7 @@ export const useConnectionStore = defineStore("connection", () => {
   // 每个连接最近一次「建立会话」的本地墙钟时间（Unix 毫秒）。用于识别后端空闲自动断开
   // 事件的迟到：若连接时间晚于事件里的 `closedAtMs`，说明事件描述的是上一个会话。
   const connectionConnectedAtMs = new Map<string, number>();
+  const sharedConnectionStateRequests = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
   const tableListSourceRevisions = new Map<string, number>();
   // TDengine and native PostgreSQL reuse persisted snapshots without a background
@@ -5850,9 +5852,44 @@ export const useConnectionStore = defineStore("connection", () => {
    * 所有「连上」的路径都必须走这里，否则 `handleConnectionIdleClosed` 无法判断后端事件是否
    * 早于当前会话（见该函数的「迟到事件」说明）。
    */
-  function markConnectionConnected(connectionId: string): void {
+  function markConnectionConnected(connectionId: string, notifyOtherWindows = true): void {
     connectedIds.value.add(connectionId);
     connectionConnectedAtMs.set(connectionId, Date.now());
+    if (notifyOtherWindows) void notifyConnectionStateChanged({ connectionId });
+  }
+
+  async function syncSharedConnectionState(connectionId: string, closedByUser = false): Promise<void> {
+    const config = getConfig(connectionId);
+    if (!config || connectingIds.value.has(connectionId) || hasDisconnectInFlight(connectionId)) return;
+    const revision = connectionStateRevision(connectionId);
+    const fingerprint = connectionConfigFingerprint(config);
+    const request = (sharedConnectionStateRequests.get(connectionId) ?? 0) + 1;
+    sharedConnectionStateRequests.set(connectionId, request);
+    let open: boolean;
+    try {
+      open = await api.connectionIsOpen(connectionId);
+    } catch (error) {
+      console.warn("[DBX][connection:state-confirm]", error);
+      return;
+    }
+    const current = getConfig(connectionId);
+    if (!current || connectionConfigFingerprint(current) !== fingerprint || !isCurrentConnectionStateRevision(connectionId, revision) || sharedConnectionStateRequests.get(connectionId) !== request || connectingIds.value.has(connectionId) || hasDisconnectInFlight(connectionId)) return;
+    // Remote notifications are hints. Read the shared backend pool without
+    // connecting, closing tabs, expanding the tree, or changing the selection.
+    if (open) {
+      if (!connectedIds.value.has(connectionId)) {
+        markConnectionConnected(connectionId, false);
+        clearConnectionError(connectionId);
+        clearAutomaticReconnectCooldown(connectionId);
+      }
+      clearConnectionClosedByUser(connectionId);
+    } else {
+      if (connectedIds.value.has(connectionId)) {
+        bumpConnectionStateRevision(connectionId);
+        markConnectionOffline(connectionId);
+      }
+      if (closedByUser) markConnectionClosedByUser(connectionId);
+    }
   }
 
   /**
@@ -5982,6 +6019,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await disconnectRequest;
     if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       clearConnectionError(connectionId);
+      void notifyConnectionStateChanged({ connectionId, closedByUser: options.markClosedByUser !== false });
     }
     if (shouldRemoveOneTimeConnection && isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       await removeConnection(connectionId);
@@ -12216,6 +12254,7 @@ export const useConnectionStore = defineStore("connection", () => {
     handleConnectionLivenessMessage,
     handleConnectionIdleClosed,
     markConnectionConnected,
+    syncSharedConnectionState,
     metadataGenerationFor,
     disconnectAndForgetConnectionPassword,
     retirePasswordAfterChange,

@@ -224,6 +224,7 @@ import { consumeDetachedTabTransfer, markTabWindowTransferAccepted, tabWindowTra
 import { TAB_WINDOW_TRANSFER, useTabWindowTransfer } from "@/composables/useTabWindowTransfer";
 import { restoreWorkspaceWindows } from "@/lib/app/workspaceWindows";
 import { useWindowSettingsSync } from "@/composables/useWindowSettingsSync";
+import { useWindowConnectionSync } from "@/composables/useWindowConnectionSync";
 import { dismissOpenModalSurface } from "@/lib/ui/modalSurface";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
@@ -304,6 +305,7 @@ provide(TAB_WINDOW_TRANSFER, tabWindowTransfer);
 const navigationStore = useNavigationStore();
 const settingsStore = useSettingsStore();
 useWindowSettingsSync();
+useWindowConnectionSync();
 const { active: appBackgroundActive, backgroundObjectUrl: appBackgroundObjectUrl, backgroundImageStyle: appBackgroundImageStyle } = useBackgroundImage(settingsStore);
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 const { uiFontFamilyPreview } = useUiFontFamilyPreview();

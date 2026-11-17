@@ -2938,7 +2938,8 @@ pub fn format_grid_sql_literal_with_spatial(
         if let Some(number) = value.as_number() {
             return number.to_string();
         }
-        if let Some(text) = value.as_str().and_then(format_mysql_bit_literal_text) {
+        let bit_width = column_info.and_then(|column| mysql_bit_width(&column.data_type));
+        if let Some(text) = value.as_str().and_then(|text| format_mysql_bit_literal_text(text, bit_width)) {
             return text;
         }
     }
@@ -3639,7 +3640,7 @@ fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColu
     None
 }
 
-fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
+fn format_mysql_bit_literal_text(text: &str, bit_width: Option<usize>) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("true") {
         return Some("1".to_string());
@@ -3651,7 +3652,7 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
         return Some(if trimmed.len() == 1 {
             trimmed.to_string()
         } else if trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
-            format!("b'{trimmed}'")
+            format!("b'{}'", fit_mysql_bit_text(trimmed, bit_width))
         } else {
             trimmed.to_string()
         });
@@ -3660,10 +3661,46 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
     if lower.starts_with("b'") && trimmed.ends_with('\'') {
         let bits = &trimmed[2..trimmed.len() - 1];
         if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
-            return Some(format!("b'{bits}'"));
+            return Some(format!("b'{}'", fit_mysql_bit_text(bits, bit_width)));
         }
     }
     None
+}
+
+/// Fit a run of `0`/`1` characters to the column's declared `BIT(n)` width.
+/// MySQL rejects `b'...'` literals whose length differs from the column width
+/// (`bit string length 8 does not match type bit(1)`), and drivers commonly
+/// hand a `BIT(1)` value up as a whole byte (`"00000001"`). Keep the low-order
+/// `width` bits and zero-pad when the text is shorter, so the literal always
+/// matches the declaration. Truncating the high-order bits mirrors how MySQL
+/// itself assigns an over-long bit string, so we follow the server rather than
+/// rejecting the value here.
+fn fit_mysql_bit_text(bits: &str, bit_width: Option<usize>) -> String {
+    let Some(width) = bit_width.filter(|width| *width > 0) else {
+        return bits.to_string();
+    };
+    if bits.len() == width {
+        return bits.to_string();
+    }
+    if bits.len() > width {
+        return bits[bits.len() - width..].to_string();
+    }
+    format!("{}{}", "0".repeat(width - bits.len()), bits)
+}
+
+/// Width of a MySQL-family `BIT(n)` declaration; a bare `bit` means `bit(1)`.
+fn mysql_bit_width(data_type: &str) -> Option<usize> {
+    let lower = data_type.to_ascii_lowercase();
+    let index = lower.find("bit")?;
+    let rest = lower[index + 3..].trim_start();
+    let Some(rest) = rest.strip_prefix('(') else {
+        return Some(1);
+    };
+    let digits: String = rest.trim_start().chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    // A parenthesised declaration without a readable width is unknown, and an
+    // unknown width must leave the literal alone instead of guessing `bit(1)`.
+    let width = digits.parse::<usize>().ok()?;
+    (width > 0).then_some(width)
 }
 
 fn format_kingbase_bit_literal_text(text: &str) -> Option<String> {
@@ -11468,6 +11505,36 @@ mod tests {
             "b'10101010'"
         );
         assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+    }
+
+    #[test]
+    fn fits_mysql_bit_literals_to_the_declared_width() {
+        let bit = column("flag", "bit(1)", true, None);
+        let bit8 = column("flags", "bit(8)", true, None);
+        let bit32 = column("flags32", "bit(32)", true, None);
+
+        // MySQL drivers report a BIT(1) column as a whole byte, so the raw
+        // value is "00000001"; emitting it verbatim fails with
+        // "bit string length 8 does not match type bit(1)".
+        assert_eq!(format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Mysql), Some(&bit)), "b'1'");
+        assert_eq!(format_grid_sql_literal(&json!("00000000"), Some(DatabaseType::Mysql), Some(&bit)), "b'0'");
+        assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Mysql), Some(&bit)), "0");
+        assert_eq!(format_grid_sql_literal(&json!("1"), Some(DatabaseType::Mysql), Some(&bit)), "1");
+        assert_eq!(format_grid_sql_literal(&json!("b'1'"), Some(DatabaseType::Mysql), Some(&bit)), "b'1'");
+        assert_eq!(format_grid_sql_literal(&json!(null), Some(DatabaseType::Mysql), Some(&bit)), "NULL");
+        // A value that already matches the declared width is untouched.
+        assert_eq!(format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Mysql), Some(&bit8)), "b'10101010'");
+        // Shorter bit strings are zero-padded to the width.
+        assert_eq!(format_grid_sql_literal(&json!("101"), Some(DatabaseType::Mysql), Some(&bit8)), "b'00000101'");
+        // Wider declarations keep the low-order `width` bits across u64 widths.
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("00000000000000000000000000001010"),
+                Some(DatabaseType::Mysql),
+                Some(&bit32)
+            ),
+            "b'00000000000000000000000000001010'"
+        );
     }
 
     #[test]

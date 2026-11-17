@@ -62,6 +62,7 @@ import {
   SkipForward,
   ListX,
   LocateFixed,
+  Sparkles,
 } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
@@ -982,6 +983,9 @@ const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length && props.activeTab.result.server_message !== true) return true;
   return visibleResultItems.value.length > 0;
 });
+// Mirrors the grid's own menu precondition: an execution error is not a result
+// set, and an empty/evicted result has nothing to explain (#15023).
+const canSendResultToAi = computed(() => !!props.activeTab.result && !isQueryExecutionErrorResult(props.activeTab.result) && props.activeTab.result.columns.length > 0 && props.activeTab.result.rows.length > 0);
 const redisConsoleResults = computed(() => (props.activeTab.results?.length ? props.activeTab.results : props.activeTab.result ? [props.activeTab.result] : []));
 const canShowRedisConsoleOutput = computed(() => activeEffectiveDatabaseType.value === "redis" && (props.activeTab.isExecuting || redisConsoleResults.value.some((result) => result.execution_error === true || typeof result.redis_console_output === "string")));
 const redisResultViewMode = computed<RedisResultViewMode>(() => (activeEffectiveDatabaseType.value === "redis" ? (props.activeTab.uiState?.redisResultViewMode ?? "grid") : "grid"));
@@ -3144,6 +3148,7 @@ defineExpose({
                 v-else-if="activeTab.result && hasTabularResult && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
                 ref="dataGridRef"
                 @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
+                @send-result-to-ai="emit('sendResultToAi', activeTab.id)"
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
@@ -3291,6 +3296,9 @@ defineExpose({
                     @open-result-view="openPluginResultView"
                   >
                     <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                      <Button v-if="canSendResultToAi" data-query-result-send-ai variant="ghost" size="sm" class="h-5 shrink-0 gap-1 px-2 text-xs" :title="t('ai.sendResultToAi')" :aria-label="t('ai.sendResultToAi')" @click="emit('sendResultToAi', activeTab.id)">
+                        <Sparkles class="h-3.5 w-3.5" /><span v-if="!compact">{{ t("ai.sendResultToAi") }}</span>
+                      </Button>
                       <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="compact" :on-select="dataGridRef.selectExportMenuItem" />
                       <Button
                         v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
@@ -3724,6 +3732,7 @@ defineExpose({
           v-if="activeTab.result && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
           ref="dataGridRef"
           @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
+          @send-result-to-ai="emit('sendResultToAi', activeTab.id)"
           class="flex-1 min-h-0"
           :key="activeTab.id"
           :cache-key="activeTab.id"

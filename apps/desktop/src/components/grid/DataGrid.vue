@@ -3024,6 +3024,7 @@ const gridStyle = computed(() => ({
   ...columnVars.value,
   "--header-total-w": dataGridHeaderContentWidth("var(--total-w)", gridScrollbarGutter.value),
   "--grid-scrollbar-gutter": `${gridScrollbarGutter.value}px`,
+  "--grid-vertical-scrollbar-space": hasGridVerticalOverflow.value ? "12px" : "0px",
   [EDITOR_FONT_FAMILY_CSS_VAR]: settingsStore.editorSettings.fontFamily,
   "--dbx-data-grid-font-family": tableFontFamily.value,
   "--dbx-table-font-size": `${tableFontSize.value}px`,
@@ -16348,7 +16349,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             </div>
             <template v-else>
               <!-- Sticky header -->
-              <div ref="headerRef" class="data-grid-header-shell shrink-0 z-10 w-full border-y border-border overflow-hidden">
+              <div ref="headerRef" class="data-grid-header-shell shrink-0 z-10 border-y border-border overflow-hidden">
                 <div class="data-grid-header-row flex w-(--header-total-w) font-semibold text-foreground">
                   <div
                     class="data-grid-header-cell shrink-0 px-2 py-1.5 border-r w-(--row-num-w) border-border text-center text-muted-foreground select-none cursor-default hover:bg-gray-200 dark:hover:bg-gray-800 sticky left-0 z-20"
@@ -16882,7 +16883,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    positioned) their own stacking context below the header, so their
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
-              <div class="relative min-h-0 flex-1 flex flex-col overflow-hidden">
+              <div class="data-grid-scroll-body relative min-h-0 flex-1 flex flex-col overflow-hidden">
                 <ProductionWatermark v-if="productionContext.active" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
@@ -18429,6 +18430,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   display: none;
 }
 
+.data-grid-header-shell {
+  width: calc(100% - var(--grid-vertical-scrollbar-space));
+}
+
+.data-grid-scroll-body {
+  padding-inline-end: var(--grid-vertical-scrollbar-space);
+}
+
 .data-grid-scroller {
   overflow-anchor: none;
   overscroll-behavior: none;
@@ -18520,7 +18529,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 
 .data-grid-horizontal-scrollbar {
   position: absolute;
-  inset-inline: calc(var(--row-num-w) + 8px) 4px;
+  inset-inline: calc(var(--row-num-w) + 8px) calc(4px + var(--grid-vertical-scrollbar-space));
   bottom: 0;
   z-index: 30;
   height: 10px;
@@ -18590,10 +18599,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 .data-grid-vertical-scrollbar {
   position: absolute;
   top: 10px;
-  right: 2px;
+  inset-inline-end: 2px;
   bottom: 14px;
   z-index: 30;
-  width: 10px;
+  width: calc(var(--grid-vertical-scrollbar-space) - 2px);
   cursor: pointer;
   touch-action: none;
 }

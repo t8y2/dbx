@@ -5252,11 +5252,8 @@ pub async fn execute_statements(
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, String> {
     let db_type = connection_database_type(state, connection_id).await;
-    let invalidate = statements.iter().any(|sql| crate::object_cache::sql_may_change_object_metadata(sql, db_type));
     let result = execute_statements_inner(state, connection_id, database, statements, schema, timeout_secs).await;
-    if invalidate {
-        crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
-    }
+    crate::object_cache::invalidate_for_statements(&state.storage, connection_id, statements, db_type).await;
     result
 }
 
@@ -5302,10 +5299,7 @@ pub async fn execute_statements_with_transaction_option(
         )
         .await
         .map_err(|error| error.into_legacy_string())?;
-        let invalidate = statements.iter().any(|sql| crate::object_cache::sql_may_change_object_metadata(sql, db_type));
-        if invalidate {
-            crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
-        }
+        crate::object_cache::invalidate_for_statements(&state.storage, connection_id, statements, db_type).await;
         return Ok(result);
     }
     execute_statements(state, connection_id, database, statements, schema, timeout_secs).await
@@ -5856,9 +5850,13 @@ pub async fn execute_statements_in_transaction(
     schema: Option<&str>,
     catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
-    execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog, None)
-        .await
-        .map_err(QueryExecutionError::into_legacy_string)
+    let result =
+        execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog, None)
+            .await
+            .map_err(QueryExecutionError::into_legacy_string)?;
+    let db_type = connection_database_type(state, connection_id).await;
+    crate::object_cache::invalidate_for_statements(&state.storage, connection_id, statements, db_type).await;
+    Ok(result)
 }
 
 /// Execute multiple SQL statements transactionally while retaining typed failures.
@@ -10181,6 +10179,35 @@ for line in sys.stdin:
         execute_sql_statement(&state, connection_id, "", "CREATE TABLE users (id INTEGER)", None, None).await.unwrap();
         for key in keys {
             assert!(state.storage.load_schema_cache(key).await.unwrap().is_none(), "stale cache: {key}");
+        }
+        for key in keys {
+            state.storage.save_schema_cache(key, &serde_json::json!({"old": true})).await.unwrap();
+        }
+        execute_statements_in_transaction(
+            &state,
+            connection_id,
+            "",
+            &["INSERT INTO users VALUES (1)".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for key in keys {
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_some(), "DML evicted cache: {key}");
+        }
+        execute_statements_in_transaction(
+            &state,
+            connection_id,
+            "",
+            &["ALTER TABLE users ADD COLUMN added INTEGER".into(), "SELECT 1".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for key in keys {
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_none(), "stale cache after commit: {key}");
         }
         assert!(state.storage.load_schema_cache(unrelated).await.unwrap().is_some());
     }

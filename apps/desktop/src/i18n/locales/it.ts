@@ -5227,6 +5227,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "Abilita",
     foreignKeyChecksDisable: "Disabilita",
     foreignKeyChecksHint: "Per impostazione predefinita viene mantenuta l'impostazione della sessione. Se disabilitato, viene eseguito con SET FOREIGN_KEY_CHECKS = 0, così le tabelle referenziate possono essere gestite in qualsiasi ordine; al termine, il valore originale viene ripristinato.",
+    duplicateStructureCommentsUnavailable: "La struttura della tabella è stata clonata, ma alcuni commenti della tabella di origine non sono leggibili e potrebbero non essere stati copiati.",
     createSequence: "Crea sequenza",
     viewPostgresRowLevelSecurity: "Visualizza criteri di sicurezza a livello di riga",
     copyGeneratedSql: "Copia SQL generato",

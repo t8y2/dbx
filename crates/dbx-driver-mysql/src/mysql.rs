@@ -54,6 +54,7 @@ pub struct MySqlPool {
     /// pool at creation time so that metadata, DDL, connection-info, cancel and
     /// streaming paths do not fall back to a compile-time constant (#12908).
     checkout_timeout: Duration,
+    stateless_http_tunnel: bool,
 }
 
 impl MySqlPool {
@@ -78,6 +79,7 @@ impl MySqlPool {
             data_charset: None,
             checkout_verifications: Default::default(),
             checkout_timeout: checkout_timeout.max(Duration::from_secs(1)),
+            stateless_http_tunnel: false,
         }
     }
 
@@ -91,7 +93,16 @@ impl MySqlPool {
     /// session state (temporary tables, user variables, selected catalog)
     /// survives across executions in the same tab.
     pub fn is_client_session_pool(&self) -> bool {
-        self.max_connections == 1
+        self.max_connections == 1 && !self.stateless_http_tunnel
+    }
+
+    /// Navicat PHP tunnels open a new MySQL session for every HTTP request.
+    pub fn is_stateless_http_tunnel(&self) -> bool {
+        self.stateless_http_tunnel
+    }
+
+    pub fn set_stateless_http_tunnel(&mut self) {
+        self.stateless_http_tunnel = true;
     }
 
     pub fn data_charset(&self) -> Option<MySqlDataCharset> {
@@ -8240,6 +8251,17 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stateless_http_pool_does_not_claim_a_persistent_client_session() {
+        let mut pool = super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        assert!(pool.is_client_session_pool());
+        assert!(!pool.is_stateless_http_tunnel());
+        pool.set_stateless_http_tunnel();
+        assert!(!pool.is_client_session_pool());
+        assert!(pool.clone().is_stateless_http_tunnel());
+        assert!(super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1).is_client_session_pool());
+    }
+
     #[test]
     fn product_version_uses_starrocks_function_only_for_starrocks() {
         assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");

@@ -12343,6 +12343,8 @@ export default withEnglishFallback({
     duplicateTabTitleModeConnection: "Имя объекта + имя подключения",
     duplicateTabTitleModeConnectionDescription: "Показывает users prod-db, users staging-db… Возврат к номерам, если повторяющиеся вкладки относятся к одному подключению или заголовок уже содержит его имя.",
     shortcutConvertSelectionToDelimited: "Преобразовать выделение в список с разделителями",
+    shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
+    shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

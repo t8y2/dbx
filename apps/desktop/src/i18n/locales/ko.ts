@@ -10850,6 +10850,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "쿼리 연결의 전체 그룹 경로 표시",
     showConnectionGroupPathDescription: "활성화하면 쿼리 페이지 오른쪽 위의 연결 선택기에서 연결 이름 앞에 전체 그룹 경로를 표시합니다. 비활성화하면 연결 이름만 표시합니다.",
     shortcutConvertSelectionToDelimited: "선택한 내용을 구분 기호로 구분된 목록으로 변환",
+    shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
+    shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

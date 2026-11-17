@@ -3254,9 +3254,7 @@ describe("queryStore hidden primary key editing", () => {
     const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
     resetRowIdLocatorStateForTests();
     getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
-    getColumns.mockResolvedValue([
-      { name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
-    ]);
+    getColumns.mockResolvedValue([{ name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
     listIndexes.mockResolvedValue([]);
     lookupLocalCompletionTables.mockReturnValue([{ name: "test_no_pk", type: "table", schema: "public" }]);
     const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
@@ -3284,9 +3282,7 @@ describe("queryStore hidden primary key editing", () => {
     const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
     resetRowIdLocatorStateForTests();
     getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
-    getColumns.mockResolvedValue([
-      { name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
-    ]);
+    getColumns.mockResolvedValue([{ name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
     listIndexes.mockResolvedValue([]);
     lookupLocalCompletionTables.mockReturnValue([{ name: "test_no_pk", type: "table", schema: "public" }]);
     const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");

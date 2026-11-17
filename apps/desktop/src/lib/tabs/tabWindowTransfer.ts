@@ -13,6 +13,7 @@ export const TAB_WINDOW_DRAG_PREVIEW_EVENT = "dbx:tab-window-drag-preview";
 export const TAB_NATIVE_DRAG_PREVIEW_RELEASE_EVENT = "dbx:tab-drag-preview-release";
 export const TAB_WINDOW_INFO_REQUEST_EVENT = "dbx:tab-window-info-request";
 export const TAB_WINDOW_INFO_RESPONSE_EVENT = "dbx:tab-window-info-response";
+export const TAB_WINDOW_TRANSFER_ACCEPTED_EVENT = "dbx:tab-window-transfer-accepted";
 export const TAB_WINDOW_CONSOLIDATE_REQUEST_EVENT = "dbx:tab-window-consolidate-request";
 export const TAB_DRAG_PREVIEW_WINDOW_PREFIX = "dbx-tab-drag-preview";
 export const TAB_DRAG_PREVIEW_WEBVIEW_LABEL = "dbx-tab-drag-preview";
@@ -98,6 +99,10 @@ export interface TabWindowInfoResponse {
 
 export interface TabWindowConsolidateRequest {
   targetWindowLabel: string;
+}
+
+export interface TabWindowTransferAcceptedPayload {
+  transferId: string;
 }
 
 function jsonSafeReplacer(_key: string, value: unknown): unknown {
@@ -209,6 +214,18 @@ async function consumeSharedTransfer<T>(key: string): Promise<T | null> {
   }
 }
 
+async function peekSharedTransfer<T>(key: string): Promise<T | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    // The backend load consumes the one-shot transfer handoff. The target that
+    // handles pointerup owns this read and completes the move.
+    return (await invoke<T | null>("load_detached_tab_handoff", { tabId: key })) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function storeDetachedTabTransfer(payload: TabWindowTransferPayload): Promise<void> {
   safeLocalStorageSet(transferStorageKey(payload.transferId), encodeTabWindowTransfer(payload));
   // Chromium does not consistently expose drag DataTransfer data to a separate
@@ -220,6 +237,10 @@ export async function storeDetachedTabTransfer(payload: TabWindowTransferPayload
 
 export function readTabWindowTransfer(transferId: string): TabWindowTransferPayload | null {
   return decodeTabWindowTransfer(safeLocalStorageGet(transferStorageKey(transferId)));
+}
+
+export async function readSharedTabWindowTransfer(transferId: string): Promise<TabWindowTransferPayload | null> {
+  return readTabWindowTransfer(transferId) ?? (await peekSharedTransfer<TabWindowTransferPayload>(`${SHARED_TRANSFER_PREFIX}${transferId}`));
 }
 
 export function readActiveTabWindowTransfer(): TabWindowTransferPayload | null {
@@ -427,6 +448,17 @@ export async function requestTabWindowConsolidation(targetWindowLabel: string, p
   }
 }
 
+export async function sendTabWindowTransferAccepted(targetWindowLabel: string, payload: TabWindowTransferAcceptedPayload): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { emitTo } = await import("@tauri-apps/api/event");
+    await emitTo({ kind: "WebviewWindow", label: targetWindowLabel }, TAB_WINDOW_TRANSFER_ACCEPTED_EVENT, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function listenForTabWindowTransfer(handler: (payload: TabWindowTransferPayload) => void): Promise<() => void> {
   if (!isTauriRuntime()) return () => {};
   const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
@@ -449,6 +481,12 @@ export async function listenForTabWindowConsolidation(handler: (payload: TabWind
   if (!isTauriRuntime()) return () => {};
   const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   return getCurrentWebviewWindow().listen<TabWindowConsolidateRequest>(TAB_WINDOW_CONSOLIDATE_REQUEST_EVENT, (event) => handler(event.payload));
+}
+
+export async function listenForTabWindowTransferAccepted(handler: (payload: TabWindowTransferAcceptedPayload) => void): Promise<() => void> {
+  if (!isTauriRuntime()) return () => {};
+  const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+  return getCurrentWebviewWindow().listen<TabWindowTransferAcceptedPayload>(TAB_WINDOW_TRANSFER_ACCEPTED_EVENT, (event) => handler(event.payload));
 }
 
 export async function emitTabWindowDragPreview(payload: TabWindowDragPreviewPayload): Promise<void> {

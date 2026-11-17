@@ -19,9 +19,11 @@ import {
   currentTabWindowLabel,
   focusTabWindow,
   listOtherTabWindows,
+  readSharedTabWindowTransfer,
   listenForTabWindowInfoRequest,
   listenForTabWindowInfoResponse,
   listenForTabWindowConsolidation,
+  listenForTabWindowTransferAccepted,
   emitTabWindowDragPreview,
   hideTabDragPreviewWebview,
   markTabWindowTransferAccepted,
@@ -34,6 +36,7 @@ import {
   showTabDragPreviewWebview,
   requestTabWindowInfo,
   sendTabWindowInfoResponse,
+  sendTabWindowTransferAccepted,
   requestTabWindowConsolidation,
   tabWindowAtCursor,
   tabWindowAtPhysicalPosition,
@@ -43,6 +46,7 @@ import {
   type TabWindowInfoRequest,
   type TabWindowInfoResponse,
   type TabWindowConsolidateRequest,
+  type TabWindowTransferAcceptedPayload,
   type TabWindowTarget,
   type NativeTabDragPreviewRelease,
   type TabWindowTransferPayload,
@@ -76,12 +80,13 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   let removeNativeTabDragPreviewReleaseListener: (() => void) | null = null;
   let removeWorkspaceWindowChangeListener: (() => void) | null = null;
   let removeTabWindowConsolidationListener: (() => void) | null = null;
+  let removeTabWindowTransferAcceptedListener: (() => void) | null = null;
   let tabWindowTransferListenerUnmounted = false;
   let tabWindowInfoListenerUnmounted = false;
   let tabWindowDragPreviewListenerUnmounted = false;
   const pendingTabWindowInfoRequests = new Map<string, { targetWindowLabel: string; resolve: (title: string | null) => void; timer: number }>();
 
-  const remoteTabWindowPreview = ref<{ transferId: string; title: string; sequence: number; rect: ReturnType<typeof tabDragPreviewRect> } | null>(null);
+  const remoteTabWindowPreview = ref<{ transferId: string; sourceWindowLabel: string; title: string; sequence: number; rect: ReturnType<typeof tabDragPreviewRect> } | null>(null);
   const remoteTabWindowPreviewSequences = new Map<string, number>();
   let focusedDragPreviewWindowLabel: string | null = null;
   let remoteTabWindowPreviewExpiryTimer: number | null = null;
@@ -92,6 +97,8 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   let tabPreviewBroadcastInFlight = false;
   let tabPreviewDisplayMode: "in-app" | "external" | null = null;
   let tabPreviewBroadcastSequence = 0;
+  const finishingTransferIds = new Set<string>();
+  const completedTransferIds = new Set<string>();
 
   function clearRemoteTabWindowPreview(transferId?: string) {
     if (remoteTabWindowPreviewExpiryTimer !== null) {
@@ -143,6 +150,9 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     removeWorkspaceWindowChangeListener = null;
     removeTabWindowConsolidationListener?.();
     removeTabWindowConsolidationListener = null;
+    removeTabWindowTransferAcceptedListener?.();
+    removeTabWindowTransferAcceptedListener = null;
+    window.removeEventListener("pointerup", handleRemoteTabWindowPointerUp, true);
     stopTabDragPreviewBroadcast();
     clearRemoteTabWindowPreview();
   });
@@ -205,6 +215,12 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
         else removeTabWindowConsolidationListener = unlisten;
       })
       .catch((error) => console.warn("[DBX][tab-window-consolidate:listen:error]", error));
+    void listenForTabWindowTransferAccepted(handleIncomingTabWindowTransferAccepted)
+      .then((unlisten) => {
+        if (tabWindowTransferListenerUnmounted) unlisten();
+        else removeTabWindowTransferAcceptedListener = unlisten;
+      })
+      .catch((error) => console.warn("[DBX][tab-window-transfer-accepted:listen:error]", error));
     void listenForTabWindowDragPreview(handleIncomingTabWindowDragPreview)
       .then((unlisten) => {
         if (tabWindowDragPreviewListenerUnmounted) unlisten();
@@ -217,6 +233,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
         else removeNativeTabDragPreviewReleaseListener = unlisten;
       })
       .catch((error) => console.warn("[DBX][tab-drag-preview-release:listen:error]", error));
+    window.addEventListener("pointerup", handleRemoteTabWindowPointerUp, true);
   });
   function isPointerOutsideTabBar(event: MouseEvent): boolean {
     return !Array.from(document.querySelectorAll<HTMLElement>("[data-main-tab-bar]")).some((bar) => {
@@ -332,10 +349,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       const currentWindow = getCurrentWindow();
       if (focusedDragPreviewWindowLabel !== currentWindow.label) {
         focusedDragPreviewWindowLabel = currentWindow.label;
-        // Bring the target above the source without taking keyboard/pointer
-        // focus away from the drag owner. Stealing focus here prevents the
-        // source WebView from receiving the final pointerup.
-        await Promise.all([currentWindow.show(), currentWindow.unminimize()]);
+        await Promise.all([currentWindow.show(), currentWindow.unminimize(), currentWindow.setFocus()]);
       }
       const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
       if (remoteTabWindowPreviewSequences.get(payload.sourceWindowLabel) !== payload.sequence) return;
@@ -349,6 +363,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       }
       remoteTabWindowPreview.value = {
         transferId: payload.transferId,
+        sourceWindowLabel: payload.sourceWindowLabel,
         title: payload.title,
         sequence: payload.sequence,
         rect: tabDragPreviewRect(cursor, { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight }),
@@ -372,7 +387,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   }
 
   async function startNativeTabDragPreview(payload: TabWindowTransferPayload, event: MouseEvent) {
-    if (!isTauriRuntime() || !navigator.userAgent.toLowerCase().includes("windows") || nativeTabDragPreviewTransferId) return;
+    if (!isTauriRuntime() || !/windows|macintosh|mac os/i.test(navigator.userAgent) || nativeTabDragPreviewTransferId) return;
     nativeTabDragPreviewTransferId = payload.transferId;
     try {
       const currentWindow = getCurrentWindow();
@@ -571,6 +586,33 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     void moveTabsToWindow(queryStore.tabs, payload.targetWindowLabel).catch((error) => console.warn("[DBX][tab-window-consolidate:error]", error));
   }
 
+  function handleIncomingTabWindowTransferAccepted(payload: TabWindowTransferAcceptedPayload) {
+    const drag = nativeTabDrag.value;
+    if (!drag || drag.payload.transferId !== payload.transferId) return;
+    nativeTabDrag.value = null;
+    nativeTabDragPreviewTransferId = null;
+    stopTabDragPreviewBroadcast(drag.payload);
+    cleanupSourceDrag?.();
+    cleanupSourceDrag = undefined;
+    void finishSourceTransfer(drag.payload).catch((error) => console.warn("[DBX][tab-window-transfer:source-finish-error]", error));
+  }
+
+  async function handleRemoteTabWindowPointerUp() {
+    const preview = remoteTabWindowPreview.value;
+    if (!preview) return;
+    const payload = await readSharedTabWindowTransfer(preview.transferId);
+    if (!payload) {
+      clearRemoteTabWindowPreview(preview.transferId);
+      return;
+    }
+    const cursor = await cursorPosition().catch(() => null);
+    const delivered = cursor ? { ...payload, dropCursorPhysical: { x: cursor.x, y: cursor.y } } : payload;
+    const accepted = await acceptTabWindowTransfer(delivered);
+    if (accepted) {
+      await sendTabWindowTransferAccepted(preview.sourceWindowLabel, { transferId: preview.transferId });
+    }
+  }
+
   async function finishTabWindowTransfer(payload: TabWindowTransferPayload, placement?: TabWindowPlacement, knownTargetWindowLabel?: string | null, dropCursorPhysical?: { x: number; y: number }) {
     // Resolve the destination from the OS cursor after pointer capture releases.
     // This keeps the move path independent from WebView2 HTML5 drag delivery.
@@ -598,13 +640,20 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   }
 
   async function finishSourceTransfer(payload: TabWindowTransferPayload) {
-    for (const entry of tabWindowTransferEntries(payload)) queryStore.detachTabForTransfer(entry.tab.id);
-    await queryStore.flushPendingPersist();
-    clearTabWindowTransfer(payload.transferId);
-    if (queryStore.tabs.length || !payload.sourceWindowLabel.startsWith("dbx-tab-") || options.canCloseEmptyWindow?.() === false) return;
-    // Reuse the normal close request: Rust checks for remaining workspaces and
-    // the frontend retains its close guards if this became the last window.
-    await requestAppClose().catch((error) => console.warn("[DBX][tab-window-transfer:close-empty:error]", error));
+    if (completedTransferIds.has(payload.transferId) || finishingTransferIds.has(payload.transferId)) return;
+    finishingTransferIds.add(payload.transferId);
+    try {
+      for (const entry of tabWindowTransferEntries(payload)) queryStore.detachTabForTransfer(entry.tab.id);
+      await queryStore.flushPendingPersist();
+      clearTabWindowTransfer(payload.transferId);
+      completedTransferIds.add(payload.transferId);
+      if (queryStore.tabs.length || !payload.sourceWindowLabel.startsWith("dbx-tab-") || options.canCloseEmptyWindow?.() === false) return;
+      // Reuse the normal close request: Rust checks for remaining workspaces and
+      // the frontend retains its close guards if this became the last window.
+      await requestAppClose().catch((error) => console.warn("[DBX][tab-window-transfer:close-empty:error]", error));
+    } finally {
+      finishingTransferIds.delete(payload.transferId);
+    }
   }
 
   async function openTabInNewWindow(tab: QueryTab) {

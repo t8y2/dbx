@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::Emitter;
 use tauri::{AppHandle, Manager};
 
@@ -44,13 +44,13 @@ struct TabDragPreviewRelease {
 
 #[tauri::command]
 pub fn start_tab_drag_preview(app: AppHandle, request: StartTabDragPreviewRequest) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    return windows::start(app, request);
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    return native::start(app, request);
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (app, request);
-        Err("native tab drag preview is only implemented on Windows".to_string())
+        Err("native tab drag release detection is unavailable on this platform".to_string())
     }
 }
 
@@ -65,14 +65,31 @@ pub fn stop_tab_drag_preview(app: AppHandle, transfer_id: String) {
     }
 }
 
-#[cfg(target_os = "windows")]
-mod windows {
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod native {
     use super::*;
     use std::thread;
-    use std::time::Duration;
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "macos")]
+    fn pointer_state(app: &AppHandle) -> Option<(i32, i32, bool)> {
+        let position = app.cursor_position().ok()?;
+        let held = objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0;
+        Some((position.x.round() as i32, position.y.round() as i32, held))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn pointer_state(_app: &AppHandle) -> Option<(i32, i32, bool)> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut position = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut position) } == 0 {
+            return None;
+        }
+        let held = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } & (0x8000u16 as i16) != 0;
+        Some((position.x, position.y, held))
+    }
 
     pub fn start(app: AppHandle, request: StartTabDragPreviewRequest) -> Result<(), String> {
         let state = app.state::<TabDragPreviewState>();
@@ -96,16 +113,16 @@ mod windows {
         let mut final_cursor_y = request.top + request.grab_y;
         let mut final_left = request.left;
         let mut final_top = request.top;
-        while !cancelled.load(Ordering::Acquire) {
-            let mut cursor = POINT { x: 0, y: 0 };
-            unsafe {
-                GetCursorPos(&mut cursor);
-            }
-            final_cursor_x = cursor.x;
-            final_cursor_y = cursor.y;
-            final_left = cursor.x - request.grab_x;
-            final_top = cursor.y - request.grab_y;
-            if unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } & (0x8000u16 as i16) == 0 {
+        let started = Instant::now();
+        while !cancelled.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(120) {
+            let Some((x, y, held)) = pointer_state(&app) else {
+                break;
+            };
+            final_cursor_x = x;
+            final_cursor_y = y;
+            final_left = x - request.grab_x;
+            final_top = y - request.grab_y;
+            if !held {
                 released = true;
                 break;
             }

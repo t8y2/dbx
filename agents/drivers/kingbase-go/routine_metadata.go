@@ -89,13 +89,13 @@ WHERE n.nspname = %s AND %s ORDER BY p.proname, signature`, kind, identity, cata
 	defer rows.Close()
 	result := []objectInfo{}
 	for rows.Next() {
-		var name, kind, signature string
-		var comment sql.NullString
+		var name, kind string
+		var comment, signature sql.NullString
 		if err := rows.Scan(&name, &kind, &comment, &signature); err != nil {
 			return nil, err
 		}
-		// Empty identifies the zero-argument overload and must survive JSON.
-		result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment), Signature: &signature})
+		// A NULL identity represents the zero-argument overload. Keep its empty signature in JSON.
+		result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment), Signature: &signature.String})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

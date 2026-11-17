@@ -129,6 +129,7 @@ import {
   buildEmptyTableSql,
   buildTruncateTableSql,
   buildVacuumTableSql,
+  kingbaseDuplicateStructureTransaction,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   tableAdminSqlOptionsForRow,
@@ -4473,17 +4474,24 @@ function requestCopyAsNewTable(row: ObjectBrowserRow) {
 }
 
 function captureTableCopyContext() {
+  const databaseType = effectiveDatabaseType.value;
   return {
     connection: { ...props.connection },
     database: props.database,
     catalog: props.catalog,
     schema: selectedSchema.value,
-    databaseType: effectiveDatabaseType.value,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+    databaseType,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id, databaseType === "kingbase" ? props.database : undefined),
   };
 }
 
 type TableCopyContext = ReturnType<typeof captureTableCopyContext>;
+
+async function ensureTableCopyIdentifierQuote(context: TableCopyContext) {
+  if (context.databaseType === "kingbase") {
+    context.identifierQuote = await connectionStore.ensureConnectionIdentifierQuote(context.connection.id, context.database);
+  }
+}
 
 function reloadTableCopyContext(context: TableCopyContext) {
   if (props.connection.id === context.connection.id && props.database === context.database && props.catalog === context.catalog && selectedSchema.value === context.schema) return reload();
@@ -4512,6 +4520,14 @@ function duplicateStructureSuccessMessage(name: string, plan: DuplicateTableStru
 
 function executeDuplicateStructurePlan(context: TableCopyContext, plan: DuplicateTableStructurePlan, schema: string | undefined) {
   if (plan.oceanbaseClone) return executeOceanbaseTableClone(plan.oceanbaseClone, (sql) => api.executeQuery(context.connection.id, context.database, sql, plan.oceanbaseClone!.targetSchema));
+  const executeTransaction = kingbaseDuplicateStructureTransaction(plan, {
+    connectionId: context.connection.id,
+    database: context.database,
+    databaseType: context.databaseType,
+    schema,
+    catalog: context.catalog,
+  });
+  if (executeTransaction) return executeTransaction();
   return plan.executeAsScript ? api.executeScript(context.connection.id, context.database, plan.sql, schema) : api.executeQuery(context.connection.id, context.database, plan.sql, schema);
 }
 
@@ -4527,6 +4543,7 @@ async function confirmDuplicateStructureImpl() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || context.schema;
+    await ensureTableCopyIdentifierQuote(context);
     const plan = await buildDuplicateStructurePlan(context, row.name, newName, schema, row.comment);
     if (!(await cloneDialog.request([{ plan, scope: [context.connection.id, context.database, context.catalog || ""] }]))) return;
     const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(context, plan, schema), context);
@@ -4894,6 +4911,7 @@ async function confirmPasteTableImpl() {
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
+  await ensureTableCopyIdentifierQuote(context);
   if (context.databaseType === "mysql") {
     const copies = entries.map((entry) => ({ ...entry, connection: context.connection, database: context.database, catalog: context.catalog, schema: entry.schema || context.schema, identifierQuote: context.identifierQuote }));
     const completed = await useTableCopyTaskStore().run(copies, mode);
@@ -4935,7 +4953,6 @@ async function confirmPasteTableImpl() {
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
         const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, copyData));
-        commentMetadataIncomplete ||= !!plan.commentMetadataIncomplete;
         sourceColumns = plan.sourceColumns;
         if (plan.oceanbaseClone) {
           targetName = plan.oceanbaseClone.targetName;
@@ -4947,6 +4964,7 @@ async function confirmPasteTableImpl() {
           break;
         }
         hasMutatedTable = true;
+        commentMetadataIncomplete ||= !!plan.commentMetadataIncomplete;
         completedClone = plan.oceanbaseClone;
       }
       if (copyData) {

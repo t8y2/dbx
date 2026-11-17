@@ -1,5 +1,6 @@
 import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { tableDataCopyColumnOptions } from "@/lib/table/tableClipboard";
@@ -516,6 +517,15 @@ export function buildSetSchemaCommentSql(options: SchemaCommentSqlOptions): stri
 
 export function buildDuplicateTableStructureSql(options: DuplicateTableStructureSqlOptions): Promise<string> {
   return api.buildDuplicateTableStructureSql(options);
+}
+
+export function kingbaseDuplicateStructureTransaction(plan: DuplicateTableStructurePlan, { databaseType, connectionId, database, schema, catalog }: Pick<DuplicateTableStructurePlanOptions, "databaseType" | "connectionId" | "database" | "schema" | "catalog">) {
+  if (databaseType !== "kingbase" || !plan.executeAsScript) return undefined;
+
+  return () => {
+    const statements = splitSqlStatementRanges(plan.sql, "kingbase").map(({ sql }) => sql);
+    return api.executeInTransaction(connectionId, database, statements, schema ?? undefined, catalog);
+  };
 }
 
 export function duplicateTableStructureRequiresScript(sql: string): boolean {

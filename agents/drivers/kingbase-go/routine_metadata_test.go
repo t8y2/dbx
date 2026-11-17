@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -32,7 +33,7 @@ func TestRoutineMetadataUsesCatalogKindAndPreservesOverloads(t *testing.T) {
 				}
 				return &valueRows{columns: []string{"name", "kind", "comment", "signature"}, rows: [][]driver.Value{
 					{"inout_procedure", "PROCEDURE", "INOUT comment", "INOUT value integer"},
-					{"overloaded", "PROCEDURE", nil, ""},
+					{"overloaded", "PROCEDURE", nil, nil},
 					{"overloaded", "PROCEDURE", nil, "value integer"},
 					{"overloaded", "PROCEDURE", nil, "value text"},
 					{"void_function", "FUNCTION", nil, ""},
@@ -57,6 +58,17 @@ func TestRoutineMetadataUsesCatalogKindAndPreservesOverloads(t *testing.T) {
 				if item.Name != "overloaded" || item.Signature == nil || *item.Signature != signature || item.Schema != "team's" {
 					t.Fatalf("overload identity/order was lost: %+v; want signature %q", item, signature)
 				}
+			}
+			encoded, err := json.Marshal(objects[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded objectInfo
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.Signature == nil || *decoded.Signature != "" {
+				t.Fatalf("NULL catalog identity must become an explicit empty JSON signature: %s", encoded)
 			}
 			page, err := s.listObjects("team's", metadataListConstraints{ObjectTypes: []string{"PROCEDURE"}, Filter: "overloaded", Limit: 1, Offset: 1})
 			if err != nil || len(page) != 1 || page[0].Signature == nil || *page[0].Signature != "value integer" {
@@ -108,14 +120,14 @@ func TestRoutineMetadataFallsBackOnlyWhenKindColumnIsMissing(t *testing.T) {
 		if !strings.Contains(query, "prorettype") {
 			return nil, errors.New("legacy routine query lost its compatibility classification: " + query)
 		}
-		return &valueRows{columns: []string{"name", "kind", "comment", "signature"}, rows: [][]driver.Value{{"legacy_proc", "PROCEDURE", nil, ""}}}, nil
+		return &valueRows{columns: []string{"name", "kind", "comment", "signature"}, rows: [][]driver.Value{{"legacy_proc", "PROCEDURE", nil, nil}}}, nil
 	}}
 	s := newServer()
 	s.db = openMetadataDB(t, state)
 	for call := 0; call < 2; call++ {
 		objects, err := s.listObjects("public", metadataListConstraints{ObjectTypes: []string{"PROCEDURE"}})
-		if err != nil || len(objects) != 1 {
-			t.Fatalf("legacy routine fallback failed: objects=%+v err=%v", objects, err)
+		if err != nil || len(objects) != 1 || objects[0].Signature == nil || *objects[0].Signature != "" {
+			t.Fatalf("legacy routine fallback lost the empty signature: objects=%+v err=%v", objects, err)
 		}
 	}
 	queries := state.snapshotQueries()
@@ -201,12 +213,10 @@ func TestRoutineSourceUsesExplicitSignatureAndDetectsAmbiguity(t *testing.T) {
 }
 
 func TestLegacyRoutineSourceDoesNotIgnoreOverloadIdentity(t *testing.T) {
-	for _, signature := range []*string{nil, stringPtr(""), stringPtr("value integer")} {
+	emptySignature := ""
+	for _, signature := range []*string{nil, &emptySignature, stringPtr("value integer")} {
 		t.Run("overloaded", func(t *testing.T) {
 			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
-				if signature != nil && *signature == "" && !strings.Contains(query, "coalesce(length(") {
-					return nil, errors.New("legacy zero-argument routine predicate did not normalize NULL identity: " + query)
-				}
 				if !strings.Contains(query, "SELECT COUNT(*)") || strings.Contains(query, "DBMS_METADATA") {
 					return nil, errors.New("legacy name-only DDL must not run for an ambiguous name: " + query)
 				}
@@ -216,7 +226,7 @@ func TestLegacyRoutineSourceDoesNotIgnoreOverloadIdentity(t *testing.T) {
 			s.db = openMetadataDB(t, state)
 			s.useLegacyRoutineDefinition = true
 			_, err := s.getObjectSourceWithSignature("public", "overloaded", "PROCEDURE", "", signature)
-			if err == nil || !strings.Contains(err.Error(), "overloaded") {
+			if err == nil || !strings.Contains(err.Error(), "legacy routine source API cannot select overloaded routine") {
 				t.Fatalf("legacy name-only API must reject overloaded source, got %v", err)
 			}
 			if queries := state.snapshotQueries(); len(queries) != 1 {

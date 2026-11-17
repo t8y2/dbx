@@ -3584,7 +3584,7 @@ impl AppState {
         let pool_result = async {
         let pool = match db_config.db_type {
             DatabaseType::Mysql => {
-                let (pool, mode) = connect_mysql_metadata_pool(
+                let (mut pool, mode) = connect_mysql_metadata_pool(
                     &config,
                     &db_config,
                     &host,
@@ -3593,6 +3593,9 @@ impl AppState {
                     mysql_pool_max_connections,
                 )
                 .await?;
+                if matches!(&transport_stamp.plan.route, ConnectionTransportRoute::Navicat { .. }) {
+                    pool.set_stateless_http_tunnel();
+                }
                 PoolKind::Mysql(pool, mode)
             }
             DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
@@ -6325,13 +6328,36 @@ impl AppState {
         }
         let mut sessions = self.mysql_client_sessions.write().await;
         if let Some(previous) = sessions.get(pool_key) {
-            if previous.physical_connection_id != physical_connection_id
-                || !previous.publication.is_same_pool(&snapshot.publication)
-            {
+            if !previous.publication.is_same_pool(&snapshot.publication) {
                 sessions.remove(pool_key);
                 drop(sessions);
                 self.clear_preserved_explicit_transaction(pool_key).await;
                 return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. User variables and temporary tables are no longer available, and the previous transaction outcome may be unknown. This statement was not executed.".to_string());
+            }
+            if previous.physical_connection_id != physical_connection_id {
+                let has_transaction = self.mysql_preserved_transactions.read().await.contains(pool_key);
+                if !has_transaction {
+                    // The pool recycled the idle connection. Without an open
+                    // transaction there is nothing that cannot be recovered:
+                    // the caller re-issues USE to restore the database
+                    // context, and user variables or temporary tables that
+                    // were never tracked surface as their own clear errors
+                    // if referenced. Erroring here made every idle tab fail
+                    // its first query after the pool's idle timeout (#v0.6.71).
+                    sessions.insert(
+                        pool_key.to_string(),
+                        MysqlClientSession {
+                            publication: snapshot.publication,
+                            physical_connection_id,
+                            database: String::new(),
+                        },
+                    );
+                    return Ok(!database.is_empty());
+                }
+                sessions.remove(pool_key);
+                drop(sessions);
+                self.clear_preserved_explicit_transaction(pool_key).await;
+                return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. The previous transaction outcome is unknown. This statement was not executed.".to_string());
             }
             return Ok(previous.database != database && !database.is_empty());
         }
@@ -12840,12 +12866,17 @@ sleep 30
         assert!(state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
         state.record_mysql_client_session_database(key, &pool, "second").await;
         assert!(!state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        // Without a preserved transaction, a recycled connection is adopted
+        // silently: the caller re-issues USE and the query succeeds.
+        assert!(state.mysql_client_session_database_change(key, &pool, 11, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "second").await;
+        state.mark_preserved_explicit_transaction(key).await;
         assert!(state
-            .mysql_client_session_database_change(key, &pool, 11, "second")
+            .mysql_client_session_database_change(key, &pool, 12, "second")
             .await
             .unwrap_err()
             .contains("MYSQL_CLIENT_SESSION_LOST"));
-        assert!(state.mysql_client_session_database_change(key, &pool, 11, "second").await.unwrap());
+        assert!(state.mysql_client_session_database_change(key, &pool, 12, "second").await.unwrap());
         let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/second", 1);
         state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
         // Server connection ids can repeat after a server restart.
@@ -12854,6 +12885,20 @@ sleep 30
             .await
             .unwrap_err()
             .contains("MYSQL_CLIENT_SESSION_LOST"));
+    }
+
+    #[tokio::test]
+    async fn mysql_idle_tab_recycle_does_not_error_without_transaction() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-idle";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        // First query: creates the tracking entry and USEs the database.
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "app").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "app").await;
+        // Tab goes idle, pool recycles the connection (physical id 10 → 11).
+        // No transaction was open, so the next query must succeed silently.
+        assert!(state.mysql_client_session_database_change(key, &pool, 11, "app").await.unwrap());
     }
 
     #[test]

@@ -219,6 +219,7 @@ import {
   buildEmptyTableSql,
   buildTruncateTableSql,
   buildMysqlAutoIncrementSql,
+  kingbaseDuplicateStructureTransaction,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   supportsMysqlAutoIncrement as connectionSupportsMysqlAutoIncrement,
@@ -6236,6 +6237,11 @@ function isDuplicateStructureSource(node: TreeNode): node is DuplicateStructureS
   return node.type === "table" && !!node.connectionId && !!node.database;
 }
 
+function duplicateStructureSuccessMessage(name: string, plan: DuplicateTableStructurePlan) {
+  const success = t("contextMenu.duplicateStructureSuccess", { name });
+  return plan.commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success;
+}
+
 async function confirmDuplicateStructure() {
   const node = duplicateStructureSource.value || activeNode.value;
   return databaseTypeForNode(node) === "oceanbase-oracle" ? cloneDialog.run(confirmDuplicateStructureImpl) : confirmDuplicateStructureImpl();
@@ -6248,10 +6254,11 @@ async function confirmDuplicateStructureImpl() {
   if (!newName || !node) return;
   if (databaseTypeForNode(node) === "victoriametrics") return;
   const databaseType = databaseTypeForNode(node);
-  const identifierQuote = connectionStore.connectionIdentifierQuote?.(node.connectionId);
+  let identifierQuote = connectionStore.connectionIdentifierQuote?.(node.connectionId, databaseType === "kingbase" ? node.database : undefined);
   showDuplicateDialog.value = false;
   try {
     await connectionStore.ensureConnected(node.connectionId);
+    if (databaseType === "kingbase") identifierQuote = await connectionStore.ensureConnectionIdentifierQuote(node.connectionId, node.database);
     const plan = await buildDuplicateTableStructurePlan({
       connectionId: node.connectionId,
       database: node.database,
@@ -6264,14 +6271,24 @@ async function confirmDuplicateStructureImpl() {
       identifierQuote,
     });
     if (!(await cloneDialog.request([{ plan, scope: [node.connectionId, node.database, node.catalog || ""] }]))) return;
+    const clone = plan.oceanbaseClone;
+    const execute = clone
+      ? (timeoutSecs: number) => executeOceanbaseTableClone(clone, (sql) => api.executeQuery(node.connectionId, node.database, sql, clone.targetSchema, undefined, { timeoutSecs, catalog: node.catalog }))
+      : kingbaseDuplicateStructureTransaction(plan, {
+          connectionId: node.connectionId,
+          database: node.database,
+          databaseType,
+          schema: node.schema,
+          catalog: node.catalog,
+        });
     const executed = await executeTreeNodeSqlWithProductionGuard(node, plan.sql, {
       database: node.database,
       schema: node.schema,
       executeAsScript: plan.executeAsScript,
-      execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(node.connectionId, node.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs, catalog: node.catalog })) : undefined,
+      execute,
     });
     if (!executed) return;
-    toast(t("contextMenu.duplicateStructureSuccess", { name: newName }), 3000);
+    toast(duplicateStructureSuccessMessage(newName, plan), plan.commentMetadataIncomplete ? 5000 : 3000);
     await refreshTableList(node);
   } catch (e: any) {
     if (e instanceof OceanbaseTableCloneError) {
@@ -6307,7 +6324,10 @@ async function confirmPasteTable() {
 async function confirmPasteTableImpl() {
   const entries = pasteTableEntries.value
     .filter((entry) => entry.targetName.trim())
-    .map((entry) => ({ ...entry, databaseType: entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined, identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId) }));
+    .map((entry) => {
+      const databaseType = entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined;
+      return { ...entry, databaseType, identifierQuote: connectionStore.connectionIdentifierQuote?.(entry.connectionId, databaseType === "kingbase" ? entry.database : undefined) };
+    });
   if (entries.length === 0) return;
   const shouldConsumeTableClipboard = pasteTableFromClipboard.value;
   const clipboardAtPasteStart = shouldConsumeTableClipboard ? connectionStore.treeClipboard : null;
@@ -6366,6 +6386,7 @@ async function confirmPasteTableImpl() {
     }
   }
   let cloneFailure: { error: unknown; remaining: string[] } | undefined;
+  let commentMetadataIncomplete = false;
   const completedCloneTargets: string[] = [];
   for (const entry of entries) {
     let targetName = entry.targetName.trim();
@@ -6374,6 +6395,7 @@ async function confirmPasteTableImpl() {
     try {
       await connectionStore.ensureConnected(entry.connectionId);
       const databaseType = entry.databaseType;
+      const identifierQuote = databaseType === "kingbase" ? await connectionStore.ensureConnectionIdentifierQuote(entry.connectionId, entry.database) : entry.identifierQuote;
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
         const plan =
@@ -6386,24 +6408,28 @@ async function confirmPasteTableImpl() {
             sourceName: entry.sourceName,
             targetName,
             tableComment: entry.tableComment,
-            identifierQuote: entry.identifierQuote,
+            identifierQuote,
+            copyData,
           }));
         sourceColumns = plan.sourceColumns;
-        if (plan.oceanbaseClone) {
-          targetName = plan.oceanbaseClone.targetName;
-          schema = plan.oceanbaseClone.targetSchema;
+        const clone = plan.oceanbaseClone;
+        if (clone) {
+          targetName = clone.targetName;
+          schema = clone.targetSchema;
         }
+        const execute = clone ? (timeoutSecs: number) => executeOceanbaseTableClone(clone, (sql) => api.executeQuery(entry.connectionId, entry.database, sql, clone.targetSchema, undefined, { timeoutSecs })) : kingbaseDuplicateStructureTransaction(plan, entry);
         const structureExecuted = await executeTreeNodeSqlWithProductionGuard(entry, plan.sql, {
           database: entry.database,
           schema: entry.schema,
           executeAsScript: plan.executeAsScript,
-          execute: plan.oceanbaseClone ? (timeoutSecs) => executeOceanbaseTableClone(plan.oceanbaseClone!, (sql) => api.executeQuery(entry.connectionId, entry.database, sql, plan.oceanbaseClone!.targetSchema, undefined, { timeoutSecs })) : undefined,
+          execute,
         });
         if (!structureExecuted) {
           pasteCancelled = true;
           break;
         }
         hasMutatedTable = true;
+        commentMetadataIncomplete ||= !!plan.commentMetadataIncomplete;
         completedClone = plan.oceanbaseClone;
         queueRefreshTarget({ ...entry, schema });
       }
@@ -6421,7 +6447,7 @@ async function confirmPasteTableImpl() {
           sourceName: entry.sourceName,
           targetName,
           normalizeNewTargetName: mode === "structure-and-data" && databaseType !== "oceanbase-oracle",
-          identifierQuote: entry.identifierQuote,
+          identifierQuote,
           ...dataCopyColumnOptions,
         });
         const clone = preparedClones.get(entry)?.oceanbaseClone;
@@ -6474,7 +6500,8 @@ async function confirmPasteTableImpl() {
   }
   if (pasteCancelled) {
     if (hasMutatedTable && refreshFailCount === 0) {
-      toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
+      const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+      toast(`${t("contextMenu.pasteTableCancelledAfterPartial")}${warning}`, 5000);
     }
     if (refreshFailCount > 0) {
       const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
@@ -6487,9 +6514,11 @@ async function confirmPasteTableImpl() {
     if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
-    toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
+    const success = t("contextMenu.batchPasteSuccess", { count: successCount });
+    toast(commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success, commentMetadataIncomplete ? 5000 : 3000);
   } else {
-    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, { persistent: true });
+    const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}${warning}`, { persistent: true });
   }
   if (refreshFailCount > 0) {
     const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);

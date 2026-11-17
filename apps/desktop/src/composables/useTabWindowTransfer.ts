@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref, type InjectionKey } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, type InjectionKey } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -102,6 +102,21 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   let tabPreviewBroadcastSequence = 0;
   const finishingTransferIds = new Set<string>();
   const completedTransferIds = new Set<string>();
+  let closingEmptyWindow = false;
+
+  async function closeEmptyWorkspaceWindow() {
+    const canClose = () => isTauriRuntime() && currentWindowLabel.value.startsWith("dbx-tab-") && queryStore.isOpenTabsLoaded && queryStore.tabs.length === 0 && options.canCloseEmptyWindow?.() !== false && !tabWindowTransferListenerUnmounted;
+    if (closingEmptyWindow || !canClose()) return;
+    closingEmptyWindow = true;
+    try {
+      await queryStore.flushPendingPersist();
+      if (canClose()) await requestAppClose();
+    } catch (error) {
+      console.warn("[DBX][workspace:close-empty:error]", error);
+    } finally {
+      closingEmptyWindow = false;
+    }
+  }
 
   function clearRemoteTabWindowPreview(transferId?: string) {
     if (remoteTabWindowPreviewExpiryTimer !== null) {
@@ -160,6 +175,16 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     clearRemoteTabWindowPreview();
   });
   onMounted(() => {
+    let hadContent = false;
+    watch(
+      () => [queryStore.isOpenTabsLoaded, queryStore.tabs.length, options.canCloseEmptyWindow?.() !== false, currentWindowLabel.value] as const,
+      ([loaded, count, canClose]) => {
+        hadContent ||= count > 0 || !canClose;
+        // An empty window may still be starting up and awaiting its transfer.
+        if (loaded && hadContent && count === 0 && canClose) void closeEmptyWorkspaceWindow();
+      },
+      { immediate: true, flush: "post" },
+    );
     if (isTauriRuntime()) {
       const persistGeometry = () => {
         if (geometryPersistTimer !== undefined) window.clearTimeout(geometryPersistTimer);
@@ -523,7 +548,10 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       const element = document.elementFromPoint(clientX, clientY);
       const bar = element?.closest<HTMLElement>("[data-main-tab-bar]");
       const groupId = bar?.dataset.groupId;
-      if (!bar || !groupId) return null;
+      if (!bar || !groupId) {
+        if (queryStore.tabs.length === 0 && element?.closest("[data-editor-content]")) return { groupId: queryStore.focusedGroupId };
+        return null;
+      }
       const tabTarget = element?.closest<HTMLElement>("[data-tab-id]");
       const targetId = tabTarget?.dataset.tabId;
       const targetTab = targetId ? queryStore.tabs.find((tab) => tab.id === targetId) : null;
@@ -654,10 +682,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       await queryStore.flushPendingPersist();
       clearTabWindowTransfer(payload.transferId);
       completedTransferIds.add(payload.transferId);
-      if (queryStore.tabs.length || !payload.sourceWindowLabel.startsWith("dbx-tab-") || options.canCloseEmptyWindow?.() === false) return;
-      // Reuse the normal close request: Rust checks for remaining workspaces and
-      // the frontend retains its close guards if this became the last window.
-      await requestAppClose().catch((error) => console.warn("[DBX][tab-window-transfer:close-empty:error]", error));
+      await closeEmptyWorkspaceWindow();
     } finally {
       finishingTransferIds.delete(payload.transferId);
     }

@@ -123,12 +123,14 @@ function mount(props: Record<string, unknown> = {}) {
 describe("AppToolbar web branding (#8703, #11053)", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
+    localStorage.removeItem("dbx-right-toolbar-labels");
     mockIsTauriRuntime = false;
     pinia = createPinia();
     setActivePinia(pinia);
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     document.body.innerHTML = "";
   });
 
@@ -235,6 +237,67 @@ describe("AppToolbar web branding (#8703, #11053)", () => {
     const { host, unmount } = mount({ workspaceWindowLabel: "dbx-tab-child", workspaceWindowTargets: [{ label: "main", title: "DBX" }] });
     await nextTick();
     expect(host.querySelector("[data-workspace-window-identity]")).not.toBeNull();
+    unmount();
+  });
+
+  it("folds and restores labels progressively without changing the user's preference", async () => {
+    localStorage.setItem("dbx-right-toolbar-labels", "true");
+    const { host, unmount } = mount();
+    const toolbar = host.querySelector<HTMLElement>(".app-toolbar")!;
+    let width = 900;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.matches(".app-toolbar")) return parseFloat(this.style.width) || width;
+      if (this.matches("[data-toolbar-right-actions]")) return this.closest<HTMLElement>(".app-toolbar")!.clientWidth - 400;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.matches(".app-toolbar")) return this.clientWidth;
+      if (this.matches("[data-toolbar-right-actions]")) return 250 + this.querySelectorAll('[data-right-toolbar-label-visible="true"]').length * 75;
+      return 0;
+    });
+    window.dispatchEvent(new Event("resize"));
+    await vi.waitFor(() => expect(toolbar.dataset.rightToolbarLabels).toBe("partial"));
+    const narrowCount = toolbar.querySelectorAll('[data-right-toolbar-label-visible="true"]').length;
+    expect(localStorage.getItem("dbx-right-toolbar-labels")).toBe("true");
+    width = 1150;
+    window.dispatchEvent(new Event("resize"));
+    await vi.waitFor(() => expect(toolbar.querySelectorAll('[data-right-toolbar-label-visible="true"]').length).toBeGreaterThan(narrowCount));
+    expect(toolbar.dataset.rightToolbarLabels).toBe("partial");
+    width = 1400;
+    window.dispatchEvent(new Event("resize"));
+    await vi.waitFor(() => expect(toolbar.dataset.rightToolbarLabels).toBe("true"));
+    unmount();
+  });
+
+  it("keeps the user's icon-only preference when the window grows", async () => {
+    const { host, unmount } = mount();
+    const toolbar = host.querySelector<HTMLElement>(".app-toolbar")!;
+    Object.defineProperties(toolbar, {
+      clientWidth: { get: () => 1800 },
+      scrollWidth: { get: () => 1800 },
+    });
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await nextTick();
+    expect(toolbar.dataset.rightToolbarLabels).toBe("false");
+    unmount();
+  });
+
+  it("moves primary actions into More when the whole row still overflows, and restores them on growth", async () => {
+    const { host, unmount } = mount();
+    const toolbar = host.querySelector<HTMLElement>(".app-toolbar")!;
+    let width = 760;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.matches(".app-toolbar") ? parseFloat(this.style.width) || width : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.matches(".app-toolbar") && this.querySelector('[data-toolbar-item="dataTransfer"]') ? Math.max(this.clientWidth, 1000) : this.clientWidth;
+    });
+    window.dispatchEvent(new Event("resize"));
+    await vi.waitFor(() => expect(toolbar.querySelector('[data-toolbar-item="dataTransfer"]')).toBeNull());
+    width = 1200;
+    window.dispatchEvent(new Event("resize"));
+    await vi.waitFor(() => expect(toolbar.querySelector('[data-toolbar-item="dataTransfer"]')).not.toBeNull());
     unmount();
   });
 });

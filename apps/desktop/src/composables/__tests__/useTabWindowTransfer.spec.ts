@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, defineComponent, h } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueryTab } from "@/types/database";
@@ -21,7 +21,11 @@ const mocks = vi.hoisted(() => ({
   windowChange: undefined as (() => void) | undefined,
   listWindows: vi.fn(async (): Promise<{ label: string; title: string }[]> => []),
   announce: vi.fn(async (_label: string) => {}),
+  moveToGroup: vi.fn(),
+  activate: vi.fn(),
+  persist: vi.fn(async () => {}),
 }));
+const workspace = reactive({ loaded: true, canClose: true });
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/lib/backend/api", () => ({ requestAppClose: mocks.requestClose }));
@@ -31,16 +35,32 @@ vi.mock("@tauri-apps/api/event", () => ({
     return () => {};
   },
 }));
+vi.mock("@tauri-apps/api/window", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/window")>()),
+  getCurrentWindow: () => ({
+    label: mocks.windowLabel,
+    innerPosition: async () => ({ x: 0, y: 0 }),
+    scaleFactor: async () => 1,
+    onMoved: async () => () => {},
+    onResized: async () => () => {},
+  }),
+}));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { crossWindowTabDragPreviewEnabled: true } }) }));
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
     activeTabId: "tab-2",
+    focusedGroupId: "main",
+    get isOpenTabsLoaded() {
+      return workspace.loaded;
+    },
     get tabs() {
       return mocks.tabs;
     },
     detachTabForTransfer: mocks.detach,
     importTransferredTabs: mocks.importTabs,
-    flushPendingPersist: vi.fn(async () => {}),
+    flushPendingPersist: mocks.persist,
+    moveTabToGroup: mocks.moveToGroup,
+    activateTab: mocks.activate,
   }),
 }));
 vi.mock("@/lib/tabs/tabWindowTransfer", async (importOriginal) => ({
@@ -77,7 +97,7 @@ async function mountCoordinator() {
   app = createApp(
     defineComponent({
       setup() {
-        transfer = useTabWindowTransfer({ canCloseEmptyWindow: () => mocks.canCloseEmptyWindow });
+        transfer = useTabWindowTransfer({ canCloseEmptyWindow: () => mocks.canCloseEmptyWindow && workspace.canClose });
         return () => h("div");
       },
     }),
@@ -94,7 +114,10 @@ beforeEach(async () => {
   mocks.receive = undefined;
   mocks.windowChange = undefined;
   mocks.listWindows.mockReset().mockResolvedValue([]);
-  mocks.tabs = [...tabs];
+  mocks.tabs = reactive([...tabs]);
+  workspace.loaded = true;
+  workspace.canClose = true;
+  mocks.persist.mockReset().mockResolvedValue(undefined);
   mocks.windowLabel = "dbx-tab-source";
   mocks.canCloseEmptyWindow = true;
   mocks.detach.mockImplementation((id: string) => {
@@ -103,7 +126,11 @@ beforeEach(async () => {
   await mountCoordinator();
 });
 
-afterEach(() => app.unmount());
+afterEach(() => {
+  app.unmount();
+  vi.restoreAllMocks();
+  document.body.innerHTML = "";
+});
 
 describe("group window transfer acknowledgement", () => {
   it("refreshes the window menu on creation and closure notifications without dragging", async () => {
@@ -192,5 +219,94 @@ describe("group window transfer acknowledgement", () => {
     mocks.receive!({ transferId: "failed-group", sourceWindowLabel: "dbx-tab-other", tab: tabs[0] });
     await vi.waitFor(() => expect(mocks.importTabs).toHaveBeenCalledTimes(2));
     expect(mocks.markAccepted).not.toHaveBeenCalled();
+  });
+
+  it("accepts a pointer drop into an empty editor workspace without a tab bar", async () => {
+    mocks.tabs.splice(0);
+    workspace.canClose = false;
+    const editor = document.createElement("div");
+    editor.dataset.editorContent = "";
+    document.body.appendChild(editor);
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(editor);
+    mocks.receive!({ transferId: "empty-drop", sourceWindowLabel: "main", tab: tabs[0], dropCursorPhysical: { x: 100, y: 100 } });
+    await vi.waitFor(() => expect(mocks.markAccepted).toHaveBeenCalledWith("empty-drop"));
+    expect(mocks.moveToGroup).toHaveBeenCalledWith(tabs[0].id, "main", undefined);
+    expect(mocks.activate).toHaveBeenCalledWith(tabs[0].id);
+  });
+
+  it("does not accept a pointer drop over the sidebar of an empty workspace", async () => {
+    mocks.tabs.splice(0);
+    workspace.canClose = false;
+    const sidebar = document.createElement("aside");
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(sidebar);
+    mocks.receive!({ transferId: "sidebar-drop", sourceWindowLabel: "main", tab: tabs[0], dropCursorPhysical: { x: 100, y: 100 } });
+    await nextTick();
+    await nextTick();
+    expect(mocks.importTabs).not.toHaveBeenCalled();
+    expect(mocks.markAccepted).not.toHaveBeenCalled();
+  });
+
+  it("closes a loaded child workspace after the user closes its last tab", async () => {
+    mocks.tabs.splice(0);
+    await vi.waitFor(() => expect(mocks.requestClose).toHaveBeenCalledOnce());
+    expect(mocks.persist.mock.invocationCallOrder[0]).toBeLessThan(mocks.requestClose.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps a child window while its settings or driver page is still open", async () => {
+    workspace.canClose = false;
+    mocks.tabs.splice(0);
+    await nextTick();
+    expect(mocks.requestClose).not.toHaveBeenCalled();
+    workspace.canClose = true;
+    await vi.waitFor(() => expect(mocks.requestClose).toHaveBeenCalledOnce());
+  });
+
+  it("keeps an empty new window alive while it is waiting for its initial transfer", async () => {
+    app.unmount();
+    mocks.receive = undefined;
+    mocks.tabs = reactive([]);
+    workspace.loaded = false;
+    await mountCoordinator();
+    workspace.loaded = true;
+    await nextTick();
+    expect(mocks.requestClose).not.toHaveBeenCalled();
+    mocks.tabs.push(tabs[0]);
+    await nextTick();
+    mocks.tabs.pop();
+    await vi.waitFor(() => expect(mocks.requestClose).toHaveBeenCalledOnce());
+  });
+
+  it("rechecks for newly arrived tabs after persisting before closing", async () => {
+    let saved!: () => void;
+    mocks.persist.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          saved = resolve;
+        }),
+    );
+    mocks.tabs.splice(0);
+    await vi.waitFor(() => expect(mocks.persist).toHaveBeenCalledOnce());
+    mocks.tabs.push(tabs[0]);
+    saved();
+    await nextTick();
+    expect(mocks.requestClose).not.toHaveBeenCalled();
+  });
+
+  it("does not close an empty workspace when persistence fails", async () => {
+    mocks.persist.mockRejectedValueOnce(new Error("storage unavailable"));
+    mocks.tabs.splice(0);
+    await vi.waitFor(() => expect(mocks.persist).toHaveBeenCalledOnce());
+    await nextTick();
+    expect(mocks.requestClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps the main window after the user closes its last tab", async () => {
+    app.unmount();
+    mocks.receive = undefined;
+    mocks.windowLabel = "main";
+    await mountCoordinator();
+    mocks.tabs.splice(0);
+    await nextTick();
+    expect(mocks.requestClose).not.toHaveBeenCalled();
   });
 });

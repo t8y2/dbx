@@ -6979,6 +6979,11 @@ export default {
   objects: {
     loadCapacity: "Load / refresh capacity",
     loadDetails: "Load details",
+    packageMembers: "Package members",
+    hidePackageMembers: "Hide package members",
+    showPackageMembers: "Show package members",
+    packageFunctionAtLine: "Function {name}, line {line}",
+    packageProcedureAtLine: "Procedure {name}, line {line}",
     packageSaveAsTitle: "Save Package As",
     packageSaveAsHint: "Copy {name} to a new package. The original package, its callers, saved items, and open drafts remain unchanged.",
     packageSaveAsMetadataProblem: "Package metadata is incomplete or cannot be copied safely. Review diagnostics and refresh the plan.",

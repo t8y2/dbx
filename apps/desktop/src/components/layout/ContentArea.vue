@@ -85,6 +85,7 @@ import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
+import OraclePackageMembers from "@/components/objects/OraclePackageMembers.vue";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
 const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
@@ -452,6 +453,11 @@ const activeResultSchema = computed(() => activeResultExecutionTarget.value?.sch
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
+const showOraclePackageMembers = computed(() => {
+  const type = effectiveDatabaseTypeForConnection(props.activeConnection);
+  const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
+  return (type === "oracle" || type === "oceanbase-oracle") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+});
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
 function resumeTypeManagement() {
@@ -2396,69 +2402,72 @@ defineExpose({
                   {{ t("common.retry") }}
                 </Button>
               </div>
-              <QueryEditor
-                v-else
-                ref="queryEditorRef"
-                class="relative z-0 flex-1"
-                :auto-focus="sourceSectionActive && autoFocus !== false"
-                :model-value="activeTab.sql"
-                :tab-id="activeTab.id"
-                :connection-id="activeTab.connectionId"
-                :prefetch-completion="activeTab.mode === 'query' && !activeTab.sourceView"
-                :catalog="activeTab.catalog"
-                :database="activeTab.database"
-                :schema="activeTab.schema"
-                :client-session-id="activeTab.id"
-                :completion-context-version="activeTab.completionContextVersion"
-                :database-type="activeEffectiveDatabaseType"
-                :mongo-query-language="activeTab.mongoQueryLanguage"
-                :dialect="editorDialect"
-                :syntax-dialect="editorSyntaxDialect"
-                :format-dialect="activeSqlFormatDialect"
-                :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
-                :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
-                :keyword-case-request-id="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.id : undefined"
-                :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
-                :execution-error="activeQueryError"
-                :execution-error-sql="activeTab.lastExecutedSql"
-                :execution-error-result="activeQueryError ? activeTab.result : undefined"
-                :result-columns="activeTab.result?.columns"
-                :result-source-statement="activeTab.result?.sourceStatement"
-                :result-source-from="activeTab.result?.sourceFrom"
-                :result-source-to="activeTab.result?.sourceTo"
-                :statement-execution-markers="activeStatementExecutionMarkers"
-                :initial-viewport="activeTab.editorViewport"
-                :initial-selection="activeTab.editorSelection"
-                :reveal-request="activeTab.editorRevealRequest"
-                :force-word-wrap="activeTab.forceWordWrap"
-                :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"
-                :hide-execution-controls="!!activeTab.ddlViewer || managedTypeSource"
-                enable-explain-shortcut
-                :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && hasExecutableSql"
-                :is-executing="activeTab.isExecuting"
-                @update:model-value="emit('editorUpdate', activeTab.id, $event)"
-                @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
-                @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
-                @cursor-change="emit('editorCursorChange', activeTab.id, $event)"
-                @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
-                @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
-                @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
-                @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
-                @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
-                @format-error="emit('formatError', activeTab.id)"
-                @execute="sourceSectionActive && emit('execute', activeTab.id, $event)"
-                @execute-in-new-result-tab="sourceSectionActive && emit('executeInNewResultTab', activeTab.id, $event)"
-                @explain="sourceSectionActive && emit('explain', activeTab.id)"
-                @export-query="handleExportQuery"
-                @save="sourceSectionActive && emit('saveSql', props.activeTab.id)"
-                @click-table="onHandleClickTable"
-                @view-table-data="onHandleViewTableData"
-                @edit-table-structure="onHandleEditTableStructure"
-                @view-table-ddl="onHandleViewTableDdl"
-                @open-object-source="onHandleOpenObjectSource"
-                @click-column="onHandleClickColumn"
-                @close-column-panel="onHandleCloseColumnPanel"
-              />
+              <div v-else :class="showOraclePackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
+                <OraclePackageMembers v-if="showOraclePackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+                <QueryEditor
+                  ref="queryEditorRef"
+                  class="relative z-0 flex-1"
+                  :class="{ 'min-w-0': showOraclePackageMembers }"
+                  :auto-focus="sourceSectionActive && autoFocus !== false"
+                  :model-value="activeTab.sql"
+                  :tab-id="activeTab.id"
+                  :connection-id="activeTab.connectionId"
+                  :prefetch-completion="activeTab.mode === 'query' && !activeTab.sourceView"
+                  :catalog="activeTab.catalog"
+                  :database="activeTab.database"
+                  :schema="activeTab.schema"
+                  :client-session-id="activeTab.id"
+                  :completion-context-version="activeTab.completionContextVersion"
+                  :database-type="activeEffectiveDatabaseType"
+                  :mongo-query-language="activeTab.mongoQueryLanguage"
+                  :dialect="editorDialect"
+                  :syntax-dialect="editorSyntaxDialect"
+                  :format-dialect="activeSqlFormatDialect"
+                  :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
+                  :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
+                  :keyword-case-request-id="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.id : undefined"
+                  :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
+                  :execution-error="activeQueryError"
+                  :execution-error-sql="activeTab.lastExecutedSql"
+                  :execution-error-result="activeQueryError ? activeTab.result : undefined"
+                  :result-columns="activeTab.result?.columns"
+                  :result-source-statement="activeTab.result?.sourceStatement"
+                  :result-source-from="activeTab.result?.sourceFrom"
+                  :result-source-to="activeTab.result?.sourceTo"
+                  :statement-execution-markers="activeStatementExecutionMarkers"
+                  :initial-viewport="activeTab.editorViewport"
+                  :initial-selection="activeTab.editorSelection"
+                  :reveal-request="activeTab.editorRevealRequest"
+                  :force-word-wrap="activeTab.forceWordWrap"
+                  :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"
+                  :hide-execution-controls="!!activeTab.ddlViewer || managedTypeSource"
+                  enable-explain-shortcut
+                  :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && hasExecutableSql"
+                  :is-executing="activeTab.isExecuting"
+                  @update:model-value="emit('editorUpdate', activeTab.id, $event)"
+                  @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
+                  @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
+                  @cursor-change="emit('editorCursorChange', activeTab.id, $event)"
+                  @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
+                  @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
+                  @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
+                  @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
+                  @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
+                  @format-error="emit('formatError', activeTab.id)"
+                  @execute="sourceSectionActive && emit('execute', activeTab.id, $event)"
+                  @execute-in-new-result-tab="sourceSectionActive && emit('executeInNewResultTab', activeTab.id, $event)"
+                  @explain="sourceSectionActive && emit('explain', activeTab.id)"
+                  @export-query="handleExportQuery"
+                  @save="sourceSectionActive && emit('saveSql', props.activeTab.id)"
+                  @click-table="onHandleClickTable"
+                  @view-table-data="onHandleViewTableData"
+                  @edit-table-structure="onHandleEditTableStructure"
+                  @view-table-ddl="onHandleViewTableDdl"
+                  @open-object-source="onHandleOpenObjectSource"
+                  @click-column="onHandleClickColumn"
+                  @close-column-panel="onHandleCloseColumnPanel"
+                />
+              </div>
               <ColumnInfoPanel
                 v-if="showColumnInfo"
                 :columns="columnInfoColumns"

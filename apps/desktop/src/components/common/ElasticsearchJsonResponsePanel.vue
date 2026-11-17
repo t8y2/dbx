@@ -7,7 +7,8 @@ import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { formatJsonSource, parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
+import { formatJsonSource, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
+import { elasticsearchDocumentHitsFromBody, type ElasticsearchDocumentHit } from "@/lib/elasticsearch/elasticsearchDocumentHits";
 import { TEXT_CONTENT_SEARCH_MATCH_LIMIT, canFullHighlightTextContent, findTextContentMatches, nextTextContentSearchMatchIndex, renderTextContentMatchesHtml, textContentSearchStatus, type TextContentMatch } from "@/lib/common/textContentSearch";
 
 const props = defineProps<{
@@ -24,7 +25,6 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { toast } = useToast();
 type ResponseView = "raw" | "json" | "document";
-type ElasticsearchHit = { label: string; record: Record<string, unknown> };
 
 const responseView = ref<ResponseView>("json");
 const responsePanelRef = ref<HTMLElement>();
@@ -44,24 +44,9 @@ const formattedBody = computed(() => {
     return { valid: false, text: "" };
   }
 });
-const documentHits = computed<ElasticsearchHit[]>(() => {
-  try {
-    const response = parseJsonPreservingLargeNumbers(props.body);
-    const hits = response && typeof response === "object" && !Array.isArray(response) ? (response as Record<string, unknown>).hits : undefined;
-    const hitDocuments = hits && typeof hits === "object" && !Array.isArray(hits) ? (hits as Record<string, unknown>).hits : undefined;
-    if (!Array.isArray(hitDocuments)) return [];
-    return hitDocuments.flatMap((hit, index) => {
-      if (!hit || typeof hit !== "object" || Array.isArray(hit)) return [];
-      const record = hit as Record<string, unknown>;
-      const id = typeof record._id === "string" && record._id ? record._id : String(index + 1);
-      // Keep the complete search hit, including optional fields such as
-      // highlights and inner hits, without coercing Elasticsearch long values.
-      return [{ label: id, record }];
-    });
-  } catch {
-    return [];
-  }
-});
+// Shared with the Kibana-style result split view so both surfaces agree on
+// which response bodies carry documents.
+const documentHits = computed<ElasticsearchDocumentHit[]>(() => elasticsearchDocumentHitsFromBody(props.body));
 const selectedDocumentIndex = ref(0);
 const selectedDocument = computed(() => documentHits.value[selectedDocumentIndex.value]);
 // Keep raw records and stringify only the selected hit, so a large hit list

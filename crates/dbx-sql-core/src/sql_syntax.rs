@@ -7,7 +7,7 @@ use sqlparser::tokenizer::{Location, Span, Token, TokenWithSpan, Tokenizer};
 
 use crate::models::connection::DatabaseType;
 use crate::sql::statement_ranges_for_database;
-use crate::sql_analysis::{analyze_sql_references, normalize_dialect, SqlTextSpan};
+use crate::sql_analysis::{analyze_sql_references, normalize_dialect, SqlReferenceAnalysis, SqlTextSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +21,22 @@ pub struct SqlSyntaxDiagnostic {
     pub found: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlEditorAnalysis {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<SqlReferenceAnalysis>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser_error: Option<String>,
+    pub syntax: Vec<SqlSyntaxDiagnostic>,
+}
+
+/// Analyzes one editor statement with a single reference-parser invocation.
+/// The original parser error remains available for the existing keyword-recovery fallback.
+pub fn analyze_sql_editor(sql: &str, dialect: Option<&str>) -> SqlEditorAnalysis {
+    analyze_statement(sql, normalize_dialect(dialect).id)
+}
+
 /// Analyzes each statement independently so one parser failure cannot hide later
 /// statements. Known-valid dialect gaps remain owned by `analyze_sql_references`.
 pub fn analyze_sql_syntax(sql: &str, dialect: Option<&str>) -> Vec<SqlSyntaxDiagnostic> {
@@ -28,20 +44,12 @@ pub fn analyze_sql_syntax(sql: &str, dialect: Option<&str>) -> Vec<SqlSyntaxDiag
     let database_type = database_type_for_dialect(normalized.id);
     let ranges = statement_ranges_for_database(sql, database_type);
     let mut diagnostics = Vec::new();
-
     for range in ranges {
         if range.text.trim().is_empty() {
             continue;
         }
-        if let Some(diagnostic) = missing_expression_diagnostic(&range.text, normalized.id) {
-            let diagnostic = offset_diagnostic(diagnostic, sql, range.start);
-            if !diagnostics.contains(&diagnostic) {
-                diagnostics.push(diagnostic);
-            }
-            continue;
-        }
-        if let Err(error) = analyze_sql_references(&range.text, Some(normalized.id)) {
-            let diagnostic = diagnostic_for_error(&range.text, normalized.id, &error);
+        let analysis = analyze_statement(&range.text, normalized.id);
+        for diagnostic in analysis.syntax {
             let diagnostic = offset_diagnostic(diagnostic, sql, range.start);
             if !diagnostics.contains(&diagnostic) {
                 diagnostics.push(diagnostic);
@@ -49,6 +57,16 @@ pub fn analyze_sql_syntax(sql: &str, dialect: Option<&str>) -> Vec<SqlSyntaxDiag
         }
     }
     diagnostics
+}
+
+fn analyze_statement(sql: &str, dialect: &str) -> SqlEditorAnalysis {
+    let analysis = analyze_sql_references(sql, Some(dialect));
+    let diagnostic = missing_expression_diagnostic(sql, dialect)
+        .or_else(|| analysis.as_ref().err().map(|error| diagnostic_for_error(sql, dialect, error)));
+    match analysis {
+        Ok(references) => SqlEditorAnalysis { references: Some(references), parser_error: None, syntax: diagnostic.into_iter().collect() },
+        Err(error) => SqlEditorAnalysis { references: None, parser_error: Some(error), syntax: diagnostic.into_iter().collect() },
+    }
 }
 
 fn missing_expression_diagnostic(sql: &str, dialect: &str) -> Option<SqlSyntaxDiagnostic> {
@@ -92,7 +110,6 @@ fn database_type_for_dialect(dialect: &str) -> DatabaseType {
 fn diagnostic_for_error(sql: &str, dialect: &str, error: &str) -> SqlSyntaxDiagnostic {
     let message = error.strip_prefix("sql parser error: ").unwrap_or(error).to_string();
     let location = parser_location(&message).unwrap_or_else(|| end_location(sql));
-    let expected_found = expected_found(&message);
     let span = token_span_for_location(sql, dialect, location).unwrap_or_else(|| SqlTextSpan {
         start_line: location.line as usize,
         start_column: location.column as usize,
@@ -103,11 +120,14 @@ fn diagnostic_for_error(sql: &str, dialect: &str, error: &str) -> SqlSyntaxDiagn
         message,
         severity: "error".to_string(),
         span,
-        expected: expected_found.as_ref().map(|value| vec![value.0.clone()]).unwrap_or_default(),
-        found: expected_found.map(|value| value.1).or_else(|| token_text_for_location(sql, dialect, location)),
+        expected: Vec::new(),
+        found: token_text_for_location(sql, dialect, location),
     }
 }
 
+/// sqlparser 0.62 exposes parser locations only through its Display text. Keep this
+/// single compatibility parser for that upstream limitation; expected/found fields
+/// are never reconstructed from display text and come only from tokenizer-backed rules.
 fn parser_location(message: &str) -> Option<Location> {
     static LOCATION: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\bat Line:\s*(\d+),\s*Column:\s*(\d+)\b").expect("valid parser location regex"));
@@ -120,19 +140,6 @@ fn parser_location(message: &str) -> Option<Location> {
     Some(Location { line, column })
 }
 
-fn expected_found(message: &str) -> Option<(String, String)> {
-    static EXPECTED_FOUND: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)^Expected:\s*(.*?),\s*found:\s*(.*?)(?:\s+at\s+Line:.*)?$")
-            .expect("valid expected/found regex")
-    });
-    let captures = EXPECTED_FOUND.captures(message)?;
-    let expected = captures.get(1)?.as_str().trim();
-    let found = captures.get(2)?.as_str().trim();
-    if expected.is_empty() || found.is_empty() {
-        return None;
-    }
-    Some((expected.to_string(), found.to_string()))
-}
 
 fn end_location(sql: &str) -> Location {
     let mut line = 1_u64;

@@ -1,4 +1,4 @@
-use dbx_core::sql_syntax::{analyze_sql_syntax, SqlSyntaxDiagnostic};
+use dbx_core::sql_syntax::{analyze_sql_editor, analyze_sql_syntax, SqlSyntaxDiagnostic};
 
 #[test]
 fn public_api_returns_structured_serializable_diagnostics() {
@@ -27,4 +27,20 @@ fn public_api_preserves_statement_recovery_and_valid_dialect_gaps() {
 
     let valid = analyze_sql_syntax("DROP INDEX CONCURRENTLY IF EXISTS orders_idx;", Some("postgres"));
     assert_eq!(valid, Vec::<SqlSyntaxDiagnostic>::new());
+}
+
+#[test]
+fn editor_api_returns_references_and_syntax_from_one_statement_analysis() {
+    let valid = analyze_sql_editor("SELECT u.id FROM users u", Some("postgres"));
+    assert_eq!(valid.references.expect("references").tables[0].name, "users");
+    assert!(valid.parser_error.is_none());
+    assert!(valid.syntax.is_empty());
+
+    let invalid = analyze_sql_editor("SELECT * FROM users WHERE active = AND id = 1", Some("postgres"));
+    assert!(invalid.references.is_none());
+    assert!(invalid.parser_error.is_some());
+    assert_eq!(invalid.syntax.len(), 1);
+    let json = serde_json::to_value(invalid).expect("editor analysis serializes");
+    assert!(json["parserError"].is_string());
+    assert!(json["references"].is_null());
 }

@@ -2089,6 +2089,12 @@ export interface SqlSyntaxDiagnostic {
   found?: string;
 }
 
+export interface SqlEditorAnalysis {
+  references?: SqlReferenceAnalysis;
+  parserError?: string;
+  syntax: SqlSyntaxDiagnostic[];
+}
+
 export interface SqlTableReference {
   name: string;
   database?: string | null;

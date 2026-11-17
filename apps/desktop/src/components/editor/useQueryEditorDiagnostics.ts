@@ -273,20 +273,33 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     setSemanticDiagnostics([...retained, ...next].sort(compareSqlSemanticDiagnostics));
   }
 
-  async function loadSyntaxDiagnostics(range: SqlTextRange, fullSql: string, dialect: string): Promise<SqlSemanticDiagnostic[]> {
-    if (dialect !== "postgres" && dialect !== "mysql" && dialect !== "sqlite") return [];
-    try {
-      const diagnostics = await api.analyzeSqlSyntax(range.sql, dialect);
-      return offsetSqlSemanticDiagnostics(
-        diagnostics.map((diagnostic) => sqlSyntaxDiagnosticToSemantic(diagnostic, range.sql)),
-        range,
-        fullSql,
-      );
-    } catch {
-      // Backend transport/availability failures are not SQL syntax errors. The
-      // existing reference-analysis path keeps its own parser-error fallback.
-      return [];
-    }
+  function createEditorReferenceAnalysis(range: SqlTextRange, fullSql: string, dialect: string) {
+    const supportsSyntax = dialect === "postgres" || dialect === "mysql" || dialect === "sqlite";
+    let syntaxDiagnostics: SqlSemanticDiagnostic[] = [];
+    let cached: { statement: string; result: Promise<SqlReferenceAnalysis> } | null = null;
+    const analyzeStatement = (statement: string): Promise<SqlReferenceAnalysis> =>
+      supportsSyntax
+        ? api.analyzeSqlEditor(statement, dialect).then((result) => {
+            if (statement === range.sql) {
+              syntaxDiagnostics = offsetSqlSemanticDiagnostics(
+                result.syntax.map((diagnostic) => sqlSyntaxDiagnosticToSemantic(diagnostic, range.sql)),
+                range,
+                fullSql,
+              );
+            }
+            if (result.references) return result.references;
+            throw result.parserError ?? new Error("Editor analysis returned neither references nor a parser error");
+          })
+        : api.analyzeSqlReferences(statement, dialect);
+    return {
+      // One backend request per statement; a replayed rejection still carries the
+      // syntax diagnostics captured from the same unified response.
+      analyze(statement: string): Promise<SqlReferenceAnalysis> {
+        if (!cached || cached.statement !== statement) cached = { statement, result: analyzeStatement(statement) };
+        return cached.result;
+      },
+      syntaxDiagnostics: () => syntaxDiagnostics,
+    };
   }
 
   function compareSqlSemanticDiagnostics(left: SqlSemanticDiagnostic, right: SqlSemanticDiagnostic): number {
@@ -493,11 +506,14 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
           fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
         });
-        const syntaxDiagnostics = await loadSyntaxDiagnostics({ ...range, sql: analysisSql }, sql, referenceDialect);
-        if (runId !== semanticDiagnosticRunId) return;
+        const editorAnalysis = createEditorReferenceAnalysis({ ...range, sql: analysisSql }, sql, referenceDialect);
+        // Structured syntax diagnostics must survive a failed reference analysis
+        // (EOF and friends), so capture them before the keyword-recovery replay.
+        await editorAnalysis.analyze(analysisSql).catch(() => undefined);
+        const syntaxDiagnostics = editorAnalysis.syntaxDiagnostics();
         hasSyntaxDiagnostics = syntaxDiagnostics.length > 0;
         appendUniqueSqlSemanticDiagnostics(nextDiagnostics, syntaxDiagnostics);
-        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
+        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, editorAnalysis.analyze);
         if (runId !== semanticDiagnosticRunId) return;
         if (keywordDiagnostic && !hasSyntaxDiagnostics) appendUniqueSqlSemanticDiagnostics(nextDiagnostics, offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql));
 
@@ -641,14 +657,15 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
           fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
         });
-        const syntaxDiagnostics = await loadSyntaxDiagnostics({ ...range, sql: analysisSql }, sql, referenceDialect);
-        if (currentView.state.doc !== doc) return [];
+        const editorAnalysis = createEditorReferenceAnalysis({ ...range, sql: analysisSql }, sql, referenceDialect);
+        await editorAnalysis.analyze(analysisSql).catch(() => undefined);
+        const syntaxDiagnostics = editorAnalysis.syntaxDiagnostics();
         hasSyntaxDiagnostics = syntaxDiagnostics.length > 0;
         for (const diagnostic of syntaxDiagnostics) {
           const offsetRange = sqlTextSpanToRange(sql, diagnostic.span);
           if (offsetRange) statementSpans.push(offsetRange);
         }
-        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
+        const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, editorAnalysis.analyze);
         if (currentView.state.doc !== doc) return [];
         if (keywordDiagnostic && !hasSyntaxDiagnostics) {
           const [diagnostic] = offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql);

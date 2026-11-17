@@ -73,16 +73,11 @@ The dialect parser classes supply custom productions and errors while sharing ba
 
 ## DBX integration contract
 
-Add a Rust `analyze_sql_syntax(sql, dialect)` API that returns a list of structured diagnostics:
+The editor uses `analyze_sql_editor(sql, dialect)` for a single statement. One parser invocation returns optional `references`, the original `parserError` for keyword-recovery compatibility, and structured `syntax` diagnostics. Tauri and HTTP expose the same contract, so an ordinary statement needs one backend request rather than separate reference and syntax requests. Existing `analyze_sql_references` and multi-statement `analyze_sql_syntax` APIs remain available.
 
-```text
-message
-severity = error
-span = 1-based inclusive SqlTextSpan
-expected? = expected token/expression descriptions
-found? = unexpected token text or EOF
-```
+Each syntax diagnostic contains `message`, `severity = error`, and a 1-based inclusive `SqlTextSpan`. Optional `expected`/`found` fields are emitted only when tokenizer-backed rules can establish them; DBX does not reconstruct those fields from formatted parser errors. sqlparser 0.62 exposes generic parser locations through Display text, so one narrowly scoped location parser remains as a documented compatibility boundary. The editor displays the structured message and span and does not claim a complete machine-readable grammar expectation set.
 
+Tauri and HTTP preserve cancellation/stale-result behavior at the frontend boundary. Backend availability errors are not SQL syntax errors. A parser gap that deliberately accepts a known valid construct must not also produce a syntax diagnostic. Execution-error text mapping remains only a compatibility fallback for legacy result envelopes.
 Tauri and HTTP expose the same contract. The editor combines these with existing semantic and execution diagnostics while retaining worker-based statement/range preparation, debounce, viewport replacement, cancellation, stale-result checks, parameter masking, and IME/completion suppression.
 
 Backend availability errors are not SQL syntax errors. A parser gap that deliberately accepts a known valid construct must not also produce a syntax diagnostic. Execution-error text mapping remains only a compatibility fallback for legacy result envelopes.

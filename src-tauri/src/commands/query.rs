@@ -768,6 +768,11 @@ pub async fn analyze_sql_syntax(
 }
 
 #[tauri::command]
+pub async fn analyze_sql_editor(sql: String, dialect: Option<String>) -> dbx_core::sql_syntax::SqlEditorAnalysis {
+    dbx_core::sql_syntax::analyze_sql_editor(&sql, dialect.as_deref())
+}
+
+#[tauri::command]
 pub fn find_statement_at_cursor(
     sql: String,
     cursor_pos: usize,

@@ -2656,6 +2656,7 @@ pub fn run() {
             commands::query::rollback_manual_transaction,
             commands::query::analyze_sql_references,
             commands::query::analyze_sql_syntax,
+            commands::query::analyze_sql_editor,
             commands::query::find_statement_at_cursor,
             commands::query::prepare_query_pagination_execution_plan,
             commands::query::build_sorted_query_sql,

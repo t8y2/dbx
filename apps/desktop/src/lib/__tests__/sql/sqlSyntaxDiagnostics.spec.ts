@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendUniqueSqlSemanticDiagnostics, sqlSyntaxDiagnosticToSemantic, sqlTextSpanToOffsetRange } from "@/lib/sql/semantic/diagnostics";
+import { appendUniqueSqlSemanticDiagnostics, buildSqlParserErrorDiagnostic, sqlSyntaxDiagnosticToSemantic, sqlTextSpanToOffsetRange } from "@/lib/sql/semantic/diagnostics";
 import type { SqlSemanticDiagnostic } from "@/lib/sql/semantic/diagnostics";
 import type { SqlSyntaxDiagnostic } from "@/types/database";
 
@@ -18,8 +18,11 @@ describe("structured SQL syntax diagnostics", () => {
     expect(sqlTextSpanToOffsetRange("SELECT active AND", mapped.span)).toEqual({ from: 7, to: 10 });
   });
 
-  it("maps an invalid zero-length EOF span to the last visible character", () => {
+  it("keeps EOF visible where the legacy fallback produces no range", () => {
     const sql = "SELECT * FROM users WHERE id =";
+    const legacy = buildSqlParserErrorDiagnostic(`sql parser error: Expected: an expression, found: EOF at Line: 1, Column: ${sql.length + 1}`, sql);
+    expect(legacy).not.toBeNull();
+    expect(sqlTextSpanToOffsetRange(sql, legacy!.span)).toBeNull();
     const eof: SqlSyntaxDiagnostic = {
       message: "Expected: an expression",
       severity: "error",

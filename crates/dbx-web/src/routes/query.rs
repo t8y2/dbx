@@ -1073,6 +1073,12 @@ pub async fn analyze_sql_syntax(
     Json(dbx_core::sql_syntax::analyze_sql_syntax(&req.sql, req.dialect.as_deref()))
 }
 
+pub async fn analyze_sql_editor(
+    Json(req): Json<AnalyzeSqlReferencesRequest>,
+) -> Json<dbx_core::sql_syntax::SqlEditorAnalysis> {
+    Json(dbx_core::sql_syntax::analyze_sql_editor(&req.sql, req.dialect.as_deref()))
+}
+
 pub async fn find_statement_at_cursor(Json(req): Json<FindStatementAtCursorRequest>) -> Json<String> {
     Json(
         req.database_type

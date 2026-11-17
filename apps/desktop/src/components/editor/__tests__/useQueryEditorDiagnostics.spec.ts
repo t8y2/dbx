@@ -13,8 +13,8 @@ import { createSqlUnknownObjectHighlights, setSqlUnknownObjectSpans } from "@/li
 import { sqlTextSpanToOffsetRange } from "@/lib/sql/semantic/diagnostics";
 import { maskSqlParametersForAnalysis, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 
-const { analyze, analyzeSyntax, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), analyzeSyntax: vi.fn(), buildDiagnostics: vi.fn() }));
-vi.mock("@/lib/backend/api", () => ({ analyzeSqlReferences: analyze, analyzeSqlSyntax: analyzeSyntax }));
+const { analyze, analyzeEditor, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), analyzeEditor: vi.fn(), buildDiagnostics: vi.fn() }));
+vi.mock("@/lib/backend/api", () => ({ analyzeSqlReferences: analyze, analyzeSqlEditor: analyzeEditor }));
 vi.mock("@/lib/sql/semantic/diagnostics", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/sql/semantic/diagnostics")>()),
   buildSqlSemanticDiagnostics: buildDiagnostics,
@@ -27,7 +27,7 @@ const diagnostic: SqlSemanticDiagnostic = { message: "missing field", severity: 
 beforeEach(() => {
   vi.useFakeTimers();
   analyze.mockResolvedValue({ tables: [], columns: [] });
-  analyzeSyntax.mockResolvedValue([]);
+  analyzeEditor.mockImplementation(async (sql: string, dialect?: string) => ({ references: await analyze(sql, dialect), syntax: [] }));
   buildDiagnostics.mockReturnValue([diagnostic]);
 });
 
@@ -166,6 +166,36 @@ describe("QueryEditor diagnostic scheduling ownership", () => {
     expect(analyze.mock.calls[0][0]).toBe(sql);
   });
 
+  it("uses one unified backend request for references and syntax diagnostics", async () => {
+    const { diagnostics } = createHarness({ modelValue: "SELECT missing FROM rules" });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(analyzeEditor).toHaveBeenCalledTimes(1);
+    expect(analyzeEditor).toHaveBeenCalledWith("SELECT missing FROM rules", "mysql");
+    expect(analyze).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps structured EOF syntax diagnostics when reference recovery cannot repair", async () => {
+    const sql = "SELECT 1;\nSELECT * FROM demo_users WHERE id =";
+    analyzeEditor.mockImplementation(async (statement: string) => {
+      if (/WHERE id\s*=\s*$/.test(statement)) {
+        return {
+          parserError: "sql parser error: Expected: an expression, found: EOF at Line: 1, Column: 37",
+          syntax: [{ message: "Expected: an expression, found: EOF", severity: "error", span: { start_line: 1, start_column: 37, end_line: 1, end_column: 37 } }],
+        };
+      }
+      return { references: { tables: [], columns: [] }, syntax: [] };
+    });
+    const { diagnostics, currentView } = createHarness({ modelValue: sql, databaseType: "sqlite", dialect: "sqlite" });
+    diagnostics.scheduleSemanticDiagnostics(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(analyze).not.toHaveBeenCalled();
+    const eof = diagnostics.diagnostics.find((diagnostic) => diagnostic.message.includes("EOF"));
+    expect(eof).toBeDefined();
+    expect(sqlTextSpanToOffsetRange(sql, eof!.span)).not.toBeNull();
+    const spans = await diagnostics.loadSqlUnknownObjectSpans(currentView);
+    expect(spans.length).toBeGreaterThan(0);
+  });
   it("keeps real parser error positions after a masked parameter", async () => {
     const sql = "SELECT htm FROM packets WHERE htm = #{packetCode} AND ) ORDER BY djbth;";
     const from = sql.indexOf(")");

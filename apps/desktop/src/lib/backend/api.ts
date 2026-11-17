@@ -326,6 +326,7 @@ export const exportSnapshotResult = forward("exportSnapshotResult");
 export const closeClientConnectionSession = forward("closeClientConnectionSession");
 export const analyzeSqlReferences = forward("analyzeSqlReferences");
 export const analyzeSqlSyntax = forward("analyzeSqlSyntax");
+export const analyzeSqlEditor = forward("analyzeSqlEditor");
 export const findStatementAtCursor = forward("findStatementAtCursor");
 export const prepareQueryPaginationExecutionPlan = forward("prepareQueryPaginationExecutionPlan");
 export const buildSortedQuerySql = forward("buildSortedQuerySql");

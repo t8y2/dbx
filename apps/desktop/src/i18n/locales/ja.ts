@@ -5534,6 +5534,7 @@ export default withEnglishFallback({
     scopeSequences: "シーケンス",
     scopeFunctions: "関数",
     stepSkipped: "必要な前のステップが失敗したためスキップしました。",
+    selectedObjectsCount: "選択済み {count} 個のオブジェクト",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "この OceanBase バージョンのジョブ日付はマイクロ秒精度のみ対応しています。小数秒の 7～9 桁目を 0 にして、もう一度プレビューしてください。元の入力は保持されています。",

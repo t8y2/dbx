@@ -59,6 +59,7 @@ beforeEach(() => {
   operations.length = 0;
   mocks.settings.defaultExportMode = "immediate";
   connection.db_type = "mysql";
+  connection.connection_string = undefined;
   mocks.listSchemas.mockResolvedValue(["public"]);
   mocks.begin.mockReset().mockImplementation(async (_id, database) => ({ sessionId: `snapshot-${database}` }));
   mocks.rollback.mockReset().mockResolvedValue(undefined);
@@ -398,15 +399,48 @@ it("disables export of picked routines once objects are no longer included (#139
 
   expect(button("databaseExport.export").disabled).toBe(true);
 });
-it("falls back to the database name when a schema-aware connection returns no schemas (#15068)", async () => {
+it("falls back to the database name for flat database-as-schema JDBC dialects (#15068)", async () => {
   connection.db_type = "jdbc";
+  connection.connection_string = "jdbc:mysql://db.example.com:3306/app";
   mocks.listSchemas.mockResolvedValue([]);
   const dialog = await mountDialog();
-  // The export button stays enabled: schema falls back to the database name
-  // (matching the sidebar tree convention) instead of emptying canExport.
+  // The export button stays enabled: MySQL over Connector/J has no schema layer,
+  // so schema falls back to the database name (sidebar tree convention).
   await dialog.start();
   await vi.waitFor(() => expect(operations).toHaveLength(1));
   expect(operations[0]!.request).toMatchObject({ database: "app", schema: "app" });
   terminal(0);
   await vi.waitFor(() => expect(useExportTracker().tasks.value[0]!.status).toBe("Done"));
+});
+it.each([
+  ["schema-oriented JDBC (Presto/Hetu)", "jdbc:presto://coordinator.example.com:8080/hive"],
+  ["unknown generic JDBC", "jdbc:example://host:9000/app"],
+])("keeps export disabled when %s returns no schemas (#15068 review)", async (_label, connectionString) => {
+  connection.db_type = "jdbc";
+  connection.connection_string = connectionString;
+  mocks.listSchemas.mockResolvedValue([]);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const open = ref(true);
+  const app = createApp({
+    setup: () => () =>
+      h(DatabaseExportDialog, {
+        open: open.value,
+        "onUpdate:open": (value: boolean) => {
+          open.value = value;
+        },
+        prefillConnectionId: connection.id,
+        prefillDatabase: "app",
+      }),
+  });
+  mounted.push({ app, host });
+  app.mount(host);
+  // The catalog/database name is not a valid schema for these dialects, so the
+  // dialog must not enable export against the wrong namespace.
+  await vi.waitFor(() => {
+    const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((el) => el.textContent?.trim() === "databaseExport.export");
+    expect(button).toBeDefined();
+    expect(button!.disabled).toBe(true);
+  });
+  expect(mocks.export).not.toHaveBeenCalled();
 });

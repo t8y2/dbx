@@ -12,6 +12,8 @@ import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.v
 import * as api from "@/lib/backend/api";
 import type { DatabaseExportSelectedObject, ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import type { ConnectionConfig } from "@/types/database";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
@@ -378,6 +380,20 @@ async function loadDatabases(connId: string) {
   }
 }
 
+/**
+ * #15068: flat JDBC dialects (MySQL over Connector/J etc.) have no schema layer,
+ * so getSchemas() returns nothing and the export dialog would keep schema empty.
+ * Only those dialects may reuse the database/catalog name as the export schema:
+ * schema-oriented JDBC dialects (Presto/Trino/Hive, or unknown generic JDBC)
+ * expose a real schema level, where the catalog name is not a valid schema
+ * (#13994) and falling back would start an export against the wrong namespace.
+ */
+function jdbcDatabaseActsAsSchema(config: ConnectionConfig | undefined): boolean {
+  if (config?.db_type !== "jdbc") return false;
+  const effectiveType = effectiveDatabaseTypeForConnection(config);
+  return !!effectiveType && effectiveType !== "jdbc" && !isSchemaAware(effectiveType);
+}
+
 async function loadSchemas(preferredSchema = "") {
   if (!connectionId.value || !database.value) return;
   const config = store.getConfig(connectionId.value);
@@ -388,11 +404,9 @@ async function loadSchemas(preferredSchema = "") {
   }
 
   const schemaList = filterExportableSchemas(await api.listSchemas(connectionId.value, database.value), config?.db_type);
-  // #15068: engines without a real schema layer (MySQL over generic JDBC) return
-  // no schemas, which would leave schema empty and disable the export button.
-  // Fall back to the database name, matching the sidebar tree convention
-  // (databaseObjectTreeNodeSchema) so listTables keeps resolving tables.
-  if (schemaList.length === 0) {
+  // Match the sidebar tree convention (databaseObjectTreeNodeSchema) by using the
+  // database name as the schema when the dialect has no schema layer.
+  if (schemaList.length === 0 && jdbcDatabaseActsAsSchema(config)) {
     schemas.value = [];
     schema.value = database.value;
     return;

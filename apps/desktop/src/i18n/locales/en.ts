@@ -6496,6 +6496,7 @@ export default {
     specificTables: "Specific tables",
     chooseTables: "Choose tables",
     selectedTableCount: "{count} tables selected",
+    selectedObjectsCount: "{count} objects selected",
     searchTable: "Search tables",
     loadingTables: "Loading tables...",
     emptyTables: "No tables found",

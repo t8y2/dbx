@@ -6468,6 +6468,7 @@ export default withEnglishFallback({
     specificTables: "指定表",
     chooseTables: "选择表",
     selectedTableCount: "已选 {count} 张表",
+    selectedObjectsCount: "已选 {count} 个对象",
     searchTable: "搜索表",
     loadingTables: "正在加载表...",
     emptyTables: "未找到表",

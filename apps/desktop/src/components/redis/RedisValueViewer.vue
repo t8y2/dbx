@@ -753,32 +753,47 @@ const largeStringPreviewHint = computed(() => {
   return t("redis.largeStringPreviewHintUnknown", { loaded: formatBytes(loaded) });
 });
 
-function redisDownloadFileName(keyDisplay: string, encoding: RedisBlob["encoding"]): string {
+function redisDownloadFileName(keyDisplay: string, extension: "txt" | "bin" | "json"): string {
   const safe =
     keyDisplay
       .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
       .trim()
       .slice(0, 120) || "redis-value";
-  return `${safe}.${encoding === "utf8" ? "txt" : "bin"}`;
+  return `${safe}.${extension}`;
 }
 
-async function downloadLargeValue() {
+async function downloadLargeValue(format: "raw" | "json") {
   if (downloadingLargeValue.value || !isStringValueTruncated.value) return;
+  const keyDisplay = props.keyDisplay;
   downloadingLargeValue.value = true;
   try {
     const blob = await api.redisGetRawValue(props.connectionId, props.db, props.keyRaw);
-    const bytes = decodeRedisBlob(blob);
-    const filename = redisDownloadFileName(props.keyDisplay, blob.encoding);
+    let bytes: Uint8Array;
+    let extension: "txt" | "bin" | "json";
+    if (format === "json") {
+      const json = parseRedisJsonDetail(redisBlobText(blob));
+      if (!json || !isRedisJsonContainerValue(json.value)) {
+        toast(t("redis.downloadValueNotJson"), 4000);
+        return;
+      }
+      bytes = new TextEncoder().encode(json.formattedText);
+      extension = "json";
+    } else {
+      bytes = decodeRedisBlob(blob);
+      extension = blob.encoding === "utf8" ? "txt" : "bin";
+    }
+    const filename = redisDownloadFileName(keyDisplay, extension);
     if (isTauriRuntime()) {
       const [{ save }, { writeFile }] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
-      const extension = blob.encoding === "utf8" ? "txt" : "bin";
-      const path = await save({ defaultPath: filename, filters: [{ name: t(blob.encoding === "utf8" ? "redis.downloadValueTextFileType" : "redis.downloadValueFileType"), extensions: [extension] }] });
+      const filterName = extension === "json" ? "JSON" : t(extension === "txt" ? "redis.downloadValueTextFileType" : "redis.downloadValueFileType");
+      const path = await save({ defaultPath: filename, filters: [{ name: filterName, extensions: [extension] }] });
       if (path) {
         await writeFile(path, bytes);
         toast(t("redis.downloadValueSuccess"), 2500);
       }
     } else {
-      const url = URL.createObjectURL(new Blob([bytes.slice().buffer as ArrayBuffer], { type: blob.encoding === "utf8" ? "text/plain;charset=utf-8" : "application/octet-stream" }));
+      const type = extension === "json" ? "application/json" : extension === "txt" ? "text/plain;charset=utf-8" : "application/octet-stream";
+      const url = URL.createObjectURL(new Blob([bytes.slice().buffer as ArrayBuffer], { type }));
       const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = filename;
@@ -3363,13 +3378,16 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </template>
         </div>
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
-        <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+        <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 flex-wrap items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <Eye class="h-3.5 w-3.5 shrink-0" />
           <span class="min-w-0 flex-1">{{ largeStringPreviewHint }}</span>
-          <Button variant="outline" size="sm" class="h-7 shrink-0" :disabled="downloadingLargeValue" :title="t('redis.downloadValue')" :aria-label="t('redis.downloadValue')" @click="downloadLargeValue">
+          <Button variant="outline" size="sm" class="h-7 shrink-0" :disabled="downloadingLargeValue" :title="t('redis.downloadValue')" :aria-label="t('redis.downloadValue')" @click="downloadLargeValue('raw')">
             <Loader2 v-if="downloadingLargeValue" class="mr-1 h-3 w-3 animate-spin" />
             <Download v-else class="mr-1 h-3 w-3" />
             {{ t("redis.downloadValue") }}
+          </Button>
+          <Button v-if="isStringLikeKind && stringBlob?.encoding === 'utf8'" variant="outline" size="sm" class="h-7 shrink-0" :disabled="downloadingLargeValue" @click="downloadLargeValue('json')">
+            {{ t("redis.downloadValueJson") }}
           </Button>
         </div>
         <div v-else-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">

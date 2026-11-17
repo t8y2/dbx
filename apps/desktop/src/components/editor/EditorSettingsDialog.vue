@@ -1018,6 +1018,7 @@ watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarColumnDoubleClickAction = ref(settingsStore.editorSettings.sidebarColumnDoubleClickAction);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
+const editSidebarSimpleHideIndexes = ref(settingsStore.editorSettings.sidebarSimpleHideIndexes);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
@@ -1442,6 +1443,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarActivation: editSidebarActivation.value,
     sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
@@ -2166,6 +2168,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
   editSidebarColumnDoubleClickAction.value = settingsStore.editorSettings.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editSidebarSimpleHideIndexes.value = settingsStore.editorSettings.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
@@ -2356,6 +2359,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarActivation: editSidebarActivation,
   sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction,
   sidebarObjectDisplay: editSidebarObjectDisplay,
+  sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
   sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
@@ -2980,6 +2984,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
@@ -3222,6 +3227,7 @@ function resetAllDefaults() {
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
@@ -9949,6 +9955,10 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+              </div>
+              <div v-if="editSidebarObjectDisplay === 'simple'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <Label for="sidebar-simple-hide-indexes">{{ t("settings.sidebarSimpleHideIndexes") }}</Label>
+                <Switch id="sidebar-simple-hide-indexes" v-model="editSidebarSimpleHideIndexes" />
               </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">

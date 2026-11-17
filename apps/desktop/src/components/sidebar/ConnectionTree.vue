@@ -25,7 +25,7 @@ import {
   localTableSearchParentTypes,
 } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
-import { filterConnectionIndexes, insertConnectionIndexSearchControls } from "@/lib/sidebar/sidebarIndexSearch";
+import { filterConnectionIndexes, hideSimpleSidebarIndexes, insertConnectionIndexSearchControls } from "@/lib/sidebar/sidebarIndexSearch";
 import { firstSidebarSearchMatchDataNode, hasActiveSidebarSearch } from "@/lib/sidebar/sidebarSearchEnter";
 import { collectSidebarRegexIndexScopes } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
@@ -785,6 +785,7 @@ const filteredNodes = computed(() => {
   nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value });
   nodes = filterGloballyIndexedTables(nodes);
   nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
+  if (settingsStore.editorSettings.sidebarObjectDisplay === "simple" && settingsStore.editorSettings.sidebarSimpleHideIndexes) nodes = hideSimpleSidebarIndexes(nodes);
 
   const q = deferredSearchQuery.value;
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {

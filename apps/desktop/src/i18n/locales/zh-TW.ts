@@ -8429,6 +8429,7 @@ export default withEnglishFallback({
     sidebarObjectDisplayGroupedDescription: "針對包含更多物件類型的資料庫，依資料表、檢視、預存程序和函式分組物件。",
     sidebarObjectDisplaySimple: "簡單檢視",
     sidebarObjectDisplaySimpleDescription: "直接在每個資料庫或 schema 下列出資料表與檢視，減少中間層級。",
+    sidebarSimpleHideIndexes: "隱藏與資料表並列的索引",
     autoSelectActiveSidebarNode: "一律選取已開啟項目",
     autoSelectActiveSidebarNodeDescription: "切換分頁時，在側邊欄選取相符的可見資料表、集合或 SQL 檔案。",
     sidebarPinDefaultDatabase: "預設資料庫置頂",

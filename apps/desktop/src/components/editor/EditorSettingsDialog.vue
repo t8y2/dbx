@@ -244,6 +244,7 @@ import {
   type SyncSnapshotCatalog,
   type WebDavConfig,
 } from "@/lib/backend/api";
+import type { DesktopSettings } from "@/lib/backend/tauri";
 import {
   MAX_SNIPPET_AUTO_UPLOAD_INTERVAL_MINUTES,
   normalizedSnippetAutoUploadInterval,
@@ -6222,6 +6223,11 @@ async function chooseLocalBackupImport() {
   });
 }
 
+async function applySyncedDesktopSettings(settings: DesktopSettings) {
+  await settingsStore.updateDesktopSettings(settings);
+  if (settings.app_theme_mode) setThemeMode(settings.app_theme_mode, { persist: false });
+}
+
 async function confirmSyncSelection(selection: SyncSelection) {
   if (syncMethodTab.value === "local") {
     await nextTick();
@@ -6237,7 +6243,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
 
       const result = await localBackupImport(localBackupPath.value, selection.includeSecrets ? localBackupSecretsPassphrase.value : undefined, selection.includeSecrets, selection);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await applySyncedDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
       await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
@@ -6270,7 +6276,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
       persistSnippetRemoteContentHash(result.summary.snippetId, result.summary.remoteContentHash);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await applySyncedDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
       await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
@@ -6302,7 +6308,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     const config = currentWebDavConfig();
     const result = await webdavSyncDownload(config, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-    await settingsStore.updateDesktopSettings(result.desktopSettings);
+    await applySyncedDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.reloadFromStorage();
     await tunnelProfileStore.refresh();

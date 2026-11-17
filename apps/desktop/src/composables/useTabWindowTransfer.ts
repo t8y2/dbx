@@ -332,7 +332,10 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       const currentWindow = getCurrentWindow();
       if (focusedDragPreviewWindowLabel !== currentWindow.label) {
         focusedDragPreviewWindowLabel = currentWindow.label;
-        await Promise.all([currentWindow.show(), currentWindow.unminimize(), currentWindow.setFocus()]);
+        // Bring the target above the source without taking keyboard/pointer
+        // focus away from the drag owner. Stealing focus here prevents the
+        // source WebView from receiving the final pointerup.
+        await Promise.all([currentWindow.show(), currentWindow.unminimize()]);
       }
       const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
       if (remoteTabWindowPreviewSequences.get(payload.sourceWindowLabel) !== payload.sequence) return;

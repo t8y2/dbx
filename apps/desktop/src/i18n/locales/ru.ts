@@ -493,6 +493,7 @@ export default withEnglishFallback({
       urlEncode: "Кодировать компонент URL",
       urlDecode: "Декодировать компонент URL",
       radix: "Преобразование систем счисления",
+      flattenLines: "Сжать несколько строк в одну",
     },
     units: {
       auto: "Авто (10/13 цифр)",

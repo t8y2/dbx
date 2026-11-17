@@ -88,6 +88,11 @@ const {
   duplicateTableName,
   confirmDuplicateStructure,
   showPasteDialog,
+  showPasteRoutineDialog,
+  pasteRoutineName,
+  pasteRoutineLoading,
+  pasteRoutineError,
+  confirmPasteRoutine,
   pasteTableEntries,
   pasteTableMode,
   pasteTableFromClipboard,
@@ -242,6 +247,7 @@ watch(
     showStructureDocCopyDialog,
     showDuplicateDialog,
     showPasteDialog,
+    showPasteRoutineDialog,
     showCreateDatabaseDialog,
     showCreateDatabasePreviewDialog,
     showEditDatabasePropertiesDialog,
@@ -637,6 +643,43 @@ watch(
       <DialogFooter>
         <Button variant="outline" @click="showPasteDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button :disabled="pasteTargetsMissing(pasteTableEntries)" @click="confirmPasteTable">{{ t("dangerDialog.confirm") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog
+    :open="showPasteRoutineDialog"
+    @update:open="
+      (open) => {
+        if (!pasteRoutineLoading) showPasteRoutineDialog = open;
+      }
+    "
+  >
+    <DialogContent
+      class="sm:max-w-[440px]"
+      @escape-key-down="
+        (event) => {
+          if (pasteRoutineLoading) event.preventDefault();
+        }
+      "
+      @interact-outside="
+        (event) => {
+          if (pasteRoutineLoading) event.preventDefault();
+        }
+      "
+    >
+      <DialogHeader>
+        <DialogTitle>{{ t("contextMenu.pasteRoutineTitle") }}</DialogTitle>
+      </DialogHeader>
+      <p class="text-sm text-muted-foreground">{{ t("contextMenu.pasteRoutineDescription") }}</p>
+      <Input v-model="pasteRoutineName" :disabled="pasteRoutineLoading" :placeholder="t('contextMenu.pasteRoutineNamePlaceholder')" @keydown.enter.prevent="confirmPasteRoutine" />
+      <p v-if="pasteRoutineError" role="alert" class="break-words text-sm text-destructive">{{ pasteRoutineError }}</p>
+      <DialogFooter>
+        <Button variant="outline" :disabled="pasteRoutineLoading" @click="showPasteRoutineDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="pasteRoutineLoading || !pasteRoutineName.trim()" @click="confirmPasteRoutine">
+          <Loader2 v-if="pasteRoutineLoading" class="mr-1 h-4 w-4 animate-spin" />
+          {{ t("dangerDialog.confirm") }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

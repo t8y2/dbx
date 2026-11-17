@@ -879,11 +879,30 @@ export interface PluginMarketplaceArtifact {
   size?: number;
 }
 
+/** Host verdict for one catalog version, computed by the backend from the catalog's compatibility table. */
+export interface PluginVersionCompatibility {
+  compatible: boolean;
+  /** Declared `engines.dbx` requirement, echoed for display. */
+  dbx?: string;
+  /** Declared `engines.host_api` requirement, echoed for display. */
+  hostApi?: string;
+  /** Which requirement failed; absent when the version is compatible. */
+  blockedBy?: "dbx" | "hostApi";
+  /**
+   * `true` when a newer DBX could satisfy the failing requirement, `false` when it could not
+   * (upper bound such as `<0.7.0`, exact older version, or an unsatisfied host API range);
+   * absent when the version is compatible.
+   */
+  upgradeRequired?: boolean;
+}
+
 export interface PluginMarketplaceVersion {
   version: string;
   releasedAt?: string;
   releaseNotes?: string;
   artifacts: PluginMarketplaceArtifact[];
+  /** Absent when the catalog declares no engine requirement for this version (treated as compatible). */
+  compatibility?: PluginVersionCompatibility;
 }
 
 export interface PluginMarketplacePlugin {

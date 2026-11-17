@@ -67,7 +67,6 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
-  const pageLimit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
 
   if (options.isCurrent?.() === false) return;
 
@@ -79,6 +78,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
     return;
   }
   const tableSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
+  const pageLimit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize, { connectionId: target.connectionId, database: target.database, catalog: target.catalog, schema: tableSchema, tableName: target.tableName });
   const tabTitle = target.catalog ? `${target.catalog}.${tableSchema || target.database}.${target.tableName}` : tableSchema ? `${tableSchema}.${target.tableName}` : target.tableName;
   if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
     await connectionStore.ensureConnected(target.connectionId);

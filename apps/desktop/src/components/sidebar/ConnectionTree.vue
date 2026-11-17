@@ -19,7 +19,9 @@ import {
   filterSidebarTreeToConnectedConnections,
   findNodePathByIdentity,
   mergeSidebarRegexIndexScopes,
+  qualifiedTableQueryMatchesScope,
   resolveSidebarFilterGuards,
+  splitQualifiedTableQuery,
   type SidebarRegexIndexScope,
   type SidebarRegexScopeIdentity,
   localTableSearchParentTypes,
@@ -589,8 +591,18 @@ const globalSearchContext = [
   () => store.sidebarTableSearchIndexInvalidation.revision,
   () => selectedSearchScopes.value.join(","),
 ];
+const qualifiedGlobalSearch = computed(() => {
+  if (regexMode.value || !deferredSearchQuery.value) return null;
+  return splitQualifiedTableQuery(deferredSearchQuery.value);
+});
+
+// The query only gates whether an index build happens (filtering is client-side
+// and the cache key is query-independent), so pass the bare object name and let
+// the schema qualifier narrow the results here.
+const globalIndexSearchQuery = computed(() => qualifiedGlobalSearch.value?.name ?? deferredSearchQuery.value);
+
 const { scopes: globalTableSearchScopes, isLoading: isGlobalIndexLoading } = useSidebarSearchIndexes({
-  query: deferredSearchQuery,
+  query: globalIndexSearchQuery,
   context: globalSearchContext,
   load: loadGlobalTableSearchIndexes,
   onError: (error) => toast(error instanceof Error ? error.message : String(error), 5000),
@@ -686,7 +698,7 @@ async function loadGlobalTableSearchIndexes(shouldCancel: () => boolean, onProgr
             discover: discoverGlobalSearchChildren,
             loadIndex: (node, options) => {
               if (shouldCancel() || !store.connectedIds.has(connectionId)) return Promise.resolve(null);
-              return store.ensureSidebarTableSearchIndex(node.id, deferredSearchQuery.value, { connectionId, database: node.database ?? "", schema: node.schema, catalog: node.catalog, nodeType: node.type }, { connectedOnly: true, refresh: options?.refresh });
+              return store.ensureSidebarTableSearchIndex(node.id, globalIndexSearchQuery.value, { connectionId, database: node.database ?? "", schema: node.schema, catalog: node.catalog, nodeType: node.type }, { connectedOnly: true, refresh: options?.refresh });
             },
             onError: (_node, error) => toast(error instanceof Error ? error.message : String(error), 5000),
           },
@@ -709,9 +721,18 @@ async function loadGlobalTableSearchIndexes(shouldCancel: () => boolean, onProgr
 
 function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
   if (!deferredSearchQuery.value) return nodes;
-  const matcher = createSidebarLabelMatcher(deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
-  const matchingScopes = globalTableSearchScopes.value.map((scope) => ({ ...scope, entries: scope.entries.filter((entry) => !!matcher(entry.name) || ((regexMode.value || searchMatchMode.value !== "exact") && !!matcher(entry.comment || ""))) })).filter((scope) => scope.entries.length > 0);
-  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable);
+  const qualified = qualifiedGlobalSearch.value;
+  const matcher = createSidebarLabelMatcher(qualified?.name ?? deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
+  const includeComment = regexMode.value || searchMatchMode.value !== "exact";
+  const matchingScopes = globalTableSearchScopes.value
+    .map((scope) => ({
+      ...scope,
+      entries: scope.entries.filter((entry) => (!qualified || qualifiedTableQueryMatchesScope(qualified, { database: scope.database, schema: entry.schema ?? scope.schema, catalog: scope.catalog })) && (!!matcher(entry.name) || (includeComment && !!matcher(entry.comment || "")))),
+    }))
+    .filter((scope) => scope.entries.length > 0);
+  // A qualified query must surface only the matched schema, so do not merge the
+  // rest of the live tree back in the way an unqualified label search would.
+  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable, { scopesOnly: !!qualified });
 }
 
 watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
@@ -786,7 +807,9 @@ const filteredNodes = computed(() => {
   nodes = filterGloballyIndexedTables(nodes);
   nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
 
-  const q = deferredSearchQuery.value;
+  // A qualified `schema.table` query is resolved entirely by the index scopes
+  // above; feeding the dotted text to the label filter would prune those results.
+  const q = qualifiedGlobalSearch.value ? "" : deferredSearchQuery.value;
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {
     regexMode: regexMode.value,
     matchMode: searchMatchMode.value,

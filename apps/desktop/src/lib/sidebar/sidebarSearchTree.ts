@@ -103,6 +103,54 @@ function splitQualifiedLocalTableQuery(query: string): { qualifier: string; name
   return qualifier && name ? { qualifier, name } : null;
 }
 
+export interface QualifiedSidebarTableQuery {
+  /** Optional database/catalog qualifier from a three-part `database.schema.table` query. */
+  database?: string;
+  /** Schema (Oracle: user) the trailing table name is qualified with. */
+  schema: string;
+  /** The object name to match inside that schema. */
+  name: string;
+}
+
+/**
+ * Splits a fully qualified table query into its scope and object name. Accepts
+ * `schema.table` and `database.schema.table`; the last segment is always the
+ * object name, the one before it the schema, and any segment before that the
+ * database. Returns null for unqualified (or malformed) queries so plain label
+ * matching is untouched.
+ */
+export function splitQualifiedTableQuery(query: string): QualifiedSidebarTableQuery | null {
+  const parts = query.split(".").map((part) => part.trim());
+  // Two parts (schema.table) or three (database.schema.table); more than that is
+  // ambiguous, so fall back to plain label matching instead of guessing.
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !part)) return null;
+  const name = parts[parts.length - 1]!;
+  const schema = parts[parts.length - 2]!;
+  const database = parts.length >= 3 ? parts[parts.length - 3] : undefined;
+  return database ? { database, schema, name } : { schema, name };
+}
+
+/**
+ * True when a search scope (or an index entry's attribution) belongs to the
+ * schema — and, for three-part queries, the database — named by a qualified
+ * query. Comparisons are case-insensitive because Oracle reports schema users
+ * in upper case while users typically type lower case.
+ */
+export function qualifiedTableQueryMatchesScope(qualified: QualifiedSidebarTableQuery, scope: { database?: string | null; schema?: string | null; catalog?: string | null }): boolean {
+  const requested = qualified.schema.trim().toLowerCase();
+  if (!requested) return false;
+  // Leveled engines address the schema; flat engines (MySQL/MariaDB) have no
+  // schema level so the database node is the qualifier, and Doris-style trees
+  // put a catalog above the database. Fall back only when the level is absent so
+  // `sales.orders` cannot widen to every schema of a database named "sales".
+  const schemaLevel = (scope.schema ?? "").trim().toLowerCase();
+  const candidates = schemaLevel ? [schemaLevel] : [scope.database, scope.catalog].map((value) => (value ?? "").trim().toLowerCase()).filter(Boolean);
+  if (!candidates.includes(requested)) return false;
+  if (qualified.database === undefined) return true;
+  const database = qualified.database.trim().toLowerCase();
+  return [scope.database, scope.catalog].map((value) => (value ?? "").trim().toLowerCase()).includes(database);
+}
+
 export function filterLocallySearchedTables(nodes: TreeNode[], options: LocalTableSearchOptions): TreeNode[] {
   // Avoid cloning and tracking the entire reactive tree when there is no local
   // search. Check the query map once, not at each recursive subtree.
@@ -286,7 +334,7 @@ function mergeRegexTreeNodes(liveNodes: readonly TreeNode[], indexedNodes: reado
  * database, schema, and table-group ancestors are synthesized from manifest
  * scope metadata. Duplicate table identities prefer the narrowest scope.
  */
-export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[], resolveTable: (node: TreeNode) => TreeNode = (node) => node): TreeNode[] {
+export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[], resolveTable: (node: TreeNode) => TreeNode = (node) => node, options?: { scopesOnly?: boolean }): TreeNode[] {
   const selected = new Map<string, { rank: number; scope: SidebarRegexIndexScope; entry: TableInfo }>();
   const rankFor = (scope: SidebarRegexIndexScope) => (scope.nodeType.startsWith("group-") ? 3 : scope.nodeType === "schema" ? 2 : 1);
   for (const scope of scopes) {
@@ -362,7 +410,7 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
     parent.children = existing ? (parent.children ?? []).map((child) => (child.id === existing.id ? mergeRegexTreeNode(existing, scopeParent) : child)) : [...(parent.children ?? []), scopeParent];
   }
 
-  let merged = [...liveNodes];
+  let merged = options?.scopesOnly ? [] : [...liveNodes];
   // Same-id nodes can live in different branches (database "a:b" vs schema
   // "b" under database "a"), so every merge target is matched by id plus its
   // composite database context, never by the bare id.
@@ -388,6 +436,10 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
   for (const { node, identity } of anchoredParents) {
     const result = mergeRoot(merged, node, identity);
     if (result.found) merged = result.nodes;
+    // A qualified query starts from an empty tree, so a scope whose parent is
+    // not in the live tree (legacy/local-mode indexes record no path) would
+    // otherwise disappear entirely; surface it at the root instead.
+    else if (options?.scopesOnly) merged = mergeRegexTreeNodes(merged, [node]);
   }
   return merged;
 }

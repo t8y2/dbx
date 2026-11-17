@@ -1443,19 +1443,15 @@ fn is_recognizable_wkt(value: &str) -> bool {
     })
 }
 
-/// Serialize a pgvector `vector` component with f32 shortest round-trip decimal text.
-///
-/// Casting through `f64` (or fixed fractional rounding) either expands binary noise or
-/// truncates remaining single-precision digits; formatting via `f32` display keeps the
-/// full float4 value that pgvector stores.
-fn pg_vector_element_number(v: f32) -> serde_json::Value {
+/// Preserve the shortest decimal representation that round-trips to the stored float4.
+fn pg_float4_number(v: f32) -> serde_json::Value {
     v.to_string().parse().map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
 }
 
 fn pg_vector_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Value {
     if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
         if let Some(floats) = decode_pgvector_bytes(&raw) {
-            return serde_json::Value::Array(floats.into_iter().map(pg_vector_element_number).collect());
+            return serde_json::Value::Array(floats.into_iter().map(pg_float4_number).collect());
         }
     }
     serde_json::Value::Null
@@ -1475,13 +1471,7 @@ fn pg_fallback_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Val
                 serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
             })
         })
-        .or_else(|_| {
-            row.try_get::<_, f32>(idx).map(|v| {
-                serde_json::Number::from_f64((v as f64 * 1_000_000.0).round() / 1_000_000.0)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
-            })
-        })
+        .or_else(|_| row.try_get::<_, f32>(idx).map(pg_float4_number))
         .or_else(|_| row.try_get::<_, bool>(idx).map(serde_json::Value::Bool))
         .or_else(|_| row.try_get::<_, uuid::Uuid>(idx).map(|v| serde_json::Value::String(v.to_string())))
         .or_else(|e| pg_temporal_to_json_value(row, idx).ok_or(e))
@@ -14235,6 +14225,17 @@ mod tests {
         assert_eq!(decode_tsvector_bytes(&raw).as_deref(), Some("'back\\\\slash':3B 'o''clock':1,2A"));
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn scalar_real_query_preserves_precision() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect PostgreSQL");
+        let result = execute_query(&pool, "SELECT 0.0000001::real, 1.2345678::real, 0.1::real").await.unwrap();
+
+        let values: Vec<_> = result.rows[0].iter().map(serde_json::Value::as_f64).collect();
+        assert_eq!(values, [Some(0.0000001), Some(1.2345678), Some(0.1)]);
+    }
+
     fn encode_pgvector_bytes(values: &[f32]) -> Vec<u8> {
         let dims = u16::try_from(values.len()).expect("dim fits u16");
         let mut raw = Vec::with_capacity(4 + values.len() * 4);
@@ -14254,11 +14255,11 @@ mod tests {
     }
 
     #[test]
-    fn pgvector_element_number_round_trips_full_f32_precision() {
+    fn pg_float4_number_round_trips_full_f32_precision() {
         let values = [0.1f32, 0.12345679f32, 1.2345679e-5f32, -0.00012345679f32, 1.2345678f32, 1e20f32];
 
         for value in values {
-            let json = pg_vector_element_number(value);
+            let json = pg_float4_number(value);
             let text = json.to_string();
             let restored: f32 = text.parse().expect("json number parses as f32");
             let rounded_six = ((value as f64 * 1_000_000.0).round() / 1_000_000.0) as f32;
@@ -14276,7 +14277,7 @@ mod tests {
     fn pgvector_binary_to_json_preserves_component_precision() {
         let values = [0.12345679f32, 1.2345679e-5f32, -2.5f32];
         let decoded = decode_pgvector_bytes(&encode_pgvector_bytes(&values)).expect("decode vector");
-        let json = serde_json::Value::Array(decoded.into_iter().map(pg_vector_element_number).collect());
+        let json = serde_json::Value::Array(decoded.into_iter().map(pg_float4_number).collect());
         let arr = json.as_array().expect("vector json array");
 
         assert_eq!(arr.len(), values.len());

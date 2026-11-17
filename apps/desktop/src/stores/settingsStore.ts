@@ -1203,6 +1203,7 @@ export interface EditorSettings {
   sidebarConnectionSortMode: ConnectionListSortMode;
   sidebarSearchMatchMode: "fuzzy" | "contains" | "exact";
   sidebarObjectDisplay: "grouped" | "simple";
+  sidebarSimpleHideIndexes: boolean;
   routineSourceOpenMode: "query-tab" | "dialog";
   sidebarTableSearchEnabled: boolean;
   sidebarTableSearchLocal: boolean;
@@ -1612,6 +1613,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarConnectionSortMode: "manual",
   sidebarSearchMatchMode: "fuzzy",
   sidebarObjectDisplay: "grouped",
+  sidebarSimpleHideIndexes: false,
   routineSourceOpenMode: "query-tab",
   sidebarTableSearchEnabled: false,
   sidebarTableSearchLocal: true,
@@ -2366,6 +2368,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarConnectionSortMode: normalizeConnectionListSortMode(settings.sidebarConnectionSortMode),
     sidebarSearchMatchMode: settings.sidebarSearchMatchMode === "contains" || settings.sidebarSearchMatchMode === "exact" ? settings.sidebarSearchMatchMode : "fuzzy",
     sidebarObjectDisplay: settings.sidebarObjectDisplay === "simple" || settings.sidebarObjectDisplay === "grouped" ? settings.sidebarObjectDisplay : DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay,
+    sidebarSimpleHideIndexes: settings.sidebarSimpleHideIndexes === true,
     routineSourceOpenMode: settings.routineSourceOpenMode === "query-tab" || settings.routineSourceOpenMode === "dialog" ? settings.routineSourceOpenMode : DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode,
     sidebarTableSearchEnabled: typeof settings.sidebarTableSearchEnabled === "boolean" ? settings.sidebarTableSearchEnabled : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled,
     sidebarTableSearchLocal: typeof settings.sidebarTableSearchLocal === "boolean" ? settings.sidebarTableSearchLocal : DEFAULT_EDITOR_SETTINGS.sidebarTableSearchLocal,
@@ -3356,6 +3359,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarConnectionSortMode !== undefined) editorSettings.value.sidebarConnectionSortMode = normalizeConnectionListSortMode(partial.sidebarConnectionSortMode);
     if (partial.sidebarSearchMatchMode !== undefined) editorSettings.value.sidebarSearchMatchMode = partial.sidebarSearchMatchMode === "contains" || partial.sidebarSearchMatchMode === "exact" ? partial.sidebarSearchMatchMode : "fuzzy";
     if (partial.sidebarObjectDisplay !== undefined) editorSettings.value.sidebarObjectDisplay = partial.sidebarObjectDisplay;
+    if (partial.sidebarSimpleHideIndexes !== undefined) editorSettings.value.sidebarSimpleHideIndexes = partial.sidebarSimpleHideIndexes === true;
     if (partial.routineSourceOpenMode !== undefined) editorSettings.value.routineSourceOpenMode = partial.routineSourceOpenMode;
     if (partial.sidebarTableSearchEnabled !== undefined) editorSettings.value.sidebarTableSearchEnabled = partial.sidebarTableSearchEnabled;
     if (partial.sidebarTableSearchLocal !== undefined) editorSettings.value.sidebarTableSearchLocal = partial.sidebarTableSearchLocal;

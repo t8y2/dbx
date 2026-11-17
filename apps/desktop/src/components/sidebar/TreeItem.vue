@@ -12,6 +12,7 @@ import {
   FolderOpen,
   FolderClosed,
   TableProperties,
+  Hash,
   Key,
   Link,
   Link2,
@@ -103,6 +104,7 @@ import { connectionBearingGroupIdsUnder, connectionIdsUnderGroup } from "@/lib/s
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { isLoginUserSchemaNode } from "@/lib/sidebar/loginUserNode";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { columnIndexColorClass } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
@@ -310,12 +312,11 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Eye, colorClass: "text-purple-500" };
     case "materialized_view":
       return { icon: Eye, colorClass: "text-indigo-500" };
-    case "column":
-      if ((node.meta as ColumnInfo).is_primary_key) {
-        return { icon: Columns3, colorClass: "text-orange-400" };
-      } else {
-        return { icon: Columns3, colorClass: "text-muted-foreground" };
-      }
+    case "column": {
+      const kind = sidebarColumnIndexKind(node);
+      if (kind) return { icon: kind === "primary" ? Key : Hash, colorClass: columnIndexColorClass(kind) };
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
+    }
     case "type-attribute":
       return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "type-method":
@@ -524,6 +525,11 @@ function formatXuguStorageDetailValue(key: string, value: string): string {
   return value;
 }
 
+function sidebarColumnIndexKind(node: TreeNode): TreeNode["columnIndexKind"] {
+  if (node.type !== "column") return;
+  return node.columnIndexKind ?? ((node.meta as ColumnInfo | undefined)?.is_primary_key ? "primary" : undefined);
+}
+
 const detailTooltip = computed(() => {
   const node = activeNode.value;
   if (node.type === "connection" && node.connectionId) {
@@ -587,6 +593,7 @@ const detailTooltip = computed(() => {
     };
   }
   const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
+  const indexKind = sidebarColumnIndexKind(node);
   const comment = column && "comment" in column ? column.comment : node.comment;
   const tableKind = externalTableKind(node);
   if ((!comment && !column && !tableKind) || !isSidebarCommentSupportedType(node.type)) return null;
@@ -594,6 +601,7 @@ const detailTooltip = computed(() => {
     { label: t("connection.name"), value: visibleLabel(node) },
     ...(tableKind ? [{ label: t("postgresForeignTable.tableKind"), value: tableKind }] : []),
     ...(column ? [{ label: t("structureEditor.nullable"), value: t(column.is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }] : []),
+    ...(indexKind ? [{ label: t("tree.indexes"), value: t(indexKind === "primary" ? "grid.columnPrimaryIndex" : indexKind === "unique" ? "grid.columnUniqueIndex" : "grid.columnRegularIndex") }] : []),
     { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
   ].filter((row) => row.value);
   return { rows };

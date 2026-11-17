@@ -125,6 +125,7 @@ pub use dbx_sql::sql_error_position;
 pub use dbx_sql::sql_parser;
 pub use dbx_sql::sql_risk;
 pub(crate) use dbx_sql::sqlserver_temporal;
+pub use dbx_sql::tdengine_export_sql;
 pub use dbx_types::types;
 pub use host::update;
 pub use persistence::state_persistence;

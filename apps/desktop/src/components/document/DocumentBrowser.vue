@@ -201,6 +201,8 @@ const viewMode = computed<ViewMode>({
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
 const filterEnabled = ref(restoredDocumentBrowserState?.filterEnabled ?? true);
+const elasticsearchTextSearch = ref(restoredDocumentBrowserState?.elasticsearchTextSearch ?? "");
+const elasticsearchTextInput = ref(elasticsearchTextSearch.value);
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
 const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
@@ -396,6 +398,7 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
   saveDocumentBrowserState(props.stateKey, {
     filterInput: filterInput.value,
     filterEnabled: filterEnabled.value,
+    elasticsearchTextSearch: elasticsearchTextSearch.value || undefined,
     sortInput: sortInput.value,
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
@@ -420,7 +423,7 @@ function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFi
 // changed query means the local-filter snapshot no longer describes what the
 // user is looking at.
 watch(
-  [filterInput, filterEnabled, sortInput, appliedDocumentFilter],
+  [filterInput, filterEnabled, elasticsearchTextSearch, sortInput, appliedDocumentFilter],
   () => {
     localColumnFilters.value = {};
     localColumnFilterColumns.value = undefined;
@@ -1061,8 +1064,13 @@ function resetElasticsearchPagination() {
 }
 
 function currentDocumentFilter(): string | undefined {
-  const filter = filterEnabled.value ? currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind) : undefined;
-  if (documentStoreProvider.value.kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
+  const kind = documentStoreProvider.value.kind;
+  const filter = filterEnabled.value ? currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, kind) : undefined;
+  if (kind === "elasticsearch" && elasticsearchTextSearch.value) {
+    const textFilter = elasticsearchStructuredFilter({ query_string: { query: elasticsearchTextSearch.value, lenient: true } });
+    return JSON.stringify(filter ? { $and: [JSON.parse(filter), textFilter] } : textFilter);
+  }
+  if (kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
   const parsed = filter ? JSON.parse(filter) : {};
   return JSON.stringify({ ...parsed, $index: dynamodbIndexName.value });
 }
@@ -2177,6 +2185,12 @@ function applyFilter() {
   void load();
 }
 
+function applyElasticsearchTextSearch(text = elasticsearchTextInput.value) {
+  elasticsearchTextSearch.value = text.trim();
+  elasticsearchTextInput.value = elasticsearchTextSearch.value;
+  applyFilter();
+}
+
 async function paginate(offset: number, limit: number) {
   const normalizedOffset = Math.max(0, Math.trunc(offset));
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
@@ -3037,6 +3051,16 @@ defineExpose({ focusSearch });
         </PopoverContent>
       </Popover>
     </div>
+
+    <form v-if="documentStoreProvider.kind === 'elasticsearch'" class="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5" @submit.prevent="applyElasticsearchTextSearch()">
+      <Input v-model="elasticsearchTextInput" :placeholder="t('grid.elasticsearchTextSearch')" :aria-label="t('grid.elasticsearchTextSearch')" class="h-7 min-w-0 max-w-md text-xs" />
+      <Button type="submit" variant="outline" size="icon-sm" class="h-7 w-7 shrink-0" :disabled="loading" :aria-label="t('grid.applyElasticsearchTextSearch')">
+        <Search class="h-3.5 w-3.5" />
+      </Button>
+      <Button v-if="elasticsearchTextInput || elasticsearchTextSearch" type="button" variant="ghost" size="icon-sm" class="h-7 w-7 shrink-0" :disabled="loading" :aria-label="t('grid.clearElasticsearchTextSearch')" @click="applyElasticsearchTextSearch('')">
+        <X class="h-3.5 w-3.5" />
+      </Button>
+    </form>
 
     <!-- Table view -->
     <QueryLoadingState

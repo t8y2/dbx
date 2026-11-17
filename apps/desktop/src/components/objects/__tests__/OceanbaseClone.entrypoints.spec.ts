@@ -9,12 +9,13 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { useToast } from "@/composables/useToast";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { OraclePackageSaveAsFailure, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 
-const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), executeConditionalUpdate: vi.fn(), buildDuplicateTableStructureSql: vi.fn(), buildCreateTableSql: vi.fn(), buildCopyTableDataSql: vi.fn() }));
+const backend = vi.hoisted(() => ({ executeQuery: vi.fn(), executeScript: vi.fn(), executeInTransaction: vi.fn(), executeConditionalUpdate: vi.fn(), buildDuplicateTableStructureSql: vi.fn(), buildCreateTableSql: vi.fn(), buildCopyTableDataSql: vi.fn() }));
 const packageSaveAs = vi.hoisted(() => ({ prepare: vi.fn(), prepareExecution: vi.fn(), execute: vi.fn(), dispose: vi.fn() }));
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
@@ -25,12 +26,13 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
   checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+  connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
   saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
   listSchemas: vi.fn().mockResolvedValue(["APP"]),
   listDatabases: vi.fn().mockResolvedValue(["APP"]),
   listObjects: vi.fn().mockResolvedValue([{ name: "SOURCE", object_type: "TABLE", schema: "APP" }]),
   listObjectStatistics: vi.fn().mockResolvedValue([]),
-  getColumns: vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: true, is_primary_key: false, column_default: null }]),
+  getColumns: vi.fn(),
   listConstraints: vi.fn().mockResolvedValue([]),
   listIndexes: vi.fn().mockResolvedValue([]),
   listTriggers: vi.fn().mockResolvedValue([]),
@@ -51,7 +53,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   i18n.global.locale.value = "en";
   vi.mocked(api.listIndexes).mockResolvedValue([]);
+  vi.mocked(api.connectionIdentifierQuote).mockReset().mockResolvedValue(undefined);
   connection.is_production = false;
+  vi.mocked(api.getColumns)
+    .mockReset()
+    .mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: true, is_primary_key: false, column_default: null }]);
   invalidateObjectBrowserRowsCache({});
   vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
   vi.stubGlobal("alert", vi.fn());
@@ -64,6 +70,8 @@ beforeEach(() => {
   );
   backend.buildCreateTableSql.mockImplementation(async ({ schema, tableName }) => ({ statements: [`CREATE TABLE "${schema}"."${tableName}" ("ID" NUMBER);`], warnings: [] }));
   backend.buildCopyTableDataSql.mockResolvedValue('INSERT INTO "APP"."MixedCopy" SELECT * FROM "APP"."SOURCE"');
+  backend.executeScript.mockResolvedValue(result());
+  backend.executeInTransaction.mockResolvedValue(result());
   packageSaveAs.prepare.mockReset();
   packageSaveAs.execute.mockReset();
   packageSaveAs.dispose.mockReset().mockResolvedValue(undefined);
@@ -85,17 +93,17 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountEntry(surface: "sidebar" | "objects") {
+async function mountEntry(surface: "sidebar" | "objects", entryConnection = connection) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
-  store.connections = [{ ...connection }];
+  store.connections = [{ ...entryConnection }];
   store.connectedIds.add(connection.id);
   vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
   store.treeNodes = [{ id: `${connection.id}:APP:APP`, type: "schema", label: "APP", connectionId: connection.id, database: "APP", schema: "APP", children: [], isExpanded: false }];
   const refresh = vi.spyOn(store, "refreshObjectListTreeNode");
   const component = ref<any>(null);
-  const context = ref({ connection, database: "APP", schema: "APP" });
+  const context = ref({ connection: entryConnection, database: "APP", schema: "APP" });
   let controller: any;
   const app = createApp({
     setup: () => () =>
@@ -123,7 +131,7 @@ async function mountEntry(surface: "sidebar" | "objects") {
   expect(controller).toBeDefined();
   controller.duplicateTableName = '"MixedCopy"';
   if (surface === "objects") controller.duplicateTarget = { name: "SOURCE", schema: "APP", object_type: "TABLE" };
-  controller.pasteTableEntries = [{ sourceName: "SOURCE", targetName: '"MixedCopy"', connectionId: connection.id, database: "APP", schema: "APP" }];
+  controller.pasteTableEntries = [{ sourceName: "SOURCE", targetName: '"MixedCopy"', connectionId: connection.id, database: "APP", schema: "APP", databaseType: entryConnection.db_type }];
   controller.pasteTableMode = "structure-and-data";
   return { controller, refresh, context, app, runtime: component.value.$.setupState };
 }
@@ -135,6 +143,101 @@ async function acceptClone() {
   button!.click();
   await nextTick();
 }
+
+describe.each(["sidebar", "objects"] as const)("%s Kingbase clone entry points", (surface) => {
+  it.each([
+    ["confirmDuplicateStructure", "structure-only", true],
+    ["confirmPasteTable", "structure-only", true],
+    ["confirmPasteTable", "structure-and-data", false],
+  ] as const)("handles missing catalog OID for %s in %s mode", async (action, mode, shouldCreateTable) => {
+    const kingbase: ConnectionConfig = { ...connection, db_type: "kingbase", driver_profile: "kingbase" };
+    const { controller } = await mountEntry(surface, kingbase);
+    controller.pasteTableMode = mode;
+    vi.spyOn(api, "getTableComment").mockResolvedValue(null);
+    vi.mocked(api.getColumns).mockRejectedValueOnce("Agent RPC error (-1): KINGBASE_CATALOG_OID_UNAVAILABLE: kb: column c.oid does not exist");
+    const ddl = 'CREATE TABLE "APP"."MixedCopy" AS SELECT * FROM "APP"."SOURCE" WHERE 1=0;';
+    backend.buildDuplicateTableStructureSql.mockResolvedValue(ddl);
+
+    await controller[action]();
+
+    expect(api.getColumns).toHaveBeenCalledTimes(1);
+    expect(backend.buildDuplicateTableStructureSql).toHaveBeenCalledTimes(shouldCreateTable ? 1 : 0);
+    expect(ddlCalls().map((call) => call[2])).toEqual(shouldCreateTable ? [ddl] : []);
+    expect(backend.buildCopyTableDataSql).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["confirmDuplicateStructure", true],
+    ["confirmPasteTable", true],
+    ["confirmPasteTable", false],
+  ] as const)("executes Kingbase table and column comments in one transaction for %s with confirmation %j", async (action, confirmed) => {
+    const kingbase: ConnectionConfig = { ...connection, database: "DEFAULT", db_type: "kingbase", driver_profile: "kingbase", is_production: true };
+    const { controller } = await mountEntry(surface, kingbase);
+    controller.pasteTableMode = "structure-only";
+    vi.mocked(api.connectionIdentifierQuote).mockImplementation(async (_id, database) => (database === "APP" ? "`" : '"'));
+    vi.spyOn(api, "getTableComment").mockResolvedValue(null);
+    const statements = ["CREATE TABLE `APP`.`MixedCopy` AS SELECT * FROM `APP`.`SOURCE` WHERE 1=0", "COMMENT ON TABLE `APP`.`MixedCopy` IS 'Owner''s; orders'", "COMMENT ON COLUMN `APP`.`MixedCopy`.`ID` IS E'Owner\\'s notes; C:\\\\dbx\\nSecond line'"];
+    const sql = statements.join(";\n") + ";";
+    backend.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
+
+    const pending = controller[action]();
+    const safety = useProductionSafetyStore();
+    await vi.waitFor(() => expect(safety.pending?.sql).toBe(sql));
+    expect(api.connectionIdentifierQuote).toHaveBeenCalledExactlyOnceWith(connection.id, "APP");
+    expect(backend.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ identifierQuote: "`" }));
+    expect(backend.executeInTransaction).not.toHaveBeenCalled();
+    if (confirmed) safety.confirm();
+    else safety.cancel();
+    await pending;
+
+    expect(backend.executeInTransaction.mock.calls).toEqual(confirmed ? [[connection.id, "APP", statements, "APP", undefined]] : []);
+    expect(backend.executeScript).not.toHaveBeenCalled();
+    expect(ddlCalls()).toEqual([]);
+    expect(backend.buildCopyTableDataSql).not.toHaveBeenCalled();
+  });
+
+  it("uses the target database quote for both structure and data SQL", async () => {
+    const kingbase: ConnectionConfig = { ...connection, database: "DEFAULT", db_type: "kingbase", driver_profile: "kingbase" };
+    const { controller } = await mountEntry(surface, kingbase);
+    vi.mocked(api.connectionIdentifierQuote).mockImplementation(async (_id, database) => (database === "APP" ? "`" : '"'));
+    vi.spyOn(api, "getTableComment").mockResolvedValue(null);
+    backend.buildDuplicateTableStructureSql.mockResolvedValueOnce("CREATE TABLE `APP`.`MixedCopy` AS SELECT * FROM `APP`.`SOURCE` WHERE 1=0;");
+
+    await controller.confirmPasteTable();
+
+    expect(api.connectionIdentifierQuote).toHaveBeenCalledExactlyOnceWith(connection.id, "APP");
+    expect(backend.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ identifierQuote: "`" }));
+    expect(backend.buildCopyTableDataSql).toHaveBeenCalledWith(expect.objectContaining({ identifierQuote: "`" }));
+  });
+
+  it.each([false, true])("reports incomplete comments only when the affected structure was created (%j)", async (firstCloneLacksComments) => {
+    const kingbase: ConnectionConfig = { ...connection, db_type: "kingbase", driver_profile: "kingbase", is_production: true };
+    const { controller } = await mountEntry(surface, kingbase);
+    const firstEntry = controller.pasteTableEntries[0];
+    controller.pasteTableMode = "structure-only";
+    controller.pasteTableEntries.push({ ...firstEntry, sourceName: "SECOND", targetName: '"OtherCopy"' });
+    vi.spyOn(api, "getTableComment").mockImplementation(async (_connection, _database, _schema, table) => {
+      if (table === (firstCloneLacksComments ? "SOURCE" : "SECOND")) throw new Error("Agent RPC error (-1): unknown method: get_table_comment");
+      return null;
+    });
+    const firstSql = 'CREATE TABLE "APP"."MixedCopy" AS SELECT * FROM "APP"."SOURCE" WHERE 1=0;';
+    const secondSql = 'CREATE TABLE "APP"."OtherCopy" AS SELECT * FROM "APP"."SECOND" WHERE 1=0;';
+    backend.buildDuplicateTableStructureSql.mockResolvedValueOnce(firstSql).mockResolvedValueOnce(secondSql);
+
+    const pending = controller.confirmPasteTable();
+    const safety = useProductionSafetyStore();
+    await vi.waitFor(() => expect(safety.pending?.sql).toBe(firstSql));
+    safety.confirm();
+    await vi.waitFor(() => expect(safety.pending?.sql).toBe(secondSql));
+    safety.cancel();
+    await pending;
+
+    expect(ddlCalls().map((call) => call[2])).toEqual([firstSql]);
+    const cancelled = i18n.global.t("contextMenu.pasteTableCancelledAfterPartial");
+    const warning = i18n.global.t("contextMenu.duplicateStructureCommentsUnavailable");
+    expect(useToast().message.value).toBe(firstCloneLacksComments ? cancelled + "\n" + warning : cancelled);
+  });
+});
 
 describe.each(["sidebar", "objects"] as const)("%s OceanBase clone entry points", (surface) => {
   it("keeps the captured Spanner identifier quote while data-copy metadata is pending", async () => {

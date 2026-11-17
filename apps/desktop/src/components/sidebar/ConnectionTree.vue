@@ -328,6 +328,12 @@ const sidebarFilterGuards = computed(() => resolveSidebarFilterGuards(showConnec
 // features stay available while operations requiring the full root list pause.
 const isTreeSearchFiltering = computed(() => sidebarFilterGuards.value.isTreeSearchFiltering);
 const isRootListPartial = computed(() => sidebarFilterGuards.value.isRootListPartial);
+// 全局搜索过滤中同样展示局部表搜索框（#15148）：局部查询与全局过滤在
+// filteredNodes 里本就叠加生效，过滤中隐藏输入框只会让用户无法在搜索
+// 结果的子树里继续缩小范围。
+function shouldRenderSidebarTableSearchControls(): boolean {
+  return settingsStore.editorSettings.sidebarTableSearchEnabled;
+}
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
@@ -472,11 +478,6 @@ function clearSearchScopeFilter() {
 }
 
 function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { focusRestore?: TableSearchFocusRestore }) {
-  if (isTreeSearchFiltering.value) {
-    remoteTableSearchDebouncer.cancel(parentNodeId);
-    localTableSearchDebouncer.cancel(parentNodeId);
-    return;
-  }
   const restoreToken = options?.focusRestore?.shouldRestoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
   if (restoreToken) {
     tableSearchFocusRestoreTokens.clear();
@@ -758,11 +759,6 @@ function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
 watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
 
 function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusRestore?: TableSearchFocusRestore) {
-  if (isTreeSearchFiltering.value) {
-    localTableSearchDebouncer.cancel(parentNodeId);
-    remoteTableSearchDebouncer.cancel(parentNodeId);
-    return;
-  }
   scheduleExclusiveSidebarTableSearchDebounce(parentNodeId, localTableSearchDebouncer, remoteTableSearchDebouncer, () => {
     void loadLocalTableSearchResults(parentNodeId, false, focusRestore);
   });
@@ -859,7 +855,7 @@ const projectedConnectionIds = computed<ReadonlySet<string> | null>(() => {
 
 const flatNodes = computed<FlatTreeNode[]>(() => {
   const nodes = insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
-    enabled: settingsStore.editorSettings.sidebarTableSearchEnabled && !isTreeSearchFiltering.value,
+    enabled: shouldRenderSidebarTableSearchControls(),
     sidebarObjectDisplay: settingsStore.editorSettings.sidebarObjectDisplay,
     activeQueries: store.sidebarTableSearchQueries,
   });

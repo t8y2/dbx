@@ -6,6 +6,7 @@ import {
   loadDataGridColumnFrozenState,
   loadTableDataGridColumnOrder,
   loadTableDataGridColumnOrderEntry,
+  migrateDataGridColumnLayout,
   notifyTableDataGridColumnOrderChanged,
   removeDataGridColumnFrozenCount,
   removeTableDataGridColumnOrder,
@@ -116,6 +117,7 @@ export function useDataGridColumnLayoutState(options: {
   hideEmptyColumns?: MaybeRefOrGetter<boolean>;
   columnOrderKeys: MaybeRefOrGetter<readonly string[]>;
   layoutScopeKey: MaybeRefOrGetter<string>;
+  legacyLayoutScopeKey?: MaybeRefOrGetter<string | undefined>;
   tableScopeKey: MaybeRefOrGetter<string>;
   initialHiddenColumnKeys?: MaybeRefOrGetter<readonly string[] | undefined>;
   hideNullColumns?: MaybeRefOrGetter<boolean>;
@@ -280,7 +282,10 @@ export function useDataGridColumnLayoutState(options: {
 
   function loadColumnLayout() {
     flushPersistColumnLayout();
-    const storedLayout = loadDataGridColumnLayout(toValue(options.layoutScopeKey), toValue(options.columnOrderKeys));
+    const scopeKey = toValue(options.layoutScopeKey);
+    const legacyScopeKey = toValue(options.legacyLayoutScopeKey);
+    const columnKeys = toValue(options.columnOrderKeys);
+    const storedLayout = legacyScopeKey && legacyScopeKey !== scopeKey ? migrateDataGridColumnLayout(scopeKey, legacyScopeKey, columnKeys) : loadDataGridColumnLayout(scopeKey, columnKeys);
     const tableScopeKey = toValue(options.tableScopeKey);
     const tableOrder = tableScopeKey ? loadTableDataGridColumnOrderEntry(tableScopeKey, toValue(options.columnOrderKeys)) : null;
     // The layout keeps its own copy of the table order. It only stands in for

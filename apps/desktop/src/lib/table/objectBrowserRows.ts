@@ -31,7 +31,17 @@ export type ObjectBrowserRow = {
   autoIncrement?: string | null;
   characterSet?: string | null;
   collation?: string | null;
+  /** PostgreSQL foreign table (`relkind = 'f'`). Kept apart from `type` because
+   * `normalizeObjectBrowserType` folds every unknown kind into "TABLE", and a
+   * foreign table must be dropped with `DROP FOREIGN TABLE` (#14717). */
+  foreignTable?: boolean;
 };
+
+/** True when the backend-reported object type is a PostgreSQL foreign table. */
+export function isForeignTableObjectType(objectType: string | null | undefined): boolean {
+  if (!objectType) return false;
+  return objectType.toUpperCase().replace(/[\s-]+/g, "_") === "FOREIGN_TABLE";
+}
 
 export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
@@ -211,6 +221,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         displayName,
         schema,
         type,
+        foreignTable: isForeignTableObjectType(object.object_type) || undefined,
         valid: object.valid,
         signature,
         comment: object.comment,

@@ -17,6 +17,7 @@ import type {
   CompletionAssistantMatchMode,
   CompletionAssistantObjectKind,
   CompletionAssistantRequest,
+  CompletionAssistantResponse,
   ConnectionConfig,
   ConnectionIdleClosedEvent,
   ConnectionLivenessMessage,
@@ -179,13 +180,14 @@ import {
 } from "@/lib/table/tableTree";
 import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/sidebar/treeNodeContext";
 import { decodeSchemaTreeCache, decodeTableSearchIndexManifest, encodeSchemaTreeCache, encodeTableSearchIndexManifest, SCHEMA_TREE_CACHE_TTL_MS, type TableSearchIndexManifestEntry } from "@/lib/metadata/schemaTreeCache";
+import { invalidateQuickOpenMetadataCache, quickOpenMetadataCacheKey } from "@/lib/quickOpen/quickOpenMetadataCache";
 import { sortSidebarTreeChildrenByNameKeepingTableVGroups, sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
-import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, stripDatabaseSavedSqlTreeNodes, supportsDatabaseSavedSqlTree, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { formatMongoIndexKeyPattern, inferMongoCompletionFields, type MongoCompletionField, type MongoCompletionIndex } from "@/lib/mongo/mongoCompletion";
 import type { SoqlCompletionField, SoqlCompletionObject } from "@/lib/soql/soqlCompletion";
@@ -291,6 +293,16 @@ function usesProxyLogicalTables(databaseInfo: DatabaseConnectionInfo | undefined
 
 function mysqlTableListSourceChanged(config: ConnectionConfig, databaseInfo: DatabaseConnectionInfo): boolean {
   return config.db_type === "mysql" && usesProxyLogicalTables(config.database_info) !== usesProxyLogicalTables(databaseInfo);
+}
+
+// A MySQL server version change means the connection is talking to a different
+// server (e.g. the deployment was swapped from 5.7 to 8.0 between disconnect
+// and reconnect), so the database list cached from the old server is stale
+// even though the table enumeration source did not change.
+function mysqlServerVersionChanged(config: ConnectionConfig, databaseInfo: DatabaseConnectionInfo): boolean {
+  const previousVersion = config.database_info?.productVersion;
+  const nextVersion = databaseInfo.productVersion;
+  return config.db_type === "mysql" && !!previousVersion && !!nextVersion && previousVersion !== nextVersion;
 }
 
 function normalizeTableNameFilter(filter: Partial<TableNameFilter> | undefined | null): TableNameFilter {
@@ -562,7 +574,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const etcdAccessCapabilities = ref<Record<string, EtcdAccessCapabilities>>({});
   const etcdAccessCapabilityGenerations = new Map<string, number>();
   const etcdAccessCapabilityLoads = new Map<string, Promise<EtcdAccessCapabilities>>();
-  const identifierQuotes = ref<Record<string, string>>({});
+  const identifierQuotes = ref(new Map<string, string>());
+  const identifierQuoteLoads = new Map<string, Promise<string | undefined>>();
   /** Per-database compatibility mode (key `${connectionId}\u0000${database}`),
    * decoupled from sidebar tree-node lifecycle so editor parsing and sidebar
    * capabilities stay correct before/independent of database-tree rendering. */
@@ -615,6 +628,9 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarTableSearchIndexInFlight = new Map<string, Promise<SidebarTableSearchIndexCacheEntry>>();
   const sidebarTableSearchBuildingScopes = new Map<string, SidebarTableSearchIndexScope>();
   const sidebarTableSearchIndexConnectionGenerations = new Map<string, number>();
+  // A removed id stays blocked until a replacement config is added, so a read
+  // that started during deletion cannot repopulate memory for an id that may be reused.
+  const sidebarTableSearchIndexDeletedConnections = new Set<string>();
   const sidebarTableSearchIndexScopeGenerations = new Map<string, number>();
   const sidebarTableSearchIndexPersistenceQueues = new Map<string, Promise<void>>();
   const sidebarTableSearchIndexInvalidation = ref<{
@@ -974,11 +990,41 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  function connectionIdentifierQuote(connectionId?: string): string | undefined {
+  function identifierQuoteKey(connectionId: string, database?: string): string {
+    return `${connectionId}\u0000${database ?? ""}`;
+  }
+
+  function connectionIdentifierQuote(connectionId?: string, database?: string): string | undefined {
     if (!connectionId) return undefined;
     const override = gaussdbIdentifierQuoteOverride(getConfig(connectionId));
     if (override != null) return override;
-    return identifierQuotes.value[connectionId];
+    return identifierQuotes.value.get(identifierQuoteKey(connectionId, database));
+  }
+
+  async function ensureConnectionIdentifierQuote(connectionId: string, database?: string, config = getConfig(connectionId)): Promise<string | undefined> {
+    const cached = connectionIdentifierQuote(connectionId, database);
+    if (cached !== undefined || !connectionShouldLoadIdentifierQuote(config)) return cached;
+
+    const key = identifierQuoteKey(connectionId, database);
+    const existing = identifierQuoteLoads.get(key);
+    if (existing) return existing;
+
+    const revision = connectionStateRevision(connectionId);
+    const request = database ? api.connectionIdentifierQuote(connectionId, database) : api.connectionIdentifierQuote(connectionId);
+    const load = withMetadataLoadTimeout(connectionId, request, "identifier quote")
+      .catch(() => undefined)
+      .then((quote) => {
+        if (identifierQuoteLoads.get(key) !== load || !isCurrentConnectionStateRevision(connectionId, revision)) {
+          return connectionIdentifierQuote(connectionId, database);
+        }
+        if (quote !== undefined) identifierQuotes.value.set(key, quote);
+        return quote;
+      })
+      .finally(() => {
+        if (identifierQuoteLoads.get(key) === load) identifierQuoteLoads.delete(key);
+      });
+    identifierQuoteLoads.set(key, load);
+    return load;
   }
 
   function databaseCompatibilityKey(connectionId: string, database: string): string {
@@ -1091,10 +1137,13 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function clearConnectionIdentifierQuote(connectionId: string) {
     clearConnectionDatabaseModes(connectionId);
-    if (!(connectionId in identifierQuotes.value)) return;
-    const next = { ...identifierQuotes.value };
-    delete next[connectionId];
-    identifierQuotes.value = next;
+    const prefix = identifierQuoteKey(connectionId);
+    for (const key of identifierQuotes.value.keys()) {
+      if (key.startsWith(prefix)) identifierQuotes.value.delete(key);
+    }
+    for (const key of identifierQuoteLoads.keys()) {
+      if (key.startsWith(prefix)) identifierQuoteLoads.delete(key);
+    }
   }
 
   function clearConnectionDatabaseModes(connectionId: string) {
@@ -1107,9 +1156,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function refreshConnectionIdentifierQuote(connectionId: string, config: ConnectionConfig) {
     clearConnectionIdentifierQuote(connectionId);
-    if (!connectionShouldLoadIdentifierQuote(config)) return;
-    const quote = await api.connectionIdentifierQuote(connectionId).catch(() => undefined);
-    if (quote != null) identifierQuotes.value = { ...identifierQuotes.value, [connectionId]: quote };
+    await ensureConnectionIdentifierQuote(connectionId, undefined, config);
   }
 
   function connectionErrorMessage(error: unknown): string {
@@ -2187,8 +2234,23 @@ export const useConnectionStore = defineStore("connection", () => {
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children, options?.trustEmptyConnectionChildren === true);
     children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
-    if (parent.type === "database") {
+    if (supportsDatabaseSavedSqlTree(parent.type)) {
       children = withDatabaseSavedSqlRoot(parent, children, savedSqlFilesByDatabase);
+    }
+    if (parent.type === "schema" && parent.connectionId && parent.schema && getConfig(parent.connectionId)?.db_type === "postgres") {
+      const functionsIndex = children.findIndex((child) => child.type === "group-functions");
+      if (functionsIndex >= 0 && !children.some((child) => child.type === "postgres-aggregate-functions")) {
+        children = [...children];
+        children.splice(functionsIndex + 1, 0, {
+          id: `${parent.id}:__postgres_aggregate_functions`,
+          type: "postgres-aggregate-functions",
+          label: "tree.aggregateFunctions",
+          connectionId: parent.connectionId,
+          database: parent.database,
+          schema: parent.schema,
+          isExpanded: false,
+        });
+      }
     }
     // Defensive: sibling ids must be unique (RecycleScroller keys rows by id).
     // The Dameng users/roles admin nodes were once re-appended by every
@@ -2482,7 +2544,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function refreshDatabaseSavedSqlTrees(nodes: TreeNode[] = treeNodes.value) {
     for (const node of nodes) {
-      if (node.type === "database") {
+      if (supportsDatabaseSavedSqlTree(node.type)) {
         node.children = withDatabaseSavedSqlRoot(node, node.children || [], savedSqlFilesByDatabase);
       }
       if (node.children) refreshDatabaseSavedSqlTrees(node.children);
@@ -4015,7 +4077,7 @@ export const useConnectionStore = defineStore("connection", () => {
     publishSidebarTableSearchIndexInvalidation(uniqueScopes);
   }
 
-  async function invalidateSidebarTableSearchIndexesForConnection(connectionId: string): Promise<void> {
+  async function invalidateSidebarTableSearchIndexesForConnection(connectionId: string, options: { preservePersisted?: boolean } = {}): Promise<void> {
     sidebarTableSearchIndexConnectionGenerations.set(connectionId, sidebarTableSearchIndexConnectionGeneration(connectionId) + 1);
     const rawPrefix = `${connectionId}:`;
     const encodedPrefix = `${schemaCacheKey(connectionId)}:`;
@@ -4041,7 +4103,15 @@ export const useConnectionStore = defineStore("connection", () => {
     const connectionNode = findConnectionNode(connectionId);
     const activeScopes = connectionNode ? collectActiveTableSearchScopes(connectionNode) : [];
     const buildingScopes = [...sidebarTableSearchBuildingScopes.values()].filter((scope) => scope.connectionId === connectionId);
-    await invalidateSidebarTableSearchIndexScopes([...manifestScopes, ...activeScopes, ...buildingScopes], (scope) => scope.connectionId === connectionId);
+    const scopes = [...manifestScopes, ...activeScopes, ...buildingScopes];
+    if (options.preservePersisted) {
+      // Closing a session must invalidate live reads and in-flight builders, but
+      // the last-known table index remains useful to Quick Open while offline.
+      for (const scope of scopes) invalidateSidebarTableSearchBuild(scope.cacheKey);
+      publishSidebarTableSearchIndexInvalidation(scopes);
+      return;
+    }
+    await invalidateSidebarTableSearchIndexScopes(scopes, (scope) => scope.connectionId === connectionId);
   }
 
   async function invalidateSidebarTableSearchIndexesForTreeRefresh(node: TreeNode): Promise<void> {
@@ -4065,8 +4135,12 @@ export const useConnectionStore = defineStore("connection", () => {
   async function registerSidebarTableSearchIndexScope(parent: TreeNode, cacheKey: string): Promise<void> {
     const entry = sidebarTableSearchIndexManifestEntry(parent, cacheKey);
     if (!entry) return;
+    const connectionId = entry.connectionId;
+    const connectionGeneration = sidebarTableSearchIndexConnectionGeneration(connectionId);
     sidebarTableSearchIndexManifestWriteQueue = sidebarTableSearchIndexManifestWriteQueue.then(async () => {
+      if (sidebarTableSearchIndexConnectionGeneration(connectionId) !== connectionGeneration || !connections.value.some((connection) => connection.id === connectionId)) return;
       const manifest = await loadSidebarTableSearchIndexManifest();
+      if (sidebarTableSearchIndexConnectionGeneration(connectionId) !== connectionGeneration || !connections.value.some((connection) => connection.id === connectionId)) return;
       const matchesEntryScope = (item: TableSearchIndexManifestEntry) => item.parentNodeId === entry.parentNodeId && item.connectionId === entry.connectionId && item.database === entry.database && item.schema === entry.schema && item.catalog === entry.catalog && item.nodeType === entry.nodeType;
       const existing = manifest.find((item) => matchesEntryScope(item));
       if (existing?.cacheKey === entry.cacheKey) return;
@@ -4079,6 +4153,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function readSidebarTableSearchIndexCache(cacheKey: string, connectionId: string): Promise<SidebarTableSearchIndexCacheEntry> {
+    if (sidebarTableSearchIndexDeletedConnections.has(connectionId)) return { entries: null, stale: false, staleAt: Date.now() };
     const cached = getSidebarTableSearchIndexMemoryCache(cacheKey);
     if (cached !== undefined) return cached;
     const pending = sidebarTableSearchIndexInFlight.get(cacheKey);
@@ -4714,6 +4789,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
+    sidebarTableSearchIndexDeletedConnections.delete(normalized.id);
     if (normalized.save_password === false) normalized.password = "";
     const isNewConnection = !connections.value.some((c) => c.id === normalized.id);
     // 新建同名同类型连接时回填「记住的数据库」，让删除连接后重建的流程少一步手选。
@@ -4876,6 +4952,32 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function deleteSchemaCachePrefixBestEffort(prefix: string): Promise<void> {
+    try {
+      const method = (api as unknown as Record<string, unknown>).deleteSchemaCachePrefix;
+      if (typeof method === "function") await (method as (cachePrefix: string) => Promise<void>)(prefix);
+    } catch {
+      // Cache cleanup is best effort; the connection has already been removed.
+    }
+  }
+
+  async function finalizeRemovedConnectionCaches(connectionIds: ReadonlySet<string>): Promise<void> {
+    for (const connectionId of connectionIds) {
+      sidebarTableSearchIndexDeletedConnections.add(connectionId);
+      invalidateQuickOpenMetadataCache(connectionId);
+    }
+    await Promise.all(
+      [...connectionIds].map(async (connectionId) => {
+        try {
+          await invalidateSidebarTableSearchIndexesForConnection(connectionId);
+        } catch {
+          // Cache cleanup is best effort; the connection has already been removed.
+        }
+        await deleteSchemaCachePrefixBestEffort(quickOpenMetadataCacheKey(connectionId));
+      }),
+    );
+  }
+
   async function removeConnections(ids: Iterable<string>) {
     const connectionIds = [...new Set(ids)].filter((id) => connections.value.some((c) => c.id === id));
     if (!connectionIds.length) return;
@@ -4889,6 +4991,7 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);
     const applyDeletion = (layout: SidebarLayout) => [...removedIds].reduce((current, id) => removeConnectionFromSidebarLayout(current, id), layout);
     await persistConnectionDeletion(nextConnections, applyDeletion);
+    await finalizeRemovedConnectionCaches(removedIds);
     // Re-apply against the live layout: an edit that landed while the write was in
     // flight must survive, and removing connections is a pure transform of the tree.
     applyConnectionRemoval(removedIds, nextConnections, applyDeletion(sidebarLayout.value));
@@ -5056,6 +5159,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (expectedConfigFingerprint && connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
     if (JSON.stringify(current.database_info) === JSON.stringify(normalized)) return;
     const tableListSourceChanged = mysqlTableListSourceChanged(current, normalized);
+    const serverVersionChanged = mysqlServerVersionChanged(current, normalized);
     const jobEngine = nativeJobAdminEngine(current);
 
     await api.saveConnectionDatabaseInfo(connectionId, normalized);
@@ -5072,9 +5176,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const connectionNode = findConnectionNode(connectionId);
       if (connectionNode) connectionNode.children = withConnectionUtilityNodes(connectionId, connectionNode.children ?? [], connectionNode);
     }
-    if (tableListSourceChanged) {
-      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES.
-      // Discard physical-table metadata that may have loaded before background version detection completed.
+    if (tableListSourceChanged || serverVersionChanged) {
+      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES,
+      // and a server version change means a different server answers now. Either way,
+      // discard metadata that may have loaded before background version detection completed.
       bumpTableListSourceRevision(connectionId);
       treeNodeLoads.cancelPrefix(connectionId);
       invalidateCompletionCache(connectionId);
@@ -5090,7 +5195,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     // Other database info is reactive connection metadata, not tree structure. Keep
     // navigator node identities stable so an in-flight first expansion can apply
-    // its loaded children after this background refresh completes.
+    // its loaded children after this background refresh completes. (A MySQL server
+    // version change is the exception: it is handled above, because the database
+    // list itself belongs to the server that reported the old version.)
   }
 
   async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig, expectedConfigFingerprint: string, isCurrent: () => boolean): Promise<void> {
@@ -5843,7 +5950,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     invalidateCompletionCache(connectionId);
     invalidateObjectBrowserRowsCache({ connectionId });
-    await invalidateSidebarTableSearchIndexesForConnection(connectionId);
+    await invalidateSidebarTableSearchIndexesForConnection(connectionId, { preservePersisted: true });
     if (!isExpectedConfigCurrent()) return;
     const { useQueryStore } = await import("@/stores/queryStore");
     if (!isExpectedConfigCurrent()) return;
@@ -5932,6 +6039,9 @@ export const useConnectionStore = defineStore("connection", () => {
     cancelObjectDdlLoadsForDatabase(connectionId, database);
     cancelObjectMetadataLoadsForDatabase(connectionId, database);
     await api.closeDatabaseConnection(connectionId, database);
+    const quoteKey = identifierQuoteKey(connectionId, database);
+    identifierQuotes.value.delete(quoteKey);
+    identifierQuoteLoads.delete(quoteKey);
     clearMetadataRuntimeCacheForDatabase(connectionId, database);
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
@@ -9070,6 +9180,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /** Table-like nodes reload their detail groups on refresh; their caret must stay as the user left it (#14919). */
+  const isTableLikeNode = (node: TreeNode) => node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection";
+
   async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean; sidebarSearch?: boolean }): Promise<void> {
     if (options?.sidebarSearch) {
       return withSidebarSearchLoad(node.connectionId, () => refreshTreeNode(node, { ...options, sidebarSearch: false }));
@@ -9133,7 +9246,19 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadTreeNodeChildren(node, { force: true });
       if (isCurrentRefresh()) {
         await restoreExpandedChildren(node, expandedIds, { force: true }, isCurrentRefresh);
-        if (isCurrentRefresh()) await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
+        if (isCurrentRefresh()) {
+          // Table nodes load their detail groups (columns/indexes/…) on refresh; the
+          // loaders mark the node expanded for a first expand, so refreshing a
+          // collapsed table used to pop it open as if its caret had been clicked
+          // (#14919). Other node types keep the existing load-marks-expanded
+          // behaviour that container/type refreshes rely on.
+          if (!previousExpanded && isTableLikeNode(node)) {
+            node.isExpanded = false;
+            const target = treeNodeInSidebarTree(node);
+            if (target && target !== node) target.isExpanded = false;
+          }
+          await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
+        }
       }
     } catch (error) {
       // A stale failure must never overwrite a newer successful (including empty) result.
@@ -9279,7 +9404,12 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): string {
-    const databaseType = getConfig(connectionId)?.db_type;
+    const config = getConfig(connectionId);
+    const databaseType = config?.db_type;
+    if (databaseType === "dameng" || (databaseType === "jdbc" && effectiveDatabaseTypeForConnection(config) === "dameng")) {
+      const identifiers = damengCompletionColumnIdentifiers(config, table, schema, context);
+      return `${connectionId}:${database}:${catalog ?? ""}:${identifiers.schema ?? ""}:${identifiers.table}`;
+    }
     if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
       const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
       const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
@@ -9401,9 +9531,13 @@ export const useConnectionStore = defineStore("connection", () => {
     });
   }
 
-  async function completionAssistantSearch(request: CompletionAssistantRequest, requestRevision = completionCacheRevision(request.connection_id, request.database)) {
+  async function completionAssistantSearch(request: CompletionAssistantRequest, requestRevision = completionCacheRevision(request.connection_id, request.database), options: { activateConnection?: boolean; allowConnection?: boolean } = {}): Promise<CompletionAssistantResponse> {
     return withCompletionInFlight(`${request.connection_id}:${request.database}:assistant:${requestRevision}:${completionAssistantRequestKey(request)}`, async () => {
-      await ensureConnected(request.connection_id);
+      if (options.allowConnection === false || options.activateConnection === false) {
+        if (!connectedIds.value.has(request.connection_id)) return { candidates: [], incomplete: true, fallback_used: false };
+      } else {
+        await ensureConnected(request.connection_id);
+      }
       return api.completionAssistantSearch(request);
     });
   }
@@ -9564,7 +9698,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function completionAssistantTables(candidates: CompletionAssistantCandidate[], preferredSchema?: string, withOracleMetadata = false): SqlCompletionTable[] {
     return candidates
-      .filter((candidate) => candidate.kind === "table" || candidate.kind === "view")
+      .filter((candidate) => candidate.kind === "table" || candidate.kind === "view" || candidate.kind === "materialized_view")
       .map((candidate) => {
         const detail = completionTableDetail(candidate.comment);
         const table: SqlCompletionTable = {
@@ -9661,6 +9795,7 @@ export const useConnectionStore = defineStore("connection", () => {
     currentSchema?: string,
     requestRevision = completionCacheRevision(connectionId, database),
     matchMode: CompletionAssistantMatchMode = "prefix",
+    options: { activateConnection?: boolean; allowConnection?: boolean } = {},
   ): Promise<SqlCompletionTable[]> {
     const oracleAssistant = isOracleCompletionDatabase(getConfig(connectionId)?.db_type);
     const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
@@ -9678,6 +9813,7 @@ export const useConnectionStore = defineStore("connection", () => {
         match_mode: matchMode,
       },
       requestRevision,
+      options,
     );
     const tables = completionAssistantTables(response.candidates, preferredSchema, oracleAssistant);
     if (requestRevision === completionCacheRevision(connectionId, database)) indexCompletionTables(connectionId, database, schema, tables);
@@ -9728,7 +9864,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return objects;
   }
 
-  async function listCompletionAssistantColumns(connectionId: string, database: string, table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }, requestRevision = completionCacheRevision(connectionId, database)): Promise<SqlCompletionColumn[]> {
+  async function listCompletionAssistantColumns(
+    connectionId: string,
+    database: string,
+    table: string,
+    schema?: string,
+    context?: { tableQuoted?: boolean; schemaQuoted?: boolean },
+    requestRevision = completionCacheRevision(connectionId, database),
+    options: { activateConnection?: boolean } = {},
+  ): Promise<SqlCompletionColumn[]> {
     const response = await completionAssistantSearch(
       {
         connection_id: connectionId,
@@ -9742,6 +9886,7 @@ export const useConnectionStore = defineStore("connection", () => {
         match_mode: "prefix",
       },
       requestRevision,
+      options,
     );
     const columns = completionAssistantColumns(response.candidates, table, schema, context);
     if (columns.length > 0 && requestRevision === completionCacheRevision(connectionId, database)) indexCompletionColumns(connectionId, database, table, schema, columns, undefined, context);
@@ -10321,7 +10466,17 @@ export const useConnectionStore = defineStore("connection", () => {
     return api.listTables(connectionId, database, schema, filter, limit);
   }
 
-  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean; verifySchemaMetadata?: boolean } = {}): Promise<SqlCompletionTable[]> {
+  async function listCompletionTables(
+    connectionId: string,
+    database: string,
+    filter = "",
+    limit?: number,
+    schema?: string,
+    globalSearch = false,
+    currentSchema?: string,
+    catalog?: string,
+    options: { activateConnection?: boolean; allowConnection?: boolean; verifySchemaMetadata?: boolean } = {},
+  ): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
     // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
@@ -10344,18 +10499,22 @@ export const useConnectionStore = defineStore("connection", () => {
     return withCompletionInFlight(
       `${cacheKey}:tables`,
       async () => {
-        await ensureConnected(connectionId, { activate: options.activateConnection !== false });
+        if (options.allowConnection === false) {
+          if (!connectedIds.value.has(connectionId)) return lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
+        } else {
+          await ensureConnected(connectionId, { activate: options.activateConnection !== false });
+        }
 
         if (isSchemaAwareDatabase(connectionId)) {
           if (normalizedFilter || limit) {
             let results: SqlCompletionTable[] = [];
             let assistantCompleted = false;
             try {
-              results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision);
+              results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision, "prefix", options);
               assistantCompleted = true;
               if (shouldWidenCompletionMatch(trimmedFilter, results.length, limit)) {
                 try {
-                  const widenedTables = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision, "contains");
+                  const widenedTables = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision, "contains", options);
                   results = dedupeCompletionTables([...results, ...widenedTables]);
                 } catch {
                   // Keep the prefix matches when the widened lookup is unavailable.
@@ -10381,7 +10540,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (results.length === 0 && relaxedFilter) {
               if (globalSearch) {
                 try {
-                  results = await listCompletionAssistantTables(connectionId, database, relaxedFilter, expandedCompletionLimit(limit), schema, true, currentSchema, requestRevision);
+                  results = await listCompletionAssistantTables(connectionId, database, relaxedFilter, expandedCompletionLimit(limit), schema, true, currentSchema, requestRevision, "prefix", options);
                 } catch {
                   results = [];
                 }
@@ -10628,17 +10787,26 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
-  /// Engines whose CURRENT SCHEMA defaults to the login identity. An unqualified
-  /// reference resolves against the login schema there, so `listCompletionColumns`
-  /// falls back to the username instead of letting its schema-required early return
-  /// discard the lookup. A query tab hits that state when it never picked a schema
-  /// (`jdbcDialect.ts` records a new query tab or a reopened `.sql` file as the
-  /// cases). Dameng was the first engine fixed for this (#8301); DB2's CURRENT
-  /// SCHEMA is documented as the authorization ID of the session user, so it needs
-  /// the same fallback.
-  const LOGIN_SCHEMA_COMPLETION_TYPES = new Set(["dameng", "db2"]);
+  function damengCompletionColumnIdentifiers(config: ConnectionConfig | undefined, table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }) {
+    const loginSchema = config?.username?.trim() || undefined;
+    // Parser-sourced identifiers carry quote flags; metadata and selection names
+    // already have the exact spelling that must be sent to the driver.
+    let owner = schema?.trim();
+    if (!owner) owner = context?.tableQuoted === undefined ? loginSchema : loginSchema?.toUpperCase();
+    else if (context?.schemaQuoted === false) owner = owner.toUpperCase();
+    return { table: context?.tableQuoted === false ? table.toUpperCase() : table, schema: owner };
+  }
 
-  async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean; currentSchema?: string }, catalog?: string): Promise<SqlCompletionColumn[]> {
+  async function listCompletionColumns(
+    connectionId: string,
+    database: string,
+    table: string,
+    schema?: string,
+    context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean; currentSchema?: string },
+    catalog?: string,
+    options: { activateConnection?: boolean } = {},
+  ): Promise<SqlCompletionColumn[]> {
+    if (options.activateConnection === false && !connectedIds.value.has(connectionId)) return [];
     const config = getConfig(connectionId);
     // Use the effective database type (e.g. a JDBC connection whose URL is
     // `jdbc:oracle:...` resolves to "oracle") rather than the raw db_type.
@@ -10647,13 +10815,15 @@ export const useConnectionStore = defineStore("connection", () => {
     // schema-required early return below finds a schema, and every star
     // expansion silently returns no columns.
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+    const damengIdentifiers = effectiveDbType === "dameng" ? damengCompletionColumnIdentifiers(config, table, schema, context) : undefined;
     const oracleIdentifier = effectiveDbType === "oracle" || effectiveDbType === "oceanbase-oracle";
     const uppercaseUnquotedIdentifier = oracleIdentifier || effectiveDbType === "saphana";
-    const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
+    const completionTable = damengIdentifiers?.table ?? (uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table);
     const normalizedSchema = schema?.trim();
-    const loginSchema = effectiveDbType && LOGIN_SCHEMA_COMPLETION_TYPES.has(effectiveDbType) ? config?.username?.trim() || undefined : undefined;
+    // DB2 defaults CURRENT SCHEMA to the session's authorization ID.
+    const loginSchema = effectiveDbType === "db2" ? config?.username?.trim() || undefined : undefined;
     const rawCompletionSchema = effectiveDbType === "spanner" ? normalizedSchema : normalizedSchema || loginSchema;
-    const completionSchema = uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
+    const completionSchema = damengIdentifiers ? damengIdentifiers.schema : uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
     const usesCurrentSchema = usesOracleCurrentSchemaCompletion(effectiveDbType, completionSchema);
     const hasCompletionSchema = completionSchema != null && (completionSchema !== "" || effectiveDbType === "spanner");
     if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !hasCompletionSchema && !usesCurrentSchema) {
@@ -10668,11 +10838,12 @@ export const useConnectionStore = defineStore("connection", () => {
       await withCompletionInFlight(
         `${cacheKey}:columns`,
         async () => {
-          await ensureConnected(connectionId);
+          if (options.activateConnection === false && !connectedIds.value.has(connectionId)) return;
+          if (options.activateConnection !== false) await ensureConnected(connectionId);
           // Use assistant metadata opportunistically, then fall back to canonical metadata.
           if (!usesCurrentSchema && !catalog) {
             try {
-              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context, requestRevision);
+              const assistantColumns = await listCompletionAssistantColumns(connectionId, database, completionTable, completionSchema, context, requestRevision, options);
               if (assistantColumns.length > 0) {
                 const columns = assistantColumns.map((column) => ({
                   name: column.name,
@@ -10708,7 +10879,8 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     if (!completionColumnsCache.value[cacheKey]) {
-      return listCompletionColumns(connectionId, database, table, schema, context, catalog);
+      if (options.activateConnection === false) return [];
+      return listCompletionColumns(connectionId, database, table, schema, context, catalog, options);
     }
 
     const columns = completionColumnsCache.value[cacheKey].map((column) => ({
@@ -11362,6 +11534,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await persistConnectionDeletion(nextConnections, applyGroupDeletion);
     nextLayout = applyGroupDeletion(sidebarLayout.value);
     if (removedConnectionIds.size) {
+      await finalizeRemovedConnectionCaches(removedConnectionIds);
       applyConnectionRemoval(removedConnectionIds, nextConnections, nextLayout);
       purgeTableVGroupsForConnections(removedConnectionIds);
       // 删除已经落盘完成；页签处理失败只告警，不能让已成功的删除以异常收场。
@@ -11987,6 +12160,7 @@ export const useConnectionStore = defineStore("connection", () => {
     ensureEtcdAccessCapabilities,
     canWriteEtcdKey,
     connectionIdentifierQuote,
+    ensureConnectionIdentifierQuote,
     databaseCompatibilityMode,
     ensureDatabaseCompatibilityMode,
     databaseCompatibilityModes,

@@ -26,6 +26,10 @@ export interface SavedSqlDatabaseScope {
 export type SavedSqlDatabaseIndex = ReadonlyMap<string, readonly SavedSqlFile[]>;
 type SavedSqlDatabaseSource = readonly SavedSqlFile[] | SavedSqlDatabaseIndex;
 
+export function supportsDatabaseSavedSqlTree(type: TreeNode["type"]): boolean {
+  return type === "database" || type === "redis-db";
+}
+
 export function savedSqlDatabaseScopeKey(scope: SavedSqlDatabaseScope): string {
   // Null is deliberately a concrete built-in/default catalog scope, not a wildcard.
   return JSON.stringify([scope.connectionId, scope.catalog || null, scope.database]);
@@ -114,11 +118,12 @@ export function decorateDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[], so
   let existingById: Map<string, TreeNode> | undefined;
   return nodes.map((node) => {
     // Non-database nodes without children (the bulk of a large table page) are returned untouched.
-    if (node.type !== "database" && !node.children?.length) return node;
+    const supportsSavedSql = supportsDatabaseSavedSqlTree(node.type);
+    if (!supportsSavedSql && !node.children?.length) return node;
     existingById ??= new Map(existingNodes.map((existingNode) => [existingNode.id, existingNode] as const));
     const existing = existingById.get(node.id);
     const children = decorateDatabaseSavedSqlTreeNodes(node.children ?? [], source, existing?.children ?? []);
-    if (node.type !== "database") {
+    if (!supportsSavedSql) {
       return { ...node, children };
     }
 

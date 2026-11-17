@@ -1235,6 +1235,7 @@ defineExpose({
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
           :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          :clearable="activeConnection?.db_type === 'postgres' && activeTab.mode === 'query'"
           :clear-selected-option="supportsClearableQuerySchema(activeConnection?.db_type)"
           trigger-variant="ghost"
           trigger-class="gap-1.5"

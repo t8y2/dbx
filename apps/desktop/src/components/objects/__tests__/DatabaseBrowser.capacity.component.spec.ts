@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   listSchemas: vi.fn(),
   openObjectBrowser: vi.fn(),
   editorSettings: {
+    shortcuts: { newQuery: "Mod+T" },
     objectBrowserViewMode: "list" as "list" | "grid" | "compact",
     objectBrowserCompactWidth: 160,
   },

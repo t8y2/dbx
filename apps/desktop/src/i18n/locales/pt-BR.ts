@@ -3699,6 +3699,7 @@ export default withEnglishFallback({
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condição",
     rowJsonPreview: "Pré-visualização JSON",
+    exportSelectedColumnsSqlUpdates: "Exportar colunas selecionadas como SQL UPDATE",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

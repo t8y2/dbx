@@ -3961,6 +3961,7 @@ export default withEnglishFallback({
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
     rowJsonPreview: "ตัวอย่าง JSON",
+    exportSelectedColumnsSqlUpdates: "ส่งออกคอลัมน์ที่เลือกเป็น SQL UPDATE",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

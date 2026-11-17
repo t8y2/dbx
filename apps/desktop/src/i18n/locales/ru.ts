@@ -3784,6 +3784,7 @@ export default withEnglishFallback({
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
     rowJsonPreview: "Предпросмотр JSON",
+    exportSelectedColumnsSqlUpdates: "Экспортировать выбранные столбцы как SQL UPDATE",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

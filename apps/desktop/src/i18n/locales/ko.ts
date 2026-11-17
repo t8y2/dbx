@@ -3653,6 +3653,7 @@ export default withEnglishFallback({
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
     rowJsonPreview: "JSON 미리보기",
+    exportSelectedColumnsSqlUpdates: "선택한 열을 SQL UPDATE로 내보내기",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

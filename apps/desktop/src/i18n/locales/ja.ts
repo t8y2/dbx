@@ -3723,6 +3723,7 @@ export default withEnglishFallback({
     filterActive: "フィルター適用済み",
     structuredFiltersActive: "{count} 件の条件フィルター",
     rowJsonPreview: "JSON プレビュー",
+    exportSelectedColumnsSqlUpdates: "選択した列を SQL UPDATE としてエクスポート",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

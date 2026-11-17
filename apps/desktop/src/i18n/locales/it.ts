@@ -3701,6 +3701,7 @@ export default withEnglishFallback({
     filterActive: "Filtro applicato",
     structuredFiltersActive: "{count} filtri condizione",
     rowJsonPreview: "Anteprima JSON",
+    exportSelectedColumnsSqlUpdates: "Esporta le colonne selezionate come SQL UPDATE",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

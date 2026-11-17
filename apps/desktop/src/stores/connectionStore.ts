@@ -39,6 +39,7 @@ import type {
 } from "@/types/database";
 import {
   inheritNaturalTreeNodeOrder,
+  hasExplicitTreeLayoutOrder,
   isPinnedKeyPresent,
   migrateLegacyPinnedTreeNodeOrder,
   normalizePinnedTreeNodeOrder,
@@ -82,6 +83,11 @@ import {
 } from "@/lib/sidebar/sidebarLayout";
 import {
   applyTableVGroupsToChildren,
+  databaseVGroupMembers,
+  moveDatabaseVGroupMember,
+  type DatabaseVGroupPlacement,
+  isDatabaseVGroupContainer,
+  resolveDatabaseVGroupScope,
   collectTableTreeNames,
   createTableVGroup as createTableVGroupOp,
   deleteTableVGroups as deleteTableVGroupsOp,
@@ -2110,7 +2116,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function hasConnectionMetadataChildren(children: TreeNode[] | undefined): boolean {
-    return connectionMetadataChildren(children).length > 0;
+    return connectionMetadataChildren(stripTableVGroupsFromChildren(children || [])).length > 0;
   }
 
   // `trustEmptyMetadataChildren` distinguishes two very different reasons this
@@ -2231,6 +2237,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function setChildren(parent: TreeNode, children: TreeNode[], options?: { trustEmptyConnectionChildren?: boolean }) {
+    // Merge real database siblings before reapplying folders, preserving loaded subtrees.
+    if (isDatabaseVGroupContainer(parent)) {
+      if (parent.children) parent.children = stripTableVGroupsFromChildren(parent.children);
+      children = stripTableVGroupsFromChildren(children);
+    }
     // Compare markers against the resolved child list (after connection preserve), not the raw loader payload.
     children = preserveExistingConnectionMetadataChildren(parent, children, options?.trustEmptyConnectionChildren === true);
     children = decorateDatabaseSavedSqlTreeNodes(children, savedSqlFilesByDatabase, parent.children);
@@ -2324,6 +2335,10 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
       children = stripTableVGroupsFromChildren(children);
+    }
+    if (isDatabaseVGroupContainer(parent) && parent.connectionId) {
+      const scope: TableVGroupScope = { connectionId: parent.connectionId, catalog: parent.type === "doris-catalog" ? parent.catalog : undefined, objectType: "databases" };
+      children = applyTableVGroupsToChildren(children, tableVGroupLayouts.value[tableVGroupScopeKey(scope)!], scope);
     }
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
@@ -4780,10 +4795,27 @@ export const useConnectionStore = defineStore("connection", () => {
   function reorderPinnedTreeNodes(draggedKey: string, targetKey: string, position: DropPosition): boolean {
     if (position === "inside" || !canReorderPinnedTreeNodes(draggedKey, targetKey)) return false;
     const next = reorderPinnedTreeNodeOrder(pinnedTreeNodeOrder.value, draggedKey, targetKey, position);
-    if (next.length === pinnedTreeNodeOrder.value.length && next.every((key, index) => key === pinnedTreeNodeOrder.value[index])) return false;
-    setPinnedTreeNodeOrder(next);
+    const pinOrderChanged = next.length !== pinnedTreeNodeOrder.value.length || next.some((key, index) => key !== pinnedTreeNodeOrder.value[index]);
+    const source = findPinnedTreeNodeLocation(treeNodes.value, draggedKey);
+    const target = findPinnedTreeNodeLocation(treeNodes.value, targetKey);
+    let layoutChanged = false;
+    // Ordinary row dragging can change the visible layout without changing pin
+    // order. Evaluate both independently before deciding this drop is a no-op.
+    if (source && target && hasExplicitTreeLayoutOrder(source.siblings)) {
+      const scope = resolveDatabaseVGroupScope(treeNodes.value, source.node, tableVGroupLayouts.value);
+      const scopeKey = scope ? tableVGroupScopeKey(scope) : null;
+      const layout = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      const container = scope ? findTableVGroupContainerNode(treeNodes.value, scope) : null;
+      if (scope && scopeKey && layout && container?.children) {
+        const nextLayout = moveDatabaseVGroupMember(layout, source.node, { target: target.node, position }, container.children);
+        layoutChanged = JSON.stringify(nextLayout) !== JSON.stringify(layout);
+        if (layoutChanged) updateTableVGroupLayout(scope, scopeKey, nextLayout);
+      }
+    }
+    if (!pinOrderChanged && !layoutChanged) return false;
+    if (pinOrderChanged) setPinnedTreeNodeOrder(next);
     syncPinnedTreeState(treeNodes.value);
-    persistPinnedTreeNodeIds();
+    if (pinOrderChanged) persistPinnedTreeNodeIds();
     return true;
   }
 
@@ -5363,6 +5395,14 @@ export const useConnectionStore = defineStore("connection", () => {
     await reloadConnectionDatabaseChildren(connectionId);
   }
 
+  function pruneDatabaseVGroups(scope: TableVGroupScope, names: readonly string[]) {
+    const key = tableVGroupScopeKey(scope);
+    const current = key ? tableVGroupLayouts.value[key] : undefined;
+    if (!key || !current) return;
+    const next = pruneTableVGroupMembersOp(current, new Set(names));
+    if (next !== current) updateTableVGroupLayout(scope, key, next);
+  }
+
   function recordPrimaryVisibleObjectNames(connectionId: string, objectNames: readonly string[]) {
     const names = [...objectNames];
     const existing = primaryVisibleObjectNames.value[connectionId];
@@ -5477,7 +5517,7 @@ export const useConnectionStore = defineStore("connection", () => {
   // Open it right away so the schema list shows when the connection is opened.
   async function expandCatalogLessJdbcDefaultDatabase(connectionNode: TreeNode | null, config: ConnectionConfig | undefined) {
     if (!connectionNode || config?.db_type !== "jdbc" || !connectionShouldDiscoverJdbcSchemas(config)) return;
-    const databaseNodes = (connectionNode.children ?? []).filter((child) => child.type === "database");
+    const databaseNodes = stripTableVGroupsFromChildren(connectionNode.children ?? []).filter((child) => child.type === "database");
     if (databaseNodes.length !== 1 || databaseNodes[0].database !== "") return;
     const defaultNodeId = databaseNodes[0].id;
     try {
@@ -6529,6 +6569,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (isSidebarSearchQueryChanged(options)) return;
             const targetNode = treeNodeLoadTarget(load);
             if (!targetNode) return;
+            pruneDatabaseVGroups({ connectionId, objectType: "databases" }, databaseNames);
             recordPrimaryVisibleObjectNames(connectionId, databaseNames);
             setChildren(targetNode, children, { trustEmptyConnectionChildren: databaseNames.length > 0 && visibleNames.length === 0 });
             await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
@@ -6651,6 +6692,10 @@ export const useConnectionStore = defineStore("connection", () => {
               if (isSidebarSearchQueryChanged(options)) return;
               const targetNode = treeNodeLoadTarget(load);
               if (!targetNode) return;
+              pruneDatabaseVGroups(
+                { connectionId, objectType: "databases" },
+                databases.map((database) => database.name),
+              );
               recordPrimaryVisibleObjectNames(
                 connectionId,
                 databases.map((database) => database.name),
@@ -7012,6 +7057,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const visibleDbs = filterDatabaseNamesForConnection(dbs, config);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      pruneDatabaseVGroups({ connectionId, objectType: "databases" }, dbs);
       recordPrimaryVisibleObjectNames(connectionId, dbs);
       setChildren(
         targetNode,
@@ -7182,6 +7228,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Milvus databases");
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      pruneDatabaseVGroups({ connectionId, objectType: "databases" }, dbs);
       setChildren(
         targetNode,
         withSavedSqlRoot(
@@ -7581,6 +7628,10 @@ export const useConnectionStore = defineStore("connection", () => {
       if (isSidebarSearchQueryChanged(options)) return;
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
+      pruneDatabaseVGroups(
+        { connectionId, catalog, objectType: "databases" },
+        databases.map((database) => database.name),
+      );
       setChildren(targetNode, databaseNodes);
       targetNode.isExpanded = true;
     } catch (e) {
@@ -11362,12 +11413,16 @@ export const useConnectionStore = defineStore("connection", () => {
   function reprojectTableVGroupScope(scope: TableVGroupScope, scopeKey: string, tableName?: string, rowType?: string) {
     const container = findTableVGroupContainerNode(treeNodes.value, scope, tableName, rowType);
     if (!container?.children) return;
+    if (scope.objectType === "databases") {
+      container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
+      return;
+    }
     if (container.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
       container.children = stripTableVGroupsFromChildren(container.children);
       return;
     }
     const parent = findParentNode(treeNodes.value, container.id);
-    if (parent?.children && parent.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
+    if (parent?.children && !isDatabaseVGroupContainer(parent) && parent.children.some((child) => child.type === "group-tables" || isTreeGroupNodeType(child.type))) {
       parent.children = stripTableVGroupsFromChildren(parent.children);
     }
     container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
@@ -12087,6 +12142,17 @@ export const useConnectionStore = defineStore("connection", () => {
           sidebarLayoutPersisted = JSON.stringify(sidebarLayout.value);
         }
         rebuildTreeNodes();
+        // Reloaded layouts must also replace projections retained by connection state merging.
+        const reprojectDatabases = (nodes: TreeNode[]) => {
+          for (const node of nodes) {
+            if (isDatabaseVGroupContainer(node) && node.connectionId && node.children) {
+              const scope: TableVGroupScope = { connectionId: node.connectionId, catalog: node.type === "doris-catalog" ? node.catalog : undefined, objectType: "databases" };
+              node.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(node.children), tableVGroupLayouts.value[tableVGroupScopeKey(scope)!], scope);
+            }
+            if (node.children) reprojectDatabases(node.children);
+          }
+        };
+        reprojectDatabases(treeNodes.value);
       })().finally(() => {
         initFromDiskPromise = null;
       });
@@ -12404,6 +12470,17 @@ export const useConnectionStore = defineStore("connection", () => {
       if (layout !== sidebarLayout.value) updateLayoutAndRebuild(layout);
     },
     tableVGroupLayouts,
+    updateDatabaseVGroupMember(node: TreeNode, newName?: string) {
+      const scope = resolveDatabaseVGroupScope(treeNodes.value, node);
+      if (!scope) return;
+      const update = (entries: TableVGroupLayout["order"]): TableVGroupLayout["order"] =>
+        entries.flatMap<TableVGroupLayout["order"][number]>((entry) => {
+          if (entry.type === "group") return [{ ...entry, children: update(entry.children ?? []) }];
+          if (entry.name !== node.database || (entry.rowType && entry.rowType !== node.type)) return [entry];
+          return newName ? [{ ...entry, name: newName }] : [];
+        });
+      updateTableVGroupLayoutFor(scope, (layout) => ({ ...layout, order: update(layout.order) }));
+    },
     resolveTableVGroupScope,
     tableVGroupLayoutFor(scope: TableVGroupScope) {
       const resolved = resolveTableVGroupScope(scope);
@@ -12422,7 +12499,17 @@ export const useConnectionStore = defineStore("connection", () => {
     deleteTableVGroups(scope: TableVGroupScope, groupIds: Iterable<string>) {
       updateTableVGroupLayoutFor(scope, (layout) => deleteTableVGroupsOp(layout, groupIds));
     },
-    moveTableToVGroup(scope: TableVGroupScope, tableName: string, groupId: string | null, rowType?: string) {
+    moveTableToVGroup(scope: TableVGroupScope, tableName: string, groupId: string | null, rowType?: string, placement?: DatabaseVGroupPlacement) {
+      if (placement) {
+        const resolved = resolveTableVGroupScope(scope);
+        if (resolved?.scope.objectType !== "databases") return;
+        const container = findTableVGroupContainerNode(treeNodes.value, resolved.scope);
+        const source = databaseVGroupMembers(container?.children ?? []).find((node) => node.database === tableName && node.type === rowType);
+        const targetScope = resolveDatabaseVGroupScope(treeNodes.value, placement.target, tableVGroupLayouts.value);
+        if (!source || !container?.children || !targetScope || tableVGroupScopeKey(targetScope) !== resolved.scopeKey) return;
+        updateTableVGroupLayoutFor(resolved.scope, (layout) => moveDatabaseVGroupMember(layout, source, placement, container.children!), tableName, rowType);
+        return;
+      }
       updateTableVGroupLayoutFor(scope, (layout) => moveTableToVGroupOp(layout, tableName, groupId, rowType), tableName, rowType);
     },
     reorderTableVGroupEntry(scope: TableVGroupScope, draggedEntryId: string, targetEntryId: string, position: TableVGroupDropPosition) {

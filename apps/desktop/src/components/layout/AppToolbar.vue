@@ -235,7 +235,13 @@ function checkToolbarWidth() {
 const rightWrapper = ref<HTMLElement>();
 const rightOverflowCount = ref(0);
 const rightToolbarLabelsKey = "dbx-right-toolbar-labels";
+const rightToolbarLabelsRestoreSlack = 48;
 const showRightToolbarLabels = ref(safeLocalStorageGet(rightToolbarLabelsKey) === "true");
+// Keep the saved preference separate from the mode that fits the current window.
+// A narrow window may temporarily hide labels without changing the preference.
+const effectiveRightToolbarLabels = ref(showRightToolbarLabels.value);
+const rightToolbarLabelsAutoCollapsed = ref(false);
+const rightToolbarLabelsCollapsedAtWidth = ref<number | null>(null);
 let toolbarLayoutRaf = 0;
 let trafficLightSyncRaf = 0;
 let settlingRightOverflow = false;
@@ -365,6 +371,53 @@ const overflowRightMenuItems = computed(() => {
   }));
 });
 
+function hasRightToolbarOverflow(): boolean {
+  const toolbar = toolbarEl.value;
+  const wrapper = rightWrapper.value;
+  if (!toolbar || !wrapper || toolbar.clientWidth <= 0) return false;
+  return toolbar.scrollWidth > toolbar.clientWidth + 1 || wrapper.scrollWidth > wrapper.clientWidth + 1;
+}
+
+async function settleRightToolbarLabels() {
+  if (!showRightToolbarLabels.value) {
+    rightToolbarLabelsAutoCollapsed.value = false;
+    rightToolbarLabelsCollapsedAtWidth.value = null;
+    if (effectiveRightToolbarLabels.value) {
+      effectiveRightToolbarLabels.value = false;
+      await nextTick();
+    }
+    return;
+  }
+
+  const toolbar = toolbarEl.value;
+  if (!toolbar || toolbar.clientWidth <= 0) return;
+
+  if (rightToolbarLabelsAutoCollapsed.value) {
+    const collapsedAtWidth = rightToolbarLabelsCollapsedAtWidth.value;
+    if (collapsedAtWidth !== null && toolbar.clientWidth - collapsedAtWidth < rightToolbarLabelsRestoreSlack) return;
+  }
+
+  // Restore all right-side actions before measuring the full label layout. If
+  // that layout does not fit, icon mode is preferred before More overflow.
+  if (rightOverflowCount.value > 0) {
+    rightOverflowCount.value = 0;
+    await nextTick();
+  }
+  effectiveRightToolbarLabels.value = true;
+  await nextTick();
+
+  if (hasRightToolbarOverflow()) {
+    effectiveRightToolbarLabels.value = false;
+    rightToolbarLabelsAutoCollapsed.value = true;
+    rightToolbarLabelsCollapsedAtWidth.value = toolbar.clientWidth;
+    await nextTick();
+    return;
+  }
+
+  rightToolbarLabelsAutoCollapsed.value = false;
+  rightToolbarLabelsCollapsedAtWidth.value = null;
+}
+
 async function settleRightOverflowOnce() {
   const wrapper = rightWrapper.value;
   if (!wrapper) return;
@@ -411,6 +464,8 @@ async function settleRightOverflow() {
   try {
     do {
       pendingRightOverflowSettle = false;
+      await nextTick();
+      await settleRightToolbarLabels();
       await nextTick();
       await settleRightOverflowOnce();
     } while (pendingRightOverflowSettle);
@@ -466,6 +521,10 @@ watch(
   showRightToolbarLabels,
   (show) => {
     safeLocalStorageSet(rightToolbarLabelsKey, String(show));
+    effectiveRightToolbarLabels.value = show;
+    rightToolbarLabelsAutoCollapsed.value = false;
+    rightToolbarLabelsCollapsedAtWidth.value = null;
+    rightOverflowCount.value = 0;
     scheduleToolbarLayout();
   },
   { flush: "post" },
@@ -692,7 +751,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
 </script>
 
 <template>
-  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" :data-right-toolbar-labels="showRightToolbarLabels" data-tauri-drag-region @dblclick="onToolbarDblClick">
+  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" :data-right-toolbar-labels="effectiveRightToolbarLabels" data-tauri-drag-region @dblclick="onToolbarDblClick">
     <a
       v-if="!isDesktop && webLogoPosition === 'left'"
       href="https://dbxio.com"
@@ -838,7 +897,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
               :class="{ 'toolbar-action-button--active bg-accent': isAlwaysOnTop }"
               :aria-pressed="isAlwaysOnTop"
               :aria-label="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
-              :data-right-toolbar-label="t('toolbar.alwaysOnTop')"
+              :data-right-toolbar-label="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
               @click="toggleAlwaysOnTop"
             >
               <Pin v-if="isAlwaysOnTop" class="toolbar-action-icon h-4 w-4 fill-current" />

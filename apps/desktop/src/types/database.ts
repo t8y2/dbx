@@ -2279,6 +2279,7 @@ export interface TreeNode {
   nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";
@@ -2521,6 +2522,7 @@ export interface TabUiState {
   activeOutputView?: TabOutputView;
   /** Redis query results default to grid; a per-tab override selects command-line output. */
   redisResultViewMode?: RedisResultViewMode;
+  resultTransposeEnabled?: boolean;
   resultPaneOpen?: boolean;
   /** Tracks whether the active output view was auto-switched to "messages" by live server output during execution. */
   autoSwitchedToMessagesDuringExecution?: boolean;
@@ -2559,6 +2561,7 @@ export interface DatabaseSearchTableTask {
 export interface DatabaseSearchTabState {
   keyword: string;
   searchScope?: DatabaseSearchScope;
+  selectedObjects?: string[];
   perTableLimit: number;
   progressDone: number;
   progressTotal: number;

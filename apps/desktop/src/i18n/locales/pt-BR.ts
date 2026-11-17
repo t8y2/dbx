@@ -1238,6 +1238,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "O item não está disponível na barra lateral. Ele pode ter sido removido ou ocultado.",
     locateSqlFile: "Localizar na lista de arquivos SQL",
     locateActiveTab: "Localizar na barra lateral",
+    searchAllDatabases: "Pesquisar todos os bancos de dados",
   },
   savedSql: {
     openDefaultQuery: "Abrir consulta padrão",
@@ -2663,6 +2664,8 @@ export default withEnglishFallback({
     showLabels: "Mostrar valores",
   },
   grid: {
+    setTablePageSizeDefault: "Definir padrão para esta tabela",
+    resetTablePageSizeDefault: "Usar padrão global",
     exportSelectedRowsScope: "Linhas selecionadas",
     exportSelectedCellsScope: "Células selecionadas",
     exportSelectedColumnsScope: "Colunas selecionadas",
@@ -3699,6 +3702,12 @@ export default withEnglishFallback({
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condição",
     rowJsonPreview: "Pré-visualização JSON",
+    binaryColumnFormats: {
+      "binary-hex": "Binário para hexadecimal",
+      "binary-text": "Binário para UTF-8",
+      "binary-uuid": "Binário para UUID",
+      "binary-uuid-swapped": "Binário para UUID (bits de tempo trocados)",
+    },
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",
@@ -4111,6 +4120,9 @@ export default withEnglishFallback({
     exitMultiSelect: "Sair da seleção múltipla",
   },
   databaseSearch: {
+    chooseObjects: "Escolher tabelas ou visões",
+    selectedObjects: "{count} objetos selecionados",
+    resetObjectScope: "Limpar seleção de objetos",
     title: "Pesquisar no Banco de Dados",
     open: "Pesquisar no Banco de Dados",
     keyword: "Palavra-chave",
@@ -5470,6 +5482,7 @@ export default withEnglishFallback({
     scopeSequences: "sequências",
     scopeFunctions: "funções",
     stepSkipped: "Ignorado porque uma etapa anterior obrigatória falhou.",
+    selectedObjectsCount: "{count} objetos selecionados",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "As datas de jobs nesta versão do OceanBase aceitam apenas precisão de microssegundos. Defina como 0 os dígitos 7–9 dos segundos fracionários e gere a prévia novamente; a entrada original foi mantida.",
@@ -7650,6 +7663,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL bruto",
     },
+    preserveQuotedBracedParameters: "Preservar os placeholders de modelo em strings entre aspas simples",
   },
   transfer: {
     log: {
@@ -10752,6 +10766,7 @@ export default withEnglishFallback({
     shortcutConvertSelectionToDelimited: "Converter conteúdo selecionado em lista delimitada",
     shortcutSelectNextGridColumn: "Selecionar a próxima coluna dos dados da tabela",
     shortcutSelectPreviousGridColumn: "Selecionar a coluna anterior dos dados da tabela",
+    sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

@@ -1218,6 +1218,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "Элемент недоступен на боковой панели. Возможно, он был удалён или скрыт.",
     locateSqlFile: "Найти в списке SQL-файлов",
     locateActiveTab: "Найти в боковой панели",
+    searchAllDatabases: "Поиск во всех базах данных",
   },
   savedSql: {
     openDefaultQuery: "Открыть запрос по умолчанию",
@@ -2751,6 +2752,8 @@ export default withEnglishFallback({
     showLabels: "Показывать значения",
   },
   grid: {
+    setTablePageSizeDefault: "Сохранить значение для этой таблицы",
+    resetTablePageSizeDefault: "Использовать глобальное значение",
     exportSelectedRowsScope: "Выбранные строки",
     exportSelectedCellsScope: "Выделенные ячейки",
     exportSelectedColumnsScope: "Выделенные столбцы",
@@ -3784,6 +3787,12 @@ export default withEnglishFallback({
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
     rowJsonPreview: "Предпросмотр JSON",
+    binaryColumnFormats: {
+      "binary-hex": "Бинарные данные в шестнадцатеричный формат",
+      "binary-text": "Бинарные данные в UTF-8",
+      "binary-uuid": "Бинарные данные в UUID",
+      "binary-uuid-swapped": "Бинарные данные в UUID (с перестановкой битов времени)",
+    },
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",
@@ -4213,6 +4222,9 @@ export default withEnglishFallback({
     deselectGroup: "Снять выбор с группы",
   },
   databaseSearch: {
+    chooseObjects: "Выбрать таблицы или представления",
+    selectedObjects: "Выбрано объектов: {count}",
+    resetObjectScope: "Сбросить выбор объектов",
     title: "Поиск по базе данных",
     open: "Поиск по базе данных",
     keyword: "Ключевое слово",
@@ -6219,6 +6231,7 @@ export default withEnglishFallback({
     scopeSequences: "последовательности",
     scopeFunctions: "функции",
     stepSkipped: "Пропущено из-за сбоя необходимого предыдущего шага.",
+    selectedObjectsCount: "Выбрано объектов: {count}",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Даты заданий в этой версии OceanBase поддерживают только микросекундную точность. Установите цифры 7–9 дробной части секунды в 0 и повторите предварительный просмотр; исходный ввод сохранён.",
@@ -9115,6 +9128,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "Необработанный SQL",
     },
+    preserveQuotedBracedParameters: "Сохранять шаблонные заполнители в строках в одинарных кавычках",
   },
   transfer: {
     log: {
@@ -12345,6 +12359,7 @@ export default withEnglishFallback({
     shortcutConvertSelectionToDelimited: "Преобразовать выделение в список с разделителями",
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
+    sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

@@ -1244,6 +1244,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "사이드바에서 해당 항목을 찾을 수 없습니다. 삭제되었거나 숨겨져 있을 수 있습니다.",
     locateSqlFile: "SQL 파일 목록에서 찾기",
     locateActiveTab: "사이드바에서 찾기",
+    searchAllDatabases: "모든 데이터베이스 검색",
   },
   savedSql: {
     openDefaultQuery: "기본 쿼리 열기",
@@ -2661,6 +2662,8 @@ export default withEnglishFallback({
     showLabels: "값 표시",
   },
   grid: {
+    setTablePageSizeDefault: "이 테이블의 기본값으로 설정",
+    resetTablePageSizeDefault: "전역 기본값 사용",
     exportSelectedRowsScope: "선택한 행",
     exportSelectedCellsScope: "선택 영역",
     exportSelectedColumnsScope: "선택 열",
@@ -3653,6 +3656,12 @@ export default withEnglishFallback({
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
     rowJsonPreview: "JSON 미리보기",
+    binaryColumnFormats: {
+      "binary-hex": "바이너리를 16진수로",
+      "binary-text": "바이너리를 UTF-8로",
+      "binary-uuid": "바이너리를 UUID로",
+      "binary-uuid-swapped": "바이너리를 UUID로 (시간 비트 교환)",
+    },
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",
@@ -4064,6 +4073,9 @@ export default withEnglishFallback({
     deselectGroup: "그룹 선택 해제",
   },
   databaseSearch: {
+    chooseObjects: "테이블 또는 뷰 선택",
+    selectedObjects: "개체 {count}개 선택됨",
+    resetObjectScope: "개체 선택 초기화",
     title: "데이터베이스 검색",
     open: "데이터베이스 검색",
     keyword: "키워드",
@@ -5764,6 +5776,7 @@ export default withEnglishFallback({
     scopeSequences: "시퀀스",
     scopeFunctions: "함수",
     stepSkipped: "필요한 이전 단계가 실패하여 건너뜁니다.",
+    selectedObjectsCount: "{count}개 개체 선택됨",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "이 OceanBase 버전의 작업 날짜는 마이크로초 정밀도만 지원합니다. 소수 초의 7~9번째 자리를 0으로 바꾸고 다시 미리 보세요. 원래 입력은 보존되었습니다.",
@@ -7680,6 +7693,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "원본 SQL",
     },
+    preserveQuotedBracedParameters: "작은따옴표 문자열의 템플릿 자리 표시자 유지",
   },
   transfer: {
     log: {
@@ -10852,6 +10866,7 @@ export default withEnglishFallback({
     shortcutConvertSelectionToDelimited: "선택한 내용을 구분 기호로 구분된 목록으로 변환",
     shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
     shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
+    sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

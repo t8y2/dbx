@@ -1238,6 +1238,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "サイドバーに該当する項目が見つかりません。削除または非表示にされている可能性があります。",
     locateSqlFile: "SQL ファイル一覧で表示",
     locateActiveTab: "サイドバーで表示",
+    searchAllDatabases: "すべてのデータベースを検索",
   },
   savedSql: {
     openDefaultQuery: "デフォルトクエリを開く",
@@ -2683,6 +2684,8 @@ export default withEnglishFallback({
     showLabels: "値を表示",
   },
   grid: {
+    setTablePageSizeDefault: "このテーブルの既定値に設定",
+    resetTablePageSizeDefault: "全体の既定値を使用",
     exportSelectedRowsScope: "選択行",
     exportSelectedCellsScope: "選択セル",
     exportSelectedColumnsScope: "選択列",
@@ -3723,6 +3726,12 @@ export default withEnglishFallback({
     filterActive: "フィルター適用済み",
     structuredFiltersActive: "{count} 件の条件フィルター",
     rowJsonPreview: "JSON プレビュー",
+    binaryColumnFormats: {
+      "binary-hex": "バイナリ→16進数",
+      "binary-text": "バイナリ→UTF-8",
+      "binary-uuid": "バイナリ→UUID",
+      "binary-uuid-swapped": "バイナリ→UUID（時間ビット交換）",
+    },
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",
@@ -4135,6 +4144,9 @@ export default withEnglishFallback({
     exitMultiSelect: "複数選択を終了",
   },
   databaseSearch: {
+    chooseObjects: "テーブルまたはビューを選択",
+    selectedObjects: "{count} 個のオブジェクトを選択中",
+    resetObjectScope: "オブジェクトの選択を解除",
     title: "データベース検索",
     open: "データベース検索",
     keyword: "キーワード",
@@ -5534,6 +5546,7 @@ export default withEnglishFallback({
     scopeSequences: "シーケンス",
     scopeFunctions: "関数",
     stepSkipped: "必要な前のステップが失敗したためスキップしました。",
+    selectedObjectsCount: "選択済み {count} 個のオブジェクト",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "この OceanBase バージョンのジョブ日付はマイクロ秒精度のみ対応しています。小数秒の 7～9 桁目を 0 にして、もう一度プレビューしてください。元の入力は保持されています。",
@@ -7662,6 +7675,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "Raw SQL",
     },
+    preserveQuotedBracedParameters: "シングルクォート文字列内のテンプレートプレースホルダーを保持する",
   },
   transfer: {
     log: {
@@ -10781,6 +10795,7 @@ export default withEnglishFallback({
     showConnectionGroupPath: "クエリ接続の完全なグループパスを表示",
     showConnectionGroupPathDescription: "有効にすると、クエリページ右上の接続セレクターで接続名の前に完全なグループパスが表示されます。無効にすると接続名のみが表示されます。",
     shortcutConvertSelectionToDelimited: "選択内容を区切り文字付きリストに変換",
+    sidebarSimpleHideIndexes: "テーブルと並んで表示されるインデックスを非表示",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

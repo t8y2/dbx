@@ -253,10 +253,21 @@ function paneEnterClass(groupId: string): string | undefined {
   return queryStore.orientation === "horizontal" ? "workspace-pane-enter workspace-pane-enter--from-top" : "workspace-pane-enter workspace-pane-enter--from-left";
 }
 let splitterDragging = false;
+let editorFocusedBeforeResize: HTMLElement | null = null;
 const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "pointercancel"] as const;
 function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
   const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
   if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  if (event.type === "mousedown") {
+    event.preventDefault();
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.matches(".cm-content") && splitter.closest(".sql-editor-workspace-split")?.contains(focused)) {
+      // Splitpanes clears the native selection during a drag. If CodeMirror
+      // still has focus, it can read that change back into its editor state.
+      editorFocusedBeforeResize = focused;
+      focused.blur();
+    }
+  }
   splitterDragging = true;
   beginPanelResize();
   for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);
@@ -269,6 +280,15 @@ function onWorkspaceSplitterEnd() {
   for (const eventName of splitterEndEvents) document.removeEventListener(eventName, onWorkspaceSplitterEnd, true);
   window.removeEventListener("blur", onWorkspaceSplitterEnd);
   endPanelResize();
+  const editor = editorFocusedBeforeResize;
+  editorFocusedBeforeResize = null;
+  if (editor) {
+    // Splitpanes clears the native selection again on mouseup. Restore
+    // focus only after that handler and only if focus has stayed on the body.
+    queueMicrotask(() => {
+      if (editor.isConnected && document.hasFocus() && document.activeElement === document.body) editor.focus({ preventScroll: true });
+    });
+  }
 }
 
 onBeforeUnmount(onWorkspaceSplitterEnd);

@@ -475,6 +475,7 @@ import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useDataGridColumnFormatter } from "@/composables/useDataGridColumnFormatter";
 import { useDataGridTableMetadataLoaders } from "@/composables/useDataGridTableMetadataLoaders";
+import { useTableInfoHeaderLayout } from "@/composables/useTableInfoHeaderLayout";
 import { DATA_GRID_SERVER_COLUMN_FILTER_LIMIT, useDataGridColumnFilters } from "@/composables/useDataGridColumnFilters";
 import { useDataGridLargeValues, type LargeValueSnapshotDownloadTarget } from "@/composables/useDataGridLargeValues";
 import { useDataGridSaveConfirmation } from "@/composables/useDataGridSaveConfirmation";
@@ -13654,6 +13655,8 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
 // Table info drawers are tied to a single grid instance. Keeping this state
 // module-global leaks the drawer into other kept-alive tabs.
 const showTableInfo = ref(false);
+const { tableInfoHeaderRef, tableInfoActionLabelsCompact, observeTableInfoHeader, disconnectTableInfoHeader } = useTableInfoHeaderLayout();
+void tableInfoHeaderRef;
 const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
 const canPinTableInfo = computed(() => props.context === "table-data");
 const tableInfoDrawerPinned = computed(() => settingsStore.editorSettings.tableInfoDrawerPinned);
@@ -13804,6 +13807,19 @@ watch([showCellDetail, showTableInfo], () => {
 watch(activeTableInfoTab, () => {
   searchQuery.value = "";
 });
+
+watch(
+  () => [showTableInfo.value, activeTableInfoTab.value, props.tableMeta?.tableName],
+  async ([shown]) => {
+    if (!shown) {
+      disconnectTableInfoHeader();
+      return;
+    }
+    await nextTick();
+    observeTableInfoHeader();
+  },
+  { immediate: true, flush: "post" },
+);
 
 watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
   if (tab !== "ddl") return;
@@ -17480,9 +17496,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @contextmenu="onDrawerContextMenu"
           >
             <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize" @mousedown.prevent="onDdlResizeStart" />
-            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
-              <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
-              <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
+            <div ref="tableInfoHeaderRef" class="table-info-header flex min-w-0 items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9 overflow-hidden" :class="{ 'table-info-header--compact': tableInfoActionLabelsCompact }">
+              <TableProperties class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+              <span class="table-info-title min-w-0 flex-1 truncate text-xs font-medium">{{ tableMeta?.tableName }}</span>
               <div v-if="activeTableInfoTab === 'ddl'" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
                 <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :disabled="ddlLoading || !!ddlError || !ddlContent" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                   <Copy class="w-3 h-3" />
@@ -18789,10 +18805,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   transition: none;
 }
 
-.table-info-drawer {
-  container-type: inline-size;
-}
-
 .table-info-action-button {
   gap: 0.25rem;
   max-width: 8rem;
@@ -18813,17 +18825,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     opacity 120ms ease;
 }
 
-@container (max-width: 360px) {
-  .table-info-action-button {
-    width: 1.5rem;
-    max-width: 1.5rem;
-    padding-inline: 0;
-  }
+.table-info-header--compact .table-info-action-button {
+  width: 1.5rem;
+  max-width: 1.5rem;
+  padding-inline: 0;
+}
 
-  .table-info-action-label {
-    max-width: 0;
-    opacity: 0;
-  }
+.table-info-header--compact .table-info-action-label {
+  max-width: 0;
+  opacity: 0;
 }
 
 .detail-drawer-resizing {

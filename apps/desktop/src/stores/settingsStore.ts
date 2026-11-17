@@ -2572,6 +2572,17 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
+async function emitSharedSettingsChanged(event: "dbx:editor-settings-changed" | "dbx:desktop-settings-changed", snapshot: EditorSettings | DesktopSettings): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit(event, snapshot);
+  } catch (error) {
+    // A notification cannot undo a durable settings write.
+    console.warn("[DBX][settings:notify]", error);
+  }
+}
+
 /** Keep only well-formed, non-empty template id lists keyed by db_type. */
 function normalizeTemplateIdsByDbType(value?: Record<string, string[]>): Record<string, string[]> {
   if (!value) return {};
@@ -2676,8 +2687,7 @@ export const useSettingsStore = defineStore("settings", () => {
     // Older development binaries return no canonical value. Keep their open
     // windows synchronized while the updated native host is being built.
     if (isTauriRuntime() && saved == null) {
-      const { emit } = await import("@tauri-apps/api/event");
-      await emit("dbx:editor-settings-changed", snapshot);
+      await emitSharedSettingsChanged("dbx:editor-settings-changed", snapshot);
     }
     const visible = snapshot.toolbarItems.alwaysOnTop;
     if (visible !== persistedAlwaysOnTopToolbarVisibility) {
@@ -2838,10 +2848,7 @@ export const useSettingsStore = defineStore("settings", () => {
     configureMetadataRuntimeCache(desktopSettings.value.metadata_cache_max_memory_mb);
     try {
       await api.saveDesktopSettings(desktopSettings.value);
-      if (isTauriRuntime()) {
-        const { emit } = await import("@tauri-apps/api/event");
-        await emit("dbx:desktop-settings-changed", desktopSettings.value);
-      }
+      await emitSharedSettingsChanged("dbx:desktop-settings-changed", desktopSettings.value);
     } catch (error) {
       desktopSettings.value = previous;
       setDebugLoggingEnabled(previous.debug_logging_enabled);

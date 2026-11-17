@@ -1,10 +1,13 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::Emitter;
 use tauri::{AppHandle, Manager};
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub const TAB_DRAG_PREVIEW_RELEASE_EVENT: &str = "dbx:tab-drag-preview-release";
 
 #[derive(Default)]
@@ -19,18 +22,18 @@ struct ActivePreview {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+// Other platforms accept the IPC request but use the frontend drag fallback.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 pub struct StartTabDragPreviewRequest {
     pub transfer_id: String,
     pub source_window_label: String,
-    pub title: String,
     pub left: i32,
     pub top: i32,
-    pub width: i32,
-    pub height: i32,
     pub grab_x: i32,
     pub grab_y: i32,
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TabDragPreviewRelease {

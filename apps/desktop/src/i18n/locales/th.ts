@@ -2662,6 +2662,8 @@ export default withEnglishFallback({
       currentCommand: "คำสั่งปัจจุบัน",
       allCommands: "คำสั่งทั้งหมด",
     },
+    fullscreenResultsPane: "แสดงผลลัพธ์แบบเต็มหน้าจอ",
+    exitFullscreenResultsPane: "ออกจากโหมดเต็มหน้าจอผลลัพธ์",
   },
   tabs: {
     sql: "SQL",

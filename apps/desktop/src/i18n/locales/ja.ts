@@ -2531,6 +2531,8 @@ export default withEnglishFallback({
     previewChangesComment: "変更プレビュー（ドライラン）：{operation} ステートメント",
     previewChangesFailed: "変更プレビューに失敗しました。",
     previewChangesNoStatement: "変更をプレビューするには、UPDATE / INSERT / DELETE ステートメントを選択するか、その上にカーソルを置いてください。",
+    fullscreenResultsPane: "結果を全画面表示",
+    exitFullscreenResultsPane: "結果の全画面表示を終了",
   },
   tabs: {
     sql: "SQL",

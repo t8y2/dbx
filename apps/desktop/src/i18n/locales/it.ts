@@ -2512,6 +2512,8 @@ export default withEnglishFallback({
     previewChangesComment: "Anteprima modifiche (prova a secco): istruzione {operation}",
     previewChangesFailed: "Anteprima modifiche non riuscita.",
     previewChangesNoStatement: "Seleziona o posiziona il cursore su un'istruzione UPDATE / INSERT / DELETE per visualizzare l'anteprima delle modifiche.",
+    fullscreenResultsPane: "Visualizza i risultati a schermo intero",
+    exitFullscreenResultsPane: "Esci dallo schermo intero dei risultati",
   },
   tabs: {
     sql: "SQL",

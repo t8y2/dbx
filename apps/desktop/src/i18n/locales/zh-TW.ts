@@ -2491,6 +2491,8 @@ export default withEnglishFallback({
     previewChangesComment: "變更預覽（乾跑）：{operation} 語句",
     previewChangesFailed: "變更預覽失敗。",
     previewChangesNoStatement: "請選取或將游標放在一條 UPDATE / INSERT / DELETE 語句上以預覽變更。",
+    fullscreenResultsPane: "全螢幕顯示結果",
+    exitFullscreenResultsPane: "退出結果全螢幕",
   },
   tabs: {
     sql: "SQL",

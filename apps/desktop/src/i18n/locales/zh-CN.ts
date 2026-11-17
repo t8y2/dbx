@@ -2518,6 +2518,8 @@ export default withEnglishFallback({
     connectionMayBeLost: "连接可能已断开，请刷新数据重试",
     showResultsPane: "显示结果",
     hideResultsPane: "收起",
+    fullscreenResultsPane: "全屏显示结果",
+    exitFullscreenResultsPane: "退出结果全屏",
     noDatabase: "未选择数据库",
     unsavedChangesTitle: "未保存的更改",
     unsavedChangesMessage: "「{title}」有未保存的更改，关闭后将丢失。是否保存后再关闭？",

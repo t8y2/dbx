@@ -2586,6 +2586,8 @@ export default {
     connectionMayBeLost: "The connection may have been lost. Refresh data and try again.",
     showResultsPane: "Show results",
     hideResultsPane: "Hide results",
+    fullscreenResultsPane: "Fullscreen results",
+    exitFullscreenResultsPane: "Exit fullscreen results",
     noDatabase: "No database selected",
     unsavedChangesTitle: "Unsaved changes",
     unsavedChangesMessage: '"{title}" has unsaved changes that will be lost if closed. Save before closing?',

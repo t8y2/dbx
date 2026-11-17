@@ -2511,6 +2511,8 @@ export default withEnglishFallback({
     previewChangesComment: "Pré-visualização de alterações (simulação): instrução {operation}",
     previewChangesFailed: "Falha ao pré-visualizar alterações.",
     previewChangesNoStatement: "Selecione ou coloque o cursor em uma instrução UPDATE / INSERT / DELETE para pré-visualizar as alterações.",
+    fullscreenResultsPane: "Exibir resultados em tela cheia",
+    exitFullscreenResultsPane: "Sair da tela cheia dos resultados",
   },
   tabs: {
     sql: "SQL",

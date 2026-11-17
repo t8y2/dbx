@@ -8906,6 +8906,8 @@ export default withEnglishFallback({
     shortcutDeleteCurrentRow: "刪除目前資料列",
     shortcutFocusWhere: "聚焦 WHERE 條件輸入框",
     shortcutGoToColumn: "跳轉欄",
+    shortcutSelectNextGridColumn: "選取資料表的下一欄",
+    shortcutSelectPreviousGridColumn: "選取資料表的上一欄",
     shortcutGoToFirstPage: "第一頁",
     shortcutGoToPreviousPage: "上一頁",
     shortcutGoToNextPage: "下一頁",

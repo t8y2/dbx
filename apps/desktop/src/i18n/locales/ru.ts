@@ -8555,6 +8555,8 @@ export default withEnglishFallback({
     downloadValueFileType: "Значение Redis",
     downloadValueTextFileType: "Текстовый файл",
     downloadValueSuccess: "Значение Redis скачано",
+    downloadValueJson: "Скачать как JSON",
+    downloadValueNotJson: "Это значение не содержит допустимый объект или массив JSON",
   },
   mongoDump: {
     selectAll: "Выбрать все коллекции",

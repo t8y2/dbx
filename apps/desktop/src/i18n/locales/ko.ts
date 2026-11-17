@@ -7230,6 +7230,8 @@ export default withEnglishFallback({
     downloadValueFileType: "Redis 값",
     downloadValueTextFileType: "텍스트 파일",
     downloadValueSuccess: "Redis 값이 다운로드됨",
+    downloadValueJson: "JSON으로 다운로드",
+    downloadValueNotJson: "이 값에는 유효한 JSON 객체 또는 배열이 포함되어 있지 않습니다",
   },
   mongo: {
     documents: "문서 {count}개",

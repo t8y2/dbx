@@ -7278,6 +7278,8 @@ export default withEnglishFallback({
     downloadValueFileType: "Valor Redis",
     downloadValueTextFileType: "Arquivo de texto",
     downloadValueSuccess: "Valor Redis baixado",
+    downloadValueJson: "Baixar como JSON",
+    downloadValueNotJson: "Este valor não contém um objeto ou array JSON válido",
   },
   mongo: {
     documents: "{count} documentos",

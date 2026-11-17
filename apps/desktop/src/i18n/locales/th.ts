@@ -8814,6 +8814,8 @@ export default withEnglishFallback({
         keyspace: "Keyspace",
       },
     },
+    downloadValueJson: "ดาวน์โหลดเป็น JSON",
+    downloadValueNotJson: "ค่านี้ไม่มีออบเจ็กต์หรืออาร์เรย์ JSON ที่ถูกต้อง",
   },
   mongoDump: {
     selectAll: "เลือก Collections ทั้งหมด",

@@ -6307,6 +6307,11 @@ export default withEnglishFallback({
     copyAllAsTable: "모든 필터 결과를 표로 복사",
     copyNamesSuccess: "{count}개의 이름을 복사했습니다",
     copyTableDataSuccess: "표 데이터 {count}행을 복사했습니다",
+    packageMembers: "패키지 멤버",
+    hidePackageMembers: "패키지 멤버 접기",
+    showPackageMembers: "패키지 멤버 펼치기",
+    packageFunctionAtLine: "함수 {name}, {line}번째 줄",
+    packageProcedureAtLine: "프로시저 {name}, {line}번째 줄",
   },
   postgresForeignTable: {
     tableKind: "테이블 유형",

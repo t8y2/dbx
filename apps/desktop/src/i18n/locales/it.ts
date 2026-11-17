@@ -6036,6 +6036,11 @@ export default withEnglishFallback({
     copyAllAsTable: "Copia tutti i risultati filtrati come tabella",
     copyNamesSuccess: "Copiati {count} nomi",
     copyTableDataSuccess: "Copiate {count} righe di dati della tabella",
+    packageMembers: "Membri del package",
+    hidePackageMembers: "Comprimi membri del package",
+    showPackageMembers: "Espandi membri del package",
+    packageFunctionAtLine: "Funzione {name}, riga {line}",
+    packageProcedureAtLine: "Procedura {name}, riga {line}",
   },
   postgresForeignTable: {
     tableKind: "Tipo di tabella",

@@ -6967,6 +6967,11 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "ANY 类权限已被 DM8 禁用（ENABLE_DDL_ANY_PRIV=0），无法授予或回收",
   },
   objects: {
+    packageMembers: "包成员",
+    hidePackageMembers: "收起包成员",
+    showPackageMembers: "展开包成员",
+    packageFunctionAtLine: "函数 {name}，第 {line} 行",
+    packageProcedureAtLine: "过程 {name}，第 {line} 行",
     loadCapacity: "加载 / 刷新容量",
     loadDetails: "加载详情",
     packageSaveAsTitle: "包另存为",

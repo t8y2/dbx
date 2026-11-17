@@ -6088,6 +6088,11 @@ export default withEnglishFallback({
     copyAllAsTable: "すべての絞り込み結果を表としてコピー",
     copyNamesSuccess: "{count} 個の名前をコピーしました",
     copyTableDataSuccess: "{count} 行の表データをコピーしました",
+    packageMembers: "パッケージのメンバー",
+    hidePackageMembers: "パッケージのメンバーを折りたたむ",
+    showPackageMembers: "パッケージのメンバーを展開する",
+    packageFunctionAtLine: "関数 {name}、{line} 行目",
+    packageProcedureAtLine: "プロシージャ {name}、{line} 行目",
   },
   postgresForeignTable: {
     tableKind: "テーブルの種類",

@@ -828,6 +828,11 @@ function focusErrorPosition(offset: number) {
   currentView.focus();
 }
 
+function focusPackageMember(offset: number) {
+  documentState.cancelEditorViewportRestore();
+  focusErrorPosition(offset);
+}
+
 function insertLineBelow(currentView: EditorViewType): boolean {
   if (props.readOnly) return false;
   const line = currentView.state.doc.lineAt(currentView.state.selection.main.head);
@@ -3275,6 +3280,7 @@ defineExpose({
   pasteClipboardAsSqlInCondition,
   focusStatementRange,
   focusErrorPosition,
+  focusPackageMember,
   previewStatementRange,
   refreshCompletionCache,
   toggleFold,

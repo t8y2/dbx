@@ -2722,6 +2722,8 @@ export interface QueryTab {
   liveQueryMessages?: QueryMessage[];
   /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
   executingResultRunId?: string | null;
+  /** Execution during which a retained result run was explicitly projected. Never persisted. */
+  resultRunSelectionExecutionId?: string;
   isExplaining?: boolean;
   explainExecutionId?: string;
   /** Per-run connection session for explain flows that require session state. */

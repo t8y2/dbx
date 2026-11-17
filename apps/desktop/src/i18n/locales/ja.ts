@@ -2668,6 +2668,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "すべてコピー",
+    copied: "メッセージをコピーしました",
+    copyFailed: "メッセージのコピーに失敗しました：{message}",
     empty: "メッセージなし",
     code: "コード: {code}",
     mongoShell: "生成された mongo shell",

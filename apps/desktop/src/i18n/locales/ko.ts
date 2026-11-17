@@ -2646,6 +2646,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "모두 복사",
+    copied: "메시지를 복사했습니다",
+    copyFailed: "메시지 복사 실패: {message}",
     empty: "메시지 없음",
     code: "코드: {code}",
     mongoShell: "생성된 mongo shell",

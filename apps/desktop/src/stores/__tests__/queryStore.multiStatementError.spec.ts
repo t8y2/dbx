@@ -1468,44 +1468,63 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.result?.rows).toEqual([[1]]);
   });
 
-  it("restores the retained result when a new-result execution is cancelled", async () => {
+  it.each(["new-result", "auto-keep"] as const)("restores retained data, log and notices after cancellation (%s)", async (mode) => {
     const pendingExecution = deferred<never>();
-    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const oldMessages = [{ severity: "NOTICE", message: "retained notice" }];
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, messages: oldMessages }]).mockImplementationOnce(() => pendingExecution.promise);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("mysql-1", "app", "Query");
+    if (mode === "auto-keep") store.toggleResultAutoSave(tabId);
     await store.executeCurrentSql("SELECT 1 AS value");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const retainedBatch = JSON.parse(JSON.stringify(tab.batchSqlExecution));
 
-    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: mode === "new-result" });
     await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    tab.liveQueryMessages = [{ severity: "NOTICE", message: "aborted notice" }];
     await expect(store.cancelTabExecution(tabId)).resolves.toBe(true);
     pendingExecution.reject(new Error("Query canceled"));
     await execution;
 
-    const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.resultRuns).toHaveLength(1);
     expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
     expect(tab.result?.rows).toEqual([[1]]);
+    expect(tab.result?.messages).toEqual(oldMessages);
+    expect(tab.liveQueryMessages).toBeUndefined();
+    expect(tab.batchSqlExecution).toEqual(retainedBatch);
+    expect(tab.resultRuns?.[0]?.batchSqlExecution).toEqual(retainedBatch);
+    await store.setActiveResultRun(tabId, tab.activeResultRunId!);
+    expect(tab.batchSqlExecution).toEqual(retainedBatch);
+    expect(tab.result?.messages).toEqual(oldMessages);
   });
 
-  it("keeps the retained result when a cancelled execution still returns data", async () => {
+  it.each(["new-result", "auto-keep"] as const)("keeps retained output when a cancelled execution still returns data (%s)", async (mode) => {
     const pendingExecution = deferred<Array<{ columns: string[]; rows: number[][]; affected_rows: number; execution_time_ms: number }>>();
-    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const oldMessages = [{ severity: "NOTICE", message: "retained notice" }];
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, messages: oldMessages }]).mockImplementationOnce(() => pendingExecution.promise);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("mysql-1", "app", "Query");
+    if (mode === "auto-keep") store.toggleResultAutoSave(tabId);
     await store.executeCurrentSql("SELECT 1 AS value");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const retainedBatch = JSON.parse(JSON.stringify(tab.batchSqlExecution));
 
-    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
+    const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: mode === "new-result" });
     await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    tab.liveQueryMessages = [{ severity: "NOTICE", message: "aborted notice" }];
     await expect(store.cancelTabExecution(tabId)).resolves.toBe(true);
     pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
     await execution;
 
-    const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.resultRuns).toHaveLength(1);
     expect(tab.activeResultRunId).toBe(tab.resultRuns?.[0]?.id);
     expect(tab.result?.rows).toEqual([[1]]);
+    expect(tab.result?.messages).toEqual(oldMessages);
+    expect(tab.liveQueryMessages).toBeUndefined();
+    expect(tab.batchSqlExecution).toEqual(retainedBatch);
+    expect(tab.resultRuns?.[0]?.batchSqlExecution).toEqual(retainedBatch);
   });
 
   it("restores the adjacent retained result after closing the active run", async () => {

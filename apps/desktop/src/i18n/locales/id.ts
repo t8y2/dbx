@@ -2162,6 +2162,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "Salin semua",
+    copied: "Pesan disalin",
+    copyFailed: "Gagal menyalin pesan: {message}",
     empty: "Tidak ada pesan",
     code: "Kode: {code}",
     mongoShell: "Shell mongo yang dibuat",

@@ -352,6 +352,42 @@ describe("SqlEditorWorkspace mount contract", () => {
     cleanup();
   });
 
+  it("keeps stopped batch output accessible without a dataset until the batch is cleared", async () => {
+    const { store, host, vm, cleanup } = mountOutputWorkspace([{ ...tab("batch"), result: undefined, isExecuting: true }]);
+    const active = store.tabs[0]!;
+    active.batchSqlExecution = {
+      executionId: "stopped-batch",
+      submittedSql: "UPDATE t SET a = 1",
+      editorFingerprint: "batch",
+      sourceOffset: 0,
+      completed: 0,
+      total: 1,
+      startedAt: 1,
+      items: [{ statementIndex: 0, sql: "UPDATE t SET a = 1", from: 0, to: 18, status: "running" }],
+    };
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+
+    active.isExecuting = false;
+    active.batchSqlExecution.items[0]!.status = "skipped";
+    active.batchSqlExecution.finishedAt = 2;
+    await nextTick();
+    expect(active.result).toBeUndefined();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+    expect(vm.toggleResultsPane()).toBe(true);
+    await nextTick();
+    expect(host.querySelector('[aria-label="editor.showResultsPane"]')).not.toBeNull();
+    expect(vm.toggleResultsPane()).toBe(true);
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+
+    active.batchSqlExecution = undefined;
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(vm.toggleResultsPane()).toBe(false);
+    cleanup();
+  });
+
   it("shows arriving results and hides or restores them within a single render tick", async () => {
     const { store, host, vm, cleanup } = mountOutputWorkspace([{ ...tab("idle"), result: undefined }]);
     await nextTick();

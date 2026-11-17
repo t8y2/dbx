@@ -2748,6 +2748,9 @@ export default withEnglishFallback({
     },
   },
   queryMessages: {
+    copyAll: "Copiar todo",
+    copied: "Mensajes copiados",
+    copyFailed: "No se pudieron copiar los mensajes: {message}",
     empty: "Sin mensajes",
     code: "Código: {code}",
     mongoShell: "Shell de Mongo generado",

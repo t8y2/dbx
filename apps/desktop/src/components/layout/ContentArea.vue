@@ -10,6 +10,7 @@ import type { DataGridExportSheet } from "@/composables/useDataGridExport";
 import { extractGraphCells, graphPropertyFromUpdateResult, type GraphEdge, type GraphNode, type GraphProperty, type GraphResult } from "@/lib/graph/graphResult";
 import { graphAdapterForDatabase } from "@/lib/graph/graphAdapters";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
+import { hasQueryExecutionLog, isDisplayingHistoricalQueryResult, queryExecutionLog, supportsQueryExecutionLog } from "@/lib/query/queryExecutionLog";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { hasFocusableQueryResult, hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
@@ -994,12 +995,30 @@ const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!p
 // view is scoped to the whole run, so collect every result's messages instead
 // of only the active result's — otherwise a statement with no result set
 // silently loses its notices once a later statement owns the active result.
-const resultMessages = computed<QueryMessage[]>(() => {
-  if (props.activeTab.liveQueryMessages?.length) return props.activeTab.liveQueryMessages;
-  const results = props.activeTab.results?.length ? props.activeTab.results : props.activeTab.result ? [props.activeTab.result] : [];
-  return results.flatMap(queryResultMessages);
+const showExecutionLog = computed(() => props.activeTab.mode === "query" && supportsQueryExecutionLog(activeEffectiveDatabaseType.value));
+const hasExecutionLog = computed(() => showExecutionLog.value && hasQueryExecutionLog(props.activeTab));
+const executionLog = computed(() => (showExecutionLog.value ? queryExecutionLog(props.activeTab, t) : undefined));
+const serverResultMessages = computed<QueryMessage[]>(() => {
+  const tab = props.activeTab;
+  const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
+  if (showExecutionLog.value && isDisplayingHistoricalQueryResult(tab)) return results.flatMap(queryResultMessages);
+  if (tab.liveQueryMessages?.length) return tab.liveQueryMessages;
+  // A new query keeps the previous grid mounted until its response arrives.
+  // Those old notices must not be presented as part of the new execution.
+  const currentResults = showExecutionLog.value && tab.isExecuting ? results.filter((result) => tab.executionId && result.sourceExecutionId === tab.executionId) : results;
+  return currentResults.flatMap(queryResultMessages);
 });
-const resultMessageCount = computed(() => resultMessages.value.length);
+const resultMessages = computed<QueryMessage[]>(() => {
+  const messages = serverResultMessages.value;
+  // The badge and view availability must not serialize a large script on every
+  // progress event. Generate the full copyable text only for the visible view.
+  if (props.activeOutputView !== "messages" || props.editorOnly) return messages;
+  const log = executionLog.value;
+  // Streamed notices have no statement identity. Keep them separate from the
+  // execution log rather than attributing a notice to the wrong statement.
+  return log ? [log, ...messages] : messages;
+});
+const resultMessageCount = computed(() => serverResultMessages.value.length + Number(hasExecutionLog.value));
 const canShowMessagesOutput = computed(() => resultMessageCount.value > 0);
 const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || (redisResultViewMode.value === "console" && canShowRedisConsoleOutput.value) || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));

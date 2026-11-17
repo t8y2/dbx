@@ -56,6 +56,7 @@ describe("query message text selection", () => {
     expect(selection.toString()).toContain("detail");
     expect(selection.toString()).toContain("hint");
     expect(selection.toString()).not.toContain("SQL editor outside the messages");
+    expect(selection.toString()).not.toContain("queryMessages.copyAll");
     expect(region.contains(selection.anchorNode)).toBe(true);
     expect(region.contains(selection.focusNode)).toBe(true);
 

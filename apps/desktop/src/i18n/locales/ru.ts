@@ -6773,6 +6773,11 @@ export default withEnglishFallback({
     copyAllAsTable: "Копировать все результаты фильтра как таблицу",
     copyNamesSuccess: "Скопировано {count} имён",
     copyTableDataSuccess: "Скопировано {count} строк табличных данных",
+    packageMembers: "Элементы пакета",
+    hidePackageMembers: "Свернуть элементы пакета",
+    showPackageMembers: "Развернуть элементы пакета",
+    packageFunctionAtLine: "Функция {name}, строка {line}",
+    packageProcedureAtLine: "Процедура {name}, строка {line}",
   },
   postgresForeignTable: {
     tableKind: "Тип таблицы",

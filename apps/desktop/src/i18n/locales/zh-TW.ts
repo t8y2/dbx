@@ -5539,6 +5539,11 @@ export default withEnglishFallback({
     copyAllAsTable: "複製全部篩選結果為表格",
     copyNamesSuccess: "已複製 {count} 個名稱",
     copyTableDataSuccess: "已複製 {count} 列表格資料",
+    packageMembers: "套件成員",
+    hidePackageMembers: "收合套件成員",
+    showPackageMembers: "展開套件成員",
+    packageFunctionAtLine: "函式 {name}，第 {line} 行",
+    packageProcedureAtLine: "程序 {name}，第 {line} 行",
   },
   postgresForeignTable: {
     tableKind: "資料表類型",

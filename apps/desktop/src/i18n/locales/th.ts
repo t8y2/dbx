@@ -7040,6 +7040,11 @@ export default withEnglishFallback({
     copyAllAsTable: "คัดลอกผลลัพธ์ที่กรองทั้งหมดเป็นตาราง",
     copyNamesSuccess: "คัดลอกชื่อแล้ว {count} รายการ",
     copyTableDataSuccess: "คัดลอกข้อมูลตารางแล้ว {count} แถว",
+    packageMembers: "สมาชิกแพ็กเกจ",
+    hidePackageMembers: "ย่อสมาชิกแพ็กเกจ",
+    showPackageMembers: "ขยายสมาชิกแพ็กเกจ",
+    packageFunctionAtLine: "ฟังก์ชัน {name} บรรทัดที่ {line}",
+    packageProcedureAtLine: "โพรซีเดอร์ {name} บรรทัดที่ {line}",
   },
   postgresForeignTable: {
     tableKind: "ประเภทตาราง",

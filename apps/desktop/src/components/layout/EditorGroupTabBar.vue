@@ -1730,7 +1730,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       label: t("tabs.openInNewWindow"),
       action: () => (tabWindowTransfer ? void tabWindowTransfer.openTabInNewWindow(tab) : emit("detach-tab", tab)),
       icon: ExternalLink,
-      visible: !!props.canDetachTabs && isDetachableTab(tab),
+      visible: !!props.canDetachTabs && (!!tabWindowTransfer || isDetachableTab(tab)),
     },
     {
       label: t("contextMenu.moveTabToAnotherWindow"),

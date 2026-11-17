@@ -1117,6 +1117,48 @@ describe("EditorGroupTabBar group behavior", () => {
     host.remove();
   });
 
+  it.each([
+    { placement: "left", groupMode: "connection" },
+    { placement: "left", groupMode: "sidebar" },
+    { placement: "left", groupMode: "none" },
+    { placement: "right", groupMode: "sidebar" },
+    { placement: "top", groupMode: "connection" },
+    { placement: "bottom", groupMode: "connection" },
+  ] as const)("opens every tab type in a new window with $placement $groupMode navigation", async ({ placement, groupMode }) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = placement;
+    settings.editorSettings.tabGroupMode = groupMode;
+    for (const mode of ["query", "data", "objects", "structure", "mongo"] as const) {
+      store.createTab("pg-1", "app", mode, mode);
+    }
+    store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server", connectionId: "pg-1", forceNew: true });
+    const coordinator = {
+      openTabInNewWindow: vi.fn(async () => {}),
+      otherTabWindows: ref([]),
+      refreshOtherTabWindows: vi.fn(async () => {}),
+    } as unknown as ReturnType<typeof useTabWindowTransfer>;
+    const detached = vi.fn();
+    const { app, host } = mountBar(store.groups[0].id, store.tabs.slice(), store.activeTabId, pinia, { canDetachTabs: true, "onDetach-tab": detached }, coordinator);
+    try {
+      await settle();
+      for (const tab of store.tabs) {
+        host.querySelector<HTMLElement>(`[data-tab-id="${tab.id}"]`)!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+        await settle();
+        const open = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Open in new window"));
+        expect(open, `${tab.mode} tab`).toBeDefined();
+        open!.click();
+        await settle();
+        expect(coordinator.openTabInNewWindow).toHaveBeenLastCalledWith(tab);
+      }
+      expect(coordinator.openTabInNewWindow).toHaveBeenCalledTimes(store.tabs.length);
+      expect(detached).not.toHaveBeenCalled();
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
   it("renders plugin workbench tabs with the plugin icon instead of the code fallback", async () => {
     const store = useQueryStore();
     const pluginTabId = store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server", connectionId: "ssh-1", forceNew: true });

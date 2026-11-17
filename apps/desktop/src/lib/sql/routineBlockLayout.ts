@@ -80,6 +80,59 @@ function hasBlockBody(tokens: SqlSemanticToken[]): boolean {
   });
 }
 
+function lineIndentation(sql: string, offset: number): string {
+  const lineStart = Math.max(sql.lastIndexOf("\n", offset - 1), sql.lastIndexOf("\r", offset - 1)) + 1;
+  return /^[ \t]*/.exec(sql.slice(lineStart, offset))![0];
+}
+
+function indentationWidth(indent: string, tabWidth: number): number {
+  let width = 0;
+  for (const character of indent) width += character === "\t" ? tabWidth - (width % tabWidth) : 1;
+  return width;
+}
+
+/**
+ * Retain the interior of Oracle routine block comments while the SQL
+ * printer lays out the surrounding code. Restore them after routine indenting
+ * so each continuation line can follow the comment's final indentation.
+ */
+export function protectOracleRoutineComments(sql: string, tabWidth: number): { sql: string; restore: (formatted: string) => string } | undefined {
+  if (!sql.includes("/*") || !/[\r\n]/.test(sql)) return undefined;
+
+  const tokens = tokenizeSqlSemantic(sql, "oracle");
+  const routinePosition = routineDefinitionPosition(tokens);
+  if (routinePosition === -1 || (wordAt(tokens, routinePosition) !== "package" && !hasBlockBody(tokens))) return undefined;
+
+  let namespace = 0;
+  while (sql.includes(`__DBX_ORACLE_ROUTINE_COMMENT_${namespace}_`)) namespace += 1;
+  const markerPrefix = `__DBX_ORACLE_ROUTINE_COMMENT_${namespace}_`;
+  const comments: { text: string; indentWidth: number }[] = [];
+  let from = 0;
+  let masked = "";
+  for (const token of tokens) {
+    if (token.kind !== "comment" || !token.text.startsWith("/*") || token.text.startsWith("/*+") || !token.text.endsWith("*/") || !/[\r\n]/.test(token.text)) continue;
+    masked += sql.slice(from, token.span.start) + `/*${markerPrefix}${comments.length}__*/`;
+    from = token.span.end;
+    comments.push({ text: token.text, indentWidth: indentationWidth(lineIndentation(sql, token.span.start), tabWidth) });
+  }
+  if (comments.length === 0) return undefined;
+
+  const markers = new RegExp(`/\\*${markerPrefix}(\\d+)__\\*/`, "g");
+  return {
+    sql: masked + sql.slice(from),
+    restore: (formatted) =>
+      formatted.replace(markers, (marker, index: string, offset: number) => {
+        const comment = comments[Number(index)];
+        if (!comment) return marker;
+        const indent = lineIndentation(formatted, offset);
+        return comment.text.replace(/(\r\n|\r|\n)([ \t]*)(?=[^ \t\r\n])/g, (_line, newline: string, whitespace: string) => {
+          const relativeWidth = Math.max(0, indentationWidth(whitespace, tabWidth) - comment.indentWidth);
+          return newline + indent + " ".repeat(relativeWidth);
+        });
+      }),
+  };
+}
+
 /**
  * Re-indents the block structure of a routine definition, leaving every other
  * input untouched.

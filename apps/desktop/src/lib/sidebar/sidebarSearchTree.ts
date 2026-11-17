@@ -91,6 +91,18 @@ interface LocalTableSearchOptions {
   indexedResults: Readonly<Record<string, TableInfo[] | null>>;
 }
 
+/**
+ * Splits a `schema.table` local-search query into its qualifier and object name.
+ * Null for an unqualified query (or an empty side), so plain matching is untouched.
+ */
+function splitQualifiedLocalTableQuery(query: string): { qualifier: string; name: string } | null {
+  const dot = query.lastIndexOf(".");
+  if (dot <= 0 || dot === query.length - 1) return null;
+  const qualifier = query.slice(0, dot).trim();
+  const name = query.slice(dot + 1).trim();
+  return qualifier && name ? { qualifier, name } : null;
+}
+
 export function filterLocallySearchedTables(nodes: TreeNode[], options: LocalTableSearchOptions): TreeNode[] {
   // Avoid cloning and tracking the entire reactive tree when there is no local
   // search. Check the query map once, not at each recursive subtree.
@@ -105,23 +117,42 @@ function filterLocallySearchedTableNodes(nodes: TreeNode[], options: LocalTableS
     if (!query || !children) return children === node.children ? node : { ...node, children };
 
     const indexed = options.indexedResults[node.id];
+    // A "schema.table" query names the scope it wants, so only that schema's objects
+    // match; a plain query keeps the historical name/comment matching (#14316).
+    // The schema comes from the entry's own attribution, never from `parent_schema`
+    // (that field is the partitioned parent's schema).
+    const qualified = splitQualifiedLocalTableQuery(query);
+    const nameQuery = qualified?.name ?? query;
+    const scopeMatches = (schema: string | null | undefined) => {
+      if (!qualified) return true;
+      const scope = (schema ?? node.schema ?? node.database ?? node.catalog ?? "").toLowerCase();
+      return scope === qualified.qualifier.toLowerCase();
+    };
     // matchSidebarLabel compares case-insensitively internally and needs the
     // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
     // Table comments participate in matching, mirroring the global sidebar
     // search and the backend's name-or-comment metadata filter.
-    const entryMatches = (name: string, comment?: string | null) => !!matchSidebarLabel(name, query) || (!!comment && !!matchSidebarLabel(comment, query));
+    const entryMatches = (name: string, comment?: string | null, schema?: string | null) => scopeMatches(schema) && (!!matchSidebarLabel(name, nameQuery) || (!!comment && !!matchSidebarLabel(comment, nameQuery)));
     // Grouped tables are flattened before matching so virtual groups stay
     // transparent during local table search.
     const flatChildren = stripTableVGroupsFromChildren(children);
     const matchingChildren =
       indexed === null
-        ? flatChildren.filter((child) => localTableSearchChildTypes.has(child.type) && entryMatches(child.label, child.comment))
+        ? flatChildren.filter((child) => localTableSearchChildTypes.has(child.type) && entryMatches(child.label, child.comment, child.schema))
         : indexed
           ? reuseLiveSidebarTreeNodes(
-              buildSidebarIndexedTableNodes({ parentNodeId: node.id, nodeType: node.type, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, entries: indexed.filter((entry) => entryMatches(entry.name, entry.comment)) }),
+              buildSidebarIndexedTableNodes({
+                parentNodeId: node.id,
+                nodeType: node.type,
+                connectionId: node.connectionId || "",
+                database: node.database || "",
+                schema: node.schema,
+                catalog: node.catalog,
+                entries: indexed.filter((entry) => entryMatches(entry.name, entry.comment, entry.schema)),
+              }),
               flatChildren,
             )
-          : flatChildren.filter((child) => localTableSearchChildTypes.has(child.type) && entryMatches(child.label, child.comment));
+          : flatChildren.filter((child) => localTableSearchChildTypes.has(child.type) && entryMatches(child.label, child.comment, child.schema));
     return { ...node, children: matchingChildren };
   });
 }
@@ -205,7 +236,7 @@ export function buildSidebarIndexedTableNodes(scope: SidebarRegexIndexScope): Tr
   });
 }
 
-function syntheticRegexParent(scope: SidebarRegexIndexScope): TreeNode {
+function syntheticRegexParent(scope: SidebarRegexIndexScope, resolveTable: (node: TreeNode) => TreeNode): TreeNode {
   const snapshot = scope.path?.find((node) => node.id === scope.parentNodeId);
   return {
     id: scope.parentNodeId,
@@ -219,7 +250,7 @@ function syntheticRegexParent(scope: SidebarRegexIndexScope): TreeNode {
     ...(snapshot?.linkedCatalog ? { linkedCatalog: snapshot.linkedCatalog } : {}),
     ...(snapshot?.linkedSchema ? { linkedSchema: snapshot.linkedSchema } : {}),
     isExpanded: true,
-    children: buildSidebarIndexedTableNodes(scope),
+    children: buildSidebarIndexedTableNodes(scope).map(resolveTable),
   };
 }
 
@@ -255,7 +286,7 @@ function mergeRegexTreeNodes(liveNodes: readonly TreeNode[], indexedNodes: reado
  * database, schema, and table-group ancestors are synthesized from manifest
  * scope metadata. Duplicate table identities prefer the narrowest scope.
  */
-export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[]): TreeNode[] {
+export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], scopes: readonly SidebarRegexIndexScope[], resolveTable: (node: TreeNode) => TreeNode = (node) => node): TreeNode[] {
   const selected = new Map<string, { rank: number; scope: SidebarRegexIndexScope; entry: TableInfo }>();
   const rankFor = (scope: SidebarRegexIndexScope) => (scope.nodeType.startsWith("group-") ? 3 : scope.nodeType === "schema" ? 2 : 1);
   for (const scope of scopes) {
@@ -308,7 +339,7 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
       // (connection groups, Oracle/Dameng connection->schema, Doris catalogs,
       // SQL Server linked servers). Do not guess ancestors from the id.
       if (!liveScopeParentExists(scope)) continue;
-      anchoredParents.push({ node: syntheticRegexParent(scope), identity: scopeIdentity(scope) });
+      anchoredParents.push({ node: syntheticRegexParent(scope, resolveTable), identity: scopeIdentity(scope) });
       continue;
     }
     const connectionPath = path.find((node) => node.type === "connection");
@@ -326,7 +357,7 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
       if (!parent.children?.some((child) => child.id === next.id)) parent.children = [...(parent.children ?? []), next];
       parent = next;
     }
-    const scopeParent = syntheticRegexParent(scope);
+    const scopeParent = syntheticRegexParent(scope, resolveTable);
     const existing = (parent.children ?? []).find((child) => child.id === scope.parentNodeId);
     parent.children = existing ? (parent.children ?? []).map((child) => (child.id === existing.id ? mergeRegexTreeNode(existing, scopeParent) : child)) : [...(parent.children ?? []), scopeParent];
   }

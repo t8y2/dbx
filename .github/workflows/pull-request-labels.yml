@@ -51,7 +51,7 @@ jobs:
 
       - name: Setup Node.js
         if: steps.verify_head.outputs.stale != 'true'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.23.4
 

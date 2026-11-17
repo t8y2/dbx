@@ -685,6 +685,58 @@ export function removeConnectionFromSidebarLayout(layout: SidebarLayout, connect
   return { ...layout, order: removeConnectionFromEntries(layout.order, connectionId) };
 }
 
+/** Undo only the entries removed or flattened by a failed deletion. Entries
+ * edited after the deletion keep their current name, order and placement. */
+export function restoreSidebarLayoutDeletion(previous: SidebarLayout, deleted: SidebarLayout, current: SidebarLayout, editedPlacements: ReadonlySet<string> = new Set()): SidebarLayout {
+  const order = cloneEntries(current.order);
+  const groups = current.groups.map((group) => ({ ...group }));
+  const deletedGroupIds = new Set(deleted.groups.map((group) => group.id));
+  const collectRestorableEntries = (entries: SidebarOrderEntry[], ids: Set<string>) => {
+    for (const entry of entries) {
+      if (entry.type === "group") {
+        if (!editedPlacements.has(entry.id)) ids.add(entry.id);
+        collectRestorableEntries(entryChildren(entry), ids);
+      } else if (!editedPlacements.has(entry.id) && findEntryParentGroupId(current.order, entry.id) === findEntryParentGroupId(deleted.order, entry.id)) ids.add(entry.id);
+    }
+  };
+  const restore = (entries: SidebarOrderEntry[], parentId: string | null) => {
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index];
+      const deletedParent = findEntryParentGroupId(deleted.order, entry.id);
+      const currentParent = findEntryParentGroupId(order, entry.id);
+      const removedByDeletion = deletedParent === undefined;
+      const flattenedByDeletion = deletedParent !== undefined && deletedParent !== parentId && !editedPlacements.has(entry.id);
+      if ((removedByDeletion && currentParent === undefined) || (flattenedByDeletion && currentParent === deletedParent)) {
+        // A parent removed by a later user edit must not be recreated. Restore
+        // its connection at the root rather than undoing that newer decision.
+        const parent = parentId === null ? null : findGroupEntry(order, parentId);
+        const destination = parent ? parent.children! : order;
+        const restored = removeEntry(order, entry.id) ?? (entry.type === "group" ? { type: "group" as const, id: entry.id, children: [] } : { ...entry });
+        const descendantIds = new Set<string>();
+        if (entry.type === "group") collectRestorableEntries(entryChildren(entry), descendantIds);
+        // Occupy the flattened descendants' position before moving them back
+        // inside, so newly inserted siblings keep their relative order.
+        const descendantIndex = destination.findIndex((sibling) => descendantIds.has(sibling.id));
+        const nextSiblingIds = new Set(entries.slice(index + 1).map((sibling) => sibling.id));
+        collectRestorableEntries(entries.slice(index + 1), nextSiblingIds);
+        const nextIndex = destination.findIndex((sibling) => nextSiblingIds.has(sibling.id));
+        const previousSiblingIds = new Set(entries.slice(0, index).map((sibling) => sibling.id));
+        collectRestorableEntries(entries.slice(0, index), previousSiblingIds);
+        const previousIndex = destination.map((sibling) => previousSiblingIds.has(sibling.id)).lastIndexOf(true);
+        const insertionIndex = descendantIndex >= 0 ? descendantIndex : nextIndex >= 0 ? nextIndex : previousIndex + 1;
+        destination.splice(insertionIndex, 0, restored);
+        if (entry.type === "group" && !deletedGroupIds.has(entry.id) && !groups.some((group) => group.id === entry.id)) {
+          const group = previous.groups.find((group) => group.id === entry.id);
+          if (group) groups.push({ ...group });
+        }
+      }
+      if (entry.type === "group") restore(entryChildren(entry), entry.id);
+    }
+  };
+  restore(previous.order, null);
+  return { groups, order };
+}
+
 export function appendConnectionToLayout(layout: SidebarLayout, connectionId: string, groupId?: string | null): SidebarLayout {
   return moveConnectionToGroup(layout, connectionId, groupId ?? null);
 }

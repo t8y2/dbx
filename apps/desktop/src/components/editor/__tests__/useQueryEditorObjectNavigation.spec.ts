@@ -70,6 +70,19 @@ async function createHarness(overrides: Partial<QueryEditorProps> = {}, semantic
 }
 
 describe("QueryEditor object navigation ownership", () => {
+  it.each([false, true])("opens a complete MySQL fullwidth table name (semantic=%s)", async (semantic) => {
+    const name = "医疗服务项目限年龄（省级）_事后_tab_1";
+    const database = "归档库（省级）";
+    const modelValue = `SELECT * FROM ${database}.${name} gt1;`;
+    const { store, position, emit, click } = await createHarness({ modelValue, databaseType: "mysql", dialect: "mysql", database: "demo", schema: undefined }, semantic);
+    position.mockReturnValue(modelValue.lastIndexOf("省级"));
+    store.lookupLocalCompletionTables.mockReturnValue([{ name, database, type: "table" }]);
+    expect((await click()).handled).toBe(true);
+    expect(emit).toHaveBeenCalledWith("clickTable", expect.objectContaining({ name, database }));
+    expect(store.lookupLocalCompletionObjects).not.toHaveBeenCalled();
+    expect(store.listCompletionObjects).not.toHaveBeenCalled();
+  });
+
   it("gives existing selection dragging priority over object navigation", async () => {
     const harness = await createHarness();
     harness.startEditorSelectionDrag.mockReturnValue(true);

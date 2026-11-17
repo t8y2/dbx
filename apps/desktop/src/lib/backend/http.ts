@@ -275,7 +275,7 @@ import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pl
 import type { PluginDataGrant, PluginDataQueryRequest, PluginDataQueryResult } from "@/types/pluginData";
 import type { PluginToolPreview } from "@/types/pluginAiTools";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
-import type { MigrationPreflight, MigrationReport } from "./migration";
+import type { MigrationPreflight, MigrationReport, CredentialResetPreparation, CredentialResetReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
 export const migrationStatus = (retry = false): Promise<MigrationPreflight> => get(`/api/migration/status${retry ? "?retry=true" : ""}`);
 export const migrationStart = (): Promise<MigrationReport> => post("/api/migration/start", {});
@@ -1224,6 +1224,10 @@ export async function revealPathInFileManager(_path: string): Promise<void> {
   throw new Error("Reveal in file manager is only available in the desktop app.");
 }
 
+export async function openPathWithDefaultApp(_path: string): Promise<void> {
+  throw new Error("Open with default application is only available in the desktop app.");
+}
+
 export async function deleteDatabaseBackupFiles(_paths: string[], _allowedRoots: string[] = []): Promise<number> {
   throw new Error("Database backup file management is only available in the desktop app.");
 }
@@ -1316,8 +1320,22 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return schemas.map((name) => ({ name, comment: null }));
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: TableNameFilter, exactIdentity?: boolean): Promise<TableInfo[]> {
-  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined, exact_identity: exactIdentity || undefined })}`);
+export async function listTables(
+  connectionId: string,
+  database: string,
+  schema: string,
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  objectTypes?: SidebarObjectKind[],
+  catalog?: string,
+  tableNameFilter?: TableNameFilter,
+  exactIdentity?: boolean,
+  pageTableRoots?: boolean,
+): Promise<TableInfo[]> {
+  return get(
+    `/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined, exact_identity: exactIdentity || undefined, page_table_roots: pageTableRoots || undefined })}`,
+  );
 }
 
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
@@ -1355,6 +1373,7 @@ export async function listObjects(
       table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined,
       execution_id: executionId,
       identity_mode: readOptions?.identityMode,
+      lightweight: readOptions?.lightweight,
       exact_identity: options === true || undefined,
     })}`,
   );
@@ -1516,7 +1535,7 @@ export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): 
   return schemaDiffPreparationFromWire(await post<SchemaDiffPreparationWire>("/api/schema-diff/prepare", schemaDiffPreparationToWire(options)));
 }
 
-export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean): Promise<string> {
+export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean, compareCharset?: boolean): Promise<string> {
   return post("/api/schema-diff/generate-sync-sql", {
     diffs,
     databaseType,
@@ -1526,6 +1545,7 @@ export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: Da
     ruleDiffs: ruleDiffs ?? [],
     ownerDiffs: ownerDiffs ?? [],
     cascadeDelete: cascadeDelete ?? false,
+    compareCharset: compareCharset ?? true,
   });
 }
 
@@ -1730,6 +1750,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   return postQueryWithDiagnostics(
@@ -1784,6 +1806,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -1949,6 +1973,7 @@ export async function executeInManualTransaction(
   _timeoutSecs?: number,
   _boundStatements?: BlobBoundStatement[],
   _deferLobs?: boolean,
+  _reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
@@ -2191,6 +2216,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
 
 export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return post("/api/query/build-editable-object-source", { input });
+}
+
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return post("/api/query/build-oracle-object-export-sql", { input });
 }
 
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
@@ -3281,6 +3310,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string, _includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -3326,6 +3357,8 @@ export interface GlobalSearchRequest {
   respectIgnoreRules?: boolean;
   /** Max traversal depth (`WalkBuilder` semantics: root = 0, its entries = 1). */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -3337,7 +3370,21 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(_request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(_request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
+  throw new Error("Global content search is only available in the desktop app");
+}
+
+export async function cancelGlobalSearch(_searchId: string): Promise<void> {
   throw new Error("Global content search is only available in the desktop app");
 }
 
@@ -3952,11 +3999,11 @@ export async function createQueryResultTempFile(_extension = "xlsx"): Promise<st
   throw new Error("Opening query results in an external application is only available in the desktop app");
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {
   const { formatCsv } = await import("@/lib/export/exportFormats");
   const content = formatCsv(columns, rows as (string | number | boolean | null)[][], csvQuoteMode, nullLiteral);
   const fileName = filePath.split(/[\\/]/).pop() || "export.csv";
-  const blob = new Blob(["\uFEFF", content], {
+  const blob = new Blob([csvWithoutBom ? "" : "\uFEFF", content], {
     type: "text/csv;charset=utf-8",
   });
   const url = URL.createObjectURL(blob);
@@ -6058,3 +6105,6 @@ export async function deletePluginUiStorage(_pluginId: string, _key: string): Pr
 export async function openQueryResultTempFile(_path: string): Promise<void> {
   throw new Error("Opening query results requires the desktop app");
 }
+
+export const migrationPrepareCredentialReset = (): Promise<CredentialResetPreparation> => Promise.reject(new Error("Credential reset is only available in the Windows desktop app"));
+export const migrationResetCredentials = (_confirmationToken: string, _confirmed: boolean): Promise<CredentialResetReport> => Promise.reject(new Error("Credential reset is only available in the Windows desktop app"));

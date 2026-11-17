@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, h, KeepAlive, nextTick, ref, type App, type Ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   invalidateObjectMetadataCache: vi.fn(),
   invalidateTableMetadataCache: vi.fn(),
   toast: vi.fn(),
+  updateDraft: vi.fn(),
 }));
 
 vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
@@ -174,20 +175,28 @@ vi.mock("@/components/ui/searchable-select", async () => {
         modelValue: { type: String, default: "" },
         options: { type: Array, default: () => [] },
         allowCustom: { type: Boolean, default: false },
+        clearable: { type: Boolean, default: false },
       },
       emits: ["update:modelValue"],
       setup:
         (props, { attrs, emit }) =>
         () =>
-          h("button", {
-            ...attrs,
-            type: "button",
-            "data-searchable-select": "true",
-            "data-model-value": props.modelValue,
-            "data-options": JSON.stringify(props.options),
-            "data-allow-custom": String(props.allowCustom),
-            onClick: () => emit("update:modelValue", "data-mysql-table-charset-select" in attrs ? "utf8mb4" : "data-mysql-table-collation-select" in attrs ? "utf8mb4_bin" : "custom_domain"),
-          }),
+          h(
+            "select",
+            {
+              ...attrs,
+              value: props.modelValue,
+              "data-searchable-select": "true",
+              "data-model-value": props.modelValue,
+              "data-options": JSON.stringify(props.options),
+              "data-allow-custom": String(props.allowCustom),
+              onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value),
+              onKeydown: (event: KeyboardEvent) => {
+                if (props.clearable && ["Backspace", "Delete"].includes(event.key)) emit("update:modelValue", "");
+              },
+            },
+            [...new Set(["", props.modelValue, ...(props.options as string[])])].map((option) => h("option", { value: option }, option)),
+          ),
     }),
   };
 });
@@ -284,34 +293,41 @@ function draft(autoIncrement = false, counter?: { value?: string; originalValue?
   };
 }
 
-async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }, draftOverride?: ReturnType<typeof draft>, createMode = false) {
+async function mountEditor(autoIncrement = false, counter?: { value?: string; originalValue?: string }, draftOverride?: ReturnType<typeof draft> | null, createMode = false, active?: Ref<boolean>) {
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
 
   const root = document.createElement("div");
   document.body.append(root);
-  const app = createApp(TableStructureEditor, {
+  const editorProps = {
     connectionId: mocks.connection.id,
     database: "test",
     schema: "test",
-    tableName: createMode ? undefined : "users",
-    draft: draftOverride ?? draft(autoIncrement, counter),
-  });
+    tableName: createMode ? "" : "users",
+    draft: draftOverride === null ? undefined : (draftOverride ?? draft(autoIncrement, counter)),
+    "onUpdate:draft": mocks.updateDraft,
+  };
+  const app = active
+    ? createApp({
+        render: () => h(KeepAlive, {}, { default: () => (active.value ? h(TableStructureEditor, { ...editorProps, ref: (editor) => (mountedEditor = editor as unknown as typeof mountedEditor) }) : null) }),
+      })
+    : createApp(TableStructureEditor, editorProps);
   mountedApps.push(app);
-  mountedEditor = app.mount(root) as unknown as { applyChanges: () => Promise<boolean> };
+  const instance = app.mount(root);
+  if (!active) mountedEditor = instance as unknown as { applyChanges: () => Promise<boolean> };
   await nextTick();
   await Promise.resolve();
   await nextTick();
   return root;
 }
 
-function searchableSelectInColumn(root: HTMLElement, header: string): HTMLButtonElement {
+function searchableSelectInColumn(root: HTMLElement, header: string): HTMLSelectElement {
   const headerIndex = Array.from(root.querySelectorAll("thead th")).findIndex((cell) => cell.textContent?.trim() === header);
   if (headerIndex < 0) throw new Error(`Missing ${header} column`);
   const row = root.querySelector<HTMLElement>('[data-column-row-index="0"]');
   const cell = row?.querySelectorAll("td")[headerIndex];
-  const select = cell?.querySelector<HTMLButtonElement>('[data-searchable-select="true"]');
+  const select = cell?.querySelector<HTMLSelectElement>('[data-searchable-select="true"]');
   if (!select) throw new Error(`Missing ${header} searchable select`);
   return select;
 }
@@ -320,12 +336,62 @@ function queryResult(columns: string[], rows: unknown[][]): { columns: string[];
   return { columns, rows, affected_rows: 0, execution_time_ms: 1 };
 }
 
+function mockMysqlCharsetMetadata() {
+  mocks.executeQuery.mockImplementation(async (_connectionId, _database, sql: string) => {
+    if (sql === "SHOW CHARACTER SET") {
+      return queryResult(
+        ["Charset", "Default collation"],
+        [
+          ["utf8mb4", "utf8mb4_0900_ai_ci"],
+          ["utf8mb3", "utf8mb3_general_ci"],
+        ],
+      );
+    }
+    if (sql === "SHOW COLLATION") {
+      return queryResult(
+        ["Collation", "Charset", "Default"],
+        [
+          ["utf8mb4_0900_ai_ci", "utf8mb4", "Yes"],
+          ["utf8mb4_0900_as_cs", "utf8mb4", ""],
+          ["utf8mb4_bin", "utf8mb4", ""],
+          ["utf8mb3_general_ci", "utf8mb3", "Yes"],
+        ],
+      );
+    }
+    if (sql.includes("information_schema.TABLES")) return queryResult(["TABLE_COLLATION"], [["utf8mb3_general_ci"]]);
+    return queryResult([], []);
+  });
+}
+
+function newTableDraft() {
+  const value = draft();
+  value.newTableName = "users";
+  value.columns[0].characterSet = "";
+  value.columns[0].collation = "";
+  return value;
+}
+
+async function selectTableOption(root: HTMLElement, selector: string, value: string) {
+  const select = await vi.waitFor(() => {
+    const element = root.querySelector<HTMLSelectElement>(selector);
+    expect(element).not.toBeNull();
+    expect(element!.disabled).toBe(false);
+    expect(JSON.parse(element!.dataset.options ?? "[]")).toContain(value);
+    return element!;
+  });
+  select.value = value;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  await nextTick();
+  expect(select.dataset.modelValue).toBe(value);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.connection.db_type = "mysql";
   mocks.connection.name = "MySQL";
   mocks.connection.driver_label = "MySQL";
   mocks.connection.driver_profile = "mysql";
+  mocks.executeQuery.mockResolvedValue(queryResult([], []));
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id varchar(255))", cacheStatus: "remote" });
   mocks.invalidateObjectDdl.mockResolvedValue(undefined);
   mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
@@ -372,6 +438,230 @@ describe("TableStructureEditor charset/collation column width", () => {
 });
 
 describe("TableStructureEditor MySQL table charset and collation", () => {
+  it("shows table-level charset and collation for a new MySQL table", async () => {
+    const root = await mountEditor(false, undefined, null, true);
+
+    expect(root.querySelector("[data-mysql-table-charset-select]")).not.toBeNull();
+    expect(root.querySelector("[data-mysql-table-collation-select]")).not.toBeNull();
+  });
+
+  it("marks charset-only edits to a blank new table as dirty until the options are cleared", async () => {
+    mockMysqlCharsetMetadata();
+    const root = await mountEditor(false, undefined, null, true);
+    const expectDraft = async (dirty: boolean, mysqlTableCharset: string, mysqlTableCollation: string) => {
+      await vi.waitFor(() => expect(mocks.updateDraft.mock.lastCall?.[0]).toMatchObject({ dirty, newTableName: "", columns: [], mysqlTableCharset, mysqlTableCollation }));
+    };
+    await expectDraft(false, "", "");
+
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
+    await expectDraft(true, "utf8mb4", "");
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+    await expectDraft(true, "utf8mb4", "utf8mb4_0900_as_cs");
+
+    root.querySelector("[data-mysql-table-collation-select]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    await expectDraft(true, "utf8mb4", "");
+    root.querySelector("[data-mysql-table-charset-select]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    await expectDraft(false, "", "");
+  });
+
+  it("loads server charset and collation metadata when creating a MySQL table", async () => {
+    mockMysqlCharsetMetadata();
+    const root = await mountEditor(false, undefined, newTableDraft(), true);
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(mocks.connection.id, "test", "SHOW CHARACTER SET"));
+    expect(mocks.executeQuery).toHaveBeenCalledWith(mocks.connection.id, "test", "SHOW COLLATION");
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
+    await vi.waitFor(() => {
+      const collationSelect = root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")!;
+      expect(JSON.parse(collationSelect.dataset.options ?? "[]")).toEqual(["utf8mb4_0900_ai_ci", "utf8mb4_0900_as_cs", "utf8mb4_bin"]);
+    });
+  });
+
+  it("passes selected table options to the CREATE preview and executes that preview", async () => {
+    mockMysqlCharsetMetadata();
+    const sql = "CREATE TABLE `users` (`id` varchar(255)) DEFAULT CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_as_cs;";
+    mocks.buildCreateTableSql.mockResolvedValue({ statements: [sql], warnings: [] });
+    const root = await mountEditor(false, undefined, newTableDraft(), true);
+
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+    await vi.waitFor(() =>
+      expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
+        mysqlTableCharset: { charset: "utf8mb4", collation: "utf8mb4_0900_as_cs" },
+      }),
+    );
+    const preview = await vi.waitFor(() => {
+      const text = root.querySelector("pre")?.textContent;
+      expect(text).toContain("CHARACTER SET = utf8mb4");
+      expect(text).toContain("COLLATE = utf8mb4_0900_as_cs");
+      return text!;
+    });
+
+    await expect(mountedEditor?.applyChanges()).resolves.toBe(true);
+    expect(mocks.executeBatch).toHaveBeenCalledWith(mocks.connection.id, "test", [preview], "test", expect.any(Number), false);
+    expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+  });
+
+  it("leaves new table options unset so CREATE inherits the database defaults", async () => {
+    mockMysqlCharsetMetadata();
+    const root = await mountEditor(false, undefined, newTableDraft(), true);
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(mocks.connection.id, "test", "SHOW COLLATION"));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenCalled());
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-charset-select]")?.dataset.modelValue).toBe("");
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("");
+    expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, undefined);
+    expect(mocks.executeQuery.mock.calls.some((call) => String(call[2]).includes("information_schema.TABLES"))).toBe(false);
+
+    await expect(mountedEditor?.applyChanges()).resolves.toBe(true);
+    expect(mocks.executeBatch.mock.calls[0][2].join("\n")).not.toMatch(/CHARACTER SET|COLLATE/i);
+  });
+
+  it("clears new table options and disables collation until a charset is selected", async () => {
+    mockMysqlCharsetMetadata();
+    const root = await mountEditor(false, undefined, newTableDraft(), true);
+    const charsetSelect = root.querySelector<HTMLSelectElement>("[data-mysql-table-charset-select]")!;
+    const collationSelect = root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")!;
+    expect(collationSelect.disabled).toBe(true);
+
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+    collationSelect.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    await vi.waitFor(() =>
+      expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.any(Object), undefined, {
+        mysqlTableCharset: { charset: "utf8mb4", collation: undefined },
+      }),
+    );
+    expect(collationSelect.dataset.modelValue).toBe("");
+    expect(collationSelect.disabled).toBe(false);
+
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+    charsetSelect.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.any(Object), undefined, undefined));
+    expect(charsetSelect.dataset.modelValue).toBe("");
+    expect(collationSelect.dataset.modelValue).toBe("");
+    expect(collationSelect.disabled).toBe(true);
+  });
+
+  it("drops an incompatible collation when the new table charset changes", async () => {
+    mockMysqlCharsetMetadata();
+    const root = await mountEditor(false, undefined, newTableDraft(), true);
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb3");
+
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("");
+    await vi.waitFor(() =>
+      expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.any(Object), undefined, {
+        mysqlTableCharset: { charset: "utf8mb3", collation: undefined },
+      }),
+    );
+  });
+
+  it("preserves a compatible collation when switching between utf8 and utf8mb3 aliases", async () => {
+    mockMysqlCharsetMetadata();
+    const value = { ...newTableDraft(), mysqlTableCharset: "utf8", mysqlTableCollation: "utf8mb3_general_ci" };
+    const root = await mountEditor(false, undefined, value, true);
+
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb3");
+
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("utf8mb3_general_ci");
+    await vi.waitFor(() =>
+      expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.any(Object), undefined, {
+        mysqlTableCharset: { charset: "utf8mb3", collation: "utf8mb3_general_ci" },
+      }),
+    );
+  });
+
+  it("retries failed metadata on reactivation and reuses the successful server list", async () => {
+    mockMysqlCharsetMetadata();
+    const successfulQuery = mocks.executeQuery.getMockImplementation()!;
+    let serverAvailable = false;
+    mocks.executeQuery.mockImplementation(async (...args) => {
+      if (!serverAvailable && /^SHOW (CHARACTER SET|COLLATION)$/.test(String(args[2]))) throw new Error("metadata unavailable");
+      return successfulQuery(...args);
+    });
+    const active = ref(true);
+    const root = await mountEditor(false, undefined, newTableDraft(), true, active);
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
+    const fallbackOptions = JSON.parse(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")!.dataset.options ?? "[]");
+    expect(fallbackOptions).toContain("utf8mb4_bin");
+    expect(fallbackOptions).not.toContain("utf8mb4_0900_as_cs");
+
+    active.value = false;
+    await nextTick();
+    serverAvailable = true;
+    active.value = true;
+    await nextTick();
+
+    await vi.waitFor(() => {
+      const options = JSON.parse(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")!.dataset.options ?? "[]");
+      expect(options).toContain("utf8mb4_0900_as_cs");
+    });
+    const queryCount = () => mocks.executeQuery.mock.calls.filter((call) => call[2] === "SHOW COLLATION").length;
+    expect(queryCount()).toBe(2);
+    active.value = false;
+    await nextTick();
+    active.value = true;
+    await nextTick();
+    await Promise.resolve();
+    expect(queryCount()).toBe(2);
+  });
+
+  it("restores new table selections and still loads the server options", async () => {
+    mockMysqlCharsetMetadata();
+    const value = { ...newTableDraft(), mysqlTableCharset: "utf8mb4", mysqlTableCollation: "utf8mb4_0900_as_cs" };
+    const root = await mountEditor(false, undefined, value, true);
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(mocks.connection.id, "test", "SHOW COLLATION"));
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-charset-select]")?.dataset.modelValue).toBe("utf8mb4");
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("utf8mb4_0900_as_cs");
+    await vi.waitFor(() =>
+      expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
+        mysqlTableCharset: { charset: "utf8mb4", collation: "utf8mb4_0900_as_cs" },
+      }),
+    );
+  });
+
+  it("does not carry table selections into a newly opened blank create editor", async () => {
+    mockMysqlCharsetMetadata();
+    const previousRoot = await mountEditor(false, undefined, newTableDraft(), true);
+    await selectTableOption(previousRoot, "[data-mysql-table-charset-select]", "utf8mb4");
+    await selectTableOption(previousRoot, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+    mountedApps.pop()!.unmount();
+    previousRoot.remove();
+    mocks.buildCreateTableSql.mockClear();
+
+    const root = await mountEditor(false, undefined, newTableDraft(), true);
+
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-charset-select]")?.dataset.modelValue).toBe("");
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("");
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.any(Object), undefined, undefined));
+  });
+
+  it("loads complete server options for an existing table restored with table defaults", async () => {
+    mockMysqlCharsetMetadata();
+    const value = {
+      ...draft(),
+      mysqlTableCharset: "utf8mb4",
+      originalMysqlTableCharset: "utf8mb4",
+      mysqlTableCollation: "utf8mb4_0900_ai_ci",
+      originalMysqlTableCollation: "utf8mb4_0900_ai_ci",
+    };
+    const root = await mountEditor(false, undefined, value);
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith(mocks.connection.id, "test", "SHOW COLLATION"));
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_0900_as_cs");
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
+        charset: "utf8mb4",
+        collation: "utf8mb4_0900_as_cs",
+      }),
+    );
+    expect(mocks.buildCreateTableSql).not.toHaveBeenCalled();
+  });
+
   it("loads the table defaults and previews only the selected table-default change", async () => {
     mocks.executeQuery.mockImplementation(async (_connectionId, _database, sql: string) => {
       if (sql === "SHOW CHARACTER SET") {
@@ -399,23 +689,23 @@ describe("TableStructureEditor MySQL table charset and collation", () => {
 
     const root = await mountEditor();
     const charsetSelect = await vi.waitFor(() => {
-      const select = root.querySelector<HTMLButtonElement>("[data-mysql-table-charset-select]");
+      const select = root.querySelector<HTMLSelectElement>("[data-mysql-table-charset-select]");
       expect(select).not.toBeNull();
       return select!;
     });
     await vi.waitFor(() => expect(charsetSelect.dataset.modelValue).toBe("utf8mb3"));
-    expect(root.querySelector<HTMLButtonElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("utf8mb3_general_ci");
+    expect(root.querySelector<HTMLSelectElement>("[data-mysql-table-collation-select]")?.dataset.modelValue).toBe("utf8mb3_general_ci");
     expect(JSON.parse(charsetSelect.dataset.options ?? "[]")).toContain("utf8mb4");
 
-    charsetSelect.click();
+    await selectTableOption(root, "[data-mysql-table-charset-select]", "utf8mb4");
     await vi.waitFor(() =>
       expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
         charset: "utf8mb4",
-        collation: "utf8mb4_0900_ai_ci",
+        collation: undefined,
       }),
     );
 
-    root.querySelector<HTMLButtonElement>("[data-mysql-table-collation-select]")!.click();
+    await selectTableOption(root, "[data-mysql-table-collation-select]", "utf8mb4_bin");
     await vi.waitFor(() =>
       expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableName: "users" }), undefined, {
         charset: "utf8mb4",

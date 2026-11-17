@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/composables/useToast";
 import { currentLocale } from "@/i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import type { EditorSettings } from "@/stores/settingsStore";
+import type { EditorSettingsImportPatch } from "@/lib/settings/editorSettingsDraft";
 import {
   buildSettingsTransferFilename,
   MAX_SETTINGS_TRANSFER_FILE_BYTES,
@@ -27,9 +27,9 @@ const props = defineProps<{
   hasUnappliedChanges: () => boolean;
   buildSavedExportPayload: () => string;
   buildAppliedExportPayload: () => Promise<string | null>;
-  applyImportedSettings: (imported: Partial<EditorSettings>) => void;
+  applyImportedSettings: (imported: EditorSettingsImportPatch) => void;
   applyImportedExtras: (extras: SettingsTransferExtras) => void;
-  getDraftConflictCategories: (imported: Partial<EditorSettings>, extras?: SettingsTransferExtras) => SettingsTransferCategoryId[];
+  getDraftConflictCategories: (imported: EditorSettingsImportPatch, extras?: SettingsTransferExtras) => SettingsTransferCategoryId[];
 }>();
 
 const { t } = useI18n();

@@ -68,7 +68,7 @@ jobs:
             aws s3 sync "$source" "s3://${R2_BUCKET_NAME}/releases/${alias}/" \
               --endpoint-url "$endpoint" --cache-control "no-cache" --delete
           done
-          aws s3 cp "$source/latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
+          aws s3 cp "${source}latest.json" "s3://${R2_BUCKET_NAME}/releases/stable/latest.json" \
             --endpoint-url "$endpoint" --cache-control "no-cache"
 
       - name: Purge Cloudflare cache

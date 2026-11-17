@@ -69,11 +69,14 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "windows-7-offline",
     iconId: "windows-legacy",
-    labels: { en: "Windows 7 / Server\u00a02012\u00a0R2 package", cn: "Windows 7 / Server\u00a02012\u00a0R2 专用包" },
+    labels: {
+      en: "Windows 7 / Server\u00a02008\u00a0R2+",
+      cn: "Windows 7 / Server\u00a02008\u00a0R2 及以上",
+    },
     descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
     driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
     badges: { en: "Legacy", cn: "旧系统" },
-    suffix: "x64-win7-server2012r2-offline-setup.exe",
+    suffix: "x64-win7-server2008r2-offline-setup.exe",
   },
   {
     id: "linux",
@@ -105,7 +108,8 @@ const downloadArtifacts: DownloadArtifact[] = [
 const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(-beta\.\d{8}\.\d+)?$/;
 
 // Stable packages are published once under releases/stable/<release_tag>/. A
-// promoted beta keeps its beta tag there while its files are named by the plain
+// promoted beta is republished under its plain vX.Y.Z tag; releases promoted
+// earlier keep their beta tag there. Package files are always named by the plain
 // version. Releases from before channels have no release_tag and live in
 // releases/v<version>/.
 function releaseDirectory(version: string, releaseTag?: string) {

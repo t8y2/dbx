@@ -13,6 +13,7 @@ export interface StatementRange {
 }
 
 export interface QueryEditorSurfaceHandle {
+  focusSqlEditor(): boolean;
   focusSearch(target?: Element | null): boolean;
   focusWhere(): boolean;
   openGoToColumn(): boolean;
@@ -46,10 +47,14 @@ export interface QueryEditorSurfaceHandle {
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;
   foldAll?(): boolean;
+  toggleLineComment?(): boolean;
   unfoldAll?(): boolean;
 }
 
 export interface QueryResultSurfaceHandle {
+  copyActiveResult(isValid?: () => boolean): boolean;
+  focusResultGrid(): boolean;
+  cancelResultGridFocus(): void;
   focusSearch(target?: Element | null): boolean;
   refreshData(target?: Element | null): boolean;
   toggleResultsPane(): boolean;

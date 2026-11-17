@@ -23,6 +23,8 @@ export interface BuildTableSelectSqlOptions {
   tableType?: string;
   primaryKeys?: string[];
   columns?: string[];
+  /** Select exactly `columns` instead of the engine's default projection. For SQL that is read or copied, not for loading table data. */
+  projectColumns?: boolean;
   columnTypes?: string[];
   largeValuePreviewSize?: number;
   fallbackOrderColumns?: string[];
@@ -91,7 +93,9 @@ function sqlStatementSpans(sql: string, dialectId: string): Array<{ start: numbe
 }
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
-  if ((databaseType === "gaussdb" || databaseType === "opengauss") && isExplicitlyQuotedSqlIdentifier(name)) return name;
+  // Mirrors Rust `quote_table_identifier`: re-quoting an already delimited name
+  // produced `"""neptune"""` and PostgreSQL rejected it (#14194).
+  if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && isExplicitlyQuotedSqlIdentifier(name)) return name;
   if (databaseType === "iotdb") return name;
   // SOQL has no delimited identifiers — `"Account"` is a string literal there and
   // `SELECT * FROM "Account"` fails with MALFORMED_QUERY. Mirrors the Rust

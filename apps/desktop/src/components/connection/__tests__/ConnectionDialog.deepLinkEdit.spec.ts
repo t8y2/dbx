@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 import { CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
-import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider } from "@/lib/connection/connectionDeepLink";
 
 const visibleTab = vi.hoisted(() => ({ value: "connection" }));
 
@@ -211,8 +211,8 @@ async function mountDialog(config: ConnectionConfig, url = "", initiallyOpen = t
   return props;
 }
 
-async function mountNewDialog(url?: string) {
-  const props = reactive({ open: true, prefillConfig: url ? parseConnectionDeepLink(url) : null });
+async function mountNewDialog(url?: string, draft?: ConnectionDeepLinkDraft | null) {
+  const props = reactive({ open: true, prefillConfig: draft ?? (url ? parseConnectionDeepLink(url) : null) });
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -1094,5 +1094,93 @@ describe("JDBC connection parameter entry and driver metadata", () => {
         jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
       }),
     );
+  });
+});
+
+describe("ConnectionDialog plugin connection deep links", () => {
+  const sshProvider: ConnectionDeepLinkPluginProvider = {
+    pluginId: "io.dbx.ssh",
+    providerId: "io.dbx.ssh.connection",
+    label: "SSH server",
+    databaseType: "ssh",
+    defaultPort: 22,
+  };
+
+  const sshPlugin = {
+    manifest: {
+      id: "io.dbx.ssh",
+      name: "SSH",
+      version: "0.7.13",
+      contributions: [
+        {
+          type: "connection-provider",
+          id: "io.dbx.ssh.connection",
+          label: "SSH server",
+          database_type: "ssh",
+          fields: [
+            { key: "display_name", label: "Name", type: "text", binding: "name", required: true, default: "SSH server" },
+            { key: "host", label: "Host", type: "text", binding: "host", required: true, default: "127.0.0.1" },
+            { key: "port", label: "Port", type: "number", binding: "port", required: true, default: 22 },
+            { key: "username", label: "User", type: "text", binding: "username", required: true, default: "root" },
+            { key: "password", label: "Password", type: "password", binding: "password" },
+          ],
+        },
+      ],
+    },
+    compatibility: { compatible: true, errors: [] },
+  };
+
+  function sshDraft(): ConnectionDeepLinkDraft {
+    const draft = parseConnectionDeepLink("dbx://connection/new?v=1&type=ssh&host=10.0.0.9&port=2222&user=deploy&name=Prod%20SSH&one_time=true", { pluginProviders: [sshProvider] });
+    expect(draft?.pluginProvider).toBeTruthy();
+    return draft!;
+  }
+
+  it("selects the plugin provider and persists the prefilled endpoint as a plugin connection", async () => {
+    backend.listPlugins.mockResolvedValue([sshPlugin]);
+
+    await mountNewDialog(undefined, sshDraft());
+    await settle();
+
+    expect(store.addConnection).toHaveBeenCalledTimes(1);
+    expect(store.addConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "plugin",
+        driver_profile: "plugin",
+        driver_label: "SSH server",
+        plugin_id: "io.dbx.ssh",
+        plugin_connection_provider: "io.dbx.ssh.connection",
+        plugin_connection_type: "ssh",
+        name: "Prod SSH",
+        host: "10.0.0.9",
+        port: 2222,
+        username: "deploy",
+      }),
+      null,
+    );
+  });
+
+  it("waits for the plugin list before persisting a one-time plugin link", async () => {
+    let resolvePlugins: (value: unknown) => void = () => {};
+    backend.listPlugins.mockReturnValue(new Promise((resolve) => (resolvePlugins = resolve as (value: unknown) => void)));
+
+    await mountNewDialog(undefined, sshDraft());
+    await settle();
+    // 插件表还没返回：不能提前存一条没有 provider 的连接。
+    expect(store.addConnection).not.toHaveBeenCalled();
+
+    resolvePlugins([sshPlugin]);
+    await settle();
+    expect(store.addConnection).toHaveBeenCalledWith(expect.objectContaining({ plugin_id: "io.dbx.ssh", host: "10.0.0.9" }), null);
+  });
+
+  it("keeps the draft open without persisting when the provider's plugin is not installed", async () => {
+    backend.listPlugins.mockResolvedValue([]);
+
+    const props = await mountNewDialog(undefined, sshDraft());
+    await settle();
+
+    expect(store.addConnection).not.toHaveBeenCalled();
+    expect(props.open).toBe(true);
   });
 });

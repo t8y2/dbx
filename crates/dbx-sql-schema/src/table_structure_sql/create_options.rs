@@ -1,9 +1,13 @@
 //! Optional CREATE-only dialect settings. Existing table/ALTER request options remain compatible.
 use serde::{Deserialize, Serialize};
 
+use super::mysql_table_charset::MysqlTableCharsetChange;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTableDialectOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_table_charset: Option<MysqlTableCharsetChange>,
     pub starrocks: Option<StarRocksCreateOptions>,
     pub postgres_foreign_table: Option<PostgresForeignTableCreateOptions>,
 }

@@ -7,7 +7,7 @@ import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 let app: ReturnType<typeof createApp>;
 let host: HTMLDivElement;
 let mountedCount: number;
-const props = reactive({ pinned: false, enabled: true, classicLayout: false });
+const props = reactive({ pinned: false, enabled: true, classicLayout: false, hoverEnabled: true, hoverDelay: 300 });
 const edge = () => host.querySelector<HTMLElement>("[data-sidebar-reveal-edge]")!;
 const panel = () => host.querySelector<HTMLElement>("[data-sidebar-reveal-panel]")!;
 const preview = () => panel().hasAttribute("data-sidebar-preview");
@@ -18,14 +18,14 @@ async function advance(ms: number) {
 }
 async function reveal() {
   pointer(edge(), "pointerenter");
-  await advance(150);
+  await advance(props.hoverDelay);
   pointer(edge(), "pointerleave");
   pointer(panel(), "pointerenter");
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
-  Object.assign(props, { pinned: false, enabled: true, classicLayout: false });
+  Object.assign(props, { pinned: false, enabled: true, classicLayout: false, hoverEnabled: true, hoverDelay: 300 });
   mountedCount = 0;
   host = document.createElement("div");
   document.body.append(host);
@@ -47,9 +47,56 @@ afterEach(() => {
 });
 
 describe("sidebar hover preview", () => {
-  it("requires a 150ms dwell and cancels when passing the edge", async () => {
+  it("disables the edge without disabling manual expansion", async () => {
+    props.hoverEnabled = false;
+    await nextTick();
+    expect(edge()).toBeNull();
+    await advance(1000);
+    expect(preview()).toBe(false);
+    props.pinned = true;
+    await nextTick();
+    expect(panel().style.display).not.toBe("none");
+    expect(mountedCount).toBe(1);
+  });
+
+  it("cancels a pending opening and an active preview when hover is disabled", async () => {
     pointer(edge(), "pointerenter");
-    await advance(149);
+    await advance(200);
+    props.hoverEnabled = false;
+    await advance(500);
+    expect(preview()).toBe(false);
+    props.hoverEnabled = true;
+    await nextTick();
+    await reveal();
+    props.hoverEnabled = false;
+    await nextTick();
+    expect(preview()).toBe(false);
+    expect(edge()).toBeNull();
+  });
+
+  it.each([100, 300, 750, 2000])("uses the configured %sms delay", async (delay) => {
+    props.hoverDelay = delay;
+    await nextTick();
+    pointer(edge(), "pointerenter");
+    await advance(delay - 1);
+    expect(preview()).toBe(false);
+    await advance(1);
+    expect(preview()).toBe(true);
+  });
+
+  it("cancels stale opening timers when the delay changes", async () => {
+    pointer(edge(), "pointerenter");
+    await advance(200);
+    props.hoverDelay = 1000;
+    await advance(2000);
+    expect(preview()).toBe(false);
+    await reveal();
+    expect(preview()).toBe(true);
+  });
+
+  it("requires a 300ms dwell and cancels when passing the edge", async () => {
+    pointer(edge(), "pointerenter");
+    await advance(299);
     expect(preview()).toBe(false);
     pointer(edge(), "pointerleave");
     await advance(400);
@@ -58,6 +105,8 @@ describe("sidebar hover preview", () => {
     expect(preview()).toBe(true);
     expect(props.pinned).toBe(false);
     expect(panel().classList.contains("sidebar-reveal-overlay")).toBe(true);
+    // 壁纸模式下悬停浮出面板必须保持不透明（--background-solid，#14219）。
+    expect(panel().classList.contains("bg-background-solid")).toBe(true);
   });
 
   it("closes after 300ms outside and cancels closing on re-entry", async () => {

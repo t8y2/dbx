@@ -247,6 +247,9 @@ watch(
     v-if="transferDialogMounted"
     v-model:open="dialogs.showTransferDialog.value"
     :task-id="dialogs.transferTaskId.value"
+    :reexecute-task="dialogs.transferReexecuteTask.value"
+    @update:task-id="dialogs.transferTaskId.value = $event"
+    @update:reexecute-task="dialogs.transferReexecuteTask.value = $event"
     :prefill-connection-id="dialogs.transferPrefillConnectionId.value"
     :prefill-database="dialogs.transferPrefillDatabase.value"
     :prefill-catalog="dialogs.transferPrefillCatalog.value"
@@ -357,6 +360,7 @@ watch(
     :prefill-schema="dialogs.databaseExportPrefillSchema.value"
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
+    :prefill-objects="dialogs.databaseExportPrefillObjects.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
     @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />
@@ -367,6 +371,7 @@ watch(
     :busy="dialogs.applyingImportSelection.value"
     :connections="dialogs.configConnectionSelectList.value"
     :layout="dialogs.configConnectionSelectLayout.value"
+    :sort-mode="dialogs.configConnectionSelectSortMode.value"
     @update:open="dialogs.onConfigConnectionSelectOpenChange"
     @confirm="dialogs.onConfigConnectionSelectConfirm"
   />

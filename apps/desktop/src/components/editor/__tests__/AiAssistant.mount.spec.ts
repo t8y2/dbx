@@ -56,6 +56,9 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // (false), where a CLI config is ineligible and its disabled selector never
   // renders — the skill-capability test flips this for its own duration.
   tauriRuntime: false,
+  detachedWindow: false,
+  loadAiRuns: vi.fn(async () => []),
+  aiCancelStream: vi.fn(async () => true),
 }));
 
 // `onMounted` imports the syntax highlighter lazily; this module-level delay stands in for the
@@ -87,6 +90,10 @@ vi.mock("@/lib/ai/ai", async (importOriginal) => {
 });
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => aiAssistantMountApi.tauriRuntime }));
+vi.mock("@/lib/app/windowContext", async (original) => ({
+  ...(await original<typeof import("@/lib/app/windowContext")>()),
+  isDetachedWindow: () => aiAssistantMountApi.detachedWindow,
+}));
 
 // Reka's popover does not survive this harness: once a `PopoverContent` sibling
 // exists, the trigger's merged click handler is dropped on its re-render, so a
@@ -163,7 +170,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   return {
     ...actual,
     loadAiConversations: () => Promise.resolve(aiAssistantMountApi.conversations),
-    loadAiRuns: empty,
+    loadAiRuns: aiAssistantMountApi.loadAiRuns,
+    aiCancelStream: aiAssistantMountApi.aiCancelStream,
     saveAiConversation: (conversation: Record<string, unknown>) => {
       aiAssistantMountApi.savedConversations.push(conversation);
       return Promise.resolve();
@@ -228,12 +236,15 @@ afterEach(() => {
   aiAssistantMountApi.skillReadCalls = [];
   aiAssistantMountApi.skillListCalls = 0;
   aiAssistantMountApi.tauriRuntime = false;
+  aiAssistantMountApi.detachedWindow = false;
+  aiAssistantMountApi.loadAiRuns.mockClear();
   // Reset the shared catalog mock, then re-arm the default implementation that
   // reads `skillCatalog`: `mockReset()` alone leaves it returning undefined, so
   // every test would start from a broken catalog.
   aiAssistantMountApi.listUserSkills.mockReset();
   aiAssistantMountApi.listUserSkills.mockImplementation(() => Promise.resolve(aiAssistantMountApi.skillCatalog));
   while (cleanups.length) cleanups.pop()?.();
+  aiAssistantMountApi.aiCancelStream.mockClear();
 });
 
 function stubResizeObserver(): Array<{ callback: ResizeObserverCallback; targets: Element[] }> {
@@ -263,7 +274,7 @@ function stubResizeObserver(): Array<{ callback: ResizeObserverCallback; targets
 async function mountPanel(aiConfigLoaded: boolean, connection?: ConnectionConfig, configureSettings?: (settings: ReturnType<typeof useSettingsStore>) => void, pluginRecommendations?: PluginAiRecommendationHostUpdate, extraConnections: ConnectionConfig[] = [], tab?: QueryTab) {
   const pinia = createPinia();
   const errors: unknown[] = [];
-  const panelRef = ref<{ openExternalContext: (request: AiExternalContextRequest) => void; selectConversationById: (convId: string) => void } | null>(null);
+  const panelRef = ref<{ openExternalContext: (request: AiExternalContextRequest) => void; selectConversationById: (convId: string) => void; prepareForWindowClose: () => Promise<void> } | null>(null);
   const app = createApp({ render: () => h(TooltipProvider, () => h(AiAssistant, { ref: panelRef, connection, pluginRecommendations, tab })) });
   app.use(pinia);
   app.use(i18n);
@@ -921,6 +932,131 @@ describe("AiAssistant mount", () => {
   }
 
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it.each(["mysql", "postgres"] as const)("sends from a detached %s editor without recovering the main window's runs and cancels before closing", async (dbType) => {
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.detachedWindow = true;
+    aiAssistantMountApi.conversations = [storedConversation()];
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "text_delta", delta: "Partial response" });
+      await pending;
+      onEvent({ type: "text_delta", delta: "Stale response" });
+      return "Stale response";
+    };
+    const connection = { ...CONN_A, db_type: dbType };
+    const { container, errors, panelRef } = await mountPanel(true, connection, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.openExternalContext({ target: { connectionId: connection.id, database: "db_a", schema: "public" }, selections: [{ source: "editor", content: "SELECT * FROM orders;" }] });
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+    const input = aiAssistantMountApi.runAgentStreamInputs[0] as AiRequestInput;
+    expect(input.context).toMatchObject({ connectionId: connection.id, database: "db_a", schema: dbType === "postgres" ? "public" : undefined, selections: [expect.objectContaining({ content: "SELECT * FROM orders;" })] });
+    expect(aiAssistantMountApi.loadAiRuns).not.toHaveBeenCalled();
+    expect(JSON.stringify(aiAssistantMountApi.runAgentStreamHistories)).not.toContain("previous question");
+    await panelRef.value!.prepareForWindowClose();
+    expect(aiAssistantMountApi.aiCancelStream).toHaveBeenCalledOnce();
+    expect(JSON.stringify(aiAssistantMountApi.savedConversations)).toContain("Partial response");
+    finish();
+    await settle();
+    expect(container.textContent).not.toContain("Stale response");
+    expect(errors).toEqual([]);
+  });
+
+  it("offers continuation outside a truncated code block and preserves the unsent draft", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ assistantMode: "ask", assistantAction: "general" })];
+    const partial = "```sql\nSELECT * FROM orders WHERE";
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      onEvent({ type: "text_delta", delta: partial });
+      onEvent({ type: "output_truncated" });
+      onEvent({ type: "agent_end" });
+      return partial;
+    };
+    const { container, errors, panelRef } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    const prompt = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    prompt.value = "Generate a query";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")?.disabled).toBe(false));
+    const notice = container.querySelector("[data-ai-output-truncated]")!;
+    expect(notice.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    expect(notice.closest(".ai-code-block")).toBeNull();
+    expect(container.querySelector(".ai-code-block")?.textContent).not.toContain(i18n.global.t("ai.outputTruncated"));
+    const stored = aiAssistantMountApi.savedConversations.at(-1) as { messages: Array<{ content: string; kind?: string }> };
+    expect(stored.messages.at(-1)).toMatchObject({ content: partial, kind: "outputTruncated" });
+
+    // Stage an unrelated draft and selection; the continuation must send neither.
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "conn-a", database: "db_a" },
+      selections: [{ source: "editor", label: "unsent.sql", content: "SELECT secret FROM unsent" }],
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await settle();
+    prompt.value = "Keep this draft";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      await pending;
+      onEvent({ type: "text_delta", delta: " id = 1;" });
+      onEvent({ type: "agent_end" });
+      return " id = 1;";
+    };
+    const button = container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!;
+    button.click();
+    button.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(2));
+    const input = aiAssistantMountApi.runAgentStreamInputs[1] as AiRequestInput;
+    expect(input.instruction).toBe(i18n.global.t("ai.continueGenerationPrompt"));
+    expect(input.mode).toBe("ask");
+    expect(input.allowWriteSql).toBe(false);
+    expect(input.context.connectionId).toBe("conn-a");
+    expect(input.context.database).toBe("db_a");
+    expect(input.context.selections).toBeUndefined();
+    expect(aiAssistantMountApi.runAgentStreamHistories[1]).toContainEqual({ role: "assistant", content: partial });
+    expect(JSON.stringify(aiAssistantMountApi.runAgentStreamHistories[1])).not.toContain(i18n.global.t("ai.outputTruncated"));
+    expect(prompt.value).toBe("Keep this draft");
+    expect(container.querySelector("[data-ai-selection-chips]")?.textContent).toContain("unsent.sql");
+    finish();
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).toBeNull());
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("restores the continuation button from a saved truncated reply, including an empty answer", async () => {
+    aiAssistantMountApi.conversations = [
+      storedConversation({
+        assistantMode: "ask",
+        assistantAction: "general",
+        messages: [
+          { role: "user", content: "previous question" },
+          { role: "assistant", content: "", kind: "outputTruncated" },
+        ],
+      }),
+    ];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    await vi.waitFor(() => expect(container.querySelector("[data-ai-continue-generation]")).not.toBeNull());
+    expect(container.querySelector("[data-ai-output-truncated]")?.textContent).toContain(i18n.global.t("ai.outputTruncated"));
+    container.querySelector<HTMLButtonElement>("[data-ai-continue-generation]")!.click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+    expect(aiAssistantMountApi.runAgentStreamHistories[0]).toEqual([{ role: "user", content: "previous question" }]);
+    expect(errors.map(String)).toEqual([]);
+  });
 
   // #12075 review: a draft can never be reopened, so its picker selection must not
   // travel into a conversation opened from the list. The leak only surfaced one

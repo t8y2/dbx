@@ -1393,6 +1393,7 @@ mod tests {
             admin_url: String::new(),
             auth,
             tls_skip_verify: false,
+            tls: None,
             pinned_version: None,
             token_signing: None,
             connect_override: None,

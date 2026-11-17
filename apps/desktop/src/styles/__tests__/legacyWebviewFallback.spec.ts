@@ -345,7 +345,7 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(connectionDialogLegacyCss).toContain("width: 0 !important;");
     expect(connectionDialogLegacyCss).toContain("grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)) !important;");
     expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config');
-    expect(connectionDialogLegacyCss).toMatch(/\[data-slot="dialog-content"\]\.connection-dialog-content--config\s*\{[\s\S]*?width: calc\(100vw - 2rem\) !important;[\s\S]*?min-width: 38rem !important;[\s\S]*?height: 720px !important;[\s\S]*?max-width: 880px !important;[\s\S]*?\}/);
+    expect(connectionDialogLegacyCss).toMatch(/\[data-slot="dialog-content"\]\.connection-dialog-content--config\s*\{[\s\S]*?width: calc\(100vw - 2rem\) !important;[\s\S]*?min-width: 38rem !important;[\s\S]*?height: 720px !important;[\s\S]*?max-width: 660px !important;[\s\S]*?\}/);
     expect(connectionDialogLegacyCss).toContain("height: 720px !important;");
     expect(connectionDialogLegacyCss).toContain('[data-slot="dialog-content"].connection-dialog-content--config .connection-form-body');
     expect(connectionDialogLegacyCss).toContain("align-content: start !important;");

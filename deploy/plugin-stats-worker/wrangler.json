@@ -4,10 +4,6 @@
   "main": "worker.ts",
   "routes": [
     {
-      "pattern": "dl.dbxio.com/plugins/*",
-      "zone_name": "dbxio.com"
-    },
-    {
       "pattern": "dbxio.com/api/plugins/*",
       "zone_name": "dbxio.com"
     }
@@ -25,7 +21,8 @@
     }
   ],
   "vars": {
-    "CF_ACCOUNT_ID": "7ad3349ede62c17968a90108d39fd4d0"
+    "CF_ACCOUNT_ID": "7ad3349ede62c17968a90108d39fd4d0",
+    "CF_ZONE_ID": "7933df992bfebe7c019bcce7567c9e7d"
   },
   "triggers": {
     "crons": [

@@ -39,13 +39,13 @@ afterEach(() => {
   i18n.global.locale.value = "en";
 });
 
-async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit = false, columns?: SqlExportColumnSelection[], showExecutionMode = false) {
+async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit = false, columns?: SqlExportColumnSelection[], showExecutionMode = false, initialExecutionMode: "immediate" | "queued" = "immediate") {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const app = createApp(
     defineComponent({
       setup() {
-        return () => h(SqlInsertModeDialog, { open: true, allowSplit, columns, showExecutionMode, onConfirm, onCancel });
+        return () => h(SqlInsertModeDialog, { open: true, allowSplit, columns, showExecutionMode, initialExecutionMode, onConfirm, onCancel });
       },
     }),
   );
@@ -56,6 +56,15 @@ async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit
 }
 
 describe("SqlInsertModeDialog", () => {
+  it("accepts a queued default and returns an immediate single-export override", async () => {
+    const onConfirm = vi.fn();
+    await mountDialog(onConfirm, () => {}, false, undefined, true, "queued");
+    expect(document.querySelector<HTMLInputElement>('input[value="queued"]')!.checked).toBe(true);
+    document.querySelector<HTMLInputElement>('input[value="immediate"]')!.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")!.click();
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: undefined, executionMode: "immediate" });
+  });
   it("confirms the SQL mode and queued execution together without changing the immediate default", async () => {
     const onConfirm = vi.fn();
     await mountDialog(onConfirm, () => {}, false, undefined, true);

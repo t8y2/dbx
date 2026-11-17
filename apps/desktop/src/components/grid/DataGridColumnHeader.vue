@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { CSSProperties, HTMLAttributes } from "vue";
-import { Copy, KeyRound, Hash, Highlighter } from "@lucide/vue";
+import { Copy, KeyRound, Hash, Highlighter, Filter } from "@lucide/vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { columnIndexColorClass, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 
@@ -18,6 +18,8 @@ const props = defineProps<{
   columnComment?: string;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
+  /** `schema.table.column` of the column this result column came from, when known. */
+  tooltipColumnSource?: string;
   columnNullability?: "nullable" | "required";
   showTypeLine?: boolean;
   showCommentLine?: boolean;
@@ -30,6 +32,7 @@ const props = defineProps<{
   columnNameLabel: string;
   columnTypeLabel: string;
   columnCommentLabel: string;
+  columnSourceLabel: string;
   nullableLabel?: string;
   yesLabel?: string;
   noLabel?: string;
@@ -45,6 +48,9 @@ const props = defineProps<{
   /** 该列当前启用了重复值或空值高亮。 */
   highlightActive?: boolean;
   highlightLabel?: string;
+  /** 该列存在生效中的结构化筛选规则（#14969）。 */
+  filterActive?: boolean;
+  filterLabel?: string;
 }>();
 
 function columnIndexText(kind: ColumnIndexKind): string {
@@ -105,6 +111,10 @@ const emit = defineEmits<{
               <span class="text-muted-foreground">{{ columnTypeLabel }}</span>
               <span :class="typeClass">{{ tooltipColumnType ?? columnType }}</span>
             </template>
+            <template v-if="tooltipColumnSource">
+              <span class="text-muted-foreground">{{ columnSourceLabel }}</span>
+              <span class="min-w-0 break-all font-mono">{{ tooltipColumnSource }}</span>
+            </template>
             <template v-if="tooltipColumnComment ?? columnComment">
               <span class="text-muted-foreground">{{ columnCommentLabel }}</span>
               <span class="flex min-w-0 items-start gap-2">
@@ -132,6 +142,9 @@ const emit = defineEmits<{
       <span v-if="formatterActive" data-column-formatter-indicator class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm bg-violet-600 text-[10px] font-bold leading-none text-white shadow-sm dark:bg-violet-500" :title="formatterLabel" :aria-label="formatterLabel">F</span>
       <span v-if="highlightActive" data-column-highlight-indicator class="inline-flex h-4 w-4 shrink-0 items-center justify-center text-amber-500 dark:text-amber-400" :title="highlightLabel" :aria-label="highlightLabel">
         <Highlighter class="h-3 w-3" />
+      </span>
+      <span v-if="filterActive" data-column-filter-indicator class="inline-flex h-4 w-4 shrink-0 items-center justify-center text-sky-600 dark:text-sky-400" :title="filterLabel" :aria-label="filterLabel">
+        <Filter class="h-3 w-3" />
       </span>
       <span data-column-header-actions class="contents"><slot name="actions" /></span>
     </span>

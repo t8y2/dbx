@@ -290,7 +290,8 @@ afterEach(() => {
 describe("TableStructureEditor DDL tab lifecycle", () => {
   it("queries fresh DDL for a new clean navigation request", async () => {
     const { root } = mountDdlNavigationEditor();
-    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL));
+    // The first mount cold-loads CodeMirror; CI shards can exceed waitFor's 1s default.
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 5000 });
     expect(mocks.loadObjectDdl).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ tableName: "users" }), { force: true });
   });
 

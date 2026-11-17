@@ -64,7 +64,7 @@ import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, formatTran
 import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
 import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
-import { useExportTracker } from "@/composables/useExportTracker";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { openDataTransferTask, openSchemaDiffSession } from "@/composables/useDialogSources";
 import { startSchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
@@ -90,11 +90,27 @@ const props = defineProps<{
   prefillTargetDatabase?: string;
   prefillTargetSchema?: string;
   taskId?: string | null;
+  reexecuteTask?: ExportTask | null;
 }>();
 
+const emit = defineEmits<{
+  (e: "update:taskId", value: string | null): void;
+  (e: "update:reexecuteTask", value: ExportTask | null): void;
+}>();
+
+const activeTrackingTaskId = ref<string | null | undefined>(props.taskId);
+const isReexecuting = ref(false);
+watch(
+  () => props.taskId,
+  (val) => {
+    activeTrackingTaskId.value = val;
+  },
+);
+
 const trackedTransferTask = computed(() => {
-  if (!props.taskId) return undefined;
-  return tasks.value.find((task) => task.exportId === props.taskId && task.kind === "data-transfer");
+  const id = activeTrackingTaskId.value;
+  if (!id) return undefined;
+  return tasks.value.find((task) => task.exportId === id && task.kind === "data-transfer");
 });
 
 const transferDialogStyle = {
@@ -851,6 +867,10 @@ watch(
   [open, () => props.taskId],
   async ([val, taskId]) => {
     if (!val || taskId) return;
+    if (isReexecuting.value) {
+      isReexecuting.value = false;
+      return;
+    }
     void taskStore.initFromStorage();
     if (currentConfig().oraclePackageDrafts?.length) {
       const sameContext = [
@@ -1070,6 +1090,7 @@ function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: bool
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onStarted: () => toast(t("transfer.backgroundStarted")),
     onOpen: () => openDataTransferTask(request.transferId),
+    openTask: (taskId: string) => openDataTransferTask(taskId),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
         await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);
@@ -1192,13 +1213,45 @@ watch(
 );
 onBeforeUnmount(cancelPendingTransfer);
 
-/** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */
-async function loadTaskIntoForm(task: TransferTask) {
-  const taskLoadToken = taskLoadTracker.begin(task.id);
+/** Builds a serializable transfer configuration from an existing transfer request. */
+function transferConfigFromRequest(request: api.TransferRequest): TransferTaskConfig {
+  const objects: Partial<Record<TransferObjectKind, string[]>> = {};
+  if (request.objects?.length) {
+    for (const sel of request.objects) {
+      if (sel.names?.length) objects[sel.objectType] = [...sel.names];
+    }
+  } else if (request.tables?.length) {
+    objects.TABLE = [...request.tables];
+  }
+  return {
+    sourceConnectionId: request.sourceConnectionId,
+    sourceCatalog: request.sourceCatalog,
+    sourceDatabase: request.sourceDatabase,
+    sourceSchema: request.sourceSchema,
+    targetConnectionId: request.targetConnectionId,
+    targetCatalog: request.targetCatalog,
+    targetDatabase: request.targetDatabase,
+    targetSchema: request.targetSchema,
+    objects,
+    content: request.content,
+    mode: request.mode,
+    dropTargetBeforeCreate: request.dropTargetBeforeCreate,
+    dropTargetConfirmed: false,
+    targetTableNameCase: request.targetTableNameCase,
+    targetColumnNameCase: request.targetColumnNameCase ?? "preserve",
+    quoteTargetColumnNames: request.quoteTargetColumnNames,
+    batchSize: request.batchSize,
+    operationTimeoutSecs: request.operationTimeoutSecs,
+    tableFilters: request.tableFilters ? { ...request.tableFilters } : undefined,
+  };
+}
+
+async function loadConfigIntoForm(config: TransferTaskConfig, taskId = "") {
+  const loadId = taskId || `config-${Date.now()}`;
+  const taskLoadToken = taskLoadTracker.begin(loadId);
   const isTaskLoadStale = () => !taskLoadTracker.isCurrent(taskLoadToken, activeTaskId.value);
-  const config = task.config;
   resetState(false);
-  activeTaskId.value = task.id;
+  activeTaskId.value = loadId;
   transferContent.value = config.content;
   selectedStrategy.value = resolveTransferStrategy(config);
   targetTableNameCase.value = config.targetTableNameCase;
@@ -1283,7 +1336,33 @@ async function loadTaskIntoForm(task: TransferTask) {
   if (isTaskLoadStale()) return;
   savedPackageDrafts.value = config.oraclePackageDrafts?.length ? { context: packageDraftContext(config), drafts: JSON.parse(JSON.stringify(config.oraclePackageDrafts)) } : null;
   savedConfigSnapshot.value = configSnapshot(currentConfig());
+  if (!taskId) activeTaskId.value = "";
 }
+
+/** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */
+async function loadTaskIntoForm(task: TransferTask) {
+  return loadConfigIntoForm(task.config, task.id);
+}
+
+async function handleReexecuteTask(task: ExportTask) {
+  if (!task.dataTransferRequest || isSubmitting.value) return;
+  isReexecuting.value = true;
+  activeTrackingTaskId.value = null;
+  emit("update:taskId", null);
+  const config = transferConfigFromRequest(task.dataTransferRequest);
+  await loadConfigIntoForm(config);
+  await requestStartTransfer();
+}
+
+watch(
+  () => props.reexecuteTask,
+  async (task) => {
+    if (!task) return;
+    emit("update:reexecuteTask", null);
+    if (!trackedTransferTask.value && isSubmitting.value) return;
+    await handleReexecuteTask(task);
+  },
+);
 
 /** Runs the action immediately, or asks for confirmation when the form has unsaved changes. */
 function requestDiscardableAction(action: () => void) {
@@ -1359,8 +1438,8 @@ const confirmationDetails = computed(() => {
   if (!preview || !request) return "";
   const lines = [confirmationSummary.value];
   if (preview.rebuild) {
-    const missingTargets = preview.rebuild.tables.some((table) => !table.backupTable);
-    if (!preview.structure) lines.push(t("transfer.rebuildSummary", { count: preview.rebuild.tables.length }));
+    const missingTargets = (preview.rebuild.tables ?? []).some((table) => !table.backupTable);
+    if (!preview.structure) lines.push(t("transfer.rebuildSummary", { count: preview.rebuild.tables?.length ?? 0 }));
     if (missingTargets) lines.push(t("transfer.rebuildMissingTargets"));
   }
   if (preview.structure) {
@@ -1689,7 +1768,7 @@ async function saveConfigTask() {
 </script>
 
 <template>
-  <DataTransferProgressDialog v-if="trackedTransferTask" v-model:open="open" :task="trackedTransferTask" />
+  <DataTransferProgressDialog v-if="trackedTransferTask" v-model:open="open" :task="trackedTransferTask" @reexecute="handleReexecuteTask(trackedTransferTask)" />
   <Dialog v-else v-model:open="open">
     <DialogContent class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden resize" :style="transferDialogStyle" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
@@ -1855,36 +1934,27 @@ async function saveConfigTask() {
                   {{ t("transfer.objects") }}
                   <span v-if="objectSelectionSummary.total" class="text-muted-foreground/60">({{ objectSelectionSummary.selected }}/{{ objectSelectionSummary.total }})</span>
                 </div>
+                <span v-if="tableFilterSupported && transferContent !== 'structureOnly' && activeTableFilterCount" class="text-xs text-primary">{{ t("transfer.tableFilterSection") }} ({{ activeTableFilterCount }})</span>
               </div>
 
               <div v-if="(!loadingObjects && !sourceConnectionId) || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
                 {{ t("transfer.selectSourceFirst") }}
               </div>
-              <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
-              <!-- Per-table SQL filters (MySQL / PostgreSQL sources) -->
-              <div v-if="tableFilterSupported && transferContent !== 'structureOnly' && selectedTableList.length" class="shrink-0 rounded-lg border border-border/60 bg-card/60 p-1.5">
-                <div class="flex items-center justify-between gap-2 px-1 pb-1">
-                  <span class="text-xs font-medium text-muted-foreground">
-                    {{ t("transfer.tableFilterSection") }}
-                    <span v-if="activeTableFilterCount" class="text-primary">({{ activeTableFilterCount }})</span>
-                  </span>
-                  <span class="text-[11px] text-muted-foreground/70">{{ t("transfer.tableFilterSectionHint") }}</span>
-                </div>
-                <div class="max-h-24 space-y-0.5 overflow-auto">
-                  <div v-for="name in selectedTableList" :key="name" class="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs hover:bg-muted/60">
-                    <span class="min-w-0 flex-1 truncate" :title="name">{{ name }}</span>
-                    <span v-if="tableFilters[name]" class="max-w-[45%] truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[name]">
-                      {{ tableFilters[name] }}
+              <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1">
+                <template #item-actions="{ kind, item, selected, disabled }">
+                  <div v-if="kind === 'TABLE' && selected && tableFilterSupported && transferContent !== 'structureOnly'" class="flex shrink-0 items-center gap-1 pr-1">
+                    <span v-if="tableFilters[item]" class="max-w-40 truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[item]">
+                      {{ tableFilters[item] }}
                     </span>
-                    <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" @click="openTableFilter(name)">
-                      {{ tableFilters[name] ? t("transfer.tableFilterEdit") : t("transfer.tableFilterSet") }}
+                    <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" :disabled="disabled" @click="openTableFilter(item)">
+                      {{ tableFilters[item] ? t("transfer.tableFilterEdit") : t("transfer.tableFilterSet") }}
                     </Button>
-                    <Button v-if="tableFilters[name]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('transfer.tableFilterClear')" :aria-label="t('transfer.tableFilterClear')" @click="clearTableFilter(name)">
+                    <Button v-if="tableFilters[item]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="disabled" :title="t('transfer.tableFilterClear')" :aria-label="t('transfer.tableFilterClear')" @click="clearTableFilter(item)">
                       <X class="h-3 w-3" />
                     </Button>
                   </div>
-                </div>
-              </div>
+                </template>
+              </ObjectSelectionTree>
               <div v-if="showCrossFamilyViewHint" class="mt-1.5 rounded-md border border-amber-300/40 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
                 {{ t("transfer.crossFamilyViewHint") }}
               </div>

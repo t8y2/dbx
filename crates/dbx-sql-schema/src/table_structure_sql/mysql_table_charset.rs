@@ -19,6 +19,39 @@ fn valid_mysql_charset_identifier(value: &str) -> bool {
         && value.chars().all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+fn normalize_mysql_charset(charset: &str) -> String {
+    if charset.eq_ignore_ascii_case("utf8") {
+        "utf8mb3".to_string()
+    } else {
+        charset.to_ascii_lowercase()
+    }
+}
+
+pub(super) fn mysql_table_charset_clause(change: &MysqlTableCharsetChange) -> Result<String, String> {
+    let charset = change.charset.trim();
+    if !valid_mysql_charset_identifier(charset) {
+        return Err("MySQL table character set contains invalid characters.".to_string());
+    }
+
+    let collation = change.collation.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    if let Some(collation) = collation {
+        if !valid_mysql_charset_identifier(collation) {
+            return Err("MySQL table collation contains invalid characters.".to_string());
+        }
+        let charset_prefix = collation.split_once('_').map_or(collation, |(prefix, _)| prefix);
+        if normalize_mysql_charset(charset_prefix) != normalize_mysql_charset(charset) {
+            return Err(format!("MySQL collation {collation} does not belong to character set {charset}."));
+        }
+    }
+
+    let mut clause = format!("DEFAULT CHARACTER SET {charset}");
+    if let Some(collation) = collation {
+        clause.push_str(" COLLATE ");
+        clause.push_str(collation);
+    }
+    Ok(clause)
+}
+
 pub fn build_mysql_table_charset_change_sql(
     options: &TableStructureSqlOptions,
     change: MysqlTableCharsetChange,
@@ -32,38 +65,12 @@ pub fn build_mysql_table_charset_change_sql(
         };
     }
 
-    let charset = change.charset.trim();
-    if !valid_mysql_charset_identifier(charset) {
-        return TableStructureSqlResult {
-            statements: Vec::new(),
-            warnings: vec!["MySQL table character set contains invalid characters.".to_string()],
-        };
-    }
-
-    let collation = change.collation.as_deref().map(str::trim).filter(|value| !value.is_empty());
-    if let Some(collation) = collation {
-        if !valid_mysql_charset_identifier(collation) {
-            return TableStructureSqlResult {
-                statements: Vec::new(),
-                warnings: vec!["MySQL table collation contains invalid characters.".to_string()],
-            };
-        }
-        let charset_prefix = collation.split_once('_').map(|(prefix, _)| prefix);
-        if charset_prefix.is_some_and(|prefix| !prefix.eq_ignore_ascii_case(charset)) {
-            return TableStructureSqlResult {
-                statements: Vec::new(),
-                warnings: vec![format!("MySQL collation {collation} does not belong to character set {charset}.")],
-            };
-        }
-    }
-
+    let clause = match mysql_table_charset_clause(&change) {
+        Ok(clause) => clause,
+        Err(warning) => return TableStructureSqlResult { statements: Vec::new(), warnings: vec![warning] },
+    };
     let table = qualified_table(StructureDialect::Mysql, options.schema.as_deref(), &options.table_name);
-    let mut statement = format!("ALTER TABLE {table} DEFAULT CHARACTER SET {charset}");
-    if let Some(collation) = collation {
-        statement.push_str(" COLLATE ");
-        statement.push_str(collation);
-    }
-    statement.push(';');
+    let statement = format!("ALTER TABLE {table} {clause};");
 
     TableStructureSqlResult { statements: vec![statement], warnings: Vec::new() }
 }

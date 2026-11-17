@@ -43,11 +43,20 @@ describe("quickConnectionOpenTarget", () => {
     });
   });
 
-  it("carries the connection's default schema into the query tab (#11844)", () => {
-    expect(quickConnectionOpenTarget({ ...connection("oracle"), database: "XE", default_schema: "REPORTING" })).toEqual({
+  it("includes configured default schema for Oracle and other query connections", () => {
+    expect(quickConnectionOpenTarget({ ...connection("oracle"), database: "ORCL", default_schema: "HR" })).toEqual({
       kind: "query",
-      database: "XE",
-      schema: "REPORTING",
+      database: "ORCL",
+      schema: "HR",
+    });
+    expect(quickConnectionOpenTarget({ ...connection("oracle"), database: "ORCL", default_schema: "  FINANCE  " })).toEqual({
+      kind: "query",
+      database: "ORCL",
+      schema: "FINANCE",
+    });
+    expect(quickConnectionOpenTarget({ ...connection("oracle"), database: "ORCL", default_schema: "   " })).toEqual({
+      kind: "query",
+      database: "ORCL",
     });
   });
 });

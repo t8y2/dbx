@@ -183,6 +183,27 @@ describe("batch execution output view", () => {
     expect(state.view).toBe("result");
   });
 
+  it("formats per-statement durations with adaptive units", async () => {
+    const running = batch("run-1", 3);
+    running.items = [
+      { statementIndex: 0, sql: "SELECT 1", from: 0, to: 0, status: "success", executionTimeMs: 623_662 },
+      { statementIndex: 1, sql: "SELECT 2", from: 0, to: 0, status: "success", executionTimeMs: 1_281 },
+      { statementIndex: 2, sql: "SELECT 3", from: 0, to: 0, status: "running" },
+    ];
+    const results = [
+      { columns: ["a"], rows: [[1]], affected_rows: 0, execution_time_ms: 623_662, statement_index: 0 },
+      { columns: ["a"], rows: [[2]], affected_rows: 0, execution_time_ms: 1_281, statement_index: 1 },
+    ];
+    const { state, host } = await mountTab({ batch: running, defaultView: "summary", results });
+
+    expect(state.view).toBe("summary");
+    const text = host.textContent ?? "";
+    expect(text).toContain("10m 23s");
+    expect(text).toContain("1.2 s");
+    expect(text).not.toContain("623662ms");
+    expect(text).not.toContain("1281ms");
+  });
+
   it("does not redirect a run that already finished", async () => {
     const { state } = await mountTab({ batch: batch("run-1", 2, Date.now()), isExecuting: false, results: [{ columns: ["a"], rows: [[1]], affected_rows: 1, execution_time_ms: 1 }] });
 

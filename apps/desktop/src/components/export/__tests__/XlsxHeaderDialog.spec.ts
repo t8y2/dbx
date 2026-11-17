@@ -77,4 +77,27 @@ describe("XlsxHeaderDialog", () => {
     expect(selectedOptions).toEqual({ headerMode: "name", autoFilter: false, executionMode: "queued" });
     app.unmount();
   });
+
+  it("initializes from the supplied default and allows a one-off override", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    let selectedOptions: XlsxExportOptions | undefined;
+    const app = createApp(XlsxHeaderDialog, {
+      open: true,
+      showExecutionMode: true,
+      initialExecutionMode: "queued",
+      onConfirm: (options: XlsxExportOptions) => {
+        selectedOptions = options;
+      },
+    });
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+    expect(document.querySelector<HTMLInputElement>('input[value="queued"]')!.checked).toBe(true);
+    document.querySelector<HTMLInputElement>('input[value="immediate"]')!.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-xlsx-header-confirm]")!.click();
+    expect(selectedOptions?.executionMode).toBe("immediate");
+    app.unmount();
+  });
 });

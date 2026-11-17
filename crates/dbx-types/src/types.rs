@@ -423,6 +423,8 @@ pub enum CompletionAssistantCandidateKind {
     Table,
     #[serde(alias = "VIEW")]
     View,
+    #[serde(alias = "MATERIALIZED_VIEW")]
+    MaterializedView,
     #[serde(alias = "PROCEDURE")]
     Procedure,
     #[serde(alias = "FUNCTION")]
@@ -488,6 +490,7 @@ pub struct CompletionAssistantResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SpatialColumn {
     /// Zero-based index into `QueryResult.columns`.
     pub column_index: usize,
@@ -2023,6 +2026,7 @@ mod tests {
             ("SCHEMA", CompletionAssistantCandidateKind::Schema),
             ("TABLE", CompletionAssistantCandidateKind::Table),
             ("VIEW", CompletionAssistantCandidateKind::View),
+            ("MATERIALIZED_VIEW", CompletionAssistantCandidateKind::MaterializedView),
             ("PROCEDURE", CompletionAssistantCandidateKind::Procedure),
             ("FUNCTION", CompletionAssistantCandidateKind::Function),
             ("COLUMN", CompletionAssistantCandidateKind::Column),

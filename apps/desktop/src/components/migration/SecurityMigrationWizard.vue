@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -12,6 +12,16 @@ const props = defineProps<{ store: ReturnType<typeof useMigrationStore> }>();
 const { t, locale } = useI18n({ useScope: "global" });
 const status = computed(() => props.store.state.status);
 const confirmingCleanup = ref(false);
+const resetConfirmed = ref(false);
+const cancelResetButton = ref<HTMLButtonElement | null>(null);
+const recoveryView = computed(() => status.value?.state === "succeeded" && !status.value.needsMigration && status.value.keyRecoveryRequired);
+const resetView = computed(() => recoveryView.value || Boolean(props.store.state.resetReport) || Boolean(props.store.state.resetFailure));
+async function prepareReset() {
+  resetConfirmed.value = false;
+  await props.store.prepareCredentialReset();
+  await nextTick();
+  cancelResetButton.value?.focus();
+}
 const diagnosticText = computed(() => (props.store.state.error ? JSON.stringify(props.store.diagnostic(), null, 2) : ""));
 const exportingDiagnostic = ref(false);
 const canRevealPaths = computed(() => isTauriRuntime());
@@ -83,8 +93,8 @@ async function diagnostic() {
     <section class="my-auto w-full max-w-2xl rounded-xl border bg-card p-8 shadow-2xl">
       <div class="mb-8 flex items-start justify-between gap-4">
         <div>
-          <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">{{ t("migration.eyebrow") }}</p>
-          <h1 class="mt-2 text-2xl font-semibold">{{ t("migration.title") }}</h1>
+          <p v-if="!resetView" class="text-xs font-medium uppercase tracking-wider text-muted-foreground">{{ t("migration.eyebrow") }}</p>
+          <h1 class="mt-2 text-2xl font-semibold">{{ t(props.store.state.resetReport && !props.store.state.resetFailure ? "migration.resetSuccessTitle" : resetView ? "migration.recoveryTitle" : "migration.title") }}</h1>
         </div>
         <label class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
           <span class="sr-only">{{ t("migration.language") }}</span>
@@ -93,7 +103,7 @@ async function diagnostic() {
           </select>
         </label>
       </div>
-      <ol class="mb-8 grid grid-cols-3 gap-3" :aria-label="t('migration.stepsLabel')">
+      <ol v-if="!resetView" class="mb-8 grid grid-cols-3 gap-3" :aria-label="t('migration.stepsLabel')">
         <li v-for="item in [1, 2, 3]" :key="item" class="flex min-w-0 items-center justify-center gap-2 text-center text-sm">
           <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold" :class="item <= props.store.state.step ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground'">{{ item }}</span
           ><span :class="item <= props.store.state.step ? 'font-medium' : 'text-muted-foreground'">{{ t(`migration.step${item}`) }}</span>
@@ -102,7 +112,7 @@ async function diagnostic() {
       <div v-if="props.store.state.loading" class="py-10 text-center text-sm text-muted-foreground">{{ t("migration.checking") }}</div>
       <template v-else>
         <div v-if="props.store.state.step === 1" class="space-y-5">
-          <p class="text-sm text-muted-foreground">{{ keyRecoveryRequired ? t("migration.keyUnavailable") : t("migration.intro") }}</p>
+          <p class="text-sm text-muted-foreground">{{ recoveryView ? t("migration.recoveryIntro") : keyRecoveryRequired ? t("migration.keyUnavailable") : t("migration.intro") }}</p>
           <div v-if="!keyRecoveryRequired" class="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm">
             <h2 class="font-medium">{{ t("migration.whyTitle") }}</h2>
             <p class="mt-2 text-muted-foreground">{{ t("migration.whyBody") }}</p>
@@ -116,15 +126,24 @@ async function diagnostic() {
               <span class="text-muted-foreground">{{ t("migration.connectionCountLabel") }}</span> {{ status.connectionCount }}
             </div>
             <div>
-              <span class="text-muted-foreground">{{ t("migration.secretCountLabel") }}</span> {{ status.databasePlaintextCount }}
+              <span class="text-muted-foreground">{{ t(recoveryView ? "migration.encryptedRecordCountLabel" : "migration.secretCountLabel") }}</span> {{ recoveryView ? (status.encryptedRecordCount ?? "—") : status.databasePlaintextCount }}
             </div>
-            <div>
+            <div v-if="!recoveryView">
               <span class="text-muted-foreground">{{ t("migration.backupRequiredLabel") }}</span> {{ status.backupRequired ? t("migration.yes") : t("migration.no") }}
             </div>
             <div>
               <span class="text-muted-foreground">{{ t("migration.keyProviderLabel") }}</span>
               {{ status.keyStatus === "will_create" ? t("migration.keyWillCreate") : status.persistentKeyConfigured ? t("migration.ready") : t("migration.pending") }}
             </div>
+          </div>
+          <div v-if="recoveryView" class="space-y-3 text-sm">
+            <p class="text-xs text-muted-foreground">{{ t("migration.encryptedRecordHint") }}</p>
+            <ol class="list-decimal space-y-2 pl-5">
+              <li>{{ t("migration.recoveryAccount") }}</li>
+              <li>{{ t("migration.recoveryExternal") }}</li>
+              <li>{{ t("migration.recoveryAccess") }}</li>
+            </ol>
+            <p class="font-medium">{{ t("migration.recoveryWarning") }}</p>
           </div>
           <p v-if="status?.dataDir" class="break-all text-xs text-muted-foreground">
             {{ t("migration.dataDir") }}<!--
@@ -140,12 +159,24 @@ async function diagnostic() {
           </p>
           <p v-if="status?.keyProviderAvailable === false && !status.keyCreationAllowed && !keyRecoveryRequired" class="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{{ t("migration.keyUnavailable") }}</p>
           <p v-else-if="status?.keyStatus === 'will_create'" class="rounded-lg bg-primary/5 p-3 text-sm text-muted-foreground">{{ t("migration.keyWillCreateHint") }}</p>
-          <p v-if="status?.keyFileConfigured === false && status?.persistentKeyConfigured === false && status?.keyCreationAllowed === false" class="text-xs text-muted-foreground">{{ t("migration.keyRecoveryHint") }}</p>
+          <p v-if="!recoveryView && status?.keyFileConfigured === false && status?.persistentKeyConfigured === false && status?.keyCreationAllowed === false" class="text-xs text-muted-foreground">{{ t("migration.keyRecoveryHint") }}</p>
           <div v-if="props.store.state.error" class="space-y-1 rounded-lg bg-destructive/10 p-4 text-sm text-destructive">
-            <p>{{ keyRecoveryRequired ? t("migration.keyUnavailable") : t(`migration.${props.store.state.error === "statusFailed" ? "statusFailed" : props.store.state.error === "cleanupFailed" ? "cleanupFailed" : "failed"}`) }}</p>
+            <p>
+              {{
+                props.store.state.error === "resetFailed"
+                  ? t("migration.resetFailed")
+                  : recoveryView
+                    ? t("migration.recoveryIntro")
+                    : keyRecoveryRequired
+                      ? t("migration.keyUnavailable")
+                      : t(`migration.${props.store.state.error === "statusFailed" ? "statusFailed" : props.store.state.error === "cleanupFailed" ? "cleanupFailed" : "failed"}`)
+              }}
+            </p>
             <p v-if="errorCode">{{ t("migration.errorCode", { code: errorCode }) }}</p>
             <p v-if="errorMessage">{{ errorMessage }}</p>
-            <p>{{ t(errorAdviceKey) }}</p>
+            <p v-if="!recoveryView">{{ t(errorAdviceKey) }}</p>
+            <p v-if="props.store.state.resetFailure">{{ props.store.state.resetFailure.code }} ({{ props.store.state.resetFailure.stage }})</p>
+            <p v-if="props.store.state.resetFailure?.backupPath" class="break-all">{{ t("migration.backupPath") }} {{ props.store.state.resetFailure.backupPath }}</p>
           </div>
           <div class="flex flex-wrap gap-3">
             <button
@@ -154,7 +185,7 @@ async function diagnostic() {
               :disabled="props.store.state.busy"
               @click="props.store.retryStatus"
             >
-              {{ t("migration.retryStatus") }}</button
+              {{ t(recoveryView ? "migration.recheckKey" : "migration.retryStatus") }}</button
             ><button
               v-else
               class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50"
@@ -166,6 +197,19 @@ async function diagnostic() {
             ><button v-if="props.store.state.error && status?.dataDir && canRevealPaths" class="rounded-md border px-4 py-2" @click="revealPath(status.dataDir)">{{ t("migration.openDataDir") }}</button
             ><button v-if="props.store.state.error" class="rounded-md border px-4 py-2" @click="exitApp">{{ t("migration.exit") }}</button>
           </div>
+          <button v-if="recoveryView && status?.credentialResetAllowed && canRevealPaths" class="text-sm underline underline-offset-2 disabled:opacity-50" :disabled="props.store.state.busy" @click="prepareReset">{{ t("migration.resetEntry") }}</button>
+          <section v-if="props.store.state.resetPreparation" role="alertdialog" aria-modal="true" :aria-label="t('migration.resetTitle')" class="space-y-3 rounded-lg border border-destructive/40 p-4" @keydown.esc="props.store.cancelCredentialReset()">
+            <h2 class="font-medium">{{ t("migration.resetTitle") }}</h2>
+            <p class="text-sm">{{ t("migration.resetImpact", { count: props.store.state.resetPreparation.encryptedRecordCount }) }}</p>
+            <p class="text-sm">{{ t("migration.resetPreserves") }}</p>
+            <p class="text-sm">{{ t("migration.resetBackupWarning") }}</p>
+            <label class="flex items-start gap-2 text-sm"><input v-model="resetConfirmed" type="checkbox" :disabled="props.store.state.busy" />{{ t("migration.resetAcknowledgement") }}</label>
+            <div class="flex flex-wrap gap-3">
+              <button ref="cancelResetButton" class="rounded-md border px-4 py-2" :disabled="props.store.state.busy" @click="props.store.cancelCredentialReset()">{{ t("migration.cancel") }}</button>
+              <button class="rounded-md bg-destructive px-4 py-2 text-destructive-foreground disabled:opacity-50" :disabled="!resetConfirmed || props.store.state.busy" @click="props.store.resetCredentials(resetConfirmed)">{{ t("migration.resetConfirm") }}</button>
+            </div>
+          </section>
+          <p v-if="props.store.state.busy && recoveryView" role="status" class="text-sm">{{ t("migration.resetWorking") }}</p>
         </div>
         <div v-else-if="props.store.state.step === 2" class="space-y-5">
           <div class="rounded-lg border p-5" :class="props.store.state.error ? 'border-destructive/40' : 'border-primary/30'">
@@ -186,9 +230,16 @@ async function diagnostic() {
         </div>
         <div v-else class="space-y-5">
           <div class="rounded-lg border border-primary/30 bg-primary/5 p-5">
-            <h2 class="font-medium">{{ t("migration.successTitle") }}</h2>
-            <p class="mt-2 text-sm text-muted-foreground">{{ t("migration.successIntro") }}</p>
-            <p v-if="status?.backupPath" class="mt-3 break-all text-xs text-muted-foreground">
+            <h2 class="font-medium">{{ t(props.store.state.resetFailure ? "migration.resetFailed" : props.store.state.resetReport ? "migration.resetSuccessTitle" : "migration.successTitle") }}</h2>
+            <p v-if="!props.store.state.resetFailure" class="mt-2 text-sm text-muted-foreground">{{ t(props.store.state.resetReport ? "migration.resetSuccessIntro" : "migration.successIntro") }}</p>
+            <div v-if="props.store.state.resetFailure" role="alert" class="mt-3 space-y-2 text-sm">
+              <p>{{ t("migration.resetReadyAfterFailure") }}</p>
+              <p>{{ props.store.state.resetFailure.code }} ({{ props.store.state.resetFailure.stage }})</p>
+              <p v-if="props.store.state.resetFailure.backupPath" class="break-all">{{ t("migration.backupPath") }} {{ props.store.state.resetFailure.backupPath }}</p>
+              <button class="rounded-md border px-3 py-1" @click="diagnostic">{{ t("migration.exportDiagnostic") }}</button>
+            </div>
+            <p v-if="props.store.state.resetReport" class="mt-3 break-all text-sm">{{ t("migration.resetCleared", { count: props.store.state.resetReport.clearedRecordCount }) }}<br />{{ t("migration.backupPath") }} {{ props.store.state.resetReport.backupPath }}</p>
+            <p v-if="status?.backupPath && !props.store.state.resetReport" class="mt-3 break-all text-xs text-muted-foreground">
               {{ t("migration.backupPath") }}<!--
               --><button
                 type="button"
@@ -203,7 +254,12 @@ async function diagnostic() {
           </div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
             <button class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" :disabled="props.store.state.busy" @click="props.store.enter">{{ t("migration.enter") }}</button
-            ><button v-if="status?.backupPath && props.store.state.error !== 'cleanupFailed'" class="text-xs text-muted-foreground underline underline-offset-2 hover:text-destructive disabled:opacity-50" :disabled="props.store.state.busy" @click="confirmingCleanup = true">
+            ><button
+              v-if="!props.store.state.resetFailure && !props.store.state.resetReport && status?.backupPath && props.store.state.error !== 'cleanupFailed'"
+              class="text-xs text-muted-foreground underline underline-offset-2 hover:text-destructive disabled:opacity-50"
+              :disabled="props.store.state.busy"
+              @click="confirmingCleanup = true"
+            >
               {{ t("migration.deleteBackup") }}
             </button>
           </div>

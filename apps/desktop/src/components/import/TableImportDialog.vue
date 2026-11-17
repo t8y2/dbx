@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useI18n } from "vue-i18n";
+import { FocusScope } from "reka-ui";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogScrollContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, DatabaseBackup, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, Plus, RefreshCw, Square, Trash2, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -19,8 +21,10 @@ import {
   autoMapImportColumns,
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
+  fixedValueFromGenerator,
   formatTableImportPreviewCell,
   formatTableImportElapsed,
+  isFixedValueGenerator,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
   requiredImportTargetColumns,
@@ -30,6 +34,7 @@ import {
   TABLE_IMPORT_ENCODING_OPTIONS,
   TABLE_IMPORT_GENERATOR_OPTIONS,
   tableImportProgressPercent,
+  toFixedValueGenerator,
   type TableImportGeneratorKey,
   type TableImportWizardStep,
   validateImportMappings,
@@ -37,7 +42,7 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
-import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
@@ -162,7 +167,14 @@ const sqlScriptFallbackSource = ref<ImportSource | null>(null);
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const navicatBackupInput = ref<HTMLInputElement | null>(null);
-const delimiter = ref(",");
+const delimitersByFormat = ref<Partial<Record<api.TableImportSourceFormat, string>>>({});
+const delimiter = computed({
+  get: () => delimiterForFormat(sourceFormat.value),
+  set: (value) => {
+    delimitersByFormat.value[sourceFormat.value] = value;
+    schedulePreviewReloadForTextOptions();
+  },
+});
 const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
@@ -367,7 +379,7 @@ const selectedSourceName = computed(() => {
 });
 const createColumnSummaries = computed(() =>
   mappedColumns.value.map((mapping) => ({
-    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${mapping.generator}]` : ""),
+    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${generatorBadgeLabel(mapping.generator)}]` : ""),
     targetColumn: mapping.targetColumn,
     targetDataType: mapping.targetDataType || "",
   })),
@@ -533,7 +545,7 @@ function resetState() {
   batchTasks.value = [];
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
-  delimiter.value = ",";
+  delimitersByFormat.value = {};
   decimalSeparator.value = ".";
   textEncoding.value = "auto";
   titleRow.value = 1;
@@ -580,6 +592,10 @@ function isDelimitedFormat(format: api.TableImportSourceFormat) {
   return format === "csv" || format === "tsv" || format === "delimited";
 }
 
+function delimiterForFormat(format: api.TableImportSourceFormat) {
+  return delimitersByFormat.value[format] ?? (format === "tsv" ? "\\t" : ",");
+}
+
 function encodingLabel(encoding: api.TableImportTextEncoding) {
   return t(encodingOptions.find((option) => option.value === encoding)?.labelKey || "tableImport.encodingAuto");
 }
@@ -606,7 +622,7 @@ function uniqueTableName(baseName: string, usedNames: Set<string>): string {
 function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): api.TableImportParseOptions {
   return buildTableImportParseOptions({
     format,
-    delimiter: delimiter.value,
+    delimiter: delimiterForFormat(format),
     decimalSeparator: decimalSeparator.value,
     textEncoding: textEncoding.value,
     titleRow: titleRow.value,
@@ -680,6 +696,7 @@ function applySuggestedColumnDataTypes(currentPreview = preview.value) {
 // 200+ 列时 SearchableSelect 太重，换成一个全局 popover，
 // 只有点击输入框时才挂载，避免创建上百分组件实例。
 const activeDataTypeColumn = ref<string | null>(null);
+const activeDataTypeTrigger = ref<HTMLElement | null>(null);
 const dataTypePickerOpen = ref(false);
 const dataTypePickerStyle = ref<Record<string, string>>({});
 const activeDataTypeOptionIndex = ref(-1);
@@ -690,23 +707,51 @@ const dataTypePickerOptions = computed(() => {
   return currentValue && !options.includes(currentValue) ? [...options, currentValue] : options;
 });
 
+function updateDataTypePickerPosition() {
+  const trigger = activeDataTypeTrigger.value;
+  if (!trigger || !dataTypePickerOpen.value) return;
+
+  if (!trigger.isConnected) {
+    closeDataTypePicker();
+    return;
+  }
+
+  const scrollParent = trigger.closest(".overflow-auto");
+  const triggerRect = trigger.getBoundingClientRect();
+  if (scrollParent) {
+    const parentRect = scrollParent.getBoundingClientRect();
+    if (triggerRect.bottom < parentRect.top || triggerRect.top > parentRect.bottom) {
+      closeDataTypePicker();
+      return;
+    }
+  }
+
+  dataTypePickerStyle.value = {
+    position: "fixed",
+    top: `${triggerRect.bottom + 2}px`,
+    left: `${triggerRect.left}px`,
+    width: `${Math.max(triggerRect.width, 200)}px`,
+  };
+}
+
 function closeDataTypePicker() {
   dataTypePickerOpen.value = false;
   activeDataTypeColumn.value = null;
+  activeDataTypeTrigger.value = null;
   activeDataTypeOptionIndex.value = -1;
+  checkSyncListeners();
 }
 
 function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
-  const rect = input.getBoundingClientRect();
-  dataTypePickerStyle.value = {
-    position: "fixed",
-    top: `${rect.bottom + 2}px`,
-    left: `${rect.left}px`,
-    width: `${Math.max(rect.width, 200)}px`,
-  };
+  if (generatorPickerOpen.value) {
+    closeGeneratorPicker();
+  }
+  activeDataTypeTrigger.value = input;
   activeDataTypeColumn.value = sourceColumn;
   activeDataTypeOptionIndex.value = -1;
   dataTypePickerOpen.value = true;
+  updateDataTypePickerPosition();
+  checkSyncListeners();
 }
 
 function selectDataTypeOption(value: string) {
@@ -915,6 +960,8 @@ async function loadPreview(fileOrPath = selectedSource.value) {
     preview.value = null;
     columnMapping.value = {};
     columnDataTypes.value = {};
+    if (await openMultiTableSqlFile(fileOrPath, e, requestId)) return;
+    if (requestId !== previewRequestId) return;
     errorMessage.value = String(e?.message || e);
     if (sourceFormat.value === "sql") sqlScriptFallbackSource.value = fileOrPath;
   } finally {
@@ -946,7 +993,7 @@ function assignSelectedSource(source: string | File) {
   if (!newTableName.value.trim()) {
     newTableName.value = suggestedTableName(name);
   }
-  delimiter.value = sourceFormat.value === "tsv" ? "\\t" : ",";
+  delimitersByFormat.value = {};
   selectedSheet.value = "";
   wizardStep.value = "options";
   void loadPreview(source);
@@ -979,6 +1026,7 @@ function saveActiveBatchTask() {
 }
 
 async function prepareBatchSources(sources: ImportSource[]) {
+  const requestId = ++previewRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   const tasks: BatchImportTask[] = [];
@@ -1003,6 +1051,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
         parseOptions: taskParseOptions(format),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
       });
+      if (requestId !== previewRequestId) return;
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
         const input = importPreviewInput(uploadedImportSourceFromPreview(initialPreview), source);
@@ -1017,6 +1066,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
               previewLimit: Math.max(1, Number(previewLimit.value) || 50),
             })
           : initialPreview;
+        if (requestId !== previewRequestId) return;
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
@@ -1043,11 +1093,16 @@ async function prepareBatchSources(sources: ImportSource[]) {
       wizardStep.value = "options";
     }
   } catch (e: any) {
+    if (requestId !== previewRequestId) return;
     batchTasks.value = [];
+    // A multi-table dump is one script, rather than one row-import task. Keep
+    // mixed batches here so switching modes never discards the other files.
+    if (sources.length === 1 && previewingSource !== undefined && (await openMultiTableSqlFile(previewingSource, e, requestId))) return;
+    if (requestId !== previewRequestId) return;
     errorMessage.value = String(e?.message || e);
     if (previewingSource !== undefined && detectFormat(sourceName(previewingSource)) === "sql") sqlScriptFallbackSource.value = previewingSource;
   } finally {
-    loadingPreview.value = false;
+    if (requestId === previewRequestId) loadingPreview.value = false;
   }
 }
 
@@ -1112,15 +1167,31 @@ async function handleNavicatBackupInputChange(event: Event) {
   if (file && !running.value) await openSqlFileExecutor(file);
 }
 
+async function openMultiTableSqlFile(source: ImportSource, error: unknown, requestId: number): Promise<boolean> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (detectFormat(sourceName(source)) !== "sql" || !props.prefillConnectionId || !message.startsWith("SQL import supports one table per file; found ")) return false;
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
+  sqlScriptFallbackSource.value = source;
+  // This only opens the existing preview/target window. The script is not run
+  // until the user starts execution there, including its normal write checks.
+  await openSqlFileExecutor(source, requestId);
+  return true;
+}
+
 /**
  * Navicat archives and whole-database SQL dumps hold DDL, rows, routines and triggers rather
  * than rows for one table, so they run through the streaming SQL file executor, prefilled
  * with this dialog's target database.
  */
-async function openSqlFileExecutor(source: ImportSource) {
+async function openSqlFileExecutor(source: ImportSource, requestId = previewRequestId) {
   const connectionId = props.prefillConnectionId;
   if (!connectionId) return;
   const target = { connectionId, database: props.prefillDatabase || "", ...(props.prefillSchema ? { schema: props.prefillSchema } : {}) };
+  const targetIsCurrent = () => open.value && requestId === previewRequestId && props.prefillConnectionId === connectionId && (props.prefillDatabase || "") === target.database && (props.prefillSchema || "") === (target.schema || "");
+  if (!targetIsCurrent()) return;
   if (typeof source === "string") {
     store.sqlFileSource = { ...target, filePath: source };
   } else {
@@ -1129,12 +1200,17 @@ async function openSqlFileExecutor(source: ImportSource) {
     errorMessage.value = "";
     try {
       const { previewSqlFile } = await import("@/lib/backend/http");
-      store.sqlFileSource = { ...target, preview: await previewSqlFile(source) };
+      const sqlPreview = await previewSqlFile(source);
+      if (!targetIsCurrent()) {
+        if (sqlPreview.cleanupToken) await api.releaseSqlFilePreview(sqlPreview.cleanupToken).catch((error) => console.warn("[DBX][table-import:release-sql-preview-failed]", error));
+        return;
+      }
+      store.sqlFileSource = { ...target, preview: sqlPreview };
     } catch (e: any) {
-      errorMessage.value = String(e?.message || e);
+      if (targetIsCurrent()) errorMessage.value = String(e?.message || e);
       return;
     } finally {
-      loadingPreview.value = false;
+      if (open.value && requestId === previewRequestId) loadingPreview.value = false;
     }
   }
   open.value = false;
@@ -1184,40 +1260,184 @@ function updateColumnDataType(sourceColumn: string, value: any) {
 }
 
 const generatorPickerOpen = ref(false);
+const activeGeneratorTrigger = ref<HTMLElement | null>(null);
 const activeGeneratorColumn = ref<{ type: "source"; sourceColumn: string } | { type: "generated"; id: string } | null>(null);
 const generatorPickerStyle = ref<Record<string, string>>({});
 
-function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
-  const rect = trigger.getBoundingClientRect();
+function updateGeneratorPickerPosition() {
+  const trigger = activeGeneratorTrigger.value;
+  if (!trigger || !generatorPickerOpen.value) return;
+
+  if (!trigger.isConnected) {
+    closeGeneratorPicker();
+    return;
+  }
+
+  const scrollParent = trigger.closest(".overflow-auto");
+  const triggerRect = trigger.getBoundingClientRect();
+  if (scrollParent) {
+    const parentRect = scrollParent.getBoundingClientRect();
+    if (triggerRect.bottom < parentRect.top || triggerRect.top > parentRect.bottom) {
+      closeGeneratorPicker();
+      return;
+    }
+  }
+
+  const menuHeight = document.getElementById("table-import-generator-options")?.offsetHeight ?? 0;
+  const belowTop = triggerRect.bottom + 2;
+  // 底部放不下整个菜单时向上弹出；上方也不够就钳制在视口内（菜单自身可滚动）
+  const openAbove = menuHeight > 0 && belowTop + menuHeight > window.innerHeight - 8 && triggerRect.top - 2 - menuHeight >= 8;
+  const top = openAbove ? triggerRect.top - 2 - menuHeight : Math.max(8, Math.min(belowTop, window.innerHeight - menuHeight - 8));
   generatorPickerStyle.value = {
     position: "fixed",
-    top: `${rect.bottom + 2}px`,
-    left: `${Math.max(10, Math.min(rect.left, window.innerWidth - 260))}px`,
+    top: `${top}px`,
+    left: `${Math.max(10, Math.min(triggerRect.left, window.innerWidth - 260))}px`,
     width: "250px",
   };
+}
+
+function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
+  if (dataTypePickerOpen.value) {
+    closeDataTypePicker();
+  }
+  activeGeneratorTrigger.value = trigger;
   activeGeneratorColumn.value = target;
   generatorPickerOpen.value = true;
+  updateGeneratorPickerPosition();
+  // 首次打开时菜单尚未渲染、量不到高度，渲染后再定位一次才能正确向上翻转
+  void nextTick(updateGeneratorPickerPosition);
+  checkSyncListeners();
 }
 
 function closeGeneratorPicker() {
   generatorPickerOpen.value = false;
   activeGeneratorColumn.value = null;
+  activeGeneratorTrigger.value = null;
+  checkSyncListeners();
+}
+
+let syncListenersAttached = false;
+
+function onPickerScroll(event: Event) {
+  const dtMenu = document.getElementById("table-import-data-type-options");
+  const genMenu = document.getElementById("table-import-generator-options");
+  if (event.target instanceof Node && (dtMenu?.contains(event.target) || genMenu?.contains(event.target))) {
+    return;
+  }
+  if (dataTypePickerOpen.value) {
+    updateDataTypePickerPosition();
+  }
+  if (generatorPickerOpen.value) {
+    updateGeneratorPickerPosition();
+  }
+}
+
+function onPickerResize() {
+  if (dataTypePickerOpen.value) {
+    updateDataTypePickerPosition();
+  }
+  if (generatorPickerOpen.value) {
+    updateGeneratorPickerPosition();
+  }
+}
+
+function onOutsidePointerDown(event: PointerEvent) {
+  const target = event.target as Node | null;
+  if (!target) return;
+
+  if (dataTypePickerOpen.value) {
+    const dtMenu = document.getElementById("table-import-data-type-options");
+    if (!dtMenu?.contains(target) && !activeDataTypeTrigger.value?.contains(target)) {
+      closeDataTypePicker();
+    }
+  }
+
+  if (generatorPickerOpen.value) {
+    const genMenu = document.getElementById("table-import-generator-options");
+    if (!genMenu?.contains(target) && !activeGeneratorTrigger.value?.contains(target)) {
+      closeGeneratorPicker();
+    }
+  }
+}
+
+function onGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    if (generatorPickerOpen.value) {
+      event.preventDefault();
+      closeGeneratorPicker();
+    } else if (dataTypePickerOpen.value) {
+      event.preventDefault();
+      closeDataTypePicker();
+    }
+  }
+}
+
+function checkSyncListeners() {
+  const needsListeners = dataTypePickerOpen.value || generatorPickerOpen.value;
+  if (needsListeners && !syncListenersAttached) {
+    syncListenersAttached = true;
+    window.addEventListener("scroll", onPickerScroll, true);
+    window.addEventListener("resize", onPickerResize);
+    window.addEventListener("pointerdown", onOutsidePointerDown, true);
+    window.addEventListener("keydown", onGlobalKeydown);
+  } else if (!needsListeners && syncListenersAttached) {
+    syncListenersAttached = false;
+    window.removeEventListener("scroll", onPickerScroll, true);
+    window.removeEventListener("resize", onPickerResize);
+    window.removeEventListener("pointerdown", onOutsidePointerDown, true);
+    window.removeEventListener("keydown", onGlobalKeydown);
+  }
 }
 
 function selectGeneratorOption(generator: string) {
   if (!activeGeneratorColumn.value) return;
+  // 固定值需要接着输入常量：选中后不关 popover，保留已有值便于改选回来
+  const next = generator === "fixed" ? toFixedValueGenerator(isFixedValueGenerator(activeGeneratorKey.value) ? fixedValueFromGenerator(activeGeneratorKey.value!) : "") : generator;
   if (activeGeneratorColumn.value.type === "source") {
-    updateColumnGenerator(activeGeneratorColumn.value.sourceColumn, generator);
+    updateColumnGenerator(activeGeneratorColumn.value.sourceColumn, next);
   } else {
-    updateGeneratedColumn(activeGeneratorColumn.value.id, { generator });
+    updateGeneratedColumn(activeGeneratorColumn.value.id, { generator: next });
   }
-  closeGeneratorPicker();
+  if (generator !== "fixed") {
+    closeGeneratorPicker();
+    return;
+  }
+  // 固定值输入框让菜单变高：等渲染后重新定位（必要时向上翻转）并聚焦输入框
+  void nextTick(() => {
+    updateGeneratorPickerPosition();
+    document.querySelector<HTMLInputElement>("input[data-fixed-value-input]")?.focus();
+  });
+}
+
+const activeGeneratorKey = computed(() => {
+  const target = activeGeneratorColumn.value;
+  if (!target) return undefined;
+  return target.type === "source" ? columnGenerators.value[target.sourceColumn] : generatedColumns.value.find((col) => col.id === target.id)?.generator;
+});
+
+function updateActiveFixedValue(value: string) {
+  const target = activeGeneratorColumn.value;
+  if (!target) return;
+  if (target.type === "source") {
+    updateColumnGenerator(target.sourceColumn, toFixedValueGenerator(value));
+  } else {
+    updateGeneratedColumn(target.id, { generator: toFixedValueGenerator(value) });
+  }
 }
 
 function generatorLabel(key: string | undefined): string {
   if (!key) return t("tableImport.sourceValue");
+  if (isFixedValueGenerator(key)) {
+    const value = fixedValueFromGenerator(key);
+    return value ? `${t("tableImport.generatorFixed")}: ${value}` : t("tableImport.generatorFixed");
+  }
   const opt = TABLE_IMPORT_GENERATOR_OPTIONS.find((o) => o.value === key);
   return opt ? t(opt.labelKey) : key;
+}
+
+// 预览/摘要列头标记：固定值只显示国际化名称，不带用户常量（下方单元格已逐行展示）
+function generatorBadgeLabel(key: string): string {
+  return isFixedValueGenerator(key) ? t("tableImport.generatorFixed") : key;
 }
 
 function updateColumnGenerator(sourceColumn: string, generator: string) {
@@ -1260,8 +1480,10 @@ function updateGeneratedColumn(id: string, updates: Partial<GeneratedColumnItem>
   generatedColumns.value = generatedColumns.value.map((col) => {
     if (col.id !== id) return col;
     const updated = { ...col, ...updates };
-    if (updates.generator && updates.generator !== col.generator && targetMode.value === "create") {
-      updated.targetDataType = suggestDataTypeForGenerator(updates.generator, structureDatabaseType.value);
+    // 固定值逐键输入也是 generator 变化，不能每次都重置用户选好的数据类型
+    const kindChanged = updates.generator && (isFixedValueGenerator(updates.generator) ? "fixed" : updates.generator) !== (isFixedValueGenerator(col.generator) ? "fixed" : col.generator);
+    if (kindChanged && targetMode.value === "create") {
+      updated.targetDataType = suggestDataTypeForGenerator(updates.generator!, structureDatabaseType.value);
     }
     return updated;
   });
@@ -1354,6 +1576,30 @@ async function goNext() {
   wizardStep.value = nextTableImportWizardStep(wizardStep.value);
 }
 
+async function refreshImportedTable(target: Pick<api.TableImportRequest, "connectionId" | "database" | "schema" | "table">) {
+  try {
+    store.invalidateMetadataCache(target.connectionId, target.database, target.schema || undefined, target.table);
+    // Respect an explicit disconnect while an import finishes in the background.
+    if (!store.connectedIds.has(target.connectionId)) return;
+    const schema = target.schema || undefined;
+    // MySQL metadata uses the database as schema; open data tabs may omit it.
+    const schemaCandidates = [...new Set([schema, connectionObjectTreeNodeSchema(store.getConfig(target.connectionId), target.database, schema)])];
+    await useQueryStore().refreshDataTabsForTable({ connectionId: target.connectionId, database: target.database, schema, schemaCandidates, name: target.table }, { skipPendingChanges: true });
+  } catch (error) {
+    // Refresh failure must not turn committed writes into a failed import.
+    console.warn("[DBX][table-import:refresh-data-failed]", error);
+  }
+}
+
+async function importTableFileAndRefresh(request: api.TableImportRequest, onProgress: (progress: api.TableImportProgress) => void) {
+  try {
+    return await api.importTableFile(request, onProgress);
+  } finally {
+    // Truncate or earlier batches can commit even when import fails/cancels.
+    void refreshImportedTable(request);
+  }
+}
+
 async function startImport() {
   saveActiveBatchTask();
   if (!canImport.value) return;
@@ -1367,6 +1613,7 @@ async function startImport() {
   const currentPreview = preview.value;
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
+  const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: tableName };
   backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
@@ -1388,13 +1635,10 @@ async function startImport() {
   };
 
   try {
-    const summary = await api.importTableFile(
+    const summary = await importTableFileAndRefresh(
       {
         importId: importId.value,
-        connectionId: props.prefillConnectionId,
-        database: props.prefillDatabase || "",
-        schema: targetSchema.value,
-        table: tableName,
+        ...target,
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
@@ -1425,9 +1669,8 @@ async function startImport() {
       failuresTruncated: summary.failuresTruncated ?? false,
     };
     toast(importSummaryMessage(summary.rowsImported, summary.rowsFailed ?? 0), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -1507,13 +1750,11 @@ async function startBatchImport() {
         throw new Error(validation.errors[0] || "Target table name is required");
       }
 
-      const summary = await api.importTableFile(
+      const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: task.tableName };
+      const summary = await importTableFileAndRefresh(
         {
           importId: importId.value,
-          connectionId: props.prefillConnectionId,
-          database: props.prefillDatabase || "",
-          schema: targetSchema.value,
-          table: task.tableName,
+          ...target,
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
           sourceFormat: task.format,
@@ -1559,7 +1800,6 @@ async function startBatchImport() {
       completedFailureList = [...completedFailureList, ...(summary.failures ?? [])];
       completedFailuresTruncated ||= summary.failuresTruncated ?? false;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = {
@@ -1633,9 +1873,9 @@ function schedulePreviewReload() {
   }, 250);
 }
 
-function schedulePreviewReloadAfterEncodingChange() {
+function schedulePreviewReloadForTextOptions() {
   if (isBatchImport.value) {
-    void reloadBatchPreviewsForEncoding();
+    void reloadBatchTextPreviews();
     return;
   }
   if (!selectedSource.value || running.value) return;
@@ -1646,14 +1886,14 @@ function schedulePreviewReloadAfterEncodingChange() {
   }, 250);
 }
 
-async function reloadBatchPreviewsForEncoding() {
+async function reloadBatchTextPreviews() {
   if (!isBatchImport.value || running.value) return;
   const requestId = ++batchEncodingRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   try {
     for (const task of batchTasks.value) {
-      // SQL 脚本同样是文本源，编码变化时需要重新预览
+      // SQL scripts also need a fresh preview after an encoding change.
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
       const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
@@ -1689,6 +1929,7 @@ watch(
       void loadTargetColumns();
       void loadDataTypeOptions();
     } else {
+      previewRequestId++;
       minimized.value = false;
       backgroundMode.value = false;
       dialogDragOffset.value = { x: 0, y: 0 };
@@ -1697,12 +1938,17 @@ watch(
         previewReloadTimer = null;
       }
       if (!running.value) void releaseTableImportSources();
+      closeDataTypePicker();
+      closeGeneratorPicker();
     }
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
+  previewRequestId++;
+  closeDataTypePicker();
+  closeGeneratorPicker();
   stopDialogDrag();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
@@ -1710,8 +1956,8 @@ onBeforeUnmount(() => {
   }
 });
 
-watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
-watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
+watch([sourceFormat, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
+watch([textEncoding, decimalSeparator], schedulePreviewReloadForTextOptions);
 watch([newTableName, columnMapping, columnGenerators, generatedColumns, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") {
@@ -1970,7 +2216,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
+          <div v-if="isDelimitedFormat(sourceFormat)" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
@@ -1989,7 +2235,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
-              <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />
+              <Input v-model="delimiter" class="h-8 text-xs font-mono" :aria-label="t('tableImport.delimiter')" />
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.decimalSeparator") }}</Label>
@@ -2224,7 +2470,6 @@ watch(rawProgressPercent, (percent) => {
                       :aria-activedescendant="activeDataTypeColumn === sourceColumn && activeDataTypeOptionIndex >= 0 ? `table-import-data-type-option-${activeDataTypeOptionIndex}` : undefined"
                       class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
                       @focus="(event) => openDataTypePicker(sourceColumn, event.currentTarget as HTMLInputElement)"
-                      @blur="closeDataTypePicker"
                       @keydown="(event) => handleDataTypePickerKeydown(event, sourceColumn, event.currentTarget as HTMLInputElement)"
                       @input="(e) => updateColumnDataType(sourceColumn, (e.target as HTMLInputElement).value)"
                     />
@@ -2299,13 +2544,13 @@ watch(rawProgressPercent, (percent) => {
                           :title="isSourceColumnSkipped(column) ? `${column} (${t('tableImport.skipColumn')})` : column"
                         >
                           {{ column }}
-                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ columnGenerators[column] }}] </span>
+                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ generatorBadgeLabel(columnGenerators[column]) }}] </span>
                         </span>
                       </th>
                       <th v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="border-b border-r px-2 py-1.5 text-left font-medium transition-colors bg-muted/10">
-                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${genCol.generator})`">
+                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${generatorBadgeLabel(genCol.generator)})`">
                           {{ genCol.targetColumn }}
-                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ genCol.generator }}]</span>
+                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ generatorBadgeLabel(genCol.generator) }}]</span>
                         </span>
                       </th>
                     </tr>
@@ -2528,18 +2773,30 @@ watch(rawProgressPercent, (percent) => {
 
       <!-- 全局生成器 popover -->
       <Teleport to="body">
-        <div v-if="generatorPickerOpen" class="fixed inset-0 z-[9998]" @click="closeGeneratorPicker" />
-        <div v-if="generatorPickerOpen" id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
-          <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
-            {{ t("tableImport.valueSource") }}
+        <!-- FocusScope 压入全局焦点栈并暂停 Dialog 的焦点陷阱：否则 modal Dialog 会把焦点抢回对话框内，固定值输入框无法点击输入 -->
+        <FocusScope v-if="generatorPickerOpen" :trapped="false" :loop="false">
+          <div id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+            <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
+              {{ t("tableImport.valueSource") }}
+            </div>
+            <button v-if="activeGeneratorColumn?.type === 'source'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('')">
+              {{ t("tableImport.sourceValue") }}
+            </button>
+            <button v-for="opt in TABLE_IMPORT_GENERATOR_OPTIONS" :key="opt.value" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption(opt.value)">
+              {{ t(opt.labelKey) }}
+            </button>
+            <div v-if="isFixedValueGenerator(activeGeneratorKey)" class="mt-1 border-t px-1 pt-2 pb-1">
+              <input
+                data-fixed-value-input
+                autofocus
+                :value="fixedValueFromGenerator(activeGeneratorKey!)"
+                :placeholder="t('tableImport.fixedValuePlaceholder')"
+                class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none focus-visible:ring-1 focus-visible:ring-ring/25"
+                @input="(e) => updateActiveFixedValue((e.target as HTMLInputElement).value)"
+              />
+            </div>
           </div>
-          <button v-if="activeGeneratorColumn?.type === 'source'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('')">
-            {{ t("tableImport.sourceValue") }}
-          </button>
-          <button v-for="opt in TABLE_IMPORT_GENERATOR_OPTIONS" :key="opt.value" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption(opt.value)">
-            {{ t(opt.labelKey) }}
-          </button>
-        </div>
+        </FocusScope>
       </Teleport>
 
       <DialogFooter class="shrink-0">

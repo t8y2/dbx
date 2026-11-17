@@ -7,6 +7,7 @@ import {
   buildTableTreeNodes,
   mergeTableInfosIntoObjects,
   mergeTableTreePageChildren,
+  partitionPageTables,
   tablePageRowAnchorKey,
   tablePartitionGroups,
   syncTablePartitionGroups,
@@ -554,6 +555,39 @@ describe("PostgreSQL table hierarchy", () => {
     const yearPartition = tablePartitionGroups(withLoadMore[0])[0].children?.[0];
     expect(yearPartition?.label).toBe("orders_2026");
     expect(tablePartitionGroups(yearPartition!)[0].children?.map((node) => node.label)).toEqual(["orders_2026_01"]);
+  });
+});
+
+describe("PostgreSQL root-paged table windows", () => {
+  const table = (name: string, parentName?: string): TableInfo => ({
+    name,
+    table_type: "BASE TABLE",
+    comment: null,
+    ...(parentName ? { parent_schema: "public", parent_name: parentName } : {}),
+  });
+
+  it("keeps every partition below the roots that fit the page", () => {
+    const tables = [table("orders"), table("orders_2025", "orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users")];
+
+    expect(partitionPageTables(tables, 2)).toEqual(tables);
+  });
+
+  it("drops the probe root with its complete multi-level subtree", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users"), table("z_probe"), table("z_probe_2026", "z_probe"), table("z_probe_2026_01", "z_probe_2026")];
+
+    expect(partitionPageTables(tables, 2).map((row) => row.name)).toEqual(["orders", "orders_2026", "orders_2026_01", "users", "users_2026"]);
+  });
+
+  it("matches roots by name when the backend resolves a blank schema", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("z_probe"), table("z_probe_2026", "z_probe")];
+
+    expect(partitionPageTables(tables, 1)).toEqual([tables[0], tables[1]]);
+  });
+
+  it("keeps roots whose names differ only by case distinct", () => {
+    const tables = [table("Orders"), table("orders"), table("z_probe")];
+
+    expect(partitionPageTables(tables, 2)).toEqual([tables[0], tables[1]]);
   });
 });
 

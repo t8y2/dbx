@@ -17,6 +17,8 @@ pub struct QueryResultCsvExportRequest {
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
+    #[serde(default)]
+    pub csv_without_bom: bool,
     /// CSV 里 NULL 写成什么。默认 `\N`；空字符串表示关闭该字面量，
     /// 退回「NULL 写成空字段」的旧行为（此时 NULL 与空字符串在文件里无法区分）。
     #[serde(default = "default_csv_null_literal")]
@@ -32,7 +34,8 @@ pub async fn export_query_result_csv(request: QueryResultCsvExportRequest) -> Re
             request.csv_quote_mode,
             csv_null_literal(&request.null_literal),
         );
-        std::fs::write(&request.file_path, format!("\u{FEFF}{csv}")).map_err(|err| err.to_string())
+        let content = if request.csv_without_bom { csv } else { format!("\u{FEFF}{csv}") };
+        std::fs::write(&request.file_path, content).map_err(|err| err.to_string())
     })
     .await
     .map_err(|err| err.to_string())?

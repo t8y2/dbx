@@ -6968,6 +6968,150 @@ fn mysql_single_column_alter_carries_temporal_precision_into_current_timestamp_c
 }
 
 #[test]
+fn mysql_preset_default_with_on_update_clause_is_not_quoted() {
+    let mut col = column("update_time");
+    col.data_type = "datetime".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE `users` (\n  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n);"]
+    );
+}
+
+#[test]
+fn mysql_preset_on_update_default_supports_a_literal_default() {
+    let mut col = column("update_time");
+    col.data_type = "datetime".to_string();
+    col.is_nullable = false;
+    col.default_value = "'2020-01-01 00:00:00' ON UPDATE CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE `users` (\n  `update_time` datetime NOT NULL DEFAULT '2020-01-01 00:00:00' ON UPDATE CURRENT_TIMESTAMP\n);"]
+    );
+}
+
+#[test]
+fn mysql_preset_on_update_with_unknown_expression_stays_quoted() {
+    let mut col = column("update_time");
+    col.data_type = "datetime".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE foo".to_string();
+
+    let result = build_create_table_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE `users` (\n  `update_time` datetime NOT NULL DEFAULT 'CURRENT_TIMESTAMP ON UPDATE foo'\n);"]
+    );
+}
+
+#[test]
+fn mysql_preset_on_update_default_carries_temporal_precision() {
+    let mut col = column("update_time");
+    col.data_type = "datetime(3)".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE TABLE `users` (\n  `update_time` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)\n);"]
+    );
+}
+
+#[test]
+fn mysql_preset_on_update_default_does_not_duplicate_the_extra_clause() {
+    let mut col = column("update_time");
+    col.data_type = "datetime".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP".to_string();
+    col.extra = Some(ColumnExtra { on_update_current_timestamp: Some(true), ..Default::default() });
+
+    let result = build_create_table_sql(structure_change_options(DatabaseType::Mysql, None, "users", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements[0].matches("ON UPDATE").count(), 1, "{}", result.statements[0]);
+}
+
+#[test]
+fn mysql_add_column_preset_default_with_on_update_clause_is_not_quoted() {
+    let mut col = column("update_time");
+    col.data_type = "datetime".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP".to_string();
+
+    let result =
+        build_table_structure_change_sql(structure_change_options(DatabaseType::Mysql, None, "sys_student", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `sys_student` ADD COLUMN `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;"]
+    );
+}
+
+#[test]
+fn mysql_modify_column_preset_default_with_on_update_clause_is_not_quoted() {
+    let mut col = column("update_time");
+    col.data_type = "datetime".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP".to_string();
+    col.original = Some(ColumnInfo {
+        name: "update_time".to_string(),
+        data_type: "datetime".to_string(),
+        is_nullable: false,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        driver_profile: None,
+        schema: None,
+        table_name: "sys_student".to_string(),
+        column: col,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `sys_student` MODIFY COLUMN `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;"]
+    );
+}
+
+#[test]
+fn non_mysql_targets_keep_quoting_an_on_update_default_text() {
+    let mut col = column("update_time");
+    col.data_type = "timestamp".to_string();
+    col.is_nullable = false;
+    col.default_value = "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(structure_change_options(DatabaseType::Postgres, None, "users", vec![col]));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(
+        result.statements[0].contains("DEFAULT 'CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'"),
+        "{}",
+        result.statements[0]
+    );
+}
+
+#[test]
 fn mysql_single_column_alter_resaving_precision_column_keeps_temporal_precision() {
     let mut col = column("updated_at");
     col.data_type = "datetime(3)".to_string();
@@ -12230,6 +12374,7 @@ fn starrocks_places_primary_keys_before_value_columns() {
 fn starrocks_layout_options(granularity: StarRocksTimeGranularity) -> CreateTableDialectOptions {
     CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             partition: None,
             time_partition: Some(StarRocksTimePartition {
@@ -12330,6 +12475,7 @@ fn starrocks_validates_hash_keys_and_bucket_count() {
 fn starrocks_random_distribution_requires_duplicate_table_and_supported_version() {
     let settings = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions { distribution: StarRocksDistribution::Random, ..Default::default() }),
     };
     let mut options = starrocks_partitioned_table_options();
@@ -12366,6 +12512,7 @@ fn starrocks_builds_multicolumn_value_and_list_partitions() {
         structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city"), column("channel")]);
     let values = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             partition: Some(StarRocksPartitionOptions::Values { column_ids: vec!["city".into(), "channel".into()] }),
             ..Default::default()
@@ -12376,6 +12523,7 @@ fn starrocks_builds_multicolumn_value_and_list_partitions() {
     assert!(result.statements[0].contains("PARTITION BY (`city`, `channel`) DISTRIBUTED BY RANDOM"));
     let list = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             partition: Some(StarRocksPartitionOptions::List {
                 column_ids: vec!["city".into(), "channel".into()],
@@ -12399,6 +12547,7 @@ fn starrocks_builds_range_bounds_and_validates_arity() {
     options.columns.insert(1, column("payload"));
     let settings = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             partition: Some(StarRocksPartitionOptions::Range {
                 column_ids: vec!["ts".into(), "id".into()],
@@ -12451,6 +12600,7 @@ fn starrocks_rejects_duplicate_list_values_and_incompatible_partition_types() {
     let options = structure_change_options(DatabaseType::StarRocks, None, "events", vec![column("city")]);
     let list = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             partition: Some(StarRocksPartitionOptions::List {
                 column_ids: vec!["city".into()],
@@ -12465,6 +12615,7 @@ fn starrocks_rejects_duplicate_list_values_and_incompatible_partition_types() {
     assert!(build_create_table_sql_with_dialect_options(options.clone(), Some("3.5.0"), list).statements.is_empty());
     let range = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             partition: Some(StarRocksPartitionOptions::Range {
                 column_ids: vec!["city".into()],
@@ -12487,6 +12638,7 @@ fn starrocks_sort_columns_preserve_priority_and_allow_non_primary_columns() {
     options.columns[1].name = "event`time".into();
     let settings = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions {
             sort_column_ids: vec!["ts".into(), "id".into()],
             ..Default::default()
@@ -12519,6 +12671,7 @@ fn starrocks_sort_validates_version_identity_and_primary_table_types() {
         }
         let settings = CreateTableDialectOptions {
             postgres_foreign_table: None,
+            mysql_table_charset: None,
             starrocks: Some(StarRocksCreateOptions { sort_column_ids: ids, ..Default::default() }),
         };
         let result = build_create_table_sql_with_dialect_options(options, version, settings);
@@ -12536,6 +12689,7 @@ fn starrocks_duplicate_sort_requires_33_and_allows_decimal() {
     options.columns[1].data_type = "decimal(10,2)".into();
     let settings = CreateTableDialectOptions {
         postgres_foreign_table: None,
+        mysql_table_charset: None,
         starrocks: Some(StarRocksCreateOptions { sort_column_ids: vec!["ts".into()], ..Default::default() }),
     };
     let old = build_create_table_sql_with_dialect_options(options.clone(), Some("3.2.0"), settings.clone());

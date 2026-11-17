@@ -3,11 +3,12 @@
 import { createApp, h, nextTick, ref, shallowRef, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { StreamLanguage, foldable, foldedRanges, language } from "@codemirror/language";
+import { StreamLanguage, ensureSyntaxTree, foldable, foldedRanges, language, syntaxTree } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QUERY_EDITOR_FULL_FEATURE_MAX_DOCUMENT_LENGTH, QUERY_EDITOR_FULL_FEATURE_MAX_LINE_COUNT } from "@/lib/editor/queryEditorLargeDocument";
 import type { QueryEditorProps } from "../queryEditorTypes";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const analysisProbe = vi.hoisted(() => ({
   documentLengths: [] as number[],
@@ -285,6 +286,28 @@ describe("QueryEditor large document mode", () => {
     const { undo } = await import("@codemirror/commands");
     expect(undo(view)).toBe(true);
     await vi.waitFor(() => expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage));
+  });
+
+  it("honors parameter settings in stream mode without re-enabling the full grammar", async () => {
+    const firstLine = "SELECT 1 WHERE id = #{packetCode} AND 1 = 1;\n";
+    const source = firstLine + "SELECT 1;\n".repeat(Math.ceil(SYNTAX_PARSE_TEST_BUDGET / 10));
+    const { view } = await mountEditor(source, { databaseType: "mysql", dialect: "mysql" });
+    const settings = useSettingsStore();
+    const andPosition = firstLine.indexOf("AND");
+    ensureSyntaxTree(view.state, firstLine.length, 1000);
+    expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+    expect(syntaxTree(view.state).resolveInner(andPosition, 1).name).not.toMatch(/comment/i);
+    settings.editorSettings.sqlVariableSyntaxOverrides = { mysql: { mybatis: false } };
+    await nextTick();
+    ensureSyntaxTree(view.state, firstLine.length, 1000);
+    expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+    expect(syntaxTree(view.state).resolveInner(andPosition, 1).name).toMatch(/comment/i);
+    settings.editorSettings.sqlVariableSyntaxOverrides = {};
+    await nextTick();
+    ensureSyntaxTree(view.state, firstLine.length, 1000);
+    expect(view.state.facet(language)).toBeInstanceOf(StreamLanguage);
+    expect(syntaxTree(view.state).resolveInner(andPosition, 1).name).not.toMatch(/comment/i);
+    expect(view.state.doc.toString()).toBe(source);
   });
 
   it("keeps the full grammar for documents at or below the syntax budget", async () => {

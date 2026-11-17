@@ -1167,6 +1167,7 @@ mod tests {
                 admin_url: self.base_url.clone(),
                 auth: MqAuth::None,
                 tls_skip_verify: false,
+                tls: None,
                 pinned_version: Some("3.1".to_string()),
                 token_signing: None,
                 connect_override: None,

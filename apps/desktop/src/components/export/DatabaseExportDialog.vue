@@ -10,11 +10,11 @@ import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
-import type { ExportProgress } from "@/lib/backend/api";
+import type { DatabaseExportSelectedObject, ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
-import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
+import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { useToast } from "@/composables/useToast";
@@ -25,13 +25,15 @@ import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { revealExportedPath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
+import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_ROWS_PER_TABLE_LIMIT, MAX_SPLIT_SQL_PART_MB, MIN_ROWS_PER_TABLE_LIMIT, MIN_SPLIT_SQL_PART_MB, normalizeRowsPerTableLimit, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
 import { notifyExportComplete } from "@/lib/export/exportReveal";
 import ExportExecutionMode from "@/components/export/ExportExecutionMode.vue";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import type { ExportTask } from "@/composables/useExportTracker";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
+import { filterTableNames } from "./databaseExportTableFilter";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -46,6 +48,7 @@ const props = defineProps<{
   prefillSchema?: string;
   prefillTable?: string;
   prefillTables?: string[];
+  prefillObjects?: DatabaseExportSelectedObject[];
   prefillAllDatabases?: boolean;
 }>();
 
@@ -64,12 +67,15 @@ const schemas = ref<string[]>([]);
 const loadingMeta = ref(false);
 const tables = ref<string[]>([]);
 const selectedTables = ref<string[]>([]);
+// Set when the dialog opens with objects picked in the object browser: the picked
+// objects the table list cannot show (routines, sequences, packages, ...). The whole
+// selection is then sent as typed `selectedObjects` (#13940).
+const selectedOtherObjects = ref<DatabaseExportSelectedObject[] | null>(null);
+const viewNames = ref<ReadonlySet<string>>(new Set());
 const loadingTables = ref(false);
 const tableFilter = ref("");
 const filteredTables = computed(() => {
-  const q = tableFilter.value.trim().toLowerCase();
-  if (!q) return tables.value;
-  return tables.value.filter((name) => name.toLowerCase().includes(q));
+  return filterTableNames(tables.value, tableFilter.value);
 });
 const tableError = ref<string | null>(null);
 const POSTGRES_ALL_SCHEMAS = "__DBX_ALL_SCHEMAS__";
@@ -88,6 +94,10 @@ const omitDatabaseQualifier = ref(savedOptions.omitDatabaseQualifier);
 const preserveOriginalLanguage = ref(savedOptions.preserveOriginalLanguage);
 const splitSqlOutput = ref(savedOptions.splitSqlOutput);
 const splitSqlPartMaxMb = ref(savedOptions.splitSqlPartMaxMb);
+const limitRowsPerTable = ref(savedOptions.limitRowsPerTable);
+const rowsPerTableLimitInput = ref<string>(savedOptions.rowsPerTableLimit.toString());
+const rowLimitSortColumnInput = ref(savedOptions.rowLimitSortColumn);
+const rowLimitSortDescending = ref(savedOptions.rowLimitSortDescending);
 const executionMode = ref<ManualExportMode>("immediate");
 const desktopTaskStatus = ref<ExportTask["status"] | null>(null);
 let disposed = false;
@@ -106,6 +116,10 @@ function applyStoredExportOptions() {
   preserveOriginalLanguage.value = saved.preserveOriginalLanguage;
   splitSqlOutput.value = saved.splitSqlOutput;
   splitSqlPartMaxMb.value = saved.splitSqlPartMaxMb;
+  limitRowsPerTable.value = saved.limitRowsPerTable;
+  rowsPerTableLimitInput.value = saved.rowsPerTableLimit.toString();
+  rowLimitSortColumnInput.value = saved.rowLimitSortColumn;
+  rowLimitSortDescending.value = saved.rowLimitSortDescending;
 }
 
 function persistExportOptions() {
@@ -122,6 +136,10 @@ function persistExportOptions() {
     preserveOriginalLanguage: preserveOriginalLanguage.value,
     splitSqlOutput: splitSqlOutput.value,
     splitSqlPartMaxMb: normalizedSplitSqlPartMaxMb(),
+    limitRowsPerTable: limitRowsPerTable.value,
+    rowsPerTableLimit: normalizedRowsPerTableLimit(),
+    rowLimitSortColumn: rowLimitSortColumnInput.value.trim(),
+    rowLimitSortDescending: rowLimitSortDescending.value,
   });
 }
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
@@ -158,6 +176,7 @@ async function revealExportFile() {
 const currentTime = ref(Date.now());
 const pendingPrefillTable = ref("");
 const pendingPrefillTables = ref<string[]>([]);
+const pendingPrefillObjects = ref<DatabaseExportSelectedObject[]>([]);
 const exportAllDatabases = ref(false);
 const batchDatabaseIndex = ref(0);
 const batchDatabaseTotal = ref(0);
@@ -197,14 +216,30 @@ const canExport = computed(() => {
     schema.value &&
     !loadingTables.value &&
     !tableError.value &&
-    isDatabaseExportTableSelectionValid({
-      allTableCount: tables.value.length,
-      selectedTableCount: selectedTables.value.length,
-      includeStructure: includeStructure.value,
-      includeData: includeData.value,
-    })
+    (selectedOtherObjects.value
+      ? // Picked routines, sequences and packages are only exported with "include objects".
+        selectedTables.value.length > 0 || (includeObjects.value && selectedOtherObjects.value.length > 0)
+      : isDatabaseExportTableSelectionValid({
+          allTableCount: tables.value.length,
+          selectedTableCount: selectedTables.value.length,
+          includeStructure: includeStructure.value,
+          includeData: includeData.value,
+        }))
   );
 });
+
+function selectedTablesRequest(): string[] | undefined {
+  if (isPostgresAllSchemas.value || selectedOtherObjects.value) return undefined;
+  return includeStructure.value || includeData.value ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined;
+}
+
+function selectedObjectsRequest(): DatabaseExportSelectedObject[] | undefined {
+  if (isPostgresAllSchemas.value || !selectedOtherObjects.value) return undefined;
+  return databaseExportSelectedObjectsRequest(selectedTables.value, viewNames.value, selectedOtherObjects.value);
+}
+
+const selectedObjectCount = computed(() => selectedTables.value.length + (selectedOtherObjects.value?.length ?? 0));
+const selectedObjectNames = () => [...selectedTables.value, ...(selectedOtherObjects.value ?? []).map((object) => object.name)];
 
 const selectedTableSet = computed(() => new Set(selectedTables.value));
 const selectedDatabaseSet = computed(() => new Set(selectedDatabases.value));
@@ -239,6 +274,40 @@ function normalizedSplitSqlPartMaxMb(): number {
   const value = Number(splitSqlPartMaxMb.value);
   if (!Number.isFinite(value)) return 100;
   return Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(value)));
+}
+
+/**
+ * The rows-per-table cap as the request carries it: `undefined` when the user
+ * did not enable the limit, a positive safe integer otherwise. Invalid or blank
+ * input falls back to the smallest cap instead of silently disabling the
+ * enabled toggle.
+ */
+function rowsPerTableLimitRequest(): number | undefined {
+  if (!limitRowsPerTable.value) return undefined;
+  return normalizeRowsPerTableLimit(Number(rowsPerTableLimitInput.value));
+}
+
+/** The rows-per-table cap as the preference stores it, so a reload keeps the user's intent. */
+function normalizedRowsPerTableLimit(): number {
+  return normalizeRowsPerTableLimit(Number(rowsPerTableLimitInput.value));
+}
+
+/**
+ * Sort column for the per-table cap (review on #14799): `undefined` when the
+ * limit is off or the field is blank — blank keeps the existing read order.
+ */
+function rowLimitSortColumnRequest(): string | undefined {
+  if (!limitRowsPerTable.value) return undefined;
+  return rowLimitSortColumnInput.value.trim() || undefined;
+}
+
+/**
+ * Direction for the sort column; only carried when a column is set, so the
+ * backend never applies a direction to the default read order.
+ */
+function rowLimitSortDescendingRequest(): boolean | undefined {
+  if (rowLimitSortColumnRequest() === undefined) return undefined;
+  return rowLimitSortDescending.value;
 }
 
 // Lenient exports write per-object failures into the SQL file as `-- ERROR`
@@ -324,7 +393,7 @@ async function loadSchemas(preferredSchema = "") {
   schema.value = selected;
 }
 
-async function loadTables(preferredTable = "", preferredTables: string[] = []) {
+async function loadTables(preferredTable = "", preferredTables: string[] = [], preferredObjects: DatabaseExportSelectedObject[] = []) {
   if (schema.value === POSTGRES_ALL_SCHEMAS) {
     tables.value = [];
     selectedTables.value = [];
@@ -337,6 +406,7 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
   tableError.value = null;
   tables.value = [];
   selectedTables.value = [];
+  selectedOtherObjects.value = null;
   try {
     const tableInfos = await api.listTables(connectionId.value, database.value, schema.value);
     const names = sortDatabaseTableNames(tableInfos.map((table) => table.name));
@@ -344,6 +414,14 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
     // Kingbase 系的 listTables 同时返回视图（relkind v/m）；预填里命中视图的项
     // 必须走 include_objects 通道，否则后端对象门会静默丢弃它们。
     const viewTypeNames = new Set(tableInfos.filter((table) => table.table_type.toUpperCase().includes("VIEW")).map((table) => table.name));
+    viewNames.value = viewTypeNames;
+    if (preferredObjects.length > 0) {
+      const selection = splitDatabaseExportObjectSelection(preferredObjects, names);
+      selectedTables.value = selection.tables;
+      selectedOtherObjects.value = selection.others;
+      if (selection.others.length > 0 || selection.tables.some((name) => viewTypeNames.has(name))) includeObjects.value = true;
+      return;
+    }
     const preferredSet = new Set(preferredTables.filter((name) => names.includes(name) && !viewTypeNames.has(name)));
     const nonTablePrefills = preferredTables.filter((name) => !names.includes(name) || viewTypeNames.has(name));
     if (nonTablePrefills.length > 0) {
@@ -425,10 +503,12 @@ async function startDesktopExport() {
     allDatabases: exportAllDatabases.value,
     databases: [...selectedDatabases.value],
     tables: [...selectedTables.value],
+    objectNames: selectedObjectNames(),
     mode: executionMode.value,
     split: splitSqlOutput.value,
     request: {
-      selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+      selectedTables: selectedTablesRequest(),
+      selectedObjects: selectedObjectsRequest(),
       includeStructure: includeStructure.value,
       includeData: includeData.value,
       insertDialect: insertDialect.value,
@@ -441,6 +521,9 @@ async function startDesktopExport() {
       preserveOriginalLanguage: preserveOriginalLanguage.value,
       batchSize: 1000,
       splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+      rowLimitPerTable: rowsPerTableLimitRequest(),
+      rowLimitSortColumn: rowLimitSortColumnRequest(),
+      rowLimitSortDescending: rowLimitSortDescendingRequest(),
     },
   };
   let destination: string;
@@ -451,7 +534,7 @@ async function startDesktopExport() {
       if (typeof path !== "string") return;
       destination = path;
     } else {
-      const name = sanitizeFileName(databaseExportFileStem(captured.database || "database", captured.tables) || "database");
+      const name = sanitizeFileName(databaseExportFileStem(captured.database || "database", captured.objectNames) || "database");
       const path = await promptExportSavePath({ defaultFileName: `${name}.${captured.split ? "zip" : "sql"}`, filters: [{ name: captured.split ? "ZIP" : "SQL", extensions: [captured.split ? "zip" : "sql"] }] });
       if (!path) return;
       destination = path;
@@ -558,7 +641,17 @@ async function startDesktopExport() {
           activeExport = currentId;
           try {
             return await runDatabaseExportUntilTerminal(
-              { ...captured.request, selectedTables: captured.allDatabases ? undefined : captured.request.selectedTables, exportId: currentId, connectionId: captured.connectionId, database: item.database, schema: item.schema, filePath, snapshotSessionId },
+              {
+                ...captured.request,
+                selectedTables: captured.allDatabases ? undefined : captured.request.selectedTables,
+                selectedObjects: captured.allDatabases ? undefined : captured.request.selectedObjects,
+                exportId: currentId,
+                connectionId: captured.connectionId,
+                database: item.database,
+                schema: item.schema,
+                filePath,
+                snapshotSessionId,
+              },
               (progress) => {
                 lastProgress = progress;
                 const nextRows = Math.max(0, progress.rowsExported);
@@ -652,7 +745,7 @@ async function startExport() {
 
   if (isTauriRuntime()) {
     try {
-      const safeName = sanitizeFileName(databaseExportFileStem(database.value || "database", selectedTables.value) || "database");
+      const safeName = sanitizeFileName(databaseExportFileStem(database.value || "database", selectedObjectNames()) || "database");
       const path = await promptExportSavePath({
         defaultFileName: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
         filters: [{ name: splitSqlOutput.value ? "ZIP" : "SQL", extensions: [splitSqlOutput.value ? "zip" : "sql"] }],
@@ -709,7 +802,8 @@ async function startExport() {
           database: database.value,
           schema: isPostgresAllSchemas.value ? "" : schema.value,
           filePath,
-          selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+          selectedTables: selectedTablesRequest(),
+          selectedObjects: selectedObjectsRequest(),
           includeStructure: includeStructure.value,
           includeData: includeData.value,
           insertDialect: insertDialect.value,
@@ -723,6 +817,9 @@ async function startExport() {
           snapshotSessionId,
           batchSize: 1000,
           splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+          rowLimitPerTable: rowsPerTableLimitRequest(),
+          rowLimitSortColumn: rowLimitSortColumnRequest(),
+          rowLimitSortDescending: rowLimitSortDescendingRequest(),
         };
         return runDatabaseExportUntilTerminal(request, (progress) => {
           exportProgress.value = { ...progress };
@@ -875,6 +972,9 @@ async function startAllDatabasesExport() {
               snapshotSessionId,
               batchSize: 1000,
               splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+              rowLimitPerTable: rowsPerTableLimitRequest(),
+              rowLimitSortColumn: rowLimitSortColumnRequest(),
+              rowLimitSortDescending: rowLimitSortDescendingRequest(),
             },
             (progress) => {
               const nextRowsExported = Math.max(0, progress.rowsExported);
@@ -995,7 +1095,7 @@ async function cancelExport() {
 
 function resetState() {
   desktopTaskStatus.value = null;
-  executionMode.value = "immediate";
+  executionMode.value = getDefaultExportExecutionMode();
   connectionId.value = "";
   database.value = "";
   databases.value = [];
@@ -1003,9 +1103,11 @@ function resetState() {
   schemas.value = [];
   tables.value = [];
   selectedTables.value = [];
+  selectedOtherObjects.value = null;
   tableError.value = null;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];
+  pendingPrefillObjects.value = [];
   exportAllDatabases.value = false;
   selectedDatabases.value = [];
   databaseFilter.value = "";
@@ -1105,13 +1207,16 @@ watch(schema, (value) => {
   }
   tables.value = [];
   selectedTables.value = [];
+  selectedOtherObjects.value = null;
   tableError.value = null;
   const preferredTable = pendingPrefillTable.value;
   const preferredTables = pendingPrefillTables.value;
+  const preferredObjects = pendingPrefillObjects.value;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];
+  pendingPrefillObjects.value = [];
   if (value === POSTGRES_ALL_SCHEMAS) return;
-  if (value) loadTables(preferredTable, preferredTables).catch((e) => toast(String(e), 5000));
+  if (value) loadTables(preferredTable, preferredTables, preferredObjects).catch((e) => toast(String(e), 5000));
 });
 
 watch(
@@ -1122,6 +1227,7 @@ watch(
       exportAllDatabases.value = props.prefillAllDatabases ?? false;
       pendingPrefillTable.value = props.prefillTable ?? "";
       pendingPrefillTables.value = props.prefillTables ?? [];
+      pendingPrefillObjects.value = props.prefillObjects ?? [];
       if (props.prefillConnectionId) {
         skipConnectionWatch.value = true;
         connectionId.value = props.prefillConnectionId;
@@ -1136,11 +1242,31 @@ watch(
   { immediate: true },
 );
 
-watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, omitDatabaseQualifier, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb], () => {
-  if (open.value) {
-    persistExportOptions();
-  }
-});
+watch(
+  [
+    includeStructure,
+    includeData,
+    insertDialect,
+    insertMode,
+    includeObjects,
+    includeCreateDatabase,
+    dropTableIfExists,
+    omitAutoIncrement,
+    omitDatabaseQualifier,
+    preserveOriginalLanguage,
+    splitSqlOutput,
+    splitSqlPartMaxMb,
+    limitRowsPerTable,
+    rowsPerTableLimitInput,
+    rowLimitSortColumnInput,
+    rowLimitSortDescending,
+  ],
+  () => {
+    if (open.value) {
+      persistExportOptions();
+    }
+  },
+);
 </script>
 
 <template>
@@ -1237,7 +1363,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
             <div class="flex items-center justify-between gap-2">
               <Label class="text-xs">{{ t("databaseExport.tableSelection") }}</Label>
               <div v-if="tables.length" class="text-[11px] text-muted-foreground">
-                {{ t("databaseExport.selectedTables", { selected: selectedTables.length, total: tables.length }) }}
+                {{ t("databaseExport.selectedTables", { selected: selectedObjectCount, total: tables.length }) }}
               </div>
             </div>
 
@@ -1363,6 +1489,48 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
             <p v-if="splitSqlOutput" class="pl-5 text-[11px] text-muted-foreground">
               {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
             </p>
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <button type="button" class="flex min-w-0 items-center gap-2 text-left" :class="includeData ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground/50'" :disabled="!includeData" @click="includeData && (limitRowsPerTable = !limitRowsPerTable)">
+                <CheckSquare v-if="limitRowsPerTable" class="w-3.5 h-3.5 text-primary shrink-0" />
+                <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+                <span>{{ t("databaseExport.limitRowsPerTable") }}</span>
+              </button>
+              <Input
+                v-if="includeData && limitRowsPerTable"
+                v-model="rowsPerTableLimitInput"
+                type="number"
+                inputmode="numeric"
+                :min="MIN_ROWS_PER_TABLE_LIMIT"
+                :max="MAX_ROWS_PER_TABLE_LIMIT"
+                class="h-7 w-28 text-xs"
+                :aria-label="t('databaseExport.rowsPerTableLimit')"
+                @blur="rowsPerTableLimitInput = normalizedRowsPerTableLimit().toString()"
+              />
+            </div>
+            <p v-if="includeData && limitRowsPerTable" class="pl-5 text-[11px] text-muted-foreground">
+              {{ t("databaseExport.limitRowsPerTableDescription") }}
+            </p>
+            <div v-if="includeData && limitRowsPerTable" class="pl-5 space-y-1.5">
+              <div class="flex items-center gap-2">
+                <label for="database-export-row-limit-sort-column" class="shrink-0 text-xs text-muted-foreground">
+                  {{ t("databaseExport.rowLimitSortColumn") }}
+                </label>
+                <Input id="database-export-row-limit-sort-column" v-model="rowLimitSortColumnInput" class="h-7 w-44 text-xs" :placeholder="t('databaseExport.rowLimitSortColumnPlaceholder')" :aria-label="t('databaseExport.rowLimitSortColumn')" />
+              </div>
+              <div class="flex items-center gap-4 text-xs" role="radiogroup" :aria-label="t('databaseExport.rowLimitSortDirection')">
+                <label class="flex cursor-pointer items-center gap-1.5">
+                  <input v-model="rowLimitSortDescending" type="radio" :value="false" name="row-limit-sort-direction" class="accent-primary" />
+                  <span>{{ t("databaseExport.rowLimitSortEarliestFirst") }}</span>
+                </label>
+                <label class="flex cursor-pointer items-center gap-1.5">
+                  <input v-model="rowLimitSortDescending" type="radio" :value="true" name="row-limit-sort-direction" class="accent-primary" />
+                  <span>{{ t("databaseExport.rowLimitSortLatestFirst") }}</span>
+                </label>
+              </div>
+              <p class="text-[11px] text-muted-foreground">
+                {{ t("databaseExport.rowLimitSortDescription") }}
+              </p>
+            </div>
             <ExportExecutionMode v-if="isTauriRuntime()" v-model="executionMode" />
           </div>
         </div>

@@ -49,6 +49,9 @@ const props = withDefaults(
 
 const customPageSizeInput = defineModel<string>("customPageSizeInput", { default: "" });
 const pageInput = ref(String(props.currentPage));
+// Use the pager's known last page, not maximumInputPage: the latter falls
+// back to a large safe-offset bound when the result count is still unknown.
+const totalPages = computed(() => (Number.isSafeInteger(props.maxPage) && (props.maxPage ?? 0) >= 1 ? props.maxPage : undefined));
 const maximumInputPage = computed(() => {
   const pageSize = Math.max(1, Math.trunc(props.pageSize));
   const maximumSafeOffsetPage = Math.min(Number.MAX_SAFE_INTEGER, Math.floor(Number.MAX_SAFE_INTEGER / pageSize) + 1);
@@ -186,6 +189,7 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
     </template>
     <template v-if="paginationEnabled && !infiniteScrollEnabled && !loadAllRowsActive">
+      <span v-if="totalPages !== undefined" class="shrink-0 whitespace-nowrap text-xs text-muted-foreground tabular-nums" data-pagination-total-pages>{{ t("grid.totalPages", { count: totalPages }) }}</span>
       <LightDropdown
         :model-value="String(pageSize)"
         :items="pageSizeMenuItems"

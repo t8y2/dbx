@@ -3,6 +3,7 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
+import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
 import { findCteColumnResolution, resolveCteColumnOrigins, type CteColumnOrigin } from "@/lib/sql/semantic/cteNavigation";
 import type { SqlSemanticModel, SqlSemanticRowSource } from "@/lib/sql/semantic/types";
 import { resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
@@ -39,7 +40,8 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
   const SEMANTIC_SQL_COMPLETION_ENABLED = options.semanticCompletionEnabled;
   const MAX_COMPLETION_TABLES = options.maxCompletionTables;
   function identifierRangeAt(sql: string, pos: number): { from: number; to: number; text: string } | null {
-    const located = extractQualifiedIdentifierAt(sql, pos);
+    const dialectId = resolveSqlDialectId({ databaseType: props.databaseType, dialect: props.databaseType ? undefined : props.dialect });
+    const located = extractQualifiedIdentifierAt(sql, pos, dialectId);
     if (!located) return null;
     if (located.parts.length === 1 && !located.parts[0].quoted && isSqlKeyword(located.parts[0].value)) return null;
     const text = located.parts.map((part) => quoteIdentifier(part.value)).join(".");

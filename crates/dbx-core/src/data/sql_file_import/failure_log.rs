@@ -26,9 +26,12 @@ use crate::sql::{SqlFileProgress, SqlFileStatus};
 
 /// Sub-directory of the application data directory holding the logs.
 pub const SQL_FILE_FAILURE_LOG_DIR: &str = "sql-file-logs";
-/// Per-statement cap. A mysqldump extended INSERT can reach ~1MB on its own, so
-/// a total-only cap would let a single statement dominate the whole budget.
-pub const SQL_FILE_FAILURE_LOG_MAX_STATEMENT_BYTES: usize = 256 * 1024;
+/// Per-statement cap for the *log capture* only; execution never truncates the
+/// SQL. A mysqldump extended INSERT commonly reaches ~1MB and can be much
+/// larger, so the cap is high enough to keep the whole failing statement for
+/// diagnosis while a total-only cap would still let one runaway record
+/// dominate the budget.
+pub const SQL_FILE_FAILURE_LOG_MAX_STATEMENT_BYTES: usize = 4 * 1024 * 1024;
 /// Per-execution cap: past this the writer stops appending and the summary
 /// reports how many failures were dropped.
 pub const SQL_FILE_FAILURE_LOG_MAX_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
@@ -130,6 +133,10 @@ enum LogRecord<'a> {
         file_statement_index: usize,
         statement_index: usize,
         sql: &'a str,
+        /// Full source-statement size before the log capture cap was applied.
+        /// Execution always sends the complete statement; this field only
+        /// distinguishes a truncated log entry from a truncated execution.
+        sql_bytes: usize,
         sql_truncated: bool,
         error: &'a str,
         recorded_at_ms: i64,
@@ -457,6 +464,7 @@ impl SqlFileFailureLogHandle {
             return;
         };
 
+        let sql_bytes = sql.len();
         let (sql, sql_truncated) = truncate_utf8(sql, self.limits.max_statement_bytes);
         if sql_truncated {
             self.truncated_statements += 1;
@@ -469,6 +477,7 @@ impl SqlFileFailureLogHandle {
             file_statement_index,
             statement_index: progress.statement_index,
             sql,
+            sql_bytes,
             sql_truncated,
             error,
             recorded_at_ms: now_ms(),
@@ -939,6 +948,7 @@ mod tests {
         let records = lines(handle.path().unwrap());
         let failure = records.iter().find(|record| record["type"] == "failure").unwrap();
         assert_eq!(failure["sqlTruncated"], true);
+        assert_eq!(failure["sqlBytes"], sql.len());
         assert!(failure["sql"].as_str().unwrap().len() <= 32);
         // Truncation must land on a char boundary, so the text stays valid UTF-8.
         assert!(std::str::from_utf8(failure["sql"].as_str().unwrap().as_bytes()).is_ok());

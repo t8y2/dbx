@@ -3968,6 +3968,7 @@ export default withEnglishFallback({
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
     rowJsonPreview: "ตัวอย่าง JSON",
+    exportSelectedColumnsSqlUpdates: "ส่งออกคอลัมน์ที่เลือกเป็น SQL UPDATE",
     binaryColumnFormats: {
       "binary-hex": "ไบนารีเป็นเลขฐานสิบหก",
       "binary-text": "ไบนารีเป็น UTF-8",

@@ -3791,6 +3791,7 @@ export default withEnglishFallback({
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
     rowJsonPreview: "Предпросмотр JSON",
+    exportSelectedColumnsSqlUpdates: "Экспортировать выбранные столбцы как SQL UPDATE",
     binaryColumnFormats: {
       "binary-hex": "Бинарные данные в шестнадцатеричный формат",
       "binary-text": "Бинарные данные в UTF-8",

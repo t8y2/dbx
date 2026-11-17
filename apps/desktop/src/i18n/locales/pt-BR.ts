@@ -3706,6 +3706,7 @@ export default withEnglishFallback({
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condição",
     rowJsonPreview: "Pré-visualização JSON",
+    exportSelectedColumnsSqlUpdates: "Exportar colunas selecionadas como SQL UPDATE",
     binaryColumnFormats: {
       "binary-hex": "Binário para hexadecimal",
       "binary-text": "Binário para UTF-8",

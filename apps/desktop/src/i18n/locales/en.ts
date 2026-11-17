@@ -3390,6 +3390,7 @@ export default {
     exportSelectedColumnsMarkdown: "Export Selected Columns as Markdown",
     exportSelectedColumnsHtml: "Export Selected Columns as HTML",
     exportSelectedColumnsSql: "Export Selected Columns as SQL INSERT",
+    exportSelectedColumnsSqlUpdates: "Export Selected Columns as SQL UPDATE",
     exportSelectedColumnsTxt: "Export Selected Columns as TXT",
     exportSelectedCellsCsv: "Export Selected Cells as CSV",
     exportSelectedCellsXlsx: "Export Selected Cells as XLSX",

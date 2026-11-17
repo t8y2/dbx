@@ -7659,6 +7659,13 @@ function exportSelectedColumnsSql() {
   return exportSql({ rowIds, columnIndexes });
 }
 
+const showSelectedColumnsUpdateExport = computed(() => hasColumnSelection.value && props.databaseType !== "mongodb" && !extractorUnavailableForDatabase("sql-updates", props.databaseType));
+
+function exportSelectedColumnsUpdateSql() {
+  if (!showSelectedColumnsUpdateExport.value) return;
+  return exportWithExtractor("sql-updates");
+}
+
 function exportSelectedColumnsTxt() {
   const columnIndexes = targetColumnIndexes();
   if (columnIndexes.length === 0) return;
@@ -10405,6 +10412,7 @@ const unrestrictedExportMenuItems = computed(() => {
           label: t("grid.exportSelectedColumnsHtml"),
         },
         { value: "selected-columns-sql", label: t("grid.exportSelectedColumnsSql") },
+        ...(showSelectedColumnsUpdateExport.value ? [{ value: "selected-columns-sql-updates", label: t("grid.exportSelectedColumnsSqlUpdates"), disabled: !canCopyWithExtractor("sql-updates") }] : []),
         { value: "selected-columns-txt", label: t("grid.exportSelectedColumnsTxt") },
       ]
     : [];
@@ -10556,6 +10564,7 @@ function selectExportMenuItem(value: string) {
     "selected-columns-markdown": exportSelectedColumnsMarkdown,
     "selected-columns-html": exportSelectedColumnsHtml,
     "selected-columns-sql": exportSelectedColumnsSql,
+    "selected-columns-sql-updates": exportSelectedColumnsUpdateSql,
     "selected-columns-txt": exportSelectedColumnsTxt,
     "selected-cells-csv": exportSelectedCellsCsv,
     "selected-cells-xlsx": exportSelectedCellsXlsx,
@@ -15332,6 +15341,7 @@ function exportSubmenu(): ContextMenuItem {
         action: exportSelectedColumnsHtml,
       },
       { label: t("grid.exportSelectedColumnsSql"), action: exportSelectedColumnsSql },
+      ...(showSelectedColumnsUpdateExport.value ? [{ label: t("grid.exportSelectedColumnsSqlUpdates"), action: exportSelectedColumnsUpdateSql, disabled: !canCopyWithExtractor("sql-updates") }] : []),
       { label: t("grid.exportSelectedColumnsTxt"), action: exportSelectedColumnsTxt },
       { label: "", separator: true },
     );

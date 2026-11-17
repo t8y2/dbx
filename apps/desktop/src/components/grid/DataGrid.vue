@@ -16966,7 +16966,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    positioned) their own stacking context below the header, so their
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
-              <div class="relative min-h-0 flex-1 flex flex-col overflow-hidden">
+              <div class="data-grid-scroll-body relative min-h-0 flex-1 flex flex-col overflow-hidden" :class="{ 'is-scrolling': isScrolling }">
                 <ProductionWatermark v-if="productionContext.active" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
@@ -18678,16 +18678,19 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 .data-grid-vertical-scrollbar {
   position: absolute;
   top: 10px;
-  right: 2px;
+  inset-inline-end: 2px;
   bottom: 14px;
   z-index: 30;
   width: 10px;
   cursor: pointer;
   touch-action: none;
+  pointer-events: none;
+  background: transparent;
 }
 
-:global(.dark) [data-grid-root] .data-grid-vertical-scrollbar {
-  background-color: var(--data-grid-background);
+.data-grid-vertical-scrollbar:hover,
+.data-grid-vertical-scrollbar--dragging {
+  pointer-events: auto;
 }
 
 .data-grid-vertical-scrollbar__thumb {
@@ -18697,17 +18700,28 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   min-height: 24px;
   border-radius: 999px;
   background: var(--data-grid-scrollbar-thumb);
+  opacity: 0.25;
+  pointer-events: auto;
   transition:
+    opacity 220ms ease 650ms,
     background-color 120ms ease,
     left 120ms ease,
     width 120ms ease;
 }
 
+.data-grid-scroll-body.is-scrolling .data-grid-vertical-scrollbar__thumb {
+  opacity: 0.8;
+  transition-duration: 80ms;
+  transition-delay: 0ms;
+}
+
 .data-grid-vertical-scrollbar:hover .data-grid-vertical-scrollbar__thumb,
-.data-grid-vertical-scrollbar--dragging .data-grid-vertical-scrollbar__thumb {
+.data-grid-vertical-scrollbar.data-grid-vertical-scrollbar--dragging .data-grid-vertical-scrollbar__thumb {
   left: 2px;
   width: 6px;
   background: var(--data-grid-scrollbar-thumb-hover);
+  opacity: 1;
+  transition-delay: 0ms;
 }
 
 .canvas-grid-surface {

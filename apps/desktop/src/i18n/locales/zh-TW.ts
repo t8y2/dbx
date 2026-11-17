@@ -3681,6 +3681,8 @@ export default withEnglishFallback({
     queryWhileSaving: "正在儲存結果集修改，請等待儲存完成後再執行查詢。",
     filterActive: "已套用篩選",
     structuredFiltersActive: "{count} 個條件篩選",
+    mongoJsonPreviewSelected: "選取的文件",
+    mongoJsonPreviewPage: "目前頁面",
   },
   exportProgress: {
     recoveryTitle: "刪除尚未確認結束的匯出？",

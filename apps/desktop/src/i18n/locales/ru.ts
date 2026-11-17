@@ -3784,6 +3784,8 @@ export default withEnglishFallback({
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
     rowJsonPreview: "Предпросмотр JSON",
+    mongoJsonPreviewSelected: "Выбранный документ",
+    mongoJsonPreviewPage: "Текущая страница",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

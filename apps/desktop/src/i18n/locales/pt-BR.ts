@@ -3699,6 +3699,8 @@ export default withEnglishFallback({
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condição",
     rowJsonPreview: "Pré-visualização JSON",
+    mongoJsonPreviewSelected: "Documento selecionado",
+    mongoJsonPreviewPage: "Página atual",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

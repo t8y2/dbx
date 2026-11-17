@@ -3723,6 +3723,8 @@ export default withEnglishFallback({
     filterActive: "フィルター適用済み",
     structuredFiltersActive: "{count} 件の条件フィルター",
     rowJsonPreview: "JSON プレビュー",
+    mongoJsonPreviewSelected: "選択したドキュメント",
+    mongoJsonPreviewPage: "現在のページ",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

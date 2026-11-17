@@ -3653,6 +3653,8 @@ export default withEnglishFallback({
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
     rowJsonPreview: "JSON 미리보기",
+    mongoJsonPreviewSelected: "선택한 문서",
+    mongoJsonPreviewPage: "현재 페이지",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

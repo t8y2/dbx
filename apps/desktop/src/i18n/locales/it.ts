@@ -3701,6 +3701,8 @@ export default withEnglishFallback({
     filterActive: "Filtro applicato",
     structuredFiltersActive: "{count} filtri condizione",
     rowJsonPreview: "Anteprima JSON",
+    mongoJsonPreviewSelected: "Documento selezionato",
+    mongoJsonPreviewPage: "Pagina corrente",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

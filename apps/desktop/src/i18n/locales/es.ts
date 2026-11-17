@@ -5676,6 +5676,7 @@ export default withEnglishFallback({
     scopeSequences: "secuencias",
     scopeFunctions: "funciones",
     stepSkipped: "Omitido porque falló un paso anterior requerido.",
+    selectedObjectsCount: "{count} objetos seleccionados",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Las fechas de los trabajos en esta versión de OceanBase solo admiten precisión de microsegundos. Cambie a 0 los dígitos 7–9 de los segundos fraccionarios y vuelva a generar la vista previa; se conservó la entrada original.",

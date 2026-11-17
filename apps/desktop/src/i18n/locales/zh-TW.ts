@@ -10714,6 +10714,7 @@ export default withEnglishFallback({
     specificTables: "指定資料表",
     chooseTables: "選擇資料表",
     selectedTableCount: "已選 {count} 張資料表",
+    selectedObjectsCount: "已選 {count} 個物件",
     searchTable: "搜尋資料表",
     loadingTables: "正在載入資料表...",
     emptyTables: "找不到資料表",

@@ -6225,6 +6225,7 @@ export default withEnglishFallback({
     scopeSequences: "последовательности",
     scopeFunctions: "функции",
     stepSkipped: "Пропущено из-за сбоя необходимого предыдущего шага.",
+    selectedObjectsCount: "Выбрано объектов: {count}",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Даты заданий в этой версии OceanBase поддерживают только микросекундную точность. Установите цифры 7–9 дробной части секунды в 0 и повторите предварительный просмотр; исходный ввод сохранён.",

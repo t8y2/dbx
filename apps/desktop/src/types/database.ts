@@ -2521,6 +2521,7 @@ export interface TabUiState {
   activeOutputView?: TabOutputView;
   /** Redis query results default to grid; a per-tab override selects command-line output. */
   redisResultViewMode?: RedisResultViewMode;
+  resultTransposeEnabled?: boolean;
   resultPaneOpen?: boolean;
   /** Tracks whether the active output view was auto-switched to "messages" by live server output during execution. */
   autoSwitchedToMessagesDuringExecution?: boolean;

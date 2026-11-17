@@ -606,6 +606,7 @@ interface DataGridProps {
   context?: "results" | "table-data";
   pageSizePreference?: DataGridPageSizePreference;
   autoTransposeSingleRow?: boolean;
+  resultTransposeEnabled?: boolean;
   sourceColumns?: Array<string | undefined>;
   joinedWriteTargets?: import("@/types/database").QueryTab["queryWriteTargets"];
   queryMultiSource?: boolean;
@@ -746,6 +747,7 @@ interface DataGridProps {
 
 const props = withDefaults(defineProps<DataGridProps>(), {
   // Vue casts absent Boolean props to false unless a default is explicit.
+  resultTransposeEnabled: undefined,
   // Regular grids have exact totals; document stores opt into lower-bound totals.
   totalRowCountIsExact: true,
   inexactTotalRowCountMode: "at-least",
@@ -789,6 +791,7 @@ const emit = defineEmits<{
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
+  "update:resultTransposeEnabled": [value: boolean];
   "update:structuredOrderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
   changeQueryTimeout: [connectionId: string];
@@ -884,17 +887,17 @@ watch(
 watch(
   () => props.result,
   (result) => {
-    if (
-      !shouldAutoTransposeSingleRow({
+    const shouldOpen = () =>
+      props.resultTransposeEnabled ??
+      shouldAutoTransposeSingleRow({
         enabled: !!props.autoTransposeSingleRow,
         preserveTranspose: preserveTransposeOnNextResult.value,
         rowCount: result.rows.length,
         columnCount: result.columns.length,
-      })
-    )
-      return;
+      });
+    if (!shouldOpen() || result.rows.length === 0 || preserveTransposeOnNextResult.value) return;
     nextTick(() => {
-      if (props.result !== result || !props.autoTransposeSingleRow || result.rows.length !== 1 || result.columns.length <= 1) return;
+      if (props.result !== result || !shouldOpen()) return;
       applyTransposeState({ showTranspose: true, transposeRowIndex: 0 }, "start");
     });
   },
@@ -11745,6 +11748,7 @@ function toggleKeyboardTranspose(): boolean {
   }
   showTranspose.value = next.showTranspose;
   transposeRowIndex.value = next.transposeRowIndex;
+  rememberResultTranspose(next.showTranspose);
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
@@ -11753,6 +11757,21 @@ function toggleKeyboardTranspose(): boolean {
     scrollGridRowIntoView(requestedRowIndex);
   }
   return true;
+}
+
+const transposeToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
+  visible: props.context === "results",
+  disabled: displayRowCount.value === 0,
+  active: isTransposeMode.value,
+  label: t("grid.transpose"),
+  tooltip: t("settings.shortcutToggleTranspose"),
+  onTrigger: () => {
+    toggleKeyboardTranspose();
+  },
+}));
+
+function rememberResultTranspose(enabled: boolean) {
+  if (props.context === "results") emit("update:resultTransposeEnabled", enabled);
 }
 
 // Shared path that selects or extends to nextPosition and scrolls it into view.
@@ -12972,7 +12991,10 @@ function closeTranspose(scrollToCurrentRecord = true) {
   const rowIndex = currentTransposeViewportRowIndex();
   showTranspose.value = false;
   transposeRowIndex.value = null;
-  if (scrollToCurrentRecord) scrollGridRowIntoView(rowIndex);
+  if (scrollToCurrentRecord) {
+    rememberResultTranspose(false);
+    scrollGridRowIntoView(rowIndex);
+  }
 }
 
 function openContextTranspose() {
@@ -12993,6 +13015,7 @@ function openContextTranspose() {
   });
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
+  rememberResultTranspose(next.showTranspose);
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
@@ -13005,6 +13028,7 @@ function toggleTranspose(rowIndex: number) {
   const next = nextTransposeState(showTranspose.value, transposeRowIndex.value, rowIndex);
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
+  rememberResultTranspose(next.showTranspose);
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
@@ -15783,6 +15807,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
             :delete-row="deleteRowToolbarCapability"
+            :transpose="transposeToolbarCapability"
             :layer-preview="layerPreviewToolbarCapability"
             :preview="previewToolbarCapability"
             :save="saveToolbarCapability"

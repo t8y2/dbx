@@ -23,7 +23,10 @@ use crate::models::connection::{
     is_mysql_jdbc_tls_param, mysql_jdbc_tls_mode, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
     MysqlJdbcTlsMode,
 };
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword,
+    starts_with_executable_sql_keyword_for_database,
+};
 use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
@@ -7841,6 +7844,12 @@ async fn mysql_add_column_if_not_exists_fallback(
 /// Route it through the existing query path; MySQL servers that do not support
 /// the syntax still return their normal SQL syntax error.
 fn mysql_statement_returns_rows(sql: &str) -> bool {
+    // Every non-SELECT statement reaches this check, including multi-megabyte
+    // INSERTs from SQL dumps. Only parse the statements that can contain a
+    // RETURNING clause at all.
+    if !contains_ascii_case_insensitive(sql, "returning") {
+        return false;
+    }
     let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
         return false;
     };
@@ -9091,7 +9100,11 @@ mod tests {
 
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
+        assert!(is_result_set_query("insert into users (id) values (1) returning id", dialect));
+        assert!(is_result_set_query("REPLACE INTO users (id) VALUES (1) Returning id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+        assert!(!is_result_set_query("INSERT INTO users (id) VALUES (1)", dialect));
+        assert!(!is_result_set_query("INSERT INTO notes (body) VALUES ('returning soon')", dialect));
     }
 
     #[test]

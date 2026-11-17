@@ -34,7 +34,9 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence,
+};
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
@@ -9202,6 +9204,14 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
     // keep the row-returning assumption whenever parsing does not say otherwise.
     let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
 
+    // INSERT/UPDATE/DELETE only return rows through RETURNING. Skip the full
+    // parse of statements without it, such as large multi-row INSERT batches.
+    if starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"])
+        && !contains_ascii_case_insensitive(sql, "returning")
+    {
+        return false;
+    }
+
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
         return leads_with_cte;
     };
@@ -12967,6 +12977,8 @@ mod tests {
             "INSERT INTO users (id) VALUES (1) RETURNING id",
             "UPDATE users SET name = 'Ada' RETURNING id, name",
             "DELETE FROM users WHERE id = 1 RETURNING id",
+            "insert into users (id) values (1) returning id",
+            "-- audit\nUpdate users SET name = 'Ada' Returning id",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
             "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
         ] {

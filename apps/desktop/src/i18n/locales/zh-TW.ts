@@ -495,6 +495,7 @@ export default withEnglishFallback({
       urlEncode: "URL 元件編碼",
       urlDecode: "URL 元件解碼",
       radix: "整數進位轉換",
+      flattenLines: "多行壓縮為一行",
     },
     units: {
       auto: "自動（10/13 位）",
@@ -1325,6 +1326,7 @@ export default withEnglishFallback({
     collapseMatches: "收起",
     searchContentIncomplete: "搜尋結果不完整：{count} 個檔案的內容無法載入。",
     matchPreviewLimit: "共 {total} 行相符，僅提供前 {limit} 行的預覽。",
+    sortByDateCreated: "按建立日期排序",
   },
 
   connection: {
@@ -2492,6 +2494,8 @@ export default withEnglishFallback({
     previewChangesComment: "變更預覽（乾跑）：{operation} 語句",
     previewChangesFailed: "變更預覽失敗。",
     previewChangesNoStatement: "請選取或將游標放在一條 UPDATE / INSERT / DELETE 語句上以預覽變更。",
+    fullscreenResultsPane: "全螢幕顯示結果",
+    exitFullscreenResultsPane: "退出結果全螢幕",
   },
   tabs: {
     sql: "SQL",
@@ -6781,6 +6785,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "按一下「開始傳輸」先檢閱傳輸計畫，確認後才會寫入資料。",
     log: {
       title: "執行日誌",
       tableStarted: "開始傳輸資料表 {table}（{index}/{total}）",
@@ -8930,6 +8935,8 @@ export default withEnglishFallback({
     shortcutDeleteCurrentRow: "刪除目前資料列",
     shortcutFocusWhere: "聚焦 WHERE 條件輸入框",
     shortcutGoToColumn: "跳轉欄",
+    shortcutSelectNextGridColumn: "選取資料表的下一欄",
+    shortcutSelectPreviousGridColumn: "選取資料表的上一欄",
     shortcutGoToFirstPage: "第一頁",
     shortcutGoToPreviousPage: "上一頁",
     shortcutGoToNextPage: "下一頁",

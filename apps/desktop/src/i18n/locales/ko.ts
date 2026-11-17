@@ -512,6 +512,7 @@ export default withEnglishFallback({
       urlEncode: "URL 구성 요소 인코딩",
       urlDecode: "URL 구성 요소 디코딩",
       radix: "정수 진법 변환",
+      flattenLines: "여러 줄을 한 줄로 압축",
     },
     units: {
       auto: "자동(10/13자리)",
@@ -1346,6 +1347,7 @@ export default withEnglishFallback({
     collapseMatches: "접기",
     searchContentIncomplete: "검색 결과가 완전하지 않습니다. 파일 {count}개의 내용을 불러오지 못했습니다.",
     matchPreviewLimit: "일치하는 총 {total}개 줄 중 처음 {limit}개 줄만 미리 볼 수 있습니다.",
+    sortByDateCreated: "생성 날짜순으로 정렬",
   },
   connection: {
     groupPath: "그룹 경로",
@@ -2434,6 +2436,8 @@ export default withEnglishFallback({
     previewChangesComment: "변경 미리 보기(드라이 런): {operation} 문",
     previewChangesFailed: "변경 미리 보기 실패.",
     previewChangesNoStatement: "변경 사항을 미리 보려면 UPDATE / INSERT / DELETE 문을 선택하거나 커서를 해당 문에 놓으십시오.",
+    fullscreenResultsPane: "결과 전체 화면 표시",
+    exitFullscreenResultsPane: "결과 전체 화면 종료",
   },
   tabs: {
     sql: "SQL",
@@ -7704,6 +7708,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "작은따옴표 문자열의 템플릿 자리 표시자 유지",
   },
   transfer: {
+    reviewBeforeStart: "전송 시작을 선택하면 전송 계획을 검토하고 확인한 후에 데이터가 기록됩니다.",
     log: {
       title: "실행 로그",
       tableStarted: "테이블 {table} 전송 중({index}/{total})",
@@ -10874,6 +10879,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "쿼리 연결의 전체 그룹 경로 표시",
     showConnectionGroupPathDescription: "활성화하면 쿼리 페이지 오른쪽 위의 연결 선택기에서 연결 이름 앞에 전체 그룹 경로를 표시합니다. 비활성화하면 연결 이름만 표시합니다.",
     shortcutConvertSelectionToDelimited: "선택한 내용을 구분 기호로 구분된 목록으로 변환",
+    shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
+    shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
     sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
   },
   driverStore: {

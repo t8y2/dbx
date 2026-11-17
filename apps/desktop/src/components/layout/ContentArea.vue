@@ -62,6 +62,8 @@ import {
   SkipForward,
   ListX,
   LocateFixed,
+  Maximize2,
+  Minimize2,
 } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
@@ -302,14 +304,16 @@ const props = defineProps<
     editorOnly?: boolean;
     /** Render only the shared query result pane (used by QueryResultSurface). */
     resultOnly?: boolean;
+    resultFullscreen?: boolean;
     /** Whether the query editor should request focus on mount. */
     autoFocus?: boolean;
   }
 >();
 
-const emit = defineEmits<ContentAreaSurfaceEmits>();
+const emit = defineEmits<ContentAreaSurfaceEmits & { toggleResultFullscreen: [button: HTMLElement] }>();
 
 const { t } = useI18n();
+const resultFullscreenLabel = computed(() => t(props.resultFullscreen ? "editor.exitFullscreenResultsPane" : "editor.fullscreenResultsPane"));
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
@@ -2925,6 +2929,12 @@ defineExpose({
                     />
                   </PopoverContent>
                 </Popover>
+                <LightTooltip v-if="resultFullscreen !== undefined" :text="resultFullscreenLabel" side="bottom" :delay="0" :close-delay="0" nowrap>
+                  <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:text-foreground" :title="resultFullscreenLabel" :aria-label="resultFullscreenLabel" :aria-pressed="resultFullscreen" @click="emit('toggleResultFullscreen', $event.currentTarget as HTMLElement)">
+                    <Minimize2 v-if="resultFullscreen" class="h-3.5 w-3.5" />
+                    <Maximize2 v-else class="h-3.5 w-3.5" />
+                  </Button>
+                </LightTooltip>
                 <LightTooltip :text="t('editor.hideResultsPane')" side="bottom" :delay="0" :close-delay="0" nowrap>
                   <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:text-foreground" :title="t('editor.hideResultsPane')" :aria-label="t('editor.hideResultsPane')" @click="handleHideResultsPane">
                     <ChevronDown class="h-3.5 w-3.5" />

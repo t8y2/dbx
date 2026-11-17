@@ -655,6 +655,7 @@ export default withEnglishFallback({
       urlEncode: "URL 组件编码",
       urlDecode: "URL 组件解码",
       radix: "整数进制转换",
+      flattenLines: "多行压缩为一行",
     },
     units: {
       auto: "自动（10/13 位）",
@@ -1474,6 +1475,7 @@ export default withEnglishFallback({
     changeTargetFailed: "修改 SQL 目标失败：{message}",
     clearSelection: "清除选择",
     sortByDate: "按修改日期排序",
+    sortByDateCreated: "按创建日期排序",
     sortByFolder: "按文件夹结构排序",
     sortFiles: "排序文件",
     sortSubfolders: "排序子文件夹",
@@ -2519,6 +2521,8 @@ export default withEnglishFallback({
     connectionMayBeLost: "连接可能已断开，请刷新数据重试",
     showResultsPane: "显示结果",
     hideResultsPane: "收起",
+    fullscreenResultsPane: "全屏显示结果",
+    exitFullscreenResultsPane: "退出结果全屏",
     noDatabase: "未选择数据库",
     unsavedChangesTitle: "未保存的更改",
     unsavedChangesMessage: "「{title}」有未保存的更改，关闭后将丢失。是否保存后再关闭？",
@@ -8886,6 +8890,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "点击「开始传输」先查看传输计划，确认后才会写入数据。",
     title: "数据传输",
     reexecute: "重新执行",
     log: {
@@ -11335,6 +11340,8 @@ export default withEnglishFallback({
     shortcutDeleteCurrentRow: "删除当前数据行",
     shortcutFocusWhere: "聚焦 WHERE 条件输入框",
     shortcutGoToColumn: "跳转列",
+    shortcutSelectNextGridColumn: "选中表数据的下一列",
+    shortcutSelectPreviousGridColumn: "选中表数据的上一列",
     shortcutGoToFirstPage: "第一页",
     shortcutGoToPreviousPage: "上一页",
     shortcutGoToNextPage: "下一页",

@@ -710,6 +710,7 @@ export default {
       urlEncode: "URL component encode",
       urlDecode: "URL component decode",
       radix: "Integer base conversion",
+      flattenLines: "Collapse lines to one",
     },
     units: {
       auto: "Auto (10/13 digits)",
@@ -1538,6 +1539,7 @@ export default {
     changeTargetFailed: "Failed to change SQL target: {message}",
     clearSelection: "Clear Selection",
     sortByDate: "Sort by Date Modified",
+    sortByDateCreated: "Sort by Date Created",
     sortByFolder: "Sort by Folder Structure",
     sortFiles: "Sort Files",
     sortSubfolders: "Sort Subfolders",
@@ -2587,6 +2589,8 @@ export default {
     connectionMayBeLost: "The connection may have been lost. Refresh data and try again.",
     showResultsPane: "Show results",
     hideResultsPane: "Hide results",
+    fullscreenResultsPane: "Fullscreen results",
+    exitFullscreenResultsPane: "Exit fullscreen results",
     noDatabase: "No database selected",
     unsavedChangesTitle: "Unsaved changes",
     unsavedChangesMessage: '"{title}" has unsaved changes that will be lost if closed. Save before closing?',
@@ -8922,6 +8926,7 @@ export default {
     },
   },
   transfer: {
+    reviewBeforeStart: "Select Start Transfer to review the transfer plan and confirm before any data is written.",
     log: {
       title: "Execution log",
       tableStarted: "Transferring table {table} ({index}/{total})",
@@ -11369,6 +11374,8 @@ export default {
     shortcutDeleteCurrentRow: "Delete current data row",
     shortcutFocusWhere: "Focus WHERE condition",
     shortcutGoToColumn: "Go to column",
+    shortcutSelectNextGridColumn: "Select next column in table data",
+    shortcutSelectPreviousGridColumn: "Select previous column in table data",
     shortcutGoToFirstPage: "First page",
     shortcutGoToPreviousPage: "Previous page",
     shortcutGoToNextPage: "Next page",

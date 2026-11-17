@@ -515,6 +515,7 @@ export default withEnglishFallback({
       urlEncode: "Codificar componente URL",
       urlDecode: "Decodificar componente URL",
       radix: "Conversión de base de enteros",
+      flattenLines: "Comprimir varias líneas en una sola",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -1350,6 +1351,7 @@ export default withEnglishFallback({
     collapseMatches: "Contraer",
     searchContentIncomplete: "Resultados incompletos: no se pudo cargar el contenido de {count} archivos.",
     matchPreviewLimit: "Las vistas previas se limitan a las primeras {limit} de {total} líneas coincidentes.",
+    sortByDateCreated: "Ordenar por fecha de creación",
   },
 
   connection: {
@@ -2603,6 +2605,8 @@ export default withEnglishFallback({
     previewChangesComment: "Previsualización de cambios (simulación): sentencia {operation}",
     previewChangesFailed: "Error al previsualizar los cambios.",
     previewChangesNoStatement: "Seleccione o coloque el cursor sobre una sentencia UPDATE / INSERT / DELETE para previsualizar los cambios.",
+    fullscreenResultsPane: "Mostrar resultados en pantalla completa",
+    exitFullscreenResultsPane: "Salir de resultados en pantalla completa",
   },
   tabs: {
     sql: "SQL",
@@ -7880,6 +7884,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "Conservar los marcadores de posición de plantilla en cadenas entre comillas simples",
   },
   transfer: {
+    reviewBeforeStart: "Selecciona Iniciar transferencia para revisar el plan y confirmar antes de escribir datos.",
     log: {
       title: "Registro de ejecución",
       tableStarted: "Transfiriendo tabla {table} ({index}/{total})",
@@ -11064,6 +11069,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "Mostrar la ruta completa del grupo de la conexión de consulta",
     showConnectionGroupPathDescription: "Cuando está activado, el selector de conexiones de la esquina superior derecha de la página de consulta mostrará la ruta completa del grupo antes del nombre de la conexión; cuando está desactivado, solo mostrará el nombre de la conexión.",
     shortcutConvertSelectionToDelimited: "Convertir el contenido seleccionado en una lista delimitada",
+    shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
+    shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
   },
   driverStore: {

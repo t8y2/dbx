@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlEncode: "URL コンポーネントのエンコード",
       urlDecode: "URL コンポーネントのデコード",
       radix: "整数の基数変換",
+      flattenLines: "複数行を1行に圧縮",
     },
     units: {
       auto: "自動（10/13 桁）",
@@ -1340,6 +1341,7 @@ export default withEnglishFallback({
     collapseMatches: "折りたたむ",
     searchContentIncomplete: "検索結果は不完全です：{count} 件のファイルの内容を読み込めませんでした。",
     matchPreviewLimit: "一致する全 {total} 行のうち、先頭 {limit} 行のみプレビューできます。",
+    sortByDateCreated: "作成日で並べ替え",
   },
   connection: {
     groupPath: "グループパス",
@@ -2532,6 +2534,8 @@ export default withEnglishFallback({
     previewChangesComment: "変更プレビュー（ドライラン）：{operation} ステートメント",
     previewChangesFailed: "変更プレビューに失敗しました。",
     previewChangesNoStatement: "変更をプレビューするには、UPDATE / INSERT / DELETE ステートメントを選択するか、その上にカーソルを置いてください。",
+    fullscreenResultsPane: "結果を全画面表示",
+    exitFullscreenResultsPane: "結果の全画面表示を終了",
   },
   tabs: {
     sql: "SQL",
@@ -7686,6 +7690,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "シングルクォート文字列内のテンプレートプレースホルダーを保持する",
   },
   transfer: {
+    reviewBeforeStart: "「転送開始」で転送内容を確認できます。データの書き込みは確認後に始まります。",
     log: {
       title: "実行ログ",
       tableStarted: "テーブル {table} を転送中（{index}/{total}）",
@@ -10805,6 +10810,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "クエリ接続の完全なグループパスを表示",
     showConnectionGroupPathDescription: "有効にすると、クエリページ右上の接続セレクターで接続名の前に完全なグループパスが表示されます。無効にすると接続名のみが表示されます。",
     shortcutConvertSelectionToDelimited: "選択内容を区切り文字付きリストに変換",
+    shortcutSelectNextGridColumn: "テーブルデータの次の列を選択",
+    shortcutSelectPreviousGridColumn: "テーブルデータの前の列を選択",
     sidebarSimpleHideIndexes: "テーブルと並んで表示されるインデックスを非表示",
   },
   driverStore: {

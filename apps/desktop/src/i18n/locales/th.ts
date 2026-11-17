@@ -1041,6 +1041,7 @@ export default withEnglishFallback({
     rightToolbarLabels: "ข้อความแถบเครื่องมือด้านขวา",
     showRightToolbarLabels: "แสดงข้อความแถบเครื่องมือด้านขวา",
     hideRightToolbarLabels: "ซ่อนข้อความแถบเครื่องมือด้านขวา",
+    independentWindow: "หน้าต่างอิสระ",
   },
   multiDbExecute: {
     manualTransaction: "Transaction แบบ Manual",
@@ -5528,6 +5529,13 @@ export default withEnglishFallback({
     createSequence: "สร้างซีเควนซ์",
     viewPostgresRowLevelSecurity: "ดูนโยบายความปลอดภัยระดับแถว",
     copyGeneratedSql: "คัดลอก SQL ที่สร้างขึ้น",
+    openTabInNewWindow: "เปิดแท็บในหน้าต่างใหม่",
+    moveTabToAnotherWindow: "ย้ายแท็บไปยังหน้าต่างอื่น",
+    openTabGroupInNewWindow: "เปิดกลุ่มในหน้าต่างใหม่",
+    moveTabGroupToAnotherWindow: "ย้ายกลุ่มไปยังหน้าต่างอื่น",
+    consolidateWorkspaceWindows: "รวมหน้าต่างรองทั้งหมด",
+    mainWindow: "หน้าต่างหลัก",
+    detachedWindow: "หน้าต่าง {number}",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",
@@ -12705,6 +12713,8 @@ export default withEnglishFallback({
     duplicateTabTitleModeConnection: "ชื่อวัตถุ + ชื่อการเชื่อมต่อ",
     duplicateTabTitleModeConnectionDescription: "แสดงเป็น users prod-db, users staging-db … กลับไปใช้หมายเลขเมื่อแท็บชื่อซ้ำอยู่ในการเชื่อมต่อเดียวกัน หรือชื่อเรื่องมีชื่อการเชื่อมต่ออยู่แล้ว",
     shortcutConvertSelectionToDelimited: "แปลงเนื้อหาที่เลือกเป็นรายการที่คั่นด้วยตัวคั่น",
+    crossWindowTabDragPreview: "ตัวอย่างการลากแท็บข้ามหน้าต่าง",
+    crossWindowTabDragPreviewDescription: "เมื่อเปิดใช้งาน สามารถลากแท็บไปยังหน้าต่าง DBX อื่น หรือลากออกเพื่อสร้างหน้าต่างใหม่ได้ เมื่อปิดใช้งานจะปิดฟีเจอร์ทดลองนี้",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

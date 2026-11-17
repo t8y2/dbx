@@ -939,6 +939,7 @@ export default withEnglishFallback({
     rightToolbarLabels: "Подписи правой панели инструментов",
     showRightToolbarLabels: "Показать подписи правой панели инструментов",
     hideRightToolbarLabels: "Скрыть подписи правой панели инструментов",
+    independentWindow: "Отдельное окно",
   },
   multiDbExecute: {
     manualTransaction: "Ручная транзакция",
@@ -5353,6 +5354,13 @@ export default withEnglishFallback({
     createSequence: "Создать последовательность",
     viewPostgresRowLevelSecurity: "Просмотреть политики безопасности на уровне строк",
     copyGeneratedSql: "Копировать сгенерированный SQL",
+    openTabInNewWindow: "Открыть вкладку в новом окне",
+    moveTabToAnotherWindow: "Переместить вкладку в другое окно",
+    openTabGroupInNewWindow: "Открыть группу в новом окне",
+    moveTabGroupToAnotherWindow: "Переместить группу в другое окно",
+    consolidateWorkspaceWindows: "Объединить все дополнительные окна",
+    mainWindow: "Главное окно",
+    detachedWindow: "Окно {number}",
   },
   visibleDatabases: {
     title: "Видимые базы данных",
@@ -12343,6 +12351,8 @@ export default withEnglishFallback({
     duplicateTabTitleModeConnection: "Имя объекта + имя подключения",
     duplicateTabTitleModeConnectionDescription: "Показывает users prod-db, users staging-db… Возврат к номерам, если повторяющиеся вкладки относятся к одному подключению или заголовок уже содержит его имя.",
     shortcutConvertSelectionToDelimited: "Преобразовать выделение в список с разделителями",
+    crossWindowTabDragPreview: "Предпросмотр перетаскивания вкладок между окнами",
+    crossWindowTabDragPreviewDescription: "Если включено, вкладки можно перетаскивать в другие окна DBX или выносить в новые окна; если отключено, эта тестовая функция недоступна.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

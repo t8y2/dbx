@@ -16,7 +16,19 @@ import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { parseQuickSearchQuery, quickSearchCategory as itemCategory, type QuickSearchCategory as SearchCategory } from "@/lib/quickOpen/quickSearch";
-import { getGlobalSearchRoots, saveGlobalSearchRoots, getGlobalSearchExtensions, saveGlobalSearchExtensions } from "@/lib/globalSearch/globalSearchSettings";
+import {
+  getGlobalSearchMatchMode,
+  getGlobalSearchRoots,
+  getGlobalSearchShowQuickFilters,
+  saveGlobalSearchMatchMode,
+  saveGlobalSearchRoots,
+  getGlobalSearchExtensions,
+  saveGlobalSearchExtensions,
+  saveGlobalSearchShowQuickFilters,
+  globalSearchSettingsVersion,
+  type GlobalSearchMatchMode,
+} from "@/lib/globalSearch/globalSearchSettings";
+import { isQuickOpenMetadataIndexSupported } from "@/lib/quickOpen/quickOpenIndex";
 
 const QuickOpenFilePreview = defineAsyncComponent(() => import("./QuickOpenFilePreview.vue"));
 
@@ -37,6 +49,8 @@ const { t } = useI18n();
 const pluginPalette = usePluginCommandPalette();
 const { toast } = useToast();
 const activeCategory = ref<SearchCategory>("all");
+const matchMode = ref<GlobalSearchMatchMode>(getGlobalSearchMatchMode());
+const showQuickFilters = ref(getGlobalSearchShowQuickFilters());
 const {
   searchQuery,
   matchingItems,
@@ -61,7 +75,12 @@ const {
   scopeConnectionIds,
   scopeActive,
   setScopeConnectionIds,
-} = useQuickOpen({ extraItems: pluginPalette.items, category: activeCategory, enabled: computed(() => props.open) });
+  metadataIndexStatuses,
+  refreshMetadataIndexStatuses,
+  rebuildMetadataIndex,
+  rebuildAllMetadataIndexes,
+  clearMetadataIndex,
+} = useQuickOpen({ extraItems: pluginPalette.items, category: activeCategory, enabled: computed(() => props.open), matchMode });
 const previewEditing = ref(false);
 const pinnedPreviewItem = ref<QuickOpenItem | null>(null);
 
@@ -151,8 +170,16 @@ const settingsStore = useSettingsStore();
 const globalSearchShortcut = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.globalSearch || "Mod+Shift+F"));
 const secondaryActionShortcut = computed(() => formatShortcutDisplay("Mod+Enter"));
 
+watch(globalSearchSettingsVersion, () => {
+  matchMode.value = getGlobalSearchMatchMode();
+  showQuickFilters.value = getGlobalSearchShowQuickFilters();
+  refreshSearchSettings();
+});
+
 // Search settings panel state (extra search roots and file extensions).
 const searchSettingsOpen = ref(false);
+const indexBusyConnection = ref<string | null>(null);
+const indexableConnections = computed(() => scopeConnections.value.filter((connection) => isQuickOpenMetadataIndexSupported(connection.db_type)));
 const searchRoots = ref<string[]>([]);
 const extensionsInput = ref("");
 const parsedSearchQuery = computed(() => parseQuickSearchQuery(searchQuery.value));
@@ -204,6 +231,66 @@ function saveExtensions(): void {
   refreshSearchSettings();
 }
 
+function updateMatchMode(value: GlobalSearchMatchMode): void {
+  matchMode.value = value;
+  saveGlobalSearchMatchMode(value);
+}
+
+function updateQuickFilterVisibility(value: boolean): void {
+  showQuickFilters.value = value;
+  saveGlobalSearchShowQuickFilters(value);
+}
+
+function indexStatusLabel(connectionId: string): string {
+  const state = metadataIndexStatuses.value[connectionId]?.state ?? "not-built";
+  return t(`quickOpen.index${state === "not-built" ? "NotBuilt" : state === "building" ? "Building" : state === "ready" ? "Ready" : "Failed"}`);
+}
+
+function indexStatusTime(connectionId: string): string {
+  const capturedAt = metadataIndexStatuses.value[connectionId]?.capturedAt;
+  if (!capturedAt) return "";
+  return new Date(capturedAt).toLocaleString();
+}
+
+async function runIndexBuild(connectionId: string): Promise<void> {
+  if (indexBusyConnection.value) return;
+  indexBusyConnection.value = connectionId;
+  try {
+    await rebuildMetadataIndex(connectionId);
+    toast(t("quickOpen.indexBuildComplete"), 3000);
+  } catch {
+    toast(t("quickOpen.indexBuildFailed"), 5000);
+  } finally {
+    indexBusyConnection.value = null;
+  }
+}
+
+async function runAllIndexBuild(): Promise<void> {
+  if (indexBusyConnection.value) return;
+  indexBusyConnection.value = "__all__";
+  try {
+    await rebuildAllMetadataIndexes();
+    toast(t("quickOpen.indexBuildComplete"), 3000);
+  } catch {
+    toast(t("quickOpen.indexBuildFailed"), 5000);
+  } finally {
+    indexBusyConnection.value = null;
+  }
+}
+
+async function runIndexClear(connectionId: string): Promise<void> {
+  if (indexBusyConnection.value) return;
+  indexBusyConnection.value = connectionId;
+  try {
+    await clearMetadataIndex(connectionId);
+    await refreshMetadataIndexStatuses();
+  } catch {
+    toast(t("quickOpen.indexClearFailed"), 5000);
+  } finally {
+    indexBusyConnection.value = null;
+  }
+}
+
 // Content mode exposes the same shared searchQuery; only featured results differ.
 
 const contentMatchCount = computed(() => contentGroups.value.reduce((total, group) => total + group.matches.length, 0));
@@ -227,6 +314,15 @@ const dialogOpen = computed({
     if (value || canLeavePreview()) emit("update:open", value);
   },
 });
+
+function handleWorkspaceKeyDown(e: KeyboardEvent): void {
+  if (previewEditing.value) return;
+  if ((e.metaKey || e.ctrlKey) && /^[1-8]$/.test(e.key)) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectCategory(categoryDefinitions[Number(e.key) - 1]!.id);
+  }
+}
 
 function handleKeyDown(e: KeyboardEvent): void {
   if (previewEditing.value) return;
@@ -546,7 +642,7 @@ watch(selectedIndex, async () => {
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
     <DialogContent class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden">
-      <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background">
+      <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background" @keydown.capture="handleWorkspaceKeyDown">
         <!-- Search Input -->
         <div class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">
           <Command class="h-5 w-5 text-muted-foreground" />
@@ -592,7 +688,45 @@ watch(selectedIndex, async () => {
         <GlobalSearchCategoryBar :categories="categoryDefinitions" :active="activeCategory" :counts="{ ...categoryCounts, content: contentMatchCount }" @select="selectCategoryFromBar" />
 
         <!-- Search settings panel -->
-        <div v-if="searchSettingsOpen" class="max-h-[30vh] shrink-0 space-y-3 overflow-y-auto border-b bg-muted/30 px-4 py-3 text-sm">
+        <div v-if="searchSettingsOpen" class="max-h-[38vh] shrink-0 space-y-4 overflow-y-auto border-b bg-muted/30 px-4 py-3 text-sm">
+          <div class="space-y-2">
+            <div class="text-xs font-medium text-foreground">{{ t("quickOpen.matchMode") }}</div>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="rounded-md border px-2.5 py-1.5 text-xs" :class="matchMode === 'precise' ? 'border-foreground bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:bg-muted'" @click="updateMatchMode('precise')">
+                {{ t("quickOpen.matchModePrecise") }}
+              </button>
+              <button type="button" class="rounded-md border px-2.5 py-1.5 text-xs" :class="matchMode === 'enhanced' ? 'border-foreground bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:bg-muted'" @click="updateMatchMode('enhanced')">
+                {{ t("quickOpen.matchModeEnhanced") }}
+              </button>
+            </div>
+            <p class="text-xs text-muted-foreground">{{ t("quickOpen.matchModeHint") }}</p>
+          </div>
+          <label class="flex items-center gap-2 text-xs text-foreground">
+            <input type="checkbox" :checked="showQuickFilters" @change="updateQuickFilterVisibility(($event.target as HTMLInputElement).checked)" />
+            <span>{{ t("quickOpen.showQuickFilters") }}</span>
+          </label>
+          <div class="space-y-2 border-t pt-3">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-medium text-foreground">{{ t("quickOpen.indexManagement") }}</span>
+              <button type="button" class="rounded px-2 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50" :disabled="!!indexBusyConnection || indexableConnections.length === 0" @click="runAllIndexBuild">{{ t("quickOpen.indexBuildAll") }}</button>
+            </div>
+            <div v-if="indexableConnections.length === 0" class="text-xs text-muted-foreground">{{ t("quickOpen.indexUnsupported") }}</div>
+            <div v-for="connection in indexableConnections" :key="connection.id" class="flex items-center gap-2 rounded-md bg-background px-2.5 py-2 text-xs">
+              <div class="min-w-0 flex-1">
+                <div class="truncate text-foreground">{{ connection.name }}</div>
+                <div class="text-[11px] text-muted-foreground">
+                  {{ indexStatusLabel(connection.id) }}<span v-if="metadataIndexStatuses[connection.id]?.itemCount"> · {{ t("quickOpen.indexItems", { count: metadataIndexStatuses[connection.id]?.itemCount }) }}</span
+                  ><span v-if="indexStatusTime(connection.id)"> · {{ t("quickOpen.indexLastBuilt", { time: indexStatusTime(connection.id) }) }}</span>
+                </div>
+              </div>
+              <button type="button" class="rounded px-2 py-1 text-[11px] text-foreground hover:bg-muted disabled:opacity-50" :disabled="!!indexBusyConnection" @click="runIndexBuild(connection.id)">
+                {{ metadataIndexStatuses[connection.id]?.state === "ready" ? t("quickOpen.indexRebuild") : t("quickOpen.indexBuild") }}
+              </button>
+              <button v-if="metadataIndexStatuses[connection.id]?.state === 'ready'" type="button" class="rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" :disabled="!!indexBusyConnection" @click="runIndexClear(connection.id)">
+                {{ t("quickOpen.indexClear") }}
+              </button>
+            </div>
+          </div>
           <div>
             <div class="mb-1.5 flex items-center justify-between">
               <span class="text-xs text-muted-foreground">{{ t("quickOpen.searchRoots") }}</span>
@@ -623,6 +757,7 @@ watch(selectedIndex, async () => {
         <div class="grid min-h-0 flex-1 overflow-y-auto md:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[190px_minmax(0,1fr)_290px]">
           <GlobalSearchScopeRail
             :content-mode="contentMode"
+            :show-quick-filters="showQuickFilters"
             :preview-editing="previewEditing"
             :scope-selection="scopeSelection"
             :scope-all-value="SCOPE_ALL_VALUE"

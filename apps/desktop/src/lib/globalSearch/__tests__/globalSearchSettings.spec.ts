@@ -31,7 +31,21 @@ class MemoryStorage {
   }
 }
 
-const { DEFAULT_GLOBAL_SEARCH_EXTENSIONS, getGlobalSearchExtensions, getGlobalSearchRoots, saveGlobalSearchExtensions, saveGlobalSearchRoots, composeGlobalSearchRoots, globalSearchSettingsVersion, initializeGlobalSearchSettings } = await import("../globalSearchSettings");
+const {
+  DEFAULT_GLOBAL_SEARCH_EXTENSIONS,
+  DEFAULT_GLOBAL_SEARCH_MATCH_MODE,
+  getGlobalSearchExtensions,
+  getGlobalSearchMatchMode,
+  getGlobalSearchRoots,
+  getGlobalSearchShowQuickFilters,
+  saveGlobalSearchExtensions,
+  saveGlobalSearchMatchMode,
+  saveGlobalSearchRoots,
+  saveGlobalSearchShowQuickFilters,
+  composeGlobalSearchRoots,
+  globalSearchSettingsVersion,
+  initializeGlobalSearchSettings,
+} = await import("../globalSearchSettings");
 
 describe("globalSearchSettings", () => {
   beforeEach(() => {
@@ -46,12 +60,12 @@ describe("globalSearchSettings", () => {
     expect(getGlobalSearchExtensions()).toEqual(["sql"]);
   });
 
-  it("normalizes extensions (dot prefix, case, whitespace, dedupe) and persists to disk", () => {
+  it("normalizes extensions (dot prefix, case, whitespace, dedupe) and persists to disk", async () => {
     const versionBefore = globalSearchSettingsVersion.value;
     saveGlobalSearchExtensions([" .SQL ", "Txt", "sql", ""]);
     expect(getGlobalSearchExtensions()).toEqual(["sql", "txt"]);
     expect(globalSearchSettingsVersion.value).toBe(versionBefore + 1);
-    expect(mocks.save).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
     expect(mocks.save).toHaveBeenCalledWith({ roots: [], extensions: ["sql", "txt"] });
   });
 
@@ -60,12 +74,25 @@ describe("globalSearchSettings", () => {
     expect(getGlobalSearchExtensions()).toEqual(["sql"]);
   });
 
-  it("saves roots, dropping blank entries, and persists to disk", () => {
+  it("defaults to precise matching and visible quick filters", () => {
+    expect(getGlobalSearchMatchMode()).toBe(DEFAULT_GLOBAL_SEARCH_MATCH_MODE);
+    expect(getGlobalSearchShowQuickFilters()).toBe(true);
+  });
+
+  it("persists enhanced matching and hidden quick filters", async () => {
+    saveGlobalSearchMatchMode("enhanced");
+    saveGlobalSearchShowQuickFilters(false);
+    expect(getGlobalSearchMatchMode()).toBe("enhanced");
+    expect(getGlobalSearchShowQuickFilters()).toBe(false);
+    await vi.waitFor(() => expect(mocks.save).toHaveBeenLastCalledWith({ roots: [], extensions: ["sql"], matchMode: "enhanced", showQuickFilters: false }));
+  });
+
+  it("saves roots, dropping blank entries, and persists to disk", async () => {
     const versionBefore = globalSearchSettingsVersion.value;
     saveGlobalSearchRoots([" D:\\work\\sql ", "", "E:\\docs"]);
     expect(getGlobalSearchRoots()).toEqual(["D:\\work\\sql", "E:\\docs"]);
     expect(globalSearchSettingsVersion.value).toBe(versionBefore + 1);
-    expect(mocks.save).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
     expect(mocks.save).toHaveBeenCalledWith({ roots: ["D:\\work\\sql", "E:\\docs"], extensions: ["sql"] });
   });
 
@@ -79,19 +106,40 @@ describe("globalSearchSettings", () => {
     mocks.load.mockResolvedValue({
       roots: ["D:\\disk-root"],
       extensions: [".sql", "txt"],
+      matchMode: "enhanced",
+      showQuickFilters: false,
     });
     await initializeGlobalSearchSettings();
     expect(getGlobalSearchRoots()).toEqual(["D:\\disk-root"]);
     expect(getGlobalSearchExtensions()).toEqual(["sql", "txt"]);
+    expect(getGlobalSearchMatchMode()).toBe("enhanced");
+    expect(getGlobalSearchShowQuickFilters()).toBe(false);
     // Hydration re-persists the normalized values back to disk.
-    expect(mocks.save).toHaveBeenCalledTimes(2);
-    expect(mocks.save).toHaveBeenLastCalledWith({ roots: ["D:\\disk-root"], extensions: ["sql", "txt"] });
+    await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(1));
+    expect(mocks.save).toHaveBeenLastCalledWith({ roots: ["D:\\disk-root"], extensions: ["sql", "txt"], matchMode: "enhanced", showQuickFilters: false });
   });
 
   it("keeps current values when the disk store is empty", async () => {
     saveGlobalSearchRoots(["D:\\keep"]);
     await initializeGlobalSearchSettings();
     expect(getGlobalSearchRoots()).toEqual(["D:\\keep"]);
+  });
+
+  it("does not let a late disk hydrate overwrite a local edit", async () => {
+    let resolveDisk!: (value: unknown) => void;
+    mocks.load.mockReturnValueOnce(new Promise((resolve) => (resolveDisk = resolve)));
+    const initializing = initializeGlobalSearchSettings();
+    saveGlobalSearchRoots(["D:\\local-edit"]);
+    resolveDisk({ roots: ["D:\\stale-disk"], extensions: ["sql"] });
+    await initializing;
+    expect(getGlobalSearchRoots()).toEqual(["D:\\local-edit"]);
+  });
+
+  it("serializes rapid writes and leaves the last payload on disk", async () => {
+    saveGlobalSearchRoots(["D:\\first"]);
+    saveGlobalSearchRoots(["D:\\last"]);
+    await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(2));
+    expect(mocks.save).toHaveBeenLastCalledWith({ roots: ["D:\\last"], extensions: ["sql"] });
   });
 
   it("ignores malformed disk payloads", async () => {

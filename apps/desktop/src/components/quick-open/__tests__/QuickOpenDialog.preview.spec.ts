@@ -19,9 +19,31 @@ const mocks = vi.hoisted(() => ({
   connectedIds: new Set<string>(),
   commands: [] as any[],
   pluginOpen: vi.fn(),
+  matchMode: "precise" as "precise" | "enhanced",
+  showQuickFilters: true,
+  saveMatchMode: vi.fn(),
+  saveShowQuickFilters: vi.fn(),
+  ensureConnected: vi.fn(),
+  loadDatabases: vi.fn(),
+  loadTreeNodeChildren: vi.fn(),
+  loadAllObjectGroupChildren: vi.fn(),
+  getConfig: vi.fn(),
+  saveSchemaCache: vi.fn(),
+  loadSchemaCache: vi.fn(),
+  deleteSchemaCachePrefix: vi.fn(),
 }));
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({ connections: mocks.connections, treeNodes: mocks.treeNodes, activeConnectionId: mocks.activeConnectionId, connectedIds: mocks.connectedIds }),
+  useConnectionStore: () => ({
+    connections: mocks.connections,
+    treeNodes: mocks.treeNodes,
+    activeConnectionId: mocks.activeConnectionId,
+    connectedIds: mocks.connectedIds,
+    ensureConnected: mocks.ensureConnected,
+    loadDatabases: mocks.loadDatabases,
+    loadTreeNodeChildren: mocks.loadTreeNodeChildren,
+    loadAllObjectGroupChildren: mocks.loadAllObjectGroupChildren,
+    getConfig: mocks.getConfig,
+  }),
 }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({ allFiles: [] }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { shortcuts: {}, fontSize: 13, fontFamily: "monospace", theme: "app" } }) }));
@@ -40,10 +62,24 @@ vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
 });
 vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
   const { ref } = await import("vue");
-  return { composeGlobalSearchRoots: () => ["/sql"], getGlobalSearchRoots: () => ["/sql"], getGlobalSearchExtensions: () => ["sql"], globalSearchSettingsVersion: ref(0), saveGlobalSearchRoots: vi.fn(), saveGlobalSearchExtensions: vi.fn() };
+  return {
+    composeGlobalSearchRoots: () => ["/sql"],
+    getGlobalSearchRoots: () => ["/sql"],
+    getGlobalSearchExtensions: () => ["sql"],
+    getGlobalSearchMatchMode: () => mocks.matchMode,
+    getGlobalSearchShowQuickFilters: () => mocks.showQuickFilters,
+    globalSearchSettingsVersion: ref(0),
+    saveGlobalSearchRoots: vi.fn(),
+    saveGlobalSearchExtensions: vi.fn(),
+    saveGlobalSearchMatchMode: mocks.saveMatchMode,
+    saveGlobalSearchShowQuickFilters: mocks.saveShowQuickFilters,
+  };
 });
 vi.mock("@/lib/backend/api", () => ({
   listPlugins: async () => [],
+  saveSchemaCache: mocks.saveSchemaCache,
+  loadSchemaCache: mocks.loadSchemaCache,
+  deleteSchemaCachePrefix: mocks.deleteSchemaCachePrefix,
   listSqlFilesInFolder: mocks.listFiles,
   readExternalSqlFileSnapshot: async (...args: unknown[]) => ({ content: await mocks.read(...args), version: { contentHash: "original", modifiedNs: "1", sizeBytes: 26 }, encoding: "utf8" }),
   writeExternalSqlFile: mocks.write,
@@ -100,6 +136,14 @@ beforeEach(() => {
   mocks.treeNodes = [];
   mocks.activeConnectionId = undefined;
   mocks.connectedIds = new Set();
+  mocks.ensureConnected.mockReset().mockResolvedValue(undefined);
+  mocks.loadDatabases.mockReset().mockResolvedValue(undefined);
+  mocks.loadTreeNodeChildren.mockReset().mockResolvedValue(undefined);
+  mocks.loadAllObjectGroupChildren.mockReset().mockResolvedValue(undefined);
+  mocks.getConfig.mockReset().mockImplementation((id: string) => mocks.connections.find((connection) => connection.id === id));
+  mocks.saveSchemaCache.mockReset().mockResolvedValue(undefined);
+  mocks.loadSchemaCache.mockReset().mockResolvedValue(null);
+  mocks.deleteSchemaCachePrefix.mockReset().mockResolvedValue(undefined);
   localStorage.clear();
   mocks.listFiles.mockReset().mockResolvedValue([]);
   mocks.globalSearch.mockReset().mockResolvedValue({
@@ -114,6 +158,10 @@ beforeEach(() => {
   mocks.read.mockReset().mockResolvedValue("-- heading\nSELECT needle;");
   mocks.write.mockReset().mockResolvedValue({ kind: "written", version: { contentHash: "saved", modifiedNs: "2", sizeBytes: 30 } });
   mocks.toast.mockReset();
+  mocks.matchMode = "precise";
+  mocks.showQuickFilters = true;
+  mocks.saveMatchMode.mockReset();
+  mocks.saveShowQuickFilters.mockReset();
   vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
 });
 afterEach(() => {
@@ -121,6 +169,64 @@ afterEach(() => {
   setQuickOpenScopeIds([]);
   host?.remove();
   vi.restoreAllMocks();
+});
+
+describe("global search controls", () => {
+  it("keeps Cmd+2 inside the search categories when focus is outside the input", async () => {
+    const { props } = await mountSearch();
+    props.initialContentMode = false;
+    await nextTick();
+    const categoryButtons = [...host.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.includes("Connections"));
+    expect(categoryButtons).toHaveLength(1);
+    const event = new KeyboardEvent("keydown", { key: "2", metaKey: true, bubbles: true, cancelable: true });
+    categoryButtons[0]!.dispatchEvent(event);
+    await nextTick();
+    expect(event.defaultPrevented).toBe(true);
+    expect(categoryButtons[0]!.className).toContain("bg-foreground");
+  });
+
+  it("builds a connection index from search settings", async () => {
+    const connection = { id: "conn1", name: "Production", db_type: "postgres", database: "app" };
+    mocks.connections = [connection];
+    mocks.treeNodes = [
+      {
+        id: connection.id,
+        connectionId: connection.id,
+        type: "connection",
+        children: [{ id: "conn1:app", connectionId: connection.id, type: "database", database: "app", label: "app", children: [{ id: "table1", connectionId: connection.id, type: "table", database: "app", label: "users", children: [] }] }],
+      },
+    ];
+    mocks.connectedIds = new Set([connection.id]);
+    mocks.getConfig.mockImplementation((id: string) => (id === connection.id ? connection : undefined));
+    const { props } = await mountSearch();
+    props.initialContentMode = false;
+    await nextTick();
+    host.querySelector<HTMLButtonElement>('[title="Search settings"]')!.click();
+    await nextTick();
+    const buildButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Build index");
+    expect(buildButton).toBeDefined();
+    buildButton!.click();
+    await vi.waitFor(() => expect(mocks.loadDatabases).toHaveBeenCalledWith(connection.id, { force: true, connectedOnly: true }));
+    expect(mocks.saveSchemaCache).toHaveBeenCalled();
+  });
+
+  it("supports matching mode and hiding quick filters from search settings", async () => {
+    const { props } = await mountSearch();
+    props.initialContentMode = false;
+    await nextTick();
+    host.querySelector<HTMLButtonElement>('[title="Search settings"]')!.click();
+    await nextTick();
+    expect(host.textContent).toContain("Matching mode");
+    expect(host.textContent).toContain("Show quick filters");
+    const enhanced = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Enhanced");
+    enhanced!.click();
+    expect(mocks.saveMatchMode).toHaveBeenCalledWith("enhanced");
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    checkbox.click();
+    await nextTick();
+    expect(mocks.saveShowQuickFilters).toHaveBeenCalledWith(false);
+    expect(host.textContent).not.toContain("kind:column");
+  });
 });
 
 describe("empty-query search home", () => {
@@ -392,6 +498,7 @@ describe("search categories and connection scope", () => {
 
 describe("object search metadata regression", () => {
   it("removes false matches and opens the correct file after keyboard navigation", async () => {
+    mocks.matchMode = "enhanced";
     mocks.folders = ["/order-reports"];
     const firstName = "report-v2024-07-customer-order-detail-export.sql";
     const firstPath = `/order-reports/export/${firstName}`;

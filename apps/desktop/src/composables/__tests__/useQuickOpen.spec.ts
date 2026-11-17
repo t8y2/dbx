@@ -130,6 +130,80 @@ describe("useQuickOpen", () => {
     vi.clearAllMocks();
   });
 
+  describe("metadata index management", () => {
+    it("keeps the previous index status when rebuilding fails before persistence", async () => {
+      const connection = { id: "failed-index", name: "Failed", db_type: "postgres", database: "app" } as any;
+      const store = {
+        connections: [connection],
+        treeNodes: [],
+        connectedIds: new Set(),
+        getConfig: vi.fn(() => connection),
+        ensureConnected: vi.fn().mockRejectedValue(new Error("offline")),
+        loadDatabases: vi.fn(),
+        loadTreeNodeChildren: vi.fn(),
+        loadMoreObjectGroupChildren: vi.fn(),
+        loadAllObjectGroupChildren: vi.fn(),
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(encodeQuickOpenMetadataCache(connection.id, "fingerprint", [{ type: "table", label: "old_users", connectionId: connection.id, database: "app", tableName: "old_users" }]));
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await expect(state.rebuildMetadataIndex(connection.id)).rejects.toThrow("offline");
+        expect(vi.mocked(api.deleteSchemaCachePrefix)).not.toHaveBeenCalled();
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("failed");
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("rejects plugin connections before attempting metadata loading", async () => {
+      const connection = { id: "plugin-1", name: "Plugin", db_type: "plugin" } as any;
+      const store = { connections: [connection], treeNodes: [], connectedIds: new Set(), getConfig: vi.fn(() => connection), ensureConnected: vi.fn(), loadDatabases: vi.fn(), loadTreeNodeChildren: vi.fn(), loadMoreObjectGroupChildren: vi.fn(), loadAllObjectGroupChildren: vi.fn() };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await expect(state.rebuildMetadataIndex(connection.id)).rejects.toThrow("not supported");
+        expect(store.ensureConnected).not.toHaveBeenCalled();
+        expect(store.loadDatabases).not.toHaveBeenCalled();
+        expect(state.metadataIndexStatuses.value[connection.id]?.state).toBe("failed");
+      } finally {
+        scope.stop();
+      }
+    });
+
+    it("rebuilds and clears the persisted connection index", async () => {
+      const connection = { id: "indexed", name: "Indexed", db_type: "postgres", database: "app" } as any;
+      const store = {
+        connections: [connection],
+        treeNodes: [{ id: "indexed", connectionId: "indexed", type: "connection", children: [{ id: "indexed:app", connectionId: "indexed", type: "database", database: "app", label: "app", children: [] }] }],
+        connectedIds: new Set(["indexed"]),
+        getConfig: vi.fn(() => connection),
+        ensureConnected: vi.fn().mockResolvedValue(undefined),
+        loadDatabases: vi.fn().mockResolvedValue(undefined),
+        loadTreeNodeChildren: vi.fn().mockResolvedValue(undefined),
+        loadMoreObjectGroupChildren: vi.fn().mockResolvedValue(undefined),
+        loadAllObjectGroupChildren: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(useConnectionStore).mockReturnValue(store as any);
+      vi.mocked(api.loadSchemaCache).mockResolvedValue(null);
+      const scope = effectScope();
+      try {
+        const state = scope.run(() => useQuickOpen())!;
+        await state.rebuildMetadataIndex("indexed");
+        expect(store.ensureConnected).toHaveBeenCalledWith("indexed", { activate: false, passive: true });
+        expect(store.loadDatabases).toHaveBeenCalledWith("indexed", { force: true, connectedOnly: true });
+        expect(vi.mocked(api.saveSchemaCache)).toHaveBeenCalledWith(quickOpenMetadataCacheKey("indexed"), expect.anything());
+        await state.clearMetadataIndex("indexed");
+        expect(vi.mocked(api.deleteSchemaCachePrefix)).toHaveBeenCalledWith(quickOpenMetadataCacheKey("indexed"));
+        expect(state.metadataIndexStatuses.value.indexed?.state).toBe("not-built");
+      } finally {
+        scope.stop();
+      }
+    });
+  });
+
   describe("recent target snapshots", () => {
     it("resolves library history against current metadata beyond the recent-file limit", () => {
       const library = reactive({ allFiles: Array.from({ length: 25 }, (_, index) => ({ id: `file${index}`, name: `file${index}.sql`, connectionId: "a", updatedAt: `2026-01-${String(25 - index).padStart(2, "0")}` })), getFile: (id: string) => library.allFiles.find((file) => file.id === id) });
@@ -705,12 +779,18 @@ describe("useQuickOpen", () => {
   });
 
   describe("fuzzyMatch function", () => {
-    it("ranks exact names, initials, prefixes, substrings, and fuzzy matches in order", () => {
-      const exact = matchQuickOpenText("shop", "shop");
-      const initials = matchQuickOpenText("gafi", "groupon_apply_finance_invoice");
-      const prefix = matchQuickOpenText("shop", "shop_attribute");
-      const substring = matchQuickOpenText("shop", "sale_payway_shop");
-      const fuzzy = matchQuickOpenText("gafi", "giftcard_define_item");
+    it("keeps enhanced identifier matching opt-in for ordinary searches", () => {
+      expect(matchQuickOpenText("api", "a_p_i", "precise")).toBeNull();
+      expect(matchQuickOpenText("api", "a_p_i", "enhanced")?.kind).toBe("initials");
+      expect(matchQuickOpenText("api", "api_users", "precise")?.kind).toBe("prefix");
+    });
+
+    it("ranks exact names, initials, prefixes, substrings, and fuzzy matches in enhanced mode", () => {
+      const exact = matchQuickOpenText("shop", "shop", "enhanced");
+      const initials = matchQuickOpenText("gafi", "groupon_apply_finance_invoice", "enhanced");
+      const prefix = matchQuickOpenText("shop", "shop_attribute", "enhanced");
+      const substring = matchQuickOpenText("shop", "sale_payway_shop", "enhanced");
+      const fuzzy = matchQuickOpenText("gafi", "giftcard_define_item", "enhanced");
 
       expect([exact?.kind, initials?.kind, prefix?.kind, substring?.kind, fuzzy?.kind]).toEqual(["exact", "initials", "prefix", "substring", "fuzzy"]);
       expect(exact!.score).toBeLessThan(initials!.score);

@@ -3395,6 +3395,8 @@ export async function cancelGlobalSearch(_searchId: string): Promise<void> {
 export interface GlobalSearchSettings {
   roots: string[];
   extensions: string[];
+  matchMode?: "precise" | "enhanced";
+  showQuickFilters?: boolean;
 }
 
 export async function loadGlobalSearchSettings(): Promise<GlobalSearchSettings | null> {

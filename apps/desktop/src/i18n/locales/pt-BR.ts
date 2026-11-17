@@ -1340,6 +1340,7 @@ export default withEnglishFallback({
     collapseMatches: "Recolher",
     searchContentIncomplete: "Resultados incompletos: não foi possível carregar o conteúdo de {count} arquivos.",
     matchPreviewLimit: "As prévias são limitadas às primeiras {limit} de {total} linhas correspondentes.",
+    sortByDateCreated: "Ordenar por data de criação",
   },
 
   connection: {

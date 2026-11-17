@@ -1474,6 +1474,7 @@ export default withEnglishFallback({
     changeTargetFailed: "修改 SQL 目标失败：{message}",
     clearSelection: "清除选择",
     sortByDate: "按修改日期排序",
+    sortByDateCreated: "按创建日期排序",
     sortByFolder: "按文件夹结构排序",
     sortFiles: "排序文件",
     sortSubfolders: "排序子文件夹",

@@ -1346,6 +1346,7 @@ export default withEnglishFallback({
     collapseMatches: "접기",
     searchContentIncomplete: "검색 결과가 완전하지 않습니다. 파일 {count}개의 내용을 불러오지 못했습니다.",
     matchPreviewLimit: "일치하는 총 {total}개 줄 중 처음 {limit}개 줄만 미리 볼 수 있습니다.",
+    sortByDateCreated: "생성 날짜순으로 정렬",
   },
   connection: {
     groupPath: "그룹 경로",

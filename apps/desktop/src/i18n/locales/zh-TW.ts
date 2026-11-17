@@ -1325,6 +1325,7 @@ export default withEnglishFallback({
     collapseMatches: "收起",
     searchContentIncomplete: "搜尋結果不完整：{count} 個檔案的內容無法載入。",
     matchPreviewLimit: "共 {total} 行相符，僅提供前 {limit} 行的預覽。",
+    sortByDateCreated: "按建立日期排序",
   },
 
   connection: {

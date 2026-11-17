@@ -1339,6 +1339,7 @@ export default withEnglishFallback({
     collapseMatches: "Comprimi",
     searchContentIncomplete: "Risultati incompleti: impossibile caricare il contenuto di {count} file.",
     matchPreviewLimit: "Le anteprime sono limitate alle prime {limit} righe su {total} righe corrispondenti.",
+    sortByDateCreated: "Ordina per data di creazione",
   },
 
   connection: {

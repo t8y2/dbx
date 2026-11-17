@@ -1,6 +1,6 @@
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
-export type SavedSqlTreeSortMode = "folder" | "date";
+export type SavedSqlTreeSortMode = "folder" | "name-asc" | "name-desc" | "created" | "date";
 
 export type SavedSqlTreeFolderRow = {
   type: "folder";
@@ -30,31 +30,28 @@ function compareNames(a: string, b: string) {
 }
 
 function compareSiblingItems(a: SavedSqlTreeItem, b: SavedSqlTreeItem, mode: SavedSqlTreeSortMode) {
-  if (mode === "date") {
-    const aUpdatedAt = a.type === "folder" ? a.folder.updatedAt : a.file.updatedAt;
-    const bUpdatedAt = b.type === "folder" ? b.folder.updatedAt : b.file.updatedAt;
-    const dateComparison = bUpdatedAt.localeCompare(aUpdatedAt);
+  const first = a.type === "folder" ? a.folder : a.file;
+  const second = b.type === "folder" ? b.folder : b.file;
+  if (mode === "date" || mode === "created") {
+    const dateKey = mode === "created" ? "createdAt" : "updatedAt";
+    const dateComparison = (second[dateKey] ?? "").localeCompare(first[dateKey] ?? "");
     if (dateComparison !== 0) return dateComparison;
   } else if (a.type !== b.type) {
     return a.type === "folder" ? -1 : 1;
   }
 
-  const aOrderIndex = a.type === "folder" ? (a.folder.orderIndex ?? 0) : (a.file.orderIndex ?? 0);
-  const bOrderIndex = b.type === "folder" ? (b.folder.orderIndex ?? 0) : (b.file.orderIndex ?? 0);
-  const orderComparison = mode === "date" ? 0 : aOrderIndex - bOrderIndex;
-  if (orderComparison !== 0) return orderComparison;
+  if (mode === "folder") {
+    const orderComparison = (first.orderIndex ?? 0) - (second.orderIndex ?? 0);
+    if (orderComparison !== 0) return orderComparison;
+  }
 
-  const aName = a.type === "folder" ? a.folder.name : a.file.name;
-  const bName = b.type === "folder" ? b.folder.name : b.file.name;
-  const nameComparison = compareNames(aName, bName);
-  if (nameComparison !== 0) return nameComparison;
+  const nameComparison = compareNames(first.name, second.name);
+  if (nameComparison !== 0) return mode === "name-desc" ? -nameComparison : nameComparison;
 
   const typeComparison = a.type.localeCompare(b.type);
   if (typeComparison !== 0) return typeComparison;
 
-  const aId = a.type === "folder" ? a.folder.id : a.file.id;
-  const bId = b.type === "folder" ? b.folder.id : b.file.id;
-  return aId.localeCompare(bId);
+  return first.id.localeCompare(second.id);
 }
 
 export function savedSqlFolderBranchMatches(folder: SavedSqlFolder, folders: readonly SavedSqlFolder[], files: readonly SavedSqlFile[], folderMatches: (candidate: SavedSqlFolder) => boolean, fileMatches: (candidate: SavedSqlFile) => boolean): boolean {

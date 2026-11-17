@@ -52,3 +52,4 @@ structural_capabilities:
 identifier_rules:
   quote_char: "`"
   case_sensitive: false
+  max_length: 128

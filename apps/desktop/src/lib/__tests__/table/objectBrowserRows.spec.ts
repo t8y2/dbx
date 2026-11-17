@@ -14,6 +14,35 @@ import {
 import type { TreeNode } from "@/types/database";
 
 describe("buildObjectBrowserRows", () => {
+  /**
+   * #14717 review: PostgreSQL rejects `DROP TABLE` on a foreign table. The row
+   * type cannot carry that: `normalizeObjectBrowserType` folds "FOREIGN TABLE"
+   * into "TABLE", so the identity has to survive on its own field or the drop
+   * statement falls back to `DROP TABLE` and the server refuses it.
+   */
+  it("keeps the foreign-table identity even though the row type is normalized to TABLE", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "remote_users", object_type: "FOREIGN TABLE", schema: "public" },
+        { name: "local_users", object_type: "TABLE", schema: "public" },
+      ],
+      database: "app",
+      fallbackSchema: "public",
+    });
+
+    const byName = new Map(rows.map((row) => [row.name, row]));
+    expect(byName.get("remote_users")?.type).toBe("TABLE");
+    expect(byName.get("remote_users")?.foreignTable).toBe(true);
+    expect(byName.get("local_users")?.foreignTable).toBeUndefined();
+  });
+
+  it("recognizes the spaced, hyphenated and underscored spellings of a foreign table", () => {
+    for (const objectType of ["FOREIGN TABLE", "foreign-table", "FOREIGN_TABLE"]) {
+      const rows = buildObjectBrowserRows({ objects: [{ name: "ft", object_type: objectType }], database: "app", fallbackSchema: "public" });
+      expect(rows[0]?.foreignTable, objectType).toBe(true);
+    }
+  });
+
   it("keeps a schema index distinct from a table and preserves its exact parent identity", () => {
     const rows = buildObjectBrowserRows({
       objects: [{ name: " Ix (a) ", object_type: "INDEX", schema: "Index Owner", parent_schema: "Table Owner", parent_name: " T(a) " }],

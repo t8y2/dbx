@@ -1168,6 +1168,51 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     format!("CREATE VIEW {qualified_name} AS\n{terminated_source}")
 }
 
+pub fn build_oracle_object_export_sql(input: EditableObjectSourceSqlInput) -> Result<String, String> {
+    let source = input.source.trim();
+    if source.is_empty() {
+        return Err("Object source not found".into());
+    }
+    if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        return Err("Object export requires Oracle or OceanBase Oracle".into());
+    }
+    match input.object_type {
+        ObjectSourceKind::Procedure
+        | ObjectSourceKind::Function
+        | ObjectSourceKind::Package
+        | ObjectSourceKind::PackageBody => {
+            let owner = input.schema.filter(|owner| !owner.is_empty()).ok_or("Object export requires a schema")?;
+            let render = |kind, source: &str| {
+                let definition = prepare_oracle_routine_definition(OracleRoutineDefinitionInput {
+                    database_type: input.database_type,
+                    object_type: kind,
+                    source_owner: owner.clone(),
+                    target_owner: owner.clone(),
+                    name: input.name.clone(),
+                    source: source.to_string(),
+                    replace: true,
+                })?;
+                // The routine builder has already validated a single complete unit.
+                Ok::<_, String>(format!("{definition}\n/"))
+            };
+            let result = render(input.object_type.clone(), source);
+            if result.is_err() && input.object_type == ObjectSourceKind::Package {
+                let (spec, body) = split_package_spec_and_body(source);
+                if let Some(body) = body {
+                    return Ok(format!(
+                        "{}\n\n{}",
+                        render(ObjectSourceKind::Package, spec)?,
+                        render(ObjectSourceKind::PackageBody, body)?
+                    ));
+                }
+            }
+            result
+        }
+        ObjectSourceKind::Sequence | ObjectSourceKind::Synonym => Ok(ensure_oracle_ddl_terminated(source)),
+        _ => Err("Unsupported object kind for Oracle source export".into()),
+    }
+}
+
 pub fn build_export_object_source_sql(
     database_type: DatabaseType,
     object_type: ObjectSourceKind,

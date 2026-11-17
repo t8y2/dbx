@@ -97,7 +97,7 @@ export interface SqlShortcutAction {
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
 
-export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "sequence" | "object";
+export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "column" | "sequence" | "object";
 
 export type CompletionAssistantMatchMode = "prefix" | "contains";
 
@@ -2181,6 +2181,7 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "postgres-aggregate-functions"
   | "group-internal-functions"
   | "group-udf-functions"
   | "group-types"
@@ -2815,7 +2816,7 @@ export interface QueryTab {
   structureTableName?: string;
   structureExactIdentity?: boolean;
   /** Navigation type of the opened structure object; views matter for "view data" routing. */
-  structureTableType?: "table" | "view";
+  structureTableType?: "table" | "view" | "materialized_view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
@@ -3038,6 +3039,12 @@ export interface QueryTab {
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;
+  /** Session restore truncated this tab's SQL because it exceeded the persistence cap. */
+  sqlTruncated?: boolean;
+  /** Original SQL length before truncation. */
+  sqlTruncatedChars?: number;
+  /** Path of the recovery file that holds the full SQL, when it was spilled. */
+  sqlRecoveryPath?: string;
   /** Whether to use auto-commit mode (default true). When false, multiple statements are
    *  wrapped in a single transaction. */
   autoCommit?: boolean;

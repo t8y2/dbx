@@ -371,6 +371,7 @@ watch(
     :busy="dialogs.applyingImportSelection.value"
     :connections="dialogs.configConnectionSelectList.value"
     :layout="dialogs.configConnectionSelectLayout.value"
+    :sort-mode="dialogs.configConnectionSelectSortMode.value"
     @update:open="dialogs.onConfigConnectionSelectOpenChange"
     @confirm="dialogs.onConfigConnectionSelectConfirm"
   />

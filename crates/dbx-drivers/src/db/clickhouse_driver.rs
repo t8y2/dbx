@@ -347,10 +347,20 @@ async fn ch_query_with_limit(
 
 fn is_readonly_result_limit_error(error: &str) -> bool {
     let readonly_error = error.contains("Code: 164") || error.contains("(READONLY)");
-    readonly_error
+    if readonly_error
         && ["max_result_rows", "result_overflow_mode"]
             .iter()
             .any(|setting| error.contains(&format!("Cannot modify '{setting}' setting in readonly mode")))
+    {
+        return true;
+    }
+    // A per-user setting constraint (Code 452) rejects the same server-side
+    // result-limit settings with different wording; the client-side fallback
+    // applies there too.
+    error.contains("Code: 452")
+        && ["max_result_rows", "result_overflow_mode"]
+            .iter()
+            .any(|setting| error.contains(&format!("Setting {setting} should not be changed")))
 }
 
 async fn ch_query_with_client_limit(
@@ -1273,6 +1283,15 @@ mod tests {
         ));
         assert!(!is_readonly_result_limit_error(
             "Code: 164. DB::Exception: Cannot modify 'max_execution_time' setting in readonly mode. (READONLY)"
+        ));
+        assert!(is_readonly_result_limit_error(
+            "Code: 452. DB::Exception: Setting result_overflow_mode should not be changed. (SETTING_CONSTRAINT_VIOLATION)"
+        ));
+        assert!(is_readonly_result_limit_error(
+            "Code: 452. DB::Exception: Setting max_result_rows should not be changed. (SETTING_CONSTRAINT_VIOLATION)"
+        ));
+        assert!(!is_readonly_result_limit_error(
+            "Code: 452. DB::Exception: Setting max_execution_time should not be changed. (SETTING_CONSTRAINT_VIOLATION)"
         ));
         assert!(!is_readonly_result_limit_error("Code: 62. DB::Exception: Syntax error near max_result_rows"));
     }

@@ -881,3 +881,24 @@ it("opens a cross-product package in the actual review and requires explicit tar
   expect(button("diff.deployToServer").disabled).toBe(false);
   expect(calls.execute).not.toHaveBeenCalled();
 });
+
+/**
+ * #14877: the deploy review is the last screen before "deploy to server", and it
+ * used to carry only the target side, so the user could not confirm which two
+ * databases the script would touch. Both endpoints now stay visible on the result
+ * and deploy steps.
+ */
+it("keeps both comparison endpoints visible from the result step onward", async () => {
+  await mountComparison("oracle", "oracle", ["FUNCTION"]);
+
+  const bar = document.querySelector<HTMLElement>("[data-schema-diff-endpoints]");
+  expect(bar).not.toBeNull();
+  // Connection names ("source"/"target") and database ("tenant") from the mocked store.
+  expect(bar!.textContent).toContain("diff.sourceObject");
+  expect(bar!.textContent).toContain("diff.targetObject");
+  expect(bar!.textContent).toContain("tenant");
+  // Both sides rendered in source → target order.
+  const text = bar!.textContent ?? "";
+  expect(text.indexOf("diff.sourceObject")).toBeLessThan(text.indexOf("diff.targetObject"));
+  expect(text).toContain("→");
+});

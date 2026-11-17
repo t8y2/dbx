@@ -20,7 +20,7 @@ import type { PluginAiRecommendationHostUpdate } from "@/lib/plugins/pluginHostB
 import { queryErrorSelection, type AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import type { AiContext, AiRequestInput } from "@/lib/ai/ai";
 import { buildAgentRequest } from "@/lib/ai/ai";
-import { AI_SELECTION_CONTEXT_MAX_CHARS } from "@/lib/ai/aiAttachments";
+import { AI_SELECTION_CONTEXT_MAX_CHARS, AI_SELECTION_CONTEXT_MAX_COUNT } from "@/lib/ai/aiAttachments";
 import type { UserSkillsListResult } from "@/types/userSkills";
 
 const aiAssistantMountApi = vi.hoisted(() => ({
@@ -1321,6 +1321,87 @@ describe("AiAssistant mount", () => {
     // The 9th gesture is rejected by the count budget instead of stacking
     // another chip into the same request.
     expect(chips?.textContent).not.toContain("sel-9");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // "Send result to AI" carries both an action and the payload the action is
+  // about. If the budget rejects that payload the request must not leave at all:
+  // an `explain` send without the result answers from unrelated context, and the
+  // user never sees the rows — the one thing they asked about (#15023).
+  const queryResultInput = { source: "query-result" as const, label: "Query 1", content: "Executed SQL:\nSELECT id FROM users" };
+  const budgetFill = Array.from({ length: AI_SELECTION_CONTEXT_MAX_COUNT }, (_, i) => ({ source: "editor" as const, label: `sel-${i + 1}`, content: "select 1" }));
+
+  it("does not send an action-carrying request whose selection the budget rejected", async () => {
+    const { errors, container, panelRef } = await mountPanel(true, POSTGRES, configureAiPanel);
+    panelRef.value!.openExternalContext({ target: { connectionId: "postgres", database: "app" }, selections: budgetFill, unresolvedKey: "ai.externalTargetUnavailable" });
+    await settle();
+    expect(container.querySelectorAll("[data-ai-selection-chips] button")).toHaveLength(AI_SELECTION_CONTEXT_MAX_COUNT);
+
+    const prompt = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    prompt.value = "keep this draft";
+    prompt.dispatchEvent(new Event("input"));
+    await settle();
+    useToast().dismissToast();
+    useToast().message.value = "";
+
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "postgres", database: "app" },
+      selections: [queryResultInput],
+      action: "explain",
+      instruction: i18n.global.t("ai.explainQueryResultInstruction"),
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await settle();
+
+    // Nothing was sent…
+    expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(0);
+    // …the user is told why…
+    expect(useToast().visible.value).toBe(true);
+    expect(useToast().message.value).toBe(i18n.global.t("ai.selectionContextBudgetBlocksSend"));
+    // …the rejected chip was not left behind…
+    expect(container.querySelectorAll("[data-ai-selection-chips] button")).toHaveLength(AI_SELECTION_CONTEXT_MAX_COUNT);
+    expect(container.querySelector("[data-ai-selection-chips]")?.textContent).not.toContain("Query 1");
+    // …and the draft was not overwritten by the action's instruction.
+    expect(container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!.value).toBe("keep this draft");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("sends an action-carrying query-result request when the budget has room", async () => {
+    const { errors, panelRef } = await mountPanel(true, POSTGRES, configureAiPanel);
+
+    panelRef.value!.openExternalContext({
+      target: { connectionId: "postgres", database: "app" },
+      selections: [queryResultInput],
+      action: "explain",
+      instruction: i18n.global.t("ai.explainQueryResultInstruction"),
+      unresolvedKey: "ai.externalTargetUnavailable",
+    });
+    await vi.waitFor(() => expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(1));
+
+    const input = aiAssistantMountApi.runAgentStreamInputs[0] as AiRequestInput;
+    expect(input.action).toBe("explain");
+    expect(input.instruction).toBe(i18n.global.t("ai.explainQueryResultInstruction"));
+    const context = input.context as AiContext;
+    expect(context.connectionId).toBe("postgres");
+    expect(context.selections).toEqual([expect.objectContaining({ source: "query-result", content: queryResultInput.content })]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps the partial-attach behavior for a request without an action", async () => {
+    const { errors, container, panelRef } = await mountPanel(true, POSTGRES, configureAiPanel);
+    panelRef.value!.openExternalContext({ target: { connectionId: "postgres", database: "app" }, selections: budgetFill, unresolvedKey: "ai.externalTargetUnavailable" });
+    await settle();
+    useToast().dismissToast();
+    useToast().message.value = "";
+
+    panelRef.value!.openExternalContext({ target: { connectionId: "postgres", database: "app" }, selections: [queryResultInput] });
+    await settle();
+
+    // No action = the selection is staged for a later send, so the old
+    // behavior (reject, toast, keep what already fit, send nothing) stands.
+    expect(aiAssistantMountApi.runAgentStreamInputs).toHaveLength(0);
+    expect(useToast().message.value).toBe(i18n.global.t("ai.selectionContextLimit"));
+    expect(container.querySelectorAll("[data-ai-selection-chips] button")).toHaveLength(AI_SELECTION_CONTEXT_MAX_COUNT);
     expect(errors.map(String)).toEqual([]);
   });
 

@@ -14,6 +14,7 @@ export const contentSurfaceEventNames = [
   "update:activeOutputView",
   "fixWithAi",
   "sendSelectionToAi",
+  "sendResultToAi",
   "previewChangesAvailable",
   "execute",
   "executeInNewResultTab",

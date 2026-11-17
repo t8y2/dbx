@@ -131,7 +131,7 @@ export interface AiInlineImageContext {
  * model-facing data block name the origin without inventing a second channel —
  * adding a member here must not require touching the request pipeline.
  */
-export type AiSelectionSource = "editor" | "terminal" | "query-error";
+export type AiSelectionSource = "editor" | "terminal" | "query-error" | "query-result";
 
 /**
  * A user selection attached as *context*, never as an instruction (#10058 R8).

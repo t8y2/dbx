@@ -6630,16 +6630,39 @@ function openExternalContext(request: AiExternalContextRequest) {
   }
   applyDraftBinding(plan.binding);
   if (!plan.binding.connectionId && request.unresolvedKey) toast(t(request.unresolvedKey), 5000);
+  // Snapshot before the `fix` special case below: a blocked send must restore
+  // exactly what the composer held when the gesture arrived, not lose the
+  // selections that case deliberately replaced.
+  const selectionsBeforeRequest = [...selectedEditorSelections.value];
   // An explicit failed result replaces staged SQL selections, including a
   // previous failed query. It must not be dropped by a full selection budget.
   if (request.action === "fix" && request.selections?.some((selection) => selection.source === "query-error")) selectedEditorSelections.value = [];
+  let selectionBudgetExceeded = false;
   for (const selection of request.selections ?? []) {
     const budgetError = selectionContextBudgetError(selectedEditorSelections.value);
     if (budgetError) {
-      toast(t(budgetError === "count" ? "ai.selectionContextLimit" : "ai.selectionContextTotalLimit"), 4000);
+      if (request.action) {
+        // An action-carrying trigger ("Explain this result") exists *for* the
+        // selection it carries. Sending without it would answer a different
+        // question from unrelated context, so the send is blocked instead of
+        // degraded — and the composer draft stays untouched until the user
+        // frees space and clicks the entry again.
+        toast(t("ai.selectionContextBudgetBlocksSend"), 4000);
+        selectionBudgetExceeded = true;
+      } else {
+        // No action: the selection is staged for a later send, so today's
+        // partial attach (whatever fits) is still the right behavior.
+        toast(t(budgetError === "count" ? "ai.selectionContextLimit" : "ai.selectionContextTotalLimit"), 4000);
+      }
       break;
     }
     selectedEditorSelections.value.push(createSelectionContext(selection, uuid()));
+  }
+  if (selectionBudgetExceeded) {
+    // Nothing was sent, so no chip may stay behind claiming otherwise.
+    selectedEditorSelections.value = selectionsBeforeRequest;
+    nextTick(() => promptTextareaRef.value?.focus());
+    return;
   }
   for (const mention of request.tableMentions ?? []) {
     // The table's own namespace is the one the request targets: the binding has

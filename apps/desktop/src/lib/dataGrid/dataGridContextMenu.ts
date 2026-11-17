@@ -317,6 +317,15 @@ export function createDataGridContextMenuItems(...groups: Array<readonly DataGri
   return groups.flat();
 }
 
+/**
+ * Explicit "send this result to AI" entry (#15023). Returns an empty group when
+ * the displayed result is not sendable (execution error, no rows, evicted), so
+ * the entry disappears instead of opening an empty AI request.
+ */
+export function createDataGridSendResultToAiItems(options: { label: string; icon: Component; send: () => void; visible: boolean }): DataGridContextMenuItem[] {
+  return options.visible ? [{ label: options.label, action: options.send, icon: options.icon }] : [];
+}
+
 export type DataGridColumnSortState = {
   column: string | null;
   columnIndex: number | null;

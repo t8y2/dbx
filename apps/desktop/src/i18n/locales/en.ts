@@ -1536,6 +1536,7 @@ export default {
     changeTargetFailed: "Failed to change SQL target: {message}",
     clearSelection: "Clear Selection",
     sortByDate: "Sort by Date Modified",
+    sortByDateCreated: "Sort by Date Created",
     sortByFolder: "Sort by Folder Structure",
     sortFiles: "Sort Files",
     sortSubfolders: "Sort Subfolders",

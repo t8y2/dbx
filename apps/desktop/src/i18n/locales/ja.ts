@@ -7300,6 +7300,8 @@ export default withEnglishFallback({
     downloadValueFileType: "Redis 値",
     downloadValueTextFileType: "テキストファイル",
     downloadValueSuccess: "Redis 値をダウンロードしました",
+    downloadValueJson: "JSON としてダウンロード",
+    downloadValueNotJson: "この値には有効な JSON オブジェクトまたは配列が含まれていません",
   },
   mongo: {
     documents: "{count}ドキュメント",

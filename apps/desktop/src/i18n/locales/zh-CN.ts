@@ -8204,6 +8204,8 @@ export default withEnglishFallback({
     largeStringPreviewHint: "值过大，仅加载前 {loaded}（共 {total}）。预览为只读。",
     largeStringPreviewHintUnknown: "值过大，仅加载前 {loaded}。预览为只读。",
     downloadValue: "下载完整值",
+    downloadValueJson: "下载为 JSON",
+    downloadValueNotJson: "该值不包含有效的 JSON 对象或数组",
     downloadValueFileType: "Redis 值",
     downloadValueTextFileType: "文本文件",
     downloadValueSuccess: "Redis 值已下载",

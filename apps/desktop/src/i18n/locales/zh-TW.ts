@@ -6396,6 +6396,8 @@ export default withEnglishFallback({
     keySearchHistory: "搜尋紀錄",
     keySearchHistoryForget: "從紀錄中移除",
     keySearchHistoryEmpty: "暫無歷史紀錄",
+    downloadValueJson: "下載為 JSON",
+    downloadValueNotJson: "該值不包含有效的 JSON 物件或陣列",
   },
   mongo: {
     documents: "{count} 個文件",

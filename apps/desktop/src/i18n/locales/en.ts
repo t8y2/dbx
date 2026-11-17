@@ -8234,6 +8234,8 @@ export default {
     largeStringPreviewHint: "This value is large. Only the first {loaded} of {total} is loaded, and the preview is read-only.",
     largeStringPreviewHintUnknown: "This value is large. Only the first {loaded} is loaded, and the preview is read-only.",
     downloadValue: "Download full value",
+    downloadValueJson: "Download as JSON",
+    downloadValueNotJson: "The value does not contain a JSON object or array",
     downloadValueFileType: "Redis value",
     downloadValueTextFileType: "Text file",
     downloadValueSuccess: "Redis value downloaded",

@@ -4860,7 +4860,7 @@ watch(mcpManagementTab, (tab) => {
   if (tab === "permissions") void loadMcpPluginScopeContext();
   if (tab !== "capabilities") return;
   void ensureMcpToolCatalog();
-  if (!isWeb && mcpPluginViews.value === null) void loadMcpPluginViews();
+  if (mcpPluginViews.value === null) void loadMcpPluginViews();
 });
 
 const mcpCoverageConnections = computed(() => mcpSelectableConnections.value.map((connection) => ({ id: connection.id, name: connection.name, dbType: connection.db_type })));
@@ -13590,7 +13590,6 @@ LIMIT 100;</pre>
                     :plugins-loading="mcpPluginViewsLoading"
                     :plugins-error="mcpPluginViewsError"
                     :pending-plugin-ids="[...mcpPluginSavingIds]"
-                    :show-plugins="!isWeb"
                     :save-plugin="persistMcpPluginGrant"
                     @set:toolset="onMcpToolsetAllowedChange"
                     @set:tool="onMcpToolAllowedChange"
@@ -13599,7 +13598,7 @@ LIMIT 100;</pre>
                     @refresh:plugins="loadMcpPluginViews"
                   >
                     <template #plugin-warning>
-                      <div v-if="!isWeb && mcpPluginToolsBlockedByAllowlist" class="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200" data-mcp-plugin-allowlist-blocked>
+                      <div v-if="mcpPluginToolsBlockedByAllowlist" class="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200" data-mcp-plugin-allowlist-blocked>
                         <AlertTriangle class="size-3.5 shrink-0" />
                         <div class="min-w-0 flex-1 space-y-1">
                           <p>{{ t("settings.mcpPluginAllowlistBlocked") }}</p>

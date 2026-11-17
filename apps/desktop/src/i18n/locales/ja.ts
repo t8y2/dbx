@@ -957,6 +957,9 @@ export default withEnglishFallback({
     mongoShellCopied: "Mongo shell コマンドをコピーしました",
     multiDbExecute: "複数DB実行",
     executeAllSql: "すべての SQL を実行",
+    rightToolbarLabels: "右側ツールバーのラベル",
+    showRightToolbarLabels: "右側ツールバーのラベルを表示",
+    hideRightToolbarLabels: "右側ツールバーのラベルを非表示",
   },
   multiDbExecute: {
     manualTransaction: "手動トランザクション",
@@ -3717,6 +3720,7 @@ export default withEnglishFallback({
     queryWhileSaving: "結果セットの変更を保存しています。保存が完了してからクエリを実行してください。",
     filterActive: "フィルター適用済み",
     structuredFiltersActive: "{count} 件の条件フィルター",
+    rowJsonPreview: "JSON プレビュー",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",
@@ -4193,6 +4197,8 @@ export default withEnglishFallback({
     selectImportTitle: "インポートする接続を選択",
     selectAll: "すべて選択",
     deselectAll: "すべて解除",
+    searchPlaceholder: "グループまたは接続を検索",
+    searchNoResults: "一致するグループまたは接続がありません",
     selectedCount: "{selected} / {total}",
     next: "次へ",
     importSelected: "{count}件をインポート",
@@ -5251,6 +5257,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "デフォルトではセッション設定を引き継ぎます。無効時は SET FOREIGN_KEY_CHECKS = 0 で実行し、参照されるテーブルを任意の順序で処理できます。実行後は元の値に戻します。",
     createSequence: "シーケンスの作成",
     viewPostgresRowLevelSecurity: "行レベルセキュリティポリシーを表示",
+    copyGeneratedSql: "生成された SQL をコピー",
   },
   visibleDatabases: {
     title: "表示するデータベース",

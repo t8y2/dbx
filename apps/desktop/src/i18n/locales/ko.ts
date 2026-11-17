@@ -963,6 +963,9 @@ export default withEnglishFallback({
     saveSqlFile: "원본 파일에 저장",
     pluginCenter: "플러그인 센터",
     executeAllSql: "모든 SQL 실행",
+    rightToolbarLabels: "오른쪽 도구 모음 텍스트",
+    showRightToolbarLabels: "오른쪽 도구 모음 텍스트 표시",
+    hideRightToolbarLabels: "오른쪽 도구 모음 텍스트 숨기기",
   },
   multiDbExecute: {
     manualTransaction: "수동 트랜잭션",
@@ -3647,6 +3650,7 @@ export default withEnglishFallback({
     queryWhileSaving: "결과 집합 변경 사항을 저장하는 중입니다. 저장이 완료된 후 쿼리를 실행하세요.",
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
+    rowJsonPreview: "JSON 미리보기",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",
@@ -4122,6 +4126,8 @@ export default withEnglishFallback({
     selectImportTitle: "가져올 연결 선택",
     selectAll: "모두 선택",
     deselectAll: "모두 해제",
+    searchPlaceholder: "그룹 또는 연결 검색",
+    searchNoResults: "일치하는 그룹 또는 연결이 없습니다",
     selectedCount: "{selected} / {total}",
     next: "다음",
     importSelected: "{count}개 가져오기",
@@ -5163,6 +5169,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "기본적으로 세션 설정을 따릅니다. 비활성화하면 SET FOREIGN_KEY_CHECKS = 0으로 실행하며, 참조되는 테이블을 임의 순서로 처리할 수 있습니다. 실행 후 원래 값으로 복원합니다.",
     createSequence: "시퀀스 만들기",
     viewPostgresRowLevelSecurity: "행 수준 보안 정책 보기",
+    copyGeneratedSql: "생성된 SQL 복사",
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

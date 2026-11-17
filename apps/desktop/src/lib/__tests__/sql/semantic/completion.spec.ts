@@ -101,10 +101,10 @@ WHERE b.Workcenter_ID = :workcenter_ID`;
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("legacy_id");
   });
 
-  it("shows the column comment inline in the completion detail", () => {
+  it.each(["postgres", "mysql", "sqlserver"] as const)("shows the column comment inline in the %s completion detail", (databaseType) => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", [{ name: "nickname", table: "users", schema: "public", dataType: "text", comment: "用户昵称" }]]]);
 
-    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType, dialect: databaseType });
 
     const nickname = items.find((item) => item.type === "column" && item.label === "nickname");
     expect(nickname?.detail).toContain("-- 用户昵称");

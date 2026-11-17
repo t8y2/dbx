@@ -7,8 +7,9 @@ import { CLOUDFLARE_D1_COMMON_FUNCTION_NAMES } from "@/lib/sql/cloudflareD1";
 import { searchClickHouseFunctions } from "@/lib/sql/clickhouse/functionRegistry";
 import type { ClickHouseFunctionDefinition, ClickHouseFunctionKind } from "@/lib/sql/clickhouse/functionTypes";
 import type { SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
-import { resolveSqlDialectId } from "@/lib/sql/semantic/dialect";
-import { findActiveSqlStatementSpan, matchDollarQuoteTag, tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+import { resolveSqlDialectId, sqlSemanticDialectFor, type SqlSemanticDialectAdapter } from "@/lib/sql/semantic/dialect";
+import { sqlSemanticQueryBlockSources, type SqlSemanticGroupedSourceScope } from "@/lib/sql/semantic/model";
+import { findActiveSqlStatementSpan, matchDollarQuoteTag, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import type { SqlSemanticBuildOptions, SqlSemanticSpan } from "@/lib/sql/semantic/types";
 import { isEditorStatePlausibleFor, resolveLexicalLeafFromSyntaxTree, resolveSqlStatementWindow } from "@/lib/sql/sqlSyntaxTreeWindow";
@@ -1836,6 +1837,8 @@ export interface SqlCompletionContext {
   prioritizeSelectAliases: boolean;
   selectAliases: string[];
   referencedTables: SqlCompletionReferencedTable[];
+  /** References resolved within the cursor query block, including correlated ancestors. */
+  referencedTablesScoped?: boolean;
   insertTable?: string;
   insertDatabase?: string;
   insertSchema?: string;
@@ -2902,6 +2905,75 @@ export function getSqlCompletionResultValidFor(sql: string, cursor: number): Reg
   return undefined;
 }
 
+export function getSqlProcedureCall(sql: string, options: SqlSemanticBuildOptions, truncatedPrefix = false) {
+  if (!/\bcall\b/i.test(sql)) return null;
+  const dialect = resolveSqlDialectId(options);
+  const databaseType = options.databaseType;
+  const tokens = tokenizeSqlSemantic(sql, dialect, {
+    mysqlDashCommentRequiresWhitespace: !!databaseType && MYSQL_DASH_COMMENT_DIALECTS.has(databaseType),
+    mysqlBackslashEscape: !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType),
+    squareBracketsAsDelimiters: dialect === "postgres",
+  }).filter((token) => token.kind !== "comment");
+  let depth = 0;
+  let activeParameter = 0;
+  for (let index = tokens.length - 1; index >= 0; index--) {
+    const token = tokens[index];
+    if (token.kind !== "punctuation") continue;
+    if (token.text === ";") return null;
+    if ([")", "]", "）"].includes(token.text)) depth++;
+    if (["(", "[", "（"].includes(token.text)) {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      if (token.text === "[") return null;
+      const parts = [];
+      let beforeName = index - 1;
+      while (beforeName >= 0) {
+        const part = tokens[beforeName];
+        if (part.kind !== "word" && (part.kind !== "quoted_identifier" || !part.closed)) break;
+        parts.unshift(part);
+        beforeName--;
+        if (tokens[beforeName]?.text !== ".") break;
+        beforeName--;
+      }
+      const call = tokens[beforeName];
+      const name = parts.pop();
+      if (!name || call?.kind !== "word" || call.normalized !== "call" || (truncatedPrefix && call.span.start === 0)) return null;
+      const identifier = (part: typeof name) => {
+        if (part.kind !== "quoted_identifier") return part.text;
+        const quote = part.quote === "[" ? "]" : (part.quote ?? '"');
+        return part.text.slice(1, -1).replaceAll(quote + quote, quote);
+      };
+      return {
+        name: sql.slice(parts[0]?.span.start ?? name.span.start, name.span.end),
+        nameEnd: name.span.end,
+        prefix: identifier(name),
+        prefixQuoted: name.kind === "quoted_identifier",
+        qualifierParts: parts.map(identifier),
+        qualifierQuoted: parts.map((part) => part.kind === "quoted_identifier"),
+        activeParameter,
+      };
+    }
+    if (token.text === "," && depth === 0) activeParameter++;
+  }
+  return null;
+}
+
+export function buildSqlProcedureSignatureHelp(call: NonNullable<ReturnType<typeof getSqlProcedureCall>>, signatures: string[]): SqlFunctionSignatureHelp | null {
+  const overloads = signatures
+    .map(splitRoutineSignatureParameters)
+    .filter((parameters) => parameters.length > 0)
+    .sort((left, right) => Number(call.activeParameter < right.length) - Number(call.activeParameter < left.length))
+    .map((parameters) => ({
+      signature: `${call.name}(${parameters.join(", ")})`,
+      parameterGroups: [parameters],
+      activeGroup: 0,
+      activeParameter: call.activeParameter,
+    }));
+  return overloads.length ? { name: call.name, overloads, activeOverload: 0 } : null;
+}
+
 export function getSqlFunctionSignatureHelp(sql: string, cursor: number, databaseType?: DatabaseType, driverProfile?: string, options?: { truncatedPrefix?: boolean }): SqlFunctionSignatureHelp | null {
   const beforeCursor = sql.slice(0, cursor);
   const call = findActiveFunctionCall(beforeCursor, options?.truncatedPrefix === true);
@@ -3050,6 +3122,199 @@ function getFollowingKeywordAfterCursor(sql: string, cursor: number, maxPos?: nu
   return match ? match[1].toUpperCase() : undefined;
 }
 
+function isCompletionGroupedSource(tokens: ReturnType<typeof tokenizeSqlSemantic>, open: number, close: number, scopes: readonly SqlSemanticGroupedSourceScope[]): boolean {
+  // Empty placeholder scopes also describe extra query parentheses, ((SELECT ...)).
+  // Only a matching scope with parsed row sources identifies a table/JOIN group.
+  return open >= 0 && close >= 0 && scopes.some((scope) => scope.sources.length > 0 && scope.span.start === tokens[open].span.end && scope.span.end === tokens[close].span.start);
+}
+
+/**
+ * The legacy reference scan deliberately tolerates unfinished SQL, but scanning the whole
+ * statement also finds declarations in sibling/child queries. For multi-query SELECTs,
+ * use the semantic declaration parser to choose visible sources without replacing the
+ * legacy projection metadata or relying on the cursor intent's confidence.
+ */
+function scopedQueryCompletionReferences(sql: string, cursor: number, references: SqlCompletionReferencedTable[], ctes: readonly ScannedCteDefinition[], options: SqlSemanticBuildOptions): SqlCompletionReferencedTable[] | undefined {
+  if (sql.length > 128 * 1024 || !/\bselect\b[\s\S]*\bselect\b/i.test(sql)) return undefined;
+  const dialect = sqlSemanticDialectFor(options);
+  const tokens = tokenizeSqlSemantic(sql, dialect.id, {
+    mysqlDashCommentRequiresWhitespace: dialect.id === "mysql",
+    mysqlBackslashEscape: dialect.id === "mysql",
+  }).filter((token) => token.kind !== "comment");
+  if (!tokens.length || tokens.length > 20_000 || !["select", "with"].includes(tokens[0].normalized)) return undefined;
+  // WITH can precede DML too; mutation targets use the established completion path.
+  const mainStatement = tokens.find((token) => token.depth === 0 && token.kind === "word" && ["select", "insert", "update", "delete", "merge"].includes(token.normalized));
+  if (mainStatement?.normalized !== "select") return undefined;
+  const blocks: Array<{ start: number; end: number; depth: number }> = [];
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.kind !== "word" || token.normalized !== "select") continue;
+    if (blocks.length >= 128) return undefined;
+    let end = index + 1;
+    while (end < tokens.length) {
+      const next = tokens[end];
+      if (next.depth < token.depth || next.text === ";" || (next.depth === token.depth && next.kind === "word" && ["union", "intersect", "except"].includes(next.normalized))) break;
+      end++;
+    }
+    blocks.push({ start: index, end, depth: token.depth });
+  }
+  if (blocks.length < 2) return undefined;
+  // Keep the established unresolved CTE-star fallback until column lineage is available.
+  // A query containing an inline view still needs its own scope even when CTEs precede it.
+  if (
+    ctes.length > 0 &&
+    blocks.filter((block) => block.depth === 0).length === 1 &&
+    blocks.every((block) => block.depth === 0 || ctes.some((cte) => tokens[block.start].span.start > cte.bodyStart && tokens[block.start].span.start < cte.bodyEnd && block.depth === (tokens.find((token) => token.span.start === cte.bodyStart)?.depth ?? -1) + 1))
+  )
+    return undefined;
+  function queryBoundary(open: number) {
+    const introducer = tokens[open]?.text === "(" ? tokens[open - 1] : undefined;
+    let fromComma = false;
+    if (introducer?.text === ",") {
+      // SELECT-list/function commas introduce correlated expressions; FROM-list commas
+      // introduce derived tables. Only inspect the clause at the comma's nesting level.
+      for (let index = open - 2; index >= 0; index--) {
+        const token = tokens[index];
+        if (token.depth < introducer.depth) break;
+        if (token.depth !== introducer.depth || token.kind !== "word") continue;
+        if (["select", "from", "where", "group", "having", "order", "limit", "offset"].includes(token.normalized)) {
+          fromComma = token.normalized === "from";
+          break;
+        }
+      }
+    }
+    const keyword = introducer?.kind === "word" ? introducer.normalized : "";
+    let first = open + 1;
+    while (tokens[first]?.text === "(") first++;
+    const startsQuery = tokens[first]?.kind === "word" && ["select", "with"].includes(tokens[first].normalized);
+    return {
+      open,
+      derived: fromComma || ["from", "join", "lateral", "apply"].includes(keyword),
+      isolated: startsQuery && (fromComma || ["from", "join"].includes(keyword)),
+    };
+  }
+  const boundaries = new Map(
+    blocks.map((block) => {
+      let open = block.start - 1;
+      while (open >= 0 && tokens[open].depth >= block.depth) open--;
+      return [block, queryBoundary(open)] as const;
+    }),
+  );
+  // A nested WITH body may refer to outer queries even before its own main SELECT.
+  // Find isolation from enclosing parentheses, including FROM (WITH ...) wrappers
+  // whose main SELECT starts after the cursor and is absent from `containing`.
+  const parents: number[] = [];
+  for (let index = 0; index < tokens.length && tokens[index].span.start < cursor; index++) {
+    if (tokens[index].text === "(") parents.push(index);
+    else if (tokens[index].text === ")") parents.pop();
+  }
+  const blockedOwners = new Set<(typeof blocks)[number]>();
+  for (const open of parents) {
+    if (!queryBoundary(open).isolated) continue;
+    // Non-LATERAL hides the FROM sources of the SELECT owning this derived table,
+    // not the sources of more distant queries that can legally be correlated.
+    const owner = blocks.filter((block) => block.start < open && block.end > open).sort((a, b) => b.depth - a.depth)[0];
+    if (owner) blockedOwners.add(owner);
+  }
+  const containing = blocks.filter((block) => !blockedOwners.has(block) && tokens[block.start].span.start < cursor && (tokens[block.end]?.span.start ?? sql.length) >= cursor).sort((a, b) => b.depth - a.depth);
+  if (!containing.length) return undefined;
+  // Legacy names have already lost their quote information. Re-read CTE declarations
+  // in this scoped path so unquoted aliases fold without changing quoted names.
+  const normalizedCtes = scanCteDefinitions(sql, options.databaseType, dialect);
+  const result: SqlCompletionReferencedTable[] = [];
+  const visibleNames = new Set<string>();
+  const nameKey = (name: string) => (["mysql", "sqlserver", "sqlite"].includes(dialect.id) ? name.toLowerCase() : name);
+  for (const block of containing) {
+    const groupedScopes: SqlSemanticGroupedSourceScope[] = [];
+    const sources = sqlSemanticQueryBlockSources(tokens.slice(block.start, block.end), options, groupedScopes);
+    // Aliased JOIN groups hide their members outside the parentheses, but their ON
+    // expressions (including correlated queries) still see the group's inner sources.
+    const scopes = [
+      ...groupedScopes
+        .filter((scope) => scope.span.start <= cursor && cursor <= scope.span.end)
+        .sort((a, b) => b.depth - a.depth)
+        .map((scope) => scope.sources),
+      sources,
+    ];
+    // Once an isolated owner was skipped, a distant ancestor's unresolved projection
+    // must not restore the global scan and make that owner's FROM sources visible again.
+    const crossesIsolation = [...blockedOwners].some((owner) => owner.depth > block.depth);
+    // Until an inline view's closing parenthesis and alias are available, the declaration
+    // parser cannot describe it. Do not turn that partial parse into an empty column list.
+    if (!crossesIsolation && blocks.some((child) => child.depth === block.depth + 1 && child.start > block.start && child.end <= block.end && boundaries.get(child)?.derived && !sources.some((source) => source.sourceSpan.start === tokens[boundaries.get(child)!.open].span.start))) return undefined;
+    for (const scopeSources of scopes) {
+      const scopeNames = new Set<string>();
+      for (const source of scopeSources) {
+        // An enclosing derived table is not visible inside its own body, even with LATERAL.
+        if (source.kind === "subquery" && source.sourceSpan.start < cursor && source.sourceSpan.end > cursor) continue;
+        let columns = source.columns;
+        let unresolvedProjection = false;
+        if (source.kind === "subquery") {
+          const openIndex = tokens.findIndex((token) => token.span.start === source.sourceSpan.start);
+          if (openIndex < 0) {
+            if (!crossesIsolation) return undefined;
+            continue;
+          }
+          const closeIndex = tokens.findIndex((token, index) => index > openIndex && token.text === ")" && token.depth === tokens[openIndex].depth);
+          if (closeIndex < 0) {
+            if (!crossesIsolation) return undefined;
+            continue;
+          }
+          const isGroupedSource = isCompletionGroupedSource(tokens, openIndex, closeIndex, groupedScopes);
+          // Preserve explicit group column aliases; otherwise do not borrow an ON
+          // subquery's columns from either this projection scan or the legacy fallback.
+          if (isGroupedSource && !columns?.length) unresolvedProjection = true;
+          const expressions = isGroupedSource ? [] : completionProjectionExpressions(sql.slice(tokens[openIndex].span.end, tokens[closeIndex].span.start), dialect);
+          // A star may need physical-table metadata that the local projection parser cannot
+          // expand yet. Preserve that existing fallback instead of removing its only columns.
+          const unresolvedStar = expressions.some((expression) => SELECT_WILDCARD_PATTERN.test(expression.trim()));
+          if (unresolvedStar) {
+            if (!crossesIsolation) return undefined;
+            columns = undefined;
+            unresolvedProjection = true;
+          } else if (expressions.length) {
+            // Read this body's projection, not a same-named alias elsewhere in the statement.
+            // The legacy expression parser distinguishes CAST's inner AS from an output alias
+            // and stops at set operators; the declaration parser's projection names do not.
+            const projected = expressions.map((expression, index) => normalizedSelectColumnName(expression, dialect) ?? source.columns?.[index]);
+            const aliases = source.aliasSpan ? tokens.filter((token) => token.span.start >= source.aliasSpan!.end && token.span.end <= source.sourceSpan.end && (token.kind === "word" || token.kind === "quoted_identifier")) : [];
+            columns = projected.map((name, index) => (aliases[index] ? dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(aliases[index]), aliases[index].kind === "quoted_identifier") : name)).filter((name): name is string => !!name);
+          }
+        }
+        const key = nameKey(source.alias ?? source.name);
+        if (visibleNames.has(key)) continue;
+        scopeNames.add(key);
+        const existing = references.find((reference) => nameKey(reference.name) === nameKey(source.name) && nameKey(completionLookupIdentifier(reference.alias ?? reference.name, options.databaseType)) === key);
+        const cte = source.kind === "table" && !source.qualifierParts.length ? normalizedCtes.find((candidate) => nameKey(candidate.name) === nameKey(source.name)) : undefined;
+        let columnAliases = source.columnAliases ?? (unresolvedProjection ? undefined : existing?.columnAliases);
+        if (cte?.projection && columnAliases?.length) {
+          columns = completionProjectionWithAliases(cte.projection, columnAliases).slots.filter((name): name is string => name !== undefined);
+          // Aliases have been applied before filtering unnamed outputs. Applying them
+          // again to the shortened list downstream would shift the remaining columns.
+          columnAliases = undefined;
+        }
+        result.push({
+          ...existing,
+          name: source.name,
+          nameQuoted: !!source.qualifiedName?.parts[source.qualifiedName.parts.length - 1]?.quote,
+          database: source.metadataTarget?.database,
+          schema: source.qualifierParts[source.qualifierParts.length - 1],
+          schemaQuoted: !!source.qualifiedName?.parts[source.qualifiedName.parts.length - 2]?.quote,
+          alias: source.alias,
+          aliasSql: source.aliasSpan ? sql.slice(source.aliasSpan.start, source.aliasSpan.end) : existing?.aliasSql,
+          columns: unresolvedProjection ? undefined : columns?.length ? columns : (cte?.columns ?? (existing?.kind !== "cte" ? existing?.columns : undefined)),
+          columnAliases,
+          kind: cte ? "cte" : existing?.kind !== "cte" ? existing?.kind : undefined,
+        });
+      }
+      // Shadow enclosing groups/queries, while retaining same-named tables from
+      // different schemas within one scope (e.g. sales.orders JOIN archive.orders).
+      for (const name of scopeNames) visibleNames.add(name);
+    }
+  }
+  return result;
+}
+
 export function getSqlCompletionContext(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): SqlCompletionContext {
   const statementSpan = sqlCompletionStatementSpan(sql, cursor, options);
   // Extract the full statement at cursor position for referenced tables
@@ -3120,6 +3385,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken, options.databaseType);
   const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const scopedReferences = exclusiveTableSuggestions ? undefined : scopedQueryCompletionReferences(fullStatement, cursorInStatement, referencedTables, cteDefs, options);
+  if (scopedReferences) referencedTables = scopedReferences;
   const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);
   const autoAliasTableCompletions = (lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext) && !tableAliasAfterCursor;
   const exclusiveColumnSuggestions = !!qualifier && !exclusiveTableSuggestions && !insertInfo;
@@ -3180,6 +3447,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     prioritizeSelectAliases: insertInfo ? false : prioritizeSelectAliases,
     selectAliases: prioritizeSelectAliases ? extractSelectAliases(fullStatement) : [],
     referencedTables,
+    referencedTablesScoped: scopedReferences !== undefined,
     insertTable: insertInfo?.table,
     insertDatabase: insertInfo?.database,
     insertSchema: insertInfo?.schema,
@@ -4435,6 +4703,277 @@ function extractSelectColumnNameFromExpression(expression: string): string | nul
   return null;
 }
 
+function completionDeclarationTokens(sql: string, dialect: SqlSemanticDialectAdapter) {
+  return tokenizeSqlSemantic(sql, dialect.id, {
+    mysqlDashCommentRequiresWhitespace: dialect.id === "mysql",
+    mysqlBackslashEscape: dialect.id === "mysql",
+  }).filter((token) => token.kind !== "comment");
+}
+
+function completionExpressionText(sql: string, tokens: ReturnType<typeof completionDeclarationTokens>): string {
+  // Preserve adjacency (1e3, ::type, ARRAY[...]); inserting spaces can create aliases.
+  // Gaps contain only whitespace or comments because comment tokens were removed.
+  return tokens.map((token, index) => (index ? sql.slice(tokens[index - 1].span.end, token.span.start).replace(/[^\r\n]/g, " ") : "") + token.text).join("");
+}
+
+function completionProjectionSelectIndex(tokens: ReturnType<typeof completionDeclarationTokens>): number {
+  // Keep the previous selection for WITH forms not parsed below, such as ClickHouse
+  // scalar bindings and PostgreSQL SEARCH/CYCLE clauses, rather than losing columns.
+  let fallbackIndex = -1;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.kind === "word" && token.normalized === "select" && (fallbackIndex < 0 || token.depth < tokens[fallbackIndex].depth)) fallbackIndex = index;
+  }
+  const afterParens = (open: number) => {
+    const close = tokens.findIndex((token, index) => index > open && token.text === ")" && token.depth === tokens[open].depth);
+    return close < 0 ? tokens.length : close + 1;
+  };
+  let index = 0;
+  while (index < tokens.length) {
+    // Query parentheses and set operations take their output names from the first branch.
+    if (tokens[index].text === "(") {
+      index++;
+      continue;
+    }
+    if (tokens[index].kind !== "word") return fallbackIndex;
+    if (tokens[index].normalized === "select") return index;
+    if (tokens[index].normalized !== "with") return fallbackIndex;
+    index++;
+    if (tokens[index]?.kind === "word" && tokens[index].normalized === "recursive") index++;
+    // Skip CTE declarations without mistaking their SELECTs for the query's output.
+    do {
+      if (tokens[index]?.kind !== "word" && tokens[index]?.kind !== "quoted_identifier") return fallbackIndex;
+      index++;
+      if (tokens[index]?.text === "(") index = afterParens(index);
+      if (tokens[index]?.kind !== "word" || tokens[index].normalized !== "as") return fallbackIndex;
+      index++;
+      if (tokens[index]?.kind === "word" && tokens[index].normalized === "not") index++;
+      if (tokens[index]?.kind === "word" && tokens[index].normalized === "materialized") index++;
+      if (tokens[index]?.text !== "(") return fallbackIndex;
+      index = afterParens(index);
+      if (tokens[index]?.text !== ",") break;
+      index++;
+    } while (index < tokens.length);
+  }
+  return fallbackIndex;
+}
+
+/** Keep strings and quoted identifiers intact while splitting the first SELECT's outputs. */
+function completionProjectionExpressions(sql: string, dialect: SqlSemanticDialectAdapter): string[] {
+  const tokens = completionDeclarationTokens(sql, dialect);
+  const selectIndex = completionProjectionSelectIndex(tokens);
+  if (selectIndex < 0) return [];
+  const depth = tokens[selectIndex].depth;
+  let start = selectIndex + 1;
+  if (tokens[start]?.kind === "word" && ["distinct", "all"].includes(tokens[start].normalized)) start++;
+  const expressions: string[] = [];
+  let expression: typeof tokens = [];
+  for (let index = start; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.depth < depth || token.text === ";") break;
+    if (token.depth === depth) {
+      if (token.kind === "word" && tokens[index - 1]?.text !== "." && ["from", "where", "group", "having", "order", "limit", "offset", "union", "intersect", "except"].includes(token.normalized)) break;
+      if (token.text === ",") {
+        expressions.push(completionExpressionText(sql, expression));
+        expression = [];
+        continue;
+      }
+    }
+    expression.push(token);
+  }
+  if (expression.length) expressions.push(completionExpressionText(sql, expression));
+  return expressions;
+}
+
+function completionIdentifierChain(tokens: ReturnType<typeof completionDeclarationTokens>): boolean {
+  return tokens.length > 0 && tokens.length % 2 === 1 && tokens.every((token, index) => (index % 2 === 0 ? token.kind === "word" || token.kind === "quoted_identifier" : token.text === "."));
+}
+
+type CompletionProjectionName = { strength: 0 } | { strength: 1 | 2; name: string };
+
+/** Names produced by PostgreSQL's TypeName grammar, before catalog lookup. */
+function postgresProjectionCastTypeName(typeSql: string, dialect: SqlSemanticDialectAdapter): string | undefined {
+  const tokens = completionDeclarationTokens(typeSql, dialect);
+  while (/^\[\s*\d*\s*\]$/.test(tokens[tokens.length - 1]?.text ?? "")) tokens.pop();
+  let modifier: string | undefined;
+  const open = tokens.findIndex((token) => token.text === "(" && token.depth === 0);
+  if (open >= 0) {
+    const close = tokens.findIndex((token, index) => index > open && token.text === ")" && token.depth === 0);
+    if (close < 0 || !tokens.slice(open + 1, close).every((token) => token.kind === "number" || token.kind === "string" || [",", "+", "-"].includes(token.text))) return undefined;
+    modifier = typeSql.slice(tokens[open].span.end, tokens[close].span.start).trim();
+    tokens.splice(open, close - open + 1);
+  }
+  if (!tokens.length) return undefined;
+  // A qualified or quoted user type is a GenericType: SQL aliases must not rewrite it.
+  if (completionIdentifierChain(tokens) && (tokens.length > 1 || tokens[0].kind === "quoted_identifier")) {
+    const last = tokens[tokens.length - 1];
+    return dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(last), last.kind === "quoted_identifier");
+  }
+  if (!tokens.every((token) => token.kind === "word")) return undefined;
+  const words = tokens.map((token) => token.normalized).join(" ");
+  const aliases: Record<string, string> = {
+    int: "int4",
+    integer: "int4",
+    smallint: "int2",
+    bigint: "int8",
+    real: "float4",
+    "double precision": "float8",
+    decimal: "numeric",
+    dec: "numeric",
+    numeric: "numeric",
+    boolean: "bool",
+    char: "bpchar",
+    character: "bpchar",
+    nchar: "bpchar",
+    "national char": "bpchar",
+    "national character": "bpchar",
+    "char varying": "varchar",
+    "character varying": "varchar",
+    "nchar varying": "varchar",
+    "national char varying": "varchar",
+    "national character varying": "varchar",
+    bit: "bit",
+    "bit varying": "varbit",
+    timestamp: "timestamp",
+    "timestamp without time zone": "timestamp",
+    "timestamp with time zone": "timestamptz",
+    time: "time",
+    "time without time zone": "time",
+    "time with time zone": "timetz",
+  };
+  if (words === "float") {
+    if (modifier === undefined) return "float8";
+    if (!/^\d+$/.test(modifier) || Number(modifier) < 1 || Number(modifier) > 53) return undefined;
+    return Number(modifier) <= 24 ? "float4" : "float8";
+  }
+  if (/^interval(?: (?:year|month|day|hour|minute|second)(?: to (?:month|day|hour|minute|second))?)?$/.test(words)) return "interval";
+  return Object.prototype.hasOwnProperty.call(aliases, words) ? aliases[words] : tokens.length === 1 ? words : undefined;
+}
+
+function postgresProjectionIsQuery(tokens: ReturnType<typeof completionDeclarationTokens>, recursion = 0): boolean {
+  if (recursion > 24) return false;
+  if (tokens[0]?.kind === "word" && ["select", "with"].includes(tokens[0].normalized)) return true;
+  if (tokens[0]?.text !== "(") return false;
+  const close = tokens.findIndex((token, index) => index > 0 && token.text === ")" && token.depth === tokens[0].depth);
+  if (close < 0 || !postgresProjectionIsQuery(tokens.slice(1, close), recursion + 1)) return false;
+  if (close === tokens.length - 1) return true;
+  const next = tokens[close + 1];
+  return next.kind === "word" && ["union", "intersect", "except", "order", "limit", "offset", "fetch", "for"].includes(next.normalized);
+}
+
+/** Match FigureColnameInternal's 0 (unnamed), 1 (type fallback), and 2 (strong name).
+ * undefined remains separate: an unsupported expression might have a strong name.
+ */
+function postgresDefaultProjectionName(expression: string, tokens: ReturnType<typeof completionDeclarationTokens>, dialect: SqlSemanticDialectAdapter, recursion: number): CompletionProjectionName | undefined {
+  const closeParen = (open: number) => tokens.findIndex((token, index) => index > open && token.text === ")" && token.depth === tokens[open].depth);
+  const infer = (sql: string, allowImplicitAlias = false) => completionProjectionName(sql, dialect, recursion + 1, allowImplicitAlias);
+  const trimmed = completionExpressionText(expression, tokens).trim();
+  if ((tokens.length === 1 && (tokens[0].kind === "string" || tokens[0].kind === "number" || tokens[0].kind === "parameter" || (tokens[0].kind === "word" && ["true", "false", "null"].includes(tokens[0].normalized)))) || /^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed))
+    return { strength: 0 };
+  if (tokens[0]?.kind === "word" && tokens[0].normalized === "not") return infer(expression.slice(tokens[0].span.end)) === undefined ? undefined : { strength: 0 };
+  // Operators bind outside an unparenthesized :: cast: a + b::int has no name.
+  // Validate both sides conservatively so a trailing SELECT alias still reaches the alias path.
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.depth !== 0) continue;
+    // The lexer splits exponent signs out of numeric literals (1e-3::numeric).
+    if (
+      ["+", "-"].includes(token.text) &&
+      tokens[index - 1]?.kind === "word" &&
+      tokens[index - 1].normalized === "e" &&
+      tokens[index - 1].span.end === token.span.start &&
+      tokens[index + 1]?.kind === "number" &&
+      tokens[index + 1].span.start === token.span.end &&
+      /(?:^|[^\w$])(?:\d+(?:\.\d*)?|\.\d+)[eE]$/.test(expression.slice(0, token.span.start))
+    )
+      continue;
+    const symbol = token.kind !== "parameter" && /^[+\-*/%^<>=!~|&#@]+$/.test(token.text);
+    const keyword = token.kind === "word" && ["and", "or", "is", "like", "ilike", "between", "in"].includes(token.normalized);
+    if (!symbol && !keyword) continue;
+    let end = index + 1;
+    if (symbol) while (end < tokens.length && tokens[end].depth === 0 && /^[+\-*/%^<>=!~|&#@]+$/.test(tokens[end].text) && tokens[end - 1].span.end === tokens[end].span.start) end++;
+    const right = infer(expression.slice(tokens[end - 1].span.end));
+    if (index === 0 && ["+", "-"].includes(token.text)) return right === undefined ? undefined : { strength: 0 };
+    const left = infer(expression.slice(0, token.span.start));
+    return left === undefined || right === undefined ? undefined : { strength: 0 };
+  }
+  // The lexer represents ::integer as parameter(":") + parameter(":integer").
+  for (let index = tokens.length - 2; index >= 0; index--) {
+    if (tokens[index].depth !== 0 || tokens[index].text !== ":" || !tokens[index + 1].text.startsWith(":") || tokens[index].span.end !== tokens[index + 1].span.start) continue;
+    const name = postgresProjectionCastTypeName(expression.slice(tokens[index + 1].span.start + 1), dialect);
+    if (name !== undefined) {
+      const input = infer(expression.slice(0, tokens[index].span.start));
+      return input === undefined ? undefined : input.strength === 2 ? input : { name, strength: 1 };
+    }
+  }
+  if (tokens[0]?.text === "(" && closeParen(0) === tokens.length - 1) {
+    const body = expression.slice(tokens[0].span.end, tokens[tokens.length - 1].span.start);
+    if (postgresProjectionIsQuery(tokens.slice(1, -1))) {
+      const outputs = completionProjectionExpressions(body, dialect);
+      const output = outputs.length === 1 ? infer(outputs[0], true) : undefined;
+      // A scalar subquery has already finalized its output name, even ?column?.
+      return output === undefined ? undefined : { name: output.strength === 0 ? "?column?" : output.name, strength: 2 };
+    }
+    return infer(body);
+  }
+  const open = tokens.findIndex((token) => token.depth === 0 && token.text === "(");
+  if (open < 1 || !completionIdentifierChain(tokens.slice(0, open))) return undefined;
+  const close = closeParen(open);
+  if (close < 0) return undefined;
+  if (open === 1 && tokens[0].kind === "word" && tokens[0].normalized === "cast") {
+    if (close !== tokens.length - 1) return undefined;
+    const as = tokens.findIndex((token, index) => index > open && index < close && token.depth === 1 && token.kind === "word" && token.normalized === "as");
+    if (as < 0) return undefined;
+    const name = postgresProjectionCastTypeName(expression.slice(tokens[as].span.end, tokens[close].span.start), dialect);
+    const input = infer(expression.slice(tokens[open].span.end, tokens[as].span.start));
+    return name === undefined || input === undefined ? undefined : input.strength === 2 ? input : { name, strength: 1 };
+  }
+  // A complete call can have aggregate/window suffixes, but not arithmetic after it.
+  let index = close + 1;
+  const suffixes = new Set<string>();
+  while (index < tokens.length) {
+    const suffix = tokens[index];
+    if (suffix.kind !== "word" || !["filter", "over", "within"].includes(suffix.normalized) || suffixes.has(suffix.normalized)) return undefined;
+    suffixes.add(suffix.normalized);
+    index++;
+    if (suffix.normalized === "within") {
+      if (tokens[index]?.kind !== "word" || tokens[index].normalized !== "group") return undefined;
+      index++;
+    }
+    if (tokens[index]?.text === "(") {
+      const end = closeParen(index);
+      if (end < 0) return undefined;
+      index = end + 1;
+    } else if (suffix.normalized === "over" && (tokens[index]?.kind === "word" || tokens[index]?.kind === "quoted_identifier")) index++;
+    else return undefined;
+  }
+  // SQL TRIM syntax does not use its keyword as the function name. Leave this unsupported.
+  if (open === 1 && tokens[0].kind === "word" && ["trim", "treat", "values", "any", "all", "some"].includes(tokens[0].normalized)) return undefined;
+  const name = tokens[open - 1];
+  return { name: dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(name), name.kind === "quoted_identifier"), strength: 2 };
+}
+
+function completionProjectionName(expression: string, dialect: SqlSemanticDialectAdapter, recursion = 0, allowImplicitAlias = true): CompletionProjectionName | undefined {
+  if (recursion > 24) return undefined;
+  const tokens = completionDeclarationTokens(expression, dialect);
+  const last = tokens[tokens.length - 1];
+  const lastIsIdentifier = last && (last.kind === "word" || last.kind === "quoted_identifier");
+  const explicitAs = tokens[tokens.length - 2];
+  if (lastIsIdentifier && explicitAs?.kind === "word" && explicitAs.normalized === "as" && explicitAs.depth === 0) return { name: dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(last), last.kind === "quoted_identifier"), strength: 2 };
+  if (dialect.id === "postgres") {
+    const inferred = postgresDefaultProjectionName(expression, tokens, dialect, recursion);
+    if (inferred !== undefined) return inferred;
+  }
+  if (lastIsIdentifier && completionIdentifierChain(tokens)) return { name: dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(last), last.kind === "quoted_identifier"), strength: 2 };
+  if (!allowImplicitAlias || !extractSelectColumnNameFromExpression(completionExpressionText(expression, tokens))) return undefined;
+  return lastIsIdentifier ? { name: dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(last), last.kind === "quoted_identifier"), strength: 2 } : undefined;
+}
+
+function normalizedSelectColumnName(expression: string, dialect: SqlSemanticDialectAdapter, recursion = 0, allowImplicitAlias = true): string | null {
+  const inferred = completionProjectionName(expression, dialect, recursion, allowImplicitAlias);
+  return inferred && inferred.strength !== 0 ? inferred.name : null;
+}
+
 function extractSelectList(sql: string): string | null {
   const lower = sql.toLowerCase();
   const selectIndex = lower.search(/\bselect\b/);
@@ -4580,24 +5119,76 @@ function extractReferencedTablesInBody(sql: string, knownCtes?: readonly Scanned
   return refs;
 }
 
-function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): string[] {
-  const selectList = extractSelectList(sql);
-  if (!selectList) return [];
+// Guards the subquery-reference recursion below on pathological inputs. Real statements
+// stay far below this depth; the cap only exists so a hostile/degenerate document cannot
+// turn completion into unbounded work.
+const MAX_COMPLETION_SUBQUERY_DEPTH = 64;
 
+function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType, normalizedDialect?: SqlSemanticDialectAdapter, projection?: CompletionProjection, depth = 0): string[] {
+  if (depth > MAX_COMPLETION_SUBQUERY_DEPTH) return [];
+  const expressions = normalizedDialect ? completionProjectionExpressions(sql, normalizedDialect) : splitTopLevel(extractSelectList(sql) ?? "", ",");
+  if (!expressions.length) {
+    if (projection) projection.widthKnown = false;
+    return [];
+  }
+
+  const nameKey = (name: string) => (!normalizedDialect || ["mysql", "sqlserver", "sqlite"].includes(normalizedDialect.id) ? name.toLowerCase() : name);
   const cteColumnsByName = new Map<string, string[]>();
   if (knownCtes) {
     for (const cte of knownCtes) {
       if (cte.columns.length > 0) {
-        cteColumnsByName.set(cte.name.toLowerCase(), cte.columns);
+        cteColumnsByName.set(nameKey(cte.name), cte.columns);
       }
     }
   }
 
-  let referencedInBody: SqlCompletionReferencedTable[] | null = null;
-  function getReferencedInBody(): SqlCompletionReferencedTable[] {
+  type ProjectedReference = SqlCompletionReferencedTable & { projection?: CompletionProjection };
+  let referencedInBody: ProjectedReference[] | null = null;
+  function getReferencedInBody(): ProjectedReference[] {
     if (!referencedInBody) {
+      if (normalizedDialect) {
+        const tokens = completionDeclarationTokens(sql, normalizedDialect);
+        const selectIndex = completionProjectionSelectIndex(tokens);
+        if (selectIndex < 0) return (referencedInBody = []);
+        const setOperator = tokens.findIndex((token, index) => index > selectIndex && token.depth === tokens[selectIndex].depth && token.kind === "word" && ["union", "intersect", "except"].includes(token.normalized));
+        const dialectId = normalizedDialect.id;
+        const dialect = dialectId === "mysql" || dialectId === "postgres" || dialectId === "sqlserver" || dialectId === "clickhouse" || dialectId === "doris" ? dialectId : undefined;
+        const groupedScopes: SqlSemanticGroupedSourceScope[] = [];
+        const sources = sqlSemanticQueryBlockSources(tokens.slice(selectIndex, setOperator < 0 ? undefined : setOperator), { databaseType, dialect }, groupedScopes);
+        referencedInBody = sources.map((source) => {
+          // Keep each source's columns on that declaration: a schema-qualified table,
+          // table function, or same-named derived alias must not inherit a CTE's columns.
+          const cte = source.kind === "table" && source.qualifierParts.length === 0 ? knownCtes?.find((candidate) => nameKey(candidate.name) === nameKey(source.name)) : undefined;
+          let columns = cte?.columns ?? (source.kind === "table_function" ? source.columns : undefined);
+          let sourceProjection = cte?.projection ?? (columns?.length ? { slots: columns, widthKnown: true } : undefined);
+          let aliases = source.columnAliases;
+          if (source.kind === "subquery") {
+            const open = tokens.findIndex((token) => token.span.start === source.sourceSpan.start);
+            const close = open < 0 ? -1 : tokens.findIndex((token, index) => index > open && token.text === ")" && token.depth === tokens[open].depth);
+            if (close >= 0) {
+              if (isCompletionGroupedSource(tokens, open, close, groupedScopes)) {
+                // Member metadata is not resolved here. Let the declaration below
+                // supply aliases, without borrowing an ON subquery's projection.
+                sourceProjection = { slots: [], widthKnown: false };
+                columns = [];
+              } else {
+                sourceProjection = { slots: [], widthKnown: true };
+                columns = extractSelectColumnNames(sql.slice(tokens[open].span.end, tokens[close].span.start), knownCtes, databaseType, normalizedDialect, sourceProjection, depth + 1);
+              }
+            }
+            const aliasTokens = source.aliasSpan ? tokens.filter((token) => token.span.start >= source.aliasSpan!.end && token.span.end <= source.sourceSpan.end && (token.kind === "word" || token.kind === "quoted_identifier")) : [];
+            if (aliasTokens.length) aliases = aliasTokens.map((token) => normalizedDialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(token), token.kind === "quoted_identifier"));
+          }
+          if (aliases?.length && sourceProjection) {
+            sourceProjection = completionProjectionWithAliases(sourceProjection, aliases);
+            columns = sourceProjection.slots.filter((name): name is string => name !== undefined);
+          }
+          return { name: source.name, alias: source.alias, columns, projection: sourceProjection };
+        });
+        return referencedInBody;
+      }
       referencedInBody = extractReferencedTablesInBody(sql, knownCtes, databaseType);
-      const subqueryRefs = extractSubqueryReferences(sql, knownCtes, databaseType);
+      const subqueryRefs = extractSubqueryReferences(sql, knownCtes, databaseType, depth);
       for (const sq of subqueryRefs) {
         if (sq.alias && sq.columns?.length) {
           const sqAlias = sq.alias.toLowerCase();
@@ -4612,12 +5203,43 @@ function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDe
   }
 
   const names: string[] = [];
-  for (const expression of splitTopLevel(selectList, ",")) {
+  for (const expression of expressions) {
     const trimmed = expression.trim();
     if (!trimmed) continue;
 
+    if (normalizedDialect) {
+      const tokens = tokenizeSqlSemantic(trimmed, normalizedDialect.id).filter((token) => token.kind !== "comment");
+      const bareStar = tokens.length === 1 && tokens[0].text === "*";
+      const qualifiedStar = tokens.length === 3 && (tokens[0].kind === "word" || tokens[0].kind === "quoted_identifier") && tokens[1].text === "." && tokens[2].text === "*";
+      if (bareStar || qualifiedStar) {
+        const refs = getReferencedInBody();
+        const appendSource = (source?: ProjectedReference) => {
+          if (source?.columns) names.push(...source.columns);
+          if (!projection) return;
+          if (source?.projection) {
+            if (projection.widthKnown && !source.projection.widthKnown) projection.knownPrefixLength = projection.slots.length + (source.projection.knownPrefixLength ?? 0);
+            projection.slots.push(...source.projection.slots);
+            projection.widthKnown &&= source.projection.widthKnown;
+          } else if (source?.columns?.length) projection.slots.push(...source.columns);
+          else {
+            if (projection.widthKnown) projection.knownPrefixLength = projection.slots.length;
+            projection.widthKnown = false;
+          }
+        };
+        if (qualifiedStar) {
+          const qualifier = normalizedDialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(tokens[0]), tokens[0].kind === "quoted_identifier");
+          const source = refs.find((reference) => nameKey(reference.alias ?? reference.name) === nameKey(qualifier));
+          appendSource(source);
+        } else {
+          if (!refs.length && projection) projection.widthKnown = false;
+          for (const source of refs) appendSource(source);
+        }
+        continue;
+      }
+    }
+
     // Check wildcard: * or qualifier.*
-    const wildcardMatch = SELECT_WILDCARD_PATTERN.exec(trimmed);
+    const wildcardMatch = normalizedDialect ? null : SELECT_WILDCARD_PATTERN.exec(trimmed);
     if (wildcardMatch) {
       const rawQualifier = wildcardMatch[1];
       if (rawQualifier) {
@@ -4642,7 +5264,8 @@ function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDe
       continue;
     }
 
-    const colName = extractSelectColumnNameFromExpression(trimmed);
+    const colName = normalizedDialect ? normalizedSelectColumnName(trimmed, normalizedDialect) : extractSelectColumnNameFromExpression(trimmed);
+    projection?.slots.push(colName ?? undefined);
     if (colName) {
       names.push(colName);
     }
@@ -4651,20 +5274,97 @@ function extractSelectColumnNames(sql: string, knownCtes?: readonly ScannedCteDe
   return names;
 }
 
+interface CompletionProjection {
+  /** Retain unnamed outputs until positional column aliases have been applied. */
+  slots: Array<string | undefined>;
+  /** A physical-table star has an unknown number of outputs without metadata. */
+  widthKnown: boolean;
+  /** Explicitly named columns before an unresolved star still have known positions. */
+  knownPrefixLength?: number;
+}
+
+function completionProjectionWithAliases(projection: CompletionProjection, aliases: readonly string[]): CompletionProjection {
+  const knownPositions = projection.widthKnown ? projection.slots.length : (projection.knownPrefixLength ?? 0);
+  if (!projection.widthKnown && aliases.length > knownPositions) {
+    // The declaration establishes this output prefix even when a star's width is
+    // unknown. Retain names only beyond its maximum reach in the shortened slots:
+    // even a zero-column star cannot place those outputs inside the renamed prefix.
+    return { slots: [...aliases, ...projection.slots.slice(aliases.length)], widthKnown: false, knownPrefixLength: aliases.length };
+  }
+  return { ...projection, slots: projection.slots.map((name, index) => (index < knownPositions ? (aliases[index] ?? name) : name)) };
+}
+
 interface ScannedCteDefinition {
   name: string;
   columns: string[];
+  projection?: CompletionProjection;
   /** Index of the `(` opening the CTE body. */
   bodyStart: number;
   /** Index of the `)` closing the CTE body. */
   bodyEnd: number;
 }
 
+function scanNormalizedCteDefinitions(sql: string, databaseType: DatabaseType | undefined, dialect: SqlSemanticDialectAdapter): ScannedCteDefinition[] {
+  const tokens = completionDeclarationTokens(sql, dialect);
+  const withIndex = tokens.findIndex((token) => token.kind === "word" && token.normalized === "with");
+  if (withIndex < 0) return [];
+  const ctes: ScannedCteDefinition[] = [];
+  const closeParen = (open: number) => tokens.findIndex((token, index) => index > open && token.text === ")" && token.depth === tokens[open].depth);
+  let index = withIndex + 1;
+  if (tokens[index]?.kind === "word" && tokens[index].normalized === "recursive") index++;
+  while (index < tokens.length) {
+    const name = tokens[index];
+    if (name.kind !== "word" && name.kind !== "quoted_identifier") break;
+    index++;
+    let columns: string[] = [];
+    if (tokens[index]?.text === "(") {
+      const close = closeParen(index);
+      if (close < 0) break;
+      columns = tokens
+        .slice(index + 1, close)
+        .filter((token) => token.kind === "word" || token.kind === "quoted_identifier")
+        .map((token) => dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(token), token.kind === "quoted_identifier"));
+      index = close + 1;
+    }
+    if (tokens[index]?.kind !== "word" || tokens[index].normalized !== "as") break;
+    index++;
+    if (tokens[index]?.text !== "(") break;
+    const close = closeParen(index);
+    if (close < 0) break;
+    const bodyStart = tokens[index].span.start;
+    const bodyEnd = tokens[close].span.start;
+    const projection: CompletionProjection = { slots: [], widthKnown: true };
+    const inferred = extractSelectColumnNames(sql.slice(tokens[index].span.end, bodyEnd), ctes, databaseType, dialect, projection);
+    if (columns.length) {
+      if (!projection.widthKnown || projection.slots.length >= columns.length) {
+        Object.assign(projection, completionProjectionWithAliases(projection, columns));
+        columns = projection.slots.filter((name): name is string => name !== undefined);
+      } else {
+        projection.slots = columns;
+        projection.widthKnown = false;
+        projection.knownPrefixLength = columns.length;
+      }
+    } else columns = inferred;
+    ctes.push({
+      name: dialect.normalizeIdentifier(unquoteSqlSemanticIdentifier(name), name.kind === "quoted_identifier"),
+      columns,
+      projection,
+      bodyStart,
+      bodyEnd,
+    });
+    index = close + 1;
+    if (tokens[index]?.text !== ",") break;
+    index++;
+  }
+  return ctes;
+}
+
 /**
  * Scans `WITH` definitions, keeping each body's span so callers can tell which
  * part of the statement belongs to a CTE rather than to the outer query.
  */
-function scanCteDefinitions(sql: string, databaseType?: DatabaseType): ScannedCteDefinition[] {
+function scanCteDefinitions(sql: string, databaseType?: DatabaseType, normalizedDialect?: SqlSemanticDialectAdapter): ScannedCteDefinition[] {
+  if (normalizedDialect) return scanNormalizedCteDefinitions(sql, databaseType, normalizedDialect);
   const ctes: ScannedCteDefinition[] = [];
   let lower = sql.toLowerCase();
   const withMatch = /\bwith\b/.exec(lower);
@@ -4766,12 +5466,11 @@ function keepOnlyCteBody(statement: string, cte: ScannedCteDefinition): string {
   return `${" ".repeat(cte.bodyStart + 1)}${statement.slice(cte.bodyStart + 1, cte.bodyEnd)}${" ".repeat(Math.max(0, statement.length - cte.bodyEnd))}`;
 }
 
-function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
+function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType, depth = 0): SqlCompletionReferencedTable[] {
   const refs: SqlCompletionReferencedTable[] = [];
-  const pattern = /\b(?:from|join)\s*\(/gi;
+  if (depth > MAX_COMPLETION_SUBQUERY_DEPTH) return refs;
 
-  for (const match of sql.matchAll(pattern)) {
-    const openParen = match.index! + match[0].length - 1;
+  for (const openParen of topLevelSubqueryOpenParens(sql)) {
     const closeParen = findMatchingParen(sql, openParen);
     if (closeParen === -1) continue;
 
@@ -4789,12 +5488,71 @@ function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteD
 
     // Extract SELECT columns from subquery body
     const body = sql.slice(openParen + 1, closeParen);
-    const columns = extractSelectColumnNames(body, knownCtes, databaseType);
+    const columns = extractSelectColumnNames(body, knownCtes, databaseType, undefined, undefined, depth + 1);
 
     refs.push({ name: alias, alias, columns });
   }
 
   return refs;
+}
+
+/**
+ * Open-paren positions of `FROM (` / `JOIN (` at the *top level* of `sql`.
+ *
+ * Depth matters here: `extractSelectColumnNames` expands `alias.*` by recursing into each
+ * body it sees, so scanning every nesting level from every level re-analyzed the whole
+ * descendant subtree once per ancestor. A chain of N `SELECT p.* FROM ( ... ) p` wrappers --
+ * the shape generated by a stack of derived tables -- then cost O(2^N) and hung the editor
+ * on completion (reported as a paste freeze). Each level now only yields its own subqueries;
+ * deeper ones are reached exactly once, from their parent body.
+ */
+function topLevelSubqueryOpenParens(sql: string): number[] {
+  const opens: number[] = [];
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+  let inBracket = false;
+  let lastWord = "";
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]!;
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (inBracket) {
+      if (ch === "]") inBracket = false;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      lastWord = "";
+      continue;
+    }
+    if (ch === "[") {
+      inBracket = true;
+      lastWord = "";
+      continue;
+    }
+    if (ch === "(") {
+      if (depth === 0 && (lastWord === "from" || lastWord === "join")) opens.push(i);
+      depth += 1;
+      lastWord = "";
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      lastWord = "";
+      continue;
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let end = i + 1;
+      while (end < sql.length && /[\w$]/.test(sql[end]!)) end++;
+      lastWord = sql.slice(i, end).toLowerCase();
+      i = end - 1;
+      continue;
+    }
+    if (!/\s/.test(ch)) lastWord = "";
+  }
+  return opens;
 }
 
 const ALIAS_BLACKLIST_FOR_REF = new Set(["where", "group", "order", "having", "limit", "offset", "union", "intersect", "except", "and", "or", "not", "is", "like", "in", "between", "exists", "select", "on", "set", "left", "right", "inner", "outer", "cross", "full", "natural", "join"]);

@@ -73,12 +73,14 @@ export function reorderSidebarMenuEntries(savedOrder: readonly string[], visible
 
 const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
   data: ["contextMenu.importData", "contextMenu.exportData", "contextMenu.exportDatabase", "contextMenu.exportAllDatabases", "transfer.dataTransfer", "dataCompare.title", "contextMenu.backupSqliteDatabase", "contextMenu.restoreSqliteDatabase", "databaseBackup.title", "databaseSearch.open"],
-  sql: ["contextMenu.generateSql", "contextMenu.sqlHistory", "contextMenu.addToAi", "modelGeneration.title", "sqlFile.title"],
+  sql: ["contextMenu.generateSql", "contextMenu.copyGeneratedSql", "contextMenu.sqlHistory", "contextMenu.addToAi", "modelGeneration.title", "sqlFile.title"],
   structure: [
     "contextMenu.editObject",
     "contextMenu.viewDdl",
     "contextMenu.viewSource",
     "contextMenu.viewDependencies",
+    "oracleSecurity.tableGrants",
+    "tree.aggregateFunctions",
     "contextMenu.viewPostgresRowLevelSecurity",
     "contextMenu.exportStructure",
     "contextMenu.duplicateStructure",

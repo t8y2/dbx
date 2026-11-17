@@ -8588,7 +8588,10 @@ async fn completion_assistant_fallback_core(
         )
         .await?;
         for table in tables {
-            let kind = if table.table_type.to_uppercase().contains("VIEW") {
+            let normalized_table_type = table.table_type.to_ascii_uppercase().replace(' ', "_");
+            let kind = if normalized_table_type == "MATERIALIZED_VIEW" {
+                db::CompletionAssistantCandidateKind::MaterializedView
+            } else if normalized_table_type.contains("VIEW") {
                 db::CompletionAssistantCandidateKind::View
             } else {
                 db::CompletionAssistantCandidateKind::Table
@@ -12815,7 +12818,13 @@ fn postgres_object_source_sql_inner(
                 "SELECT concat_ws(E'\\n\\n', \
                    '-- auto-generated definition' || E'\\n' || \
                    'create sequence ' || quote_ident(c.relname) || E'\\n' || \
-                   '    as ' || pg_catalog.format_type(s.seqtypid, NULL) || ';', \
+                   '    as ' || pg_catalog.format_type(s.seqtypid, NULL) || E'\\n' || \
+                   '    increment by ' || s.seqincrement || E'\\n' || \
+                   '    minvalue ' || s.seqmin || E'\\n' || \
+                   '    maxvalue ' || s.seqmax || E'\\n' || \
+                   '    start with ' || s.seqstart || E'\\n' || \
+                   '    cache ' || s.seqcache || E'\\n' || \
+                   CASE WHEN s.seqcycle THEN '    cycle;' ELSE '    no cycle;' END, \
                    'alter sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident(pg_get_userbyid(c.relowner)) || ';', \
                    CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
                      THEN 'alter sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \

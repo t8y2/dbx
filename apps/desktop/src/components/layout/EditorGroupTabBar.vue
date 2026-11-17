@@ -49,6 +49,7 @@ import {
   Maximize2,
   Minimize2,
   Package,
+  FilePlus2,
   PanelBottom,
   PanelLeft,
   PanelRight,
@@ -56,7 +57,6 @@ import {
   Pencil,
   Pin,
   PlugZap,
-  Plus,
   RotateCcw,
   RotateCw,
   Rows2,
@@ -383,14 +383,19 @@ function revealActiveTabAfterLayout() {
 
 const showOverflowControl = computed(() => {
   void tabLayoutRevision.value;
+  // In two-row mode the detail strip represents a selected semantic group.
+  // Keep its tab-list affordance available for every rendered group, including
+  // single-tab plugin pages, instead of deriving it from physical overflow.
+  if (isTwoRowLayout.value) return twoRowSelectedTabCount.value > 0;
+
   // A single-row strip hides tabs in two ways: they scroll out of the viewport
   // (real overflow) or they stay in it and ellipsize their labels, which the
   // scroll box cannot see because a capped pill narrows itself instead of
-  // overflowing (useTabTitleTruncation). The two-row layout decides from its
+  // overflowing (useTabTitleTruncation). The fixed-row layout decides from its
   // rows' scroll extents alone: its first row narrows itself by the arrow's
   // reserved width (.tab-section-frame--with-overflow-control), so feeding
-  // clipping back into the arrow there would rebuild the loop that the constant
-  // reservation exists to break.
+  // clipping back into the arrow there would rebuild the loop that the
+  // constant reservation exists to break.
   const hasHiddenTab = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value || hasTruncatedTabTitle.value;
   return props.tabs.length > 0 && hasHiddenTab && !isWrapLayout.value && !isVerticalLayout.value;
 });
@@ -1240,6 +1245,7 @@ const twoRowSelectedKey = computed<string | null>(() => {
   if (twoRowFocusedGroupKey.value !== null && items.some((item) => item.key === twoRowFocusedGroupKey.value)) return twoRowFocusedGroupKey.value;
   return items[0]!.key;
 });
+const twoRowSelectedTabCount = computed(() => twoRowGroupItems.value.find((group) => group.key === twoRowSelectedKey.value)?.count ?? 0);
 
 type SpecialPageSurface = "pluginCenter" | "settings" | "driverStore";
 
@@ -2095,7 +2101,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
       <Tooltip v-if="canNewQuery">
         <TooltipTrigger as-child>
           <button type="button" data-new-query-tab :class="verticalTabToolbarButtonClass" :aria-label="t('toolbar.newQuery')" @click="toolbar?.newQuery(groupId)">
-            <Plus class="h-4 w-4" />
+            <FilePlus2 class="h-4 w-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
@@ -2216,7 +2222,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         </div>
       </div>
     </div>
-    <div class="relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl }]">
+    <div
+      class="relative flex w-full min-w-0 shrink-0 overflow-hidden"
+      :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl, 'has-tab-action-controls': showOverflowControl && canNewQuery }]"
+    >
       <LightDropdown
         v-if="!isVerticalLayout && !isTwoRowLayout"
         model-value=""
@@ -2502,19 +2511,20 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           <button
             type="button"
             data-new-query-tab
-            class="mx-0.5 inline-flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="tab-bar-action-button inline-flex shrink-0 self-center items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :class="showOverflowControl ? ['absolute right-7', 'top-1/2 z-30 -translate-y-1/2'] : 'mx-0.5'"
             :aria-label="t('toolbar.newQuery')"
             @click="toolbar?.newQuery(groupId)"
           >
-            <Plus class="h-4 w-4" />
+            <FilePlus2 class="h-4 w-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
       </Tooltip>
-      <div v-if="showOverflowControl" class="tab-overflow-control absolute top-0 z-30 flex h-full items-center" :class="canNewQuery ? (isClassicLayout ? 'right-[2.125rem]' : 'right-[2.625rem]') : 'right-0'">
+      <div v-if="showOverflowControl" class="tab-overflow-control absolute right-0 top-0 z-30 flex h-full items-center">
         <Popover v-model:open="tabOverflowOpen">
           <PopoverTrigger as-child>
-            <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
+            <button type="button" class="tab-bar-action-button inline-flex shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>

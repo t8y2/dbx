@@ -1473,6 +1473,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -1537,6 +1539,8 @@ export interface GlobalSearchRequest {
    * (Quick Open behavior).
    */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -1550,8 +1554,22 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
   return invoke("global_search", { request });
+}
+
+export async function cancelGlobalSearch(searchId: string): Promise<void> {
+  return invoke("cancel_global_search", { searchId });
 }
 
 // --- AI Conversations ---
@@ -6756,6 +6774,19 @@ export interface DatabaseExportRequest {
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
+  /**
+   * Cap each exported table at this many data rows (#14750). `undefined` keeps
+   * the unlimited behavior; the backend rejects zero.
+   */
+  rowLimitPerTable?: number;
+  /**
+   * Sort column the per-table cap takes the first/last N rows by (review on
+   * #14799). `undefined`/empty keeps the export's existing read order; the
+   * backend falls back per table with a dump comment when the column is absent.
+   */
+  rowLimitSortColumn?: string;
+  /** `true` takes the newest rows by `rowLimitSortColumn`; only sent with a column. */
+  rowLimitSortDescending?: boolean;
 }
 
 export interface DatabaseBackupSnapshot {

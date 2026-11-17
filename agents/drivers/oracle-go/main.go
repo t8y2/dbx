@@ -2159,6 +2159,9 @@ func metadataListConstraintsFromParams(params map[string]json.RawMessage) metada
 }
 
 func oracleListTablesQuery(schema string, constraints metadataListConstraints) oracleMetadataListQuery {
+	if query, ok := oracleRequestedMetadataListQuery(schema, schema, constraints, false, true); ok {
+		return query
+	}
 	return oracleConstrainedMetadataListQuery(
 		oracleListTablesBaseSQL,
 		"OBJECT_NAME, TABLE_TYPE, COMMENTS",
@@ -2170,6 +2173,9 @@ func oracleListTablesQuery(schema string, constraints metadataListConstraints) o
 }
 
 func oracleListSessionUserTablesQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	if query, ok := oracleRequestedMetadataListQuery("", "", constraints, true, true); ok {
+		return query
+	}
 	return oracleConstrainedMetadataListQuery(
 		oracleListTablesSessionUserBaseSQL,
 		"OBJECT_NAME, TABLE_TYPE, COMMENTS",
@@ -2185,6 +2191,9 @@ func oracleListObjectsQuery(schema string, constraints metadataListConstraints) 
 }
 
 func oracleListObjectsQueryWithTypeOwner(schema, typeOwner string, constraints metadataListConstraints) oracleMetadataListQuery {
+	if query, ok := oracleRequestedMetadataListQuery(schema, typeOwner, constraints, false, false); ok {
+		return query
+	}
 	baseSQL := oracleListObjectsBaseSQL + `
 UNION ALL
 SELECT o.OBJECT_NAME,
@@ -2208,6 +2217,9 @@ WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
 }
 
 func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	if query, ok := oracleRequestedMetadataListQuery("", "", constraints, true, false); ok {
+		return query
+	}
 	baseSQL := oracleListObjectsSessionUserBaseSQL
 	if constraints.Exact {
 		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')", "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY', 'TRIGGER')", 1)

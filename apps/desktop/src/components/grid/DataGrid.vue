@@ -488,6 +488,7 @@ const DataGridInsertRowsDialog = defineAsyncComponent(() => import("@/components
 const ExportProgressDialog = defineAsyncComponent(() => import("@/components/export/ExportProgressDialog.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
 const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
+const MONGO_PAGE_JSON_PREVIEW_MAX_LENGTH = 256 * 1024;
 let largeValueRuntime: ReturnType<typeof useDataGridLargeValues> | undefined;
 
 function scheduleVisibleLargeValuePreviewHydration(delay = 150) {
@@ -1232,6 +1233,7 @@ const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
 const showCellDetail = ref(false);
 const showMongoJsonPreview = ref(false);
+const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const cellDetailDialogOpen = ref(false);
 const cellDetailDialogTarget = ref<{ rowIndex: number; col: number } | null>(null);
@@ -7827,19 +7829,35 @@ const activeMongoJsonDocument = computed(() => {
   const item = displayItemAt(selectedCell.rowIndex);
   return item?.sourceIndex === undefined ? undefined : props.result.mongo_documents?.[item.sourceIndex];
 });
-const mongoJsonPreviewFullText = computed(() => {
-  const document = activeMongoJsonDocument.value;
-  if (document === undefined) return "";
+function formatMongoJsonPreview(limit = Infinity): string {
+  if (!mongoJsonPreviewOpen.value) return "";
   try {
-    // Relaxed Extended JSON (`{"$date": "…"}`) like Compass's JSON view, instead
-    // of the browser form's escaped `ISODate("…")` strings.
-    return JSON.stringify(mongoDocumentRelaxedExtendedJson(document), null, 2) ?? "";
+    if (mongoJsonPreviewScope.value === "selected") {
+      const document = activeMongoJsonDocument.value;
+      return document === undefined ? "" : (JSON.stringify(mongoDocumentRelaxedExtendedJson(document), null, 2) ?? "").slice(0, limit);
+    }
+    const documents = props.result.mongo_documents ?? [];
+    const parts = ["["];
+    let length = 1;
+    // Reuse the table's visible row order and stop formatting once the preview is full.
+    for (const row of displayRowRefs.value) {
+      if (!("sourceIndex" in row)) continue;
+      const json = JSON.stringify(mongoDocumentRelaxedExtendedJson(documents[row.sourceIndex]), null, 2);
+      if (json === undefined) continue;
+      const part = `${parts.length > 1 ? ",\n" : "\n"}${json.replace(/^/gm, "  ")}`;
+      parts.push(part.slice(0, limit - length));
+      length += part.length;
+      if (length >= limit) return parts.join("");
+    }
+    return parts.length > 1 ? `${parts.join("")}\n]`.slice(0, limit) : "[]";
   } catch {
     return "";
   }
-});
-const mongoJsonPreviewText = computed(() => mongoJsonPreviewFullText.value.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH));
-const mongoJsonPreviewTruncated = computed(() => mongoJsonPreviewText.value.length < mongoJsonPreviewFullText.value.length);
+}
+const mongoJsonPreviewLimit = computed(() => (mongoJsonPreviewScope.value === "page" ? MONGO_PAGE_JSON_PREVIEW_MAX_LENGTH : CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH));
+const mongoJsonPreview = computed(() => formatMongoJsonPreview(mongoJsonPreviewLimit.value + 1));
+const mongoJsonPreviewText = computed(() => mongoJsonPreview.value.slice(0, mongoJsonPreviewLimit.value));
+const mongoJsonPreviewTruncated = computed(() => mongoJsonPreviewText.value.length < mongoJsonPreview.value.length);
 const mongoJsonPreviewUsesCodeEditor = computed(() => !!mongoJsonPreviewText.value && !mongoJsonPreviewTruncated.value);
 
 watch(canShowMongoJsonPreview, (available) => {
@@ -8240,7 +8258,8 @@ function closeMongoJsonPreview() {
 }
 
 function copyMongoJsonPreview() {
-  if (mongoJsonPreviewFullText.value) copyText(mongoJsonPreviewFullText.value);
+  const text = mongoJsonPreviewTruncated.value ? formatMongoJsonPreview() : mongoJsonPreviewText.value;
+  if (text) copyText(text);
 }
 
 function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false) {
@@ -17684,7 +17703,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           </div>
           <DataGridMongoJsonPreview
             v-if="mongoJsonPreviewOpen"
-            :full-text="mongoJsonPreviewFullText"
+            v-model:scope="mongoJsonPreviewScope"
             :text="mongoJsonPreviewText"
             :uses-code-editor="mongoJsonPreviewUsesCodeEditor"
             :panel-style="mongoJsonPreviewStyle"

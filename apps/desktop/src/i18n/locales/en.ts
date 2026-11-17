@@ -3252,6 +3252,8 @@ export default {
       "invalid-php-row-delimiter": "PHP row delimiter may contain whitespace characters only.",
     },
     mongoJsonPreview: "JSON Preview",
+    mongoJsonPreviewSelected: "Selected document",
+    mongoJsonPreviewPage: "Current page",
     mongoJsonPreviewEmpty: "Select a MongoDB document to preview.",
     copyJson: "Copy JSON",
     copyDdl: "Copy DDL",

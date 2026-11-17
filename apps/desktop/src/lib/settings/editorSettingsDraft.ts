@@ -125,6 +125,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarActivation",
   "sidebarColumnDoubleClickAction",
   "sidebarObjectDisplay",
+  "sidebarSimpleHideIndexes",
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "sidebarSearchOpenedDatabasesOnly",

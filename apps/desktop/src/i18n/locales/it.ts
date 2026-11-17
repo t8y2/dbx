@@ -1238,6 +1238,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "L’elemento non è disponibile nella barra laterale. Potrebbe essere stato rimosso o nascosto.",
     locateSqlFile: "Individua nell’elenco dei file SQL",
     locateActiveTab: "Trova nella barra laterale",
+    searchAllDatabases: "Cerca in tutti i database",
   },
   savedSql: {
     openDefaultQuery: "Apri query predefinita",
@@ -2664,6 +2665,8 @@ export default withEnglishFallback({
     showLabels: "Mostra valori",
   },
   grid: {
+    setTablePageSizeDefault: "Imposta come predefinito per questa tabella",
+    resetTablePageSizeDefault: "Usa il valore predefinito globale",
     exportSelectedRowsScope: "Righe selezionate",
     exportSelectedCellsScope: "Celle selezionate",
     exportSelectedColumnsScope: "Colonne selezionate",
@@ -3702,6 +3705,12 @@ export default withEnglishFallback({
     filterActive: "Filtro applicato",
     structuredFiltersActive: "{count} filtri condizione",
     rowJsonPreview: "Anteprima JSON",
+    binaryColumnFormats: {
+      "binary-hex": "Binario in esadecimale",
+      "binary-text": "Binario in UTF-8",
+      "binary-uuid": "Binario in UUID",
+      "binary-uuid-swapped": "Binario in UUID (bit temporali scambiati)",
+    },
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",
@@ -4114,6 +4123,9 @@ export default withEnglishFallback({
     exitMultiSelect: "Esci dalla selezione multipla",
   },
   databaseSearch: {
+    chooseObjects: "Scegli tabelle o viste",
+    selectedObjects: "{count} oggetti selezionati",
+    resetObjectScope: "Azzera la selezione degli oggetti",
     title: "Cerca nel Database",
     open: "Cerca nel Database",
     keyword: "Parola chiave",
@@ -5480,6 +5492,7 @@ export default withEnglishFallback({
     scopeSequences: "sequenze",
     scopeFunctions: "funzioni",
     stepSkipped: "Ignorato perché un passaggio precedente richiesto non è riuscito.",
+    selectedObjectsCount: "{count} oggetti selezionati",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Le date dei job in questa versione di OceanBase supportano solo la precisione al microsecondo. Imposta a 0 le cifre 7–9 dei secondi frazionari e genera di nuovo l'anteprima; l'input originale è stato conservato.",
@@ -7660,6 +7673,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL grezzo",
     },
+    preserveQuotedBracedParameters: "Mantieni i segnaposto del template nelle stringhe racchiuse tra virgolette singole",
   },
   transfer: {
     log: {
@@ -10765,6 +10779,7 @@ export default withEnglishFallback({
     showConnectionGroupPath: "Mostra il percorso completo del gruppo per le connessioni query",
     showConnectionGroupPathDescription: "Se attivato, il selettore di connessione nell'angolo in alto a destra della pagina query mostrerà il percorso completo del gruppo prima del nome della connessione; se disattivato, mostrerà solo il nome della connessione.",
     shortcutConvertSelectionToDelimited: "Converti il contenuto selezionato in un elenco delimitato",
+    sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

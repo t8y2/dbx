@@ -1321,6 +1321,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "รายการนี้ไม่พร้อมใช้งานในแถบด้านข้าง อาจถูกลบหรือซ่อนไว้",
     locateSqlFile: "ค้นหาในรายการไฟล์ SQL",
     locateActiveTab: "ค้นหาในแถบด้านข้าง",
+    searchAllDatabases: "ค้นหาฐานข้อมูลทั้งหมด",
   },
   savedSql: {
     openDefaultQuery: "เปิดคำสั่งค้นหาเริ่มต้น",
@@ -2902,6 +2903,8 @@ export default withEnglishFallback({
     showLabels: "แสดงค่า",
   },
   grid: {
+    setTablePageSizeDefault: "ตั้งค่าเริ่มต้นสำหรับตารางนี้",
+    resetTablePageSizeDefault: "ใช้ค่าเริ่มต้นส่วนกลาง",
     exportSelectedRowsScope: "แถวที่เลือก",
     exportSelectedCellsScope: "เซลล์ที่เลือก",
     exportSelectedColumnsScope: "คอลัมน์ที่เลือก",
@@ -3962,6 +3965,12 @@ export default withEnglishFallback({
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
     rowJsonPreview: "ตัวอย่าง JSON",
+    binaryColumnFormats: {
+      "binary-hex": "ไบนารีเป็นเลขฐานสิบหก",
+      "binary-text": "ไบนารีเป็น UTF-8",
+      "binary-uuid": "ไบนารีเป็น UUID",
+      "binary-uuid-swapped": "ไบนารีเป็น UUID (สลับบิตเวลา)",
+    },
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",
@@ -4399,6 +4408,9 @@ export default withEnglishFallback({
     deselectGroup: "ยกเลิกการเลือกกลุ่ม",
   },
   databaseSearch: {
+    chooseObjects: "เลือกตารางหรือมุมมอง",
+    selectedObjects: "เลือกแล้ว {count} ออบเจ็กต์",
+    resetObjectScope: "ล้างการเลือกออบเจ็กต์",
     title: "ค้นหาฐานข้อมูล",
     open: "ค้นหาฐานข้อมูล",
     keyword: "คีย์เวิร์ด",
@@ -6410,6 +6422,7 @@ export default withEnglishFallback({
     scopeSequences: "Sequences",
     scopeFunctions: "Functions",
     stepSkipped: "ข้ามเนื่องจากขั้นตอนก่อนหน้าที่จำเป็นล้มเหลว",
+    selectedObjectsCount: "เลือกแล้ว {count} รายการ",
   },
   xuguUserPermissions: {
     title: "ผู้ใช้และสิทธิ์ของ Xugu",
@@ -9446,6 +9459,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL ดิบ",
     },
+    preserveQuotedBracedParameters: "เก็บตัวแทนที่ของเทมเพลตไว้ในสตริงที่อยู่ในเครื่องหมายคำพูดเดี่ยว",
   },
   transfer: {
     log: {
@@ -12715,6 +12729,7 @@ export default withEnglishFallback({
     shortcutConvertSelectionToDelimited: "แปลงเนื้อหาที่เลือกเป็นรายการที่คั่นด้วยตัวคั่น",
     crossWindowTabDragPreview: "ตัวอย่างการลากแท็บข้ามหน้าต่าง",
     crossWindowTabDragPreviewDescription: "เมื่อเปิดใช้งาน สามารถลากแท็บไปยังหน้าต่าง DBX อื่น หรือลากออกเพื่อสร้างหน้าต่างใหม่ได้ เมื่อปิดใช้งานจะปิดฟีเจอร์ทดลองนี้",
+    sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

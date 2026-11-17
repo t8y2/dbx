@@ -244,6 +244,7 @@ import {
   type SyncSnapshotCatalog,
   type WebDavConfig,
 } from "@/lib/backend/api";
+import type { DesktopSettings } from "@/lib/backend/tauri";
 import {
   MAX_SNIPPET_AUTO_UPLOAD_INTERVAL_MINUTES,
   normalizedSnippetAutoUploadInterval,
@@ -1018,6 +1019,7 @@ watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarColumnDoubleClickAction = ref(settingsStore.editorSettings.sidebarColumnDoubleClickAction);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
+const editSidebarSimpleHideIndexes = ref(settingsStore.editorSettings.sidebarSimpleHideIndexes);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
@@ -1443,6 +1445,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarActivation: editSidebarActivation.value,
     sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
@@ -2168,6 +2171,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
   editSidebarColumnDoubleClickAction.value = settingsStore.editorSettings.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editSidebarSimpleHideIndexes.value = settingsStore.editorSettings.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
@@ -2359,6 +2363,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarActivation: editSidebarActivation,
   sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction,
   sidebarObjectDisplay: editSidebarObjectDisplay,
+  sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
   sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
@@ -2984,6 +2989,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
@@ -3226,6 +3232,7 @@ function resetAllDefaults() {
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
@@ -6227,6 +6234,11 @@ async function chooseLocalBackupImport() {
   });
 }
 
+async function applySyncedDesktopSettings(settings: DesktopSettings) {
+  await settingsStore.updateDesktopSettings(settings);
+  if (settings.app_theme_mode) setThemeMode(settings.app_theme_mode, { persist: false });
+}
+
 async function confirmSyncSelection(selection: SyncSelection) {
   if (syncMethodTab.value === "local") {
     await nextTick();
@@ -6242,7 +6254,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
 
       const result = await localBackupImport(localBackupPath.value, selection.includeSecrets ? localBackupSecretsPassphrase.value : undefined, selection.includeSecrets, selection);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await applySyncedDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
       await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
@@ -6275,7 +6287,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
       persistSnippetRemoteContentHash(result.summary.snippetId, result.summary.remoteContentHash);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await applySyncedDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
       await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
@@ -6307,7 +6319,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     const config = currentWebDavConfig();
     const result = await webdavSyncDownload(config, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-    await settingsStore.updateDesktopSettings(result.desktopSettings);
+    await applySyncedDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.reloadFromStorage();
     await tunnelProfileStore.refresh();
@@ -9956,6 +9968,10 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+              </div>
+              <div v-if="editSidebarObjectDisplay === 'simple'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <Label for="sidebar-simple-hide-indexes">{{ t("settings.sidebarSimpleHideIndexes") }}</Label>
+                <Switch id="sidebar-simple-hide-indexes" v-model="editSidebarSimpleHideIndexes" />
               </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">

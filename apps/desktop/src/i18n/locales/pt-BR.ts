@@ -1238,6 +1238,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "O item não está disponível na barra lateral. Ele pode ter sido removido ou ocultado.",
     locateSqlFile: "Localizar na lista de arquivos SQL",
     locateActiveTab: "Localizar na barra lateral",
+    searchAllDatabases: "Pesquisar todos os bancos de dados",
   },
   savedSql: {
     openDefaultQuery: "Abrir consulta padrão",

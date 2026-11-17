@@ -142,7 +142,10 @@ const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop
 const workspaceWindowCaption = computed(() => {
   if (!isDesktop) return "";
   if (props.workspaceWindowLabel === "main") return t("contextMenu.mainWindow");
-  if (props.workspaceWindowLabel?.startsWith("dbx-tab-") && !props.workspaceWindowLabel.startsWith("dbx-tab-drag-preview")) return t("toolbar.independentWindow");
+  if (props.workspaceWindowLabel?.startsWith("dbx-tab-") && !props.workspaceWindowLabel.startsWith("dbx-tab-drag-preview")) {
+    const labels = [props.workspaceWindowLabel, ...(props.workspaceWindowTargets ?? []).map((window) => window.label)].filter((label, index, all) => label !== "main" && all.indexOf(label) === index).sort();
+    return t("contextMenu.detachedWindow", { number: labels.indexOf(props.workspaceWindowLabel) + 1 });
+  }
   return "";
 });
 const workspaceWindowMenuVisible = computed(() => {
@@ -153,13 +156,16 @@ const workspaceWindowMenuVisible = computed(() => {
 const workspaceWindowItems = computed<LightDropdownItem[]>(() => {
   if (!props.workspaceWindowLabel) return [];
   const windows = [{ label: props.workspaceWindowLabel, title: "" }, ...(props.workspaceWindowTargets ?? [])].filter((window, index, all) => all.findIndex((candidate) => candidate.label === window.label) === index);
-  const detachedLabels = windows.filter((window) => window.label !== "main").map((window) => window.label);
+  const detachedLabels = windows
+    .filter((window) => window.label !== "main")
+    .map((window) => window.label)
+    .sort();
   return windows.map((window) => {
     const label = window.label === "main" ? t("contextMenu.mainWindow") : t("contextMenu.detachedWindow", { number: detachedLabels.indexOf(window.label) + 1 });
     return {
       label,
       value: window.label,
-      title: window.title || label,
+      title: label,
       icon: window.label === "main" ? AppWindow : PanelsTopLeft,
       disabled: window.label === props.workspaceWindowLabel,
     };
@@ -877,10 +883,11 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
           :items="workspaceWindowItems"
           :aria-label="workspaceWindowCaption"
           :trigger-title="workspaceWindowCaption"
-          trigger-class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          :trigger-label="workspaceWindowCaption"
+          trigger-class="flex h-7 items-center justify-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
           :trigger-icon="PanelsTopLeft"
-          :show-trigger-label="false"
-          :show-chevron="false"
+          :show-trigger-label="true"
+          :show-chevron="true"
           check-position="none"
           :match-trigger-width="false"
           @click="emit('refresh-workspace-windows')"

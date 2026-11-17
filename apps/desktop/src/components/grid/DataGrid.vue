@@ -221,7 +221,7 @@ import {
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
-import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, resolveColumnFormatter, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import {
   BOOLEAN_CELL_EDITOR_VALUES,
@@ -8576,6 +8576,13 @@ const CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH = 512;
 
 const resolvedColumnFormatters = computed(() => props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)));
 const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
+// BSON dates carry their type with each value. Mixed columns and subdocuments
+// may contain dates even when the column itself has no temporal type.
+const mongoDateDisplayFormatter = computed(() => {
+  if (!usesMongoDocumentGridValues.value) return undefined;
+  return resolveColumnFormatter(undefined, {}, { pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat, columnType: "datetime" });
+});
+const mongoDateDisplaySignature = computed(() => formatterSignature(mongoDateDisplayFormatter.value));
 const primitiveCellFormatCache = new Map<string, string>();
 let objectCellFormatCache = new WeakMap<object, Map<number, string>>();
 // 搜索用小写文本缓存：按行数组身份挂 WeakMap（工作集=当前结果行，GC 回收），
@@ -8612,7 +8619,7 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number, limitDisplay = true): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   if (usesMongoDocumentGridValues.value) {
-    const documentGridText = mongoDocumentGridDisplayText(value, formatter);
+    const documentGridText = mongoDocumentGridDisplayText(value, formatter ?? mongoDateDisplayFormatter.value);
     if (documentGridText !== undefined) return documentGridText;
   }
   if (formatter?.kind === "foreign-key-display" && columnIndex !== undefined) {
@@ -8663,7 +8670,7 @@ function formatCellCached(value: CellValue, columnIndex?: number, originalBytes?
     return formatCell(value, columnIndex, originalBytes);
   }
 
-  const key = `${primitiveCellFormatKey(value, columnIndex)}\u0000${originalBytes ?? ""}`;
+  const key = `${primitiveCellFormatKey(value, columnIndex)}\u0000${originalBytes ?? ""}\u0000${mongoDateDisplaySignature.value}`;
   const cached = primitiveCellFormatCache.get(key);
   if (cached !== undefined) return cached;
   return rememberPrimitiveCellFormat(key, formatCell(value, columnIndex, originalBytes));
@@ -8711,6 +8718,10 @@ watch(
     scheduleCanvasDraw();
   },
 );
+watch(mongoDateDisplaySignature, () => {
+  clearCellFormatCache();
+  scheduleCanvasDraw();
+});
 
 function quoteIdent(name: string): string {
   return quoteTableDataIdentifier(props.databaseType, name, connectionStore.connectionIdentifierQuote?.(props.connectionId));
@@ -10071,11 +10082,12 @@ const {
   captureColumnFormatterDisplay: () => {
     const formatters = resolvedColumnFormatters.value.map((formatter) => (formatter ? (JSON.parse(JSON.stringify(formatter)) as ColumnFormatterConfig) : undefined));
     const mongo = usesMongoDocumentGridValues.value;
+    const mongoDateFormatter = mongoDateDisplayFormatter.value;
     const foreignKeys = new Map([...foreignKeyDisplayLabels.value].map(([index, state]) => [index, { ...state, labels: new Map(state.labels) }]));
     return (value, index) => {
       const formatter = formatters[index];
       if (mongo) {
-        const text = mongoDocumentGridDisplayText(value, formatter);
+        const text = mongoDocumentGridDisplayText(value, formatter ?? mongoDateFormatter);
         if (text !== undefined) return text;
       }
       if (formatter?.kind === "foreign-key-display") {

@@ -398,3 +398,15 @@ it("disables export of picked routines once objects are no longer included (#139
 
   expect(button("databaseExport.export").disabled).toBe(true);
 });
+it("falls back to the database name when a schema-aware connection returns no schemas (#15068)", async () => {
+  connection.db_type = "jdbc";
+  mocks.listSchemas.mockResolvedValue([]);
+  const dialog = await mountDialog();
+  // The export button stays enabled: schema falls back to the database name
+  // (matching the sidebar tree convention) instead of emptying canExport.
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  expect(operations[0]!.request).toMatchObject({ database: "app", schema: "app" });
+  terminal(0);
+  await vi.waitFor(() => expect(useExportTracker().tasks.value[0]!.status).toBe("Done"));
+});

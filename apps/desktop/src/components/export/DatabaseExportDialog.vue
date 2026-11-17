@@ -388,6 +388,15 @@ async function loadSchemas(preferredSchema = "") {
   }
 
   const schemaList = filterExportableSchemas(await api.listSchemas(connectionId.value, database.value), config?.db_type);
+  // #15068: engines without a real schema layer (MySQL over generic JDBC) return
+  // no schemas, which would leave schema empty and disable the export button.
+  // Fall back to the database name, matching the sidebar tree convention
+  // (databaseObjectTreeNodeSchema) so listTables keeps resolving tables.
+  if (schemaList.length === 0) {
+    schemas.value = [];
+    schema.value = database.value;
+    return;
+  }
   const selected = preferredSchema && schemaList.includes(preferredSchema) ? preferredSchema : schemaList.includes("public") ? "public" : (schemaList[0] ?? "");
   schemas.value = schemaList;
   schema.value = selected;

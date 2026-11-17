@@ -2855,6 +2855,7 @@ export default withEnglishFallback({
     exportSelectedColumnsMarkdown: "匯出選取欄為 Markdown",
     exportSelectedColumnsHtml: "匯出選取欄為 HTML",
     exportSelectedColumnsSql: "匯出選取欄為 SQL INSERT",
+    exportSelectedColumnsSqlUpdates: "匯出選取欄為 SQL UPDATE",
     exportSelectedColumnsTxt: "匯出選取欄為 TXT",
     exportSelectedCellsCsv: "匯出選取範圍為 CSV",
     exportSelectedCellsXlsx: "匯出選取範圍為 XLSX",

@@ -238,7 +238,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       sourceItems = items.map((item) => fullItemsById.get(item.id) ?? item);
       selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
       selectionKind = "rows";
-    } else if (isMultiCellSelection && matrix) {
+    } else if (matrix && (isMultiCellSelection || (extractor === "sql-updates" && options.hasColumnSelection.value))) {
       const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && !item.isDraft);
       sourceRows = items.map((item) => (fullItemsById.get(item.id) ?? item).data);
       sourceRowIds = items.map((item) => item.id);

@@ -3311,6 +3311,7 @@ export default withEnglishFallback({
     exportSelectedColumnsMarkdown: "导出选中列为 Markdown",
     exportSelectedColumnsHtml: "导出选中列为 HTML",
     exportSelectedColumnsSql: "导出选中列为 SQL INSERT",
+    exportSelectedColumnsSqlUpdates: "导出选中列为 SQL UPDATE",
     exportSelectedColumnsTxt: "导出选中列为 TXT",
     exportSelectedCellsCsv: "导出选区为 CSV",
     exportSelectedCellsXlsx: "导出选区为 XLSX",

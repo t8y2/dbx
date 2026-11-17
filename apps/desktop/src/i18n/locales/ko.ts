@@ -1244,6 +1244,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "사이드바에서 해당 항목을 찾을 수 없습니다. 삭제되었거나 숨겨져 있을 수 있습니다.",
     locateSqlFile: "SQL 파일 목록에서 찾기",
     locateActiveTab: "사이드바에서 찾기",
+    searchAllDatabases: "모든 데이터베이스 검색",
   },
   savedSql: {
     openDefaultQuery: "기본 쿼리 열기",

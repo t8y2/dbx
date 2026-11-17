@@ -1320,6 +1320,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "รายการนี้ไม่พร้อมใช้งานในแถบด้านข้าง อาจถูกลบหรือซ่อนไว้",
     locateSqlFile: "ค้นหาในรายการไฟล์ SQL",
     locateActiveTab: "ค้นหาในแถบด้านข้าง",
+    searchAllDatabases: "ค้นหาฐานข้อมูลทั้งหมด",
   },
   savedSql: {
     openDefaultQuery: "เปิดคำสั่งค้นหาเริ่มต้น",

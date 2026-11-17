@@ -400,8 +400,20 @@ const sidebarListOptionItems = computed(() => [
         },
       ]
     : []),
+  {
+    value: "opened-databases",
+    label: t("settings.sidebarSearchOpenedDatabasesOnly"),
+    role: "menuitemcheckbox" as const,
+    separatorBefore: true,
+    disabled: regexMode.value || settingsStore.editorSettings.sidebarGlobalSearchLocal,
+  },
 ]);
-const selectedSidebarListOptions = computed(() => [`match:${searchMatchMode.value}`, `sort:${settingsStore.editorSettings.sidebarConnectionSortMode}`, ...selectedSearchScopes.value.map((scope) => `scope:${scope}`)]);
+const selectedSidebarListOptions = computed(() => [
+  `match:${searchMatchMode.value}`,
+  `sort:${settingsStore.editorSettings.sidebarConnectionSortMode}`,
+  ...selectedSearchScopes.value.map((scope) => `scope:${scope}`),
+  ...(settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly ? ["opened-databases"] : []),
+]);
 const hasCustomSidebarListOptions = computed(() => isConnectionListAlphabeticallySorted.value || hasSearchScopeFilter.value);
 
 function updateConnectionListSortMode(mode: string) {
@@ -432,6 +444,12 @@ function toggleSearchScope(scope: SearchScope) {
 }
 
 function selectSidebarListOption(value: string) {
+  if (value === "opened-databases") {
+    if (!regexMode.value && !settingsStore.editorSettings.sidebarGlobalSearchLocal) {
+      settingsStore.updateEditorSettings({ sidebarSearchOpenedDatabasesOnly: !settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly });
+    }
+    return;
+  }
   if (value === "match:fuzzy" || value === "match:contains" || value === "match:exact") {
     if (!regexMode.value) settingsStore.updateEditorSettings({ sidebarSearchMatchMode: value === "match:exact" ? "exact" : value === "match:contains" ? "contains" : "fuzzy" });
     return;
@@ -3404,6 +3422,19 @@ defineExpose({
     <EventTriggerDetailsDialog v-if="sidebarEventTriggerDetailsTarget" ref="sidebarEventTriggerDetailsDialogRef" :node="sidebarEventTriggerDetailsTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
+    </div>
+    <div v-else-if="deferredSearchQuery && !isSidebarSearchLoading && flatNodes.length === 0 && !(regexMode && compileSearchRegex(deferredSearchQuery).invalid)" class="px-3 py-5 text-center text-xs text-muted-foreground">
+      <p role="status">{{ t("grid.noSearchResults") }}</p>
+      <Button
+        v-if="!regexMode && !settingsStore.editorSettings.sidebarGlobalSearchLocal && settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly && store.connectedIds.size > 0"
+        variant="ghost"
+        size="sm"
+        class="mt-1 h-auto max-w-full whitespace-normal text-primary"
+        :title="t('settings.sidebarSearchOpenedDatabasesOnlyDescription')"
+        @click="settingsStore.updateEditorSettings({ sidebarSearchOpenedDatabasesOnly: false })"
+      >
+        {{ t("sidebar.searchAllDatabases") }}
+      </Button>
     </div>
   </div>
 </template>

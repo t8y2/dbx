@@ -1443,6 +1443,7 @@ export default {
     regexSearch: "Regex search",
     regexSearchTooltip: "Match sidebar names, comments, and aliases with JavaScript regular expressions.",
     listOptions: "Sort and filter",
+    searchAllDatabases: "Search all databases",
     searchMatchMode: "Search matching",
     searchMatchModeFuzzy: "Smart matching",
     searchMatchModeContains: "Contains text",

@@ -1214,6 +1214,7 @@ export default withEnglishFallback({
     regexSearch: "正規表示式搜尋",
     regexSearchTooltip: "使用 JavaScript 正規表示式比對側邊欄名稱、備註與別名。",
     listOptions: "排序與篩選",
+    searchAllDatabases: "搜尋所有資料庫",
     searchMatchMode: "搜尋比對",
     searchMatchModeFuzzy: "智慧比對",
     searchMatchModeContains: "連續包含",

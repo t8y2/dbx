@@ -1218,6 +1218,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "Элемент недоступен на боковой панели. Возможно, он был удалён или скрыт.",
     locateSqlFile: "Найти в списке SQL-файлов",
     locateActiveTab: "Найти в боковой панели",
+    searchAllDatabases: "Поиск во всех базах данных",
   },
   savedSql: {
     openDefaultQuery: "Открыть запрос по умолчанию",

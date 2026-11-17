@@ -1379,6 +1379,7 @@ export default withEnglishFallback({
     regexSearch: "正则搜索",
     regexSearchTooltip: "使用 JavaScript 正则表达式匹配侧边栏名称、备注和别名。",
     listOptions: "排序与筛选",
+    searchAllDatabases: "搜索全部数据库",
     searchMatchMode: "搜索匹配",
     searchMatchModeFuzzy: "智能匹配",
     searchMatchModeContains: "连续包含",

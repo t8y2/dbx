@@ -5,6 +5,8 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 import type { ConnectionConfig } from "@/types/database";
 
+vi.mock("@/lib/backend/api", () => ({ connectionWriteUnlockState: vi.fn(async () => 0) }));
+
 function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
     id: "conn-1",

@@ -117,11 +117,26 @@ describe("treeNodeClick", () => {
   });
 
   it("browses objects on single-click activation only when enabled", () => {
-    expect(treeNodeRowAction("database", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("database", true, "single", "postgres", true, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("database", false, "single", "postgres", true, true)).toBe("open-object-browser");
-    expect(treeNodeRowAction("schema", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("schema", true, "single", "postgres", true, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("database", true, "single", "postgres", false, true)).toBe("toggle");
     expect(treeNodeRowAction("schema", true, "single", "postgres", false, true)).toBe("toggle");
+  });
+
+  it.each(["database", "schema", "mongo-db"] as const)("expands %s by default and preserves expansion when opted out", (type) => {
+    expect(treeNodeRowAction(type, true, "single", "mysql", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction(type, true, "single", "mysql", true, true, false)).toBe("open-object-browser");
+    expect(treeNodeRowDoubleClickAction(type, true, "double", true, "mysql", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction(type, true, "double", true, "mysql", false, true, false)).toBe("open-object-browser");
+    for (const autoExpand of [false, true]) {
+      expect(treeNodeRowAction(type, true, "single", "mysql", false, true, autoExpand)).toBe("toggle");
+      expect(treeNodeRowDoubleClickAction(type, true, "double", true, "mysql", false, false, autoExpand)).toBe("toggle");
+      expect(treeNodeRowAction(type, true, "single", "mysql", true, false, autoExpand)).toBe("toggle");
+      expect(treeNodeRowDoubleClickAction(type, false, "double", true, "mysql", false, true, autoExpand)).toBe("toggle");
+      expect(treeNodeRowAction(type, false, "single", "mysql", true, true, autoExpand)).toBe("open-object-browser");
+      expect(treeNodeRowDoubleClickAction(type, true, "double", false, "mysql", false, true, autoExpand)).toBe("open-object-browser");
+    }
   });
 
   it("keeps the first click selection-only in double-click activation", () => {
@@ -137,7 +152,7 @@ describe("treeNodeClick", () => {
   });
 
   it("browses objects on double-click activation only when enabled", () => {
-    expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowDoubleClickAction("schema", true, "double", false, "postgres", false, true)).toBe("open-object-browser");
     expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, false)).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("schema", true, "double", false, "postgres", false, false)).toBe("none");
@@ -161,10 +176,10 @@ describe("treeNodeClick", () => {
   });
 
   it("opens the MongoDB object browser from mongo-db nodes like SQL databases", () => {
-    expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", true, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", false, true)).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("mongo-db", true, "single", true, "mongodb", false, true)).toBe("none");
-    expect(treeNodeRowDoubleClickAction("mongo-db", true, "double", true, "mongodb", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction("mongo-db", true, "double", true, "mongodb", false, true, true)).toBe("open-object-browser-and-expand");
   });
 
   it("expands package containers while preserving source behavior for leaf packages", () => {

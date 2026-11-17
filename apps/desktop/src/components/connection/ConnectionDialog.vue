@@ -3251,6 +3251,7 @@ function applyPluginConnectionPrefill(draft: ConnectionDeepLinkDraft): boolean {
   pluginFormValues.value = pluginConnectionFormValues(entry.contribution, seed);
 
   form.value.name = seed.name;
+  form.value.one_time = draft.oneTime || undefined;
   if (draft.host) form.value.host = draft.host;
   if (draft.port) form.value.port = draft.port;
   if (draft.username !== undefined) form.value.username = draft.username;
@@ -5134,6 +5135,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
     config.save_password = form.value.save_password;
+    config.one_time = form.value.one_time;
     // 生产保护只拦截 SQL/数据编辑路径，插件连接走不到；表单已隐藏该区块，提交时清掉历史残留标志。
     config.is_production = false;
     config.production_databases = [];

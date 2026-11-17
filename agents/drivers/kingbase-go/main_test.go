@@ -2079,11 +2079,14 @@ func TestListTriggerDefinitionsFallsBackToSingleArgument(t *testing.T) {
 
 func TestListTriggersFallsBackToV7InternalPredicate(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "||") {
+			t.Fatalf("listTriggers query must not use string || operator: %s", query)
+		}
 		if strings.Contains(query, "tg.tgisinternal") {
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column TG.TGISINTERNAL does not exist"}
 		}
 		if strings.Contains(query, "tg.tgkind <> 'c'") {
-			return &valueRows{columns: []string{"tgname", "events", "tgtype"}, rows: [][]driver.Value{{"orders_audit", "INSERT", int64(7)}}}, nil
+			return &valueRows{columns: []string{"tgname", "tgtype"}, rows: [][]driver.Value{{"orders_audit", int64(7)}}}, nil
 		}
 		return nil, errors.New("unexpected query: " + query)
 	}}
@@ -2095,7 +2098,7 @@ func TestListTriggersFallsBackToV7InternalPredicate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(triggers) != 1 || triggers[0].Name != "orders_audit" {
+		if len(triggers) != 1 || triggers[0].Name != "orders_audit" || triggers[0].Event != "INSERT" || triggers[0].Timing != "BEFORE" {
 			t.Fatalf("unexpected triggers: %#v", triggers)
 		}
 	}
@@ -2155,6 +2158,9 @@ func TestMetadataNormalizationHelpers(t *testing.T) {
 	}
 	if decodeTriggerTiming(1<<6) != "INSTEAD OF" || decodeTriggerTiming(1<<1) != "BEFORE" || decodeTriggerTiming(0) != "AFTER" {
 		t.Fatal("trigger timing decoding is incorrect")
+	}
+	if decodeTriggerEvent(4|8|16|32) != "INSERT,DELETE,UPDATE,TRUNCATE" || decodeTriggerEvent(4|16) != "INSERT,UPDATE" || decodeTriggerEvent(0) != "" {
+		t.Fatal("trigger event decoding is incorrect")
 	}
 	length := boundedVarcharLength("character varying ( 128 )")
 	if length == nil || *length != 128 {
@@ -2652,6 +2658,38 @@ func TestTableCommentCachesMissingCatalogOIDCapability(t *testing.T) {
 	}
 	if queries := state.snapshotQueries(); len(queries) != 1 {
 		t.Fatalf("cached capability must avoid all later comment requests, got %d: %v", len(queries), queries)
+	}
+}
+
+func TestGetColumnsMarksMissingCatalogOID(t *testing.T) {
+	tests := []struct {
+		name        string
+		mysqlCompat bool
+		failure     error
+		wantMarker  bool
+	}{
+		{name: "catalog", failure: &gokb.Error{Code: "42703", Message: "column c.oid does not exist"}, wantMarker: true},
+		{name: "mysql catalog join", mysqlCompat: true, failure: &gokb.Error{Code: "42703", Message: "column rel.oid does not exist"}, wantMarker: true},
+		{name: "unrelated column", failure: &gokb.Error{Code: "42703", Message: "column a.attnum does not exist"}},
+		{name: "permission denied", failure: &gokb.Error{Code: "42501", Message: "permission denied for relation sys_class"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(_ string) (driver.Rows, error) {
+				return nil, test.failure
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode.mysqlCompat = test.mysqlCompat
+			_, _, err := server.dispatch("get_columns", map[string]json.RawMessage{"schema": json.RawMessage("\"public\""), "table": json.RawMessage("\"orders\"")})
+			if !errors.Is(err, test.failure) {
+				t.Fatalf("expected the original metadata error, got %v", err)
+			}
+			rpcError := errorResponse(nil, err).Error
+			if strings.HasPrefix(rpcError.Message, "KINGBASE_CATALOG_OID_UNAVAILABLE:") != test.wantMarker {
+				t.Fatalf("unexpected RPC error: %s", rpcError.Message)
+			}
+		})
 	}
 }
 
@@ -3291,6 +3329,16 @@ func TestKingbaseCustomTypeQueriesFollowCatalog(t *testing.T) {
 	if !strings.Contains(pgQueries.domainRenderedDefault, "pg_get_expr") || !strings.Contains(sysQueries.domainRenderedDefault, "sys_get_expr") {
 		t.Fatal("domain default renderer must follow the selected catalog")
 	}
+	for _, query := range []string{
+		pgQueries.general, pgQueries.compositeMembers, pgQueries.domainBaseType,
+		pgQueries.rangeAttributes, pgQueries.rangeAttributesForMultirange, pgQueries.collationName,
+		sysQueries.general, sysQueries.compositeMembers, sysQueries.domainBaseType,
+		sysQueries.rangeAttributes, sysQueries.rangeAttributesForMultirange, sysQueries.collationName,
+	} {
+		if strings.Contains(query, "||") {
+			t.Fatalf("custom type query must not use || string operator: %s", query)
+		}
+	}
 }
 
 func TestKingbaseDomainDefaultRenderFailureIsDegradable(t *testing.T) {
@@ -3445,12 +3493,15 @@ func TestCustomTypeDetailsJSONNeverNullsSlices(t *testing.T) {
 
 func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "||") {
+			return nil, errors.New("listTriggers query must not use || operator: " + query)
+		}
 		if !strings.Contains(query, "FROM pg_catalog.pg_trigger") || !strings.Contains(query, "NOT tg.tgisinternal") {
 			return nil, errors.New("unexpected query: " + query)
 		}
 		return &valueRows{
-			columns: []string{"tgname", "event", "tgtype"},
-			rows:    [][]driver.Value{{"orders_before", "INSERT,UPDATE", int64(2)}, {"orders_instead", "DELETE", int64(64)}},
+			columns: []string{"tgname", "tgtype"},
+			rows:    [][]driver.Value{{"orders_before", int64(22)}, {"orders_instead", int64(72)}},
 		}, nil
 	}}
 	server := newServer()
@@ -3461,7 +3512,9 @@ func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(triggers) != 2 || triggers[0].Timing != "BEFORE" || triggers[1].Timing != "INSTEAD OF" {
+	if len(triggers) != 2 ||
+		triggers[0].Event != "INSERT,UPDATE" || triggers[0].Timing != "BEFORE" ||
+		triggers[1].Event != "DELETE" || triggers[1].Timing != "INSTEAD OF" {
 		t.Fatalf("unexpected triggers: %#v", triggers)
 	}
 }

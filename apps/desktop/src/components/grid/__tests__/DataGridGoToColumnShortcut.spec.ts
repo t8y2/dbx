@@ -59,6 +59,7 @@ function mountGrid(
     slots?: Record<string, () => ReturnType<typeof h>>;
     withTableMetadata?: boolean;
     context?: "table-data" | "results";
+    columnLayoutScopeKey?: string;
     queryMultiSource?: boolean;
     databaseType?: DatabaseType;
     sourceDatabase?: string;
@@ -106,6 +107,7 @@ function mountGrid(
                   result,
                   databaseType: options.databaseType ?? "mysql",
                   context: options.context ?? "table-data",
+                  columnLayoutScopeKey: options.columnLayoutScopeKey,
                   onExecuteSql: options.filterControls ? async () => undefined : undefined,
                   queryMultiSource: options.queryMultiSource,
                   joinedWriteTargets: options.joinedWriteTargetCount ? Array.from({ length: options.joinedWriteTargetCount }, (_, index) => ({ tableMeta: { tableName: `table_${index}`, columns: [], primaryKeys: [] }, sourceColumns: ["id"] })) : undefined,
@@ -211,6 +213,12 @@ function goToColumnEvent(target: HTMLElement): KeyboardEvent {
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "g" });
   target.dispatchEvent(event);
   return event;
+}
+
+function dialogButton(label: string): HTMLButtonElement {
+  const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === label);
+  if (!button) throw new Error(`Dialog button ${label} not found`);
+  return button;
 }
 
 afterEach(() => {
@@ -468,11 +476,15 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(host.querySelector("[data-column-lookup-panel]")).not.toBeNull();
   });
 
-  it("lists columns in the local column order after the user reorders them", async () => {
-    const { host, grid } = mountGrid({ columns: ["id", "name"] });
+  it("requires confirmation before persisting table-data column order", async () => {
+    const { host, grid } = mountGrid({ columns: ["id", "name"], columnLayoutScopeKey: "test-confirm-column-order-save" });
     await settle();
 
     grid.value!.moveDisplayableColumn(1, 0);
+    await settle();
+
+    expect(document.body.textContent).toContain(i18n.global.t("grid.confirmColumnOrderTitle"));
+    dialogButton(i18n.global.t("common.save")).click();
     await settle();
 
     const root = gridRoot(host);
@@ -481,6 +493,25 @@ describe("DataGrid go-to-column shortcut", () => {
     await settle();
 
     expect(goToColumnOrder()).toEqual(["name#2", "id#1"]);
+  });
+
+  it("discards a table-data column reorder when confirmation is cancelled", async () => {
+    const { host, grid } = mountGrid({ columns: ["id", "name"], columnLayoutScopeKey: "test-confirm-column-order-cancel" });
+    await settle();
+
+    grid.value!.moveDisplayableColumn(1, 0);
+    await settle();
+
+    expect(document.body.textContent).toContain(i18n.global.t("grid.confirmColumnOrderTitle"));
+    dialogButton(i18n.global.t("common.cancel")).click();
+    await settle();
+
+    const root = gridRoot(host);
+    root.focus();
+    goToColumnEvent(root);
+    await settle();
+
+    expect(goToColumnOrder()).toEqual(["id#1", "name#2"]);
   });
 
   it("does not consume the configured shortcut without a displayable column", async () => {

@@ -403,7 +403,14 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
             }
             ok(add_rownum_limit(&statement, safe_limit, safe_offset))
         }
-        TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
+        TablePaginationStrategy::AgentMaxRows
+        | TablePaginationStrategy::TeradataTop
+        | TablePaginationStrategy::Unbounded => {
+            // TeradataTop cannot appear for user queries (`pagination_strategy` routes
+            // Teradata user queries to AgentMaxRows, #14604), so the statement reaches
+            // the server exactly as written here too.
+            ok(format!("{statement};"))
+        }
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
             // Kingbase SQL Server compatibility mode and Xugu accept TOP as a real clause.

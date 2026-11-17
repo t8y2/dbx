@@ -35,6 +35,9 @@ use crate::transfer::{
     supports_primary_key_upsert, SqlBatchLimits,
 };
 
+mod delimited_reader;
+use delimited_reader::DelimitedReader;
+
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
@@ -826,7 +829,7 @@ fn unique_import_headers(headers: impl IntoIterator<Item = String>) -> Vec<Strin
 
 #[derive(Debug, Clone)]
 pub struct DelimitedParseConfig {
-    pub delimiter: u8,
+    pub delimiter: Vec<u8>,
     pub decimal_separator: char,
     pub trim_values: bool,
     pub empty_string_as_null: bool,
@@ -878,20 +881,17 @@ pub fn effective_delimited_config(
     options: &TableImportParseOptions,
 ) -> Result<DelimitedParseConfig, String> {
     let default_delimiter = match source_format {
-        TableImportSourceFormat::Tsv => b'\t',
-        _ => b',',
+        TableImportSourceFormat::Tsv => b"\t",
+        _ => b",",
     };
-    let delimiter = match options.delimiter.as_deref() {
+    let delimiter: &[u8] = match options.delimiter.as_deref() {
         None | Some("") => default_delimiter,
-        Some("\\t") | Some("tab") | Some("TAB") => b'\t',
-        Some(value) => {
-            let bytes = value.as_bytes();
-            if bytes.len() != 1 {
-                return Err("Delimiter must be a single-byte character".to_string());
-            }
-            bytes[0]
-        }
+        Some("\\t") | Some("tab") | Some("TAB") => b"\t",
+        Some(value) => value.as_bytes(),
     };
+    if delimiter.len() > 1 && delimiter.iter().any(|byte| matches!(byte, b'"' | b'\r' | b'\n')) {
+        return Err("A multi-character delimiter cannot contain a double quote or a line break".to_string());
+    }
 
     let null_literal = effective_delimited_null_literal(options.null_literal.as_deref());
     let decimal_separator = match options.decimal_separator.as_deref() {
@@ -901,7 +901,7 @@ pub fn effective_delimited_config(
     };
 
     Ok(DelimitedParseConfig {
-        delimiter,
+        delimiter: delimiter.to_vec(),
         decimal_separator,
         trim_values: options.trim_values.unwrap_or(false),
         // 配了 NULL 字面量时空字段一律是空串：否则字面量刚把 NULL 和空串分开，
@@ -958,7 +958,7 @@ pub fn csv_value(value: &str) -> serde_json::Value {
     csv_value_with_config(
         value,
         &DelimitedParseConfig {
-            delimiter: b',',
+            delimiter: b",".to_vec(),
             decimal_separator: '.',
             trim_values: false,
             empty_string_as_null: true,
@@ -1287,15 +1287,14 @@ fn open_delimited_csv_reader_with_progress(
     source_format: TableImportSourceFormat,
     options: &TableImportParseOptions,
     on_encoding_progress: impl FnMut(u64),
-) -> Result<(csv::Reader<StrictTranscodingReader<File>>, DelimitedParseConfig, TableImportTextEncoding), String> {
+) -> Result<(DelimitedReader<StrictTranscodingReader<File>>, DelimitedParseConfig, TableImportTextEncoding), String> {
     let config = effective_delimited_config(source_format, options)?;
     let (encoding, bom_len) =
         resolve_text_encoding_from_file_with_progress(path, options.encoding, on_encoding_progress)?;
     let mut file = File::open(path).map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(bom_len as u64)).map_err(|error| error.to_string())?;
     let transcoded = StrictTranscodingReader::new(file, encoding)?;
-    let reader =
-        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(transcoded);
+    let reader = DelimitedReader::new(transcoded, &config.delimiter);
     Ok((reader, config, encoding))
 }
 
@@ -1313,8 +1312,7 @@ fn parse_decoded_delimited_reader<R: IoRead>(
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
-    let reader =
-        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(reader);
+    let reader = DelimitedReader::new(reader, &config.delimiter);
     parse_csv_reader(reader, config, preview_limit, effective_encoding)
 }
 
@@ -1371,7 +1369,7 @@ pub fn parse_delimited_file_with_options(
 }
 
 fn parse_csv_reader<R: IoRead>(
-    mut reader: csv::Reader<R>,
+    mut reader: DelimitedReader<R>,
     config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
@@ -1380,16 +1378,16 @@ fn parse_csv_reader<R: IoRead>(
 }
 
 fn parse_csv_reader_bounded<R: IoRead>(
-    mut reader: csv::Reader<R>,
+    reader: impl Into<DelimitedReader<R>>,
     config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
-    parse_csv_reader_inner(&mut reader, config, preview_limit.max(1), effective_encoding, false)
+    parse_csv_reader_inner(&mut reader.into(), config, preview_limit.max(1), effective_encoding, false)
 }
 
 fn parse_csv_reader_inner<R: IoRead>(
-    reader: &mut csv::Reader<R>,
+    reader: &mut DelimitedReader<R>,
     config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
@@ -1400,7 +1398,7 @@ fn parse_csv_reader_inner<R: IoRead>(
     let mut columns = Vec::new();
     let mut record = csv::StringRecord::new();
     let mut index = 0usize;
-    while reader.read_record(&mut record).map_err(|e| e.to_string())? {
+    while reader.read_record(&mut record)? {
         index += 1;
         let row_number = index;
         if config.row_range.title_row == Some(row_number) {
@@ -7107,13 +7105,14 @@ fn delimited_record_to_row(
 }
 
 fn delimited_columns_and_first_record<R: std::io::Read>(
-    reader: &mut csv::Reader<R>,
+    reader: &mut DelimitedReader<R>,
     config: &DelimitedParseConfig,
 ) -> Result<(Vec<String>, Option<csv::StringRecord>), String> {
     let mut columns = Vec::new();
-    for (index, record) in reader.records().enumerate() {
-        let record = record.map_err(|e| e.to_string())?;
-        let row_number = index + 1;
+    let mut record = csv::StringRecord::new();
+    let mut row_number = 0;
+    while reader.read_record(&mut record)? {
+        row_number += 1;
         if config.row_range.title_row == Some(row_number) {
             columns = unique_import_headers(
                 record
@@ -7171,7 +7170,7 @@ fn stream_delimited_rows_to_channel(
             record
         } else {
             let mut record = csv::StringRecord::new();
-            if !reader.read_record(&mut record).map_err(|error| error.to_string())? {
+            if !reader.read_record(&mut record)? {
                 break;
             }
             record

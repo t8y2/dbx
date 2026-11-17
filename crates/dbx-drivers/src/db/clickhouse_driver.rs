@@ -347,10 +347,20 @@ async fn ch_query_with_limit(
 
 fn is_readonly_result_limit_error(error: &str) -> bool {
     let readonly_error = error.contains("Code: 164") || error.contains("(READONLY)");
-    readonly_error
+    if readonly_error
         && ["max_result_rows", "result_overflow_mode"]
             .iter()
             .any(|setting| error.contains(&format!("Cannot modify '{setting}' setting in readonly mode")))
+    {
+        return true;
+    }
+    // A per-user setting constraint (Code 452) rejects the same server-side
+    // result-limit settings with different wording; the client-side fallback
+    // applies there too.
+    error.contains("Code: 452")
+        && ["max_result_rows", "result_overflow_mode"]
+            .iter()
+            .any(|setting| error.contains(&format!("Setting {setting} should not be changed")))
 }
 
 async fn ch_query_with_client_limit(
@@ -622,11 +632,30 @@ fn limited_query_result(result: ChJsonResult, execution_time_ms: u128, max_rows:
     }
 }
 
+/// `reqwest::Error`'s `Display` only prints the failing phase plus the URL, so
+/// the actionable cause (DNS lookup, TCP connect, TLS handshake, refused
+/// connection) is only reachable through the error source chain. Dropping it
+/// made every transport failure read as the same opaque "error sending request
+/// for url" line, which is impossible to diagnose when the cause is
+/// environment-specific (firewall, VPN, unreachable proxy) (#14714).
+fn request_error_detail(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string().trim().to_string();
+        if !text.is_empty() && !parts.iter().any(|part| part.contains(&text)) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
 pub async fn test_connection(client: &ChClient, timeout: Duration) -> Result<(), String> {
     let url = build_connection_test_url(&client.base_url, client.extra_params.as_deref());
     let req = build_request(client, client.http.get(&url));
     let resp = with_connection_timeout("ClickHouse", timeout, async {
-        req.send().await.map_err(|e| format!("ClickHouse connection failed: {e}"))
+        req.send().await.map_err(|e| format!("ClickHouse connection failed: {}", request_error_detail(&e)))
     })
     .await?;
     if !resp.status().is_success() {
@@ -893,6 +922,23 @@ pub async fn execute_query_with_max_rows(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn connection_test_error_carries_the_reqwest_source_chain() {
+        // Port 1 on loopback is closed everywhere, so the request fails during
+        // TCP connect and the source chain must name the transport cause
+        // instead of the bare "error sending request for url" phase text
+        // (#14714).
+        let client =
+            ChClient::new_with_ca_cert("http://127.0.0.1:1", None, None, None, None, Duration::from_secs(2)).unwrap();
+        let error = test_connection(&client, Duration::from_secs(2)).await.expect_err("closed port must fail");
+        assert!(error.starts_with("ClickHouse connection failed:"), "got: {error}");
+        assert!(
+            error.contains("error sending request")
+                && error.len() > "ClickHouse connection failed: error sending request".len(),
+            "the transport cause must be appended, got: {error}"
+        );
+    }
+
     use super::*;
 
     async fn read_http_request<Stream: tokio::io::AsyncRead + Unpin>(socket: &mut Stream) -> String {
@@ -1237,6 +1283,15 @@ mod tests {
         ));
         assert!(!is_readonly_result_limit_error(
             "Code: 164. DB::Exception: Cannot modify 'max_execution_time' setting in readonly mode. (READONLY)"
+        ));
+        assert!(is_readonly_result_limit_error(
+            "Code: 452. DB::Exception: Setting result_overflow_mode should not be changed. (SETTING_CONSTRAINT_VIOLATION)"
+        ));
+        assert!(is_readonly_result_limit_error(
+            "Code: 452. DB::Exception: Setting max_result_rows should not be changed. (SETTING_CONSTRAINT_VIOLATION)"
+        ));
+        assert!(!is_readonly_result_limit_error(
+            "Code: 452. DB::Exception: Setting max_execution_time should not be changed. (SETTING_CONSTRAINT_VIOLATION)"
         ));
         assert!(!is_readonly_result_limit_error("Code: 62. DB::Exception: Syntax error near max_result_rows"));
     }

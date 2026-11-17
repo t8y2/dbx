@@ -3784,6 +3784,12 @@ export default withEnglishFallback({
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
     rowJsonPreview: "Предпросмотр JSON",
+    binaryColumnFormats: {
+      "binary-hex": "Бинарные данные в шестнадцатеричный формат",
+      "binary-text": "Бинарные данные в UTF-8",
+      "binary-uuid": "Бинарные данные в UUID",
+      "binary-uuid-swapped": "Бинарные данные в UUID (с перестановкой битов времени)",
+    },
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

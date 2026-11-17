@@ -3653,6 +3653,12 @@ export default withEnglishFallback({
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
     rowJsonPreview: "JSON 미리보기",
+    binaryColumnFormats: {
+      "binary-hex": "바이너리를 16진수로",
+      "binary-text": "바이너리를 UTF-8로",
+      "binary-uuid": "바이너리를 UUID로",
+      "binary-uuid-swapped": "바이너리를 UUID로 (시간 비트 교환)",
+    },
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

@@ -11329,6 +11329,8 @@ export default withEnglishFallback({
     shortcutDeleteCurrentRow: "删除当前数据行",
     shortcutFocusWhere: "聚焦 WHERE 条件输入框",
     shortcutGoToColumn: "跳转列",
+    shortcutSelectNextGridColumn: "选中表数据的下一列",
+    shortcutSelectPreviousGridColumn: "选中表数据的上一列",
     shortcutGoToFirstPage: "第一页",
     shortcutGoToPreviousPage: "上一页",
     shortcutGoToNextPage: "下一页",

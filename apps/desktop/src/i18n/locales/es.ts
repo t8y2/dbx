@@ -11058,6 +11058,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "Mostrar la ruta completa del grupo de la conexión de consulta",
     showConnectionGroupPathDescription: "Cuando está activado, el selector de conexiones de la esquina superior derecha de la página de consulta mostrará la ruta completa del grupo antes del nombre de la conexión; cuando está desactivado, solo mostrará el nombre de la conexión.",
     shortcutConvertSelectionToDelimited: "Convertir el contenido seleccionado en una lista delimitada",
+    shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
+    shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
   },
   driverStore: {

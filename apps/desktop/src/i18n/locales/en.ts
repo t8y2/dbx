@@ -11363,6 +11363,8 @@ export default {
     shortcutDeleteCurrentRow: "Delete current data row",
     shortcutFocusWhere: "Focus WHERE condition",
     shortcutGoToColumn: "Go to column",
+    shortcutSelectNextGridColumn: "Select next column in table data",
+    shortcutSelectPreviousGridColumn: "Select previous column in table data",
     shortcutGoToFirstPage: "First page",
     shortcutGoToPreviousPage: "Previous page",
     shortcutGoToNextPage: "Next page",

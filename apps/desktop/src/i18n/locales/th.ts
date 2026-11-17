@@ -12723,6 +12723,8 @@ export default withEnglishFallback({
     duplicateTabTitleModeConnection: "ชื่อวัตถุ + ชื่อการเชื่อมต่อ",
     duplicateTabTitleModeConnectionDescription: "แสดงเป็น users prod-db, users staging-db … กลับไปใช้หมายเลขเมื่อแท็บชื่อซ้ำอยู่ในการเชื่อมต่อเดียวกัน หรือชื่อเรื่องมีชื่อการเชื่อมต่ออยู่แล้ว",
     shortcutConvertSelectionToDelimited: "แปลงเนื้อหาที่เลือกเป็นรายการที่คั่นด้วยตัวคั่น",
+    shortcutSelectNextGridColumn: "เลือกคอลัมน์ถัดไปของข้อมูลตาราง",
+    shortcutSelectPreviousGridColumn: "เลือกคอลัมน์ก่อนหน้าของข้อมูลตาราง",
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
   },
   driverStore: {

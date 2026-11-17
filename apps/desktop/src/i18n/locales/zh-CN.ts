@@ -8841,6 +8841,7 @@ export default withEnglishFallback({
     sourceDataEditor: "数据编辑器",
   },
   sqlParameters: {
+    preserveQuotedBracedParameters: "保留单引号字符串中的模板占位符",
     title: "SQL 参数",
     description: "为 SQL 模板占位符填写参数值，DBX 会在执行前替换为 SQL 字面量。",
     name: "参数名",

@@ -3964,6 +3964,12 @@ export default withEnglishFallback({
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
     rowJsonPreview: "ตัวอย่าง JSON",
+    binaryColumnFormats: {
+      "binary-hex": "ไบนารีเป็นเลขฐานสิบหก",
+      "binary-text": "ไบนารีเป็น UTF-8",
+      "binary-uuid": "ไบนารีเป็น UUID",
+      "binary-uuid-swapped": "ไบนารีเป็น UUID (สลับบิตเวลา)",
+    },
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

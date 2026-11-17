@@ -3704,6 +3704,12 @@ export default withEnglishFallback({
     filterActive: "Filtro applicato",
     structuredFiltersActive: "{count} filtri condizione",
     rowJsonPreview: "Anteprima JSON",
+    binaryColumnFormats: {
+      "binary-hex": "Binario in esadecimale",
+      "binary-text": "Binario in UTF-8",
+      "binary-uuid": "Binario in UUID",
+      "binary-uuid-swapped": "Binario in UUID (bit temporali scambiati)",
+    },
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

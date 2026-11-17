@@ -9454,6 +9454,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "เก็บตัวแทนที่ของเทมเพลตไว้ในสตริงที่อยู่ในเครื่องหมายคำพูดเดี่ยว",
   },
   transfer: {
+    reviewBeforeStart: "เลือกเริ่มถ่ายโอนเพื่อตรวจสอบแผนและยืนยันก่อนเขียนข้อมูล",
     log: {
       title: "บันทึกการทำงาน",
       tableStarted: "กำลังถ่ายโอนตาราง {table} ({index}/{total})",

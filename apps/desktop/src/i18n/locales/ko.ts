@@ -2432,6 +2432,8 @@ export default withEnglishFallback({
     previewChangesComment: "변경 미리 보기(드라이 런): {operation} 문",
     previewChangesFailed: "변경 미리 보기 실패.",
     previewChangesNoStatement: "변경 사항을 미리 보려면 UPDATE / INSERT / DELETE 문을 선택하거나 커서를 해당 문에 놓으십시오.",
+    fullscreenResultsPane: "결과 전체 화면 표시",
+    exitFullscreenResultsPane: "결과 전체 화면 종료",
   },
   tabs: {
     sql: "SQL",

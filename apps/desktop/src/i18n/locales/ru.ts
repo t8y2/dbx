@@ -2511,6 +2511,8 @@ export default withEnglishFallback({
       currentCommand: "Текущая команда",
       allCommands: "Все команды",
     },
+    fullscreenResultsPane: "Показать результаты на весь экран",
+    exitFullscreenResultsPane: "Выйти из полноэкранного режима результатов",
   },
   tabs: {
     sql: "SQL",

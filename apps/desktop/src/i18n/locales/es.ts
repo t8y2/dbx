@@ -2601,6 +2601,8 @@ export default withEnglishFallback({
     previewChangesComment: "Previsualización de cambios (simulación): sentencia {operation}",
     previewChangesFailed: "Error al previsualizar los cambios.",
     previewChangesNoStatement: "Seleccione o coloque el cursor sobre una sentencia UPDATE / INSERT / DELETE para previsualizar los cambios.",
+    fullscreenResultsPane: "Mostrar resultados en pantalla completa",
+    exitFullscreenResultsPane: "Salir de resultados en pantalla completa",
   },
   tabs: {
     sql: "SQL",

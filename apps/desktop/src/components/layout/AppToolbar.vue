@@ -30,6 +30,8 @@ import {
   CalendarClock,
   Waypoints,
   RefreshCw,
+  AppWindow,
+  PanelsTopLeft,
   ChevronsLeft,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -63,6 +65,8 @@ const GithubIcon = {
 const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
+  workspaceWindowLabel?: string;
+  workspaceWindowTargets?: Array<{ label: string; title: string }>;
   showSidebarExpand?: boolean;
   showAiPanel: boolean;
   activeAiRunCount: number;
@@ -114,6 +118,9 @@ const emit = defineEmits<{
   "open-data-compare": [];
   "open-backups": [];
   "open-mcp-settings": [];
+  "focus-workspace-window": [label: string];
+  "refresh-workspace-windows": [];
+  "consolidate-workspace-windows": [];
   "immediate-sync": [];
   logout: [];
 }>();
@@ -122,6 +129,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 
 const settingsStore = useSettingsStore();
+const CONSOLIDATE_WORKSPACE_WINDOWS = "__consolidate-workspace-windows__";
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const orderedToolbarKeys = computed(() => ({
   primary: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "primary"),
@@ -129,10 +137,56 @@ const orderedToolbarKeys = computed(() => ({
   right: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "right"),
   controls: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "controls"),
 }));
-watch(orderedToolbarKeys, scheduleToolbarLayout, { deep: true });
+watch(orderedToolbarKeys, resetToolbarMeasurement, { deep: true });
 const webLogoPosition = computed(() => settingsStore.editorSettings.webLogoPosition ?? "left");
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
+const workspaceWindowCaption = computed(() => {
+  if (!isDesktop) return "";
+  if (props.workspaceWindowLabel === "main") return t("contextMenu.mainWindow");
+  if (props.workspaceWindowLabel?.startsWith("dbx-tab-") && !props.workspaceWindowLabel.startsWith("dbx-tab-drag-preview")) {
+    const labels = [props.workspaceWindowLabel, ...(props.workspaceWindowTargets ?? []).map((window) => window.label)].filter((label, index, all) => label !== "main" && all.indexOf(label) === index).sort();
+    return t("contextMenu.detachedWindow", { number: labels.indexOf(props.workspaceWindowLabel) + 1 });
+  }
+  return "";
+});
+const workspaceWindowMenuVisible = computed(() => {
+  if (!isDesktop || !props.workspaceWindowLabel) return false;
+  if (props.workspaceWindowLabel === "main" && !settingsStore.editorSettings.crossWindowTabDragPreviewEnabled) return false;
+  return props.workspaceWindowLabel !== "main" || (props.workspaceWindowTargets?.length ?? 0) > 0;
+});
+const workspaceWindowItems = computed<LightDropdownItem[]>(() => {
+  if (!props.workspaceWindowLabel) return [];
+  const windows = [{ label: props.workspaceWindowLabel, title: "" }, ...(props.workspaceWindowTargets ?? [])].filter((window, index, all) => all.findIndex((candidate) => candidate.label === window.label) === index);
+  const detachedLabels = windows
+    .filter((window) => window.label !== "main")
+    .map((window) => window.label)
+    .sort();
+  const items: LightDropdownItem[] = windows.map((window) => {
+    const label = window.label === "main" ? t("contextMenu.mainWindow") : t("contextMenu.detachedWindow", { number: detachedLabels.indexOf(window.label) + 1 });
+    return {
+      label,
+      value: window.label,
+      title: label,
+      icon: window.label === "main" ? AppWindow : PanelsTopLeft,
+      disabled: window.label === props.workspaceWindowLabel,
+    };
+  });
+  if (props.workspaceWindowLabel === "main" && detachedLabels.length > 0) {
+    items.push({
+      label: t("contextMenu.consolidateWorkspaceWindows"),
+      value: CONSOLIDATE_WORKSPACE_WINDOWS,
+      title: t("contextMenu.consolidateWorkspaceWindows"),
+      icon: PanelsTopLeft,
+      separatorBefore: true,
+    });
+  }
+  return items;
+});
+function handleWorkspaceWindowSelection(value: string) {
+  if (value === CONSOLIDATE_WORKSPACE_WINDOWS) emit("consolidate-workspace-windows");
+  else emit("focus-workspace-window", value);
+}
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the
 // window is actually pinned even with the setting off, so turning the setting
@@ -218,6 +272,7 @@ function onToolbarDblClick(e: MouseEvent) {
 const toolbarEl = ref<HTMLElement>();
 const newConnectionLabelEl = shallowRef<HTMLElement>();
 const toolbarCollapsed = ref(false);
+let primaryToolbarExpandedRequiredWidth: number | null = null;
 const pluginCenterGroup = shallowRef<HTMLElement | null>(null);
 const showPluginCenterShortcuts = computed(() => settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === "plugin-center");
 const shouldReserveTrafficLightInset = computed(() => shouldReserveMacTrafficLightInset(isMac, isFullscreen.value, isDesktop));
@@ -225,9 +280,10 @@ const shouldReserveTrafficLightInset = computed(() => shouldReserveMacTrafficLig
 function checkToolbarWidth() {
   const el = toolbarEl.value;
   if (!el) return;
-  const screenWidth = window.visualViewport?.width ?? window.innerWidth;
-  const threshold = screenWidth / 2;
-  toolbarCollapsed.value = el.clientWidth < threshold;
+  if (toolbarCollapsed.value && primaryToolbarExpandedRequiredWidth !== null && el.clientWidth >= primaryToolbarExpandedRequiredWidth + rightToolbarLabelsRestoreSlack) {
+    toolbarCollapsed.value = false;
+    primaryToolbarExpandedRequiredWidth = null;
+  }
 }
 
 // ──────────── Right-side overflow detection ────────────
@@ -235,17 +291,20 @@ function checkToolbarWidth() {
 const rightWrapper = ref<HTMLElement>();
 const rightOverflowCount = ref(0);
 const rightToolbarLabelsKey = "dbx-right-toolbar-labels";
-const rightToolbarLabelsRestoreSlack = 48;
+const rightToolbarLabelsRestoreSlack = 24;
 const showRightToolbarLabels = ref(safeLocalStorageGet(rightToolbarLabelsKey) === "true");
 // Keep the saved preference separate from the mode that fits the current window.
 // A narrow window may temporarily hide labels without changing the preference.
-const effectiveRightToolbarLabels = ref(showRightToolbarLabels.value);
-const rightToolbarLabelsAutoCollapsed = ref(false);
-const rightToolbarLabelsCollapsedAtWidth = ref<number | null>(null);
+const effectiveRightToolbarLabels = ref<"true" | "partial" | "false">("false");
+let collapsedRightLabelCount = 0;
 let toolbarLayoutRaf = 0;
 let trafficLightSyncRaf = 0;
 let settlingRightOverflow = false;
 let pendingRightOverflowSettle = false;
+const toolbarWidthMeasurements = new Map<string, number>();
+const toolbarLabelMeasurements = new Map<boolean, { buttons: HTMLButtonElement[]; requiredWidths: number[] }>();
+let lastTrafficLightPosition = "";
+let pluginToolbarSignature = "";
 const measuredTrafficLightInset = ref<number | null>(null);
 
 type MacosTrafficLightLayout = {
@@ -371,86 +430,148 @@ const overflowRightMenuItems = computed(() => {
   }));
 });
 
-function hasRightToolbarOverflow(): boolean {
+function withToolbarMeasurement<T>(measure: (copy: HTMLElement) => T): T | undefined {
   const toolbar = toolbarEl.value;
-  const wrapper = rightWrapper.value;
-  if (!toolbar || !wrapper || toolbar.clientWidth <= 0) return false;
-  return toolbar.scrollWidth > toolbar.clientWidth + 1 || wrapper.scrollWidth > wrapper.clientWidth + 1;
+  if (!toolbar?.parentElement || toolbar.clientWidth <= 0) return;
+  // Cache intrinsic widths independently of the live window and animation.
+  const copy = toolbar.cloneNode(true) as HTMLElement;
+  copy.inert = true;
+  copy.setAttribute("aria-hidden", "true");
+  copy.dataset.toolbarMeasuring = "";
+  Object.assign(copy.style, { position: "fixed", left: "-100000px", top: "0", width: "max-content", minWidth: "0", maxWidth: "none", visibility: "hidden", pointerEvents: "none" });
+  toolbar.parentElement.appendChild(copy);
+  try {
+    return measure(copy);
+  } finally {
+    copy.remove();
+  }
+}
+
+function measuredToolbarContentWidth(toolbar: HTMLElement): number {
+  const wrapper = toolbar.querySelector<HTMLElement>("[data-toolbar-right-actions]");
+  return Math.max(toolbar.scrollWidth, toolbar.clientWidth + (wrapper ? wrapper.scrollWidth - wrapper.clientWidth : 0));
+}
+
+function applyMeasuredRightOverflow(copy: HTMLElement, count: number) {
+  collapsibleRightItemDefs.value.forEach(({ key }, index) => {
+    const item = copy.querySelector<HTMLElement>(`[data-toolbar-item="${key}"]`);
+    if (item) item.style.display = index < count ? "none" : "";
+  });
+  const menu = toolbarCollapsed.value ? collapsedItems.value : moreItems.value;
+  const needsMore = count > 0 || menu.some((item) => !item.value.startsWith("right-"));
+  const more = copy.querySelector<HTMLElement>(".app-toolbar-more");
+  if (!needsMore) more?.remove();
+  else if (!more) {
+    const trigger = document.createElement("button");
+    trigger.className = toolbarDropdownTriggerClass;
+    trigger.textContent = t("common.more");
+    const chevron = document.createElement("span");
+    Object.assign(chevron.style, { width: "12px", height: "12px", flexShrink: "0" });
+    trigger.appendChild(chevron);
+    copy.insertBefore(trigger, copy.querySelector("[data-toolbar-workspace-spacer]"));
+  }
+}
+
+function toolbarMeasurementKey(overflow: number, collapsed: number) {
+  return `${toolbarCollapsed.value}:${overflow}:${collapsed}`;
+}
+
+function rightToolbarContentWidth(overflow = rightOverflowCount.value): number {
+  const key = toolbarMeasurementKey(overflow, collapsedRightLabelCount);
+  const cached = toolbarWidthMeasurements.get(key);
+  if (cached !== undefined) return cached;
+  const width =
+    withToolbarMeasurement((copy) => {
+      applyMeasuredRightOverflow(copy, overflow);
+      return measuredToolbarContentWidth(copy);
+    }) ?? 0;
+  if (width > 0) toolbarWidthMeasurements.set(key, width);
+  return width;
+}
+
+function visibleToolbarLabelButtons(toolbar: HTMLElement): HTMLButtonElement[] {
+  return Array.from(toolbar.querySelectorAll<HTMLButtonElement>("button[data-right-toolbar-label]")).filter((button) => {
+    for (let element: HTMLElement | null = button; element && element !== toolbar; element = element.parentElement) {
+      if (getComputedStyle(element).display === "none") return false;
+    }
+    return true;
+  });
+}
+
+function handlePluginToolbarLayout() {
+  const signature = Array.from(toolbarEl.value?.querySelectorAll<HTMLElement>("[data-plugin-shortcut-toolbar]") ?? [])
+    .map(
+      (element) =>
+        `${element.style.width}:${Array.from(element.querySelectorAll<HTMLElement>("[data-shortcut-id]"))
+          .map((entry) => entry.dataset.shortcutId)
+          .join(",")}`,
+    )
+    .join("|");
+  if (signature === pluginToolbarSignature) return;
+  pluginToolbarSignature = signature;
+  resetToolbarMeasurement();
 }
 
 async function settleRightToolbarLabels() {
-  if (!showRightToolbarLabels.value) {
-    rightToolbarLabelsAutoCollapsed.value = false;
-    rightToolbarLabelsCollapsedAtWidth.value = null;
-    if (effectiveRightToolbarLabels.value) {
-      effectiveRightToolbarLabels.value = false;
-      await nextTick();
-    }
-    return;
-  }
-
   const toolbar = toolbarEl.value;
   if (!toolbar || toolbar.clientWidth <= 0) return;
 
-  if (rightToolbarLabelsAutoCollapsed.value) {
-    const collapsedAtWidth = rightToolbarLabelsCollapsedAtWidth.value;
-    if (collapsedAtWidth !== null && toolbar.clientWidth - collapsedAtWidth < rightToolbarLabelsRestoreSlack) return;
+  let metrics = toolbarLabelMeasurements.get(toolbarCollapsed.value);
+  if (!metrics) {
+    const measured = withToolbarMeasurement((copy) => {
+      applyMeasuredRightOverflow(copy, 0);
+      const copies = visibleToolbarLabelButtons(copy);
+      copies.forEach((button) => {
+        button.dataset.rightToolbarLabelVisible = "true";
+      });
+      const widths = copies.map((button) => getComputedStyle(button, "::after").width);
+      const requiredWidths: number[] = [];
+      for (let collapsed = 0; collapsed <= copies.length; collapsed++) {
+        copies.forEach((button, index) => {
+          button.dataset.rightToolbarLabelVisible = String(index >= collapsed);
+        });
+        const width = measuredToolbarContentWidth(copy);
+        requiredWidths.push(width);
+        toolbarWidthMeasurements.set(toolbarMeasurementKey(0, collapsed), width);
+      }
+      return { widths, requiredWidths };
+    });
+    if (!measured) return;
+    const visibleButtons = new Set(visibleToolbarLabelButtons(toolbar));
+    const buttons = Array.from(toolbar.querySelectorAll<HTMLButtonElement>("button[data-right-toolbar-label]")).filter((button) => {
+      const item = button.closest<HTMLElement>("[data-toolbar-item]");
+      return (item && collapsibleRightItemDefs.value.some(({ key }) => item.dataset.toolbarItem === key)) || visibleButtons.has(button);
+    });
+    buttons.forEach((button, index) => {
+      if (measured.widths[index]) button.style.setProperty("--toolbar-label-width", measured.widths[index]);
+    });
+    metrics = { buttons, requiredWidths: measured.requiredWidths };
+    toolbarLabelMeasurements.set(toolbarCollapsed.value, metrics);
   }
-
-  // Restore all right-side actions before measuring the full label layout. If
-  // that layout does not fit, icon mode is preferred before More overflow.
-  if (rightOverflowCount.value > 0) {
-    rightOverflowCount.value = 0;
-    await nextTick();
+  const { buttons, requiredWidths } = metrics;
+  let collapsed = showRightToolbarLabels.value ? 0 : buttons.length;
+  for (; collapsed < buttons.length; collapsed++) {
+    const slack = collapsed < collapsedRightLabelCount ? rightToolbarLabelsRestoreSlack : 0;
+    if (requiredWidths[collapsed] + slack <= toolbar.clientWidth + 1) break;
   }
-  effectiveRightToolbarLabels.value = true;
-  await nextTick();
-
-  if (hasRightToolbarOverflow()) {
-    effectiveRightToolbarLabels.value = false;
-    rightToolbarLabelsAutoCollapsed.value = true;
-    rightToolbarLabelsCollapsedAtWidth.value = toolbar.clientWidth;
-    await nextTick();
-    return;
-  }
-
-  rightToolbarLabelsAutoCollapsed.value = false;
-  rightToolbarLabelsCollapsedAtWidth.value = null;
+  collapsedRightLabelCount = collapsed;
+  buttons.forEach((button, index) => {
+    const visible = String(showRightToolbarLabels.value && index >= collapsed);
+    if (button.dataset.rightToolbarLabelVisible !== visible) button.dataset.rightToolbarLabelVisible = visible;
+  });
+  effectiveRightToolbarLabels.value = !showRightToolbarLabels.value || collapsed >= buttons.length ? "false" : collapsed === 0 ? "true" : "partial";
 }
 
 async function settleRightOverflowOnce() {
-  const wrapper = rightWrapper.value;
-  if (!wrapper) return;
-
+  const toolbar = toolbarEl.value;
+  if (!toolbar) return;
   const defsLength = collapsibleRightItemDefs.value.length;
-  if (rightOverflowCount.value > defsLength) {
-    rightOverflowCount.value = defsLength;
+  let count = Math.min(rightOverflowCount.value, defsLength);
+  while (count < defsLength && rightToolbarContentWidth(count) > toolbar.clientWidth + 1) count++;
+  while (count > 0 && rightToolbarContentWidth(count - 1) + rightToolbarLabelsRestoreSlack <= toolbar.clientWidth) count--;
+  if (count !== rightOverflowCount.value) {
+    rightOverflowCount.value = count;
     await nextTick();
-  }
-
-  for (let i = 0; i <= defsLength + 1; i++) {
-    const current = rightWrapper.value;
-    if (!current) return;
-
-    if (current.scrollWidth > current.clientWidth + 1 && rightOverflowCount.value < defsLength) {
-      rightOverflowCount.value++;
-      await nextTick();
-      continue;
-    }
-
-    if (rightOverflowCount.value <= 0) return;
-
-    rightOverflowCount.value--;
-    await nextTick();
-
-    const restored = rightWrapper.value;
-    if (restored && restored.scrollWidth <= restored.clientWidth + 1) {
-      continue;
-    }
-
-    rightOverflowCount.value++;
-    await nextTick();
-    return;
   }
 }
 
@@ -468,6 +589,12 @@ async function settleRightOverflow() {
       await settleRightToolbarLabels();
       await nextTick();
       await settleRightOverflowOnce();
+      const toolbar = toolbarEl.value;
+      if (!toolbarCollapsed.value && toolbar && rightToolbarContentWidth() > toolbar.clientWidth + 1) {
+        primaryToolbarExpandedRequiredWidth = rightToolbarContentWidth();
+        toolbarCollapsed.value = true;
+        pendingRightOverflowSettle = true;
+      }
     } while (pendingRightOverflowSettle);
   } finally {
     settlingRightOverflow = false;
@@ -475,11 +602,10 @@ async function settleRightOverflow() {
 }
 
 function scheduleToolbarLayout() {
-  if (toolbarLayoutRaf) cancelAnimationFrame(toolbarLayoutRaf);
+  if (toolbarLayoutRaf) return;
   toolbarLayoutRaf = requestAnimationFrame(() => {
     toolbarLayoutRaf = 0;
     checkToolbarWidth();
-    scheduleTrafficLightSync();
     void settleRightOverflow();
   });
 }
@@ -500,6 +626,9 @@ async function syncTrafficLightsToToolbar() {
   const targetRect = targetEl?.getBoundingClientRect();
   if (!toolbarRect || !targetRect) return;
   const targetCenterY = targetRect.top - toolbarRect.top + targetRect.height / 2;
+  const positionKey = `${targetCenterY}:${settingsStore.editorSettings.uiScale}`;
+  if (lastTrafficLightPosition === positionKey) return;
+  lastTrafficLightPosition = positionKey;
   try {
     const layout = await invoke<MacosTrafficLightLayout>("set_macos_traffic_light_position", {
       x: MAC_TRAFFIC_LIGHT_X,
@@ -508,6 +637,7 @@ async function syncTrafficLightsToToolbar() {
     });
     measuredTrafficLightInset.value = Math.ceil(layout.reserved_inset / settingsStore.editorSettings.uiScale);
   } catch (error) {
+    lastTrafficLightPosition = "";
     console.warn("[DBX] Failed to sync macOS traffic light position", { targetCenterY, error });
   }
 }
@@ -516,49 +646,63 @@ function handleWindowResize() {
   scheduleToolbarLayout();
 }
 
-watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
+function resetRightToolbarMeasurement() {
+  toolbarWidthMeasurements.clear();
+  toolbarLabelMeasurements.clear();
+  collapsedRightLabelCount = 0;
+  scheduleToolbarLayout();
+}
+function resetToolbarMeasurement() {
+  toolbarCollapsed.value = false;
+  primaryToolbarExpandedRequiredWidth = null;
+  resetRightToolbarMeasurement();
+  scheduleTrafficLightSync();
+}
+watch(measuredTrafficLightInset, resetRightToolbarMeasurement);
+watch(collapsibleRightItemDefs, resetToolbarMeasurement, { flush: "post" });
+watch(toolbarItems, resetToolbarMeasurement, { deep: true, flush: "post" });
+watch(() => [workspaceWindowMenuVisible.value, workspaceWindowCaption.value, props.hasUpdateAvailable, props.showLogout, showAlwaysOnTopButton.value, isAlwaysOnTop.value, props.canNewQuery, props.hasClosedTabs, props.agentDriverUpdateCount], resetToolbarMeasurement, { flush: "post" });
 watch(
   showRightToolbarLabels,
   (show) => {
     safeLocalStorageSet(rightToolbarLabelsKey, String(show));
-    effectiveRightToolbarLabels.value = show;
-    rightToolbarLabelsAutoCollapsed.value = false;
-    rightToolbarLabelsCollapsedAtWidth.value = null;
-    rightOverflowCount.value = 0;
+    collapsedRightLabelCount = 0;
     scheduleToolbarLayout();
   },
   { flush: "post" },
 );
-watch(
-  () => settingsStore.editorSettings.webLogoPosition,
-  () => scheduleToolbarLayout(),
-  { flush: "post" },
-);
-watch(
-  () => props.showSidebarExpand,
-  () => scheduleToolbarLayout(),
-  { flush: "post" },
-);
+watch(() => settingsStore.editorSettings.webLogoPosition, resetToolbarMeasurement, { flush: "post" });
+watch(() => props.showSidebarExpand, resetToolbarMeasurement, { flush: "post" });
+watch(() => settingsStore.editorSettings.uiFontFamily, resetToolbarMeasurement, { flush: "post" });
 watch(
   () => settingsStore.editorSettings.uiScale,
   () => {
     measuredTrafficLightInset.value = null;
-    scheduleToolbarLayout();
+    resetToolbarMeasurement();
     window.setTimeout(scheduleTrafficLightSync, 120);
   },
 );
-watch(shouldReserveTrafficLightInset, () => scheduleToolbarLayout());
+watch(shouldReserveTrafficLightInset, () => {
+  lastTrafficLightPosition = "";
+  resetToolbarMeasurement();
+});
 
 // ──────────── Resize observer ────────────
 
 let resizeObserver: ResizeObserver | null = null;
+let toolbarContentObserver: MutationObserver | null = null;
 
 onMounted(() => {
   resizeObserver = new ResizeObserver(scheduleToolbarLayout);
   if (toolbarEl.value) resizeObserver.observe(toolbarEl.value);
-  if (rightWrapper.value) resizeObserver.observe(rightWrapper.value);
+  if (rightWrapper.value) {
+    toolbarContentObserver = new MutationObserver(resetToolbarMeasurement);
+    toolbarContentObserver.observe(rightWrapper.value, { childList: true, subtree: true });
+  }
+  document.fonts?.addEventListener("loadingdone", resetToolbarMeasurement);
   window.addEventListener("resize", handleWindowResize);
   scheduleToolbarLayout();
+  scheduleTrafficLightSync();
 });
 
 onBeforeUnmount(() => {
@@ -566,6 +710,8 @@ onBeforeUnmount(() => {
   if (trafficLightSyncRaf) cancelAnimationFrame(trafficLightSyncRaf);
   window.clearTimeout(sqlLibrarySaveFeedbackTimer);
   resizeObserver?.disconnect();
+  toolbarContentObserver?.disconnect();
+  document.fonts?.removeEventListener("loadingdone", resetToolbarMeasurement);
   window.removeEventListener("resize", handleWindowResize);
 });
 
@@ -725,7 +871,7 @@ function isRightItemVisible(key: string) {
 
 const toolbarTextButtonClass = "h-8 px-2 text-xs gap-1 leading-none";
 const toolbarTextLabelClass = "inline-flex translate-y-px items-center leading-none";
-const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px`;
+const toolbarDropdownTriggerClass = `app-toolbar-more inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px [&>svg]:shrink-0`;
 const toolbarStyle = computed(() => {
   if (!shouldReserveTrafficLightInset.value) return undefined;
   return {
@@ -803,45 +949,46 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
           <PlugZap class="h-3.5 w-3.5" />
           <span :class="toolbarTextLabelClass">{{ t("toolbar.pluginCenter") }}</span>
         </Button>
-        <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="scheduleToolbarLayout" />
+        <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="handlePluginToolbarLayout" />
       </div>
     </template>
-    <template v-if="!toolbarCollapsed"
-      ><LightDropdown
-        v-if="showMoreDropdown"
-        model-value=""
-        :items="moreItems"
-        :aria-label="t('common.more')"
-        :trigger-label="t('common.more')"
-        :trigger-class="toolbarDropdownTriggerClass"
-        :show-trigger-label="true"
-        :show-chevron="true"
-        check-position="none"
-        align="start"
-        @update:model-value="runMoreItem"
-    /></template>
-    <template v-if="toolbarCollapsed">
-      <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only @layout-change="scheduleToolbarLayout" />
-      <LightDropdown
-        v-if="collapsedItems.length > 0"
-        model-value=""
-        :items="collapsedItems"
-        :aria-label="t('common.more')"
-        :trigger-label="t('common.more')"
-        :trigger-class="toolbarDropdownTriggerClass"
-        :show-trigger-label="true"
-        :show-chevron="true"
-        check-position="none"
-        align="start"
-        @update:model-value="runCollapsedItem"
-      />
-    </template>
+    <PluginShortcutToolbar v-if="toolbarCollapsed && showPluginCenterShortcuts" dropdown-only @layout-change="handlePluginToolbarLayout" />
+    <LightDropdown
+      v-if="toolbarCollapsed ? collapsedItems.length > 0 : showMoreDropdown"
+      model-value=""
+      :items="toolbarCollapsed ? collapsedItems : moreItems"
+      :aria-label="t('common.more')"
+      :trigger-label="t('common.more')"
+      :trigger-class="toolbarDropdownTriggerClass"
+      :show-trigger-label="true"
+      :show-chevron="true"
+      check-position="none"
+      align="start"
+      @update:model-value="toolbarCollapsed ? runCollapsedItem($event) : runMoreItem($event)"
+    />
 
-    <div class="flex-1" data-tauri-drag-region />
+    <div class="flex flex-1 items-center justify-center px-1" :class="workspaceWindowMenuVisible ? 'min-w-max' : 'min-w-0'" data-toolbar-workspace-spacer data-tauri-drag-region>
+      <span v-if="workspaceWindowMenuVisible" class="shrink-0 whitespace-nowrap" data-workspace-window-identity data-workspace-window-menu @click="emit('refresh-workspace-windows')">
+        <LightDropdown
+          :model-value="workspaceWindowLabel ?? ''"
+          :items="workspaceWindowItems"
+          :aria-label="workspaceWindowCaption"
+          :trigger-title="workspaceWindowCaption"
+          :trigger-label="workspaceWindowCaption"
+          trigger-class="flex h-7 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md px-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          :trigger-icon="PanelsTopLeft"
+          :show-trigger-label="true"
+          :show-chevron="true"
+          check-position="none"
+          :match-trigger-width="false"
+          @update:model-value="handleWorkspaceWindowSelection"
+        />
+      </span>
+    </div>
 
     <!-- Right-side items wrapped in overflow-aware container -->
-    <div ref="rightWrapper" class="flex min-w-0 items-center gap-1 overflow-hidden">
-      <PluginShortcutToolbar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'toolbar'" @layout-change="scheduleToolbarLayout" /><template v-for="toolbarKey in orderedToolbarKeys.right" :key="toolbarKey"
+    <div ref="rightWrapper" data-toolbar-right-actions class="flex min-w-0 items-center gap-0.5 overflow-hidden">
+      <PluginShortcutToolbar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'toolbar'" @layout-change="handlePluginToolbarLayout" /><template v-for="toolbarKey in orderedToolbarKeys.right" :key="toolbarKey"
         ><template v-if="toolbarKey === 'checkUpdates' && showToolbarUpdateEntry">
           <Tooltip>
             <TooltipTrigger as-child>
@@ -1041,7 +1188,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
     <!-- /rightWrapper -->
     <Tooltip>
       <TooltipTrigger as-child>
-        <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :aria-label="t('toolbar.rightToolbarLabels')" :aria-pressed="showRightToolbarLabels" @click="showRightToolbarLabels = !showRightToolbarLabels">
+        <Button variant="ghost" size="icon" class="toolbar-label-toggle h-8 w-5 shrink-0 p-0" :aria-label="t('toolbar.rightToolbarLabels')" :aria-pressed="showRightToolbarLabels" @click="showRightToolbarLabels = !showRightToolbarLabels">
           <ChevronsRight v-if="showRightToolbarLabels" class="h-4 w-4" />
           <ChevronsLeft v-else class="h-4 w-4" />
         </Button>
@@ -1098,17 +1245,42 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
 </template>
 
 <style scoped>
-.app-toolbar[data-right-toolbar-labels="true"] :deep(button[data-right-toolbar-label]) {
+.app-toolbar :deep(button[data-right-toolbar-label]) {
   width: auto;
+  min-width: 2rem;
   flex-shrink: 0;
-  gap: 0.375rem;
-  padding-inline: 0.5rem;
+  gap: 0;
+  padding-inline: 0.375rem;
 }
 
-.app-toolbar[data-right-toolbar-labels="true"] :deep(button[data-right-toolbar-label]::after) {
+.app-toolbar :deep(button[data-right-toolbar-label]::after) {
   content: attr(data-right-toolbar-label);
+  display: block;
+  min-width: 0;
+  max-width: 0;
+  overflow: hidden;
   font-size: 0.75rem;
   white-space: nowrap;
+  opacity: 0;
+  margin-left: 0;
+  transition:
+    max-width 160ms ease,
+    margin-left 160ms ease,
+    opacity 120ms ease;
+}
+
+.app-toolbar :deep(button[data-right-toolbar-label-visible="true"]::after) {
+  max-width: var(--toolbar-label-width, 24rem);
+  margin-left: 0.25rem;
+  opacity: 1;
+}
+
+.app-toolbar[data-toolbar-measuring] :deep(button[data-right-toolbar-label]::after) {
+  transition: none;
+}
+
+.app-toolbar[data-toolbar-measuring] :deep(button[data-right-toolbar-label-visible="true"]::after) {
+  max-width: none;
 }
 
 .toolbar-action-icon {
@@ -1212,6 +1384,10 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .app-toolbar :deep(button[data-right-toolbar-label]::after) {
+    transition: none;
+  }
+
   .toolbar-action-icon,
   .toolbar-panel-status,
   .toolbar-theme-icon {

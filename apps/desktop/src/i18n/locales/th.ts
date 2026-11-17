@@ -1038,6 +1038,9 @@ export default withEnglishFallback({
     copyMongoShell: "คัดลอก shell ที่สร้างขึ้น",
     mongoShellCopied: "คัดลอกคำสั่ง Mongo shell แล้ว",
     executeAllSql: "เรียกใช้ SQL ทั้งหมด",
+    rightToolbarLabels: "ข้อความแถบเครื่องมือด้านขวา",
+    showRightToolbarLabels: "แสดงข้อความแถบเครื่องมือด้านขวา",
+    hideRightToolbarLabels: "ซ่อนข้อความแถบเครื่องมือด้านขวา",
   },
   multiDbExecute: {
     manualTransaction: "Transaction แบบ Manual",
@@ -3293,6 +3296,9 @@ export default withEnglishFallback({
     filterBuilderReorderRule: "ลากหรือใช้ปุ่มลูกศรเพื่อจัดลำดับเงื่อนไขใหม่",
     filterBuilderColumn: "คอลัมน์",
     filterBuilderSearchColumns: "ค้นหาคอลัมน์...",
+    elasticsearchTextSearch: "ค้นหาในดัชนี (รองรับไวลด์การ์ด)",
+    applyElasticsearchTextSearch: "ค้นหาในดัชนี",
+    clearElasticsearchTextSearch: "ล้างการค้นหาในดัชนี",
     filterBuilderNoMatchingColumns: "ไม่มีคอลัมน์ที่ตรงกัน",
     filterBuilderValue: "ค่า",
     filterBuilderTextValue: "<?>",
@@ -3954,6 +3960,7 @@ export default withEnglishFallback({
     queryWhileSaving: "กำลังบันทึกการแก้ไขชุดผลลัพธ์ โปรดรอให้การบันทึกเสร็จสิ้นก่อนเรียกใช้คิวรี",
     filterActive: "ใช้ตัวกรองแล้ว",
     structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
+    rowJsonPreview: "ตัวอย่าง JSON",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",
@@ -5517,8 +5524,10 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "เปิดใช้งาน",
     foreignKeyChecksDisable: "ปิดใช้งาน",
     foreignKeyChecksHint: "โดยค่าเริ่มต้นจะใช้การตั้งค่าของเซสชัน เมื่อปิดใช้งาน จะดำเนินการด้วย SET FOREIGN_KEY_CHECKS = 0 และสามารถจัดการตารางที่ถูกอ้างอิงในลำดับใดก็ได้ หลังจากดำเนินการแล้วจะคืนค่าเดิม",
+    duplicateStructureCommentsUnavailable: "โครงสร้างตารางถูกโคลนแล้ว แต่ไม่สามารถอ่านคอมเมนต์ของตารางต้นฉบับบางส่วนได้ จึงอาจไม่ได้ถูกคัดลอก",
     createSequence: "สร้างซีเควนซ์",
     viewPostgresRowLevelSecurity: "ดูนโยบายความปลอดภัยระดับแถว",
+    copyGeneratedSql: "คัดลอก SQL ที่สร้างขึ้น",
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",
@@ -8809,6 +8818,8 @@ export default withEnglishFallback({
         keyspace: "Keyspace",
       },
     },
+    downloadValueJson: "ดาวน์โหลดเป็น JSON",
+    downloadValueNotJson: "ค่านี้ไม่มีออบเจ็กต์หรืออาร์เรย์ JSON ที่ถูกต้อง",
   },
   mongoDump: {
     selectAll: "เลือก Collections ทั้งหมด",

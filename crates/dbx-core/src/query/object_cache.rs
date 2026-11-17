@@ -64,6 +64,17 @@ pub(crate) fn sql_may_change_object_metadata(sql: &str, db_type: Option<Database
     })
 }
 
+pub(super) async fn invalidate_for_statements(
+    storage: &Storage,
+    connection_id: &str,
+    statements: &[String],
+    db_type: Option<DatabaseType>,
+) {
+    if statements.iter().any(|sql| sql_may_change_object_metadata(sql, db_type)) {
+        invalidate_connection_object_cache(storage, connection_id).await;
+    }
+}
+
 /// Connection scope also covers qualified cross-database DDL and session USE.
 /// Await before returning the SQL result; cache failures must not turn an
 /// already committed database operation into an apparent execution failure.

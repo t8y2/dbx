@@ -956,6 +956,9 @@ export default withEnglishFallback({
     mongoShellCopied: "Mongo shell コマンドをコピーしました",
     multiDbExecute: "複数DB実行",
     executeAllSql: "すべての SQL を実行",
+    rightToolbarLabels: "右側ツールバーのラベル",
+    showRightToolbarLabels: "右側ツールバーのラベルを表示",
+    hideRightToolbarLabels: "右側ツールバーのラベルを非表示",
   },
   multiDbExecute: {
     manualTransaction: "手動トランザクション",
@@ -3521,6 +3524,9 @@ export default withEnglishFallback({
     undoChange: "変更を元に戻す",
     redoChange: "変更をやり直す",
     filterBuilderSearchColumns: "フィールドを検索...",
+    elasticsearchTextSearch: "インデックスを検索（ワイルドカード対応）",
+    applyElasticsearchTextSearch: "インデックスを検索",
+    clearElasticsearchTextSearch: "インデックス検索をクリア",
     filterBuilderNoMatchingColumns: "一致するフィールドがありません",
     copyExtractorSmart: "スマートコピー",
     copyExtractorRaw: "原文（単一列）",
@@ -3716,6 +3722,7 @@ export default withEnglishFallback({
     queryWhileSaving: "結果セットの変更を保存しています。保存が完了してからクエリを実行してください。",
     filterActive: "フィルター適用済み",
     structuredFiltersActive: "{count} 件の条件フィルター",
+    rowJsonPreview: "JSON プレビュー",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",
@@ -5244,8 +5251,10 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "有効",
     foreignKeyChecksDisable: "無効",
     foreignKeyChecksHint: "デフォルトではセッション設定を引き継ぎます。無効時は SET FOREIGN_KEY_CHECKS = 0 で実行し、参照されるテーブルを任意の順序で処理できます。実行後は元の値に戻します。",
+    duplicateStructureCommentsUnavailable: "テーブル構造は複製されましたが、一部のソーステーブルのコメントを読み取れないため、コピーされていない可能性があります。",
     createSequence: "シーケンスの作成",
     viewPostgresRowLevelSecurity: "行レベルセキュリティポリシーを表示",
+    copyGeneratedSql: "生成された SQL をコピー",
   },
   visibleDatabases: {
     title: "表示するデータベース",
@@ -7291,6 +7300,8 @@ export default withEnglishFallback({
     downloadValueFileType: "Redis 値",
     downloadValueTextFileType: "テキストファイル",
     downloadValueSuccess: "Redis 値をダウンロードしました",
+    downloadValueJson: "JSON としてダウンロード",
+    downloadValueNotJson: "この値には有効な JSON オブジェクトまたは配列が含まれていません",
   },
   mongo: {
     documents: "{count}ドキュメント",

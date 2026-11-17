@@ -7,7 +7,7 @@ import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { expandToBoundedSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
-import { getSqlFunctionSignatureHelp } from "@/lib/sql/sqlCompletion";
+import { buildSqlProcedureSignatureHelp, getSqlFunctionSignatureHelp } from "@/lib/sql/sqlCompletion";
 import { shellLineCommentTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom } from "@/lib/editor/codemirrorStatementGutter";
 import { compareSqlCompletions } from "@/lib/editor/sqlCompletionPresentation";
@@ -322,16 +322,84 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   codeMirrorRuntime.buildSqlSignatureExtension = () => {
     if (!supportsQueryEditorSqlLanguage(props.databaseType)) return [];
-    return showTooltip.compute(["doc", "selection"], (currentState) => {
+    const { getProcedureCall, loadProcedureSignatures } = options.completion;
+    const readCall = (currentState: import("@codemirror/state").EditorState) => {
       const cursor = currentState.selection.main.head;
       // Signature detection only scans backward from the cursor, so window the
       // text instead of materializing the whole document prefix on every
       // keystroke — doc.toString() was O(document) per key on large scripts.
       const windowFrom = Math.max(0, cursor - SQL_SIGNATURE_HELP_WINDOW_CHARS);
       const source = currentState.doc.sliceString(windowFrom, cursor);
+      return { cursor, source, truncatedPrefix: windowFrom > 0 };
+    };
+    const readProcedure = (state: import("@codemirror/state").EditorState) => {
+      const { source, truncatedPrefix } = readCall(state);
+      const call = isGraphQueryDatabase(props.databaseType) ? null : getProcedureCall(source, truncatedPrefix);
+      return call && { call, source };
+    };
+    const procedureCall = StateField.define({
+      create: readProcedure,
+      update: (previous, transaction) => (transaction.docChanged || transaction.selection ? readProcedure(transaction.state) : previous),
+    });
+    type ProcedureSignatures = { name: string; signatures: string[] };
+    const setProcedureSignatures = StateEffect.define<ProcedureSignatures>();
+    const procedureSignatures = StateField.define<ProcedureSignatures | null>({
+      create: () => null,
+      update(previous, transaction) {
+        for (const effect of transaction.effects) {
+          if (effect.is(setProcedureSignatures)) return effect.value;
+        }
+        return previous;
+      },
+    });
+    const procedureLookup = ViewPlugin.fromClass(
+      class {
+        private pending: { name: string } | null = null;
+
+        constructor(view: EditorViewType) {
+          this.lookup(view);
+        }
+
+        update(update: import("@codemirror/view").ViewUpdate) {
+          if (update.docChanged || update.selectionSet || update.focusChanged) this.lookup(update.view);
+        }
+
+        destroy() {
+          this.pending = null;
+        }
+
+        private lookup(view: EditorViewType) {
+          const procedure = view.state.field(procedureCall);
+          if (!procedure || !view.hasFocus) {
+            this.pending = null;
+            return;
+          }
+          const { call, source } = procedure;
+          if (this.pending?.name === call.name) return;
+          this.pending = null;
+          if (view.state.field(procedureSignatures)?.name === call.name) return;
+          const request = { name: call.name };
+          this.pending = request;
+          void loadProcedureSignatures(call, source)
+            .then((signatures) => {
+              if (this.pending !== request) return;
+              this.pending = null;
+              if (!signatures) return;
+              view.dispatch({ effects: setProcedureSignatures.of({ name: request.name, signatures }) });
+            })
+            .catch(() => {
+              if (this.pending === request) this.pending = null;
+            });
+        }
+      },
+    );
+    const tooltip = showTooltip.compute(["doc", "selection", procedureCall, procedureSignatures], (currentState) => {
+      const { cursor, source, truncatedPrefix } = readCall(currentState);
+      const procedure = currentState.field(procedureCall);
+      const loaded = currentState.field(procedureSignatures);
       const signature = isGraphQueryDatabase(props.databaseType)
-        ? getGraphFunctionSignatureHelp(source, cursor - windowFrom, props.databaseType, { truncatedPrefix: windowFrom > 0 })
-        : getSqlFunctionSignatureHelp(source, cursor - windowFrom, options.sqlFunctionDatabaseType?.() ?? props.databaseType, sqlDriverProfile.value, { truncatedPrefix: windowFrom > 0 });
+        ? getGraphFunctionSignatureHelp(source, source.length, props.databaseType, { truncatedPrefix })
+        : ((procedure && loaded?.name === procedure.call.name ? buildSqlProcedureSignatureHelp(procedure.call, loaded.signatures) : null) ?? getSqlFunctionSignatureHelp(source, source.length, options.sqlFunctionDatabaseType?.() ?? props.databaseType, sqlDriverProfile.value, { truncatedPrefix }));
       if (!signature) return null;
       return {
         pos: cursor,
@@ -340,6 +408,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
         create: () => ({ dom: createSqlSignatureTooltipDom(signature) }),
       };
     });
+    return [procedureCall, procedureSignatures, procedureLookup, tooltip];
   };
 
   codeMirrorRuntime.buildSqlCompletionExtension = () => {

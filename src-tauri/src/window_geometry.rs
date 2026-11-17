@@ -190,19 +190,14 @@ fn centered_axis(start: f64, length: f64, monitor_start: f64, monitor_length: f6
     }
 }
 
-/// Origin of the one logical frame shared by all displays, given `primary`.
-/// On macOS every origin is AppKit points relative to the main display's
-/// top-left, and Tauri reports each origin multiplied by its own factor, so a
-/// display above or left of the main one shows up as a negative logical origin
-/// and a shared frame is in use. Windows and X11 keep separate pixel origins,
-/// which a display left of or above the primary also makes negative, so this
-/// only holds when the primary sits at `(0, 0)` and nothing reports a negative
-/// origin — the macOS setup, where logical positions really are points.
-pub(crate) fn shared_frame_base(monitors: &[MonitorRect], primary: Option<&MonitorRect>) -> Option<LogicalRect> {
+/// The main display's bounds when the displays share one point frame anchored
+/// at its top-left, as on macOS: every origin is AppKit points relative to the
+/// main display, and Tauri reports each origin multiplied by its own factor,
+/// so a display above or left of the main one has a negative logical origin
+/// (e.g. an external monitor placed above the built-in one). Only callers on
+/// macOS may rely on this; on Windows and X11 the primary also sits at
+/// `(0, 0)`, but the other displays' origins are pixels, not points.
+pub(crate) fn shared_frame_base(primary: Option<&MonitorRect>) -> Option<LogicalRect> {
     let primary = primary?.logical();
-    let shared = monitors.iter().all(|monitor| {
-        let origin = monitor.logical();
-        origin.x >= 0.0 && origin.y >= 0.0
-    });
-    (shared && primary.x == 0.0 && primary.y == 0.0).then_some(primary)
+    (primary.x == 0.0 && primary.y == 0.0).then_some(primary)
 }

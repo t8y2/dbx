@@ -120,6 +120,16 @@ describe("visible database wildcard patterns (issue #7164)", () => {
     expect(filterDatabaseNamesForConnection(["n1_order", "main", "mysql", "sys"], connection)).toEqual(["n1_order"]);
   });
 
+  it.each([
+    [["main"], [], true],
+    [[], ["%ak%"], true],
+    [[], [], false],
+    [[], ["  "], false],
+  ])("allows saving checks %j with patterns %j: %s (issue #14221)", async (selected, patterns, expected) => {
+    const { canSaveVisibleDatabaseSelection } = await import("@/lib/database/visibleDatabases");
+    expect(canSaveVisibleDatabaseSelection(selected, patterns)).toBe(expected);
+  });
+
   it("parses user pattern input with separators, trimming and dedupe", async () => {
     const { parseVisibleDatabasePatternsInput } = await import("@/lib/database/visibleDatabases");
     expect(parseVisibleDatabasePatternsInput(" %n1%, n2_； \n%n1% ,，")).toEqual(["%n1%", "n2_"]);

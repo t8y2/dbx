@@ -20,11 +20,22 @@ func (s *server) routineQuery(withIdentity bool, build func(kind, filter, identi
 	return s.routineQueryContext(context.Background(), withIdentity, build)
 }
 
-func (s *server) routineQueryContext(ctx context.Context, withIdentity bool, build func(kind, filter, identity string) string) (*sql.Rows, error) {
+// routineCatalogQuery runs one catalog query. The pool holds a single
+// connection (SetMaxOpenConns(1)) and an open interactive transaction pinned
+// it, so a catalog query has to run on that connection instead of waiting for
+// the pool.
+func (s *server) routineCatalogQuery(ctx context.Context, query string) (*sql.Rows, error) {
+	if s.manualConn != nil {
+		return s.manualConn.QueryContext(ctx, query)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
+	return db.QueryContext(ctx, query)
+}
+
+func (s *server) routineQueryContext(ctx context.Context, withIdentity bool, build func(kind, filter, identity string) string) (*sql.Rows, error) {
 	_, prefix := s.routineCatalog()
 	for {
 		kind := "CASE p.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'f' THEN 'FUNCTION' END"
@@ -44,7 +55,7 @@ func (s *server) routineQueryContext(ctx context.Context, withIdentity bool, bui
 			identityFunction = "oidvectortypes"
 			identity = identityFunction + "(p.proargtypes)"
 		}
-		rows, err := db.QueryContext(ctx, build(kind, filter, identity))
+		rows, err := s.routineCatalogQuery(ctx, build(kind, filter, identity))
 		if err == nil {
 			return rows, nil
 		}
@@ -78,18 +89,28 @@ WHERE n.nspname = %s AND %s ORDER BY p.proname, signature`, kind, identity, cata
 	defer rows.Close()
 	result := []objectInfo{}
 	for rows.Next() {
-		var name, kind, signature string
-		var comment sql.NullString
+		var name, kind string
+		var comment, signature sql.NullString
 		if err := rows.Scan(&name, &kind, &comment, &signature); err != nil {
 			return nil, err
 		}
-		// Empty identifies the zero-argument overload and must survive JSON.
-		result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment), Signature: &signature})
+		// A NULL identity represents the zero-argument overload. Keep its empty signature in JSON.
+		result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment), Signature: &signature.String})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func routineSignaturePredicate(identity, signature string) string {
+	if signature == "" {
+		// Kingbase can interpret an empty string literal as NULL in Oracle mode.
+		// The identity argument expression itself can therefore be NULL for a
+		// zero-argument routine; normalize it before applying the predicate.
+		return "coalesce(length(" + identity + "), 0) = 0"
+	}
+	return identity + " = " + quoteLiteral(signature)
 }
 
 func (s *server) getRoutineSource(schema, name, kind string, signature *string) (string, error) {
@@ -103,7 +124,7 @@ func (s *server) getRoutineSource(schema, name, kind string, signature *string) 
 	querySource := func(definitionFunction string) (string, error) {
 		rows, err := s.routineQueryContext(ctx, signature != nil, func(kindExpression, filter, identity string) string {
 			if signature != nil {
-				filter += " AND " + identity + " = " + quoteLiteral(*signature)
+				filter += " AND " + routineSignaturePredicate(identity, *signature)
 			}
 			return fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s AND (%s)=%s AND %s ORDER BY p.oid LIMIT 2", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name), kindExpression, quoteLiteral(kind), filter)
 		})
@@ -151,7 +172,7 @@ func (s *server) getLegacyRoutineSource(ctx context.Context, schema, name, kind 
 	countMatches := func(matchSignature bool) (int, error) {
 		rows, err := s.routineQueryContext(ctx, matchSignature, func(kindExpression, filter, identity string) string {
 			if matchSignature {
-				filter += " AND " + identity + " = " + quoteLiteral(*signature)
+				filter += " AND " + routineSignaturePredicate(identity, *signature)
 			}
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s AND (%s)=%s AND %s", catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name), kindExpression, quoteLiteral(kind), filter)
 		})
@@ -191,11 +212,10 @@ func (s *server) getLegacyRoutineSource(ctx context.Context, schema, name, kind 
 	}
 	query := fmt.Sprintf("SELECT DBMS_METADATA.%s(CAST(%s AS varchar(128)), CAST(%s AS varchar(128)))", function, quoteLiteral(name), quoteLiteral(schema))
 	var source sql.NullString
-	db, err := s.requireDB()
-	if err != nil {
-		return "", err
-	}
-	if err := db.QueryRowContext(ctx, query).Scan(&source); err != nil {
+	// The legacy lookup shares the deadline the fallback chain started with,
+	// and runs on the pinned connection while an interactive transaction is
+	// open, so it cannot block on the pool.
+	if err := s.requireDBQueryRowContext(ctx, query, &source); err != nil {
 		return "", err
 	}
 	if !source.Valid || strings.TrimSpace(source.String) == "" {

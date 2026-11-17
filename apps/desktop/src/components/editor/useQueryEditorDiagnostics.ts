@@ -128,11 +128,24 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     return { from, to };
   }
 
+  function sqlTextSpanToDocRange(doc: import("@codemirror/state").Text, span: SqlTextSpan): { from: number; to: number } | null {
+    if (!span.start_line || !span.start_column) return null;
+    if (span.start_line < 1 || span.start_line > doc.lines) return null;
+    const startLine = doc.line(span.start_line);
+    const from = Math.min(startLine.from + Math.max(0, span.start_column - 1), startLine.to);
+    const endLineNumber = Math.min(doc.lines, Math.max(span.start_line, span.end_line ?? span.start_line));
+    const endLine = doc.line(endLineNumber);
+    const rawEndCol = span.end_column ?? (endLineNumber === span.start_line ? span.start_column : endLine.length + 1);
+    const to = Math.min(endLine.from + Math.max(0, rawEndCol), endLine.to);
+    if (from >= to) return null;
+    return { from, to };
+  }
+
   function sqlSemanticDecorationRanges(currentState: import("@codemirror/state").EditorState) {
-    const sql = currentState.doc.toString();
+    const doc = currentState.doc;
     return semanticDiagnostics
       .map((diagnostic) => {
-        const range = sqlTextSpanToRange(sql, diagnostic.span);
+        const range = sqlTextSpanToDocRange(doc, diagnostic.span);
         return range
           ? {
               ...range,
@@ -249,9 +262,10 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     }));
   }
 
-  function replaceSemanticDiagnosticsInRanges(next: SqlSemanticDiagnostic[], ranges: readonly SqlTextRange[], fullSql: string) {
+  function replaceSemanticDiagnosticsInRanges(next: SqlSemanticDiagnostic[], ranges: readonly { from: number; to: number }[], fullSql: string) {
+    const doc = view.value?.state.doc;
     const retained = semanticDiagnostics.filter((diagnostic) => {
-      const diagnosticRange = sqlTextSpanToRange(fullSql, diagnostic.span);
+      const diagnosticRange = doc ? sqlTextSpanToDocRange(doc, diagnostic.span) : sqlTextSpanToRange(fullSql, diagnostic.span);
       return !diagnosticRange || !ranges.some((range) => rangesOverlap(diagnosticRange, range));
     });
     setSemanticDiagnostics([...retained, ...next].sort(compareSqlSemanticDiagnostics));
@@ -369,13 +383,29 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     }
     if (props.databaseType === "redis") {
       // Redis has no SQL semantics; run command-name / arity / quote / danger checks instead.
-      if (!shouldRunRedisDiagnostics(sql, currentView.state.selection.main.head)) {
+      if (!shouldRunRedisDiagnostics(currentView.state.doc, currentView.state.selection.main.head)) {
         scheduleSemanticDiagnostics(900, {
           preserveOutsideRanges: refreshOptions.preserveOutsideRanges,
         });
         return;
       }
-      setSemanticDiagnostics(buildRedisSyntaxDiagnostics(sql));
+      const backgroundAnalysis = options.boundedAnalysisEnabled?.() === true;
+      if (backgroundAnalysis) {
+        const visibleRanges = currentView.visibleRanges.length > 0 ? currentView.visibleRanges : [currentView.viewport];
+        const lineRanges = visibleRanges.map((r) => ({
+          startLine: currentView.state.doc.lineAt(r.from).number,
+          endLine: currentView.state.doc.lineAt(r.to).number,
+        }));
+        const nextDiagnostics = buildRedisSyntaxDiagnostics(currentView.state.doc, lineRanges);
+        if (refreshOptions.preserveOutsideRanges) {
+          const textRanges: SqlTextRange[] = visibleRanges.map((r) => ({ from: r.from, to: r.to, sql: sql.slice(r.from, r.to) }));
+          replaceSemanticDiagnosticsInRanges(nextDiagnostics, textRanges, sql);
+        } else {
+          setSemanticDiagnostics(nextDiagnostics.sort(compareSqlSemanticDiagnostics));
+        }
+        return;
+      }
+      setSemanticDiagnostics(buildRedisSyntaxDiagnostics(currentView.state.doc));
       return;
     }
     if (shouldSkipSqlSemanticDiagnostics()) {

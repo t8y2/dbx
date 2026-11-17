@@ -110,3 +110,26 @@ it("finishes a known preparation failure and permits the following independent e
   expect(pending[0]!.request.sql).toBe("SELECT 2 FROM dual");
   finish(0);
 });
+
+it("drops the idle-expired manual transaction and reports the export transaction as unavailable", async () => {
+  const { useQueryStore } = await import("../queryStore");
+  const { useExportTracker } = await import("@/composables/useExportTracker");
+  const { default: i18n } = await import("@/i18n");
+  const store = useQueryStore();
+  const id = store.createTab("oracle-1", "APP", "Query");
+  const tab = store.tabs.find((item) => item.id === id)!;
+  tab.autoCommit = false;
+  tab.txnSessionId = "txn-expired";
+  tab.txnPossiblyDirty = true;
+
+  await store.exportQuerySqlDirect(id, "UPDATE users SET active = 1", "csv", "out.csv");
+  await vi.waitFor(() => expect(pending).toHaveLength(1));
+  expect(pending[0]!.request.txnSessionId).toBe("txn-expired");
+  pending[0]!.reject(new Error("Transaction session not found or expired; it may have been auto-rolled back due to inactivity"));
+
+  const tracker = useExportTracker();
+  await vi.waitFor(() => expect(tracker.tasks.value[0]!.errorMessage).toBe(i18n.global.t("exportProgress.transactionUnavailable")));
+  expect(tab.txnSessionId).toBeUndefined();
+  expect(tab.txnAutoRolledBack).toBe(true);
+  expect(tab.txnPossiblyDirty).toBe(false);
+});

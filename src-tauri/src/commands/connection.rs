@@ -4,7 +4,7 @@ use tauri::{Emitter, State};
 
 pub use dbx_core::agent_connection::{
     agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config,
-    oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
+    oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver, with_zookeeper_endpoint_routes,
 };
 pub use dbx_core::connection::{
     agent_connect_timeout, clickhouse_http_proxy, connect_bare_metadata_pool, connect_mysql_metadata_pool,
@@ -111,8 +111,12 @@ async fn test_agent_connection(
     host: &str,
     port: u16,
     agent_env: &[(String, String)],
+    routes: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<ConnectionTestResult, String> {
-    let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?;
+    let connect_params = with_zookeeper_endpoint_routes(
+        agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?,
+        routes,
+    );
     let result = state
         .agent_manager
         .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
@@ -177,8 +181,12 @@ async fn connect_agent_pool(
     host: &str,
     port: u16,
     agent_env: &[(String, String)],
+    routes: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<PoolKind, String> {
-    let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?;
+    let connect_params = with_zookeeper_endpoint_routes(
+        agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?,
+        routes,
+    );
     let mut client =
         state.agent_manager.spawn_with_env(&config.db_type, config.driver_profile.as_deref(), agent_env).await?;
     let connect_result = client
@@ -1232,6 +1240,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 保存任意连接都会重发整张连接表，`sync_connection_configs` 因此会在每次保存时
+    /// 重新比较所有连接。插件连接的池条目持有 sidecar 会话句柄，销毁池会发
+    /// connection/disconnect 杀掉该连接全部会话——一旦比较被派生字段/密钥差异判成
+    /// “已变更”，就会连带拆掉其他 tab 的活跃终端（dbx-plugin-ssh#251）。插件连接的
+    /// 自身配置变更由前端显式重连路径处理，持久化同步不得销毁插件池。
+    #[tokio::test]
+    async fn sync_connection_configs_never_drops_open_plugin_pools() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-plugin-sync-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let mut plugin = mongodb_config();
+        plugin.id = "ssh-a".to_string();
+        plugin.db_type = DatabaseType::Plugin;
+        plugin.plugin_id = Some("io.dbx.ssh".to_string());
+        plugin.plugin_connection_provider = Some("io.dbx.ssh.connection".to_string());
+        state.configs.write().await.insert(plugin.id.clone(), plugin.clone());
+
+        // 即使端点变化（会被 pool_equivalent 判为不同），插件池也不得由同步销毁。
+        let mut changed = plugin.clone();
+        changed.host = "other-host".to_string();
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&changed)).await;
+        assert!(sync.connection_pool_ids_to_drop.is_empty());
+        assert_eq!(state.configs.read().await.get("ssh-a").map(|c| c.host.as_str()), Some("other-host"));
+
+        // 删除（不再出现在持久化列表）仍必须清理池，删除语义不受本豁免影响。
+        let sync_deleted = sync_connection_configs(&state, &[]).await;
+        assert_eq!(sync_deleted.connection_pool_ids_to_drop.as_slice(), &["ssh-a".to_string()]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
@@ -1357,6 +1397,19 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             }
             if previous.db_type == DatabaseType::MessageQueue {
                 mq_adapter_ids_to_drop.insert(config.id.clone());
+            }
+            // 插件连接的池条目持有 sidecar 会话句柄：关闭池会向插件发
+            // connection/disconnect（删注册表 + 杀掉该连接全部会话）。保存任意
+            // 连接都会重发整张连接表，这里一旦因派生字段/密钥差异把插件连接判成
+            // “已变更”，就会连带拆掉其他 tab 的活跃终端（dbx-plugin-ssh#251）。
+            // 插件连接自身的配置变更由前端显式重连路径负责——connect_db_inner 对
+            // Plugin 走 upsert-without-close 再建新会话；显式断开/删除仍走完整关闭
+            // 路径。因此持久化同步只清理会话凭据、绝不销毁插件池。
+            if config.db_type == DatabaseType::Plugin && previous.db_type == DatabaseType::Plugin {
+                if !connection_configs_session_credentials_compatible(&previous, config) {
+                    state.session_credentials.clear_connection(&config.id);
+                }
+                continue;
             }
             if !connection_configs_session_credentials_compatible(&previous, config) {
                 // 端点或认证身份变化后，旧密码不能安全复用。显示范围等本地设置
@@ -1593,14 +1646,18 @@ async fn test_connection_with_info_impl(
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
     let prepared = state.connection_endpoint_attempt(connection_id, &config).await?;
+    let mut cancellation = dbx_core::connection::ZooKeeperTransportCancellation::new(state, connection_id, &prepared);
     let result = async {
         let endpoint = prepared.endpoint?;
         let (host, port) = (endpoint.host.clone(), endpoint.port);
         let runtime_proxy = endpoint.proxy;
         // SOCKS-routed plugin tests dial through the route themselves; probing the
         // logical endpoint (possibly empty host/port) would mislead.
-        let probe_result =
-            if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
+        let probe_result = if runtime_proxy.is_some() || endpoint.zookeeper_endpoint_routes.is_some() {
+            Ok(())
+        } else {
+            probe_connection_endpoint(&config, &host, port).await
+        };
         let url = connection_url_for_endpoint(&config, &host, port);
         let target = redacted_connection_url_for_endpoint(&config, &host, port);
         let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
@@ -2072,10 +2129,10 @@ async fn test_connection_with_info_impl(
                     let validate_agent_target = consul_config.agent_target.is_some();
                     let original_host = consul_config.base_url.host_str().unwrap_or_default();
                     let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
-                    if host != original_host || port != original_port {
+                    if runtime_proxy.is_some() || host != original_host || port != original_port {
                         consul_config = consul_config.with_connect_override(&host, port);
                     }
-                    let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                    let client = dbx_core::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                     client.probe().await?;
                     let identity = if validate_agent_target {
                         Some(client.validate_configured_agent_target().await?)
@@ -2138,7 +2195,16 @@ async fn test_connection_with_info_impl(
                     Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
                 }
                 db_type if database_capabilities::is_agent_type(&db_type) => {
-                    match test_agent_connection(state, &config, &host, port, prepared.stamp.agent_launch_env()).await {
+                    match test_agent_connection(
+                        state,
+                        &config,
+                        &host,
+                        port,
+                        prepared.stamp.agent_launch_env(),
+                        endpoint.zookeeper_endpoint_routes.as_ref(),
+                    )
+                    .await
+                    {
                         Ok(details) => {
                             database_info = details.database_info;
                             Ok(details.message)
@@ -2174,6 +2240,7 @@ async fn test_connection_with_info_impl(
     }
     .await;
     state.reset_connection_transport_if_current(connection_id, &prepared.stamp).await;
+    cancellation.disarm();
     result
 }
 
@@ -2277,12 +2344,13 @@ async fn connect_db_inner(
     }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     let prepared = state.connection_endpoint_attempt(&id, &db_config).await?;
+    let mut cancellation = dbx_core::connection::ZooKeeperTransportCancellation::new(state.inner(), &id, &prepared);
     let result = async {
         let endpoint = prepared.endpoint?;
         let (host, port) = (endpoint.host, endpoint.port);
         let runtime_proxy = endpoint.proxy;
         state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-        if db_config.db_type != DatabaseType::Plugin {
+        if db_config.db_type != DatabaseType::Plugin && endpoint.zookeeper_endpoint_routes.is_none() {
             probe_connection_endpoint(&db_config, &host, port).await?;
         }
         state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
@@ -2631,10 +2699,10 @@ async fn connect_db_inner(
                 let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
                 let original_host = consul_config.base_url.host_str().unwrap_or_default();
                 let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
-                if host != original_host || port != original_port {
+                if runtime_proxy.is_some() || host != original_host || port != original_port {
                     consul_config = consul_config.with_connect_override(&host, port);
                 }
-                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                let client = dbx_core::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                 client.probe().await?;
                 PoolKind::Consul(client)
             }
@@ -2671,7 +2739,15 @@ async fn connect_db_inner(
                 );
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {
-                connect_agent_pool(state.inner(), &db_config, &host, port, prepared.stamp.agent_launch_env()).await?
+                connect_agent_pool(
+                    state.inner(),
+                    &db_config,
+                    &host,
+                    port,
+                    prepared.stamp.agent_launch_env(),
+                    endpoint.zookeeper_endpoint_routes.as_ref(),
+                )
+                .await?
             }
             DatabaseType::PrestoSql => {
                 let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port)?;
@@ -2723,6 +2799,7 @@ async fn connect_db_inner(
     if result.is_err() {
         state.reset_connection_transport_if_current(&id, &prepared.stamp).await;
     }
+    cancellation.disarm();
     result
 }
 

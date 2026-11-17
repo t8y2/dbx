@@ -53,6 +53,10 @@ use crate::persistence::task_history::{
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
+#[path = "credential_reset.rs"]
+mod credential_reset;
+pub use credential_reset::{CredentialResetFailure, CredentialResetPreparation, CredentialResetReport};
+
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 const URL_PARAMS_SECRET_KEY: &str = "url_params";
@@ -66,6 +70,10 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+/// Beta build version the app was told is the promoted stable release. Kept in
+/// app_state (not renderer localStorage) because the native About panel is
+/// built before the webview could report it again on a cold start.
+const APP_STATE_PROMOTED_BUILD_KEY: &str = "promoted_build";
 const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 /// Policy v2 (`dbx_core::mcp_access::McpAccessPolicy`). Written next to the
@@ -94,6 +102,7 @@ fn saved_mcp_access_policy(
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const WEB_LOGIN_CAPTCHA_KEY: &str = "web_login_captcha";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
@@ -273,6 +282,8 @@ pub struct Storage {
     /// Without this, each consumer can prompt a locked Secret Service again.
     secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+    desktop_credential_recovery: bool,
+    credential_reset_confirmation: Arc<Mutex<Option<credential_reset::Confirmation>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -367,6 +378,12 @@ pub struct MigrationPreflight {
     pub state: MigrationState,
     pub needs_migration: bool,
     pub key_recovery_required: bool,
+    #[serde(default)]
+    pub encrypted_record_count: usize,
+    #[serde(default)]
+    pub credential_reset_allowed: bool,
+    #[serde(default)]
+    pub credential_reset_blocked_reason: Option<String>,
     pub key_provider_available: bool,
     pub key_status: MigrationKeyStatus,
     /// Desktop may provision a new local key only for plaintext-only data.
@@ -1565,6 +1582,8 @@ impl Storage {
             secret_codec_cache: Arc::new(Mutex::new(None)),
             secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
+            desktop_credential_recovery: false,
+            credential_reset_confirmation: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -2129,11 +2148,14 @@ impl Storage {
                 self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
             }
         }
-        let preflight = MigrationPreflight {
+        let mut preflight = MigrationPreflight {
             migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
             state,
             needs_migration,
             key_recovery_required,
+            encrypted_record_count: encrypted.max(0) as usize,
+            credential_reset_allowed: false,
+            credential_reset_blocked_reason: None,
             key_provider_available,
             key_status,
             key_creation_allowed,
@@ -2157,6 +2179,8 @@ impl Storage {
             persistent_key_configured: key_provider_available,
             key_source,
         };
+        preflight.credential_reset_blocked_reason = self.credential_reset_blocked_reason(&preflight);
+        preflight.credential_reset_allowed = preflight.credential_reset_blocked_reason.is_none();
         Ok(preflight)
     }
 
@@ -3626,6 +3650,11 @@ fn scrub_mq_auth_secrets(config: &mut ConnectionConfig) {
     }
 }
 
+/// Password and certificate (optional username/password) auth both store `auth.password`.
+fn mqtt_auth_kind_carries_password(auth: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(auth.get("kind").and_then(serde_json::Value::as_str), Some("password" | "certificate"))
+}
+
 fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::Mqtt {
         return;
@@ -3636,7 +3665,7 @@ fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
     let Some(auth) = auth.as_object_mut() else {
         return;
     };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("password") {
+    if mqtt_auth_kind_carries_password(auth) {
         scrub_json_secret(auth, "password");
     }
 }
@@ -6088,6 +6117,20 @@ impl Storage {
         self.save_app_settings_json(&settings).await
     }
 
+    /// Captcha policy chosen in the Web settings dialog (`设置 → 安全`).
+    /// Stored in the shared app settings map so it travels with the data
+    /// directory, but read-modify-write keeps every other key intact.
+    pub async fn save_web_login_captcha_mode(&self, mode: &str) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert(WEB_LOGIN_CAPTCHA_KEY.to_string(), serde_json::Value::String(mode.to_string()));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_web_login_captcha_mode(&self) -> Result<Option<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings.get(WEB_LOGIN_CAPTCHA_KEY).and_then(|value| value.as_str()).map(str::to_string))
+    }
+
     pub async fn load_pinned_tree_node_ids(&self) -> Result<Vec<String>, String> {
         let settings = self.load_app_settings_json().await?;
         let Some(value) = settings.get("pinned_tree_node_ids") else {
@@ -6149,6 +6192,22 @@ impl Storage {
     /// Load open tabs from an isolated state key.
     pub async fn load_open_tabs_state_with_key(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
         self.load_app_state_value(key).await
+    }
+
+    /// Store the promoted-build marker. Only the native About panel reads it,
+    /// and only for the build recorded here — a stale marker from another build
+    /// is ignored by its reader rather than rewritten during startup.
+    pub async fn save_promoted_build(&self, build_version: &str) -> Result<(), String> {
+        let value = serde_json::Value::String(build_version.trim().to_string());
+        self.save_app_state_value(APP_STATE_PROMOTED_BUILD_KEY, &value).await
+    }
+
+    pub async fn load_promoted_build(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .load_app_state_value(APP_STATE_PROMOTED_BUILD_KEY)
+            .await?
+            .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+            .filter(|value| !value.is_empty()))
     }
 
     pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
@@ -8262,7 +8321,7 @@ impl Storage {
         let Some(auth) = auth.as_object_mut() else {
             return Ok(false);
         };
-        if auth.get("kind").and_then(serde_json::Value::as_str) != Some("password") {
+        if !mqtt_auth_kind_carries_password(auth) {
             return Ok(false);
         }
         hydrate_mq_json_secret(self, connection_id, MQTT_AUTH_PASSWORD_KEY, auth, "password").await
@@ -10155,7 +10214,7 @@ fn persist_mqtt_auth_secrets_in_tx(
         delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
         return Ok(());
     };
-    if auth.get("kind").and_then(serde_json::Value::as_str) != Some("password") {
+    if !mqtt_auth_kind_carries_password(auth) {
         delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
         return Ok(());
     }
@@ -15143,6 +15202,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn promoted_build_marker_roundtrips_in_local_app_state() {
+        let path = temp_db_path("promoted-build");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_promoted_build().await.unwrap(), None);
+
+        storage.save_promoted_build(" 0.6.67-beta.20261105.1 ").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.67-beta.20261105.1"));
+
+        // Overwriting replaces the marker instead of accumulating values.
+        storage.save_promoted_build("0.6.68-beta.20261106.1").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.68-beta.20261106.1"));
+    }
+
+    #[tokio::test]
     async fn ai_chat_selection_roundtrips_in_local_app_state() {
         let path = temp_db_path("ai-chat-selection");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
@@ -16487,6 +16561,64 @@ mod tests {
             .is_some_and(|secret| secret == "mqtt-secret"));
         assert_eq!(storage.load_connections().await.unwrap()[0], config);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mqtt_certificate_password_is_encrypted_at_rest_and_hydrated_on_load() {
+        let path = temp_db_path("mqtt-certificate-password-secret");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config = plain_connection("mqtt-certificate", "");
+        config.db_type = DatabaseType::Mqtt;
+        config.external_config = Some(serde_json::json!({
+            "auth": {
+                "kind": "certificate",
+                "username": "mqtt-user",
+                "password": "mqtt-cert-secret",
+                "clientCertPath": "/tmp/client.pem"
+            }
+        }));
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let raw = raw_connection_json(&storage, "mqtt-certificate").await;
+        assert!(!raw.contains("mqtt-cert-secret"), "{raw}");
+        assert_eq!(
+            storage.get_secret("mqtt-certificate", MQTT_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("mqtt-cert-secret")
+        );
+        assert_eq!(storage.load_connections().await.unwrap()[0], config);
+
+        // Re-saving the hydrated config must keep the stored secret.
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(
+            storage.get_secret("mqtt-certificate", MQTT_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("mqtt-cert-secret")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migration_moves_legacy_mqtt_certificate_password_into_secret_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        let mut config = plain_connection("mqtt-legacy-certificate", "");
+        config.db_type = DatabaseType::Mqtt;
+        config.external_config = Some(serde_json::json!({
+            "auth": { "kind": "certificate", "username": "mqtt-user", "password": "legacy-cert-secret" }
+        }));
+        insert_raw_connection(&storage, &config).await;
+
+        assert_eq!(storage.inspect_data_migration().await.unwrap().database_plaintext_count, 1);
+        storage.start_data_migration().await.unwrap();
+
+        let raw = raw_connection_json(&storage, "mqtt-legacy-certificate").await;
+        assert!(!raw.contains("legacy-cert-secret"), "{raw}");
+        assert_eq!(
+            storage.get_secret("mqtt-legacy-certificate", MQTT_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("legacy-cert-secret")
+        );
+        let after = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(after.database_plaintext_count, 0);
+        assert!(!after.needs_migration);
     }
 
     #[tokio::test]

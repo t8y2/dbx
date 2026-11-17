@@ -30,6 +30,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildContinueOnErrorDeployLog, buildDeployTxResult, type DeployTxResult } from "@/lib/schema/deployTxResult";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
+import { schemaDiffDefersTableDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
 import { schemaDiffRoutineObjectTypesIntersection, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
@@ -563,19 +564,33 @@ watch([selectedObject, () => ddlPreferences.value.separateDdlIndexes, sourceConn
   const generation = ++independentPreviewGeneration;
   independentPreview.value = null;
   const object = selectedObject.value;
-  if (!open.value || !ddlPreferences.value.separateDdlIndexes || object?.objectKind !== "table") return;
+  if (!open.value || object?.objectKind !== "table") return;
   const diff = lastDiffResult.value?.diffs.find((diff) => diff.name === object.name);
   if (!diff) return;
+  const separateIndexes = ddlPreferences.value.separateDdlIndexes;
   const sides = [
-    { side: "source" as const, exists: diff.type !== "removed", type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
-    { side: "target" as const, exists: diff.type !== "added", type: targetEngineDbType.value, connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value, tableName: diff.targetName ?? diff.name },
-  ].filter((side) => side.exists && (side.type === "oracle" || side.type === "oceanbase-oracle"));
+    { side: "source" as const, exists: diff.type !== "removed", deferred: !object.sourceDdl && schemaDiffDefersTableDdl(sourceDbType.value), type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
+    {
+      side: "target" as const,
+      exists: diff.type !== "added",
+      deferred: !object.targetDdl && schemaDiffDefersTableDdl(targetDbType.value),
+      type: targetEngineDbType.value,
+      connectionId: targetConnectionId.value,
+      database: targetDatabase.value,
+      schema: targetSchema.value,
+      tableName: diff.targetName ?? diff.name,
+    },
+  ].filter((side) => side.exists && (side.deferred || (separateIndexes && (side.type === "oracle" || side.type === "oceanbase-oracle"))));
   if (!sides.length) return;
   independentPreview.value = { objectId: object.id, issues: [], loading: true };
   const results = await Promise.all(
     sides.map(async (side) => {
       try {
-        const { ddl } = await loadObjectDdl({ connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, separateIndexes: true });
+        // A deferred table was just found to differ, so a cached DDL could contradict that result.
+        const { ddl } = await loadObjectDdl(
+          { connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, ...(side.deferred ? {} : { separateIndexes: true }) },
+          side.deferred ? { force: true } : undefined,
+        );
         return { side: side.side, ddl, issue: undefined };
       } catch (error: any) {
         return { side: side.side, ddl: undefined, issue: `${t(side.side === "source" ? "diff.sourceDdl" : "diff.targetDdl")} ${side.schema}.${side.tableName}: ${error?.message || String(error)}` };
@@ -673,6 +688,17 @@ function comparisonEndpointLabel(connectionId: string, database: string, schema:
   const connection = store.getConfig(connectionId);
   return [connection?.name || connectionId, database, schema].filter(Boolean).join(" / ");
 }
+
+/**
+ * Source/target endpoints kept visible above the result and deploy steps, so the
+ * last screen before "deploy to server" still names the two databases (#14877).
+ * The deploy step itself only received the target props, and the config step was
+ * already the only place the choice was visible.
+ */
+const comparisonEndpoints = computed(() => ({
+  source: comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value),
+  target: comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value),
+}));
 
 function restoreSchemaDiffSession(session: SchemaDiffSession): void {
   const config = session.config;
@@ -1096,6 +1122,7 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
   const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
     databaseType: engineDbType,
+    compareCharset: options.compareCharset,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
     cascadeDelete: options.cascadeDelete,
     sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
@@ -1688,6 +1715,19 @@ const targetConnectionInfo = computed(() => {
         </DialogTitle>
       </DialogHeader>
 
+      <!-- #14877: keep both endpoints in view on the result and deploy steps so the
+           user can confirm which two databases the script will touch before running it.
+           The config step is where they are chosen, so it needs no reminder. -->
+      <div v-if="(step === 'result' || step === 'deploy-review') && (comparisonEndpoints.source || comparisonEndpoints.target)" class="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground" data-schema-diff-endpoints>
+        <span class="truncate" :title="comparisonEndpoints.source">
+          {{ t("diff.sourceObject") }}: <span class="text-foreground">{{ comparisonEndpoints.source }}</span>
+        </span>
+        <span aria-hidden="true">→</span>
+        <span class="truncate" :title="comparisonEndpoints.target">
+          {{ t("diff.targetObject") }}: <span class="text-foreground">{{ comparisonEndpoints.target }}</span>
+        </span>
+      </div>
+
       <!-- Result step relies on splitpanes to manage its own scroll/heights, so it keeps
            `overflow-hidden`; the config step's tall content (e.g. the table multi-select
            added in the "compare specific tables" feature) can overflow a fixed-height
@@ -1844,6 +1884,7 @@ const targetConnectionInfo = computed(() => {
                     :target-db-type="targetDbType"
                     :deploy-sql="focusedDeploySql"
                     :deploy-sql-all="selectedDeploySql"
+                    :charset-sync-disabled="['mysql', 'goldendb'].includes(targetEngineDbType ?? '') && schemaDiffPanelOptions.compareCharset === false"
                     :rollback-forward-sql="selectedForwardDeploySql"
                     :compatibility-warnings="selectedCompatibilityWarnings"
                     :rollback-sql="rollbackSql"

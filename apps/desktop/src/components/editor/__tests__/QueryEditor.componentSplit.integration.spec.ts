@@ -318,6 +318,10 @@ describe("QueryEditor component split integration", () => {
     vi.spyOn(host.querySelector("[data-query-editor-root]")!, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 600));
     expect(editor.requestExecute()).toBe(true);
     await nextTick();
+    // Vue guards newly attached listeners by timestamp; nextTick alone can still
+    // dispatch a synthetic key in the same millisecond as the picker mount.
+    const firstMountTime = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(firstMountTime), { interval: 1 });
     let picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
     expect(picker).not.toBeNull();
     expect(picker.style.left).toBe("400px");
@@ -332,6 +336,8 @@ describe("QueryEditor component split integration", () => {
     expect(view.hasFocus).toBe(true);
     editor.requestExecute();
     await nextTick();
+    const secondMountTime = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(secondMountTime), { interval: 1 });
     picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
     keydown(picker, "ArrowDown");
     await nextTick();
@@ -350,6 +356,34 @@ describe("QueryEditor component split integration", () => {
     expect(onExecute).toHaveBeenCalledWith({ fullSql: props.modelValue, selectedSql: databaseType === "mongodb" ? "" : props.modelValue, cursorPos: 0, selectionFrom: 0, selectionTo: databaseType === "mongodb" ? 0 : props.modelValue.length });
     expect(host.querySelector('[role="listbox"]')).toBeNull();
     expect(await editor.pasteClipboardAsSqlInCondition()).toBe(false);
+  });
+
+  function pasteText(view: EditorView, text: string) {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { getData: (type: string) => (type === "text/plain" ? text : "") } });
+    view.contentDOM.dispatchEvent(event);
+  }
+
+  it.each(["", "SELECT 0;\n"])("runs the pasted statement immediately after a paste ending in blank lines (%j)", async (prefix) => {
+    const { editor, view, onExecute } = await mountEditor({ modelValue: prefix });
+    const sql = "SELECT 1;\nSELECT 2;";
+    view.dispatch({ selection: { anchor: prefix.length } });
+
+    pasteText(view, sql.replaceAll("\n", "\r\n") + "\r\n \r\n");
+    expect(view.state.doc.toString()).toBe(prefix + sql + "\n \n");
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ selectedSql: "SELECT 2", cursorPos: prefix.length + sql.length }));
+
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(prefix);
+  });
+
+  it("preserves the normal paste caret when inserting in the middle of a query", async () => {
+    const { view } = await mountEditor({ modelValue: "SELECT 2;" });
+    pasteText(view, "SELECT 1;\n");
+
+    expect(view.state.doc.toString()).toBe("SELECT 1;\nSELECT 2;");
+    expect(view.state.selection.main.head).toBe("SELECT 1;\n".length);
   });
 
   it.each([false, true])("preserves the blank-line execution fallback setting (%s)", async (fallback) => {
@@ -393,6 +427,29 @@ describe("QueryEditor component split integration", () => {
     expect(view.state.doc.toString()).toBe("SELECT 3;");
     expect(editor.captureExecutionSnapshot()).toBeUndefined();
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
+  });
+
+  it("does not accumulate page styles while repeatedly restoring cached SQL tabs", async () => {
+    const { props, view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;", tabId: "styles-a" });
+    settingsStore.editorSettings.theme = "cursor-light";
+    const activate = async (tabId: string, sql: string) => {
+      props.tabId = tabId;
+      props.modelValue = sql;
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await activate("styles-b", "SELECT 2;");
+    await activate("styles-a", "SELECT 1;");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const stylesheetSize = () => [...document.head.querySelectorAll("style")].reduce((total, style) => total + (style.textContent?.length ?? 0), 0);
+    const initialSize = stylesheetSize();
+    for (let index = 0; index < 20; index += 1) {
+      await activate("styles-b", "SELECT 2;");
+      await activate("styles-a", "SELECT 1;");
+    }
+    expect(stylesheetSize() - initialSize).toBe(0);
+    view.dispatch({ selection: { anchor: 0, head: 6 } });
+    expect(view.state.sliceDoc(0, 6)).toBe("SELECT");
   });
 
   it("connects manual completion to the provider without preselecting a candidate", async () => {

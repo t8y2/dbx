@@ -8,6 +8,7 @@ const { t } = useI18n();
 defineProps<{ queryResult?: boolean }>();
 const settingsStore = useSettingsStore();
 const options = [
+  { key: "csvWithoutBom", label: "settings.csvWithoutBom" },
   { key: "dataGridExportInToolbar", label: "grid.exportInToolbar" },
   { key: "dataGridLoadAllInToolbar", label: "grid.loadAllInToolbar" },
   { key: "showSaveResult", label: "grid.showSaveResult" },
@@ -37,7 +38,7 @@ const options = [
     <Switch size="sm" :model-value="settingsStore.editorSettings.dataGridHideToolbarLabels" :aria-label="t('grid.hideToolbarLabels')" @update:model-value="settingsStore.updateEditorSettings({ dataGridHideToolbarLabels: $event })" />
   </div>
   <template v-for="option in options" :key="option.key">
-    <div v-if="queryResult || option.key === 'warnIncompleteExport'" class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+    <div v-if="queryResult || option.key === 'warnIncompleteExport' || option.key === 'csvWithoutBom'" class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
       <span class="font-medium">{{ t(option.label) }}</span>
       <Switch size="sm" :model-value="settingsStore.editorSettings[option.key]" :aria-label="t(option.label)" @update:model-value="settingsStore.updateEditorSettings({ [option.key]: $event })" />
     </div>

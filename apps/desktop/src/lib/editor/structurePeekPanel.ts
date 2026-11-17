@@ -9,6 +9,40 @@ export const STRUCTURE_PEEK_MIN_WIDTH = 360;
 export const STRUCTURE_PEEK_MIN_HEIGHT = 240;
 export const STRUCTURE_PEEK_CASCADE = 24;
 
+/**
+ * Peek panels are modeless windows, so they must stay below modal dialogs.
+ * Dialog layers start at 50 (BASE_DIALOG_Z_INDEX in useDialogLayerOrder), and
+ * allocating peek panels from the same band used to tie a panel with an open
+ * dialog: the dialog's overlay painted behind the panel while its modal
+ * pointer-event guard still blocked the panel, so the panel looked on top but
+ * could not be clicked or closed.
+ */
+export const STRUCTURE_PEEK_BASE_Z_INDEX = 40;
+export const STRUCTURE_PEEK_MAX_Z_INDEX = 49;
+
+/** Number of layers available inside the peek band. */
+export const STRUCTURE_PEEK_DEPTH = STRUCTURE_PEEK_MAX_Z_INDEX - STRUCTURE_PEEK_BASE_Z_INDEX + 1;
+
+/**
+ * z-indexes for `count` open panels, ordered bottom to top: the last entry is
+ * the panel the user activated most recently and always lands on
+ * STRUCTURE_PEEK_MAX_Z_INDEX, so the whole stack stays strictly below dialogs.
+ *
+ * Peek panels are re-stacked by their current order instead of being handed a
+ * monotonic counter. A counter saturates at the top of the band after a handful
+ * of activations, after which two panels share one layer and the older panel can
+ * no longer be raised above the newer one even when clicked last. With more open
+ * panels than band slots the ones furthest back share the base layer while the
+ * front STRUCTURE_PEEK_DEPTH panels keep a strict order.
+ */
+export function structurePeekZIndexesByOrder(count: number): number[] {
+  const total = Math.max(0, Math.floor(Number.isFinite(count) ? count : 0));
+  return Array.from({ length: total }, (_unused, index) => {
+    const offset = Math.max(0, index - (total - STRUCTURE_PEEK_DEPTH));
+    return STRUCTURE_PEEK_BASE_Z_INDEX + offset;
+  });
+}
+
 export function defaultStructurePeekSize(viewportWidth: number, viewportHeight: number): { width: number; height: number } {
   const maxWidth = Math.max(STRUCTURE_PEEK_MIN_WIDTH, viewportWidth - STRUCTURE_PEEK_MARGIN * 2);
   const maxHeight = Math.max(STRUCTURE_PEEK_MIN_HEIGHT, viewportHeight - STRUCTURE_PEEK_MARGIN * 2);

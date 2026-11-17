@@ -170,6 +170,9 @@ pub struct NacosOpenApiAdmin {
     token: Mutex<Option<AccessToken>>,
     rnacos_console_session: RNacosConsoleSessionHandle,
     detected_rnacos: AtomicBool,
+    /// Set once a connection with an implied `/nacos` context is found to be
+    /// served at the server root; later requests then skip the context.
+    root_context_detected: AtomicBool,
     detected_major_version: AtomicU8,
     managed_namespace_fallback_used: AtomicBool,
     global_admin: AtomicU8,
@@ -205,11 +208,22 @@ impl NacosOpenApiAdmin {
             token: Mutex::new(None),
             rnacos_console_session,
             detected_rnacos,
+            root_context_detected: AtomicBool::new(false),
             detected_major_version,
             managed_namespace_fallback_used: AtomicBool::new(false),
             global_admin: AtomicU8::new(0),
             access_control_capabilities: StdRwLock::new(None),
         })
+    }
+
+    /// The context path requests use: the configured one, or the server root
+    /// once an implied default context turned out to be wrong (#14527).
+    fn effective_context_path(&self) -> &str {
+        if self.root_context_detected.load(Ordering::Relaxed) {
+            ""
+        } else {
+            &self.cfg.context_path
+        }
     }
 
     fn endpoint_with_context(&self, path: &str, context_path: &str) -> Result<String, String> {
@@ -244,7 +258,8 @@ impl NacosOpenApiAdmin {
         body: Option<&Value>,
         auth_token: Option<&str>,
     ) -> Result<reqwest::Response, String> {
-        let resp = self.send_once(method.clone(), path, &self.cfg.context_path, query, form, body, auth_token).await?;
+        let context_path = self.effective_context_path();
+        let resp = self.send_once(method.clone(), path, context_path, query, form, body, auth_token).await?;
         if method != reqwest::Method::GET && method != reqwest::Method::HEAD {
             return Ok(resp);
         }
@@ -254,10 +269,19 @@ impl NacosOpenApiAdmin {
 
         let status = resp.status();
         let detail = resp.text().await.unwrap_or_default();
-        if self.cfg.context_path.trim().is_empty() || !looks_like_wrong_context_path(&detail, &self.cfg.context_path) {
+        // An implied default context may simply be wrong for a deployment served
+        // at the root, whose 404 page carries no recognizable context hint.
+        let implied_context_not_found = self.cfg.context_path_implied && status == reqwest::StatusCode::NOT_FOUND;
+        if context_path.trim().is_empty()
+            || !(implied_context_not_found || looks_like_wrong_context_path(&detail, context_path))
+        {
             return Err(format!("Nacos admin {path} returned {status}: {}", detail.trim()));
         }
-        self.send_once(method, path, "", query, form, body, auth_token).await
+        let resp = self.send_once(method, path, "", query, form, body, auth_token).await?;
+        if implied_context_not_found && resp.status().is_success() {
+            self.root_context_detected.store(true, Ordering::Relaxed);
+        }
+        Ok(resp)
     }
 
     async fn send_once(
@@ -285,7 +309,7 @@ impl NacosOpenApiAdmin {
     }
 
     fn should_retry_without_context(&self, status: reqwest::StatusCode) -> bool {
-        !self.cfg.context_path.trim().is_empty()
+        !self.effective_context_path().trim().is_empty()
             && (status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::INTERNAL_SERVER_ERROR)
     }
 
@@ -301,6 +325,37 @@ impl NacosOpenApiAdmin {
             // either Nacos or r-nacos, so retain the existing automatic probes.
             None => COMPATIBLE_PATHS,
         }
+    }
+
+    /// Tries each login path under `context_path`. Returns the first usable
+    /// response, and whether every attempt was answered with 404 Not Found.
+    async fn try_login_paths(
+        &self,
+        form: &[(String, String)],
+        context_path: &str,
+        errors: &mut Vec<String>,
+    ) -> (Option<reqwest::Response>, bool) {
+        let mut all_not_found = true;
+        for &path in self.auth_login_paths() {
+            if !self.api_path_allowed(path) {
+                continue;
+            }
+            match self.send_once(reqwest::Method::POST, path, context_path, &[], Some(form), None, None).await {
+                Ok(value) if value.status().is_success() => return (Some(value), false),
+                Ok(value) => {
+                    all_not_found &= value.status() == reqwest::StatusCode::NOT_FOUND;
+                    match error_for_status(value, path).await {
+                        Ok(value) => return (Some(value), false),
+                        Err(err) => errors.push(err),
+                    }
+                }
+                Err(err) => {
+                    all_not_found = false;
+                    errors.push(err);
+                }
+            }
+        }
+        (None, all_not_found)
     }
 
     async fn access_token(&self) -> Result<Option<String>, String> {
@@ -321,24 +376,16 @@ impl NacosOpenApiAdmin {
 
         let form = vec![("username".to_string(), username.to_string()), ("password".to_string(), password.to_string())];
         let mut errors = Vec::new();
-        let mut resp = None;
-        for &path in self.auth_login_paths() {
-            if !self.api_path_allowed(path) {
-                continue;
-            }
-            match self.send_with_context_fallback(reqwest::Method::POST, path, &[], Some(&form), None, None).await {
-                Ok(value) if value.status().is_success() => {
-                    resp = Some(value);
-                    break;
-                }
-                Ok(value) => match error_for_status(value, path).await {
-                    Ok(value) => {
-                        resp = Some(value);
-                        break;
-                    }
-                    Err(err) => errors.push(err),
-                },
-                Err(err) => errors.push(err),
+        let context_path = self.effective_context_path();
+        let (mut resp, all_not_found) = self.try_login_paths(&form, context_path, &mut errors).await;
+        // Login is a POST, so it never takes the GET-only retry without the
+        // context path. A profile-less connection to a deployment served at
+        // the server root answers every probe under the implied `/nacos`
+        // context with 404; retry the probes at the root (#14527).
+        if resp.is_none() && all_not_found && self.cfg.context_path_implied && !context_path.trim().is_empty() {
+            resp = self.try_login_paths(&form, "", &mut errors).await.0;
+            if resp.is_some() {
+                self.root_context_detected.store(true, Ordering::Relaxed);
             }
         }
         let resp = resp.ok_or_else(|| {
@@ -4695,6 +4742,7 @@ mod tests {
             display_server_addr: server_addr,
             namespace: String::new(),
             context_path: String::new(),
+            context_path_implied: false,
             managed_namespaces: Vec::new(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: None,

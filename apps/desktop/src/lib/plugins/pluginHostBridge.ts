@@ -1,5 +1,6 @@
 import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
 import { permittedPluginUrl } from "./pluginOpenUrl";
+import { requirePluginClipboardImage } from "./pluginClipboardImage";
 import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
@@ -91,6 +92,10 @@ export interface PluginBridgeTheme {
 }
 
 export interface PluginWorkbenchContext {
+  /** Explicit New Query; restore this workspace's state or start with blank input. */
+  newQuery?: boolean;
+  /** Source workspace on the same connection; plugins may inherit its location. */
+  sourceWorkbenchId?: string;
   connectionId?: string;
   database?: string;
   schema?: string;
@@ -282,6 +287,7 @@ export interface PluginHostBridgeApi {
   clipboardRead?(pluginId: string): Promise<string>;
   /** Read and PNG-encode the current clipboard image. Shares the clipboard-read permission and consent gate. */
   clipboardReadImage?(pluginId: string): Promise<PluginClipboardImage>;
+  copyImage?(pluginId: string, data: Uint8Array): Promise<void>;
   /**
    * Session consent prompt for the first clipboard read of a bridge lifetime.
    * Resolves true to allow (and remember for the workbench session), false to
@@ -526,6 +532,7 @@ export class PluginHostBridge {
         clipboardWrite: !!this.api.copyText,
         clipboardRead: !!this.api.clipboardRead,
         clipboardImageRead: !!this.api.clipboardReadImage,
+        clipboardImageWrite: !!this.api.copyImage,
         mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
         // Floating desktop widget windows: advertised only when the host can both
         // open a window and drive its geometry, so a plugin sees one honest flag.
@@ -641,7 +648,12 @@ export class PluginHostBridge {
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
     try {
-      enforcePayloadLimit(request.params);
+      // Image base64 has its own bounded limit; keep all other metadata under
+      // the normal bridge cap without serializing the larger image twice.
+      if (request.method === "host.copyImage" && isRecord(request.params)) {
+        const { dataBase64: _image, ...metadata } = request.params;
+        enforcePayloadLimit(metadata);
+      } else enforcePayloadLimit(request.params);
       const result = await this.dispatch(request.method, request.params, request.data);
       this.respond(target, request.id, { result: result ?? null });
     } catch (error) {
@@ -932,6 +944,12 @@ export class PluginHostBridge {
       await this.api.copyText(this.plugin.manifest.id, input.text);
       return { success: true };
     }
+    if (method === "host.copyImage") {
+      if (!this.api.copyImage) throw new Error("Host clipboard image write is unavailable");
+      const bytes = requirePluginClipboardImage(params, binary);
+      await this.api.copyImage(this.plugin.manifest.id, bytes);
+      return { success: true };
+    }
     if (method === "host.clipboardRead") {
       // Reads are the sensitive half of the clipboard surface: the payload is
       // user data heading into plugin code, so the manifest must declare
@@ -1147,9 +1165,14 @@ export class PluginHostBridge {
 
 /**
  * Parse `host.network:<origin>` permission entries into CSP connect-src
- * origins. Must stay aligned with `parse_host_network_permission` in
- * crates/dbx-plugin-runtime/src/plugins/manifest.rs.
+ * origins. Must stay aligned with `parse_host_network_permission` and
+ * `MAX_PLUGIN_NETWORK_ORIGINS` in crates/dbx-plugin-runtime/src/plugins/manifest.rs:
+ * the manifest validator rejects a plugin beyond that bound, so this only
+ * mirrors it instead of silently dropping origins a plugin declared legally
+ * (t8y2/dbx#14299 — 8 was too tight for bookmark collections).
  */
+const MAX_PLUGIN_NETWORK_ORIGINS = 64;
+
 export function pluginNetworkOrigins(permissions: readonly string[] | undefined): string[] {
   const origins = new Set<string>();
   for (const permission of permissions || []) {
@@ -1157,7 +1180,7 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
     const origin = permission.slice("host.network:".length);
     if (!/^https:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?$/.test(origin)) continue;
     origins.add(origin);
-    if (origins.size >= 8) break;
+    if (origins.size >= MAX_PLUGIN_NETWORK_ORIGINS) break;
   }
   return [...origins];
 }
@@ -1527,6 +1550,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      copyImage: (options = {}, data) => {
+        if (data === undefined) return request('host.copyImage', options);
+        if (typeof data === 'string') return request('host.copyImage', { ...options, dataBase64: data });
+        // Copy just the view's bytes, not its unrelated backing-buffer data.
+        const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data).slice().buffer;
+        return request('host.copyImage', options, { transfer: bytes });
+      },
       // System clipboard surface: writeText rides the ungated host.copy path,
       // readText is served by host.clipboardRead and requires the plugin to
       // declare the host.clipboard:read permission (the bridge rejects

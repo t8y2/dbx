@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
-import { loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
+import { clearSqlParameterHistory, loadSqlParameterHistory, rememberSqlParameterValues } from "@/lib/sql/sqlParameterHistory";
 import { substituteSqlParameters, type SqlParameterDescriptor, type SqlParameterInput, type SqlParameterSyntax, type SqlParameterValueKind } from "@/lib/sql/sqlParameters";
 import { useDialogEditorFocusRestore } from "@/composables/useDialogEditorFocusRestore";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -101,6 +101,13 @@ function clearParameterValues() {
   values.value = next;
 }
 
+/** Drop every remembered parameter value, in storage and in this dialog's copy (#14894). */
+function clearParameterHistory() {
+  clearSqlParameterHistory();
+  histories.value = {};
+  activeHistoryName.value = "";
+}
+
 function ignoreParameters() {
   open.value = false;
   emit("execute", props.sql);
@@ -168,6 +175,9 @@ async function copyResolvedSql() {
           <p class="min-w-0 flex-1 text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
           <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-values" @click="clearParameterValues">
             {{ t("sqlParameters.clearValues") }}
+          </Button>
+          <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-history" @click="clearParameterHistory">
+            {{ t("sqlParameters.clearHistory") }}
           </Button>
           <Button type="button" size="sm" variant="outline" class="ml-auto shrink-0" data-testid="sql-parameters-use-raw-all" @click="setAllParametersToRaw">
             {{ t("sqlParameters.useRawForAll") }}

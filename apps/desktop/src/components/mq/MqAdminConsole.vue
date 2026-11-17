@@ -668,6 +668,7 @@ onUnmounted(() => {
         :supports-rate-limits="canManageRateLimits"
         :supports-backlog-quota="canManageBacklogQuota"
         :supports-retention="canManageRetention"
+        :system-kind="mqSystemKind"
       />
       <RabbitMqPermissionsPanel v-else-if="activeTab === 'permissions' && isRabbitMqCluster && canManageUserPermissions" :connection-id="connectionId" :namespace="effectiveNamespace" :read-only="readOnly" />
       <PermissionsPanel v-else-if="activeTab === 'permissions' && canManagePermissions" :connection-id="connectionId" :topic="selectedTopic" :tenant="effectiveTenant" :namespace="effectiveNamespace" :read-only="readOnly" :mq-system-kind="mqSystemKind" />

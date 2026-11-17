@@ -197,8 +197,9 @@ export function databaseNameMatchesVisiblePatterns(name: string, patterns: strin
   return patterns!.some((pattern) => visibleDatabasePatternRegExp(pattern).test(name));
 }
 
-export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
-  return selectedNames.length > 0;
+/** 没有勾选时，只要还有通配符就能保存：侧栏只显示命中通配符的库（#14221）。 */
+export function canSaveVisibleDatabaseSelection(selectedNames: string[], patterns: readonly string[] = []): boolean {
+  return selectedNames.length > 0 || visibleDatabasePatternsAreEnabled([...patterns]);
 }
 
 export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined, visibleDatabasePatterns?: string[]): string[] {

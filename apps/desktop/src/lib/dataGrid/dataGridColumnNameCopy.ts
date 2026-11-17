@@ -1,8 +1,16 @@
 import type { DatabaseType } from "@/types/database";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { BACKSLASH_ESCAPE_STRING_DIALECTS } from "@/lib/sql/sqlStatementRanges";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export type ColumnNameCopySeparator = "tab" | "comma" | "newline" | "comma-newline";
+
+/**
+ * `identifier` wraps names in the database's identifier quote; `single` wraps them in
+ * single quotes as SQL string literals, which is what an `IN ('a','b')` list needs and
+ * works for any database (no identifier-quote support implied).
+ */
+export type ColumnNameCopyQuoteStyle = "identifier" | "single";
 
 export const COLUMN_NAME_COPY_SEPARATOR_VALUES: Record<ColumnNameCopySeparator, string> = {
   tab: "\t",
@@ -55,10 +63,24 @@ export function columnNamesForCopy(options: ColumnNamesForCopyOptions): string[]
   return options.displayableIndexes.map((index) => options.allColumnNames[index]).filter((name): name is string => name !== undefined);
 }
 
-export function formatColumnNamesForCopy(names: readonly string[], options: { separator: ColumnNameCopySeparator; quote?: boolean; databaseType?: DatabaseType; showByComment?: boolean; commentByColumn?: Map<string, string> }): string {
-  const quote = !!options.quote && supportsColumnNameQuoting(options.databaseType);
+/**
+ * Formats one name as a SQL string literal for the target dialect.
+ *
+ * `'` is always doubled, which every SQL dialect accepts. Dialects where a backslash
+ * escapes the next character (MySQL family, via the same set the statement lexer uses)
+ * also need `\` doubled — otherwise a name such as `C:\tmp` turns `\t` into a tab and
+ * `a\'b` loses the string boundary (#14495 review).
+ */
+function sqlStringLiteralForCopy(name: string, databaseType?: DatabaseType): string {
+  const escaped = (!!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType) ? name.replaceAll("\\", "\\\\") : name).replaceAll("'", "''");
+  return `'${escaped}'`;
+}
+
+export function formatColumnNamesForCopy(names: readonly string[], options: { separator: ColumnNameCopySeparator; quote?: boolean; quoteStyle?: ColumnNameCopyQuoteStyle; databaseType?: DatabaseType; showByComment?: boolean; commentByColumn?: Map<string, string> }): string {
+  const singleQuoted = !!options.quote && options.quoteStyle === "single";
+  const quote = singleQuoted || (!!options.quote && supportsColumnNameQuoting(options.databaseType));
   const displayNames = options.showByComment && options.commentByColumn ? names.map((name) => options.commentByColumn!.get(name) || name) : [...names];
-  const parts = quote ? displayNames.map((name) => quoteTableIdentifier(options.databaseType, name)) : displayNames;
+  const parts = quote ? displayNames.map((name) => (singleQuoted ? sqlStringLiteralForCopy(name, options.databaseType) : quoteTableIdentifier(options.databaseType, name))) : displayNames;
   return parts.join(COLUMN_NAME_COPY_SEPARATOR_VALUES[options.separator]);
 }
 

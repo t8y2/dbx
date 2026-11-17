@@ -36,27 +36,28 @@ const (
 )
 
 type connectionConfig struct {
-	ZooKeeperConnectString string `json:"zookeeper_connect_string"`
-	ConnectString          string `json:"connect_string"`
-	ConnectionString       string `json:"connection_string"`
-	Host                   string `json:"host"`
-	Port                   int    `json:"port"`
-	Namespace              string `json:"namespace"`
-	Username               string `json:"username"`
-	Password               string `json:"password"`
-	AuthScheme             string `json:"auth_scheme"`
-	URLParams              string `json:"url_params"`
-	SessionTimeoutMS       int    `json:"session_timeout_ms"`
-	ConnectionTimeoutMS    int    `json:"connection_timeout_ms"`
-	BaseSleepTimeMS        *int   `json:"base_sleep_time_ms"`
-	MaxRetries             *int   `json:"max_retries"`
-	MaxBufferSize          *int   `json:"max_buffer_size"`
-	SSL                    bool   `json:"ssl"`
-	CACertPath             string `json:"ca_cert_path"`
-	ClientCertPath         string `json:"client_cert_path"`
-	ClientKeyPath          string `json:"client_key_path"`
-	CertPath               string `json:"cert_path"`
-	KeyPath                string `json:"key_path"`
+	EndpointRoutes         map[string]string `json:"zookeeper_endpoint_routes"`
+	ZooKeeperConnectString string            `json:"zookeeper_connect_string"`
+	ConnectString          string            `json:"connect_string"`
+	ConnectionString       string            `json:"connection_string"`
+	Host                   string            `json:"host"`
+	Port                   int               `json:"port"`
+	Namespace              string            `json:"namespace"`
+	Username               string            `json:"username"`
+	Password               string            `json:"password"`
+	AuthScheme             string            `json:"auth_scheme"`
+	URLParams              string            `json:"url_params"`
+	SessionTimeoutMS       int               `json:"session_timeout_ms"`
+	ConnectionTimeoutMS    int               `json:"connection_timeout_ms"`
+	BaseSleepTimeMS        *int              `json:"base_sleep_time_ms"`
+	MaxRetries             *int              `json:"max_retries"`
+	MaxBufferSize          *int              `json:"max_buffer_size"`
+	SSL                    bool              `json:"ssl"`
+	CACertPath             string            `json:"ca_cert_path"`
+	ClientCertPath         string            `json:"client_cert_path"`
+	ClientKeyPath          string            `json:"client_key_path"`
+	CertPath               string            `json:"cert_path"`
+	KeyPath                string            `json:"key_path"`
 }
 
 type connectionParams struct {
@@ -179,25 +180,34 @@ func openClient(config connectionConfig) (*clientSession, error) {
 	if err != nil {
 		return nil, err
 	}
+	routes, err := validateEndpointRoutes(target.Servers, config.EndpointRoutes)
+	if err != nil {
+		return nil, err
+	}
 	connectionTimeout := millisecondsOrDefault(config.ConnectionTimeoutMS, defaultConnectionTimeout)
 	probeTimeout := minDuration(defaultProbeTimeout, connectionTimeout)
-	if err := requireReachableServer(target.Servers, probeTimeout, tlsConfig); err != nil {
+	if err := requireReachableServer(target.Servers, probeTimeout, tlsConfig, routes); err != nil {
 		return nil, err
 	}
 
-	dialer := newZooKeeperDialer(connectionTimeout, nil, tlsConfig)
+	dialer := newZooKeeperDialer(connectionTimeout, nil, tlsConfig, routes)
 	if authScheme == saslDigestAuthScheme {
 		dialer = newZooKeeperDialer(connectionTimeout, &saslDigestCredentials{
 			Username: strings.TrimSpace(config.Username),
 			Password: config.Password,
-		}, tlsConfig)
+		}, tlsConfig, routes)
 	}
 
+	var hostProvider zk.HostProvider = zk.NewDNSHostProvider()
+	if routes != nil {
+		hostProvider = &routedHostProvider{}
+	}
 	sessionTimeout := millisecondsOrDefault(config.SessionTimeoutMS, defaultSessionTimeout)
 	connection, events, err := zk.Connect(
 		target.Servers,
 		sessionTimeout,
 		zk.WithDialer(dialer),
+		zk.WithHostProvider(hostProvider),
 		zk.WithLogInfo(false),
 		zk.WithMaxBufferSize(maxBufferSize),
 	)
@@ -256,13 +266,13 @@ func openClient(config connectionConfig) (*clientSession, error) {
 	return session, nil
 }
 
-func newZooKeeperDialer(connectionTimeout time.Duration, credentials *saslDigestCredentials, tlsConfig *tls.Config) zk.Dialer {
+func newZooKeeperDialer(connectionTimeout time.Duration, credentials *saslDigestCredentials, tlsConfig *tls.Config, routes map[string]string) zk.Dialer {
 	return func(network, address string, libraryTimeout time.Duration) (net.Conn, error) {
 		timeout := libraryTimeout
 		if timeout <= 0 || connectionTimeout < timeout {
 			timeout = connectionTimeout
 		}
-		connection, err := dialZooKeeperConnection(address, timeout, tlsConfig)
+		connection, err := dialZooKeeperConnection(address, timeout, tlsConfig, routes)
 		if err != nil {
 			return nil, err
 		}
@@ -300,13 +310,17 @@ func databaseInfo(config connectionConfig) map[string]any {
 	if err != nil {
 		return info
 	}
-	if version := detectServerVersion(target.Servers, millisecondsOrDefault(config.ConnectionTimeoutMS, defaultConnectionTimeout), tlsConfig); version != "" {
+	routes, err := validateEndpointRoutes(target.Servers, config.EndpointRoutes)
+	if err != nil {
+		return info
+	}
+	if version := detectServerVersion(target.Servers, millisecondsOrDefault(config.ConnectionTimeoutMS, defaultConnectionTimeout), tlsConfig, routes); version != "" {
 		info["productVersion"] = version
 	}
 	return info
 }
 
-func detectServerVersion(servers []string, timeout time.Duration, tlsConfig *tls.Config) string {
+func detectServerVersion(servers []string, timeout time.Duration, tlsConfig *tls.Config, routes map[string]string) string {
 	deadline := timeout
 	if deadline <= 0 || deadline > 2*time.Second {
 		deadline = 2 * time.Second
@@ -319,7 +333,7 @@ func detectServerVersion(servers []string, timeout time.Duration, tlsConfig *tls
 		// ZooKeeper 3.5+ whitelists only "srvr" by default; "envi"/"stat"
 		// are opt-in, so probe srvr first for default-config clusters.
 		for _, command := range []string{"srvr", "envi", "stat"} {
-			connection, err := dialZooKeeperConnection(address, deadline, tlsConfig)
+			connection, err := dialZooKeeperConnection(address, deadline, tlsConfig, routes)
 			if err != nil {
 				continue
 			}
@@ -384,7 +398,7 @@ func parseConnectTarget(value string) (connectTarget, error) {
 	return connectTarget{Servers: servers, Chroot: chroot}, nil
 }
 
-func requireReachableServer(servers []string, timeout time.Duration, tlsConfig *tls.Config) error {
+func requireReachableServer(servers []string, timeout time.Duration, tlsConfig *tls.Config, routes map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+500*time.Millisecond)
 	defer cancel()
 	workers := minInt(len(servers), maximumReachabilityWorkers)
@@ -400,7 +414,7 @@ func requireReachableServer(servers []string, timeout time.Duration, tlsConfig *
 				if err != nil {
 					continue
 				}
-				connection, err := dialZooKeeperConnection(address, timeout, tlsConfig)
+				connection, err := dialZooKeeperConnection(address, timeout, tlsConfig, routes)
 				if err == nil {
 					connection.Close()
 					select {

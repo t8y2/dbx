@@ -19,6 +19,28 @@ export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
 export const SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG = tags.special(tags.string);
 
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
+type CodeMirrorViewConstructor = typeof import("@codemirror/view").EditorView;
+
+const MAX_CACHED_EDITOR_THEMES = 256;
+const editorThemeCache = new WeakMap<CodeMirrorViewConstructor, Map<string, Extension>>();
+
+// style-mod retains mounted modules on the document after editor destruction.
+// Reuse their identities across tab restores and short-lived editor instances
+// so identical settings do not append another copy of the CSS on every visit.
+function cachedEditorTheme(EditorView: CodeMirrorViewConstructor, key: string, build: () => Extension): Extension {
+  let cache = editorThemeCache.get(EditorView);
+  if (!cache) editorThemeCache.set(EditorView, (cache = new Map()));
+  const existing = cache.get(key);
+  if (existing !== undefined) {
+    cache.delete(key);
+    cache.set(key, existing);
+    return existing;
+  }
+  const extension = build();
+  if (cache.size >= MAX_CACHED_EDITOR_THEMES) cache.delete(cache.keys().next().value!);
+  cache.set(key, extension);
+  return extension;
+}
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
 export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
@@ -37,29 +59,33 @@ export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HT
 }
 
 export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
-  return EditorView.theme({
-    ".cm-sql-table-name, .cm-sql-table-name *": {
-      // Built-in CodeMirror themes do not define the editor-specific table color
-      // variable. Keep semantic table names visible there as well, while custom
-      // and IDE themes continue to use their configured table color.
-      color: `var(${SQL_TABLE_COLOR_CSS_VAR}, #b4530b) !important`,
-    },
-  });
+  return cachedEditorTheme(EditorView, "sql-semantic", () =>
+    EditorView.theme({
+      ".cm-sql-table-name, .cm-sql-table-name *": {
+        // Built-in CodeMirror themes do not define the editor-specific table color
+        // variable. Keep semantic table names visible there as well, while custom
+        // and IDE themes continue to use their configured table color.
+        color: `var(${SQL_TABLE_COLOR_CSS_VAR}, #b4530b) !important`,
+      },
+    }),
+  );
 }
 
 // MongoDB and other shell-style editors keep the SQL grammar, so their `//` comments are decorated
 // manually. The decoration carries the active theme's comment highlight class, so it only has to
 // keep the SQL grammar's colours from leaking through on the tokens it wraps.
 export function shellLineCommentTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
-  return EditorView.theme({
-    ".cm-shell-line-comment": {
-      fontStyle: "italic",
-    },
-    ".cm-shell-line-comment *": {
-      color: "inherit !important",
-      fontStyle: "italic",
-    },
-  });
+  return cachedEditorTheme(EditorView, "shell-comment", () =>
+    EditorView.theme({
+      ".cm-shell-line-comment": {
+        fontStyle: "italic",
+      },
+      ".cm-shell-line-comment *": {
+        color: "inherit !important",
+        fontStyle: "italic",
+      },
+    }),
+  );
 }
 
 const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
@@ -109,6 +135,13 @@ export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "
 
 /** 创建自定义 CodeMirror 主题 */
 function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorView, colors?: CustomThemeColors, isDark: boolean = true): Extension {
+  const colorEntries = Object.entries(colors ?? {})
+    .filter(([, value]) => value !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return cachedEditorTheme(EditorView, `custom:${JSON.stringify([isDark, colorEntries])}`, () => buildCustomTheme(EditorView, colors, isDark));
+}
+
+function buildCustomTheme(EditorView: CodeMirrorViewConstructor, colors: CustomThemeColors | undefined, isDark: boolean): Extension {
   // 根据系统主题设置默认背景色和前景色
   const backgrounds = resolveCustomThemeBackgrounds(colors, isDark);
   const defaultColors = { background: backgrounds.background, foreground: isDark ? "#cdd6f4" : "#242424" };
@@ -534,6 +567,10 @@ export const IDE_EDITOR_THEMES = {
 } satisfies Record<string, IdeEditorThemeColors>;
 
 function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").EditorView, c: IdeEditorThemeColors): Extension {
+  return cachedEditorTheme(EditorView, `ide:${JSON.stringify(c)}`, () => buildIdeEditorTheme(EditorView, c));
+}
+
+function buildIdeEditorTheme(EditorView: CodeMirrorViewConstructor, c: IdeEditorThemeColors): Extension {
   const theme = EditorView.theme(
     {
       "&": {
@@ -1018,7 +1055,8 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
 
 /** Build a CodeMirror theme extension for font size + font family. */
 export function editorFontTheme(EditorView: typeof import("@codemirror/view").EditorView, size: number, family: string, opts?: { fixedHeight?: boolean; scrollable?: boolean }): Extension {
-  return EditorView.theme(buildEditorFontThemeRules(opts, { size, family }));
+  const key = `font:${JSON.stringify([size, family, !!opts?.fixedHeight, !!opts?.scrollable])}`;
+  return cachedEditorTheme(EditorView, key, () => EditorView.theme(buildEditorFontThemeRules(opts, { size, family })));
 }
 
 export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
@@ -1211,5 +1249,5 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
 }
 
 export function sqlCompletionTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
-  return EditorView.theme(buildSqlCompletionThemeRules());
+  return cachedEditorTheme(EditorView, "sql-completion", () => EditorView.theme(buildSqlCompletionThemeRules()));
 }

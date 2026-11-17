@@ -89,7 +89,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
   return tauriInvoke<T>(command, args);
 }
 
-import type { MigrationPreflight, MigrationReport } from "./migration";
+import type { MigrationPreflight, MigrationReport, CredentialResetPreparation, CredentialResetReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
 export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
@@ -1473,6 +1473,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -1537,6 +1539,8 @@ export interface GlobalSearchRequest {
    * (Quick Open behavior).
    */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -1550,8 +1554,22 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
   return invoke("global_search", { request });
+}
+
+export async function cancelGlobalSearch(searchId: string): Promise<void> {
+  return invoke("cancel_global_search", { searchId });
 }
 
 // --- AI Conversations ---
@@ -1983,6 +2001,7 @@ export async function listObjects(
     tableNameFilter,
     executionId,
     ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
+    ...(readOptions?.lightweight !== undefined ? { lightweight: readOptions.lightweight } : {}),
     ...(options === true ? { exactIdentity: true } : {}),
   });
 }
@@ -2661,6 +2680,10 @@ export async function buildEditableObjectSource(input: BuildEditableObjectSource
   return invoke("build_editable_object_source", { input });
 }
 
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return invoke("build_oracle_object_export_sql", { input });
+}
+
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return invoke("build_routine_rename_object_source_statements", { input });
 }
@@ -3005,7 +3028,7 @@ export async function listDialectDataTypes(dialectName: string): Promise<string[
   return invoke("list_dialect_data_types", { dialectName });
 }
 
-export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean): Promise<string> {
+export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean, compareCharset?: boolean): Promise<string> {
   return invoke("generate_schema_sync_sql", {
     diffs,
     databaseType,
@@ -3015,6 +3038,7 @@ export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: Da
     ruleDiffs: ruleDiffs ?? [],
     ownerDiffs: ownerDiffs ?? [],
     cascadeDelete: cascadeDelete ?? false,
+    compareCharset: compareCharset ?? true,
   });
 }
 
@@ -6717,6 +6741,13 @@ export async function cancelMongodbExport(exportId: string): Promise<boolean> {
 }
 
 // --- Database Export ---
+/** An object picked in the object browser for "export selected". */
+export interface DatabaseExportSelectedObject {
+  objectType: string;
+  name: string;
+  signature?: string;
+}
+
 export interface DatabaseExportRequest {
   exportId: string;
   connectionId: string;
@@ -6724,6 +6755,8 @@ export interface DatabaseExportRequest {
   schema: string;
   filePath: string;
   selectedTables?: string[];
+  /** Typed object browser selection; takes precedence over `selectedTables`, and an empty list is rejected. */
+  selectedObjects?: DatabaseExportSelectedObject[];
   excludedTables?: string[];
   includeStructure: boolean;
   includeData: boolean;
@@ -6741,6 +6774,19 @@ export interface DatabaseExportRequest {
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
+  /**
+   * Cap each exported table at this many data rows (#14750). `undefined` keeps
+   * the unlimited behavior; the backend rejects zero.
+   */
+  rowLimitPerTable?: number;
+  /**
+   * Sort column the per-table cap takes the first/last N rows by (review on
+   * #14799). `undefined`/empty keeps the export's existing read order; the
+   * backend falls back per table with a dump comment when the column is absent.
+   */
+  rowLimitSortColumn?: string;
+  /** `true` takes the newest rows by `rowLimitSortColumn`; only sent with a column. */
+  rowLimitSortDescending?: boolean;
 }
 
 export interface DatabaseBackupSnapshot {
@@ -6779,6 +6825,7 @@ export interface TableExportRequest {
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   insertMode?: SqlInsertMode;
   insertDialect?: SqlInsertDialect;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6818,6 +6865,7 @@ export interface TableCsvExportOptions {
   columns?: string[];
   pageSize?: number;
   timeoutSecs?: number;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6846,6 +6894,7 @@ export interface QueryResultExportRequest {
   filePath: string;
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -7081,13 +7130,14 @@ export async function resolveDamengDumpTool(binDir: string, kind: DamengDumpKind
   return invoke("resolve_dameng_dump_tool", { binDir, kind });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
       csvQuoteMode,
+      csvWithoutBom,
       ...(nullLiteral === undefined ? {} : { nullLiteral }),
     },
   });
@@ -7188,3 +7238,6 @@ export * from "@/lib/backend/nacos-tauri";
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });
 }
+
+export const migrationPrepareCredentialReset = (): Promise<CredentialResetPreparation> => invoke("migration_prepare_credential_reset");
+export const migrationResetCredentials = (confirmationToken: string, confirmed: boolean): Promise<CredentialResetReport> => invoke("migration_reset_credentials", { confirmationToken, confirmed });

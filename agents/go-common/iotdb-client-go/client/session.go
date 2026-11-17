@@ -29,6 +29,7 @@ import (
 	"net"
 	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/apache/thrift/lib/go/thrift"
@@ -74,11 +75,114 @@ type Session struct {
 	config             *Config
 	client             *rpc.IClientRPCServiceClient
 	sessionId          int64
-	trans              thrift.TTransport
 	requestStatementId int64
 	protocolFactory    thrift.TProtocolFactory
 	endPointList       []endPoint
 	timeFactor         int32
+
+	// Session is a value type across the client API, so the mutable transport
+	// state lives behind a pointer: embedding sync.Mutex directly would make
+	// every copy a copylocks vet failure. A blocked Thrift RPC cannot be
+	// stopped through its context (TSocket.Read waits on net.Conn.Read), so
+	// cancellation closes the socket instead; see Interrupt (#13935 review
+	// round 3).
+	transport *sessionTransportState
+}
+
+type sessionTransportState struct {
+	mu          sync.Mutex
+	trans       thrift.TTransport
+	interrupted bool
+}
+
+func (s *Session) transportState() *sessionTransportState {
+	if s.transport == nil {
+		s.transport = &sessionTransportState{}
+	}
+	return s.transport
+}
+
+// setTransport installs the transport used by the next RPC. If the session was
+// interrupted while the transport was being dialed, the fresh transport is
+// closed immediately so a cancellation that raced with reconnect cannot leave
+// a live socket behind.
+func (s *Session) setTransport(trans thrift.TTransport) error {
+	state := s.transportState()
+	state.mu.Lock()
+	state.trans = trans
+	interrupted := state.interrupted
+	state.mu.Unlock()
+	if interrupted {
+		_ = trans.Close()
+		return fmt.Errorf("IoTDB session was interrupted")
+	}
+	return nil
+}
+
+func (s *Session) currentTransport() thrift.TTransport {
+	if s.transport == nil {
+		return nil
+	}
+	state := s.transportState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.trans
+}
+
+func (s *Session) wasInterrupted() bool {
+	if s.transport == nil {
+		return false
+	}
+	state := s.transportState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.interrupted
+}
+
+// Interrupt closes the transport that a blocked RPC is reading from, so the
+// call returns instead of waiting for a server response that the caller no
+// longer wants. It permanently disables the session: callers must discard it
+// afterwards (the agent drops the whole client on cancellation).
+func (s *Session) Interrupt() {
+	state := s.transportState()
+	state.mu.Lock()
+	state.interrupted = true
+	trans := state.trans
+	state.mu.Unlock()
+	if trans != nil {
+		_ = trans.Close()
+	}
+}
+
+// watchContext calls Interrupt when ctx is cancelled or its deadline passes
+// before stop is called. Thrift's blocking socket read ignores ctx, so closing
+// the transport is the only way to abort an in-flight RPC. The returned stop
+// function must be called once the RPC finishes; it waits for the watcher so a
+// normal completion cannot race with a late interrupt.
+func (s *Session) watchContext(ctx context.Context) (stop func()) {
+	return watchContextDone(ctx, s.Interrupt)
+}
+
+// watchContextDone is the transport-independent half of Session.watchContext;
+// SessionDataSet reuses it for paged Fetch RPCs.
+func watchContextDone(ctx context.Context, interrupt func()) (stop func()) {
+	if ctx.Done() == nil || interrupt == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		select {
+		case <-ctx.Done():
+			interrupt()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 type endPoint struct {
@@ -100,19 +204,22 @@ func (s *Session) Open(enableRPCCompression bool, connectionTimeoutInMs int) err
 
 	var err error
 
-	s.trans, err = newTransport(s.config.Host, s.config.Port, connectionTimeoutInMs, s.config.TLSConfig)
+	trans, err := newTransport(s.config.Host, s.config.Port, connectionTimeoutInMs, s.config.TLSConfig)
 	if err != nil {
 		return err
 	}
-	if !s.trans.IsOpen() {
-		err = s.trans.Open()
+	if err = s.setTransport(trans); err != nil {
+		return err
+	}
+	if !trans.IsOpen() {
+		err = trans.Open()
 		if err != nil {
 			return err
 		}
 	}
 	s.protocolFactory = getProtocolFactory(enableRPCCompression)
-	iprot := s.protocolFactory.GetProtocol(s.trans)
-	oprot := s.protocolFactory.GetProtocol(s.trans)
+	iprot := s.protocolFactory.GetProtocol(trans)
+	oprot := s.protocolFactory.GetProtocol(trans)
 	s.client = rpc.NewIClientRPCServiceClient(thrift.NewTStandardClient(iprot, oprot))
 	req := rpc.TSOpenSessionReq{
 		ClientProtocol: rpc.TSProtocolVersion_IOTDB_SERVICE_PROTOCOL_V3, ZoneId: s.config.TimeZone, Username: s.config.UserName,
@@ -168,9 +275,13 @@ func (s *Session) OpenCluster(enableRPCCompression bool) error {
 
 	var err error
 
+	trans := s.currentTransport()
+	if trans == nil {
+		return fmt.Errorf("IoTDB cluster session has no transport")
+	}
 	s.protocolFactory = getProtocolFactory(enableRPCCompression)
-	iprot := s.protocolFactory.GetProtocol(s.trans)
-	oprot := s.protocolFactory.GetProtocol(s.trans)
+	iprot := s.protocolFactory.GetProtocol(trans)
+	oprot := s.protocolFactory.GetProtocol(trans)
 	s.client = rpc.NewIClientRPCServiceClient(thrift.NewTStandardClient(iprot, oprot))
 	req := rpc.TSOpenSessionReq{
 		ClientProtocol: rpc.TSProtocolVersion_IOTDB_SERVICE_PROTOCOL_V3, ZoneId: s.config.TimeZone, Username: s.config.UserName,
@@ -210,13 +321,22 @@ func getProtocolFactory(enableRPCCompression bool) thrift.TProtocolFactory {
 }
 
 func (s *Session) Close() error {
-	req := rpc.NewTSCloseSessionReq()
-	req.SessionId = s.sessionId
-	_, err := s.client.CloseSession(context.Background(), req)
-	if err != nil {
-		return err
+	trans := s.currentTransport()
+	if trans == nil {
+		return nil
 	}
-	return s.trans.Close()
+	// An interrupted session has no live transport to exchange CloseSession
+	// on; closing the socket is all that remains. For a healthy session, a
+	// CloseSession error still must not skip closing the transport.
+	if !s.wasInterrupted() && s.client != nil && s.sessionId != 0 {
+		req := rpc.NewTSCloseSessionReq()
+		req.SessionId = s.sessionId
+		if _, err := s.client.CloseSession(context.Background(), req); err != nil {
+			_ = trans.Close()
+			return err
+		}
+	}
+	return trans.Close()
 }
 
 /*
@@ -499,6 +619,10 @@ func (s *Session) ExecuteStatementWithContext(ctx context.Context, sql string) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// A Thrift read cannot observe ctx; watchContext closes the transport so
+	// cancellation returns instead of blocking for the server's reply.
+	stop := s.watchContext(ctx)
+	defer stop()
 	request := rpc.TSExecuteStatementReq{
 		SessionId:   s.sessionId,
 		Statement:   sql,
@@ -508,17 +632,75 @@ func (s *Session) ExecuteStatementWithContext(ctx context.Context, sql string) (
 	resp, err := s.client.ExecuteStatementV2(ctx, &request)
 
 	if err != nil && resp == nil {
-		if s.reconnect() {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if s.reconnectWithContext(ctx) {
 			request.SessionId = s.sessionId
 			request.StatementId = s.requestStatementId
 			resp, err = s.client.ExecuteStatementV2(ctx, &request)
 		}
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if resp == nil {
+		return nil, err
+	}
 	if statusErr := VerifySuccess(resp.Status); statusErr != nil {
 		return nil, statusErr
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, nil)
+}
+
+// ExecuteQueryStatementWithContext combines the cancellable context of
+// ExecuteStatementWithContext with the per-query timeout of
+// ExecuteQueryStatement: timeoutMs travels in TSExecuteStatementReq.Timeout so
+// the server applies it against the query task, while ctx cancels the
+// underlying RPC. Positive budgets bound the task; 0 and absent values fall
+// back to the server's query_timeout_threshold (60 s default — there is no
+// wire-level "disable"). Reconnect-once and status verification keep the
+// legacy error handling.
+func (s *Session) ExecuteQueryStatementWithContext(ctx context.Context, sql string, timeoutMs *int64) (*SessionDataSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stop := s.watchContext(ctx)
+	defer stop()
+	request := rpc.TSExecuteStatementReq{
+		SessionId:   s.sessionId,
+		Statement:   sql,
+		StatementId: s.requestStatementId,
+		FetchSize:   &s.config.FetchSize,
+		Timeout:     timeoutMs,
+	}
+	resp, err := s.client.ExecuteQueryStatementV2(ctx, &request)
+
+	if err != nil && resp == nil {
+		// A cancelled or expired context must stop here: reconnecting and
+		// replaying the statement would outlive the caller's deadline
+		// (#13935 review round 3).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if s.reconnectWithContext(ctx) {
+			request.SessionId = s.sessionId
+			request.StatementId = s.requestStatementId
+			resp, err = s.client.ExecuteQueryStatementV2(ctx, &request)
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if resp == nil {
+		return nil, err
+	}
+	if statusErr := VerifySuccess(resp.Status); statusErr != nil {
+		return nil, statusErr
+	}
+
+	return s.genDataSet(sql, resp, timeoutMs)
 }
 
 func (s *Session) ExecuteStatement(sql string, opts ...Option) (*SessionDataSet, error) {
@@ -578,7 +760,7 @@ func (s *Session) ExecuteQueryStatement(sql string, timeoutMs *int64) (*SessionD
 	}
 	if resp, err := s.client.ExecuteQueryStatementV2(context.Background(), &request); err == nil {
 		if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-			return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.ColumnIndex2TsBlockColumnIndexList)
+			return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.ColumnIndex2TsBlockColumnIndexList, s.Interrupt)
 		} else {
 			return nil, statusErr
 		}
@@ -592,7 +774,7 @@ func (s *Session) ExecuteQueryStatement(sql string, timeoutMs *int64) (*SessionD
 					return nil, fmt.Errorf("received nil response after reconnect")
 				}
 				if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-					return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+					return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 				} else {
 					return nil, statusErr
 				}
@@ -612,7 +794,7 @@ func (s *Session) ExecuteAggregationQuery(paths []string, aggregations []common.
 	}
 	if resp, err := s.client.ExecuteAggregationQueryV2(context.Background(), &request); err == nil {
 		if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-			return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+			return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 		} else {
 			return nil, statusErr
 		}
@@ -625,7 +807,7 @@ func (s *Session) ExecuteAggregationQuery(paths []string, aggregations []common.
 					return nil, fmt.Errorf("received nil response after reconnect")
 				}
 				if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-					return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+					return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 				} else {
 					return nil, statusErr
 				}
@@ -646,7 +828,7 @@ func (s *Session) ExecuteAggregationQueryWithLegalNodes(paths []string, aggregat
 	}
 	if resp, err := s.client.ExecuteAggregationQueryV2(context.Background(), &request); err == nil {
 		if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-			return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+			return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 		} else {
 			return nil, statusErr
 		}
@@ -659,7 +841,7 @@ func (s *Session) ExecuteAggregationQueryWithLegalNodes(paths []string, aggregat
 					return nil, fmt.Errorf("received nil response after reconnect")
 				}
 				if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-					return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+					return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 				} else {
 					return nil, statusErr
 				}
@@ -678,7 +860,7 @@ func (s *Session) ExecuteFastLastDataQueryForOnePrefixPath(prefixes []string, ti
 	}
 	if resp, err := s.client.ExecuteFastLastDataQueryForOnePrefixPath(context.Background(), &request); err == nil {
 		if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-			return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+			return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 		} else {
 			return nil, statusErr
 		}
@@ -691,7 +873,7 @@ func (s *Session) ExecuteFastLastDataQueryForOnePrefixPath(prefixes []string, ti
 					return nil, fmt.Errorf("received nil response after reconnect")
 				}
 				if statusErr := VerifySuccess(resp.Status); statusErr == nil {
-					return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+					return NewSessionDataSet("", resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap, *resp.QueryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, *resp.MoreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 				} else {
 					return nil, statusErr
 				}
@@ -1027,7 +1209,7 @@ func (s *Session) ExecuteRawDataQuery(paths []string, startTime int64, endTime i
 		}
 	}
 
-	return s.genDataSet("", resp)
+	return s.genDataSet("", resp, nil)
 }
 
 func (s *Session) ExecuteUpdateStatement(sql string) (*SessionDataSet, error) {
@@ -1047,10 +1229,10 @@ func (s *Session) ExecuteUpdateStatement(sql string) (*SessionDataSet, error) {
 		}
 	}
 
-	return s.genDataSet(sql, resp)
+	return s.genDataSet(sql, resp, nil)
 }
 
-func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp) (*SessionDataSet, error) {
+func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp, timeoutMs *int64) (*SessionDataSet, error) {
 	var queryId int64
 	if resp.QueryId == nil {
 		queryId = 0
@@ -1061,8 +1243,11 @@ func (s *Session) genDataSet(sql string, resp *rpc.TSExecuteStatementResp) (*Ses
 	if resp.MoreData != nil {
 		moreData = *resp.MoreData
 	}
+	// timeoutMs must ride along: every later fetchResults page rebuilds its
+	// request from the data set's timeout, so a nil here would make paged
+	// queries fall back to the server's query_timeout_threshold (#13935).
 	return NewSessionDataSet(sql, resp.Columns, resp.DataTypeList, resp.ColumnNameIndexMap,
-		queryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, nil, moreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList())
+		queryId, s.requestStatementId, s.client, s.sessionId, resp.QueryResult_, resp.IgnoreTimeStamp != nil && *resp.IgnoreTimeStamp, timeoutMs, moreData, s.config.FetchSize, s.config.TimeZone, s.timeFactor, resp.GetColumnIndex2TsBlockColumnIndexList(), s.Interrupt)
 }
 
 func (s *Session) genInsertTabletsReq(tablets []*Tablet, isAligned bool) (*rpc.TSInsertTabletsReq, error) {
@@ -1326,6 +1511,7 @@ func newSessionWithSpecifiedSqlDialect(config *Config) Session {
 	return Session{
 		config:       config,
 		endPointList: endPointList,
+		transport:    &sessionTransportState{},
 	}
 }
 
@@ -1352,7 +1538,7 @@ func parseNodeURL(nodeURL string) (endPoint, error) {
 }
 
 func newClusterSessionWithSqlDialect(clusterConfig *ClusterConfig) (Session, error) {
-	session := Session{}
+	session := Session{transport: &sessionTransportState{}}
 	session.endPointList = make([]endPoint, len(clusterConfig.NodeUrls))
 	for i := 0; i < len(clusterConfig.NodeUrls); i++ {
 		ep, err := parseNodeURL(clusterConfig.NodeUrls[i])
@@ -1361,18 +1547,22 @@ func newClusterSessionWithSqlDialect(clusterConfig *ClusterConfig) (Session, err
 		}
 		session.endPointList[i] = ep
 	}
-	var err error
 	var lastErr error
 	for i := range session.endPointList {
 		ep := session.endPointList[i]
-		session.trans, err = newTransport(ep.Host, ep.Port, 0, clusterConfig.TLSConfig)
+		trans, err := newTransport(ep.Host, ep.Port, 0, clusterConfig.TLSConfig)
 		if err != nil {
 			lastErr = err
 			log.Println(err)
 			continue
 		}
-		if !session.trans.IsOpen() {
-			err = session.trans.Open()
+		if err = session.setTransport(trans); err != nil {
+			lastErr = err
+			log.Println(err)
+			continue
+		}
+		if !trans.IsOpen() {
+			err = trans.Open()
 			if err != nil {
 				lastErr = err
 				log.Println(err)
@@ -1383,7 +1573,8 @@ func newClusterSessionWithSqlDialect(clusterConfig *ClusterConfig) (Session, err
 			}
 		}
 	}
-	if session.trans == nil || !session.trans.IsOpen() {
+	trans := session.currentTransport()
+	if trans == nil || !trans.IsOpen() {
 		if lastErr != nil {
 			return session, fmt.Errorf("no server can connect: %w", lastErr)
 		}
@@ -1393,14 +1584,23 @@ func newClusterSessionWithSqlDialect(clusterConfig *ClusterConfig) (Session, err
 }
 
 func (s *Session) initClusterConn(node endPoint) error {
-	var err error
+	return s.initClusterConnWithContext(context.Background(), node)
+}
 
-	s.trans, err = newTransport(node.Host, node.Port, 0, s.config.TLSConfig)
+// reconnectDialTimeoutMS bounds one dial attempt during a transparent
+// reconnect, so a black-holed endpoint cannot extend a cancelled query.
+const reconnectDialTimeoutMS = 5000
+
+func (s *Session) initClusterConnWithContext(ctx context.Context, node endPoint) error {
+	trans, err := newTransportWithContext(ctx, node.Host, node.Port, reconnectDialTimeoutMS, s.config.TLSConfig)
 	if err != nil {
 		return err
 	}
-	if !s.trans.IsOpen() {
-		err = s.trans.Open()
+	if err = s.setTransport(trans); err != nil {
+		return err
+	}
+	if !trans.IsOpen() {
+		err = trans.Open()
 		if err != nil {
 			return err
 		}
@@ -1418,20 +1618,20 @@ func (s *Session) initClusterConn(node endPoint) error {
 		s.config.ConnectRetryMax = DefaultConnectRetryMax
 	}
 
-	iprot := s.protocolFactory.GetProtocol(s.trans)
-	oprot := s.protocolFactory.GetProtocol(s.trans)
+	iprot := s.protocolFactory.GetProtocol(trans)
+	oprot := s.protocolFactory.GetProtocol(trans)
 	s.client = rpc.NewIClientRPCServiceClient(thrift.NewTStandardClient(iprot, oprot))
 	req := rpc.TSOpenSessionReq{
 		ClientProtocol: rpc.TSProtocolVersion_IOTDB_SERVICE_PROTOCOL_V3, ZoneId: s.config.TimeZone, Username: s.config.UserName,
 		Password: &s.config.Password,
 	}
 
-	resp, err := s.client.OpenSession(context.Background(), &req)
+	resp, err := s.client.OpenSession(ctx, &req)
 	if err != nil {
 		return err
 	}
 	s.sessionId = resp.GetSessionId()
-	s.requestStatementId, err = s.client.RequestStatementId(context.Background(), s.sessionId)
+	s.requestStatementId, err = s.client.RequestStatementId(ctx, s.sessionId)
 	return err
 }
 
@@ -1451,13 +1651,27 @@ func getConfig(host string, port string, userName string, passWord string, fetch
 }
 
 func (s *Session) reconnect() bool {
-	var err error
+	return s.reconnectWithContext(context.Background())
+}
+
+// reconnectWithContext re-establishes the session while honoring the caller's
+// context: once it is cancelled or its deadline has passed, no further connect
+// attempt is made and the caller stops retrying the statement (#13935 review
+// round 3). Connect attempts also carry a bounded dial timeout instead of
+// waiting indefinitely.
+func (s *Session) reconnectWithContext(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	connectedSuccess := false
 
 	for i := 0; i < s.config.ConnectRetryMax; i++ {
 		for i := range s.endPointList {
+			if ctx.Err() != nil {
+				return false
+			}
 			ep := s.endPointList[i]
-			err = s.initClusterConn(ep)
+			err := s.initClusterConnWithContext(ctx, ep)
 			if err == nil {
 				connectedSuccess = true
 				break

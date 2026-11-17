@@ -1,5 +1,17 @@
 import type { QueryResult } from "@/types/database";
-import { mysqlUserAccount, normalizeStarrocksCatalog, POSTGRES_TABLE_PRIVILEGES, quoteMySqlIdentifier, quotePostgresIdentifier, type CreatePrincipalInput, type DatabaseTablePrivilegeGrant, type DatabaseUserAdminProvider, type DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
+import {
+  DORIS_TABLE_PRIVILEGES,
+  dorisGrantPrivilegesSql,
+  mysqlUserAccount,
+  normalizeStarrocksCatalog,
+  POSTGRES_TABLE_PRIVILEGES,
+  quoteMySqlIdentifier,
+  quotePostgresIdentifier,
+  type CreatePrincipalInput,
+  type DatabaseTablePrivilegeGrant,
+  type DatabaseUserAdminProvider,
+  type DatabaseUserIdentity,
+} from "@/lib/database/databaseUserAdmin";
 
 export type AuthorizationAccountType = "standard" | "admin";
 export type AuthorizationPreset = "readWrite" | "readOnly" | "ddl" | "dml" | "custom";
@@ -100,7 +112,18 @@ const STARROCKS_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT"],
 };
 
+const DORIS_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = {
+  readOnly: ["SELECT_PRIV"],
+  dml: ["SELECT_PRIV", "LOAD_PRIV"],
+  ddl: ["ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV"],
+  readWrite: [...DORIS_TABLE_PRIVILEGES],
+};
+const DORIS_TABLE_PRIVILEGE_SET = new Set<string>(DORIS_TABLE_PRIVILEGES);
+
 export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = [], targetScope: AuthorizationTargetScope = "database"): string[] {
+  if (provider.authorizationModel === "doris") {
+    return preset === "custom" ? uniquePrivileges(custom).filter((privilege) => DORIS_TABLE_PRIVILEGE_SET.has(privilege)) : [...DORIS_PRESETS[preset]];
+  }
   const presetPrivileges = provider.authorizationModel === "starrocks" ? STARROCKS_PRESETS : provider.dialect === "mysql" ? MYSQL_PRESETS : POSTGRES_PRESETS;
   const privileges = preset === "custom" ? uniquePrivileges(custom) : [...presetPrivileges[preset]];
   if (provider.authorizationModel === "starrocks" && privileges.includes("ALL")) return ["ALL"];
@@ -113,7 +136,7 @@ export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvide
 export function authorizationPrivileges(provider: DatabaseUserAdminProvider, targetScope: AuthorizationTargetScope = "database"): string[] {
   const privilegesForScope = provider.privilegesForScope;
   if (!privilegesForScope) return [];
-  if (provider.authorizationModel === "starrocks") return Array.from(privilegesForScope("table"));
+  if (provider.authorizationModel === "starrocks" || provider.authorizationModel === "doris") return Array.from(privilegesForScope("table"));
   if (provider.dialect === "mysql") {
     const privileges = Array.from(privilegesForScope("mysql"));
     return provider.authorizationModel === "mysql" && targetScope === "table" ? privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege)) : privileges;
@@ -227,6 +250,7 @@ export function buildCreateUserAuthorizationPlan(input: CreateUserAuthorizationP
     if (input.provider.dialect === "mysql") {
       const targetScope = input.provider.supportsTableGrantsOnCreate && selection.tables !== undefined ? "table" : "database";
       const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+      if (input.provider.authorizationModel === "doris" && privileges.length === 0) continue;
       const tables = targetScope === "database" ? [{ name: "*" }] : uniqueTables(selection.tables ?? []);
       for (const table of tables) {
         const targetTable = table.name === "*" ? undefined : table.name;
@@ -275,7 +299,7 @@ export interface GrantAuthorizationPlanInput {
 export function buildGrantAuthorizationPlan(input: GrantAuthorizationPlanInput): AuthorizationPlan {
   const changePrivilegesSql = input.revoke ? input.provider.revokePrivilegesSql : input.provider.grantPrivilegesSql;
   if (!changePrivilegesSql) return { steps: [] };
-  if (!input.provider.supportsTableGrantsOnCreate) return { steps: [] };
+  if (!(input.provider.supportsTableGrantsOnEdit ?? input.provider.supportsTableGrantsOnCreate)) return { steps: [] };
   const steps: AuthorizationPlanStep[] = [];
   for (const selection of input.databases) {
     const database = selection.database.trim();
@@ -431,6 +455,9 @@ export function authorizationPlanStatus(results: AuthorizationStepResult[]): "su
 }
 
 function adminPrincipalGrantSql(provider: DatabaseUserAdminProvider, principal: CreatePrincipalInput): string {
+  if (provider.authorizationModel === "doris") {
+    return dorisGrantPrivilegesSql({ user: principal, privileges: ["ADMIN_PRIV"], database: "*" });
+  }
   if (provider.dialect === "mysql") {
     return `GRANT ALL PRIVILEGES ON *.* TO ${mysqlUserAccount(principal)} WITH GRANT OPTION;`;
   }

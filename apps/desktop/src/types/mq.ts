@@ -371,6 +371,10 @@ export interface PeekMessagesOptions {
   startPosition?: "latest" | "earliest" | "offset" | "timestamp";
   /** Epoch milliseconds; Kafka resolves the first record batch at or after this time per partition. */
   timestamp?: number;
+  /** Epoch milliseconds; optional inclusive upper bound for a timestamp read. */
+  endTimestamp?: number;
+  /** 仅 timestamp 窗口模式生效：newest 让 agent 从截止时间一侧倒序回扫读取。 */
+  sortOrder?: string;
   partition?: number;
   offset?: number;
 }
@@ -404,6 +408,10 @@ export interface BacklogQuota {
 export interface RetentionPolicy {
   retentionTimeInMinutes: number;
   retentionSizeInMb: number;
+  /** Kafka 专用：仅当用户改过保留时间才下发，避免未修改字段被覆盖。 */
+  writeRetentionTime?: boolean;
+  /** Kafka 专用：仅当用户改过保留大小才下发。 */
+  writeRetentionSize?: boolean;
 }
 
 export type AuthAction = "produce" | "consume" | "functions" | "sources" | "sinks" | "packages";

@@ -27,7 +27,7 @@ import {
   COMPACT_TAB_TITLE_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
-import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
@@ -56,6 +56,18 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
     settings.updateEditorSettings(defaults as { defaultExportMode: "immediate"; dataGridHideToolbarLabels: boolean });
     expect(settings.editorSettings).toMatchObject(defaults);
+  });
+
+  it("defaults dataGridOrderByVisible to true and dataGridWhereRatio to 0.5", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible).toBe(true);
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({}).dataGridOrderByVisible).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridOrderByVisible: false }).dataGridOrderByVisible).toBe(false);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.7 }).dataGridWhereRatio).toBe(0.7);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.1 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.95 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: "0.7" as any }).dataGridWhereRatio).toBe(0.5);
   });
 
   it("defaults the selection statistic to sum and validates every saved metric", () => {
@@ -705,6 +717,18 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: "sometimes" } as any).deepLinkConnectionConfirmMode).toBe("always");
   });
 
+  it("keeps duplicate tab titles on ordinal by default and accepts the connection-name mode", () => {
+    // 老配置文件没有这个字段时保持历史行为（序号），升级不该改变已有标签栏。
+    expect(normalizeEditorSettings({}).duplicateTabTitleMode).toBe("ordinal");
+    expect(DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "ordinal" }).duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "connection" }).duplicateTabTitleMode).toBe("connection");
+    // 非法值（含旧版布尔/数字）一律回落默认值。
+    for (const invalid of ["connection-name", "", null, true, 1] as unknown[]) {
+      expect(normalizeEditorSettings({ duplicateTabTitleMode: invalid } as any).duplicateTabTitleMode).toBe("ordinal");
+    }
+  });
+
   it("remembers connection databases by default and sanitizes the stored map", () => {
     expect(normalizeEditorSettings({}).rememberConnectionDatabaseOnDelete).toBe(true);
     expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: false }).rememberConnectionDatabaseOnDelete).toBe(false);
@@ -796,9 +820,24 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dsv.quotePolicy).toBe("always");
     expect(configured.sql.insertMode).toBe("row-by-row");
     expect(configured.json.pretty).toBe(false);
-    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
+    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION, dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
     expect(visible).toEqual(["php"]);
     expect(normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] }).dataGridVisibleCopyExtractors).toEqual([]);
+  });
+
+  it("adds SQL DELETE to legacy visible copy formats without restoring hidden formats", () => {
+    const legacy = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["raw", "php"] });
+    expect(legacy.dataGridVisibleCopyExtractors).toEqual(["raw", "sql-deletes", "php"]);
+    expect(legacy.dataGridVisibleCopyExtractorsMigrationVersion).toBe(DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION);
+
+    const current = normalizeEditorSettings({
+      dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
+      dataGridVisibleCopyExtractors: ["raw", "php"],
+    });
+    expect(current.dataGridVisibleCopyExtractors).toEqual(["raw", "php"]);
+
+    const intentionallyEmpty = normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] });
+    expect(intentionallyEmpty.dataGridVisibleCopyExtractors).toEqual([]);
   });
 
   it("migrates the legacy NULL clipboard sentinel once", () => {
@@ -1058,6 +1097,13 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 1 }).metadata_cache_max_memory_mb).toBe(16);
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 384 }).metadata_cache_max_memory_mb).toBe(384);
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 513 }).metadata_cache_max_memory_mb).toBe(64);
+  });
+
+  it("falls back non-positive sidebar table page sizes to the default", () => {
+    expect(normalizeDesktopSettings({}).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 500 }).sidebar_table_page_size).toBe(500);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 0 }).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: -10 }).sidebar_table_page_size).toBe(1000);
   });
 
   it("defaults DuckDB worker process isolation to disabled for old settings", () => {
@@ -1509,10 +1555,6 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],

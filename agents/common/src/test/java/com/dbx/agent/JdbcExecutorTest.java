@@ -6,6 +6,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -16,6 +17,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
@@ -160,6 +163,76 @@ class JdbcExecutorTest {
         ResultSet rs = resultSet(new SerialBlob(new byte[]{0x0A, 0x0B}), null, false);
 
         assertEquals("0x0a0b", JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.OTHER));
+    }
+
+    @Test
+    void defaultResultValueReturnsJsonSafeTextForNonFiniteFloats() throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                 "jdbc:h2:mem:nonfinite_default_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
+             Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(
+                 "SELECT CAST('NaN' AS DOUBLE), CAST('Infinity' AS REAL), CAST('-Infinity' AS DOUBLE)")) {
+            assertTrue(rs.next());
+            assertEquals("NaN", JdbcExecutor.INSTANCE.defaultResultValue(rs, 1, Types.DOUBLE));
+            assertEquals("+Inf", JdbcExecutor.INSTANCE.defaultResultValue(rs, 2, Types.REAL));
+            assertEquals("-Inf", JdbcExecutor.INSTANCE.defaultResultValue(rs, 3, Types.DOUBLE));
+        }
+    }
+
+    @Test
+    void executeReturnsJsonSafeTextForNonFiniteFloats() throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                 "jdbc:h2:mem:nonfinite_exec_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1")) {
+            QueryResult result = JdbcExecutor.INSTANCE.execute(
+                connection,
+                "SELECT CAST('NaN' AS DOUBLE), CAST('Infinity' AS REAL), CAST('-Infinity' AS DOUBLE)",
+                "",
+                schema -> ""
+            );
+
+            assertEquals(Arrays.asList("NaN", "+Inf", "-Inf"), result.getRows().get(0));
+        }
+    }
+
+    @Test
+    void rowValuesNormalizesNonFiniteFloatsFromCustomReaders() throws Exception {
+        try (Connection connection = DriverManager.getConnection(
+                 "jdbc:h2:mem:nonfinite_reader_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1")) {
+            QueryResult result = JdbcExecutor.INSTANCE.execute(
+                connection,
+                "SELECT 1",
+                "",
+                schema -> "",
+                10,
+                null,
+                (rs, index, sqlType) -> Double.NaN
+            );
+
+            assertEquals(Collections.singletonList("NaN"), result.getRows().get(0));
+        }
+    }
+
+    @Test
+    void normalizeResultValueReturnsJsonSafeTextForNonFiniteNumbers() throws Exception {
+        assertEquals("NaN", JdbcExecutor.normalizeResultValue(Double.NaN));
+        assertEquals("+Inf", JdbcExecutor.normalizeResultValue(Float.POSITIVE_INFINITY));
+        assertEquals("-Inf", JdbcExecutor.normalizeResultValue(Double.NEGATIVE_INFINITY));
+        assertEquals(Double.valueOf(1.5), JdbcExecutor.normalizeResultValue(1.5));
+    }
+
+    @Test
+    void abstractAgentResultValueReturnsJsonSafeTextForNonFiniteFloats() throws Exception {
+        ConfiguredJdbcAgent agent = new ConfiguredJdbcAgent(
+            new JdbcAgentProfile("org.h2.Driver", "jdbc:h2:mem:abstract_nonfinite", 0, false, Set.of(), List.of("TABLE"))
+        ) {};
+
+        try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:abstract_nonfinite");
+             Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery("SELECT CAST('NaN' AS DOUBLE), CAST('Infinity' AS REAL)")) {
+            assertTrue(rs.next());
+            assertEquals("NaN", agent.resultValue(rs, 1, Types.DOUBLE));
+            assertEquals("+Inf", agent.resultValue(rs, 2, Types.REAL));
+        }
     }
 
     @Test

@@ -5,6 +5,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -20,9 +21,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StandardJdbcMetadataTest {
@@ -876,6 +879,152 @@ class StandardJdbcMetadataTest {
         assertEquals(1, result.getCandidates().size());
         assertEquals("ID", result.getCandidates().get(0).getName());
         assertEquals(table, result.getCandidates().get(0).getParent_name());
+    }
+
+    @Test
+    void listsOracleTriggersInTheSchemaObjectGroup() throws Exception {
+        try (Connection connection = oracleFixture()) {
+            List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(
+                connection, oracleProfile(), "ORCL", "APP", MetadataListConstraints.NONE);
+
+            List<ObjectInfo> triggers = objects.stream()
+                .filter(object -> "TRIGGER".equals(object.getObject_type()))
+                .collect(Collectors.toList());
+            assertEquals(1, triggers.size());
+            ObjectInfo trigger = triggers.get(0);
+            assertEquals("Trigger A", trigger.getName());
+            assertEquals("APP", trigger.getSchema());
+            assertNotNull(trigger.getTrigger());
+            assertEquals("Trigger A", trigger.getTrigger().getName());
+            assertEquals("PARENT_OWNER", trigger.getParent_schema());
+            assertEquals("PARENT_TABLE", trigger.getParent_name());
+        }
+    }
+
+    @Test
+    void nonOracleConnectionsNeverReadTheOracleTriggerDictionary() {
+        AtomicInteger preparedStatements = new AtomicInteger();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getTables".equals(method.getName())) {
+                    return rows(row("TABLE_NAME", "T", "TABLE_TYPE", "TABLE", "REMARKS", null));
+                }
+                if ("getDatabaseProductName".equals(method.getName())) {
+                    return "PostgreSQL";
+                }
+                if ("getTableTypes".equals(method.getName())) {
+                    return rows(row("TABLE_TYPE", "TABLE"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("prepareStatement".equals(method.getName())) {
+                    preparedStatements.incrementAndGet();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(
+            conn, profile, "postgres", "public", MetadataListConstraints.NONE);
+        assertEquals(0, preparedStatements.get());
+        assertTrue(objects.stream().noneMatch(object -> "TRIGGER".equals(object.getObject_type())));
+    }
+
+    @Test
+    void oracleTriggerReadFailureKeepsTheRestOfTheObjectGroup() throws Exception {
+        try (Connection h2 = oracleH2Fixture()) {
+            h2.createStatement().execute("DROP TABLE ALL_TRIGGERS");
+            List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(
+                asOracleConnection(h2), oracleProfile(), "ORCL", "APP", MetadataListConstraints.NONE);
+            assertTrue(objects.stream().noneMatch(object -> "TRIGGER".equals(object.getObject_type())));
+        }
+    }
+
+    private static JdbcAgentProfile oracleProfile() {
+        return new JdbcAgentProfile(
+            "oracle.jdbc.OracleDriver",
+            "jdbc:oracle:thin:@{host}:{port}/{database}",
+            1521,
+            false,
+            Collections.singleton("SYS"),
+            Arrays.asList("TABLE", "VIEW")
+        );
+    }
+
+    /**
+     * An Oracle-flavoured connection whose ALL_TRIGGERS dictionary answers the
+     * schema-level trigger query used by the object tree's 触发器 group.
+     */
+    private static Connection oracleFixture() throws Exception {
+        return asOracleConnection(oracleH2Fixture());
+    }
+
+    private static Connection oracleH2Fixture() throws Exception {
+        Connection h2 = java.sql.DriverManager.getConnection(
+            "jdbc:h2:mem:" + java.util.UUID.randomUUID() + ";MODE=Oracle;NON_KEYWORDS=SEQUENCE,POSITION,LINE");
+        try (var statement = h2.createStatement()) {
+            statement.execute("CREATE TABLE ALL_TRIGGERS (OWNER VARCHAR, TRIGGER_NAME VARCHAR, TRIGGERING_EVENT VARCHAR, TRIGGER_TYPE VARCHAR, STATUS VARCHAR, TABLE_OWNER VARCHAR, TABLE_NAME VARCHAR, BASE_OBJECT_TYPE VARCHAR, WHEN_CLAUSE VARCHAR, REFERENCING_NAMES VARCHAR, DESCRIPTION VARCHAR, TRIGGER_BODY CLOB)");
+            statement.execute("CREATE TABLE ALL_OBJECTS (OWNER VARCHAR, OBJECT_NAME VARCHAR, OBJECT_TYPE VARCHAR, OBJECT_ID BIGINT, LAST_DDL_TIME TIMESTAMP, STATUS VARCHAR)");
+        }
+        try (java.sql.PreparedStatement statement = h2.prepareStatement(
+            "INSERT INTO ALL_TRIGGERS VALUES ('APP', 'Trigger A', 'INSERT', 'BEFORE EACH ROW', 'ENABLED', 'PARENT_OWNER', 'PARENT_TABLE', 'TABLE', NULL, NULL, NULL, 'BEGIN NULL; END;')")) {
+            statement.executeUpdate();
+        }
+        try (java.sql.PreparedStatement statement = h2.prepareStatement(
+            "INSERT INTO ALL_OBJECTS VALUES ('APP', 'Trigger A', 'TRIGGER', 42, CURRENT_TIMESTAMP, 'VALID')")) {
+            statement.executeUpdate();
+        }
+        return h2;
+    }
+
+    /**
+     * The Oracle JDBC driver reports "Oracle" as its product name; H2 cannot, so the
+     * fixture connection is wrapped to answer like the real driver.
+     */
+    private static Connection asOracleConnection(Connection delegate) {
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    DatabaseMetaData meta = (DatabaseMetaData) invoke(method, delegate, args);
+                    return proxy(DatabaseMetaData.class, new MethodHandler() {
+                        @Override
+                        public Object handle(Method inner, Object[] innerArgs) {
+                            if ("getDatabaseProductName".equals(inner.getName())) {
+                                return "Oracle";
+                            }
+                            return invoke(inner, meta, innerArgs);
+                        }
+                    });
+                }
+                return invoke(method, delegate, args);
+            }
+        });
+    }
+
+    private static Object invoke(Method method, Object target, Object[] args) {
+        try {
+            return method.invoke(target, args);
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error fatal) {
+                throw fatal;
+            }
+            throw new IllegalStateException(cause);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static Connection connection(

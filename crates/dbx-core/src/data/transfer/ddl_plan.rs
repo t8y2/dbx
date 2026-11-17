@@ -265,13 +265,14 @@ pub(super) async fn prepare_table_ddl(
             )
         }
     } else {
-        generate_create_table_ddl_with_column_quoting(
+        generate_create_table_ddl_with_source_profile(
             columns,
             target_table,
             &request.source_schema,
             &request.target_schema,
             target_db_type,
             source_db_type,
+            source_driver_profile.as_deref(),
             table_comment,
             request.target_catalog.as_deref(),
             request.quote_target_column_names,

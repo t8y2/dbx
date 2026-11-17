@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => mocks.store }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sidebarConnectionSortMode: "manual" } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
 import { useDialogSources } from "@/composables/useDialogSources";

@@ -103,6 +103,7 @@ This guide gets you through three things:
     | `DBX_PASSWORD` | Not set | Web login password; recommended for production |
     | `DBX_DISABLE_PASSWORD` | `false` | Set to `true` or `1` to disable login protection |
     | `DBX_DISABLE_PASSWORD_VIEWER` | `false` | Set to `true` or `1` to keep saved connection credentials on the server and disable password viewing, password-inclusive copying, and secret sync exports |
+    | `DBX_WEB_CAPTCHA` | Not set (`auto` in the UI) | Pins the login captcha and greys out 设置 → 安全: `always` (every login), `auto` (default, only after a failed attempt), `off` (trusted networks; the failure lockout still applies). Unset it to manage the policy from the UI |
     | `DBX_DATA_DIR` | `/app/data` | Persistent data directory |
     | `DBX_PORT` | `4224` | Container listen port |
     | `DBX_PUBLIC_BASE_PATH` | `/` | Deploy below a subpath, such as `/dbx` |

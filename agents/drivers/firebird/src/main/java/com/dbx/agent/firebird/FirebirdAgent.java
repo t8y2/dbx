@@ -21,6 +21,8 @@ import java.util.Iterator;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
+import org.firebirdsql.jdbc.FBDriver;
 
 public final class FirebirdAgent extends ConfiguredJdbcAgent {
     private static final String COMMON_OBJECTS_SQL = """
@@ -102,6 +104,24 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
         String url = super.buildJdbcUrl(params);
         LegacyTextDecoder.charsetFromUrl(url); // Fail invalid configuration before opening a connection.
         return LegacyTextDecoder.jdbcUrl(url);
+    }
+
+    @Override
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = super.buildConnectionProperties(params);
+        String url = super.buildJdbcUrl(params);
+        Charset charset = LegacyTextDecoder.charsetFromUrl(url);
+        if (charset == null) {
+            return properties;
+        }
+        return unchecked(() -> {
+            properties.putAll(FBDriver.normalizeProperties(
+                LegacyTextDecoder.jdbcUrlWithoutDataCharset(url),
+                properties
+            ));
+            LegacyTextDecoder.configureWrites(properties, charset);
+            return properties;
+        });
     }
 
     @Override
@@ -244,6 +264,11 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
 
     public FirebirdAgent() {
         super(FIREBIRD_PROFILE);
+    }
+
+    @Override
+    protected boolean defaultBeforeNotNullInTableDdl() {
+        return true;
     }
 
     @Override

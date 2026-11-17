@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorMessagePosition, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
+import { lineColumnToOffset, parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorMessagePosition, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
 
 test("locates the Oracle invalid identifier reported by the Agent", () => {
   const sql = "select x.* from si_price_adjust_task t;";
@@ -47,6 +47,22 @@ test("keeps existing line-column and PostgreSQL caret parsing", () => {
   assert.deepEqual(parseSqlErrorLocation("ERROR 1064: syntax error near 'LIMIT 100' at line 3"), { line: 2, column: 0 });
   assert.deepEqual(parseSqlErrorLocation('ERROR: column "bad" does not exist\nLINE 3: SELECT bad\n               ^'), { line: 2, column: 15 });
   assert.deepEqual(sqlErrorDecorationRange("SELECT 1\nFROM bad", "syntax error at line 2, column 2"), { from: 10, to: 11 });
+});
+
+test("lineColumnToOffset calculates offset correctly with LF and CRLF without splitting full string", () => {
+  const lfText = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+  assert.equal(lineColumnToOffset(lfText, { line: 0, column: 0 }), 0);
+  assert.equal(lineColumnToOffset(lfText, { line: 1, column: 0 }), 10);
+  assert.equal(lineColumnToOffset(lfText, { line: 1, column: 7 }), 17);
+  assert.equal(lineColumnToOffset(lfText, { line: 2, column: 0 }), 20);
+  assert.equal(lineColumnToOffset(lfText, { line: 3, column: 0 }), null);
+  assert.equal(lineColumnToOffset(lfText, { line: -1, column: 0 }), null);
+
+  const crlfText = "SELECT 1;\r\nSELECT 2;\r\nSELECT 3;";
+  assert.equal(lineColumnToOffset(crlfText, { line: 0, column: 0 }), 0);
+  assert.equal(lineColumnToOffset(crlfText, { line: 1, column: 0 }), 11);
+  assert.equal(lineColumnToOffset(crlfText, { line: 1, column: 7 }), 18);
+  assert.equal(lineColumnToOffset(crlfText, { line: 2, column: 0 }), 22);
 });
 
 test("parses the Oracle Agent offset without needing the SQL it refers to", () => {

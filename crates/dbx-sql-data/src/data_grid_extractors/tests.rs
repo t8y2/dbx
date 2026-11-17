@@ -26,6 +26,8 @@ pub(super) fn request(extractor: DataGridExtractorId) -> DataGridExtractRequest 
         rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace, Hopper")]],
         selection_kind: DataGridSelectionKind::Cells,
         options: DataGridExtractorOptions::default(),
+        spatial_columns: None,
+        spatial_values: None,
     }
 }
 
@@ -1614,6 +1616,8 @@ fn build_data_grid_copy_update_statements_returns_empty_for_mongodb() {
         source_columns: Some(vec![Some("id".to_string())]),
         rows: vec![vec![json!(1)]],
         include_database_name: false,
+        spatial_columns: None,
+        spatial_values: None,
     };
     assert!(build_data_grid_copy_update_statements(options).is_empty());
 }
@@ -1634,6 +1638,142 @@ fn format_grid_sql_literal_uses_numeric_bool_for_sqlserver() {
     assert_eq!(format_grid_sql_literal(&json!(false), Some(DatabaseType::SqlServer), Some(&column)), "0");
     // Other dialects still emit TRUE/FALSE for non-bit columns.
     assert_eq!(format_grid_sql_literal(&json!(true), Some(DatabaseType::Postgres), Some(&column)), "TRUE");
+}
+
+#[test]
+fn sqlserver_spatial_extract_selection_replays_cell_srid() {
+    use dbx_types::types::SpatialColumn;
+    let req = DataGridExtractRequest {
+        version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
+        extractor: DataGridExtractorId::SqlInserts,
+        database_type: Some(DatabaseType::SqlServer),
+        identifier_quote: None,
+        table_meta: Some(DataGridTableMeta {
+            catalog: None,
+            database: Some("test_db".to_string()),
+            schema: Some("dbo".to_string()),
+            table_name: "spatial_data".to_string(),
+            primary_keys: vec![],
+            columns: Some(vec![
+                DataGridColumnInfo {
+                    name: "shape".to_string(),
+                    data_type: "geometry".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    column_default: None,
+                    extra: None,
+                },
+                DataGridColumnInfo {
+                    name: "location".to_string(),
+                    data_type: "geography".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    column_default: None,
+                    extra: None,
+                },
+            ]),
+        }),
+        source_table_name: None,
+        columns: vec![
+            DataGridExtractColumn {
+                display_name: "shape".to_string(),
+                source_name: Some("shape".to_string()),
+                source_index: 0,
+                data_type: Some("geometry".to_string()),
+                description: None,
+            },
+            DataGridExtractColumn {
+                display_name: "location".to_string(),
+                source_name: Some("location".to_string()),
+                source_index: 1,
+                data_type: Some("geography".to_string()),
+                description: None,
+            },
+        ],
+        selected_column_indexes: vec![0, 1],
+        rows: vec![
+            vec![json!("POINT (1 2)"), json!("POINT (10 20)")],
+            vec![json!("POINT (3 4)"), json!("POINT (30 40)")],
+        ],
+        selection_kind: DataGridSelectionKind::Cells,
+        options: DataGridExtractorOptions::default(),
+        spatial_columns: Some(vec![
+            SpatialColumn { column_index: 0, srid: Some(0) },
+            SpatialColumn { column_index: 1, srid: Some(4326) },
+        ]),
+        spatial_values: Some(vec![vec![Some(3857), Some(4326)], vec![Some(2154), Some(4269)]]),
+    };
+
+    let result = extract_data_grid_selection(req).expect("extract");
+    assert_eq!(
+        result.text,
+        "INSERT INTO [test_db].[dbo].[spatial_data] ([shape], [location]) VALUES\n(geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269));"
+    );
+}
+
+#[test]
+fn sqlserver_spatial_extract_updates_replay_cell_srid() {
+    use dbx_types::types::SpatialColumn;
+    let req = DataGridExtractRequest {
+        version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
+        extractor: DataGridExtractorId::SqlUpdates,
+        database_type: Some(DatabaseType::SqlServer),
+        identifier_quote: None,
+        table_meta: Some(DataGridTableMeta {
+            catalog: None,
+            database: Some("test_db".to_string()),
+            schema: Some("dbo".to_string()),
+            table_name: "spatial_data".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![
+                DataGridColumnInfo {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    column_default: None,
+                    extra: None,
+                },
+                DataGridColumnInfo {
+                    name: "shape".to_string(),
+                    data_type: "geometry".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    column_default: None,
+                    extra: None,
+                },
+            ]),
+        }),
+        source_table_name: None,
+        columns: vec![
+            DataGridExtractColumn {
+                display_name: "id".to_string(),
+                source_name: Some("id".to_string()),
+                source_index: 0,
+                data_type: Some("int".to_string()),
+                description: None,
+            },
+            DataGridExtractColumn {
+                display_name: "shape".to_string(),
+                source_name: Some("shape".to_string()),
+                source_index: 1,
+                data_type: Some("geometry".to_string()),
+                description: None,
+            },
+        ],
+        selected_column_indexes: vec![0, 1],
+        rows: vec![vec![json!(1), json!("POINT (1 2)")], vec![json!(2), json!("POINT (3 4)")]],
+        selection_kind: DataGridSelectionKind::Cells,
+        options: DataGridExtractorOptions::default(),
+        spatial_columns: Some(vec![SpatialColumn { column_index: 1, srid: Some(0) }]),
+        spatial_values: Some(vec![vec![None, Some(3857)], vec![None, Some(2154)]]),
+    };
+
+    let result = extract_data_grid_selection(req).expect("extract");
+    assert_eq!(
+        result.text,
+        "UPDATE [test_db].[dbo].[spatial_data] SET [shape] = geometry::STGeomFromText('POINT (1 2)', 3857) WHERE [id] = 1;\nUPDATE [test_db].[dbo].[spatial_data] SET [shape] = geometry::STGeomFromText('POINT (3 4)', 2154) WHERE [id] = 2;"
+    );
 }
 
 #[test]
@@ -2362,6 +2502,41 @@ fn builds_deletes_inserts_merged_mode() {
     assert_eq!(
         result.text,
         "DELETE FROM \"public\".\"users\" WHERE \"id\" = 1;\nDELETE FROM \"public\".\"users\" WHERE \"id\" = 2;\nINSERT INTO \"public\".\"users\" (\"id\", \"name\") VALUES\n(1, 'Ada'),\n(2, 'Grace, Hopper');"
+    );
+}
+
+#[test]
+fn builds_deletes_only() {
+    let mut request = request(DataGridExtractorId::SqlDeletes);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "varchar".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+    let result = extract_data_grid_selection(request).expect("SQL DELETE extraction");
+    assert_eq!(
+        result.text,
+        "DELETE FROM \"public\".\"users\" WHERE \"id\" = 1;\nDELETE FROM \"public\".\"users\" WHERE \"id\" = 2;"
     );
 }
 

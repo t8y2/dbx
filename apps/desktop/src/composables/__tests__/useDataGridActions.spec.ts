@@ -1736,4 +1736,73 @@ describe("useDataGridActions", () => {
     await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 0, "refresh");
     expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ includeRowId: true }));
   });
+
+  it("retries a failed keyless-table database sort without the row-id locator and remembers the connection (Greenplum AO, #14922)", async () => {
+    const keylessColumn = { name: "payload", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null };
+    const tab = tableDataTab({
+      resultPageLimit: 100,
+      result: { columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+      tableMeta: {
+        schema: "public",
+        tableName: "events",
+        tableType: "TABLE",
+        columns: [keylessColumn],
+        primaryKeys: [],
+      },
+    });
+    mocks.tabs.push(tab);
+    const locatorSql = `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM "public"."events" ORDER BY "payload" ASC LIMIT 100 OFFSET 0;`;
+    const fallbackSql = `SELECT * FROM "public"."events" ORDER BY "payload" ASC LIMIT 100 OFFSET 0;`;
+    mocks.buildTableSelectSql.mockImplementation(({ includeRowId }: { includeRowId?: boolean }) => Promise.resolve(includeRowId ? locatorSql : fallbackSql));
+    mocks.executeTabSql.mockImplementation(async (_id: string, sql: string) => {
+      tab.result = sql.includes("__DBX_ROWID")
+        ? ({ columns: ["Error"], rows: [["ERROR: Invalid attnum: -3"]], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"])
+        : ({ columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as QueryTab["result"]);
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort(tab.id, "payload", 0, "asc");
+
+    // 首次带定位器的排序失败 → 降级重试一次成功，表仍可排序浏览（只读）
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(2);
+    expect(mocks.executeTabSql).toHaveBeenNthCalledWith(2, "tab-1", fallbackSql, expect.objectContaining({ pagination: { limit: 100, offset: 0 } }));
+    expect(mocks.buildTableSelectSql).toHaveBeenLastCalledWith(expect.objectContaining({ includeRowId: false }));
+    expect(tab.result?.execution_error).toBeUndefined();
+    // 连接已记忆：后续排序不再注入定位器
+    mocks.executeTabSql.mockClear();
+    mocks.buildTableSelectSql.mockClear();
+    await actions.onSort(tab.id, "payload", 0, "desc");
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ includeRowId: false }));
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(1);
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", fallbackSql, expect.anything());
+  });
+
+  it("restores the locator when the sort fallback retry also fails so the real error stays visible (#14922)", async () => {
+    const keylessColumn = { name: "payload", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null };
+    const tab = tableDataTab({
+      resultPageLimit: 100,
+      tableMeta: {
+        schema: "public",
+        tableName: "events",
+        tableType: "TABLE",
+        columns: [keylessColumn],
+        primaryKeys: [],
+      },
+    });
+    mocks.tabs.push(tab);
+    const errorResult = { columns: ["Error"], rows: [["ERROR: relation does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"];
+    mocks.buildTableSelectSql.mockImplementation(({ includeRowId }: { includeRowId?: boolean }) => Promise.resolve(includeRowId ? `SELECT ... AS "__DBX_ROWID", * FROM t` : `SELECT * FROM t`));
+    mocks.executeTabSql.mockImplementation(async () => {
+      tab.result = errorResult;
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort(tab.id, "payload", 0, "asc");
+
+    expect(mocks.executeTabSql).toHaveBeenCalledTimes(2);
+    // 重试也失败：标记还原，后续仍按原行为注入定位器
+    mocks.buildTableSelectSql.mockClear();
+    await actions.onSort(tab.id, "payload", 0, "asc");
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ includeRowId: true }));
+  });
 });

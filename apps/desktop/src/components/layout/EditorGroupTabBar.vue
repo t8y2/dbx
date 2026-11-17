@@ -28,6 +28,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { blockTabDragTextSelection } from "@/lib/tabs/tabDragSelection";
 import type { Component, CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -167,6 +168,7 @@ const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, null);
 const tabWindowTransfer = inject(TAB_WINDOW_TRANSFER, null);
+let releaseTabDragSelection: (() => void) | undefined;
 const canNewQuery = computed(() => toolbar?.canNewQuery.value ?? false);
 const { toast } = useToast();
 const tabsContainerRef = ref<HTMLElement | null>(null);
@@ -1522,6 +1524,8 @@ function handleTabPointerDown(event: PointerEvent, tab: QueryTab) {
   if ((event.buttons & 1) !== 1) {
     return;
   }
+  releaseTabDragSelection?.();
+  releaseTabDragSelection = blockTabDragTextSelection();
   groupTabDragSourceEl = event.currentTarget as HTMLElement | null;
   void tabWindowTransfer?.refreshOtherTabWindows();
   groupTabDrag.active = false;
@@ -1904,6 +1908,8 @@ function cleanupTabDrag(event?: Event) {
   window.removeEventListener("pointerup", handleTabPointerUp);
   window.removeEventListener("pointercancel", cleanupTabDrag);
   window.removeEventListener("blur", cleanupTabDrag);
+  releaseTabDragSelection?.();
+  releaseTabDragSelection = undefined;
   // The shared drag session belongs to the bar that started it: another
   // group's tab bar unmounting mid-drag must not kill the source's drag.
   if (groupTabDrag.sourceGroupId === props.groupId) {
@@ -1919,7 +1925,6 @@ function cleanupTabDrag(event?: Event) {
     groupTabDragSourceEl = null;
     removeTabDragGhost();
     document.body.style.cursor = "";
-    document.body.style.userSelect = "";
   }
 }
 
@@ -1950,7 +1955,6 @@ function handleTabPointerMove(event: PointerEvent) {
       groupTabDragGhost = createTabDragGhost(groupTabDragSourceEl, event.clientX, event.clientY);
     }
     document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
   }
   event.preventDefault();
   const sourceBar = groupTabDragSourceEl?.closest<HTMLElement>("[data-main-tab-bar]");

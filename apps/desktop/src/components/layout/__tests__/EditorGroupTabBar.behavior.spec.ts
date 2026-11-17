@@ -48,6 +48,7 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 }));
 
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { TAB_DRAG_SELECTION_CLASS } from "@/lib/tabs/tabDragSelection";
 import { TAB_WINDOW_TRANSFER, type useTabWindowTransfer } from "@/composables/useTabWindowTransfer";
 import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -188,6 +189,28 @@ describe("EditorGroupTabBar behavior", () => {
     vi.restoreAllMocks();
     pinia = createPinia();
     setActivePinia(pinia);
+  });
+
+  it.each(["pointerup", "pointercancel", "blur", "unmount"])("blocks content selection from pointerdown until %s", async (ending) => {
+    const store = useQueryStore();
+    useSettingsStore().editorSettings.tabSortMode = "manual";
+    const tabId = store.createTab("pg-1", "app", "Query");
+    const { app, host } = mountBar(store.groups[0].id, [tabId], tabId, pinia);
+    try {
+      await settle();
+      pointerDownOn(tabPill(host, tabId));
+      expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+      if (ending === "unmount") app.unmount();
+      else if (ending === "blur") window.dispatchEvent(new Event("blur"));
+      else window.dispatchEvent(new PointerEvent(ending, { bubbles: true, pointerId: 1 }));
+      expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+      const select = new Event("selectstart", { bubbles: true, cancelable: true });
+      document.body.dispatchEvent(select);
+      expect(select.defaultPrevented).toBe(false);
+    } finally {
+      if (ending !== "unmount") app.unmount();
+      host.remove();
+    }
   });
 
   it("hands a cross-window drag to the workspace coordinator without reordering the source group", async () => {

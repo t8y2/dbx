@@ -1581,6 +1581,13 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   -webkit-user-select: text !important;
 }
 
+/* Tab drags cross every content surface, including editable grid exceptions. */
+html:root.dbx-tab-dragging body,
+html:root.dbx-tab-dragging body * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

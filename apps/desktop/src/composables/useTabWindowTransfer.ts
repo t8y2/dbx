@@ -3,6 +3,7 @@ import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { tabDisplayTitle } from "@/lib/tabs/tabPresentation";
+import { blockTabDragTextSelection } from "@/lib/tabs/tabDragSelection";
 import { uuid } from "@/lib/common/utils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { requestAppClose } from "@/lib/backend/api";
@@ -90,7 +91,19 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   let tabWindowDragPreviewListenerUnmounted = false;
   const pendingTabWindowInfoRequests = new Map<string, { targetWindowLabel: string; resolve: (title: string | null) => void; timer: number }>();
 
-  const remoteTabWindowPreview = ref<{ transferId: string; sourceWindowLabel: string; title: string; sequence: number; rect: ReturnType<typeof tabDragPreviewRect> } | null>(null);
+  const remoteTabWindowPreview = ref<{ transferId: string; sourceWindowLabel: string; title: string; sequence: number; rect?: ReturnType<typeof tabDragPreviewRect> } | null>(null);
+  let releaseWindowDragSelection: (() => void) | undefined;
+  watch(
+    () => !!nativeTabDrag.value || !!remoteTabWindowPreview.value,
+    (active) => {
+      if (active) releaseWindowDragSelection ??= blockTabDragTextSelection();
+      else {
+        releaseWindowDragSelection?.();
+        releaseWindowDragSelection = undefined;
+      }
+    },
+    { flush: "sync" },
+  );
   const remoteTabWindowPreviewSequences = new Map<string, number>();
   let focusedDragPreviewWindowLabel: string | null = null;
   let remoteTabWindowPreviewExpiryTimer: number | null = null;
@@ -120,11 +133,12 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   }
 
   function clearRemoteTabWindowPreview(transferId?: string) {
+    if (transferId && remoteTabWindowPreview.value?.transferId !== transferId) return;
     if (remoteTabWindowPreviewExpiryTimer !== null) {
       window.clearTimeout(remoteTabWindowPreviewExpiryTimer);
       remoteTabWindowPreviewExpiryTimer = null;
     }
-    if (!transferId || remoteTabWindowPreview.value?.transferId === transferId) remoteTabWindowPreview.value = null;
+    remoteTabWindowPreview.value = null;
   }
 
   function refreshRemoteTabWindowPreviewExpiry(transferId: string, sequence: number) {
@@ -133,7 +147,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     // loses its final mouse-up event or closes during a drag.
     remoteTabWindowPreviewExpiryTimer = window.setTimeout(() => {
       if (remoteTabWindowPreview.value?.transferId === transferId && remoteTabWindowPreview.value.sequence === sequence) {
-        remoteTabWindowPreview.value = null;
+        clearRemoteTabWindowPreview(transferId);
       }
       remoteTabWindowPreviewExpiryTimer = null;
     }, 500);
@@ -174,6 +188,8 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     window.removeEventListener("pointerup", handleRemoteTabWindowPointerUp, true);
     stopTabDragPreviewBroadcast();
     clearRemoteTabWindowPreview();
+    releaseWindowDragSelection?.();
+    releaseWindowDragSelection = undefined;
   });
   onMounted(() => {
     let hadContent = false;
@@ -378,6 +394,10 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       return;
     }
 
+    const previousRect = remoteTabWindowPreview.value?.transferId === payload.transferId ? remoteTabWindowPreview.value.rect : undefined;
+    // Protect the destination before focusing it or awaiting native geometry.
+    remoteTabWindowPreview.value = { transferId: payload.transferId, sourceWindowLabel: payload.sourceWindowLabel, title: payload.title, sequence: payload.sequence, rect: previousRect };
+    refreshRemoteTabWindowPreviewExpiry(payload.transferId, payload.sequence);
     try {
       const currentWindow = getCurrentWindow();
       if (focusedDragPreviewWindowLabel !== currentWindow.label) {
@@ -385,7 +405,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
         await Promise.all([currentWindow.show(), currentWindow.unminimize(), currentWindow.setFocus()]);
       }
       const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
-      if (remoteTabWindowPreviewSequences.get(payload.sourceWindowLabel) !== payload.sequence) return;
+      if (remoteTabWindowPreview.value?.transferId !== payload.transferId || remoteTabWindowPreview.value.sequence !== payload.sequence) return;
       const cursor = {
         x: (payload.cursorPhysical.x - innerPosition.x) / scaleFactor,
         y: (payload.cursorPhysical.y - innerPosition.y) / scaleFactor,
@@ -401,7 +421,6 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
         sequence: payload.sequence,
         rect: tabDragPreviewRect(cursor, { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight }),
       };
-      refreshRemoteTabWindowPreviewExpiry(payload.transferId, payload.sequence);
     } catch {
       // A destination window may close while the global preview event is in flight.
     }

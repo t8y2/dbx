@@ -3,7 +3,8 @@ import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QueryTab } from "@/types/database";
-import type { TabWindowTransferPayload } from "@/lib/tabs/tabWindowTransfer";
+import type { TabWindowDragPreviewPayload, TabWindowTransferPayload } from "@/lib/tabs/tabWindowTransfer";
+import { blockTabDragTextSelection, TAB_DRAG_SELECTION_CLASS } from "@/lib/tabs/tabDragSelection";
 
 const mocks = vi.hoisted(() => ({
   createWindow: vi.fn(async (_payload: TabWindowTransferPayload) => true),
@@ -24,10 +25,13 @@ const mocks = vi.hoisted(() => ({
   moveToGroup: vi.fn(),
   activate: vi.fn(),
   persist: vi.fn(async () => {}),
+  preview: undefined as ((payload: TabWindowDragPreviewPayload) => Promise<void>) | undefined,
+  show: vi.fn(async () => {}),
 }));
 const workspace = reactive({ loaded: true, canClose: true });
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+vi.mock("@/lib/tabs/tabPresentation", () => ({ tabDisplayTitle: (tab: QueryTab) => tab.title }));
 vi.mock("@/lib/backend/api", () => ({ requestAppClose: mocks.requestClose }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: async (event: string, handler: () => void) => {
@@ -43,6 +47,9 @@ vi.mock("@tauri-apps/api/window", async (importOriginal) => ({
     scaleFactor: async () => 1,
     onMoved: async () => () => {},
     onResized: async () => () => {},
+    show: mocks.show,
+    unminimize: async () => {},
+    setFocus: async () => {},
   }),
 }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { crossWindowTabDragPreviewEnabled: true } }) }));
@@ -80,9 +87,13 @@ vi.mock("@/lib/tabs/tabWindowTransfer", async (importOriginal) => ({
   },
   listenForTabWindowInfoRequest: async () => () => {},
   listenForTabWindowInfoResponse: async () => () => {},
-  listenForTabWindowDragPreview: async () => () => {},
+  listenForTabWindowDragPreview: async (handler: (payload: TabWindowDragPreviewPayload) => Promise<void>) => {
+    mocks.preview = handler;
+    return () => {};
+  },
   listenForNativeTabDragPreviewRelease: async () => () => {},
   hideTabDragPreviewWebview: async () => {},
+  storeDetachedTabTransfer: vi.fn(),
 }));
 
 import { useTabWindowTransfer } from "@/composables/useTabWindowTransfer";
@@ -127,12 +138,83 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  app.unmount();
+  if (host.hasChildNodes()) app.unmount();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   document.body.innerHTML = "";
 });
 
 describe("group window transfer acknowledgement", () => {
+  function preview(sequence = 1, transferId = "drag"): TabWindowDragPreviewPayload {
+    return { transferId, sequence, sourceWindowLabel: "other", targetWindowLabel: mocks.windowLabel, title: "Query", cursorPhysical: { x: 100, y: 100 }, visible: true };
+  }
+
+  it("protects a destination before asynchronous focus and restores selection after hiding", async () => {
+    await vi.waitFor(() => expect(mocks.preview).toBeTypeOf("function"));
+    let finishFocus!: () => void;
+    mocks.show.mockImplementationOnce(() => new Promise<void>((resolve) => (finishFocus = resolve)));
+    vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(1200);
+    vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(800);
+    const pending = mocks.preview!(preview());
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+    finishFocus();
+    await pending;
+    expect(transfer.visibleTabWindowPreview.value).toBeDefined();
+    await mocks.preview!({ ...preview(2), visible: false });
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+  });
+
+  it("expires a lost remote drag without letting delayed geometry re-enable selection blocking", async () => {
+    await vi.waitFor(() => expect(mocks.preview).toBeTypeOf("function"));
+    vi.useFakeTimers();
+    let finishFocus!: () => void;
+    mocks.show.mockImplementationOnce(() => new Promise<void>((resolve) => (finishFocus = resolve)));
+    const pending = mocks.preview!(preview());
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+    await vi.advanceTimersByTimeAsync(501);
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+    finishFocus();
+    await pending;
+    expect(transfer.visibleTabWindowPreview.value).toBeUndefined();
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+  });
+
+  it("preserves the current remote expiry when an older transfer hides", async () => {
+    await vi.waitFor(() => expect(mocks.preview).toBeTypeOf("function"));
+    vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(1200);
+    vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(800);
+    vi.useFakeTimers();
+    await mocks.preview!(preview(1, "current"));
+    await mocks.preview!({ ...preview(2, "older"), visible: false });
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+    await vi.advanceTimersByTimeAsync(501);
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+  });
+
+  it("releases a remote selection guard when its workspace unmounts", async () => {
+    await vi.waitFor(() => expect(mocks.preview).toBeTypeOf("function"));
+    vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(1200);
+    vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(800);
+    await mocks.preview!(preview());
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+    app.unmount();
+    expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+  });
+
+  it("keeps the source protected after its local pointer cleanup until the native drag is cancelled", () => {
+    const releaseLocal = blockTabDragTextSelection();
+    try {
+      expect(transfer.move(tabs[0].id, new PointerEvent("pointermove", { clientX: 300, clientY: 200, buttons: 1 }), () => {})).toBe(true);
+      releaseLocal();
+      expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+      transfer.cancel();
+      expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+    } finally {
+      releaseLocal();
+      transfer.cancel();
+    }
+  });
+
   it("refreshes the window menu on creation and closure notifications without dragging", async () => {
     await vi.waitFor(() => expect(mocks.windowChange).toBeTypeOf("function"));
     await vi.waitFor(() => expect(mocks.announce).toHaveBeenCalledWith("dbx-tab-source"));

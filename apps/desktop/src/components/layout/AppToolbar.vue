@@ -30,6 +30,7 @@ import {
   CalendarClock,
   Waypoints,
   RefreshCw,
+  ChevronsLeft,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -44,6 +45,7 @@ import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 const RecentClosedTabsDialog = defineAsyncComponent(() => import("@/components/tabs/RecentClosedTabsDialog.vue"));
 const showRecentClosedTabs = ref(false);
@@ -232,6 +234,14 @@ function checkToolbarWidth() {
 
 const rightWrapper = ref<HTMLElement>();
 const rightOverflowCount = ref(0);
+const rightToolbarLabelsKey = "dbx-right-toolbar-labels";
+const rightToolbarLabelsRestoreSlack = 48;
+const showRightToolbarLabels = ref(safeLocalStorageGet(rightToolbarLabelsKey) === "true");
+// Keep the saved preference separate from the mode that fits the current window.
+// A narrow window may temporarily hide labels without changing the preference.
+const effectiveRightToolbarLabels = ref(showRightToolbarLabels.value);
+const rightToolbarLabelsAutoCollapsed = ref(false);
+const rightToolbarLabelsCollapsedAtWidth = ref<number | null>(null);
 let toolbarLayoutRaf = 0;
 let trafficLightSyncRaf = 0;
 let settlingRightOverflow = false;
@@ -361,6 +371,53 @@ const overflowRightMenuItems = computed(() => {
   }));
 });
 
+function hasRightToolbarOverflow(): boolean {
+  const toolbar = toolbarEl.value;
+  const wrapper = rightWrapper.value;
+  if (!toolbar || !wrapper || toolbar.clientWidth <= 0) return false;
+  return toolbar.scrollWidth > toolbar.clientWidth + 1 || wrapper.scrollWidth > wrapper.clientWidth + 1;
+}
+
+async function settleRightToolbarLabels() {
+  if (!showRightToolbarLabels.value) {
+    rightToolbarLabelsAutoCollapsed.value = false;
+    rightToolbarLabelsCollapsedAtWidth.value = null;
+    if (effectiveRightToolbarLabels.value) {
+      effectiveRightToolbarLabels.value = false;
+      await nextTick();
+    }
+    return;
+  }
+
+  const toolbar = toolbarEl.value;
+  if (!toolbar || toolbar.clientWidth <= 0) return;
+
+  if (rightToolbarLabelsAutoCollapsed.value) {
+    const collapsedAtWidth = rightToolbarLabelsCollapsedAtWidth.value;
+    if (collapsedAtWidth !== null && toolbar.clientWidth - collapsedAtWidth < rightToolbarLabelsRestoreSlack) return;
+  }
+
+  // Restore all right-side actions before measuring the full label layout. If
+  // that layout does not fit, icon mode is preferred before More overflow.
+  if (rightOverflowCount.value > 0) {
+    rightOverflowCount.value = 0;
+    await nextTick();
+  }
+  effectiveRightToolbarLabels.value = true;
+  await nextTick();
+
+  if (hasRightToolbarOverflow()) {
+    effectiveRightToolbarLabels.value = false;
+    rightToolbarLabelsAutoCollapsed.value = true;
+    rightToolbarLabelsCollapsedAtWidth.value = toolbar.clientWidth;
+    await nextTick();
+    return;
+  }
+
+  rightToolbarLabelsAutoCollapsed.value = false;
+  rightToolbarLabelsCollapsedAtWidth.value = null;
+}
+
 async function settleRightOverflowOnce() {
   const wrapper = rightWrapper.value;
   if (!wrapper) return;
@@ -407,6 +464,8 @@ async function settleRightOverflow() {
   try {
     do {
       pendingRightOverflowSettle = false;
+      await nextTick();
+      await settleRightToolbarLabels();
       await nextTick();
       await settleRightOverflowOnce();
     } while (pendingRightOverflowSettle);
@@ -458,6 +517,18 @@ function handleWindowResize() {
 }
 
 watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
+watch(
+  showRightToolbarLabels,
+  (show) => {
+    safeLocalStorageSet(rightToolbarLabelsKey, String(show));
+    effectiveRightToolbarLabels.value = show;
+    rightToolbarLabelsAutoCollapsed.value = false;
+    rightToolbarLabelsCollapsedAtWidth.value = null;
+    rightOverflowCount.value = 0;
+    scheduleToolbarLayout();
+  },
+  { flush: "post" },
+);
 watch(
   () => settingsStore.editorSettings.webLogoPosition,
   () => scheduleToolbarLayout(),
@@ -680,7 +751,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
 </script>
 
 <template>
-  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" data-tauri-drag-region @dblclick="onToolbarDblClick">
+  <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" :data-right-toolbar-labels="effectiveRightToolbarLabels" data-tauri-drag-region @dblclick="onToolbarDblClick">
     <a
       v-if="!isDesktop && webLogoPosition === 'left'"
       href="https://dbxio.com"
@@ -783,6 +854,8 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
                 :size="hasUpdateAvailable ? 'sm' : 'icon'"
                 class="toolbar-action-button shrink-0"
                 :class="hasUpdateAvailable ? 'h-7 gap-1.5 px-2 text-xs' : 'relative h-8 w-8'"
+                :data-right-toolbar-label="hasUpdateAvailable ? undefined : t('updates.check')"
+                :aria-label="hasUpdateAvailable ? t('updates.updateAction') : t('updates.check')"
                 @click="emit('check-updates')"
               >
                 <template v-if="hasUpdateAvailable">
@@ -804,6 +877,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
               size="icon"
               class="toolbar-action-button h-8 w-8 shrink-0"
               :aria-label="t('toolbar.immediateSync')"
+              :data-right-toolbar-label="t('toolbar.immediateSync')"
               :aria-busy="immediateSyncing"
               :disabled="immediateSyncing"
               @click="emit('immediate-sync')"
@@ -823,6 +897,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
               :class="{ 'toolbar-action-button--active bg-accent': isAlwaysOnTop }"
               :aria-pressed="isAlwaysOnTop"
               :aria-label="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
+              :data-right-toolbar-label="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
               @click="toggleAlwaysOnTop"
             >
               <Pin v-if="isAlwaysOnTop" class="toolbar-action-icon h-4 w-4 fill-current" />
@@ -840,6 +915,8 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
               data-toolbar-item="sqlLibrary"
               v-show="isRightItemVisible('sqlLibrary')"
               data-sql-library-trigger
+              :data-right-toolbar-label="t('sqlLibrary.title')"
+              :aria-label="t('sqlLibrary.title')"
               variant="ghost"
               size="icon"
               class="toolbar-action-button relative h-8 w-8 shrink-0"
@@ -873,7 +950,17 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Tooltip>
         <Tooltip v-if="toolbarKey === 'sqlFileTree' && toolbarItems.sqlFileTree">
           <TooltipTrigger as-child>
-            <Button data-toolbar-item="sqlFileTree" v-show="isRightItemVisible('sqlFileTree')" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showSqlFilePanel }" @click="emit('toggle-sql-file-panel')">
+            <Button
+              data-toolbar-item="sqlFileTree"
+              v-show="isRightItemVisible('sqlFileTree')"
+              variant="ghost"
+              size="icon"
+              class="toolbar-action-button relative h-8 w-8 shrink-0"
+              :class="{ 'toolbar-action-button--active bg-accent': showSqlFilePanel }"
+              :data-right-toolbar-label="t('sqlFileTree.title')"
+              :aria-label="t('sqlFileTree.title')"
+              @click="emit('toggle-sql-file-panel')"
+            >
               <FolderTree class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showSqlFilePanel }" />
               <span v-if="showSqlFilePanel" class="toolbar-panel-status" aria-hidden="true" />
             </Button>
@@ -882,7 +969,17 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Tooltip>
         <Tooltip v-if="toolbarKey === 'history' && toolbarItems.history">
           <TooltipTrigger as-child>
-            <Button data-toolbar-item="history" v-show="isRightItemVisible('history')" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showHistory }" @click="emit('toggle-history')">
+            <Button
+              data-toolbar-item="history"
+              v-show="isRightItemVisible('history')"
+              variant="ghost"
+              size="icon"
+              class="toolbar-action-button relative h-8 w-8 shrink-0"
+              :class="{ 'toolbar-action-button--active bg-accent': showHistory }"
+              :data-right-toolbar-label="t('history.title')"
+              :aria-label="t('history.title')"
+              @click="emit('toggle-history')"
+            >
               <History class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showHistory }" />
               <span v-if="showHistory" class="toolbar-panel-status" aria-hidden="true" />
             </Button>
@@ -891,7 +988,17 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Tooltip>
         <Tooltip v-if="toolbarKey === 'ai' && toolbarItems.ai">
           <TooltipTrigger as-child>
-            <Button data-toolbar-item="ai" v-show="isRightItemVisible('ai')" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showAiPanel }" @click="emit('toggle-ai')">
+            <Button
+              data-toolbar-item="ai"
+              v-show="isRightItemVisible('ai')"
+              variant="ghost"
+              size="icon"
+              class="toolbar-action-button relative h-8 w-8 shrink-0"
+              :class="{ 'toolbar-action-button--active bg-accent': showAiPanel }"
+              data-right-toolbar-label="AI"
+              :aria-label="aiTooltip"
+              @click="emit('toggle-ai')"
+            >
               <Bot class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showAiPanel }" />
               <span
                 v-if="awaitingAiRunCount > 0"
@@ -911,7 +1018,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Tooltip>
         <Tooltip v-if="toolbarKey === 'theme' && toolbarItems.theme">
           <TooltipTrigger as-child>
-            <Button data-toolbar-item="theme" v-show="isRightItemVisible('theme')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('toolbar.theme')" @click="cycleThemeMode">
+            <Button data-toolbar-item="theme" v-show="isRightItemVisible('theme')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('toolbar.theme')" :data-right-toolbar-label="t('toolbar.theme')" @click="cycleThemeMode">
               <component :is="themeTriggerIcon" :key="themeMode" class="toolbar-action-icon toolbar-theme-icon h-4 w-4" />
             </Button>
           </TooltipTrigger>
@@ -919,7 +1026,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Tooltip>
         <Tooltip v-if="toolbarKey === 'github' && toolbarItems.github">
           <TooltipTrigger as-child>
-            <Button data-toolbar-item="github" v-show="isRightItemVisible('github')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" @click="emit('open-github')">
+            <Button data-toolbar-item="github" v-show="isRightItemVisible('github')" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" data-right-toolbar-label="GitHub" aria-label="GitHub" @click="emit('open-github')">
               <svg class="toolbar-action-icon h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
                 <path
                   d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z"
@@ -932,6 +1039,15 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
       >
     </div>
     <!-- /rightWrapper -->
+    <Tooltip>
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :aria-label="t('toolbar.rightToolbarLabels')" :aria-pressed="showRightToolbarLabels" @click="showRightToolbarLabels = !showRightToolbarLabels">
+          <ChevronsRight v-if="showRightToolbarLabels" class="h-4 w-4" />
+          <ChevronsLeft v-else class="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t(showRightToolbarLabels ? "toolbar.hideRightToolbarLabels" : "toolbar.showRightToolbarLabels") }}</TooltipContent>
+    </Tooltip>
 
     <a
       v-if="!isDesktop && webLogoPosition === 'right'"
@@ -949,7 +1065,16 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
     <template v-for="toolbarKey in orderedToolbarKeys.controls" :key="toolbarKey"
       ><Tooltip v-if="toolbarKey === 'settings' && toolbarItems.settings !== false">
         <TooltipTrigger as-child>
-          <Button data-toolbar-item="settings" variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': showSettingsPage }" @click="emit('open-settings')">
+          <Button
+            data-toolbar-item="settings"
+            variant="ghost"
+            size="icon"
+            class="toolbar-action-button relative h-8 w-8 shrink-0"
+            :class="{ 'toolbar-action-button--active bg-accent': showSettingsPage }"
+            :data-right-toolbar-label="t('settings.title')"
+            :aria-label="t('settings.title')"
+            @click="emit('open-settings')"
+          >
             <Settings class="toolbar-action-icon h-4 w-4" :class="{ 'toolbar-action-icon--active': showSettingsPage }" />
             <span v-if="showSettingsPage" class="toolbar-panel-status" aria-hidden="true" />
             <span v-if="hasMcpUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" :aria-label="t('toolbar.mcpUpdateAvailable')" :title="t('toolbar.mcpUpdateAvailable')" />
@@ -959,7 +1084,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
       </Tooltip>
       <Tooltip v-if="toolbarKey === 'logout' && toolbarItems.logout !== false && showLogout">
         <TooltipTrigger as-child>
-          <Button data-toolbar-item="logout" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('auth.logout')" @click="emit('logout')">
+          <Button data-toolbar-item="logout" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('auth.logout')" :data-right-toolbar-label="t('auth.logout')" @click="emit('logout')">
             <LogOut class="toolbar-action-icon h-4 w-4" />
           </Button>
         </TooltipTrigger>
@@ -973,6 +1098,19 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
 </template>
 
 <style scoped>
+.app-toolbar[data-right-toolbar-labels="true"] :deep(button[data-right-toolbar-label]) {
+  width: auto;
+  flex-shrink: 0;
+  gap: 0.375rem;
+  padding-inline: 0.5rem;
+}
+
+.app-toolbar[data-right-toolbar-labels="true"] :deep(button[data-right-toolbar-label]::after) {
+  content: attr(data-right-toolbar-label);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
 .toolbar-action-icon {
   transform: translateY(0) scale(1);
   transition:

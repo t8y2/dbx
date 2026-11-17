@@ -965,6 +965,9 @@ export default withEnglishFallback({
     mongoShellCopied: "Comando de mongo shell copiado",
     multiDbExecute: "Ejecución multi-base de datos",
     executeAllSql: "Ejecutar todo el SQL",
+    rightToolbarLabels: "Texto de la barra de herramientas derecha",
+    showRightToolbarLabels: "Mostrar texto de la barra de herramientas derecha",
+    hideRightToolbarLabels: "Ocultar texto de la barra de herramientas derecha",
   },
   multiDbExecute: {
     manualTransaction: "Transacción manual",
@@ -3832,6 +3835,7 @@ export default withEnglishFallback({
     queryWhileSaving: "Se están guardando los cambios del conjunto de resultados. Espere a que termine el guardado antes de ejecutar la consulta.",
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condición",
+    rowJsonPreview: "Vista previa de JSON",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",
@@ -4336,6 +4340,8 @@ export default withEnglishFallback({
     selectImportTitle: "Seleccionar conexiones para importar",
     selectAll: "Seleccionar todo",
     deselectAll: "Deseleccionar todo",
+    searchPlaceholder: "Buscar grupos o conexiones",
+    searchNoResults: "No hay grupos ni conexiones coincidentes",
     selectedCount: "{selected} / {total}",
     next: "Siguiente",
     importSelected: "Importar {count}",
@@ -5423,6 +5429,7 @@ export default withEnglishFallback({
     foreignKeyChecksHint: "De forma predeterminada, se usa la configuración de la sesión. Al deshabilitarla, se ejecuta con SET FOREIGN_KEY_CHECKS = 0, lo que permite procesar las tablas referenciadas en cualquier orden; después de la ejecución, se restaura el valor original.",
     createSequence: "Crear secuencia",
     viewPostgresRowLevelSecurity: "Ver políticas de seguridad a nivel de fila",
+    copyGeneratedSql: "Copiar SQL generado",
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

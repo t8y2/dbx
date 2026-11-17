@@ -955,6 +955,13 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
   const isEtcdNavigation = node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control";
   await connectionStore.ensureConnected(node.connectionId, isNacosNavigation || isEtcdNavigation ? { verifyHealth: false } : undefined);
   if (!isCurrentNavigationRequest(requestId)) return;
+  if (node.type === "redis-db" && node.database !== undefined) {
+    const alias = connectionStore.getRedisDatabaseAlias(node.connectionId, node.database);
+    const databaseLabel = alias ? `db${node.database} · ${alias}` : `db${node.database}`;
+    const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:${databaseLabel}`;
+    queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
+    return;
+  }
   if ((node.type === "etcd-dashboard" || node.type === "etcd-access-control") && !connectionStore.getEtcdAccessCapabilities(node.connectionId).admin) return;
   const connectionName = connectionStore.getConfig(node.connectionId)?.name || (isNacosNavigation ? "Nacos" : isEtcdNavigation ? "etcd" : "Consul");
   if (node.type === "consul-root") {
@@ -1011,7 +1018,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     connectionStore.activeConnectionId = node.connectionId;
   }
   const treeLoadSearchOptions = sidebarTreeContext?.getTreeLoadSearchOptions?.(node);
-  if (isDirectNavigationTreeNode(node.type)) {
+  if (node.type === "redis-db" || isDirectNavigationTreeNode(node.type)) {
     try {
       await openDirectNavigationNode(node, requestId);
     } catch (e: any) {
@@ -1240,12 +1247,6 @@ async function toggle(requestId = beginNavigationRequest()) {
       node.isExpanded = true;
       const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node));
       if (liveNode) liveNode.isExpanded = true;
-    } else if (node.type === "redis-db" && node.connectionId && node.database) {
-      await connectionStore.ensureConnected(node.connectionId);
-      const alias = connectionStore.getRedisDatabaseAlias(node.connectionId, node.database);
-      const databaseLabel = alias ? `db${node.database} · ${alias}` : `db${node.database}`;
-      const tabTitle = `${connectionStore.getConfig(node.connectionId)?.name || "Redis"}:${databaseLabel}`;
-      queryStore.createTab(node.connectionId, node.database, tabTitle, "redis");
     } else if (node.type === "mq-tenant" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       queryStore.openMqAdmin(node.connectionId, { tenant: node.mqTenant || node.label, initialTab: node.mqInitialTab });
@@ -2474,15 +2475,16 @@ async function loadTemplateContext(allowView = false, node: TreeNode = activeNod
 }
 
 type TableTemplateContext = NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>;
+type SqlTemplateDestination = "editor" | "clipboard";
 
-async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, buildSql: (context: TableTemplateContext) => string, allowView: boolean, titlePrefix: string) {
+async function presentMultiTableSqlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, buildSql: (context: TableTemplateContext) => string, allowView: boolean, titlePrefix: string, destination: SqlTemplateDestination) {
   const contexts = (await Promise.all(targets.map((target) => loadTemplateContext(allowView, target)))).filter((context): context is TableTemplateContext => context !== null);
   const parts = contexts.map((context) => buildSql(context));
   if (!parts.length) return;
   const sql = parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
   const title = targets.length === 1 ? undefined : `${titlePrefix} - ${targets.map((target) => target.label).join(", ")}`;
   const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
-  openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
+  await presentSqlTemplate(tabTarget, sql, destination, title);
 }
 
 async function newColumnQuery(requestId: number) {
@@ -2521,11 +2523,25 @@ function openSqlTemplateTab(connectionId: string, database: string, schema: stri
   queryStore.updateSql(tabId, sql);
 }
 
-async function newSelectTemplate() {
+async function presentSqlTemplate(target: TreeNode, sql: string, destination: SqlTemplateDestination, title?: string) {
+  if (destination === "editor") {
+    if (target.connectionId && target.database !== undefined) openSqlTemplateTab(target.connectionId, target.database, target.schema, target.catalog, sql, title);
+    return;
+  }
+  if (!sql.trim()) return;
+  try {
+    await copyToClipboard(sql);
+    toast(t("connection.copied"), 2000);
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: translateBackendError(t, error) }), 5000);
+  }
+}
+
+async function newSelectTemplate(destination: SqlTemplateDestination) {
   try {
     const targets = selectedDdlTargets().filter((target) => target.type === "table" || target.type === "view" || target.type === "materialized_view");
     if (targets.length > 1) {
-      await openMultiTableSqlTemplate(
+      await presentMultiTableSqlTemplate(
         targets,
         (context) =>
           buildTableSelectTemplate({
@@ -2544,6 +2560,7 @@ async function newSelectTemplate() {
           }),
         true,
         "SELECT",
+        destination,
       );
       return;
     }
@@ -2563,14 +2580,14 @@ async function newSelectTemplate() {
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
+    await presentSqlTemplate(context.node, sql, destination);
   } catch (e: any) {
     toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
-async function newInsertTemplate() {
-  await runInsertTemplate(1);
+async function newInsertTemplate(destination: SqlTemplateDestination) {
+  await runInsertTemplate(1, destination);
 }
 
 const insertTemplateRowsOpen = ref(false);
@@ -2599,7 +2616,7 @@ function openInsertTemplateRowsDialog() {
 async function confirmInsertTemplateRows(count: number) {
   const prefetched = insertTemplateRowsPrefetch;
   insertTemplateRowsPrefetch = null;
-  await runInsertTemplate(count, prefetched ? await prefetched : null);
+  await runInsertTemplate(count, "editor", prefetched ? await prefetched : null);
 }
 
 function insertTemplateOptions(context: TableTemplateContext, rowCount: number) {
@@ -2627,7 +2644,7 @@ function warnInsertTemplatePkConflicts(contexts: TableTemplateContext[], rowCoun
   }
 }
 
-async function runInsertTemplate(rowCount: number, prefetchedContexts?: TableTemplateContext[] | null) {
+async function runInsertTemplate(rowCount: number, destination: SqlTemplateDestination, prefetchedContexts?: TableTemplateContext[] | null) {
   try {
     const contexts = prefetchedContexts ?? (await loadInsertTemplateContexts());
     if (!contexts.length) return;
@@ -2636,17 +2653,17 @@ async function runInsertTemplate(rowCount: number, prefetchedContexts?: TableTem
     const sql = parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
     const tabTarget = contexts.find((context) => context.node.id === activeNode.value.id)?.node ?? contexts[0]!.node;
     const title = contexts.length === 1 ? undefined : `INSERT - ${contexts.map((context) => context.node.label).join(", ")}`;
-    openSqlTemplateTab(tabTarget.connectionId!, tabTarget.database!, tabTarget.schema, tabTarget.catalog, sql, title);
+    await presentSqlTemplate(tabTarget, sql, destination, title);
   } catch (e: any) {
     toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
-async function newUpdateTemplate() {
+async function newUpdateTemplate(destination: SqlTemplateDestination) {
   try {
     const targets = selectedDdlTargets().filter((target) => target.type === "table");
     if (targets.length > 1) {
-      await openMultiTableSqlTemplate(
+      await presentMultiTableSqlTemplate(
         targets,
         (context) =>
           buildTableUpdateTemplate({
@@ -2664,6 +2681,7 @@ async function newUpdateTemplate() {
           }),
         false,
         "UPDATE",
+        destination,
       );
       return;
     }
@@ -2682,17 +2700,17 @@ async function newUpdateTemplate() {
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
+    await presentSqlTemplate(context.node, sql, destination);
   } catch (e: any) {
     toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
-async function newDeleteTemplate() {
+async function newDeleteTemplate(destination: SqlTemplateDestination) {
   try {
     const targets = selectedDdlTargets().filter((target) => target.type === "table");
     if (targets.length > 1) {
-      await openMultiTableSqlTemplate(
+      await presentMultiTableSqlTemplate(
         targets,
         (context) =>
           buildTableDeleteTemplate({
@@ -2710,6 +2728,7 @@ async function newDeleteTemplate() {
           }),
         false,
         "DELETE",
+        destination,
       );
       return;
     }
@@ -2728,13 +2747,13 @@ async function newDeleteTemplate() {
       tableName: context.node.label,
       columns: context.columns,
     });
-    openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
+    await presentSqlTemplate(context.node, sql, destination);
   } catch (e: any) {
     toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
-async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectionId: string; database: string }>) {
+async function presentSidebarDdlTemplate(targets: Array<TreeNode & { connectionId: string; database: string }>, destination: SqlTemplateDestination = "editor") {
   const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
   const sql = await buildSidebarDdlTemplateSql(
     targets,
@@ -2758,17 +2777,17 @@ async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectio
       return formatSidebarDdlTemplateForDisplay(formatted, formatDialect, databaseTypeForNode(target), settingsStore.editorSettings.generateSqlIncludeDatabaseName, target.database, settingsStore.editorSettings.generateSqlQuoteIdentifiers, settingsStore.editorSettings, target.catalog);
     },
   );
-  connectionStore.activeConnectionId = tabTarget.connectionId;
+  if (destination === "editor") connectionStore.activeConnectionId = tabTarget.connectionId;
   const title = `DDL - ${targets.map((target) => target.label).join(", ")}`;
-  openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
+  await presentSqlTemplate(tabTarget, sql, destination, title);
 }
 
-async function generateDdlTemplate() {
+async function generateDdlTemplate(destination: SqlTemplateDestination) {
   if (currentDatabaseType() === "victoriametrics") return;
   const targets = selectedDdlTargets();
   if (!targets.length) return;
   try {
-    await openSidebarMultiTableDdlTab(targets);
+    await presentSidebarDdlTemplate(targets, destination);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
@@ -2778,13 +2797,24 @@ function selectedDdlTargets() {
   return resolveSidebarDdlTargets(activeNode.value, connectionStore.treeNodes, acceptedSelectionIds ?? connectionStore.selectedTreeNodeIds);
 }
 
+function generatedSqlMenuItems(isTable: boolean, destination: SqlTemplateDestination): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [{ label: "SELECT", action: () => newSelectTemplate(destination), icon: TerminalSquare }];
+  if (isTable) {
+    items.push({ label: "INSERT", action: () => newInsertTemplate(destination), icon: FilePlus });
+    if (destination === "editor") items.push({ label: "INSERT (N)…", action: openInsertTemplateRowsDialog, icon: ListPlus });
+    items.push({ label: "UPDATE", action: () => newUpdateTemplate(destination), icon: SquarePen }, { label: "DELETE", action: () => newDeleteTemplate(destination), icon: ListX });
+  }
+  items.push({ label: "DDL", action: () => generateDdlTemplate(destination), icon: FileCode });
+  return items;
+}
+
 async function openDdl() {
   if (currentDatabaseType() === "victoriametrics") return;
   const targets = selectedDdlTargets();
   if (!targets.length) return;
   if (targets.length > 1) {
     try {
-      await openSidebarMultiTableDdlTab(targets);
+      await presentSidebarDdlTemplate(targets);
     } catch (e: any) {
       toast(e?.message || String(e), 5000);
     }
@@ -2802,7 +2832,7 @@ async function openDdlForSelection(node: TreeNode, selectedNodeIds: readonly str
   if (!targets.length) return false;
   if (targets.length > 1) {
     try {
-      await openSidebarMultiTableDdlTab(targets);
+      await presentSidebarDdlTemplate(targets);
     } catch (e: any) {
       toast(e?.message || String(e), 5000);
     }
@@ -8472,24 +8502,10 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     if (node.type === "table") items.push({ sidebarActionId: "modelGeneration.title", label: t("modelGeneration.title"), action: openModelGeneration, icon: Code2 });
-    items.push({
-      sidebarActionId: "contextMenu.generateSql",
-      label: t("contextMenu.generateSql"),
-      icon: FilePlus,
-      children: isTableNotView.value
-        ? [
-            { label: "SELECT", action: newSelectTemplate, icon: TerminalSquare },
-            { label: "INSERT", action: newInsertTemplate, icon: FilePlus },
-            { label: "INSERT (N)…", action: openInsertTemplateRowsDialog, icon: ListPlus },
-            { label: "UPDATE", action: newUpdateTemplate, icon: SquarePen },
-            { label: "DELETE", action: newDeleteTemplate, icon: ListX },
-            { label: "DDL", action: generateDdlTemplate, icon: FileCode },
-          ]
-        : [
-            { label: "SELECT", action: newSelectTemplate, icon: TerminalSquare },
-            { label: "DDL", action: generateDdlTemplate, icon: FileCode },
-          ],
-    });
+    items.push(
+      { sidebarActionId: "contextMenu.generateSql", label: t("contextMenu.generateSql"), icon: FilePlus, children: generatedSqlMenuItems(isTableNotView.value, "editor") },
+      { sidebarActionId: "contextMenu.copyGeneratedSql", label: t("contextMenu.copyGeneratedSql"), icon: Copy, children: generatedSqlMenuItems(isTableNotView.value, "clipboard") },
+    );
     const sqlHistoryMenu = savedSqlHistorySubmenu();
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (canOpenDiagram.value) {
@@ -9383,6 +9399,13 @@ function requestPaste(node: TreeNode): boolean {
 
 function toggleNode(node: TreeNode) {
   activateRuntimeNode(node);
+  if (node.type === "redis-db" && node.children?.length) {
+    // The chevron and arrow keys open the saved queries. Activating the row
+    // itself still opens the Redis key browser.
+    emit("search-toggle", node);
+    emitNodeToggled(node, !!node.isExpanded);
+    return;
+  }
   void toggle(beginNavigationRequest());
 }
 

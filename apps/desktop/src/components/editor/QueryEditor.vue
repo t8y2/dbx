@@ -2847,6 +2847,17 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
 });
 
 watch(
+  [() => props.connectionId, () => props.database, () => props.schema, () => props.catalog, () => props.clientSessionId, () => props.completionContextVersion, () => !!props.connectionId && connectionStore.connectedIds.has(props.connectionId)],
+  () => {
+    const { sqlSignatureComp, buildSqlSignatureExtension } = codeMirrorRuntime;
+    if (view.value && sqlSignatureComp && buildSqlSignatureExtension) {
+      view.value.dispatch({ effects: sqlSignatureComp.reconfigure(buildSqlSignatureExtension()) });
+    }
+  },
+  { flush: "post" },
+);
+
+watch(
   [() => props.tabId, () => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlSyntaxDialect, () => props.mongoQueryLanguage, sqlDriverProfile, () => kingbaseConfig.value?.database_info?.compatibilityMode, () => JSON.stringify(sqlStatementParameterOptions())],
   () => {
     completion.invalidateRequests();

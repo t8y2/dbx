@@ -3,6 +3,12 @@ import type { TreeNode } from "@/types/database";
 
 export function filterConnectionIndexes(nodes: readonly TreeNode[], connectionIds: ReadonlySet<string>, queries: Readonly<Record<string, string>>): TreeNode[] {
   return nodes.map((node) => {
+    if (node.type === "connection-group" && node.children?.length) {
+      const originalChildren = node.children;
+      const children = filterConnectionIndexes(originalChildren, connectionIds, queries);
+      if (children.some((child, index) => child !== originalChildren[index])) return { ...node, children };
+      return node;
+    }
     if (node.type !== "connection" || !connectionIds.has(node.connectionId ?? node.id)) return node;
     const query = queries[node.id]?.trim().toLowerCase();
     if (!query || !node.children) return node;

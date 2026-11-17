@@ -8301,7 +8301,7 @@ async function openExternalUrl(url: string) {
   background: var(--muted);
   padding: 0.125rem 0.375rem;
   font-size: var(--dbx-ai-inline-code-font-size, 11px);
-  font-family: ui-monospace, monospace;
+  font-family: var(--dbx-ai-content-font-family, ui-monospace, monospace);
 }
 .ai-markdown :deep(pre) {
   background: var(--muted);
@@ -8313,6 +8313,7 @@ async function openExternalUrl(url: string) {
 .ai-markdown :deep(pre code) {
   background: none;
   padding: 0;
+  font-family: ui-monospace, monospace;
 }
 .ai-markdown :deep(table) {
   border-collapse: collapse;

@@ -381,7 +381,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     exclusiveRoutineSuggestions: scope.kind === "routine",
     prioritizeSelectAliases: base.prioritizeSelectAliases || projectionAliases.length > 0,
     selectAliases: projectionAliases.length > 0 ? projectionAliases : base.selectAliases,
-    referencedTables: referencedTables.length > 0 ? referencedTables : base.referencedTables,
+    referencedTables: base.referencedTablesScoped ? base.referencedTables : referencedTables.length > 0 ? referencedTables : base.referencedTables,
     insertTable: model.cursorIntent.kind === "insert_column" ? mutationTarget?.name : base.insertTable,
     insertDatabase: model.cursorIntent.kind === "insert_column" ? mutationDatabase : base.insertDatabase,
     insertSchema: model.cursorIntent.kind === "insert_column" ? mutationSchema : base.insertSchema,

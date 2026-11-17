@@ -85,13 +85,19 @@ describe("logoutWeb", () => {
   });
 
   it("returns no logoutUrl for legacy backends without the field", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
+    );
     const result = await logoutWeb();
     expect(result.logoutUrl).toBeUndefined();
   });
 
   it("rejects non-2xx responses", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 500 })),
+    );
     await expect(logoutWeb()).rejects.toThrow("AUTH_LOGOUT_FAILED");
   });
 });

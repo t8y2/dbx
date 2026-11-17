@@ -40,9 +40,7 @@ const formProviders = computed(() => props.providers.filter((provider) => provid
 // choice; with a single one the backend resolves it and the page keeps the legacy look.
 const needsProviderChoice = computed(() => formProviders.value.length > 1);
 const selectedProviderId = ref("");
-const selectedProvider = computed(
-  () => formProviders.value.find((provider) => provider.id === selectedProviderId.value) ?? formProviders.value[0],
-);
+const selectedProvider = computed(() => formProviders.value.find((provider) => provider.id === selectedProviderId.value) ?? formProviders.value[0]);
 const requiresUsername = computed(() => selectedProvider.value?.requires_username === true);
 
 // A replaced provider list (auth/check refetch) invalidates the picked id.

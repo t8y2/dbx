@@ -34,6 +34,7 @@ const excludedLabels: Record<string, string> = {
   "settings.mcpUninstallCommand": "Read-only removal command",
   "settings.updateStatusTitle": "Installed/available release status",
   "auth.logout": "Session action, not a preference",
+  "auth.currentUser": "Session identity display, not a preference",
   "settings.sqlShortcutsPreview": "Read-only generated SQL preview",
   "ai.aiImportSelectConfig": "Per-import record selection",
   "ai.aiImportUnsupported": "Disabled unsupported-import indicator",

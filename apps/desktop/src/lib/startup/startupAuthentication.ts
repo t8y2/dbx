@@ -77,8 +77,6 @@ export async function logoutWeb(): Promise<WebLogoutResult> {
   }
   const result: unknown = await response.json();
   if (!result || typeof result !== "object") return {};
-  const logoutUrl = "logout_url" in result && typeof (result as Record<string, unknown>).logout_url === "string"
-    ? ((result as Record<string, unknown>).logout_url as string)
-    : undefined;
+  const logoutUrl = "logout_url" in result && typeof (result as Record<string, unknown>).logout_url === "string" ? ((result as Record<string, unknown>).logout_url as string) : undefined;
   return { logoutUrl };
 }

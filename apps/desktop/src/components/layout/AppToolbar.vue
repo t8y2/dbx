@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, orderToolbarItems } from "@/lib/settings/toolbarCustomization";
+import { TOOLBAR_ITEM_GROUPS, isToolbarMenuItem, toolbarGroupOrder, orderToolbarItems } from "@/lib/settings/toolbarCustomization";
 import { computed, defineAsyncComponent, ref, shallowRef, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
@@ -124,7 +124,7 @@ const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const orderedToolbarKeys = computed(() => ({
-  primary: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "primary"),
+  primary: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "left").filter((key) => !isToolbarMenuItem(key) || toolbarItems.value.pinnedMenuItems.includes(key)),
   menu: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "menu"),
   right: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "right"),
   controls: toolbarGroupOrder(settingsStore.editorSettings.toolbarItemOrder, "controls"),
@@ -226,7 +226,11 @@ function checkToolbarWidth() {
   const el = toolbarEl.value;
   if (!el) return;
   const screenWidth = window.visualViewport?.width ?? window.innerWidth;
-  const threshold = screenWidth / 2;
+  const pinnedCount = pinnedMenuActions.value.size;
+  // Leave room for the default actions and the window controls before adding
+  // the pinned icon buttons. A narrow toolbar can expose them through More.
+  const minimumPinnedWidth = pinnedCount > 0 ? 480 + pinnedCount * 36 : 0;
+  const threshold = Math.max(screenWidth / 2, minimumPinnedWidth);
   toolbarCollapsed.value = el.clientWidth < threshold;
 }
 
@@ -574,6 +578,7 @@ onBeforeUnmount(() => {
 type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 
 const toolbarMenuItemKeys: Record<string, string> = {
+  "recent-closed-tabs": "recentClosedTabs",
   "open-sql-editor-file": "openSql",
   transfer: "dataTransfer",
   "driver-store": "driverManager",
@@ -595,7 +600,7 @@ function toolbarMenuItemKey(item: ToolbarMenuItem): string {
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
-  if (props.hasClosedTabs) {
+  if (props.hasClosedTabs && toolbarItems.value.recentClosedTabs) {
     items.push({
       value: "recent-closed-tabs",
       label: t("tabs.recentClosedTitle"),
@@ -702,7 +707,18 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
   return orderToolbarItems(orderedPrimary, orderedToolbarKeys.value.controls, toolbarMenuItemKey);
 }
 
-const moreItems = computed(() => buildToolbarMenuItems(false));
+const visibleMenuActions = computed(() => buildToolbarMenuItems(false));
+const pinnedMenuActions = computed(() => {
+  const actions = new Map<string, ToolbarMenuItem>();
+  for (const item of visibleMenuActions.value) {
+    const key = toolbarMenuItemKey(item);
+    if (isToolbarMenuItem(key) && toolbarItems.value.pinnedMenuItems.includes(key)) actions.set(key, item);
+  }
+  return actions;
+});
+const primaryToolbarEntries = computed(() => orderedToolbarKeys.value.primary.map((key) => ({ key, menuAction: pinnedMenuActions.value.get(key) })));
+watch(() => pinnedMenuActions.value.size, scheduleToolbarLayout);
+const moreItems = computed(() => visibleMenuActions.value.filter((item) => !pinnedMenuActions.value.has(toolbarMenuItemKey(item))));
 
 const showMoreDropdown = computed(() => moreItems.value.length > 0);
 
@@ -772,7 +788,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
       </TooltipTrigger>
       <TooltipContent>{{ sidebarExpandTooltip }}</TooltipContent>
     </Tooltip>
-    <template v-for="toolbarKey in orderedToolbarKeys.primary" :key="toolbarKey">
+    <template v-for="{ key: toolbarKey, menuAction } in primaryToolbarEntries" :key="toolbarKey">
       <Button data-toolbar-item="newConnection" v-if="toolbarKey === 'newConnection' && toolbarItems.newConnection !== false" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
         <span class="inline-flex items-center gap-1">
           <DatabaseZap class="h-3.5 w-3.5" />
@@ -805,6 +821,9 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
         </Button>
         <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="scheduleToolbarLayout" />
       </div>
+      <Button v-if="menuAction && !toolbarCollapsed" :data-toolbar-item="toolbarKey" variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :disabled="menuAction.disabled" :title="menuAction.label" :aria-label="menuAction.label" @click="menuAction.action">
+        <component :is="menuAction.icon" class="size-3.5" />
+      </Button>
     </template>
     <template v-if="!toolbarCollapsed"
       ><LightDropdown

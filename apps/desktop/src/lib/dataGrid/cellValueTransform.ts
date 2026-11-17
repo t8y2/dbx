@@ -7,7 +7,7 @@ export const CELL_TRANSFORM_MAX_OUTPUT = 200_000;
 export const CELL_TRANSFORM_MAX_RADIX_DIGITS = 4_096;
 /** Base64 二进制转换的输入字符上限（约 7.5MB 解码字节），与 BLOB 下载路径的量级一致。 */
 export const CELL_TRANSFORM_MAX_BINARY_INPUT = 10_000_000;
-export const CELL_TRANSFORM_KINDS = ["timestamp", "json", "jsonCompact", "xml", "html", "base64Encode", "base64Decode", "base64Image", "base64File", "urlEncode", "urlDecode", "radix"] as const;
+export const CELL_TRANSFORM_KINDS = ["timestamp", "json", "jsonCompact", "xml", "html", "base64Encode", "base64Decode", "base64Image", "base64File", "urlEncode", "urlDecode", "radix", "flattenLines"] as const;
 export type CellTransformKind = (typeof CELL_TRANSFORM_KINDS)[number];
 export const BINARY_CELL_TRANSFORM_KINDS: readonly CellTransformKind[] = ["base64Image", "base64File"];
 export type CellTransformError = "tooLarge" | "invalid" | "invalidTimestamp" | "ambiguousUnit" | "invalidInteger" | "invalidBase64";
@@ -198,6 +198,17 @@ export function transformCellValue(source: string, options: CellTransformOptions
         if (!valid.test(digits)) fail("invalidInteger");
         const prefix = from === 2 ? "0b" : from === 8 ? "0o" : from === 16 ? "0x" : "";
         text = (sign * BigInt(prefix + digits)).toString(to);
+        break;
+      }
+      case "flattenLines": {
+        // Multi-line cell text collapsed to a single line (#14960): each line is
+        // trimmed and blank lines are dropped, so wrapped values (addresses,
+        // pasted logs, hand-broken JSON) paste back as one clean line.
+        text = source
+          .split(/\r\n|\r|\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+          .join(" ");
         break;
       }
       default:

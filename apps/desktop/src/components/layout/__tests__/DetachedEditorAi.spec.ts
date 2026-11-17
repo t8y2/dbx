@@ -180,6 +180,7 @@ function mountShell(detached = true) {
           ...deps,
           ...state,
           initializeUpdatePreparation: async () => {},
+          setupCloseActionPromptListener: vi.fn(),
           setupDetachedWindowEvents: async () => {},
           updateWindowReady: false,
           window: { addEventListener: vi.fn() },

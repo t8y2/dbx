@@ -2793,7 +2793,7 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return loadBrowserAppState("editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
+export async function saveEditorSettings(settings: unknown, _patch?: unknown): Promise<void> {
   await saveBrowserAppState("editor_settings", settings);
 }
 
@@ -2870,7 +2870,11 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   await saveBrowserAppState("transfer_task_library", library);
 }
 
-export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
+export async function completeAppClose(_action: "quit" | "hide", _quitRequestId?: string): Promise<void> {
+  return undefined;
+}
+
+export async function completeWindowClose(): Promise<void> {
   return undefined;
 }
 

@@ -53,6 +53,7 @@ import {
   FileCode,
   FileText,
   Network,
+  Columns3,
   FilePlus2,
   PencilRuler,
   Search,
@@ -578,6 +579,7 @@ const emit = defineEmits<{
   "search-toggle": [node: TreeNode];
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
+  "peek-structure": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection, createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding>];
   "open-procedure": [node: TreeNode];
@@ -2792,6 +2794,12 @@ async function generateDdlTemplate(destination: SqlTemplateDestination) {
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   }
+}
+
+function openStructurePeek() {
+  const node = activeNode.value;
+  if (!node) return;
+  emit("peek-structure", node);
 }
 
 function selectedDdlTargets() {
@@ -8473,6 +8481,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         label: t("contextMenu.viewDdl"),
         action: openDdl,
         icon: FileCode,
+      });
+      // Read-only column preview: the only structure entry below opens the full
+      // editor, which is a write surface users avoid when they just want to look.
+      items.push({
+        sidebarActionId: "contextMenu.peekStructure",
+        label: t("contextMenu.peekStructure"),
+        action: openStructurePeek,
+        icon: Columns3,
       });
     }
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {

@@ -12,6 +12,8 @@ import { useToast } from "@/composables/useToast";
 import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { listEventTriggers } from "@/lib/backend/api";
+import { useTableStructurePeek } from "@/composables/useTableStructurePeek";
+import TableStructurePeekDialog from "@/components/editor/TableStructurePeekDialog.vue";
 import {
   filterLocallySearchedTables,
   filterSidebarSearchRootsByConnectionState,
@@ -19,7 +21,9 @@ import {
   filterSidebarTreeToConnectedConnections,
   findNodePathByIdentity,
   mergeSidebarRegexIndexScopes,
+  qualifiedTableQueryMatchesScope,
   resolveSidebarFilterGuards,
+  splitQualifiedTableQuery,
   type SidebarRegexIndexScope,
   type SidebarRegexScopeIdentity,
   localTableSearchParentTypes,
@@ -178,6 +182,7 @@ const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
 const sidebarDdlTarget = ref<TreeNode | null>(null);
 const sidebarDdlOpen = ref(false);
+const { target: sidebarStructureTarget, columns: sidebarStructureColumns, loading: sidebarStructureLoading, error: sidebarStructureError, open: openSidebarStructurePeekState, close: closeSidebarStructurePeek } = useTableStructurePeek();
 const sidebarElasticsearchIndexMetadataTarget = ref<{ node: TreeNode; kind: ElasticsearchIndexMetadataKind } | null>(null);
 const sidebarElasticsearchIndexMetadataOpen = ref(false);
 const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean; initialSection?: ObjectDetailsSection; createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding> } | null>(null);
@@ -326,6 +331,12 @@ const sidebarFilterGuards = computed(() => resolveSidebarFilterGuards(showConnec
 // features stay available while operations requiring the full root list pause.
 const isTreeSearchFiltering = computed(() => sidebarFilterGuards.value.isTreeSearchFiltering);
 const isRootListPartial = computed(() => sidebarFilterGuards.value.isRootListPartial);
+// 全局搜索过滤中同样展示局部表搜索框（#15148）：局部查询与全局过滤在
+// filteredNodes 里本就叠加生效，过滤中隐藏输入框只会让用户无法在搜索
+// 结果的子树里继续缩小范围。
+function shouldRenderSidebarTableSearchControls(): boolean {
+  return settingsStore.editorSettings.sidebarTableSearchEnabled;
+}
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
@@ -470,11 +481,6 @@ function clearSearchScopeFilter() {
 }
 
 function scheduleSidebarTableSearchRefresh(parentNodeId: string, options?: { focusRestore?: TableSearchFocusRestore }) {
-  if (isTreeSearchFiltering.value) {
-    remoteTableSearchDebouncer.cancel(parentNodeId);
-    localTableSearchDebouncer.cancel(parentNodeId);
-    return;
-  }
   const restoreToken = options?.focusRestore?.shouldRestoreFocus ? ++tableSearchFocusRestoreTokenSeq : 0;
   if (restoreToken) {
     tableSearchFocusRestoreTokens.clear();
@@ -609,8 +615,18 @@ const globalSearchContext = [
   () => store.sidebarTableSearchIndexInvalidation.revision,
   () => selectedSearchScopes.value.join(","),
 ];
+const qualifiedGlobalSearch = computed(() => {
+  if (regexMode.value || !deferredSearchQuery.value) return null;
+  return splitQualifiedTableQuery(deferredSearchQuery.value);
+});
+
+// The query only gates whether an index build happens (filtering is client-side
+// and the cache key is query-independent), so pass the bare object name and let
+// the schema qualifier narrow the results here.
+const globalIndexSearchQuery = computed(() => qualifiedGlobalSearch.value?.name ?? deferredSearchQuery.value);
+
 const { scopes: globalTableSearchScopes, isLoading: isGlobalIndexLoading } = useSidebarSearchIndexes({
-  query: deferredSearchQuery,
+  query: globalIndexSearchQuery,
   context: globalSearchContext,
   load: loadGlobalTableSearchIndexes,
   onError: (error) => toast(error instanceof Error ? error.message : String(error), 5000),
@@ -706,7 +722,7 @@ async function loadGlobalTableSearchIndexes(shouldCancel: () => boolean, onProgr
             discover: discoverGlobalSearchChildren,
             loadIndex: (node, options) => {
               if (shouldCancel() || !store.connectedIds.has(connectionId)) return Promise.resolve(null);
-              return store.ensureSidebarTableSearchIndex(node.id, deferredSearchQuery.value, { connectionId, database: node.database ?? "", schema: node.schema, catalog: node.catalog, nodeType: node.type }, { connectedOnly: true, refresh: options?.refresh });
+              return store.ensureSidebarTableSearchIndex(node.id, globalIndexSearchQuery.value, { connectionId, database: node.database ?? "", schema: node.schema, catalog: node.catalog, nodeType: node.type }, { connectedOnly: true, refresh: options?.refresh });
             },
             onError: (_node, error) => toast(error instanceof Error ? error.message : String(error), 5000),
           },
@@ -729,19 +745,23 @@ async function loadGlobalTableSearchIndexes(shouldCancel: () => boolean, onProgr
 
 function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
   if (!deferredSearchQuery.value) return nodes;
-  const matcher = createSidebarLabelMatcher(deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
-  const matchingScopes = globalTableSearchScopes.value.map((scope) => ({ ...scope, entries: scope.entries.filter((entry) => !!matcher(entry.name) || ((regexMode.value || searchMatchMode.value !== "exact") && !!matcher(entry.comment || ""))) })).filter((scope) => scope.entries.length > 0);
-  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable);
+  const qualified = qualifiedGlobalSearch.value;
+  const matcher = createSidebarLabelMatcher(qualified?.name ?? deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
+  const includeComment = regexMode.value || searchMatchMode.value !== "exact";
+  const matchingScopes = globalTableSearchScopes.value
+    .map((scope) => ({
+      ...scope,
+      entries: scope.entries.filter((entry) => (!qualified || qualifiedTableQueryMatchesScope(qualified, { database: scope.database, schema: entry.schema ?? scope.schema, catalog: scope.catalog })) && (!!matcher(entry.name) || (includeComment && !!matcher(entry.comment || "")))),
+    }))
+    .filter((scope) => scope.entries.length > 0);
+  // A qualified query must surface only the matched schema, so do not merge the
+  // rest of the live tree back in the way an unqualified label search would.
+  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable, { scopesOnly: !!qualified });
 }
 
 watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
 
 function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusRestore?: TableSearchFocusRestore) {
-  if (isTreeSearchFiltering.value) {
-    localTableSearchDebouncer.cancel(parentNodeId);
-    remoteTableSearchDebouncer.cancel(parentNodeId);
-    return;
-  }
   scheduleExclusiveSidebarTableSearchDebounce(parentNodeId, localTableSearchDebouncer, remoteTableSearchDebouncer, () => {
     void loadLocalTableSearchResults(parentNodeId, false, focusRestore);
   });
@@ -807,7 +827,9 @@ const filteredNodes = computed(() => {
   nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
   if (settingsStore.editorSettings.sidebarObjectDisplay === "simple" && settingsStore.editorSettings.sidebarSimpleHideIndexes) nodes = hideSimpleSidebarIndexes(nodes);
 
-  const q = deferredSearchQuery.value;
+  // A qualified `schema.table` query is resolved entirely by the index scopes
+  // above; feeding the dotted text to the label filter would prune those results.
+  const q = qualifiedGlobalSearch.value ? "" : deferredSearchQuery.value;
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {
     regexMode: regexMode.value,
     matchMode: searchMatchMode.value,
@@ -836,7 +858,7 @@ const projectedConnectionIds = computed<ReadonlySet<string> | null>(() => {
 
 const flatNodes = computed<FlatTreeNode[]>(() => {
   const nodes = insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
-    enabled: settingsStore.editorSettings.sidebarTableSearchEnabled && !isTreeSearchFiltering.value,
+    enabled: shouldRenderSidebarTableSearchControls(),
     sidebarObjectDisplay: settingsStore.editorSettings.sidebarObjectDisplay,
     activeQueries: store.sidebarTableSearchQueries,
   });
@@ -2390,6 +2412,12 @@ function openSidebarDdl(node: TreeNode) {
   sidebarDdlOpen.value = true;
 }
 
+function openSidebarStructurePeek(node: TreeNode) {
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node)) return;
+  beginSidebarAction();
+  void openSidebarStructurePeekState(createSidebarActionTarget(node));
+}
+
 function openSidebarDdlForSelection(): boolean {
   const selectedNodeId = store.selectedTreeNodeId;
   const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : null;
@@ -3136,6 +3164,7 @@ defineExpose({
       @search-toggle="onSearchToggle"
       @node-toggled="handleTreeNodeToggled"
       @open-ddl="openSidebarDdl"
+      @peek-structure="openSidebarStructurePeek"
       @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
@@ -3381,6 +3410,17 @@ defineExpose({
       :database-type="sidebarDdlDatabaseType"
       :dialect="codeMirrorSqlDialect(sidebarDdlDatabaseType)"
       :format-dialect="sqlFormatDialectForDbType(sidebarDdlDatabaseType)"
+    />
+
+    <TableStructurePeekDialog
+      v-if="sidebarStructureTarget"
+      :table-name="sidebarStructureTarget.objectName || sidebarStructureTarget.label"
+      :schema="sidebarStructureTarget.schema"
+      :columns="sidebarStructureColumns"
+      :loading="sidebarStructureLoading"
+      :error="sidebarStructureError"
+      :insert-enabled="false"
+      @close="closeSidebarStructurePeek"
     />
 
     <SidebarElasticsearchIndexMetadataDialog

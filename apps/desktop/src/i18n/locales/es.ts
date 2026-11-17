@@ -515,6 +515,7 @@ export default withEnglishFallback({
       urlEncode: "Codificar componente URL",
       urlDecode: "Decodificar componente URL",
       radix: "Conversión de base de enteros",
+      flattenLines: "Comprimir varias líneas en una sola",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -894,6 +895,7 @@ export default withEnglishFallback({
     logoutConfirm: "¿Seguro que deseas cerrar sesión?",
   },
   toolbar: {
+    independentWindow: "Ventana independiente",
     fileEncoding: "Codificación del archivo",
     encodingAuto: "Automática",
     immediateSync: "Sincronizar ahora",
@@ -1349,6 +1351,7 @@ export default withEnglishFallback({
     collapseMatches: "Contraer",
     searchContentIncomplete: "Resultados incompletos: no se pudo cargar el contenido de {count} archivos.",
     matchPreviewLimit: "Las vistas previas se limitan a las primeras {limit} de {total} líneas coincidentes.",
+    sortByDateCreated: "Ordenar por fecha de creación",
   },
 
   connection: {
@@ -2602,6 +2605,8 @@ export default withEnglishFallback({
     previewChangesComment: "Previsualización de cambios (simulación): sentencia {operation}",
     previewChangesFailed: "Error al previsualizar los cambios.",
     previewChangesNoStatement: "Seleccione o coloque el cursor sobre una sentencia UPDATE / INSERT / DELETE para previsualizar los cambios.",
+    fullscreenResultsPane: "Mostrar resultados en pantalla completa",
+    exitFullscreenResultsPane: "Salir de resultados en pantalla completa",
   },
   tabs: {
     sql: "SQL",
@@ -3844,6 +3849,7 @@ export default withEnglishFallback({
     rowJsonPreview: "Vista previa de JSON",
     mongoJsonPreviewSelected: "Documento seleccionado",
     mongoJsonPreviewPage: "Página actual",
+    exportSelectedColumnsSqlUpdates: "Exportar columnas seleccionadas como SQL UPDATE",
     binaryColumnFormats: {
       "binary-hex": "Binario a hexadecimal",
       "binary-text": "Binario a UTF-8",
@@ -5024,6 +5030,13 @@ export default withEnglishFallback({
     renameTab: "Renombrar pestaña",
     setTabSuffix: "Definir sufijo de pestaña",
     duplicateTab: "Duplicar pestaña",
+    openTabInNewWindow: "Abrir pestaña en una nueva ventana",
+    moveTabToAnotherWindow: "Mover pestaña a otra ventana",
+    openTabGroupInNewWindow: "Abrir grupo en una nueva ventana",
+    moveTabGroupToAnotherWindow: "Mover grupo a otra ventana",
+    consolidateWorkspaceWindows: "Combinar todas las ventanas secundarias",
+    mainWindow: "Ventana principal",
+    detachedWindow: "Ventana {number}",
     splitRight: "Dividir a la derecha",
     splitDown: "Dividir hacia abajo",
     changeOrientation: "Cambiar dirección de división",
@@ -5452,6 +5465,8 @@ export default withEnglishFallback({
     detailActionLabel: 'Configurar bases de datos visibles para "{connection}"',
     description: 'Elige qué bases de datos se muestran bajo "{connection}".',
     searchPlaceholder: "Buscar bases de datos...",
+    searchWildcardHint: "La búsqueda admite el comodín %: app_% solo muestra las bases de datos que empiezan por app_",
+    searchMatchCount: "{count} coincidencias",
     selectedCount: "{selected}/{total} seleccionadas",
     patternsPlaceholder: "Comodines, p. ej. %n1%, separados por comas",
     patternsHint: "Las bases de datos que coincidan con estos patrones se muestran siempre junto con las marcadas; desmarca todo para mostrar solo las coincidencias (% = cualquier caracteres, _ = un carácter)",
@@ -5472,6 +5487,8 @@ export default withEnglishFallback({
     detailActionLabel: 'Configurar schemas visibles para "{connection}"',
     description: 'Elige qué schemas se muestran bajo "{connection}".',
     searchPlaceholder: "Buscar schemas...",
+    searchWildcardHint: "La búsqueda admite el comodín %: app_% solo muestra los esquemas que empiezan por app_",
+    searchMatchCount: "{count} coincidencias",
     selectedCount: "{selected}/{total} seleccionados",
     selectAll: "Seleccionar todo",
     selectFiltered: "Seleccionar resultados de búsqueda",
@@ -6231,6 +6248,11 @@ export default withEnglishFallback({
     copyAllAsTable: "Copiar todos los resultados filtrados como tabla",
     copyNamesSuccess: "Se copiaron {count} nombres",
     copyTableDataSuccess: "Se copiaron {count} filas de datos de tabla",
+    packageMembers: "Miembros del paquete",
+    hidePackageMembers: "Contraer miembros del paquete",
+    showPackageMembers: "Expandir miembros del paquete",
+    packageFunctionAtLine: "Función {name}, línea {line}",
+    packageProcedureAtLine: "Procedimiento {name}, línea {line}",
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabla",
@@ -7874,6 +7896,7 @@ export default withEnglishFallback({
     preserveQuotedBracedParameters: "Conservar los marcadores de posición de plantilla en cadenas entre comillas simples",
   },
   transfer: {
+    reviewBeforeStart: "Selecciona Iniciar transferencia para revisar el plan y confirmar antes de escribir datos.",
     log: {
       title: "Registro de ejecución",
       tableStarted: "Transfiriendo tabla {table} ({index}/{total})",
@@ -9331,6 +9354,8 @@ export default withEnglishFallback({
     tabLayoutScrollDescription: "Las pestañas se desplazan horizontalmente al desbordarse.",
     tabLayoutWrap: "Ajuste multilínea",
     tabLayoutWrapDescription: "Las pestañas se ajustan en varias filas para mostrarlas todas.",
+    crossWindowTabDragPreview: "Vista previa de arrastre de pestañas entre ventanas",
+    crossWindowTabDragPreviewDescription: "Al activarlo, puede arrastrar pestañas a otra ventana de DBX o sacarlas a una ventana nueva. Desactívelo para apagar esta función experimental.",
     colorizeConnectionTabs: "Colorear pestañas por conexión",
     colorizeConnectionTabsDescription: "Usar el color configurado de cada conexión para las pestañas del editor.",
     colorizeConnectionTabsScope: "Ámbito de color de pestañas",
@@ -11056,6 +11081,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "Mostrar la ruta completa del grupo de la conexión de consulta",
     showConnectionGroupPathDescription: "Cuando está activado, el selector de conexiones de la esquina superior derecha de la página de consulta mostrará la ruta completa del grupo antes del nombre de la conexión; cuando está desactivado, solo mostrará el nombre de la conexión.",
     shortcutConvertSelectionToDelimited: "Convertir el contenido seleccionado en una lista delimitada",
+    shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
+    shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
   },
   driverStore: {

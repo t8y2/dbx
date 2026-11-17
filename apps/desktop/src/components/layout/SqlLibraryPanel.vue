@@ -4,7 +4,6 @@ import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowDownAZ,
-  ArrowDownWideNarrow,
   ArrowRightLeft,
   ArrowUpAZ,
   ArrowUpDown,
@@ -21,6 +20,7 @@ import {
   FolderClosed,
   FolderOpen,
   FolderPlus,
+  GripVertical,
   Layers,
   Library,
   Loader2,
@@ -33,6 +33,7 @@ import {
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useSqlPanelSearchMode } from "@/composables/useSqlPanelSearchMode";
 import SidebarLocateButton from "@/components/sidebar/SidebarLocateButton.vue";
 import SqlPanelSearch from "@/components/layout/SqlPanelSearch.vue";
@@ -61,7 +62,7 @@ import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { getSavedSqlExpandedFolderIds, saveSavedSqlExpandedFolderIds } from "@/lib/savedSql/savedSqlUiState";
 import { ensureSqlExtension, extractCandidateDatabaseFromName, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
-import { buildSavedSqlTreeRows, savedSqlFolderBranchMatches, type SavedSqlTreeRow } from "@/lib/savedSql/savedSqlTreeRows";
+import { buildSavedSqlTreeRows, savedSqlFolderBranchMatches, type SavedSqlTreeRow, type SavedSqlTreeSortMode } from "@/lib/savedSql/savedSqlTreeRows";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
@@ -123,8 +124,19 @@ watch(
   },
 );
 
-// Sort mode: "folder" (manual sibling order) or "date" (updated date among siblings)
-const sortMode = ref<"folder" | "date">("folder");
+const sortMode = ref<SavedSqlTreeSortMode>("folder");
+const sortMenuOpen = ref(false);
+const sortOptions = computed(
+  () =>
+    [
+      { mode: "folder", label: t("sqlFileTree.sortManual"), icon: GripVertical },
+      { mode: "name-asc", label: t("sqlLibrary.sortNameAsc"), icon: ArrowDownAZ },
+      { mode: "name-desc", label: t("sqlLibrary.sortNameDesc"), icon: ArrowUpAZ },
+      { mode: "created", label: t("sqlLibrary.sortByDateCreated"), icon: Calendar },
+      { mode: "date", label: t("sqlLibrary.sortByDate"), icon: Clock },
+    ] as const,
+);
+const currentSortOption = computed(() => sortOptions.value.find((option) => option.mode === sortMode.value)!);
 
 function getConnectionLabel(connectionId: string) {
   if (!connectionId) return t("sqlLibrary.unassociated");
@@ -1535,6 +1547,7 @@ async function performDrop() {
   const targetType = dragState.targetType;
   const dropPosition = dragState.dropPosition;
   if (!draggedId || !draggedType || !targetId || !targetType || !dropPosition) return;
+  if (sortMode.value !== "folder" && dropPosition !== "inside") return;
 
   if (draggedType === "folder" && targetType === "folder" && dropPosition !== "inside") {
     await savedSqlStore.reorderFolders(draggedId, targetId, dropPosition);
@@ -1618,6 +1631,7 @@ function updateDropTarget(event: MouseEvent, targetId: string, targetType: DragI
     nextPosition = "inside";
   }
 
+  if (sortMode.value !== "folder" && nextPosition !== "inside") nextPosition = null;
   dragState.targetId = nextPosition ? targetId : null;
   dragState.targetType = nextPosition ? targetType : null;
   dragState.dropPosition = nextPosition;
@@ -1667,11 +1681,23 @@ defineExpose({
           <ChevronsDownUp class="h-3 w-3" />
         </Button>
       </LightTooltip>
-      <LightTooltip :text="sortMode === 'folder' ? t('sqlLibrary.sortByDate') : t('sqlLibrary.sortByFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
-          <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
-        </Button>
-      </LightTooltip>
+      <DropdownMenu v-model:open="sortMenuOpen">
+        <LightTooltip :text="currentSortOption.label" side="bottom" :delay="0" :close-delay="0" nowrap :disabled="sortMenuOpen">
+          <DropdownMenuTrigger as-child>
+            <Button data-sql-library-sort-btn variant="ghost" size="icon" class="h-5 w-5" :aria-label="currentSortOption.label">
+              <component :is="currentSortOption.icon" class="h-3 w-3" :class="{ 'text-primary': sortMode !== 'folder' }" />
+            </Button>
+          </DropdownMenuTrigger>
+        </LightTooltip>
+        <DropdownMenuContent align="end" class="w-max max-w-[calc(100vw-16px)]">
+          <DropdownMenuRadioGroup :model-value="sortMode" @update:model-value="sortMode = $event as SavedSqlTreeSortMode">
+            <DropdownMenuRadioItem v-for="option in sortOptions" :key="option.mode" :value="option.mode">
+              <component :is="option.icon" class="h-3.5 w-3.5" />
+              {{ option.label }}
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentSavedSqlFile" @locate="locateCurrentFile" />
       </LightTooltip>

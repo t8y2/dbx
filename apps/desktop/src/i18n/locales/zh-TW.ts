@@ -9875,6 +9875,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "顯示查詢連線完整群組路徑",
     showConnectionGroupPathDescription: "開啟後，查詢頁面右上角的連線選擇器會在連線名稱前顯示完整群組路徑；關閉後僅顯示連線名稱。",
     shortcutConvertSelectionToDelimited: "將選取內容轉換為以分隔符號分隔的清單",
+    toolbarGroup_left: "主操作列與更多選單",
+    toolbarPinItem: "將{item}釘選到工具列",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

@@ -11040,6 +11040,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "Mostrar la ruta completa del grupo de la conexión de consulta",
     showConnectionGroupPathDescription: "Cuando está activado, el selector de conexiones de la esquina superior derecha de la página de consulta mostrará la ruta completa del grupo antes del nombre de la conexión; cuando está desactivado, solo mostrará el nombre de la conexión.",
     shortcutConvertSelectionToDelimited: "Convertir el contenido seleccionado en una lista delimitada",
+    toolbarGroup_left: "Barra de acciones principal y menú Más",
+    toolbarPinItem: "Fijar {item} a la barra de herramientas",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

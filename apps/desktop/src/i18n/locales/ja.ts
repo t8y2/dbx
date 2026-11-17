@@ -10781,6 +10781,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "クエリ接続の完全なグループパスを表示",
     showConnectionGroupPathDescription: "有効にすると、クエリページ右上の接続セレクターで接続名の前に完全なグループパスが表示されます。無効にすると接続名のみが表示されます。",
     shortcutConvertSelectionToDelimited: "選択内容を区切り文字付きリストに変換",
+    toolbarGroup_left: "メイン操作バーとその他のメニュー",
+    toolbarPinItem: "{item}をツールバーに固定",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

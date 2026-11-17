@@ -59,6 +59,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   oracle: { type: "oracle", profile: "oracle", label: "Oracle", defaultPort: 1521 },
+  db2: { type: "db2", profile: "db2", label: "IBM DB2", defaultPort: 50000 },
   elasticsearch: { type: "elasticsearch", profile: "elasticsearch", label: "Elasticsearch", defaultPort: 9200 },
   easysearch: { type: "easysearch", profile: "easysearch", label: "Easysearch", defaultPort: 9200 },
   meilisearch: { type: "meilisearch", profile: "meilisearch", label: "Meilisearch", defaultPort: 7700 },

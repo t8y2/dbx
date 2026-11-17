@@ -3212,3 +3212,25 @@ describe("settingsStore defaultAiMode lifecycle", () => {
     await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenLastCalledWith(expect.objectContaining({ includeQueryResult: true })));
   });
 });
+
+it("persists and restores the dedicated MCP approval model without changing chat selection", async () => {
+  vi.resetModules();
+  setActivePinia(createPinia());
+  let saved: Record<string, unknown> | null = null;
+  const loadEditorSettings = vi.fn(async () => saved);
+  const saveEditorSettings = vi.fn(async (value: Record<string, unknown>) => {
+    saved = JSON.parse(JSON.stringify(value));
+  });
+  vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+  const { useSettingsStore } = await import("@/stores/settingsStore");
+  const store = useSettingsStore();
+  await store.initEditorSettings();
+  const selection = { configId: "review-profile", modelId: "review-model", autoGenerate: true };
+  await store.updateEditorSettingsAndPersist({ mcpApprovalAi: selection });
+  expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ mcpApprovalAi: selection }));
+  setActivePinia(createPinia());
+  const restored = useSettingsStore();
+  await restored.initEditorSettings();
+  expect(restored.editorSettings.mcpApprovalAi).toEqual(selection);
+  expect(restored.activeModel).toBeNull();
+});

@@ -3709,6 +3709,8 @@ export default withEnglishFallback({
     filterActive: "Filtro applicato",
     structuredFiltersActive: "{count} filtri condizione",
     rowJsonPreview: "Anteprima JSON",
+    mongoJsonPreviewSelected: "Documento selezionato",
+    mongoJsonPreviewPage: "Pagina corrente",
     exportSelectedColumnsSqlUpdates: "Esporta le colonne selezionate come SQL UPDATE",
     binaryColumnFormats: {
       "binary-hex": "Binario in esadecimale",

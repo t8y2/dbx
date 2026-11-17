@@ -3792,6 +3792,8 @@ export default withEnglishFallback({
     filterActive: "Фильтр применён",
     structuredFiltersActive: "{count} фильтров по условиям",
     rowJsonPreview: "Предпросмотр JSON",
+    mongoJsonPreviewSelected: "Выбранный документ",
+    mongoJsonPreviewPage: "Текущая страница",
     exportSelectedColumnsSqlUpdates: "Экспортировать выбранные столбцы как SQL UPDATE",
     binaryColumnFormats: {
       "binary-hex": "Бинарные данные в шестнадцатеричный формат",

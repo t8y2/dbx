@@ -3188,6 +3188,8 @@ export default withEnglishFallback({
       "invalid-php-row-delimiter": "PHP 行分隔符只能包含空白字符。",
     },
     mongoJsonPreview: "JSON 预览",
+    mongoJsonPreviewSelected: "选中文档",
+    mongoJsonPreviewPage: "当前页",
     mongoJsonPreviewEmpty: "选择一条 MongoDB 文档以预览。",
     copyJson: "复制 JSON",
     copyDdl: "复制 DDL",

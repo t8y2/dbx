@@ -3661,6 +3661,8 @@ export default withEnglishFallback({
     filterActive: "필터 적용됨",
     structuredFiltersActive: "{count}개 조건 필터",
     rowJsonPreview: "JSON 미리보기",
+    mongoJsonPreviewSelected: "선택한 문서",
+    mongoJsonPreviewPage: "현재 페이지",
     exportSelectedColumnsSqlUpdates: "선택한 열을 SQL UPDATE로 내보내기",
     binaryColumnFormats: {
       "binary-hex": "바이너리를 16진수로",

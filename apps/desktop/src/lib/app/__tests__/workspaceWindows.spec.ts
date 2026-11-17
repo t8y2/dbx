@@ -9,9 +9,11 @@ const mocks = vi.hoisted(() => ({
   windows: new Set<string>(),
   maximize: vi.fn(async () => {}),
   invoke: vi.fn(),
+  announce: vi.fn(async (_label: string) => {}),
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@/lib/tabs/tabWindowTransfer", () => ({ notifyTabWindowsChanged: mocks.announce }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     label: mocks.label,
@@ -53,6 +55,7 @@ beforeEach(() => {
   mocks.records.clear();
   mocks.windows.clear();
   mocks.created.mockClear();
+  mocks.announce.mockClear();
   mocks.invoke.mockImplementation(async (command, args) => {
     if (command === "save_detached_tab_handoff") {
       mocks.records.set(args.tabId, JSON.parse(JSON.stringify(args.handoff)));
@@ -87,6 +90,7 @@ describe("durable multi-window sessions", () => {
     await restoreWorkspaceWindows();
     await restoreWorkspaceWindows();
     expect(mocks.created.mock.calls.map(([label]) => label)).toEqual(["dbx-tab-a", "dbx-tab-b"]);
+    expect(mocks.announce.mock.calls.map(([label]) => label)).toEqual(["dbx-tab-a", "dbx-tab-b"]);
     expect(mocks.created.mock.calls[0][1]).toMatchObject({ width: 1200, height: 800, x: 200, y: 100 });
     expect(new URL(mocks.created.mock.calls[0][1].url).searchParams.get("dbxWorkspaceWindow")).toBe("dbx-tab-a");
     mocks.label = "dbx-tab-a";

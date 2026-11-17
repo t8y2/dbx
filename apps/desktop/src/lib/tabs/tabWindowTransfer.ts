@@ -3,7 +3,7 @@ import { serializeOpenTabs } from "@/lib/app/openTabsPersistence";
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { uuid } from "@/lib/common/utils";
-import { TAB_DRAG_PREVIEW_GRAB_X, TAB_DRAG_PREVIEW_GRAB_Y, TAB_DRAG_PREVIEW_HEIGHT, TAB_DRAG_PREVIEW_HOST_PADDING, TAB_DRAG_PREVIEW_WIDTH } from "@/lib/tabs/tabWindowPreview";
+import { TAB_DRAG_PREVIEW_GRAB_X, TAB_DRAG_PREVIEW_GRAB_Y, TAB_DRAG_PREVIEW_HEIGHT, TAB_DRAG_PREVIEW_HOST_PADDING, TAB_DRAG_PREVIEW_WIDTH, tabWindowBoundsInWorkArea } from "@/lib/tabs/tabWindowPreview";
 import type { QueryTab } from "@/types/database";
 
 export const TAB_WINDOW_TRANSFER_MIME = "application/x-dbx-tab";
@@ -15,6 +15,7 @@ export const TAB_WINDOW_INFO_REQUEST_EVENT = "dbx:tab-window-info-request";
 export const TAB_WINDOW_INFO_RESPONSE_EVENT = "dbx:tab-window-info-response";
 export const TAB_WINDOW_TRANSFER_ACCEPTED_EVENT = "dbx:tab-window-transfer-accepted";
 export const TAB_WINDOW_CONSOLIDATE_REQUEST_EVENT = "dbx:tab-window-consolidate-request";
+export const WORKSPACE_WINDOWS_CHANGED_EVENT = "dbx:workspace-windows-changed";
 export const TAB_DRAG_PREVIEW_WINDOW_PREFIX = "dbx-tab-drag-preview";
 export const TAB_DRAG_PREVIEW_WEBVIEW_LABEL = "dbx-tab-drag-preview";
 export const TAB_DRAG_PREVIEW_CONTENT_EVENT = "dbx:tab-drag-preview-content";
@@ -604,6 +605,12 @@ export async function currentTabWindowLabel(): Promise<string> {
   return getCurrentWebviewWindow().label;
 }
 
+export async function notifyTabWindowsChanged(label: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const { emit } = await import("@tauri-apps/api/event");
+  await emit(WORKSPACE_WINDOWS_CHANGED_EVENT, label);
+}
+
 export async function createDetachedTabWindow(payload: TabWindowTransferPayload, placement?: TabWindowPlacement): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   await storeDetachedTabTransfer(payload);
@@ -612,20 +619,25 @@ export async function createDetachedTabWindow(payload: TabWindowTransferPayload,
   const url = new URL(window.location.href);
   url.searchParams.set(DETACHED_TAB_QUERY, payload.transferId);
   const label = `dbx-tab-${payload.transferId}`;
+  let bounds: { width: number; height: number; minWidth: number; minHeight: number; x?: number; y?: number } = { width: 1200, height: 800, minWidth: 900, minHeight: 600 };
+  try {
+    const { cursorPosition, monitorFromPoint, currentMonitor } = await import("@tauri-apps/api/window");
+    const cursor = await cursorPosition();
+    const monitor = (await monitorFromPoint(cursor.x, cursor.y)) ?? (await currentMonitor());
+    if (monitor) bounds = tabWindowBoundsInWorkArea(placement, monitor);
+  } catch {
+    // Let the OS choose a visible default if monitor lookup is unavailable.
+    bounds = { width: 1200, height: 800, minWidth: 900, minHeight: 600 };
+  }
   const child = new WebviewWindow(label, {
     url: url.toString(),
     title: "DBX",
-    // Keep the real native window equal to the drag outline dimensions.
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
+    ...bounds,
     resizable: true,
     fullscreen: false,
     decorations: !navigator.userAgent.toLowerCase().includes("windows"),
     titleBarStyle: "overlay",
     hiddenTitle: true,
-    ...(placement ? { x: placement.x, y: placement.y } : {}),
   });
 
   return new Promise((resolve) => {
@@ -638,6 +650,7 @@ export async function createDetachedTabWindow(payload: TabWindowTransferPayload,
     };
     void child.once("tauri://created", () => {
       console.info(`[WINDOW] child workspace window created: ${label}`);
+      void notifyTabWindowsChanged(label).catch(() => {});
       settle(true);
     });
     void child.once("tauri://error", () => {

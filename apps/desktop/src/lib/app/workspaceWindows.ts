@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
+import { notifyTabWindowsChanged } from "@/lib/tabs/tabWindowTransfer";
 
 const PREFIX = `workspace-window:${import.meta.env.DEV ? "development:" : ""}`;
 
@@ -72,6 +73,7 @@ export async function restoreWorkspaceWindows(): Promise<void> {
       const timeout = setTimeout(() => reject(new Error(`Window restore timed out: ${snapshot.windowLabel}`)), 10_000);
       void child.once("tauri://created", () => {
         clearTimeout(timeout);
+        void notifyTabWindowsChanged(snapshot.windowLabel).catch(() => {});
         if (snapshot.maximized) void child.maximize().catch(() => {});
         resolve();
       });

@@ -18,10 +18,19 @@ const mocks = vi.hoisted(() => ({
   windowLabel: "dbx-tab-source",
   canCloseEmptyWindow: true,
   receive: undefined as ((payload: TabWindowTransferPayload) => void) | undefined,
+  windowChange: undefined as (() => void) | undefined,
+  listWindows: vi.fn(async (): Promise<{ label: string; title: string }[]> => []),
+  announce: vi.fn(async (_label: string) => {}),
 }));
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/lib/backend/api", () => ({ requestAppClose: mocks.requestClose }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: async (event: string, handler: () => void) => {
+    if (event === "dbx:workspace-windows-changed") mocks.windowChange = handler;
+    return () => {};
+  },
+}));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { crossWindowTabDragPreviewEnabled: true } }) }));
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
@@ -42,7 +51,9 @@ vi.mock("@/lib/tabs/tabWindowTransfer", async (importOriginal) => ({
   markTabWindowTransferAccepted: mocks.markAccepted,
   clearTabWindowTransfer: mocks.clear,
   currentTabWindowLabel: async () => mocks.windowLabel,
-  listOtherTabWindows: async () => [],
+  listOtherTabWindows: mocks.listWindows,
+  notifyTabWindowsChanged: mocks.announce,
+  requestTabWindowInfo: async () => false,
   listenForTabWindowTransfer: async (handler: (payload: TabWindowTransferPayload) => void) => {
     mocks.receive = handler;
     return () => {};
@@ -81,6 +92,8 @@ beforeEach(async () => {
   mocks.accepted.mockResolvedValue(true);
   mocks.importTabs.mockReturnValue(true);
   mocks.receive = undefined;
+  mocks.windowChange = undefined;
+  mocks.listWindows.mockReset().mockResolvedValue([]);
   mocks.tabs = [...tabs];
   mocks.windowLabel = "dbx-tab-source";
   mocks.canCloseEmptyWindow = true;
@@ -93,6 +106,34 @@ beforeEach(async () => {
 afterEach(() => app.unmount());
 
 describe("group window transfer acknowledgement", () => {
+  it("refreshes the window menu on creation and closure notifications without dragging", async () => {
+    await vi.waitFor(() => expect(mocks.windowChange).toBeTypeOf("function"));
+    await vi.waitFor(() => expect(mocks.announce).toHaveBeenCalledWith("dbx-tab-source"));
+    mocks.listWindows.mockResolvedValue([{ label: "dbx-tab-new", title: "DBX" }]);
+    mocks.windowChange!();
+    await vi.waitFor(() => expect(transfer.otherTabWindows.value.map((window) => window.label)).toEqual(["dbx-tab-new"]));
+    mocks.listWindows.mockResolvedValue([]);
+    mocks.windowChange!();
+    await vi.waitFor(() => expect(transfer.otherTabWindows.value).toEqual([]));
+  });
+
+  it("ignores an older window enumeration that completes after a newer notification", async () => {
+    await vi.waitFor(() => expect(mocks.announce).toHaveBeenCalled());
+    let resolveOlder!: (windows: { label: string; title: string }[]) => void;
+    mocks.listWindows.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOlder = resolve;
+        }),
+    );
+    mocks.windowChange!();
+    mocks.listWindows.mockResolvedValue([{ label: "dbx-tab-new", title: "DBX" }]);
+    mocks.windowChange!();
+    await vi.waitFor(() => expect(transfer.otherTabWindows.value.map((window) => window.label)).toEqual(["dbx-tab-new"]));
+    resolveOlder([]);
+    await Promise.resolve();
+    expect(transfer.otherTabWindows.value.map((window) => window.label)).toEqual(["dbx-tab-new"]);
+  });
   it("creates one window for all tabs and removes the source only after acceptance", async () => {
     await transfer.openTabsInNewWindow(tabs);
     expect(mocks.createWindow).toHaveBeenCalledOnce();

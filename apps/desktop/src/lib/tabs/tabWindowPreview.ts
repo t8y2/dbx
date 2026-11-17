@@ -17,6 +17,33 @@ export interface TabWindowPreviewRect {
   height: number;
 }
 
+export function tabWindowBoundsInWorkArea(
+  position: { x: number; y: number } | undefined,
+  monitor: {
+    scaleFactor: number;
+    position: { x: number; y: number };
+    size: { width: number; height: number };
+    workArea?: { position: { x: number; y: number }; size: { width: number; height: number } };
+  },
+): { x: number; y: number; width: number; height: number; minWidth: number; minHeight: number } {
+  const scale = monitor.scaleFactor > 0 ? monitor.scaleFactor : 1;
+  const area = monitor.workArea ?? monitor;
+  const left = area.position.x / scale + PREVIEW_MARGIN;
+  const top = area.position.y / scale + PREVIEW_MARGIN;
+  const availableWidth = Math.max(1, area.size.width / scale - PREVIEW_MARGIN * 2);
+  const availableHeight = Math.max(1, area.size.height / scale - PREVIEW_MARGIN * 2);
+  const width = Math.min(TAB_WINDOW_PREVIEW_WIDTH, availableWidth);
+  const height = Math.min(TAB_WINDOW_PREVIEW_HEIGHT, availableHeight);
+  return {
+    x: clamp(position?.x ?? left + (availableWidth - width) / 2, left, left + availableWidth - width),
+    y: clamp(position?.y ?? top + (availableHeight - height) / 2, top, top + availableHeight - height),
+    width,
+    height,
+    minWidth: Math.min(900, width),
+    minHeight: Math.min(600, height),
+  };
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }

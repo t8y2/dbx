@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   consumeDetachedTabTransfer,
   createTabWindowGroupTransfer,
+  createDetachedTabWindow,
   decodeTabWindowTransfer,
   encodeTabWindowTransfer,
   isDetachedTabWindow,
@@ -19,10 +20,30 @@ import type { QueryTab } from "@/types/database";
 const bridge = vi.hoisted(() => ({
   listen: vi.fn(async (_event: string, _handler: (event: { payload: unknown }) => void) => () => {}),
   invoke: vi.fn(async (_command: string, _args: unknown) => null),
+  emit: vi.fn(async (_event: string, _label: string) => {}),
+  created: vi.fn(),
+  monitor: vi.fn(),
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: bridge.invoke }));
-vi.mock("@tauri-apps/api/webviewWindow", () => ({ getCurrentWebviewWindow: () => ({ listen: bridge.listen }) }));
+vi.mock("@tauri-apps/api/event", () => ({ emit: bridge.emit }));
+vi.mock("@tauri-apps/api/window", () => ({
+  cursorPosition: async () => ({ x: 2980, y: 1800 }),
+  monitorFromPoint: bridge.monitor,
+  currentMonitor: async () => null,
+}));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ listen: bridge.listen }),
+  WebviewWindow: class {
+    constructor(label: string, options: unknown) {
+      bridge.created(label, options);
+    }
+    async once(event: string, callback: () => void) {
+      if (event === "tauri://created") queueMicrotask(callback);
+      return () => {};
+    }
+  },
+}));
 
 const transfer: TabWindowTransferPayload = {
   transferId: "detached-transfer",
@@ -36,14 +57,31 @@ const transfer: TabWindowTransferPayload = {
   },
 };
 
+beforeEach(() => {
+  bridge.monitor.mockResolvedValue({ scaleFactor: 2, position: { x: 0, y: 0 }, size: { width: 3024, height: 1964 }, workArea: { position: { x: 0, y: 48 }, size: { width: 3024, height: 1800 } } });
+});
+
 afterEach(() => {
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
   window.sessionStorage.clear();
   bridge.invoke.mockReset();
+  bridge.emit.mockClear();
+  bridge.created.mockClear();
 });
 
 describe("detached tab window role", () => {
+  it("announces a newly created workspace and clamps its placement before showing it", async () => {
+    expect(await createDetachedTabWindow(transfer, { x: 1490, y: 900 })).toBe(true);
+    expect(bridge.created).toHaveBeenCalledWith(`dbx-tab-${transfer.transferId}`, expect.objectContaining({ x: 300, y: 112, width: 1200, height: 800 }));
+    await vi.waitFor(() => expect(bridge.emit).toHaveBeenCalledWith("dbx:workspace-windows-changed", `dbx-tab-${transfer.transferId}`));
+  });
+  it("lets the OS place the window when no monitor bounds are available", async () => {
+    bridge.monitor.mockResolvedValue(null);
+    expect(await createDetachedTabWindow(transfer, { x: 5000, y: 5000 })).toBe(true);
+    expect(bridge.created.mock.calls[0][1]).not.toHaveProperty("x");
+    expect(bridge.created.mock.calls[0][1]).not.toHaveProperty("y");
+  });
   it("survives consuming the one-time transfer URL token", async () => {
     await storeDetachedTabTransfer(transfer);
     window.history.replaceState(null, "", `/?dbxTransfer=${transfer.transferId}`);

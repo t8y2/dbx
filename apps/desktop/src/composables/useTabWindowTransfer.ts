@@ -19,6 +19,8 @@ import {
   currentTabWindowLabel,
   focusTabWindow,
   listOtherTabWindows,
+  notifyTabWindowsChanged,
+  WORKSPACE_WINDOWS_CHANGED_EVENT,
   readSharedTabWindowTransfer,
   listenForTabWindowInfoRequest,
   listenForTabWindowInfoResponse,
@@ -70,6 +72,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   const currentWindowLabel = ref(`dbx-webview-${Math.random().toString(36).slice(2)}`);
   const nativeTabDrag = ref<{ payload: TabWindowTransferPayload } | null>(null);
   const otherTabWindows = ref<TabWindowTarget[]>([]);
+  let windowListRevision = 0;
   const geometryUnlisteners: (() => void)[] = [];
   let geometryPersistTimer: number | undefined;
   let nativeTabDragPreviewTransferId: string | null = null;
@@ -183,12 +186,16 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     void currentTabWindowLabel().then((label) => {
       currentWindowLabel.value = label;
     });
-    void refreshOtherTabWindows();
     void import("@tauri-apps/api/event")
-      .then(({ listen }) => listen("dbx:workspace-windows-changed", () => void refreshOtherTabWindows()))
-      .then((unlisten) => {
-        if (tabWindowTransferListenerUnmounted) unlisten();
-        else removeWorkspaceWindowChangeListener = unlisten;
+      .then(({ listen }) => listen(WORKSPACE_WINDOWS_CHANGED_EVENT, () => void refreshOtherTabWindows()))
+      .then(async (unlisten) => {
+        if (tabWindowTransferListenerUnmounted) {
+          unlisten();
+          return;
+        }
+        removeWorkspaceWindowChangeListener = unlisten;
+        await refreshOtherTabWindows();
+        if (!tabWindowTransferListenerUnmounted) await notifyTabWindowsChanged(await currentTabWindowLabel());
       })
       .catch(() => {});
     void listenForTabWindowTransfer(handleIncomingTabWindowTransfer)
@@ -461,7 +468,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     // its release event is also responsible for clearing the source drag state.
     cleanupSourceDrag?.();
     cleanupSourceDrag = undefined;
-    const monitor = await monitorFromPoint(release.left, release.top).catch(() => null);
+    const monitor = await monitorFromPoint(release.cursorX, release.cursorY).catch(() => null);
     const placement = new PhysicalPosition(release.left, release.top).toLogical(monitor?.scaleFactor ?? 1);
     // A visible target window wins in overlap cases. Only when the pointer is
     // not over B/C do we interpret a drop back on A's strip as a local reorder.
@@ -677,13 +684,17 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   }
 
   async function refreshOtherTabWindows() {
-    const windows = await listOtherTabWindows().catch(() => []);
-    otherTabWindows.value = await Promise.all(
+    const revision = ++windowListRevision;
+    const windows = await listOtherTabWindows().catch(() => null);
+    if (!windows || tabWindowTransferListenerUnmounted || revision !== windowListRevision) return;
+    otherTabWindows.value = windows;
+    const titledWindows = await Promise.all(
       windows.map(async (window) => ({
         ...window,
         title: (await requestOtherTabWindowTitle(window.label)) ?? window.title,
       })),
     );
+    if (!tabWindowTransferListenerUnmounted && revision === windowListRevision) otherTabWindows.value = titledWindows;
   }
 
   async function requestOtherTabWindowTitle(targetWindowLabel: string): Promise<string | null> {

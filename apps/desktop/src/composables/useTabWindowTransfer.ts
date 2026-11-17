@@ -54,7 +54,8 @@ import {
   type TabWindowTransferPayload,
 } from "@/lib/tabs/tabWindowTransfer";
 
-export const TAB_WINDOW_TRANSFER: InjectionKey<ReturnType<typeof useTabWindowTransfer>> = Symbol("tab-window-transfer");
+// Keep mounted providers reachable when Vite reloads a consumer or this module.
+export const TAB_WINDOW_TRANSFER: InjectionKey<ReturnType<typeof useTabWindowTransfer>> = Symbol.for("dbx:tab-window-transfer");
 
 /** One coordinator per workspace; all split tab bars share its native drag session. */
 export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => boolean } = {}) {

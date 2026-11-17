@@ -1118,6 +1118,7 @@ describe("EditorGroupTabBar group behavior", () => {
   });
 
   it.each([
+    { placement: "left", groupMode: "database-type" },
     { placement: "left", groupMode: "connection" },
     { placement: "left", groupMode: "sidebar" },
     { placement: "left", groupMode: "none" },

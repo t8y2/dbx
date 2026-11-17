@@ -3505,6 +3505,12 @@ export default {
     columnFormatterHint: "Formats display only; raw values stay unchanged.",
     formatterType: "Type",
     formatterDatetime: "Unix timestamp",
+    binaryColumnFormats: {
+      "binary-hex": "Binary as hexadecimal",
+      "binary-text": "Binary as UTF-8",
+      "binary-uuid": "Binary as UUID",
+      "binary-uuid-swapped": "Binary as UUID (time-swapped)",
+    },
     formatterJsonPath: "JSON path",
     formatterNumber: "Number",
     formatterNumberGrouping: "Thousands separators",

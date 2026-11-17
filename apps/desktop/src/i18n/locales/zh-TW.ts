@@ -2954,6 +2954,12 @@ export default withEnglishFallback({
     columnFormatterHint: "僅改變顯示效果，原始值保持不變。",
     formatterType: "類型",
     formatterDatetime: "Unix 時間戳",
+    binaryColumnFormats: {
+      "binary-hex": "二進位轉十六進位",
+      "binary-text": "二進位轉 UTF-8",
+      "binary-uuid": "二進位轉 UUID",
+      "binary-uuid-swapped": "二進位轉 UUID（時間段交換）",
+    },
     formatterJsonPath: "JSON 路徑",
     formatterNumber: "數字",
     formatterNumberGrouping: "千分位分隔符",

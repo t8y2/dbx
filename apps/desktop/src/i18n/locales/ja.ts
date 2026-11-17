@@ -956,6 +956,9 @@ export default withEnglishFallback({
     mongoShellCopied: "Mongo shell コマンドをコピーしました",
     multiDbExecute: "複数DB実行",
     executeAllSql: "すべての SQL を実行",
+    rightToolbarLabels: "右側ツールバーのラベル",
+    showRightToolbarLabels: "右側ツールバーのラベルを表示",
+    hideRightToolbarLabels: "右側ツールバーのラベルを非表示",
   },
   multiDbExecute: {
     manualTransaction: "手動トランザクション",

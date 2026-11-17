@@ -956,6 +956,9 @@ export default withEnglishFallback({
     mongoShellCopied: "Comando mongo shell copiado",
     multiDbExecute: "Execução em múltiplos bancos",
     executeAllSql: "Executar todo o SQL",
+    rightToolbarLabels: "Texto da barra de ferramentas direita",
+    showRightToolbarLabels: "Mostrar texto da barra de ferramentas direita",
+    hideRightToolbarLabels: "Ocultar texto da barra de ferramentas direita",
   },
   multiDbExecute: {
     manualTransaction: "Transação manual",

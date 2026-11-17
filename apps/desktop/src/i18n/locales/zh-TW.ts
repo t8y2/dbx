@@ -941,6 +941,9 @@ export default withEnglishFallback({
     mongoShellCopied: "已複製 Mongo shell 命令",
     multiDbExecute: "多庫執行",
     immediateSync: "立即同步",
+    rightToolbarLabels: "右側工具列文字",
+    showRightToolbarLabels: "顯示右側工具列文字",
+    hideRightToolbarLabels: "隱藏右側工具列文字",
   },
   multiDbExecute: {
     manualTransaction: "手動交易",

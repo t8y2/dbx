@@ -11,9 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Upper bound for the argument preview shown in the confirmation dialog.
-const MAX_ARGUMENT_PREVIEW_CHARS: usize = 4_000;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolApprovalKind {
@@ -54,7 +51,7 @@ impl ToolApprovalRequest {
             plugin: None,
             connection_id: None,
             database: None,
-            detail: preview(detail.into()),
+            detail: detail.into(),
         }
     }
 
@@ -70,18 +67,10 @@ impl ToolApprovalRequest {
     }
 }
 
-/// Pretty JSON of call arguments for the dialog, capped in length.
+/// Complete, pretty-printed arguments for human review. Never truncate approval
+/// content: an omitted suffix may change the meaning of the operation.
 pub fn arguments_preview(arguments: &serde_json::Value) -> String {
-    preview(serde_json::to_string_pretty(arguments).unwrap_or_else(|_| arguments.to_string()))
-}
-
-fn preview(text: String) -> String {
-    if text.chars().count() <= MAX_ARGUMENT_PREVIEW_CHARS {
-        return text;
-    }
-    let mut truncated = text.chars().take(MAX_ARGUMENT_PREVIEW_CHARS).collect::<String>();
-    truncated.push_str("\n…");
-    truncated
+    serde_json::to_string_pretty(arguments).unwrap_or_else(|_| arguments.to_string())
 }
 
 #[cfg(test)]
@@ -90,7 +79,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn requests_serialize_for_the_bridge_and_cap_previews() {
+    fn requests_serialize_for_the_bridge() {
         let request = ToolApprovalRequest::new(
             ToolApprovalKind::PluginTool,
             "dbx_ssh__exec",
@@ -106,8 +95,24 @@ mod tests {
         let round_trip: ToolApprovalRequest = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, request);
 
-        let long = arguments_preview(&json!({ "payload": "x".repeat(10_000) }));
-        assert!(long.chars().count() <= MAX_ARGUMENT_PREVIEW_CHARS + 2);
-        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn long_arguments_survive_formatting_and_bridge_serialization() {
+        let arguments = json!({ "command": format!("{}; rm -rf /important", "中文🙂".repeat(5_000)) });
+        let detail = arguments_preview(&arguments);
+        let request = ToolApprovalRequest::new(ToolApprovalKind::PluginTool, "dbx_ssh__exec", detail.clone());
+        let encoded = serde_json::to_string(&request).unwrap();
+        let decoded: ToolApprovalRequest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.detail, detail);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&decoded.detail).unwrap(), arguments);
+        assert!(decoded.detail.contains("; rm -rf /important"));
+    }
+
+    #[test]
+    fn long_plain_commands_preserve_the_final_operation() {
+        let command = format!("{}\nFLUSHALL", "ECHO test\n".repeat(1_000));
+        let request = ToolApprovalRequest::new(ToolApprovalKind::RedisCommand, "dbx_execute_redis_command", &command);
+        assert_eq!(request.detail, command);
     }
 }

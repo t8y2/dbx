@@ -6,7 +6,7 @@ import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/quer
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
-import { editableRowIdentifierColumns, physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, isViewTableType, physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
@@ -417,8 +417,8 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   async function openDatabaseSearchTarget(target: NavigationTarget) {
     dialogs.showDatabaseSearchDialog.value = false;
     if (target.searchScope === "structure" && target.tableName) {
-      const normalizedTableType = (target.tableType || "").toUpperCase().replaceAll(" ", "_");
-      const tableType = normalizedTableType === "VIEW" ? "view" : normalizedTableType === "MATERIALIZED_VIEW" ? "materialized_view" : "table";
+      const normalizedTableType = target.tableType?.trim().toUpperCase().replaceAll(" ", "_");
+      const tableType = normalizedTableType === "MATERIALIZED_VIEW" ? "materialized_view" : isViewTableType(normalizedTableType) ? "view" : "table";
       queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, "columns", target.columnName ? { kind: "column", name: target.columnName } : undefined, target.catalog, tableType);
       return;
     }

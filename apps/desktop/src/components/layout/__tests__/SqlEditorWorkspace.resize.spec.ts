@@ -63,10 +63,11 @@ describe("workspace real Splitpanes drag lifecycle", () => {
     document.body.append(host);
     const app = createApp(SqlEditorWorkspace, {
       activeTab: tabs[0],
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -88,12 +89,25 @@ describe("workspace real Splitpanes drag lifecycle", () => {
     const selector = shared ? ".sql-editor-workspace-split" : ".sql-editor-groups";
     const splitter = host.querySelector(`${selector} > .splitpanes__splitter`)!;
     vi.spyOn(splitter, "getBoundingClientRect").mockReturnValue({ left: 500, top: 500 } as DOMRect);
-    splitter.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 500, clientY: 500 }));
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 500, clientY: 500 });
+    splitter.dispatchEvent(event);
+    return event;
   }
 
   function move(position: number) {
     document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: position, clientY: position }));
   }
+
+  it.each(["horizontal", "vertical", "shared"] as const)("prevents native text selection while dragging %s panes", async (layout) => {
+    const { host } = await mountWorkspace(layout === "horizontal" ? "horizontal" : "vertical");
+    const event = start(host, layout === "shared");
+    expect(event.defaultPrevented).toBe(true);
+    expect(isPanelResizing.value).toBe(true);
+    move(600);
+    await flushFrames();
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    expect(isPanelResizing.value).toBe(false);
+  });
 
   it.each(["horizontal", "vertical", "shared"] as const)("ignores queued resize after release for %s panes and preserves final sizes", async (layout) => {
     const { host, store } = await mountWorkspace(layout === "horizontal" ? "horizontal" : "vertical");
@@ -202,7 +216,9 @@ describe("workspace real Splitpanes drag lifecycle", () => {
 
   it("ignores content clicks and leaves another panel's resize state alone", async () => {
     const { host, store } = await mountWorkspace();
-    host.querySelector(".splitpanes__pane")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    host.querySelector(".splitpanes__pane")!.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
     expect(isPanelResizing.value).toBe(false);
     beginPanelResize();
     store.sizes = [55, 45];

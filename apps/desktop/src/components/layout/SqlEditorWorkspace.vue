@@ -257,6 +257,9 @@ const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "p
 function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
   const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
   if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  // Cancel the native text-selection gesture on press, before it can extend
+  // the editor selection. Splitpanes only cancels subsequent mousemove events.
+  if (event.type === "mousedown") event.preventDefault();
   splitterDragging = true;
   beginPanelResize();
   for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);

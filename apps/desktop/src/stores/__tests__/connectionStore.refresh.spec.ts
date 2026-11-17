@@ -75,6 +75,8 @@ function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; list
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
     getColumns: options?.getColumns ?? vi.fn().mockResolvedValue([]),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
+    listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+    listSchemas: vi.fn().mockResolvedValue(["public"]),
     listObjects: options?.listObjects ?? vi.fn().mockResolvedValue([]),
     listTables: options?.listTables ?? vi.fn().mockResolvedValue([]),
     listTriggers: options?.listTriggers ?? vi.fn().mockResolvedValue([]),
@@ -103,6 +105,58 @@ describe("connectionStore tree refresh state", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+  });
+
+  it.each([true, false])("keeps a collapsed MySQL database closed after dynamic DDL (activation expansion %s)", async (autoExpand) => {
+    const listTables = vi.fn().mockResolvedValue([{ name: "tq_plat_customer", table_type: "BASE TABLE", comment: null }]);
+    installApiMocks({ listTables });
+    const root: TreeNode = { id: "pg-1:app", label: "app", type: "database", connectionId: "pg-1", database: "app", isExpanded: false, children: [] };
+    const store = await createStore(root);
+    store.connections[0]!.db_type = "mysql";
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarAutoExpandOnDatabaseActivation = autoExpand;
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    const { sqlMetadataRefreshTarget } = await import("@/lib/sql/sqlMetadataRefresh");
+    const target = sqlMetadataRefreshTarget(`SET @customer_mobile_order_sql = IF(
+      EXISTS(SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'tq_plat_customer' AND COLUMN_NAME = 'mobile_order_enabled'),
+      'SELECT 1',
+      'ALTER TABLE \`tq_plat_customer\` ADD COLUMN \`mobile_order_enabled\` BIT(1) NOT NULL DEFAULT b''1'' COMMENT ''是否允许移动端下单'' AFTER \`batch_remark_required\`'
+    );
+    PREPARE customer_mobile_order_stmt FROM @customer_mobile_order_sql;
+    EXECUTE customer_mobile_order_stmt;
+    DEALLOCATE PREPARE customer_mobile_order_stmt;`);
+    expect(target.scope).toBe("database");
+    if (target.scope !== "database") throw new Error("Expected metadata refresh");
+
+    await store.refreshObjectListTreeNode("pg-1", "app", target.schema);
+
+    expect(listTables).toHaveBeenCalled();
+    expect(root.children?.some((child) => child.label === "tq_plat_customer")).toBe(true);
+    expect(root.isExpanded).toBe(false);
+    expect(store.treeNodes[0]!.isExpanded).toBe(true);
+  });
+
+  it("keeps the connection closed when refreshing a database absent from the tree", async () => {
+    installApiMocks();
+    const store = await createStore(schemaNode([]));
+    store.treeNodes[0]!.isExpanded = false;
+
+    await store.refreshObjectListTreeNode("pg-1", "app", "missing_schema");
+
+    expect(store.treeNodes[0]!.isExpanded).toBe(false);
+  });
+
+  it.each([true, false])("preserves schema expansion during an object list refresh (%s)", async (expanded) => {
+    installApiMocks();
+    const root = schemaNode([]);
+    root.isExpanded = expanded;
+    const store = await createStore(root);
+
+    await store.refreshObjectListTreeNode("pg-1", "app", "public");
+
+    expect(root.isExpanded).toBe(expanded);
+    expect(root.children?.length).toBeGreaterThan(0);
   });
 
   it.each([

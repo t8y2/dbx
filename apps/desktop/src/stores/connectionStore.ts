@@ -9148,7 +9148,7 @@ export const useConnectionStore = defineStore("connection", () => {
   /** Table-like nodes reload their detail groups on refresh; their caret must stay as the user left it (#14919). */
   const isTableLikeNode = (node: TreeNode) => node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection";
 
-  async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean; sidebarSearch?: boolean }): Promise<void> {
+  async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean; sidebarSearch?: boolean; preserveExpansion?: boolean }): Promise<void> {
     if (options?.sidebarSearch) {
       return withSidebarSearchLoad(node.connectionId, () => refreshTreeNode(node, { ...options, sidebarSearch: false }));
     }
@@ -9210,6 +9210,13 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       await loadTreeNodeChildren(node, { force: true });
       if (isCurrentRefresh()) {
+        // Background metadata refreshes must not act like a sidebar activation.
+        // Restore before awaiting descendant loads so a collapsed database stays hidden.
+        if (options?.preserveExpansion) {
+          node.isExpanded = previousExpanded;
+          const target = treeNodeInSidebarTree(node);
+          if (target && target !== node) target.isExpanded = previousExpanded;
+        }
         await restoreExpandedChildren(node, expandedIds, { force: true }, isCurrentRefresh);
         if (isCurrentRefresh()) {
           // Table nodes load their detail groups (columns/indexes/…) on refresh; the
@@ -9290,17 +9297,18 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateCompletionCache(connectionId, database);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database, catalog);
     if (node) {
-      await refreshTreeNode(node);
+      await refreshTreeNode(node, { preserveExpansion: true });
       return;
     }
     if (catalog) {
       const catalogNode = findNode(treeNodes.value, dorisCatalogId(connectionId, catalog));
       if (catalogNode) {
-        await refreshTreeNode(catalogNode);
+        await refreshTreeNode(catalogNode, { preserveExpansion: true });
         return;
       }
     }
-    await loadDatabases(connectionId, { force: true });
+    const connectionNode = findConnectionNode(connectionId);
+    if (connectionNode) await refreshTreeNode(connectionNode, { preserveExpansion: true });
   }
 
   async function refreshObjectListTreeNode(connectionId: string, database: string, schema?: string, catalog?: string, schemaOnly = false) {
@@ -9310,7 +9318,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const shouldRefreshSchemaNode = !!schema && !catalog;
     const node = shouldRefreshSchemaNode ? findNode(treeNodes.value, `${connectionId}:${database}:${schema}`) : null;
     if (node) {
-      await refreshTreeNode(node);
+      await refreshTreeNode(node, { preserveExpansion: true });
     } else if (!schemaOnly) {
       await refreshDatabaseTreeNode(connectionId, database, catalog);
     }

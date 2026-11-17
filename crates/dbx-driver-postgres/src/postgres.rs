@@ -5412,9 +5412,15 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // `CAST(... AS int)`: GaussDB parses the shorthand but rejects the ANSI form
 // with `syntax error at or near "int"`, which made `getColumns` fail outright
 // there (#14613).
+//
+// `full_type` is a plain `data_type` here: GaussDB's `information_schema.columns`
+// has no `udt_name` column at all (`Column c.udt_name does not exist`, SQLSTATE
+// 42703), and referencing it failed the whole tier (#15130). Enumerated types
+// therefore degrade to the generic `USER-DEFINED` label in this last-resort
+// tier instead of aborting the column listing.
 fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
     "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
-             CASE WHEN ic.data_type = 'USER-DEFINED' THEN ic.udt_name ELSE ic.data_type END AS full_type, \
+             ic.data_type AS full_type, \
              ic.is_nullable = 'YES' AS is_nullable, \
              ic.column_default AS column_default, \
              EXISTS ( \
@@ -8521,8 +8527,13 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
 // servers where the `pg_attribute` tiers yield nothing. Casts the precision,
 // scale and length with `::int` because GaussDB rejects `CAST(... AS int)`
 // with `syntax error at or near "int"` (#14613).
+//
+// `full_type` is a plain `data_type` because GaussDB's `information_schema.columns`
+// has no `udt_name` column (`Column c.udt_name does not exist`, SQLSTATE 42703),
+// which used to fail this tier outright (#15130); user-defined types fall back to
+// the generic `USER-DEFINED` label rather than taking the listing down with them.
 const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
-             CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+             c.data_type AS full_type, \
              c.is_nullable = 'YES' AS is_nullable, \
              c.column_default, \
              EXISTS ( \
@@ -17019,12 +17030,17 @@ mod tests {
     /// Column order is asserted as well: `column_info_from_row_offset` decodes
     /// these rows positionally, so the cast spelling may change but the order
     /// and count must not.
+    ///
+    /// `udt_name` is also asserted absent: GaussDB's `information_schema.columns`
+    /// omits it, and selecting it failed the tier with SQLSTATE 42703 (#15130).
     #[test]
     fn information_schema_columns_sql_avoids_cast_to_int_for_gaussdb() {
         for sql in [POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL, postgres_columns_for_relations_information_schema_sql()] {
             let lowered = sql.to_lowercase();
             assert!(!lowered.contains("cast("), "ANSI CAST is a syntax error on GaussDB here: {sql}");
             assert!(!lowered.contains(" as int"), "CAST(... AS int) is a syntax error on GaussDB: {sql}");
+            assert!(!lowered.contains("udt_name"), "udt_name is missing on GaussDB (SQLSTATE 42703): {sql}");
+            assert!(lowered.contains("as full_type"), "full_type column must stay in place: {sql}");
             let precision = sql.find("AS numeric_precision").expect("numeric_precision column");
             let scale = sql.find("AS numeric_scale").expect("numeric_scale column");
             let length = sql.find("AS character_maximum_length").expect("character_maximum_length column");

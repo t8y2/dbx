@@ -1588,6 +1588,11 @@ html:root.dbx-tab-dragging body * {
   -webkit-user-select: none !important;
 }
 
+/* Embedded workbenches must not swallow the source WebView's pointerup. */
+html:root.dbx-tab-dragging iframe {
+  pointer-events: none !important;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

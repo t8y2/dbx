@@ -6822,6 +6822,17 @@ pub fn redshift_procedure_source_sql(schema: &str, name: &str, signature: Option
 /// and array companion types are excluded via `typelem = 0`. The type branch
 /// has no usable timestamp/stat columns, so created_at/updated_at are always
 /// NULL. Column order must match the relation and routine branches.
+///
+/// `signature` is built with `concat()` rather than the `||` operator, for the
+/// same reason as the relation/index name probes (#13873): PostgreSQL-compatible
+/// kernels running with `pipes_as_concat` off (openGauss B/MySQL mode, and this
+/// KingbaseES V8R6 instance) do not treat `||` as text concatenation, so the
+/// `x || CASE ... END` expression was inferred as `boolean` and the `UNION ALL`
+/// with the `NULL::text` branches failed with
+/// `UNION types text and boolean cannot be matched` (#15128). The call stays
+/// the nested two-argument form rather than variadic `concat(a, b, c)` for the
+/// same reason as #13873/#14875: an Oracle-compatible GaussDB A mode exposes
+/// only the two-argument Oracle CONCAT. `concat()` always returns `text`.
 fn list_object_custom_types_sql() -> &'static str {
     "SELECT t.typname AS object_name, \
        'TYPE' AS object_type, \
@@ -6830,7 +6841,7 @@ fn list_object_custom_types_sql() -> &'static str {
        NULL::text AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
-       (t.typtype::text || ':' || CASE \
+       concat(concat(t.typtype::text, ':'), CASE \
          WHEN t.typtype = 'c' THEN CASE WHEN EXISTS ( \
            SELECT 1 FROM pg_catalog.pg_attribute a \
            WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped \
@@ -6839,7 +6850,7 @@ fn list_object_custom_types_sql() -> &'static str {
            SELECT 1 FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid \
          ) THEN '1' ELSE '0' END \
          ELSE '0' \
-       END) AS signature, \
+       END)::text AS signature, \
        5 AS sort_order \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
@@ -7011,7 +7022,12 @@ async fn list_objects_rows(
         // cannot serve); skip the round-trip instead of executing empty SQL.
         return Ok(Vec::new());
     }
-    postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
+    // Keep the server's own message (and SQLSTATE) in the error we surface:
+    // `tokio_postgres::Error`'s Display is the bare "db error" for DbError, which
+    // left the object page showing only `db error; timestamp fallback failed: db
+    // error` instead of e.g. `UNION types text and boolean cannot be matched`
+    // (#15128). No cursor marker here — this SQL is not the user's statement.
+    postgres_query_cached(client, &sql, &[&schema]).await.map_err(pg_error_to_string_plain)
 }
 
 pub async fn list_objects(
@@ -16821,7 +16837,7 @@ mod tests {
         assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
         assert!(sql.contains("FROM pg_catalog.pg_attribute a"));
         assert!(sql.contains("FROM pg_catalog.pg_enum e"));
-        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("END)::text AS signature"));
         assert!(sql.contains("'TYPE' AS object_type"));
         assert!(sql.contains("5 AS sort_order"));
         assert!(sql.contains("n.nspname = $1"));
@@ -16911,8 +16927,21 @@ mod tests {
         assert!(sql.contains("NULL::text AS updated_at"));
         assert!(sql.contains("NULL::text AS parent_schema"));
         assert!(sql.contains("NULL::text AS parent_name"));
-        assert!(sql.contains("t.typtype::text || ':'"));
-        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("concat(concat(t.typtype::text, ':'), CASE"));
+        assert!(sql.contains("END)::text AS signature"));
+    }
+
+    /// KingbaseES V8R6 resolves `x || CASE ... END` as a logical OR over boolean
+    /// operands, so `signature` was inferred as `boolean` and the `UNION ALL`
+    /// against the `NULL::text` branches failed with
+    /// `UNION types text and boolean cannot be matched` (#15128). The signature
+    /// must be built with `concat()` and explicitly cast back to `text`.
+    #[test]
+    fn list_objects_sql_custom_types_signature_avoids_the_boolean_or_reading() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true, false);
+        assert!(!sql.contains("|| ':'"), "the `||` concatenation is read as boolean OR on Kingbase: {sql}");
+        assert!(sql.contains("concat(concat(t.typtype::text, ':'), CASE"), "{sql}");
+        assert!(sql.contains("END)::text AS signature"), "{sql}");
     }
 
     #[test]

@@ -2543,10 +2543,12 @@ describe("cell detail surfaces", () => {
       // canonical 值仍是 0x 十六进制，解码文本只出现在只读预览里。
       expect(hostText(mounted.root)).toContain("0x5b5b68656164657273203d207b7d");
       expect(hostText(mounted.root)).toContain("grid.binaryTextPreview");
-      // binary 列不再渲染 timestamp/radix 这类对 hex 无意义的文本转换。
-      expect(findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(0);
+      // binary 列不再渲染 timestamp/radix 这类对 hex 无意义的文本转换；只有插件解码（收原始字节）可用。
+      const transforms = findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridValueTransform");
+      expect(transforms.every((node) => node.props["plugin-only"] !== undefined)).toBe(true);
       expect(findOne(mounted.root, (node) => node.type === "textarea").value).toBe("[[headers = {}");
     }
+    expect(findAll(dialog.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(1);
   });
 
   it("re-decodes the binary text preview with GBK only after the user picks it", async () => {

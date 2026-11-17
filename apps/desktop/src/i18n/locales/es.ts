@@ -7869,6 +7869,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL sin procesar",
     },
+    preserveQuotedBracedParameters: "Conservar los marcadores de posición de plantilla en cadenas entre comillas simples",
   },
   transfer: {
     log: {

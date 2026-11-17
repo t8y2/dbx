@@ -6749,6 +6749,7 @@ export default withEnglishFallback({
     confirm: "執行",
   },
   sqlParameters: {
+    preserveQuotedBracedParameters: "保留單引號字串中的範本預留位置",
     title: "SQL 參數",
     description: "為 SQL 模板佔位符填寫參數值，DBX 會在執行前替換為 SQL 字面量。",
     name: "參數名",

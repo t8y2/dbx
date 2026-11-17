@@ -62,6 +62,7 @@ export interface SqlParameterOptions {
   compatibilityMode?: string;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
+  preserveQuotedBracedParameters?: boolean;
 }
 
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$/u;
@@ -253,6 +254,14 @@ export function extractSqlParameterDescriptors(sql: string, options?: SqlParamet
     }
   }
   return descriptors;
+}
+
+export function hasQuotedBracedSqlParameters(sql: string, options?: SqlParameterOptions): boolean {
+  return findSqlParameterOccurrences(sql, options).some((occurrence) => {
+    const body = occurrence.foreach?.body ?? occurrence.where?.body;
+    if (body) return hasQuotedBracedSqlParameters(body, options);
+    return (occurrence.syntax === "mybatis" || occurrence.syntax === "shell") && (occurrence.replacement === "quoted-string" || occurrence.replacement === "string-fragment");
+  });
 }
 
 export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
@@ -498,7 +507,8 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
 
     if (ch === "'" || ch === '"') {
-      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled);
+      const preserveBraces = ch === "'" && options?.preserveQuotedBracedParameters;
+      const quoted = preserveBraces ? null : tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled);
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;
@@ -515,7 +525,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       const quotedEnd = skipQuoted(sql, i, ch, databaseType);
       // Double quotes can delimit identifiers, so only ordinary single-quoted
       // values opt into embedded interpolation.
-      if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
+      if (ch === "'" && !preserveBraces && !hasSqlStringLiteralPrefix(sql, i)) {
         occurrences.push(...collectEmbeddedQuotedBracedPlaceholders(sql, i + 1, quotedEnd, isSyntaxEnabled));
       }
       i = quotedEnd;

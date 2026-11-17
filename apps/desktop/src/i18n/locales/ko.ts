@@ -7693,6 +7693,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "원본 SQL",
     },
+    preserveQuotedBracedParameters: "작은따옴표 문자열의 템플릿 자리 표시자 유지",
   },
   transfer: {
     log: {

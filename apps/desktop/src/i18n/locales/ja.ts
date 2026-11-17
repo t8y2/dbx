@@ -7675,6 +7675,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "Raw SQL",
     },
+    preserveQuotedBracedParameters: "シングルクォート文字列内のテンプレートプレースホルダーを保持する",
   },
   transfer: {
     log: {

@@ -8903,6 +8903,7 @@ export default {
     clearValues: "Clear Values",
     clearHistory: "Clear History",
     useRawForAll: "Use Raw SQL for All",
+    preserveQuotedBracedParameters: "Keep template placeholders inside SQL strings",
     ignore: "Ignore",
     kind: {
       string: "String",

@@ -9451,6 +9451,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL ดิบ",
     },
+    preserveQuotedBracedParameters: "เก็บตัวแทนที่ของเทมเพลตไว้ในสตริงที่อยู่ในเครื่องหมายคำพูดเดี่ยว",
   },
   transfer: {
     log: {

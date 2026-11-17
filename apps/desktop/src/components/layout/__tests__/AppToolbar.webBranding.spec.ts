@@ -257,6 +257,7 @@ describe("AppToolbar web branding (#8703, #11053)", () => {
     });
     window.dispatchEvent(new Event("resize"));
     await vi.waitFor(() => expect(toolbar.dataset.rightToolbarLabels).toBe("partial"));
+    const clone = vi.spyOn(toolbar, "cloneNode");
     const narrowCount = toolbar.querySelectorAll('[data-right-toolbar-label-visible="true"]').length;
     expect(localStorage.getItem("dbx-right-toolbar-labels")).toBe("true");
     width = 1150;
@@ -266,6 +267,18 @@ describe("AppToolbar web branding (#8703, #11053)", () => {
     width = 1400;
     window.dispatchEvent(new Event("resize"));
     await vi.waitFor(() => expect(toolbar.dataset.rightToolbarLabels).toBe("true"));
+    expect(clone).not.toHaveBeenCalled();
+    useSettingsStore().editorSettings.toolbarItems.sqlLibrary = false;
+    await vi.waitFor(() => expect(clone).toHaveBeenCalled());
+    unmount();
+  });
+
+  it("does not observe the action wrapper that changes width during label transitions", async () => {
+    const observe = vi.spyOn(ResizeObserver.prototype, "observe");
+    const { host, unmount } = mount();
+    const toolbar = host.querySelector<HTMLElement>(".app-toolbar")!;
+    expect(observe).toHaveBeenCalledWith(toolbar);
+    expect(observe).not.toHaveBeenCalledWith(toolbar.querySelector("[data-toolbar-right-actions]"));
     unmount();
   });
 

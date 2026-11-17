@@ -301,6 +301,10 @@ let toolbarLayoutRaf = 0;
 let trafficLightSyncRaf = 0;
 let settlingRightOverflow = false;
 let pendingRightOverflowSettle = false;
+const toolbarWidthMeasurements = new Map<string, number>();
+const toolbarLabelMeasurements = new Map<boolean, { buttons: HTMLButtonElement[]; requiredWidths: number[] }>();
+let lastTrafficLightPosition = "";
+let pluginToolbarSignature = "";
 const measuredTrafficLightInset = ref<number | null>(null);
 
 type MacosTrafficLightLayout = {
@@ -429,13 +433,12 @@ const overflowRightMenuItems = computed(() => {
 function withToolbarMeasurement<T>(measure: (copy: HTMLElement) => T): T | undefined {
   const toolbar = toolbarEl.value;
   if (!toolbar?.parentElement || toolbar.clientWidth <= 0) return;
-  // Measure a noninteractive copy at final sizes so animation frames cannot
-  // trigger extra condensation or make a previously hidden label flash.
+  // Cache intrinsic widths independently of the live window and animation.
   const copy = toolbar.cloneNode(true) as HTMLElement;
   copy.inert = true;
   copy.setAttribute("aria-hidden", "true");
   copy.dataset.toolbarMeasuring = "";
-  Object.assign(copy.style, { position: "fixed", left: "-100000px", top: "0", width: `${toolbar.clientWidth}px`, minWidth: "0", maxWidth: "none", visibility: "hidden", pointerEvents: "none" });
+  Object.assign(copy.style, { position: "fixed", left: "-100000px", top: "0", width: "max-content", minWidth: "0", maxWidth: "none", visibility: "hidden", pointerEvents: "none" });
   toolbar.parentElement.appendChild(copy);
   try {
     return measure(copy);
@@ -449,8 +452,41 @@ function measuredToolbarContentWidth(toolbar: HTMLElement): number {
   return Math.max(toolbar.scrollWidth, toolbar.clientWidth + (wrapper ? wrapper.scrollWidth - wrapper.clientWidth : 0));
 }
 
-function rightToolbarContentWidth(): number {
-  return withToolbarMeasurement(measuredToolbarContentWidth) ?? 0;
+function applyMeasuredRightOverflow(copy: HTMLElement, count: number) {
+  collapsibleRightItemDefs.value.forEach(({ key }, index) => {
+    const item = copy.querySelector<HTMLElement>(`[data-toolbar-item="${key}"]`);
+    if (item) item.style.display = index < count ? "none" : "";
+  });
+  const menu = toolbarCollapsed.value ? collapsedItems.value : moreItems.value;
+  const needsMore = count > 0 || menu.some((item) => !item.value.startsWith("right-"));
+  const more = copy.querySelector<HTMLElement>(".app-toolbar-more");
+  if (!needsMore) more?.remove();
+  else if (!more) {
+    const trigger = document.createElement("button");
+    trigger.className = toolbarDropdownTriggerClass;
+    trigger.textContent = t("common.more");
+    const chevron = document.createElement("span");
+    Object.assign(chevron.style, { width: "12px", height: "12px", flexShrink: "0" });
+    trigger.appendChild(chevron);
+    copy.insertBefore(trigger, copy.querySelector("[data-toolbar-workspace-spacer]"));
+  }
+}
+
+function toolbarMeasurementKey(overflow: number, collapsed: number) {
+  return `${toolbarCollapsed.value}:${overflow}:${collapsed}`;
+}
+
+function rightToolbarContentWidth(overflow = rightOverflowCount.value): number {
+  const key = toolbarMeasurementKey(overflow, collapsedRightLabelCount);
+  const cached = toolbarWidthMeasurements.get(key);
+  if (cached !== undefined) return cached;
+  const width =
+    withToolbarMeasurement((copy) => {
+      applyMeasuredRightOverflow(copy, overflow);
+      return measuredToolbarContentWidth(copy);
+    }) ?? 0;
+  if (width > 0) toolbarWidthMeasurements.set(key, width);
+  return width;
 }
 
 function visibleToolbarLabelButtons(toolbar: HTMLElement): HTMLButtonElement[] {
@@ -462,74 +498,80 @@ function visibleToolbarLabelButtons(toolbar: HTMLElement): HTMLButtonElement[] {
   });
 }
 
+function handlePluginToolbarLayout() {
+  const signature = Array.from(toolbarEl.value?.querySelectorAll<HTMLElement>("[data-plugin-shortcut-toolbar]") ?? [])
+    .map(
+      (element) =>
+        `${element.style.width}:${Array.from(element.querySelectorAll<HTMLElement>("[data-shortcut-id]"))
+          .map((entry) => entry.dataset.shortcutId)
+          .join(",")}`,
+    )
+    .join("|");
+  if (signature === pluginToolbarSignature) return;
+  pluginToolbarSignature = signature;
+  resetToolbarMeasurement();
+}
+
 async function settleRightToolbarLabels() {
   const toolbar = toolbarEl.value;
   if (!toolbar || toolbar.clientWidth <= 0) return;
 
-  if (showRightToolbarLabels.value && rightOverflowCount.value > 0) {
-    rightOverflowCount.value = 0;
-    await nextTick();
-  }
-  const buttons = visibleToolbarLabelButtons(toolbar);
-  const result = withToolbarMeasurement((copy) => {
-    const copies = visibleToolbarLabelButtons(copy);
-    copies.forEach((button) => {
-      button.dataset.rightToolbarLabelVisible = "true";
-    });
-    const widths = copies.map((button) => getComputedStyle(button, "::after").width);
-    let collapsed = showRightToolbarLabels.value ? 0 : copies.length;
-    for (; collapsed < copies.length; collapsed++) {
-      copies.forEach((button, index) => {
-        button.dataset.rightToolbarLabelVisible = String(index >= collapsed);
+  let metrics = toolbarLabelMeasurements.get(toolbarCollapsed.value);
+  if (!metrics) {
+    const measured = withToolbarMeasurement((copy) => {
+      applyMeasuredRightOverflow(copy, 0);
+      const copies = visibleToolbarLabelButtons(copy);
+      copies.forEach((button) => {
+        button.dataset.rightToolbarLabelVisible = "true";
       });
-      const slack = collapsed < collapsedRightLabelCount ? rightToolbarLabelsRestoreSlack : 0;
-      copy.style.width = `${Math.max(1, toolbar.clientWidth - slack)}px`;
-      if (measuredToolbarContentWidth(copy) <= copy.clientWidth + 1) break;
-    }
-    return { collapsed, widths };
-  });
-  if (!result) return;
-  collapsedRightLabelCount = result.collapsed;
+      const widths = copies.map((button) => getComputedStyle(button, "::after").width);
+      const requiredWidths: number[] = [];
+      for (let collapsed = 0; collapsed <= copies.length; collapsed++) {
+        copies.forEach((button, index) => {
+          button.dataset.rightToolbarLabelVisible = String(index >= collapsed);
+        });
+        const width = measuredToolbarContentWidth(copy);
+        requiredWidths.push(width);
+        toolbarWidthMeasurements.set(toolbarMeasurementKey(0, collapsed), width);
+      }
+      return { widths, requiredWidths };
+    });
+    if (!measured) return;
+    const visibleButtons = new Set(visibleToolbarLabelButtons(toolbar));
+    const buttons = Array.from(toolbar.querySelectorAll<HTMLButtonElement>("button[data-right-toolbar-label]")).filter((button) => {
+      const item = button.closest<HTMLElement>("[data-toolbar-item]");
+      return (item && collapsibleRightItemDefs.value.some(({ key }) => item.dataset.toolbarItem === key)) || visibleButtons.has(button);
+    });
+    buttons.forEach((button, index) => {
+      if (measured.widths[index]) button.style.setProperty("--toolbar-label-width", measured.widths[index]);
+    });
+    metrics = { buttons, requiredWidths: measured.requiredWidths };
+    toolbarLabelMeasurements.set(toolbarCollapsed.value, metrics);
+  }
+  const { buttons, requiredWidths } = metrics;
+  let collapsed = showRightToolbarLabels.value ? 0 : buttons.length;
+  for (; collapsed < buttons.length; collapsed++) {
+    const slack = collapsed < collapsedRightLabelCount ? rightToolbarLabelsRestoreSlack : 0;
+    if (requiredWidths[collapsed] + slack <= toolbar.clientWidth + 1) break;
+  }
+  collapsedRightLabelCount = collapsed;
   buttons.forEach((button, index) => {
-    button.style.setProperty("--toolbar-label-width", result.widths[index]);
-    button.dataset.rightToolbarLabelVisible = String(showRightToolbarLabels.value && index >= result.collapsed);
+    const visible = String(showRightToolbarLabels.value && index >= collapsed);
+    if (button.dataset.rightToolbarLabelVisible !== visible) button.dataset.rightToolbarLabelVisible = visible;
   });
-  effectiveRightToolbarLabels.value = !showRightToolbarLabels.value || result.collapsed >= buttons.length ? "false" : result.collapsed === 0 ? "true" : "partial";
+  effectiveRightToolbarLabels.value = !showRightToolbarLabels.value || collapsed >= buttons.length ? "false" : collapsed === 0 ? "true" : "partial";
 }
 
 async function settleRightOverflowOnce() {
-  const wrapper = rightWrapper.value;
-  if (!wrapper) return;
-
+  const toolbar = toolbarEl.value;
+  if (!toolbar) return;
   const defsLength = collapsibleRightItemDefs.value.length;
-  if (rightOverflowCount.value > defsLength) {
-    rightOverflowCount.value = defsLength;
+  let count = Math.min(rightOverflowCount.value, defsLength);
+  while (count < defsLength && rightToolbarContentWidth(count) > toolbar.clientWidth + 1) count++;
+  while (count > 0 && rightToolbarContentWidth(count - 1) + rightToolbarLabelsRestoreSlack <= toolbar.clientWidth) count--;
+  if (count !== rightOverflowCount.value) {
+    rightOverflowCount.value = count;
     await nextTick();
-  }
-
-  for (let i = 0; i <= defsLength + 1; i++) {
-    const current = rightWrapper.value;
-    if (!current) return;
-
-    if (rightToolbarContentWidth() > (toolbarEl.value?.clientWidth ?? 0) + 1 && rightOverflowCount.value < defsLength) {
-      rightOverflowCount.value++;
-      await nextTick();
-      continue;
-    }
-
-    if (rightOverflowCount.value <= 0) return;
-
-    rightOverflowCount.value--;
-    await nextTick();
-
-    const restored = rightWrapper.value;
-    if (restored && rightToolbarContentWidth() <= (toolbarEl.value?.clientWidth ?? 0) + 1) {
-      continue;
-    }
-
-    rightOverflowCount.value++;
-    await nextTick();
-    return;
   }
 }
 
@@ -560,11 +602,10 @@ async function settleRightOverflow() {
 }
 
 function scheduleToolbarLayout() {
-  if (toolbarLayoutRaf) cancelAnimationFrame(toolbarLayoutRaf);
+  if (toolbarLayoutRaf) return;
   toolbarLayoutRaf = requestAnimationFrame(() => {
     toolbarLayoutRaf = 0;
     checkToolbarWidth();
-    scheduleTrafficLightSync();
     void settleRightOverflow();
   });
 }
@@ -585,6 +626,9 @@ async function syncTrafficLightsToToolbar() {
   const targetRect = targetEl?.getBoundingClientRect();
   if (!toolbarRect || !targetRect) return;
   const targetCenterY = targetRect.top - toolbarRect.top + targetRect.height / 2;
+  const positionKey = `${targetCenterY}:${settingsStore.editorSettings.uiScale}`;
+  if (lastTrafficLightPosition === positionKey) return;
+  lastTrafficLightPosition = positionKey;
   try {
     const layout = await invoke<MacosTrafficLightLayout>("set_macos_traffic_light_position", {
       x: MAC_TRAFFIC_LIGHT_X,
@@ -593,6 +637,7 @@ async function syncTrafficLightsToToolbar() {
     });
     measuredTrafficLightInset.value = Math.ceil(layout.reserved_inset / settingsStore.editorSettings.uiScale);
   } catch (error) {
+    lastTrafficLightPosition = "";
     console.warn("[DBX] Failed to sync macOS traffic light position", { targetCenterY, error });
   }
 }
@@ -602,6 +647,8 @@ function handleWindowResize() {
 }
 
 function resetRightToolbarMeasurement() {
+  toolbarWidthMeasurements.clear();
+  toolbarLabelMeasurements.clear();
   collapsedRightLabelCount = 0;
   scheduleToolbarLayout();
 }
@@ -609,17 +656,17 @@ function resetToolbarMeasurement() {
   toolbarCollapsed.value = false;
   primaryToolbarExpandedRequiredWidth = null;
   resetRightToolbarMeasurement();
+  scheduleTrafficLightSync();
 }
-watch(toolbarCollapsed, resetRightToolbarMeasurement, { flush: "post" });
+watch(measuredTrafficLightInset, resetRightToolbarMeasurement);
 watch(collapsibleRightItemDefs, resetToolbarMeasurement, { flush: "post" });
 watch(toolbarItems, resetToolbarMeasurement, { deep: true, flush: "post" });
-watch(() => [workspaceWindowMenuVisible.value, workspaceWindowCaption.value, props.hasUpdateAvailable, props.showLogout, showAlwaysOnTopButton.value], resetToolbarMeasurement, { flush: "post" });
+watch(() => [workspaceWindowMenuVisible.value, workspaceWindowCaption.value, props.hasUpdateAvailable, props.showLogout, showAlwaysOnTopButton.value, isAlwaysOnTop.value, props.canNewQuery, props.hasClosedTabs, props.agentDriverUpdateCount], resetToolbarMeasurement, { flush: "post" });
 watch(
   showRightToolbarLabels,
   (show) => {
     safeLocalStorageSet(rightToolbarLabelsKey, String(show));
     collapsedRightLabelCount = 0;
-    rightOverflowCount.value = 0;
     scheduleToolbarLayout();
   },
   { flush: "post" },
@@ -635,18 +682,27 @@ watch(
     window.setTimeout(scheduleTrafficLightSync, 120);
   },
 );
-watch(shouldReserveTrafficLightInset, resetToolbarMeasurement);
+watch(shouldReserveTrafficLightInset, () => {
+  lastTrafficLightPosition = "";
+  resetToolbarMeasurement();
+});
 
 // ──────────── Resize observer ────────────
 
 let resizeObserver: ResizeObserver | null = null;
+let toolbarContentObserver: MutationObserver | null = null;
 
 onMounted(() => {
   resizeObserver = new ResizeObserver(scheduleToolbarLayout);
   if (toolbarEl.value) resizeObserver.observe(toolbarEl.value);
-  if (rightWrapper.value) resizeObserver.observe(rightWrapper.value);
+  if (rightWrapper.value) {
+    toolbarContentObserver = new MutationObserver(resetToolbarMeasurement);
+    toolbarContentObserver.observe(rightWrapper.value, { childList: true, subtree: true });
+  }
+  document.fonts?.addEventListener("loadingdone", resetToolbarMeasurement);
   window.addEventListener("resize", handleWindowResize);
   scheduleToolbarLayout();
+  scheduleTrafficLightSync();
 });
 
 onBeforeUnmount(() => {
@@ -654,6 +710,8 @@ onBeforeUnmount(() => {
   if (trafficLightSyncRaf) cancelAnimationFrame(trafficLightSyncRaf);
   window.clearTimeout(sqlLibrarySaveFeedbackTimer);
   resizeObserver?.disconnect();
+  toolbarContentObserver?.disconnect();
+  document.fonts?.removeEventListener("loadingdone", resetToolbarMeasurement);
   window.removeEventListener("resize", handleWindowResize);
 });
 
@@ -813,7 +871,7 @@ function isRightItemVisible(key: string) {
 
 const toolbarTextButtonClass = "h-8 px-2 text-xs gap-1 leading-none";
 const toolbarTextLabelClass = "inline-flex translate-y-px items-center leading-none";
-const toolbarDropdownTriggerClass = `inline-flex h-8 items-center gap-1 rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px`;
+const toolbarDropdownTriggerClass = `app-toolbar-more inline-flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] px-2 text-xs font-medium leading-none hover:bg-muted hover:text-foreground dark:hover:bg-muted/50 transition-colors [&>span:first-child]:translate-y-px [&>svg]:shrink-0`;
 const toolbarStyle = computed(() => {
   if (!shouldReserveTrafficLightInset.value) return undefined;
   return {
@@ -891,41 +949,25 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
           <PlugZap class="h-3.5 w-3.5" />
           <span :class="toolbarTextLabelClass">{{ t("toolbar.pluginCenter") }}</span>
         </Button>
-        <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="scheduleToolbarLayout" />
+        <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only :menu-anchor="pluginCenterGroup" @layout-change="handlePluginToolbarLayout" />
       </div>
     </template>
-    <template v-if="!toolbarCollapsed"
-      ><LightDropdown
-        v-if="showMoreDropdown"
-        model-value=""
-        :items="moreItems"
-        :aria-label="t('common.more')"
-        :trigger-label="t('common.more')"
-        :trigger-class="toolbarDropdownTriggerClass"
-        :show-trigger-label="true"
-        :show-chevron="true"
-        check-position="none"
-        align="start"
-        @update:model-value="runMoreItem"
-    /></template>
-    <template v-if="toolbarCollapsed">
-      <PluginShortcutToolbar v-if="showPluginCenterShortcuts" dropdown-only @layout-change="scheduleToolbarLayout" />
-      <LightDropdown
-        v-if="collapsedItems.length > 0"
-        model-value=""
-        :items="collapsedItems"
-        :aria-label="t('common.more')"
-        :trigger-label="t('common.more')"
-        :trigger-class="toolbarDropdownTriggerClass"
-        :show-trigger-label="true"
-        :show-chevron="true"
-        check-position="none"
-        align="start"
-        @update:model-value="runCollapsedItem"
-      />
-    </template>
+    <PluginShortcutToolbar v-if="toolbarCollapsed && showPluginCenterShortcuts" dropdown-only @layout-change="handlePluginToolbarLayout" />
+    <LightDropdown
+      v-if="toolbarCollapsed ? collapsedItems.length > 0 : showMoreDropdown"
+      model-value=""
+      :items="toolbarCollapsed ? collapsedItems : moreItems"
+      :aria-label="t('common.more')"
+      :trigger-label="t('common.more')"
+      :trigger-class="toolbarDropdownTriggerClass"
+      :show-trigger-label="true"
+      :show-chevron="true"
+      check-position="none"
+      align="start"
+      @update:model-value="toolbarCollapsed ? runCollapsedItem($event) : runMoreItem($event)"
+    />
 
-    <div class="flex flex-1 items-center justify-center px-1" :class="workspaceWindowMenuVisible ? 'min-w-max' : 'min-w-0'" data-tauri-drag-region>
+    <div class="flex flex-1 items-center justify-center px-1" :class="workspaceWindowMenuVisible ? 'min-w-max' : 'min-w-0'" data-toolbar-workspace-spacer data-tauri-drag-region>
       <span v-if="workspaceWindowMenuVisible" class="shrink-0 whitespace-nowrap" data-workspace-window-identity data-workspace-window-menu @click="emit('refresh-workspace-windows')">
         <LightDropdown
           :model-value="workspaceWindowLabel ?? ''"
@@ -946,7 +988,7 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
 
     <!-- Right-side items wrapped in overflow-aware container -->
     <div ref="rightWrapper" data-toolbar-right-actions class="flex min-w-0 items-center gap-0.5 overflow-hidden">
-      <PluginShortcutToolbar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'toolbar'" @layout-change="scheduleToolbarLayout" /><template v-for="toolbarKey in orderedToolbarKeys.right" :key="toolbarKey"
+      <PluginShortcutToolbar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'toolbar'" @layout-change="handlePluginToolbarLayout" /><template v-for="toolbarKey in orderedToolbarKeys.right" :key="toolbarKey"
         ><template v-if="toolbarKey === 'checkUpdates' && showToolbarUpdateEntry">
           <Tooltip>
             <TooltipTrigger as-child>

@@ -213,12 +213,28 @@ describe("AppToolbar web branding (#8703, #11053)", () => {
     mockIsTauriRuntime = true;
     const settings = useSettingsStore();
     settings.editorSettings.crossWindowTabDragPreviewEnabled = true;
-    const { host, unmount } = mount({ workspaceWindowLabel: "main" });
+    const { host, unmount } = mount({ workspaceWindowLabel: "main", workspaceWindowTargets: [{ label: "dbx-tab-child", title: "DBX" }] });
     await nextTick();
     expect(host.querySelector("[data-workspace-window-identity]")).not.toBeNull();
     settings.editorSettings.crossWindowTabDragPreviewEnabled = false;
     await nextTick();
     expect(host.querySelector("[data-workspace-window-identity]")).toBeNull();
+    unmount();
+  });
+
+  it("hides the main-window menu when no child windows remain", async () => {
+    mockIsTauriRuntime = true;
+    const { host, unmount } = mount({ workspaceWindowLabel: "main" });
+    await nextTick();
+    expect(host.querySelector("[data-workspace-window-identity]")).toBeNull();
+    unmount();
+  });
+
+  it("shows the window menu for an independent window", async () => {
+    mockIsTauriRuntime = true;
+    const { host, unmount } = mount({ workspaceWindowLabel: "dbx-tab-child", workspaceWindowTargets: [{ label: "main", title: "DBX" }] });
+    await nextTick();
+    expect(host.querySelector("[data-workspace-window-identity]")).not.toBeNull();
     unmount();
   });
 });

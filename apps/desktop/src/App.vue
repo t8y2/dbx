@@ -5678,7 +5678,7 @@ onUnmounted(() => {
           :is-dark="isDark"
           :theme-mode="themeMode"
           :workspace-window-label="tabWindowTransfer.currentWindowLabel.value"
-          :active-tab-title="activeTab ? tabDisplayTitle(activeTab, t) : ''"
+          :workspace-window-targets="tabWindowTransfer.otherTabWindows.value"
           :show-sidebar-expand="!sidebarOpen && !isZenMode"
           :show-ai-panel="showAiPanel"
           :active-ai-run-count="activeAiRunCount"
@@ -5726,6 +5726,8 @@ onUnmounted(() => {
           @open-data-compare="dialogs.showDataCompareDialog.value = true"
           @open-backups="openSettings('backups')"
           @open-mcp-settings="openSettings('mcp')"
+          @focus-workspace-window="tabWindowTransfer.focusWorkspaceWindow"
+          @refresh-workspace-windows="tabWindowTransfer.refreshOtherTabWindows"
           @logout="handleWebLogout"
         />
 

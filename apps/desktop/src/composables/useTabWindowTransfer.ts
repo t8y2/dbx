@@ -17,6 +17,7 @@ import {
   createTabWindowGroupTransfer,
   tabWindowTransferEntries,
   currentTabWindowLabel,
+  focusTabWindow,
   listOtherTabWindows,
   listenForTabWindowInfoRequest,
   listenForTabWindowInfoResponse,
@@ -70,6 +71,7 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
   let removeTabWindowInfoResponseListener: (() => void) | null = null;
   let removeTabWindowDragPreviewListener: (() => void) | null = null;
   let removeNativeTabDragPreviewReleaseListener: (() => void) | null = null;
+  let removeWorkspaceWindowChangeListener: (() => void) | null = null;
   let tabWindowTransferListenerUnmounted = false;
   let tabWindowInfoListenerUnmounted = false;
   let tabWindowDragPreviewListenerUnmounted = false;
@@ -132,6 +134,8 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     removeTabWindowDragPreviewListener = null;
     removeNativeTabDragPreviewReleaseListener?.();
     removeNativeTabDragPreviewReleaseListener = null;
+    removeWorkspaceWindowChangeListener?.();
+    removeWorkspaceWindowChangeListener = null;
     stopTabDragPreviewBroadcast();
     clearRemoteTabWindowPreview();
   });
@@ -163,6 +167,13 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
       currentWindowLabel.value = label;
     });
     void refreshOtherTabWindows();
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen("dbx:workspace-windows-changed", () => void refreshOtherTabWindows()))
+      .then((unlisten) => {
+        if (tabWindowTransferListenerUnmounted) unlisten();
+        else removeWorkspaceWindowChangeListener = unlisten;
+      })
+      .catch(() => {});
     void listenForTabWindowTransfer(handleIncomingTabWindowTransfer)
       .then((unlisten) => {
         if (tabWindowTransferListenerUnmounted) unlisten();
@@ -635,6 +646,11 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     clearTabWindowTransfer(payload.transferId);
   }
 
+  async function focusWorkspaceWindow(targetWindowLabel: string) {
+    await focusTabWindow(targetWindowLabel);
+    await refreshOtherTabWindows();
+  }
+
   function move(tabId: string, event: PointerEvent, cleanup: () => void): boolean {
     if (!isTauriRuntime() || !crossWindowTabDragPreviewEnabled.value) return false;
     cleanupSourceDrag = cleanup;
@@ -660,5 +676,5 @@ export function useTabWindowTransfer(options: { canCloseEmptyWindow?: () => bool
     cleanupSourceDrag = undefined;
   }
 
-  return { currentWindowLabel, move, end, cancel, otherTabWindows, refreshOtherTabWindows, openTabInNewWindow, openTabsInNewWindow, moveTabToWindow, moveTabsToWindow, tabWindowTargetLabel, visibleTabWindowPreview, visibleTabWindowPreviewTitle };
+  return { currentWindowLabel, move, end, cancel, otherTabWindows, refreshOtherTabWindows, focusWorkspaceWindow, openTabInNewWindow, openTabsInNewWindow, moveTabToWindow, moveTabsToWindow, tabWindowTargetLabel, visibleTabWindowPreview, visibleTabWindowPreviewTitle };
 }

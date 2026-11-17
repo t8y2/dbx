@@ -2488,6 +2488,7 @@ pub fn run() {
                     .app_handle()
                     .state::<workspace_session::WorkspaceSessionState>()
                     .set_ready(window.label(), false);
+                let _ = window.app_handle().emit("dbx:workspace-windows-changed", window.label());
                 // A webview that no longer exists must not leave drop grants
                 // behind for a future renderer to claim.
                 if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {

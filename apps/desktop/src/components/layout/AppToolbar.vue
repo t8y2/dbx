@@ -64,7 +64,7 @@ const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
   workspaceWindowLabel?: string;
-  activeTabTitle?: string;
+  workspaceWindowTargets?: Array<{ label: string; title: string }>;
   showSidebarExpand?: boolean;
   showAiPanel: boolean;
   activeAiRunCount: number;
@@ -116,6 +116,8 @@ const emit = defineEmits<{
   "open-data-compare": [];
   "open-backups": [];
   "open-mcp-settings": [];
+  "focus-workspace-window": [label: string];
+  "refresh-workspace-windows": [];
   "immediate-sync": [];
   logout: [];
 }>();
@@ -137,11 +139,30 @@ const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
 const workspaceWindowCaption = computed(() => {
   if (!isDesktop) return "";
-  if (props.workspaceWindowLabel === "main") return settingsStore.editorSettings.crossWindowTabDragPreviewEnabled ? t("contextMenu.mainWindow") : "";
+  if (props.workspaceWindowLabel === "main") return t("contextMenu.mainWindow");
   if (props.workspaceWindowLabel?.startsWith("dbx-tab-") && !props.workspaceWindowLabel.startsWith("dbx-tab-drag-preview")) return t("toolbar.independentWindow");
   return "";
 });
-const workspaceWindowTitle = computed(() => ["DBX", workspaceWindowCaption.value, props.activeTabTitle].filter(Boolean).join(" · "));
+const workspaceWindowMenuVisible = computed(() => {
+  if (!isDesktop || !props.workspaceWindowLabel) return false;
+  if (props.workspaceWindowLabel === "main" && !settingsStore.editorSettings.crossWindowTabDragPreviewEnabled) return false;
+  return props.workspaceWindowLabel !== "main" || (props.workspaceWindowTargets?.length ?? 0) > 0;
+});
+const workspaceWindowItems = computed<LightDropdownItem[]>(() => {
+  if (!props.workspaceWindowLabel) return [];
+  const windows = [{ label: props.workspaceWindowLabel, title: "" }, ...(props.workspaceWindowTargets ?? [])].filter((window, index, all) => all.findIndex((candidate) => candidate.label === window.label) === index);
+  const detachedLabels = windows.filter((window) => window.label !== "main").map((window) => window.label);
+  return windows.map((window) => {
+    const label = window.label === "main" ? t("contextMenu.mainWindow") : t("contextMenu.detachedWindow", { number: detachedLabels.indexOf(window.label) + 1 });
+    return {
+      label,
+      value: window.label,
+      title: window.title || label,
+      icon: window.label === "main" ? AppWindow : PanelsTopLeft,
+      disabled: window.label === props.workspaceWindowLabel,
+    };
+  });
+});
 // The always-on-top control is opt-in (外观 → 工具栏): the right side of the
 // toolbar is the most crowded strip in the app. It stays visible while the
 // window is actually pinned even with the setting off, so turning the setting
@@ -778,13 +799,23 @@ function setSqlLibraryMorphToBookmarkRef(el: unknown): void {
     </template>
 
     <div class="flex min-w-0 flex-1 items-center justify-center overflow-hidden px-2" data-tauri-drag-region>
-      <div v-if="workspaceWindowCaption" data-workspace-window-identity class="flex min-w-0 max-w-64 items-center gap-2 overflow-hidden text-xs text-muted-foreground" :title="workspaceWindowTitle" data-tauri-drag-region>
-        <span class="pointer-events-none inline-flex h-5 shrink-0 items-center gap-1 rounded border px-1.5" :class="workspaceWindowLabel === 'main' ? 'border-transparent bg-muted/60' : 'border-border/70 bg-background/70 text-foreground/80'">
-          <component :is="workspaceWindowLabel === 'main' ? AppWindow : PanelsTopLeft" class="h-3 w-3 shrink-0" />
-          <span class="whitespace-nowrap">{{ workspaceWindowCaption }}</span>
-        </span>
-        <span v-if="activeTabTitle" data-workspace-window-title class="pointer-events-none min-w-0 truncate">{{ activeTabTitle }}</span>
-      </div>
+      <span v-if="workspaceWindowMenuVisible" data-workspace-window-identity>
+        <LightDropdown
+          data-workspace-window-menu
+          :model-value="workspaceWindowLabel ?? ''"
+          :items="workspaceWindowItems"
+          :aria-label="workspaceWindowCaption"
+          :trigger-title="workspaceWindowCaption"
+          trigger-class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          :trigger-icon="PanelsTopLeft"
+          :show-trigger-label="false"
+          :show-chevron="false"
+          check-position="none"
+          :match-trigger-width="false"
+          @click="emit('refresh-workspace-windows')"
+          @update:model-value="emit('focus-workspace-window', $event)"
+        />
+      </span>
     </div>
 
     <!-- Right-side items wrapped in overflow-aware container -->

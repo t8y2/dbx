@@ -335,6 +335,22 @@ export async function listOtherTabWindows(): Promise<TabWindowTarget[]> {
   return targets.filter((target): target is TabWindowTarget => !!target).sort((left, right) => left.label.localeCompare(right.label));
 }
 
+export async function focusTabWindow(targetWindowLabel: string): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  try {
+    const { getAllWindows, getCurrentWindow } = await import("@tauri-apps/api/window");
+    if (getCurrentWindow().label === targetWindowLabel) return true;
+    const target = (await getAllWindows()).find((window) => window.label === targetWindowLabel);
+    if (!target) return false;
+    await target.show();
+    await target.unminimize();
+    await target.setFocus();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function sendTabWindowTransfer(targetWindowLabel: string, payload: TabWindowTransferPayload): Promise<boolean> {
   if (!isTauriRuntime()) return false;
   try {

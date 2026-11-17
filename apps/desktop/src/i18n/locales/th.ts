@@ -1420,6 +1420,7 @@ export default withEnglishFallback({
     collapseMatches: "ยุบ",
     searchContentIncomplete: "ผลการค้นหาไม่ครบถ้วน: ไม่สามารถโหลดเนื้อหาของไฟล์ {count} ไฟล์ได้",
     matchPreviewLimit: "แสดงตัวอย่างได้เฉพาะ {limit} บรรทัดแรกจากทั้งหมด {total} บรรทัดที่ตรงกัน",
+    sortByDateCreated: "เรียงตามวันที่สร้าง",
   },
   connection: {
     groupPath: "เส้นทางกลุ่ม",

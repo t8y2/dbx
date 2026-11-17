@@ -1318,6 +1318,7 @@ export default withEnglishFallback({
     collapseMatches: "Свернуть",
     searchContentIncomplete: "Результаты поиска неполные: не удалось загрузить содержимое {count} файлов.",
     matchPreviewLimit: "Предпросмотр ограничен первыми {limit} из {total} совпадающих строк.",
+    sortByDateCreated: "Сортировать по дате создания",
   },
   connection: {
     groupPath: "Путь группы",

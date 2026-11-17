@@ -1338,6 +1338,7 @@ export default withEnglishFallback({
     collapseMatches: "折りたたむ",
     searchContentIncomplete: "検索結果は不完全です：{count} 件のファイルの内容を読み込めませんでした。",
     matchPreviewLimit: "一致する全 {total} 行のうち、先頭 {limit} 行のみプレビューできます。",
+    sortByDateCreated: "作成日で並べ替え",
   },
   connection: {
     groupPath: "グループパス",

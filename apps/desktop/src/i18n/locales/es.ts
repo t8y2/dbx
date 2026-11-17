@@ -2540,6 +2540,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Pegar y restaurar SQL de origen",
       pasteClipboardReadFailed: "Error al leer el portapapeles: {message}",
       convertNamingStyle: "Cambiar estilo de nomenclatura",
+      addSnippet: "Agregar fragmento",
     },
     gotoLine: {
       placeholder: "Número de línea",
@@ -2601,6 +2602,10 @@ export default withEnglishFallback({
     previewChangesComment: "Previsualización de cambios (simulación): sentencia {operation}",
     previewChangesFailed: "Error al previsualizar los cambios.",
     previewChangesNoStatement: "Seleccione o coloque el cursor sobre una sentencia UPDATE / INSERT / DELETE para previsualizar los cambios.",
+    snippetQuickAdd: {
+      prefixUnique: "La clave de activación debe ser única.",
+      saved: "Fragmento {label} agregado",
+    },
   },
   tabs: {
     sql: "SQL",

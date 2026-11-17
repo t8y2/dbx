@@ -2608,6 +2608,7 @@ export default withEnglishFallback({
       findReplace: "ค้นหา/แทนที่",
       deleteEmptyLines: "ลบบรรทัดว่าง",
       selectAll: "เลือกทั้งหมด",
+      addSnippet: "เพิ่มสแนปเป็ต",
     },
     delimitedList: {
       title: "แปลงเป็นรายการคั่น",
@@ -2660,6 +2661,10 @@ export default withEnglishFallback({
       allStatements: "SQL ทั้งหมด",
       currentCommand: "คำสั่งปัจจุบัน",
       allCommands: "คำสั่งทั้งหมด",
+    },
+    snippetQuickAdd: {
+      prefixUnique: "คีย์ทริกเกอร์ต้องไม่ซ้ำกัน",
+      saved: "เพิ่มสแนปเป็ต {label} แล้ว",
     },
   },
   tabs: {

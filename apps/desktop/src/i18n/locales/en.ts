@@ -2739,6 +2739,7 @@ export default {
       lowercaseSelection: "Convert to lowercase",
       convertNamingStyle: "Toggle naming style",
       delimitedList: "Convert to delimited list",
+      addSnippet: "Add snippet",
       addNextSelectionOccurrence: "Add next occurrence",
       selectAllSelectionOccurrences: "Select all occurrences",
       selectCurrentStatement: "Select current statement",
@@ -2768,6 +2769,10 @@ export default {
       doubleClickInsert: "Double-click to insert",
       drag: "Drag to move",
       empty: "No columns",
+    },
+    snippetQuickAdd: {
+      prefixUnique: "Prefix must be unique.",
+      saved: 'Snippet "{label}" added',
     },
     gotoLine: {
       placeholder: "Line number",

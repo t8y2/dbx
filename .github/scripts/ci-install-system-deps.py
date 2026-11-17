@@ -171,9 +171,10 @@ def install(source_path=None, group="gtk"):
     try:
         for index, (label, candidate) in enumerate(candidates):
             source_path.write_bytes(candidate.encode("utf-8"))
+            # Cold GTK installs can keep downloading beyond the old one/two-minute limits.
             for phase, arguments, budget in [
-                ("index", ["update"], 60),
-                ("download", ["--download-only", "install", "-y", *packages], 120),
+                ("index", ["update"], 180),
+                ("download", ["--download-only", "install", "-y", *packages], 600),
             ]:
                 print(f"APT source={label} phase={phase} budget={budget}s", flush=True)
                 code, output, timed_out = run_apt(arguments, budget)

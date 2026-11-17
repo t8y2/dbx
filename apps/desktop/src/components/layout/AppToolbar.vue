@@ -30,6 +30,7 @@ import {
   CalendarClock,
   Waypoints,
   RefreshCw,
+  SquareTerminal,
   ChevronsLeft,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -88,6 +89,7 @@ const props = defineProps<{
   hasConnections: boolean;
   hasClosedTabs?: boolean;
   canNewQuery: boolean;
+  canOpenConsole: boolean;
   hasSqlFileConnections: boolean;
   immediateSyncing: boolean;
   showLogout?: boolean;
@@ -97,6 +99,7 @@ const emit = defineEmits<{
   "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
+  "open-console": [];
   "open-sql-editor-file": [];
   "set-theme-mode": [mode: AppThemeMode];
   "toggle-ai": [];
@@ -594,6 +597,14 @@ function toolbarMenuItemKey(item: ToolbarMenuItem): string {
 
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
+
+  items.push({
+    value: "console",
+    label: t("console.title"),
+    icon: SquareTerminal,
+    action: () => emit("open-console"),
+    disabled: !props.canOpenConsole,
+  });
 
   if (props.hasClosedTabs) {
     items.push({

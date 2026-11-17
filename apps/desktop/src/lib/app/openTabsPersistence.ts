@@ -64,6 +64,7 @@ export interface SavedOpenTab {
   externalSqlIgnoredFileVersion?: QueryTab["externalSqlIgnoredFileVersion"];
   externalSqlFileMissing?: boolean;
   lastExecutedSql?: string;
+  lastConsoleSql?: string;
   resultBaseSql?: string;
   resultSortedSql?: string;
   resultSortColumn?: string;
@@ -144,6 +145,9 @@ function shouldPersistTabSql(tab: QueryTab) {
 // its request is in flight would restore an empty source tab after restart,
 // because the request itself is intentionally not durable.
 function shouldPersistOpenTab(tab: QueryTab): boolean {
+  // Console tabs are session-scoped (terminal history is not restorable);
+  // like the native clients' command windows they do not survive restarts.
+  if (tab.mode === "console") return false;
   return !tab.sourceLoad || !!tab.typeManagementDraft;
 }
 
@@ -243,6 +247,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       ...(tab.externalSqlIgnoredFileVersion ? { externalSqlIgnoredFileVersion: tab.externalSqlIgnoredFileVersion } : {}),
       ...(tab.externalSqlFileMissing ? { externalSqlFileMissing: true } : {}),
       ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: truncateForPersistence(tab.lastExecutedSql) } : {}),
+      ...(tab.lastConsoleSql !== undefined ? { lastConsoleSql: truncateForPersistence(tab.lastConsoleSql) } : {}),
       ...(tab.resultBaseSql !== undefined ? { resultBaseSql: truncateForPersistence(tab.resultBaseSql) } : {}),
       ...(tab.resultSortedSql !== undefined ? { resultSortedSql: truncateForPersistence(tab.resultSortedSql) } : {}),
       ...(tab.resultSortColumn !== undefined ? { resultSortColumn: tab.resultSortColumn } : {}),
@@ -354,6 +359,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         mode,
         mongoQueryLanguage: tab.mongoQueryLanguage === "sql" ? "sql" : undefined,
         sql: typeof tab.sql === "string" ? tab.sql : "",
+        lastConsoleSql: typeof tab.lastConsoleSql === "string" ? tab.lastConsoleSql : undefined,
         isExecuting: false,
         redisMonitorActive: false,
         isCancelling: false,

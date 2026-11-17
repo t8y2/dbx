@@ -5,6 +5,8 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 import type { ConnectionConfig } from "@/types/database";
 
+vi.mock("@/lib/backend/api", () => ({ connectionWriteUnlockState: vi.fn(async () => 0) }));
+
 function connection(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
     id: "conn-1",
@@ -99,6 +101,27 @@ describe("production SQL execution guard", () => {
     useProductionSafetyStore().cancel();
 
     await expect(pendingExecution).resolves.toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reviews original console input while classifying its parsed executable statements", async () => {
+    const execute = vi.fn();
+    const sql = "DESC emp\nDELETE FROM users;";
+    const pending = executeWithProductionSqlGuard({ connection: connection({ is_production: true }), database: "prod_app", sql, assessmentSql: "DELETE FROM users", execute });
+    await vi.waitFor(() => expect(useProductionSafetyStore().pending?.sql).toBe(sql));
+    expect(execute).not.toHaveBeenCalled();
+    useProductionSafetyStore().cancel();
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("rejects a stale execution after a production confirmation is accepted", async () => {
+    const execute = vi.fn();
+    let current = true;
+    const pending = executeWithProductionSqlGuard({ connection: connection(), database: "prod_app", sql: "DELETE FROM users", execute, isCurrent: () => current });
+    await vi.waitFor(() => expect(useProductionSafetyStore().pending).toBeDefined());
+    current = false;
+    useProductionSafetyStore().confirm();
+    await expect(pending).resolves.toBeUndefined();
     expect(execute).not.toHaveBeenCalled();
   });
 

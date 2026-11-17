@@ -11,6 +11,7 @@ export interface ReadOnlyUnlockRequest {
   connectionName?: string;
   sql?: string;
   source?: string;
+  scopeId?: string;
 }
 
 interface QueuedUnlockRequest {
@@ -35,6 +36,7 @@ export const useReadOnlyUnlockStore = defineStore("readOnlyUnlock", () => {
   const windows = ref<Record<string, number>>({});
   const nowMs = ref(Date.now());
   const queue: QueuedUnlockRequest[] = [];
+  const refreshing = new Set<{ scopeId?: string; cancelled: boolean }>();
   let resolvePending: ((confirmed: boolean) => void) | undefined;
   let ticker: ReturnType<typeof setInterval> | undefined;
   let unlockInFlight = false;
@@ -91,12 +93,18 @@ export const useReadOnlyUnlockStore = defineStore("readOnlyUnlock", () => {
 
   async function requestUnlock(request: ReadOnlyUnlockRequest): Promise<boolean> {
     if (isUnlocked(request.connectionId)) return true;
+    const refresh = { scopeId: request.scopeId, cancelled: false };
+    refreshing.add(refresh);
     try {
       const remaining = await refreshFromBackend(request.connectionId);
+      if (refresh.cancelled) return false;
       if (remaining > 0) return true;
     } catch {
       // Backend remains the execution gate; continue to the confirm dialog.
+    } finally {
+      refreshing.delete(refresh);
     }
+    if (refresh.cancelled) return false;
     return new Promise<boolean>((resolve) => {
       if (pending.value) {
         queue.push({ request, resolve });
@@ -131,7 +139,7 @@ export const useReadOnlyUnlockStore = defineStore("readOnlyUnlock", () => {
     try {
       const remaining = await api.unlockConnectionWrites(request.connectionId, durationSecs);
       rememberWindow(request.connectionId, remaining);
-      settle(true);
+      if (pending.value === request) settle(true);
     } catch {
       // Keep the dialog open so the user can retry or cancel.
     } finally {
@@ -141,6 +149,17 @@ export const useReadOnlyUnlockStore = defineStore("readOnlyUnlock", () => {
 
   function cancel() {
     settle(false);
+  }
+
+  function cancelScope(scopeId: string) {
+    for (const refresh of refreshing) if (refresh.scopeId === scopeId) refresh.cancelled = true;
+    const retained: QueuedUnlockRequest[] = [];
+    for (const entry of queue) {
+      if (entry.request.scopeId === scopeId) entry.resolve(false);
+      else retained.push(entry);
+    }
+    queue.splice(0, queue.length, ...retained);
+    if (pending.value?.scopeId === scopeId) settle(false);
   }
 
   async function lockNow(connectionId: string) {
@@ -171,6 +190,7 @@ export const useReadOnlyUnlockStore = defineStore("readOnlyUnlock", () => {
     requestUnlock,
     confirm,
     cancel,
+    cancelScope,
     lockNow,
     refreshFromBackend,
     rememberWindow,

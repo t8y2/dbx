@@ -14,6 +14,15 @@ function nodeNameAt(dialect: langSql.SQLDialect, statement: string, word: string
 }
 
 describe("codemirrorSqlDialect", () => {
+  it("highlights DM8 console commands alongside native keywords, types and builtins", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "oracle", "dameng");
+    expect(nodeNameAt(dialect, "PROMPT dm8", "PROMPT")).toBe("Keyword");
+    expect(nodeNameAt(dialect, "DESCRIBE t", "DESCRIBE")).toBe("Keyword");
+    expect(nodeNameAt(dialect, "CREATE TABLE t (id BIGINT AUTO_INCREMENT)", "AUTO_INCREMENT")).toBe("Keyword");
+    expect(nodeNameAt(dialect, "CREATE TABLE t (id BIGINT)", "BIGINT")).toBe("Type");
+    expect(nodeNameAt(dialect, "SELECT DATEADD(day, 1, SYSDATE) FROM dual", "DATEADD")).toBe("Builtin");
+  });
+
   it.each([
     ["oracle", "SELECT NVL(\"name\", 'n/a') FROM t", '"name"', "QuotedIdentifier"],
     ["mysql", "SELECT IFNULL(`name`, 'n/a') FROM t", "`name`", "QuotedIdentifier"],

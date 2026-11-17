@@ -2,6 +2,7 @@
 
 pub use dbx_types::{database_manifest, models, types};
 
+pub mod console_command;
 mod cypher_read_only;
 
 pub mod dml_preview_sql;

@@ -43,6 +43,7 @@ const defaultToolbarProps = {
   hasMcpUpdateAvailable: false,
   hasConnections: false,
   canNewQuery: false,
+  canOpenConsole: false,
   hasSqlFileConnections: false,
   immediateSyncing: false,
 };
@@ -67,6 +68,8 @@ function mount(props: Record<string, unknown> = {}) {
       messages: {
         en: {
           common: { more: "More" },
+          console: { title: "Command console" },
+          tabs: { recentClosedTitle: "Recently closed tabs" },
           toolbar: { newConnection: "New connection", newQuery: "New query", openSql: "Open SQL file" },
           transfer: { dataTransfer: "Data transfer" },
           sqlFile: { title: "Execute SQL file" },
@@ -216,6 +219,23 @@ describe("AppToolbar opens SQL files in the editor", () => {
     expect(openItem?.disabled).toBe(false);
     openItem!.click();
     expect(openEditor).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("keeps the console action alongside upstream menu entries when enabled=%s", async (canOpenConsole) => {
+    useSettingsStore().editorSettings.toolbarItems.openSql = false;
+    const openConsole = vi.fn();
+    const host = mount({ canOpenConsole, hasClosedTabs: true, onOpenConsole: openConsole });
+    await flushLayout();
+    buttonWithText(host, "More")!.click();
+    await nextTick();
+
+    const consoleItem = buttonWithText(document.body, "Command console");
+    expect(consoleItem).toBeDefined();
+    expect(consoleItem?.disabled).toBe(!canOpenConsole);
+    expect(buttonWithText(document.body, "Recently closed tabs")).toBeDefined();
+    expect(buttonWithText(document.body, "Open SQL file")).toBeUndefined();
+    consoleItem!.click();
+    expect(openConsole).toHaveBeenCalledTimes(canOpenConsole ? 1 : 0);
   });
 
   it("preserves the separate Execute SQL file action", async () => {

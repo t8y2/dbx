@@ -1,9 +1,9 @@
 #![recursion_limit = "256"]
 
 pub use dbx_sql_core::{
-    dml_preview_sql, mysql_ddl_normalize, mysql_event_sql, object_source_sql, oracle_type_migration_sql,
-    oracle_view_rename, query_execution_sql, sql, sql_analysis, sql_diagnostics, sql_editability, sql_error_position,
-    sql_risk, sqlserver_temporal, tdsql_mysql, value_literals,
+    console_command, dml_preview_sql, mysql_ddl_normalize, mysql_event_sql, object_source_sql,
+    oracle_type_migration_sql, oracle_view_rename, query_execution_sql, sql, sql_analysis, sql_diagnostics,
+    sql_editability, sql_error_position, sql_risk, sqlserver_temporal, tdsql_mysql, value_literals,
 };
 pub use dbx_sql_data::{
     data_grid_extractors, data_grid_sql, database_search_columns_sql, database_search_probe_sql, database_search_sql,

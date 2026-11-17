@@ -67,10 +67,27 @@ class InstallerTests(unittest.TestCase):
 
     def test_success_downloads_before_one_offline_install(self):
         self.execute([OK, OK, OK])
-        self.assertEqual([call[1] for call in self.calls], [60, 120, 1200])
+        self.assertEqual([call[1] for call in self.calls], [180, 600, 1200])
         self.assertEqual(self.calls[1][0], ["--download-only", "install", "-y", *deps.PACKAGES])
         self.assertEqual(self.calls[2][0], ["--no-download", "install", "-y", *deps.PACKAGES])
         self.assertTrue(all(deps.BACKUP not in call[2] for call in self.calls))
+
+    def test_slow_successful_acquisition_does_not_exhaust_mirrors(self):
+        for index_seconds, download_seconds in [(90, 10), (10, 180)]:
+            with self.subTest(index_seconds=index_seconds, download_seconds=download_seconds):
+                self.calls.clear()
+
+                def run(arguments, budget):
+                    self.calls.append((arguments, budget, self.source.read_text()))
+                    elapsed = index_seconds if arguments == ["update"] else download_seconds
+                    return OK if elapsed < budget else TIMEOUT
+
+                with patch.object(deps, "run_apt", side_effect=run):
+                    deps.install(self.source)
+                self.assertEqual(len(self.calls), 3)
+                self.assertEqual(self.calls[-1][0][0], "--no-download")
+                self.assertTrue(all(deps.PRIMARY in call[2] for call in self.calls))
+                self.assertEqual(self.source.read_bytes(), SOURCE.encode())
 
     def test_fixed_package_groups_preserve_each_caller_list(self):
         for group, packages in {"packaging": ["zstd"],
@@ -178,7 +195,7 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 self.calls.clear()
                 self.execute([OK, failure, OK, OK, OK])
-                self.assertEqual([call[1] for call in self.calls], [60, 120, 60, 120, 1200])
+                self.assertEqual([call[1] for call in self.calls], [180, 600, 180, 600, 1200])
                 self.assertIn(deps.PRIMARY, self.calls[1][2])
                 self.assertNotIn(deps.PRIMARY, self.calls[2][2])
                 self.assertIn(deps.BACKUP, self.calls[2][2])

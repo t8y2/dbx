@@ -7650,6 +7650,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL bruto",
     },
+    preserveQuotedBracedParameters: "Preservar os placeholders de modelo em strings entre aspas simples",
   },
   transfer: {
     log: {

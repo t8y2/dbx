@@ -7652,6 +7652,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL grezzo",
     },
+    preserveQuotedBracedParameters: "Mantieni i segnaposto del template nelle stringhe racchiuse tra virgolette singole",
   },
   transfer: {
     log: {

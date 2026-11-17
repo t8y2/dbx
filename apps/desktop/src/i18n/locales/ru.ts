@@ -9115,6 +9115,7 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "Необработанный SQL",
     },
+    preserveQuotedBracedParameters: "Сохранять шаблонные заполнители в строках в одинарных кавычках",
   },
   transfer: {
     log: {

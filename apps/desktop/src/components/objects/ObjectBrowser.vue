@@ -11,6 +11,7 @@ import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vu
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
+import { useTableInfoHeaderLayout } from "@/composables/useTableInfoHeaderLayout";
 
 import { computed, createApp, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, shallowRef, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -407,6 +408,8 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
+const { tableInfoHeaderRef, tableInfoActionLabelsCompact, observeTableInfoHeader, disconnectTableInfoHeader } = useTableInfoHeaderLayout();
+void tableInfoHeaderRef;
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableOverviewStats = ref<ObjectStatistics | null>(null);
 const tableOverviewComment = ref<string | null>(null);
@@ -449,6 +452,20 @@ const selectedTableInfoColumns = ref<string[]>([]);
 watch(tableInfoSearchQuery, () => {
   selectedTableInfoColumns.value = [];
 });
+
+watch(
+  () => [sidePanelMode.value === "table-info", tableInfoTab.value, sidePanelRow.value?.name],
+  async ([shown]) => {
+    if (!shown) {
+      disconnectTableInfoHeader();
+      return;
+    }
+    await nextTick();
+    observeTableInfoHeader();
+  },
+  { immediate: true, flush: "post" },
+);
+
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
 const tableInfoDdlMatchCount = ref(0);
 const tableInfoDdlMatchIndex = ref(0);
@@ -7237,9 +7254,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
         <!-- Table info mode -->
         <template v-if="sidePanelMode === 'table-info'">
-          <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
-            <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
-            <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
+          <div ref="tableInfoHeaderRef" class="table-info-header flex min-w-0 items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9 overflow-hidden" :class="{ 'table-info-header--compact': tableInfoActionLabelsCompact }">
+            <TableProperties class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+            <span class="table-info-title min-w-0 flex-1 truncate text-xs font-medium">{{ sidePanelRow?.name }}</span>
             <Button
               v-if="sidePanelRow && effectiveDatabaseType !== 'nebula' && (sidePanelRow.type === 'TABLE' || sidePanelRow.type === 'VIEW' || sidePanelRow.type === 'MATERIALIZED_VIEW')"
               variant="ghost"
@@ -8069,10 +8086,6 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
   outline: 1px solid var(--ddl-current-search-border);
 }
 
-.object-browser-side-panel {
-  container-type: inline-size;
-}
-
 .event-editor-layout > :first-child {
   display: none;
 }
@@ -8102,16 +8115,14 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
     opacity 120ms ease;
 }
 
-@container (max-width: 360px) {
-  .table-info-action-button {
-    width: 1.5rem;
-    max-width: 1.5rem;
-    padding-inline: 0;
-  }
+.table-info-header--compact .table-info-action-button {
+  width: 1.5rem;
+  max-width: 1.5rem;
+  padding-inline: 0;
+}
 
-  .table-info-action-label {
-    max-width: 0;
-    opacity: 0;
-  }
+.table-info-header--compact .table-info-action-label {
+  max-width: 0;
+  opacity: 0;
 }
 </style>

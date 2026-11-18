@@ -15,6 +15,7 @@ import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 const props = defineProps<{
   view: EditorView | null;
   tone?: "app" | "editor";
+  docked?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -535,8 +536,12 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-[transform,opacity] duration-150 will-change-[transform,opacity]" leave-active-class="transition-[transform,opacity] duration-100 will-change-[transform,opacity]" enter-from-class="opacity-0 -translate-y-1" leave-to-class="opacity-0 -translate-y-1">
-    <div v-if="searchVisible" class="editor-search-panel absolute right-4 top-3 z-[9999] isolate flex flex-col gap-1 rounded-lg border border-border bg-popover p-1.5 text-popover-foreground shadow-xl ring-1 ring-border/60" :class="{ 'editor-search-panel--editor': tone === 'editor' }">
-      <div class="flex items-center gap-1">
+    <div
+      v-if="searchVisible"
+      class="editor-search-panel isolate flex flex-col gap-1 border-border bg-popover p-1.5 text-popover-foreground"
+      :class="docked ? 'editor-search-panel--docked w-full shrink-0 border-b' : ['absolute right-4 top-3 z-[9999] rounded-lg border shadow-xl ring-1 ring-border/60', { 'editor-search-panel--editor': tone === 'editor' }]"
+    >
+      <div class="editor-search-controls flex items-center gap-1">
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
           <ChevronRight class="h-4 w-4 transition-transform" :class="showReplace && 'rotate-90'" />
         </button>
@@ -602,7 +607,7 @@ defineExpose({
           <X class="h-4 w-4" />
         </button>
       </div>
-      <div v-if="showReplace" class="flex items-center gap-1">
+      <div v-if="showReplace" class="editor-search-controls flex items-center gap-1">
         <div class="h-7 w-7 shrink-0" />
         <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
@@ -631,6 +636,22 @@ defineExpose({
 <style scoped>
 .editor-search-panel {
   max-width: min(calc(100vw - 2rem), 620px);
+}
+
+.editor-search-panel--docked {
+  max-height: 50%;
+  max-width: none;
+  overflow: auto;
+}
+
+.editor-search-panel--docked .editor-search-controls {
+  flex-wrap: wrap;
+}
+
+.editor-search-panel--docked .editor-search-controls > .w-64 {
+  flex: 1 1 12rem;
+  min-width: min(12rem, 100%);
+  max-width: 32rem;
 }
 
 .editor-search-panel--editor {
@@ -725,7 +746,7 @@ defineExpose({
 }
 
 @media (max-width: 720px) {
-  .editor-search-panel {
+  .editor-search-panel:not(.editor-search-panel--docked) {
     left: 0.75rem;
     right: 0.75rem;
   }

@@ -297,6 +297,40 @@ describe.each([
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  it("auto-submits a one-time DB2 link without dropping proxy JDBC properties", async () => {
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "db2", installed: true }]);
+    const params = new URLSearchParams({
+      type: "db2",
+      host: "127.0.0.1",
+      port: "5525",
+      user: "selector",
+      password: "proxy-secret",
+      database: "SAMPLE",
+      ssl: "false",
+      url_params: "securityMechanism=3;sslConnection=false;",
+      one_time: "true",
+    });
+
+    await mountNewDialog(`dbx://connection/new?${params}`);
+
+    await vi.waitFor(() => expect(store.addConnection).toHaveBeenCalledOnce());
+    expect(store.addConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "db2",
+        driver_profile: "db2",
+        host: "127.0.0.1",
+        port: 5525,
+        username: "selector",
+        password: "proxy-secret",
+        database: "SAMPLE",
+        ssl: false,
+        url_params: "securityMechanism=3;sslConnection=false;",
+        one_time: true,
+      }),
+      null,
+    );
+  });
+
   it.each([false, true])("prefills Kafka brokers and only saves on confirmation (SASL: %s)", async (sasl) => {
     store.connect.mockResolvedValue(undefined);
     backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "kafka", installed: true }]);

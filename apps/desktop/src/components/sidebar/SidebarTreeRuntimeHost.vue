@@ -53,6 +53,7 @@ import {
   FileCode,
   FileText,
   Network,
+  Columns3,
   FilePlus2,
   PencilRuler,
   Search,
@@ -110,6 +111,9 @@ import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectName
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import {
   hasTableTreeLoadMore,
+  isDatabaseVGroupMember,
+  resolveDatabaseVGroupScope,
+  vgroupMemberName,
   hasTableVGroupEntries,
   isTableVGroupContainerNode,
   isTableVGroupGroupableRowType,
@@ -578,6 +582,7 @@ const emit = defineEmits<{
   "search-toggle": [node: TreeNode];
   "context-menu": [event: MouseEvent, node: TreeNode, items: ContextMenuItem[]];
   "open-ddl": [node: TreeNode];
+  "peek-structure": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection, createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding>];
   "open-procedure": [node: TreeNode];
@@ -2794,6 +2799,12 @@ async function generateDdlTemplate(destination: SqlTemplateDestination) {
   }
 }
 
+function openStructurePeek() {
+  const node = activeNode.value;
+  if (!node) return;
+  emit("peek-structure", node);
+}
+
 function selectedDdlTargets() {
   return resolveSidebarDdlTargets(activeNode.value, connectionStore.treeNodes, acceptedSelectionIds ?? connectionStore.selectedTreeNodeIds);
 }
@@ -4699,9 +4710,11 @@ async function confirmRenameObject() {
       renameApplied = true;
       toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
       showRenameObjectDialog.value = false;
+      const previousDatabaseNode = { ...node };
       const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
       liveNode.label = newName;
       liveNode.database = newName;
+      connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
       const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
       connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
       void connectionStore.refreshTreeNode(liveNode);
@@ -6119,6 +6132,7 @@ async function confirmDropDatabase() {
       }));
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     if (!executed) return;
+    connectionStore.updateDatabaseVGroupMember(node);
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
     try {
       await connectionStore.loadDatabases(connectionId, { force: true });
@@ -8474,6 +8488,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         action: openDdl,
         icon: FileCode,
       });
+      // Read-only column preview: the only structure entry below opens the full
+      // editor, which is a write surface users avoid when they just want to look.
+      items.push({
+        sidebarActionId: "contextMenu.peekStructure",
+        label: t("contextMenu.peekStructure"),
+        action: openStructurePeek,
+        icon: Columns3,
+      });
     }
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ sidebarActionId: "contextMenu.viewDependencies", label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
@@ -9004,9 +9026,12 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
 }
 
 function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
-  const layout = connectionStore.tableVGroupLayoutFor(node);
-  const targets = selectedTableVGroupMoveTargets(node, selectedTreeNodesInVisibleOrder());
-  const targetNames = targets.map((target) => target.label);
+  const databaseScope = resolveDatabaseVGroupScope(connectionStore.treeNodes, node);
+  const scopeNode = databaseScope ? { ...node, ...databaseScope } : node;
+  const layout = connectionStore.tableVGroupLayoutFor(scopeNode);
+  // Database selection remains single-row; don't reinterpret table selection as a database batch.
+  const targets = databaseScope ? [node] : selectedTableVGroupMoveTargets(node, selectedTreeNodesInVisibleOrder());
+  const targetNames = targets.map((target) => vgroupMemberName(target, databaseScope?.objectType));
   const targetRowType = targets[0]?.type;
   const targetsInGroup = (groupId: string) => targetNames.every((name) => tableVGroupPathForTable(layout, name, targetRowType).includes(groupId));
   const items: ContextMenuItem[] = tableVGroupDestinationRows(layout).map((row) => ({
@@ -9014,14 +9039,14 @@ function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
     title: row.path.join(" / "),
     disabled: targetNames.length > 0 && targetsInGroup(row.id),
     action: () => {
-      for (const name of targetNames) connectionStore.moveTableToVGroup(node, name, row.id, targetRowType);
+      for (const name of targetNames) connectionStore.moveTableToVGroup(scopeNode, name, row.id, targetRowType);
     },
   }));
   if (targetNames.some((name) => tableVGroupPathForTable(layout, name, targetRowType).length > 0)) {
     items.push({
       label: t("tableVGroup.removeFromGroup"),
       action: () => {
-        for (const name of targetNames) connectionStore.moveTableToVGroup(node, name, null, targetRowType);
+        for (const name of targetNames) connectionStore.moveTableToVGroup(scopeNode, name, null, targetRowType);
       },
     });
   }
@@ -9029,7 +9054,7 @@ function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
   items.push({
     label: t("tableVGroup.moveToNewGroup"),
     action: () => {
-      tableVGroupDialogScope.value = node;
+      tableVGroupDialogScope.value = scopeNode;
       tableVGroupDialogParentGroupId.value = null;
       tableVGroupDialogTableNames.value = targetNames;
       tableVGroupName.value = "";
@@ -9105,6 +9130,36 @@ function treeItemMenuItems(): ContextMenuItem[] {
   const autoIncrementMenuLabel = (singleLabel: string) => (batchAutoIncrementCount > 1 ? batchMysqlAutoIncrementMenuLabel() : singleLabel);
   const autoIncrementMenuAction = (singleAction: () => void) => (batchAutoIncrementCount > 1 ? requestBatchMysqlAutoIncrement : singleAction);
 
+  const databaseGroupItems: ContextMenuItem[] = [];
+  const databaseGroupScope = resolveDatabaseVGroupScope(connectionStore.treeNodes, node, connectionStore.tableVGroupLayouts);
+  if (databaseGroupScope && node.type !== "table-vgroup") {
+    if (isDatabaseVGroupMember(node)) {
+      databaseGroupItems.push({ sidebarActionId: "databaseVGroup.moveToGroup", label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: buildTableVGroupMoveMenuItems(node) });
+    } else {
+      const scopeNode = { ...node, ...databaseGroupScope };
+      databaseGroupItems.push({ sidebarActionId: "databaseVGroup.createGroup", label: t("connectionGroup.createGroup"), icon: FolderPlus, action: () => openCreateTableVGroupDialog(scopeNode) });
+      const layout = connectionStore.tableVGroupLayoutFor(databaseGroupScope);
+      if (hasTableVGroupEntries(layout)) {
+        const enabled = tableVGroupsEnabled(layout);
+        databaseGroupItems.push({ sidebarActionId: "databaseVGroup.toggleGroups", label: t(enabled ? "tableVGroup.disableGroups" : "tableVGroup.enableGroups"), icon: FolderInput, action: () => connectionStore.setTableVGroupsEnabled(databaseGroupScope, !enabled) });
+      }
+    }
+  }
+
+  // Keep navigation/query actions first in full menus. Grouped menus still
+  // classify these entries by their stable action IDs under Organize.
+  const withDatabaseGroupItems = () => {
+    if (!databaseGroupItems.length) return items;
+    const refreshIndex = items.findIndex((item) => item.action === refresh);
+    const dangerIndex = items.findIndex((item) => item.variant === "destructive");
+    const index = refreshIndex >= 0 ? refreshIndex : dangerIndex >= 0 ? dangerIndex : items.length;
+    const entries: ContextMenuItem[] = [...databaseGroupItems];
+    if (index > 0 && !items[index - 1].separator) entries.unshift({ label: "", separator: true });
+    if (index < items.length && !items[index].separator) entries.push({ label: "", separator: true });
+    items.splice(index, 0, ...entries);
+    return items;
+  };
+
   // 1. Pin toggle
   if (canPin.value) {
     items.push({
@@ -9129,7 +9184,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     autoIncrementMenuAction,
   };
   for (const factory of sidebarMenuFactories) {
-    if (factory(factoryContext)) return items;
+    if (factory(factoryContext)) return withDatabaseGroupItems();
   }
 
   // 10. Universal Copy Name (for all types except connection)
@@ -9138,7 +9193,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
   }
 
-  return items;
+  return withDatabaseGroupItems();
 }
 
 function activateSidebarPluginContextMenuItem(pluginId: string, contribution: PluginContextMenuContribution, invocation: PluginContextMenuInvocation) {

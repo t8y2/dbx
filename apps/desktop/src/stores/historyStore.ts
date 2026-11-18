@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
-import { ref } from "vue";
+import { onScopeDispose, ref } from "vue";
 import * as api from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { HistoryConnectionOption, HistoryCursor, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 
 const DEFAULT_HISTORY_SEARCH: HistorySearchRequest = {
@@ -10,6 +11,7 @@ const DEFAULT_HISTORY_SEARCH: HistorySearchRequest = {
   databases: [],
   limit: 100,
 };
+const HISTORY_CHANGED_EVENT = "dbx:history-changed";
 
 function copyRequest(request: HistorySearchRequest): HistorySearchRequest {
   return {
@@ -36,6 +38,9 @@ export const useHistoryStore = defineStore("history", () => {
   let historyPanelActive = false;
   let optionsRequestSerial = 0;
   let latestRequestedSearch = copyRequest(DEFAULT_HISTORY_SEARCH);
+  let removeHistoryChangedListener: (() => void) | null = null;
+  let historyChangedListenerDisposed = false;
+  let remoteRefreshQueued = false;
 
   function invalidateConnectionOptionRequests() {
     optionsRequestSerial += 1;
@@ -49,6 +54,35 @@ export const useHistoryStore = defineStore("history", () => {
     loading.value = false;
     loadingMore.value = false;
   }
+
+  function refreshAfterRemoteHistoryChange() {
+    invalidateConnectionOptionRequests();
+    if (!historyPanelActive || remoteRefreshQueued) return;
+    remoteRefreshQueued = true;
+    queueMicrotask(() => {
+      remoteRefreshQueued = false;
+      if (!historyPanelActive) return;
+      // Reload from SQLite instead of merging another window's mutable cache.
+      void search(latestRequestedSearch).catch(() => {});
+      void loadConnectionOptions().catch(() => {});
+    });
+  }
+
+  if (isTauriRuntime()) {
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen(HISTORY_CHANGED_EVENT, refreshAfterRemoteHistoryChange))
+      .then((unlisten) => {
+        if (historyChangedListenerDisposed) unlisten();
+        else removeHistoryChangedListener = unlisten;
+      })
+      .catch((error) => console.warn("[DBX][history:sync-listen:error]", error));
+  }
+
+  onScopeDispose(() => {
+    historyChangedListenerDisposed = true;
+    removeHistoryChangedListener?.();
+    removeHistoryChangedListener = null;
+  });
 
   function beginDestructiveMutation() {
     requestSerial += 1;

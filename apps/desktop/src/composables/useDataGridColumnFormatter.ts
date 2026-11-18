@@ -22,6 +22,7 @@ import {
 import { filterModeNeedsValue, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { isBinaryColumnFormat } from "@/lib/dataGrid/binaryCellDownload";
 import { manualReferenceColumnValidation, manualReferenceKeyColumns, reconcileManualReferenceColumn, type ManualReferenceMetadataStatus } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 import type { ColumnInfo, DatabaseType, ForeignKeyInfo, QueryResultSourceColumnRef, ReferenceKeyInfo } from "@/types/database";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -171,9 +172,16 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     return undefined;
   }
 
+  function canFormatBinaryColumn(columnIndex: number): boolean {
+    const resultType = props.result.column_types?.[columnIndex];
+    const sourceType = options.tableColumnForGridColumn(columnIndex)?.data_type;
+    return [resultType, sourceType].some((type) => /^(?:var)?binary\b/i.test(type?.trim() ?? ""));
+  }
+
   function columnFormatter(columnIndex: number): ColumnFormatterConfig | undefined {
     const columnType = props.result.column_types?.[columnIndex] ?? options.tableColumnForGridColumn(columnIndex)?.data_type;
-    const savedFormatter = savedColumnFormatterEntry(columnIndex)?.formatter;
+    const saved = savedColumnFormatterEntry(columnIndex)?.formatter;
+    const savedFormatter = saved && (!isBinaryColumnFormat(saved.kind) || canFormatBinaryColumn(columnIndex)) ? saved : undefined;
     const configured = resolveColumnFormatter(savedFormatter, settingsStore.editorSettings.customColumnFormatters, {
       pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat,
       columnType,
@@ -195,6 +203,7 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
       return { kind: "number", useGrouping: formatterNumberGrouping.value, decimalPlaces: formatterNumberDecimalPlaces.value === "" ? undefined : Number(formatterNumberDecimalPlaces.value) };
     }
     if (formatterKind.value === "json-path") return { kind: "json-path", path: formatterJsonPath.value.trim() || "$" };
+    if (isBinaryColumnFormat(formatterKind.value)) return { kind: formatterKind.value };
     if (formatterKind.value === "mask") {
       return { kind: "mask", prefix: Math.max(0, Math.floor(Number(formatterMaskPrefix.value) || 0)), suffix: Math.max(0, Math.floor(Number(formatterMaskSuffix.value) || 0)) };
     }
@@ -591,6 +600,7 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     savedColumnFormatter,
     columnFormatter,
     columnHasFormatter,
+    canFormatBinaryColumn,
     currentFormatterDraft,
     openColumnFormatter,
     closeColumnFormatter,

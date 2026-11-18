@@ -1391,6 +1391,14 @@ describe("normalizeEditorSettings - colorizeConnectionTabsScope", () => {
   });
 });
 
+describe("normalizeEditorSettings - crossWindowTabDragPreviewEnabled", () => {
+  it("defaults to enabled and only accepts booleans", () => {
+    expect(normalizeEditorSettings({}).crossWindowTabDragPreviewEnabled).toBe(true);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: false }).crossWindowTabDragPreviewEnabled).toBe(false);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: "false" } as any).crossWindowTabDragPreviewEnabled).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - tabMaxWidth", () => {
   it("defaults tabMaxWidth to 0", () => {
     expect(normalizeEditorSettings({}).tabMaxWidth).toBe(0);

@@ -510,12 +510,12 @@ pub(super) fn cursor_sql(columns: &[db::ColumnInfo], schema: &str, table: &str) 
             let kind = normalize_xugu_type_name(&column.data_type);
             let expr = match kind.as_str() {
                 "NUMBER" => format!("TO_CHAR({name}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''')"),
-                "DATE" => format!("TO_CHAR({name}, 'YYYY-MM-DD HH24:MI:SS AD', 'NLS_DATE_LANGUAGE=American')"),
+                "DATE" => format!("TO_CHAR({name}, 'YYYY-MM-DD HH24:MI:SS AD', 'NLS_CALENDAR=GREGORIAN NLS_DATE_LANGUAGE=American')"),
                 "TIMESTAMP" => {
                     let precision =
                         parameters(&column.data_type).first().copied().or(column.numeric_scale).unwrap_or(6);
                     let fraction = if precision == 0 { String::new() } else { format!(".FF{precision}") };
-                    format!("TO_CHAR({name}, 'YYYY-MM-DD HH24:MI:SS{fraction} AD', 'NLS_DATE_LANGUAGE=American')")
+                    format!("TO_CHAR({name}, 'YYYY-MM-DD HH24:MI:SS{fraction} AD', 'NLS_CALENDAR=GREGORIAN NLS_DATE_LANGUAGE=American')")
                 }
                 "RAW" => format!("CASE WHEN {name} IS NULL THEN NULL ELSE '0x' || RAWTOHEX({name}) END"),
                 _ => name.clone(),
@@ -1129,8 +1129,12 @@ mod tests {
         ];
         let sql = cursor_sql(&columns, "Owner", "Table");
         assert!(sql.contains("TO_CHAR(\"N\", 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''') AS \"N\""));
-        assert!(sql.contains("YYYY-MM-DD HH24:MI:SS AD"));
-        assert!(sql.contains("YYYY-MM-DD HH24:MI:SS.FF6 AD"));
+        assert!(sql.contains(
+            "TO_CHAR(\"D\", 'YYYY-MM-DD HH24:MI:SS AD', 'NLS_CALENDAR=GREGORIAN NLS_DATE_LANGUAGE=American')"
+        ));
+        assert!(sql.contains(
+            "TO_CHAR(\"T\", 'YYYY-MM-DD HH24:MI:SS.FF6 AD', 'NLS_CALENDAR=GREGORIAN NLS_DATE_LANGUAGE=American')"
+        ));
         assert!(sql.contains("CASE WHEN \"R\" IS NULL THEN NULL ELSE '0x' || RAWTOHEX(\"R\") END"));
         assert!(sql.contains("\"B\" AS \"B\""));
         assert!(sql.contains("DBMS_LOB.GETLENGTH(\"B\")=0 THEN 1 ELSE 2 END AS \"DBX_LOB_STATE_4\""));

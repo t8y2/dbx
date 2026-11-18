@@ -3393,6 +3393,13 @@ defineExpose({
   }
 }
 
+/* Keep the match visible when the editor loses focus. The active syntax
+   color follows the editor theme even when it differs from the app theme. */
+[data-query-editor-root] :deep(.cm-matchingBracket) {
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
 .query-editor--table-navigation-hover :deep(.cm-content),
 .query-editor--table-navigation-hover :deep(.cm-line) {
   cursor: pointer;

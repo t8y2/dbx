@@ -6,15 +6,21 @@ if [ -n "${DBX_JAVA_BIN:-}" ] && [ -x "$DBX_JAVA_BIN" ]; then
   JAVA_BIN="$DBX_JAVA_BIN"
 elif [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
   JAVA_BIN="$JAVA_HOME/bin/java"
+elif command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
+  JAVA_BIN="$(command -v java)"
 elif [ -x "/opt/homebrew/opt/openjdk/bin/java" ]; then
   JAVA_BIN="/opt/homebrew/opt/openjdk/bin/java"
 elif [ -x "/usr/local/opt/openjdk/bin/java" ]; then
   JAVA_BIN="/usr/local/opt/openjdk/bin/java"
-elif command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
-  JAVA_BIN="java"
 else
   echo "Java runtime not found. Install Java or the optional DBX JDBC runtime." >&2
   exit 127
+fi
+
+JAVA_MAJOR="$($JAVA_BIN -version 2>&1 | awk -F'[\".]' '/version/ { if ($2 == "1") print $3; else print $2; exit }')"
+if [ -z "$JAVA_MAJOR" ] || [ "$JAVA_MAJOR" -lt 21 ]; then
+  echo "Java 21 or newer is required for the DBX JDBC runtime." >&2
+  exit 1
 fi
 
 exec "$JAVA_BIN" \

@@ -6,6 +6,8 @@ WORKDIR /app
 RUN npm i -g pnpm
 # Keep the workspace package available because Vite resolves it directly from source.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm applies the SQL parser patch while installing dependencies.
+COPY patches/ patches/
 COPY packages/mongo-shell/ packages/mongo-shell/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile

@@ -99,6 +99,7 @@ import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/ed
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { editorThemeAppearanceFor, resolveEditorThemeColors } from "@/lib/editor/editorThemeSettings";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
@@ -224,7 +225,7 @@ import { EditorView } from "@codemirror/view";
 
 const ObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 const { t } = useI18n();
-const { isDark, themePalette } = useTheme();
+const { isDark, themePalette, activeCustomUiColors } = useTheme();
 const store = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 const queryStore = useQueryStore();
@@ -475,7 +476,8 @@ async function initDdlEditor(content: string) {
   if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
 
   const editorSettings = settingsStore.editorSettings;
-  const themeExt = await loadEditorTheme(editorSettings.theme, isDark.value ? "dark" : "light", undefined, themePalette.value);
+  const appAppearance = editorThemeAppearanceFor(isDark.value ? "dark" : "light", themePalette.value, themePalette.value === "custom" ? activeCustomUiColors.value : undefined);
+  const themeExt = await loadEditorTheme(editorSettings.theme, appAppearance, resolveEditorThemeColors(editorSettings), themePalette.value);
   if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
 
   const fontExt = editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true });

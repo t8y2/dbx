@@ -166,6 +166,7 @@ public final class KafkaAgent {
             case "mq_update_partitions" -> updatePartitions(params);
             case "mq_get_topic_stats" -> getTopicStats(params);
             case "mq_get_topic_config" -> getTopicConfig(params);
+            case "mq_get_broker_config" -> getBrokerConfig(params);
             case "mq_alter_topic_config" -> alterTopicConfig(params);
             // Consumer groups
             case "mq_list_consumer_groups" -> listConsumerGroups(params, requireAdmin(), KafkaAgent::consumerGroupAdmins);
@@ -963,10 +964,24 @@ public final class KafkaAgent {
             return unsupported;
         }
 
+        return configEntries(config);
+    }
+
+    private static Object getBrokerConfig(JsonObject params) throws Exception {
+        int id = params.get("brokerId").getAsInt();
+        if (id < 0) throw new IllegalArgumentException("Broker ID must be non-negative");
+        var resource = new ConfigResource(ConfigResource.Type.BROKER, Integer.toString(id));
+        int timeout = requestTimeout(params);
+        Config config = requireAdmin().describeConfigs(Collections.singletonList(resource))
+            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource);
+        return configEntries(config);
+    }
+
+    static Map<String, Object> configEntries(Config config) {
         Map<String, Object> configs = new LinkedHashMap<>();
         for (ConfigEntry entry : config.entries()) {
             Map<String, Object> entryMap = new LinkedHashMap<>();
-            entryMap.put("value", entry.value());
+            entryMap.put("value", entry.isSensitive() ? null : entry.value());
             entryMap.put("source", entry.source().name());
             entryMap.put("isSensitive", entry.isSensitive());
             entryMap.put("isReadOnly", entry.isReadOnly());

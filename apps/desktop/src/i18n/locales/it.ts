@@ -12446,6 +12446,12 @@ export default withEnglishFallback({
     expiryMustBePositive: "La scadenza deve essere maggiore di 0 giorni",
   },
   mqBroker: {
+    searchConfigurations: "Cerca nomi delle impostazioni",
+    configuration: "Configurazione del broker",
+    noConfigurations: "Nessuna voce di configurazione corrispondente",
+    configName: "Nome",
+    configValue: "Valore",
+    configSource: "Origine",
     title: "Cluster Broker",
     autoRefresh: "Aggiornamento automatico",
     refreshInterval5s: "5s",

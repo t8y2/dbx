@@ -10695,6 +10695,12 @@ export default withEnglishFallback({
     expiryMustBePositive: "Etibarlılıq müddəti 0 gündən çox olmalıdır",
   },
   mqBroker: {
+    searchConfigurations: "Konfiqurasiya adını axtar",
+    configuration: "Broker konfiqurasiyası",
+    noConfigurations: "Uyğun konfiqurasiya qeydi yoxdur",
+    configName: "Ad",
+    configValue: "Dəyər",
+    configSource: "Mənbə",
     title: "Broker klasteri",
     autoRefresh: "Avtomatik yeniləmə",
     refreshInterval5s: "5 san",

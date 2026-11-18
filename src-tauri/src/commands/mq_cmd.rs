@@ -774,6 +774,15 @@ pub async fn mq_get_cluster_info(
 }
 
 #[tauri::command]
+pub async fn mq_get_broker_config(
+    state: tauri::State<'_, AppState>,
+    connection_id: String,
+    broker_id: i32,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_get_broker_config_core(&state, &connection_id, broker_id).await
+}
+
+#[tauri::command]
 pub async fn mq_get_topic_route(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

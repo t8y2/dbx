@@ -12470,6 +12470,12 @@ export default withEnglishFallback({
     expiryMustBePositive: "有効期限は 0 日より大きい必要があります",
   },
   mqBroker: {
+    searchConfigurations: "設定名を検索",
+    configuration: "ブローカー設定",
+    noConfigurations: "一致する設定項目がありません",
+    configName: "名前",
+    configValue: "値",
+    configSource: "ソース",
     title: "Broker クラスター",
     autoRefresh: "自動更新",
     refreshInterval5s: "5秒",

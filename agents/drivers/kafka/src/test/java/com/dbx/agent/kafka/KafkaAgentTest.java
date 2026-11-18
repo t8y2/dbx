@@ -80,6 +80,21 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 
 class KafkaAgentTest {
+    @Test
+    void configEntriesNeverExposeSensitiveValues() {
+        Config config = new Config(Arrays.asList(
+            new ConfigEntry("num.partitions", "4"),
+            new ConfigEntry("ssl.keystore.password", "hidden fixture", ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG,
+                true, true, Collections.emptyList(), ConfigEntry.ConfigType.PASSWORD, null)
+        ));
+        var result = new com.google.gson.Gson().toJsonTree(KafkaAgent.configEntries(config)).getAsJsonObject();
+        var entries = result.getAsJsonObject("configs");
+        assertEquals("4", entries.getAsJsonObject("num.partitions").get("value").getAsString());
+        var password = entries.getAsJsonObject("ssl.keystore.password");
+        assertTrue(password.get("isSensitive").getAsBoolean());
+        assertEquals("STATIC_BROKER_CONFIG", password.get("source").getAsString());
+        assertFalse(result.toString().contains("hidden fixture"));
+    }
     @TempDir
     Path tempDir;
 

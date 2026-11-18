@@ -11536,6 +11536,12 @@ export default withEnglishFallback({
     expiryMustBePositive: "Masa berlaku harus lebih besar dari 0 hari",
   },
   mqBroker: {
+    searchConfigurations: "Cari nama konfigurasi",
+    configuration: "Konfigurasi broker",
+    noConfigurations: "Tidak ada entri konfigurasi yang cocok",
+    configName: "Nama",
+    configValue: "Nilai",
+    configSource: "Sumber",
     title: "Cluster broker",
     autoRefresh: "Segarkan otomatis",
     refreshInterval5s: "5d",

@@ -779,7 +779,7 @@ fn gridfs_upload_date_to_string(value: &DateTime) -> String {
     value.try_to_rfc3339_string().unwrap_or_else(|_| value.timestamp_millis().to_string())
 }
 
-fn gridfs_file_info_from_document(doc: &Document) -> MongoGridFsFileInfo {
+pub fn gridfs_file_info_from_document(doc: &Document) -> MongoGridFsFileInfo {
     let id = gridfs_file_id_to_string(doc.get("_id").unwrap_or(&Bson::Null));
     let filename = doc.get_str("filename").ok().map(str::to_string);
     let length = doc.get_i64("length").or_else(|_| doc.get_i32("length").map(i64::from)).unwrap_or(0);
@@ -803,7 +803,7 @@ fn gridfs_file_info_from_document(doc: &Document) -> MongoGridFsFileInfo {
     MongoGridFsFileInfo { id, filename, length, chunk_size, upload_date, metadata, md5, content_type, aliases }
 }
 
-fn parse_gridfs_file_id(file_id: &str) -> Result<Bson, String> {
+pub fn parse_gridfs_file_id(file_id: &str) -> Result<Bson, String> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(file_id) {
         return Bson::try_from(value).map_err(|e| format!("Invalid GridFS file id: {e}"));
     }
@@ -815,7 +815,7 @@ fn parse_gridfs_file_id(file_id: &str) -> Result<Bson, String> {
     Ok(Bson::String(file_id.to_string()))
 }
 
-fn normalized_gridfs_bucket_name(bucket: &str) -> Result<String, String> {
+pub fn normalized_gridfs_bucket_name(bucket: &str) -> Result<String, String> {
     let bucket = bucket.trim();
     if bucket.is_empty() {
         return Err("GridFS bucket name is required".to_string());
@@ -824,6 +824,19 @@ fn normalized_gridfs_bucket_name(bucket: &str) -> Result<String, String> {
         return Err("Use the GridFS bucket name without the .files or .chunks suffix".to_string());
     }
     Ok(bucket.to_string())
+}
+
+pub fn extract_gridfs_chunk_bytes(doc: &Document) -> Result<Vec<u8>, String> {
+    match doc.get("data") {
+        Some(Bson::Binary(binary)) => Ok(binary.bytes.clone()),
+        Some(Bson::String(string)) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(string)
+                .map_err(|e| format!("Invalid base64 chunk data: {e}"))
+        }
+        _ => Err("GridFS chunk missing valid binary data field".to_string()),
+    }
 }
 
 async fn drop_collection_if_exists(database: &Database, collection_name: &str) -> Result<(), String> {

@@ -66,7 +66,7 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { resolveContextMenuExportSql } from "@/lib/sql/contextMenuExportSql";
-import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, statementParsingDatabaseType, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { statementNavigationTarget, type StatementNavigationDirection } from "@/lib/sql/statementNavigation";
 
@@ -1038,6 +1038,34 @@ function executeAllFromContextMenu() {
   focusEditor();
 }
 
+function executeScriptFromContextPosition() {
+  const currentView = view.value;
+  if (!currentView || props.isExecuting) return;
+  const doc = currentView.state.doc;
+  const position = contextMenuPosition.value ?? currentView.state.selection.main.head;
+  const cache = executableStatementRangeCacheForDoc(executableStatementRangeCache, doc, statementDatabaseType(), sqlStatementParameterOptions());
+  executableStatementRangeCache = cache;
+  const start = cache.ranges.findIndex((range) => range.to >= position);
+  if (start < 0) {
+    toast(t("editor.noExecutableStatementAtCursor"), 3000);
+    return;
+  }
+  const remaining = cache.ranges.slice(start);
+  const line = doc.lineAt(position);
+  const mysql = statementParsingDatabaseType(cache.databaseType, cache.parameterOptions) === "mysql";
+  const from = mysql && line.to <= remaining[0].from && /^\s*delimiter(?:[ \t]+\S.*|;)\s*$/i.test(line.text) ? line.from : remaining[0].from;
+  const sql = doc.sliceString(from);
+  // Slicing can lose an earlier client directive. Only dispatch when the
+  // suffix still has the same statement boundaries as the original script.
+  const ranges = executableStatementRanges(sql, cache.databaseType, cache.parameterOptions);
+  if (ranges.length !== remaining.length || ranges.some((range, index) => from + range.from !== remaining[index].from || from + range.to !== remaining[index].to)) {
+    toast(t("editor.executeScriptBoundaryMismatch"), 5000);
+    return;
+  }
+  emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, { sql, from, to: doc.length }));
+  focusEditor();
+}
+
 function executeInNewResultTabFromContextMenu() {
   if (!canExecuteContextSql.value) return;
   requestExecuteInNewResultTab();
@@ -1356,6 +1384,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   },
   executeFromContextMenu,
   executeAllFromContextMenu,
+  executeScriptFromContextPosition,
   executeInNewResultTabFromContextMenu,
   explainFromContextMenu,
   requestPreviewChanges,
@@ -1410,6 +1439,8 @@ function getContextMenuState(): QueryEditorContextMenuState {
     expandSelectStar: target ? () => void expandSelectStar(target) : undefined,
     canExplain: props.canExplain ?? (canExecuteContextSql.value && !props.readOnly && !props.hideExecutionControls),
     hasContent: (view.value?.state.doc.length ?? 0) > 0,
+    showExecuteScriptFromHere: queryEditorSelectionLanguage() === "sql" && supportsExecutionTargetPicker(statementDatabaseType()),
+    canExecuteScriptFromHere: !props.isExecuting && (view.value?.state.doc.length ?? 0) > 0,
   };
 }
 

@@ -2654,6 +2654,7 @@ export default withEnglishFallback({
     contextMenu: {
       executeSelection: "执行选中 SQL",
       executeCurrent: "执行 SQL",
+      executeScriptFromHere: "从此处执行 SQL 脚本",
       export: "导出",
       exportQueryResultTo: "导出当前查询结果集到 {format}",
       copySelection: "复制选中内容",
@@ -2733,6 +2734,7 @@ export default withEnglishFallback({
       inSelection: "选区内",
     },
     noExecutableStatementAtCursor: "光标所在位置没有可执行语句",
+    executeScriptBoundaryMismatch: "此处依赖前面的 SQL 分隔符或批次边界。请从分隔符所在行开始执行，或选中完整脚本执行。",
     executionPicker: {
       title: "执行目标",
       currentStatement: "当前 SQL",

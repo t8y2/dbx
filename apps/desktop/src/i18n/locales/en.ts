@@ -2722,6 +2722,7 @@ export default {
     contextMenu: {
       executeSelection: "Execute selection",
       executeCurrent: "Execute SQL",
+      executeScriptFromHere: "Execute Script from Here",
       export: "Export",
       exportQueryResultTo: "Export current query result to {format}",
       copySelection: "Copy selection",
@@ -2801,6 +2802,7 @@ export default {
       inSelection: "In selection",
     },
     noExecutableStatementAtCursor: "There is no executable statement at the cursor.",
+    executeScriptBoundaryMismatch: "This position depends on a SQL delimiter or batch boundary. Start at the delimiter line, or select the complete script to execute.",
     executionPicker: {
       title: "Execution Target",
       currentStatement: "Current SQL",

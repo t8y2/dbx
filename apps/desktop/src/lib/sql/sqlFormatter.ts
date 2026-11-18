@@ -2,7 +2,7 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, sqlForma
 import { formatSqlLayout, type SqlLayoutOptions } from "@/lib/sql/layout";
 import { looksLikeXml } from "@/lib/sql/autoFormat";
 import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter";
-import { indentRoutineBlocks } from "@/lib/sql/routineBlockLayout";
+import { indentRoutineBlocks, protectOracleRoutineComments } from "@/lib/sql/routineBlockLayout";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 
 export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "cypher" | "generic";
@@ -474,9 +474,10 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const linesBetweenQueries =
     normalizedSettings.customRulesEnabled && normalizedSettings.emptyLineMode === "remove" ? 0 : normalizedSettings.customRulesEnabled && normalizedSettings.emptyLineMode === "single" && normalizedSettings.linesBetweenQueries === 2 ? 1 : normalizedSettings.linesBetweenQueries;
   const options = sqlFormatterOptions({ ...normalizedSettings, linesBetweenQueries });
+  const routineComments = dialect === "oracle" ? protectOracleRoutineComments(sql, normalizedSettings.tabWidth) : undefined;
   // The external formatter reindents multiline block comments and drops CRs.
   // Preserve affected comments until all formatting and layout passes finish.
-  const commentProtection = protectBlockCommentLineEndings(sql, dialect);
+  const commentProtection = protectBlockCommentLineEndings(routineComments?.sql ?? sql, dialect);
   const emptyLineProtection = emptyLineMode === "remove" ? null : protectCodeEmptyLines(commentProtection.sql, dialect, emptyLineMode === "single");
   const sqlWithProtectedEmptyLines = emptyLineProtection?.sql ?? commentProtection.sql;
   const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sqlWithProtectedEmptyLines) : { sql: sqlWithProtectedEmptyLines, marker: null };
@@ -575,7 +576,10 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   // Routine bodies have no block nodes in sql-formatter's grammar, so the
   // clause layout prints their statements at column 0. Re-indent them once all
   // other passes have run, i.e. on text that is already the final SQL.
-  const applyRoutineBlockLayout = (formatted: string): string => indentRoutineBlocks(formatted, dialect, normalizedSettings.tabWidth, normalizedSettings.useTabs);
+  const applyRoutineBlockLayout = (formatted: string): string => {
+    const indented = indentRoutineBlocks(formatted, dialect, normalizedSettings.tabWidth, normalizedSettings.useTabs);
+    return routineComments?.restore(indented) ?? indented;
+  };
 
   try {
     return applyRoutineBlockLayout(finalizeFormattedSql(await formatOnce(protectedInput.sql)));

@@ -2,8 +2,9 @@ import { computed, nextTick, onActivated, onDeactivated, ref, watch, type Comput
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { chunkLegacyLargeValueRequests, fetchLegacyLargeValueRequestChunk, legacyLargeValueRowPredicate, resolveCapturedLegacyLargeValueCells, type LegacyLargeValueContext } from "@/lib/dataGrid/legacyLargeValueExport";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
@@ -365,7 +366,10 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
       limit: requests.size,
       offset: 0,
-      includeRowId: shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(options.connectionId.value ? rowIdLocatorUnsupported(options.connectionId.value) : false),
+      includeRowId:
+        shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) &&
+        !(options.connectionId.value ? rowIdLocatorUnsupported(options.connectionId.value) : false) &&
+        !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(options.connectionId.value)),
     });
     if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || options.result.value !== sourceResult) return;
     const connection = options.getConnectionConfig(options.connectionId.value!);
@@ -504,7 +508,7 @@ export function useDataGridLargeValues(options: UseDataGridLargeValuesOptions) {
       identifierQuote: options.connectionIdentifierQuote(connectionId),
       serverVersion: connection?.database_info?.productVersion,
       includeDatabaseName: options.includeDatabaseName.value,
-      includeRowId: !!tableMeta && shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(connectionId ? rowIdLocatorUnsupported(connectionId) : false),
+      includeRowId: !!tableMeta && shouldIncludeSyntheticRowId(options.databaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(connectionId ? rowIdLocatorUnsupported(connectionId) : false) && !postgresTupleLocatorUnsupportedEngine(connection),
       timeoutSecs: queryTimeoutSecsForConnection(connection, options.globalQueryTimeoutSecs.value),
     };
   }

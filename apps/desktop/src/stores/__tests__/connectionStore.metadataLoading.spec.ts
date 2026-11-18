@@ -1236,7 +1236,7 @@ describe("connectionStore metadata loading", () => {
     expect(treeCache?.children.map((node) => node.label)).toEqual(["fresh_table"]);
     // The local table index preserves comments, owning schema, and partition
     // parent metadata across persistence.
-    expect(indexCache?.tableSearchIndex?.version).toBe(3);
+    expect(indexCache?.tableSearchIndex?.version).toBe(4);
     expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null, schema: "public", parentSchema: "public", parentName: "parent_table" }]);
     await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null, schema: "public", parent_schema: "public", parent_name: "parent_table" }]);
     // The refreshed index is served from the in-memory cache; refreshing

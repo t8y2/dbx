@@ -147,4 +147,31 @@ describe("sidebar search for view groups (#12901)", () => {
     });
     expect(filtered[0]?.children).toEqual([]);
   });
+
+  it("matches a database-qualified query on flat engines through the node's database (#14316)", () => {
+    // MySQL-style scope: no node schema, index rows stay unattributed (a stamped
+    // schema would break child-id identity with the live tree). The qualifier
+    // still matches via the parent node's own database.
+    const databaseNode: TreeNode = { id: "conn:db", label: "dbx_test", type: "database", connectionId: "conn", database: "dbx_test", isExpanded: true, children: [] };
+    const filtered = filterLocallySearchedTables([databaseNode], {
+      enabled: true,
+      queries: { "conn:db": "dbx_test.users" },
+      indexedResults: {
+        "conn:db": [
+          { name: "users", table_type: "TABLE" },
+          { name: "orders", table_type: "TABLE" },
+        ],
+      },
+    });
+    expect(filtered[0]?.children?.map((node) => node.label)).toEqual(["users"]);
+
+    const otherQualifier = filterLocallySearchedTables([databaseNode], {
+      enabled: true,
+      queries: { "conn:db": "other.users" },
+      indexedResults: {
+        "conn:db": [{ name: "users", table_type: "TABLE" }],
+      },
+    });
+    expect(otherQualifier[0]?.children).toEqual([]);
+  });
 });

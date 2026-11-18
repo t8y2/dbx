@@ -147,7 +147,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.clipboard:read` allows reading the system clipboard from the workbench UI (see [System Clipboard](#system-clipboard)). Clipboard writes need no permission; reads hand user data (passwords, tokens) to plugin code, so they are gated.
 - `host.data:read` allows `window.dbxPlugin.queryData` to run one read-only SQL statement on a connection the user granted to the plugin (see [Read-only Data Queries](#read-only-data-queries)). Every connection needs the user's consent; it never grants writes, DDL, or reconnects.
 - `host.connections:read` allows `window.dbxPlugin.getConnections()` or `window.dbxPlugin.connections.list()` to read secret-free summary metadata for all configured connections (see [Connection Enumeration](#connection-enumeration)).
-- `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
+- `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most 64 origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `host.openUrl:http(s)://host[:port]` permits requesting navigation to up to eight exact origins. It is independent of network access and rejects paths, credentials, wildcards, and trailing slashes. Use the canonical `URL.origin` (omit default ports); bracket IPv6 addresses.
 
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
@@ -609,6 +609,21 @@ async function pasteFromClipboard() {
     // Permission missing or the clipboard read failed: keep the keyboard path.
     return null;
   }
+}
+```
+
+### Copying Images
+
+`window.dbxPlugin.copyImage({ contentType: "image/png" }, data)` writes a PNG to the system clipboard. Pass an `ArrayBuffer`, `Uint8Array`, or Base64 string without a data URL prefix, or pass `{ contentType: "image/png", dataBase64 }` alone. It returns `{ success: true }` only after the host write succeeds; failures reject rather than copying image data as text. Typed arrays send only their view's bytes.
+
+Check `window.dbxPlugin.capabilities?.clipboardImageWrite` first: older hosts and the SDK Dev Host do not provide this capability. Desktop uses the native image clipboard. Web requires a secure context, the browser image clipboard API and browser permission; browsers may also require user activation. Keep a save-image fallback when access is denied. Call from a user-initiated copy action, not in the background. Like `host.copy`, this adds no manifest permission and grants no clipboard read access. The wire method is `host.copyImage`, with `contentType` and `dataBase64` parameters or bytes in the existing binary field.
+
+Only PNG is accepted, limited to 18 MiB encoded bytes (24 MiB Base64) and 16,777,216 pixels. Dimensions are checked from the PNG header rather than caller-supplied `width` / `height`. Prefer binary transfer for larger images to avoid Base64 overhead.
+
+```js
+await window.dbxPlugin.ready;
+if (window.dbxPlugin.capabilities?.clipboardImageWrite) {
+  await window.dbxPlugin.copyImage({ contentType: "image/png" }, pngBytes);
 }
 ```
 

@@ -62,22 +62,25 @@ pub fn diagnostic_tail(text: &str, max_chars: usize) -> String {
     trimmed[start..].to_string()
 }
 
-/// The `USERID` token, always the first argument: `USERID=<user>/<password>@<host>:<port>`.
-/// Password is NOT URL-escaped; Dameng accepts it verbatim. A `/` or `@` inside the user or
-/// password would be parsed as a field separator (the tool parses up to the first `@`), and a
-/// space would end the token early, so callers must reject those up front via
-/// [`userid_field_error`] instead of launching.
+/// The `USERID` token, always the first argument: `USERID=<user>/"<password>"@<host>:<port>`.
+/// The password rides in double quotes: dexp/dimp then accept `/` and `@` inside it
+/// (verified on a live DM8 instance — `P@ssw0rd@123` and `P/ssw0rdX9` both exported
+/// successfully, #14779). A `"` or whitespace in the password still cannot be encoded,
+/// and neither can `/`, `@`, or whitespace in the username (the tool accepts no quoted
+/// username form), so callers must reject those up front via [`userid_field_error`]
+/// instead of launching.
 pub fn userid_token(user: &str, password: &str, host: &str, port: u16) -> String {
-    format!("USERID={user}/{password}@{host}:{port}")
+    format!("USERID={user}/\"{password}\"@{host}:{port}")
 }
 
-/// Returns the field name whose value cannot be encoded in the `USERID` token
-/// (`/` separates user/password, `@` starts the host part, a space ends the token),
-/// or `None` if both are safe to pass.
+/// Returns the field name whose value cannot be encoded in the `USERID` token.
+/// The quoted password segment tolerates `/` and `@` but not `"` or whitespace;
+/// the username has no quoted form, so `/`, `@`, and whitespace all stay fatal.
 pub fn userid_field_error(user: &str, password: &str) -> Option<&'static str> {
-    [(user, "username"), (password, "password")].into_iter().find_map(|(field, name)| {
-        (field.contains('/') || field.contains('@') || field.contains(char::is_whitespace)).then_some(name)
-    })
+    if user.contains('/') || user.contains('@') || user.contains(char::is_whitespace) {
+        return Some("username");
+    }
+    (password.contains('"') || password.contains(char::is_whitespace)).then_some("password")
 }
 
 /// Render a FILE/LOG path for the command line.
@@ -258,14 +261,24 @@ mod tests {
 
     #[test]
     fn userid_is_first_and_carries_credentials() {
-        assert_eq!(userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236), "USERID=SYSDBA/Dameng123@127.0.0.1:5236");
+        assert_eq!(
+            userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236),
+            "USERID=SYSDBA/\"Dameng123\"@127.0.0.1:5236"
+        );
+        assert_eq!(
+            userid_token("ATUSER", "P@ssw0rd@123", "127.0.0.1", 5236),
+            "USERID=ATUSER/\"P@ssw0rd@123\"@127.0.0.1:5236"
+        );
     }
 
     #[test]
     fn userid_field_error_flags_breaking_chars_in_either_field() {
         assert_eq!(userid_field_error("SYSDBA", "Dameng123"), None);
-        assert_eq!(userid_field_error("SYSDBA", "p@ss"), Some("password"));
-        assert_eq!(userid_field_error("SYSDBA", "p/ss"), Some("password"));
+        // The quoted password segment encodes / and @ (live DM8 verified, #14779).
+        assert_eq!(userid_field_error("SYSDBA", "p@ss"), None);
+        assert_eq!(userid_field_error("SYSDBA", "p/ss"), None);
+        // A quote would close the password segment and whitespace stays unencodable.
+        assert_eq!(userid_field_error("SYSDBA", "p\"ss"), Some("password"));
         assert_eq!(userid_field_error("user@dba", "Dameng123"), Some("username"));
         assert_eq!(userid_field_error("us/er", "Dameng123"), Some("username"));
     }
@@ -307,7 +320,19 @@ mod tests {
         r.file_path = r"C:\Users\John Smith\dump.dmp".to_string();
         let argv = build_command(&r, "/tmp/task.par");
         assert!(argv.contains(&r"FILE=C:\Users\John Smith\dump.dmp".to_string()), "got: {argv:?}");
-        assert!(!argv.iter().any(|arg| arg.contains('"')), "quotes are invalid in FILE/LOG: {argv:?}");
+        // Quotes are invalid in FILE/LOG paths (the tool rejects them), but the
+        // USERID password segment is deliberately quoted (#14779).
+        assert!(
+            !argv
+                .iter()
+                .filter(|arg| arg.starts_with("FILE=") || arg.starts_with("LOG=") || arg.starts_with("PARFILE="))
+                .any(|arg| arg.contains('"')),
+            "quotes are invalid in FILE/LOG: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|arg| arg.starts_with("USERID=") && arg.contains("/\"")),
+            "USERID must quote the password: {argv:?}"
+        );
     }
 
     #[test]
@@ -363,7 +388,7 @@ mod tests {
     fn command_puts_userid_first_then_parfile_and_paths() {
         let argv = build_command(&req(DamengDumpKind::Export), "/tmp/dbx_dcss.par");
         assert_eq!(argv[0], "/opt/dmdbms/bin/dexp");
-        assert_eq!(argv[1], "USERID=SYSDBA/Dameng123@127.0.0.1:5236");
+        assert_eq!(argv[1], "USERID=SYSDBA/\"Dameng123\"@127.0.0.1:5236");
         assert_eq!(argv[2], "PARFILE=/tmp/dbx_dcss.par");
         assert_eq!(argv[3], "FILE=/tmp/dbx_dcss.dmp");
         assert_eq!(argv[4], "LOG=/tmp/dbx_dcss.log");

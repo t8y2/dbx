@@ -182,6 +182,22 @@ const updatingButtonText = computed(() => {
   }
   return t("updates.updating");
 });
+
+/**
+ * "Update all" runs several categories in sequence and only the driver batch
+ * reports a total, so the bar is determinate exactly when that count exists and
+ * indeterminate otherwise instead of freezing at 0%.
+ */
+const updateAllProgress = computed(() => {
+  if (props.driverBatchTotal <= 0) return null;
+  return Math.min(100, Math.round((props.driverBatchCompleted / props.driverBatchTotal) * 100));
+});
+/**
+ * A download with no Content-Length reports `null`; the bar then pulses at a
+ * fixed width so the user still sees motion, which is what the old disabled
+ * "下载中 0%" button failed to convey.
+ */
+const downloadProgressWidth = computed(() => (props.downloadProgress === null ? null : Math.max(2, Math.min(100, props.downloadProgress))));
 // Component update tasks are owned by the app-level composable. Closing the
 // dialog only leaves them running in the background; replacing an app update
 // is the only operation that must keep the modal open.
@@ -340,6 +356,7 @@ watch(
     <DialogContent
       class="sm:max-w-[700px]"
       :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
+      portal-class="place-items-start justify-items-center pt-[max(24px,calc((var(--dbx-viewport-height)-720px)/2))]"
       :show-close-button="!isCloseBlocked"
       @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="
@@ -353,7 +370,7 @@ watch(
         }
       "
     >
-      <DialogHeader class="border-b py-4 pl-5 pr-12">
+      <DialogHeader class="shrink-0 border-b py-4 pl-5 pr-12">
         <div class="flex items-center justify-between gap-4">
           <DialogTitle class="flex min-w-0 items-center gap-2">
             <span>{{ t("updates.centerTitle") }}</span>
@@ -365,10 +382,22 @@ watch(
             {{ t("updates.updateAll") }}
           </Button>
         </div>
+        <!-- "Update all" used to be a bare spinner: no target, no position in the
+             queue. Say what is running and how far the batch got. -->
+        <div v-if="props.isUpdatingAll" data-update-all-progress class="mt-2.5 space-y-1">
+          <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span class="truncate">{{ updatingButtonText }}</span>
+            <span v-if="updateAllProgress !== null" class="shrink-0 tabular-nums">{{ updateAllProgress }}%</span>
+          </div>
+          <div class="h-1 w-full overflow-hidden rounded-full bg-muted">
+            <div v-if="updateAllProgress !== null" class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${updateAllProgress}%` }" />
+            <div v-else class="h-full w-1/2 animate-pulse rounded-full bg-primary/70" />
+          </div>
+        </div>
       </DialogHeader>
 
-      <div class="flex min-h-0 flex-1 flex-col">
-        <div v-if="tabs.length" class="px-5 pb-2.5 pt-1.5">
+      <div class="flex min-h-0 flex-auto flex-col">
+        <div v-if="tabs.length" class="shrink-0 px-5 pb-2.5 pt-1.5">
           <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1 overflow-x-auto">
             <button
               v-for="tab in tabs"
@@ -388,7 +417,7 @@ watch(
           </div>
         </div>
 
-        <div data-update-scroll-region class="min-h-0 flex-1 overflow-auto px-5 py-4 text-sm">
+        <div :key="selectedTab" data-update-scroll-region class="min-h-0 flex-auto overflow-auto px-5 py-4 text-sm">
           <ChangelogPanel v-if="selectedTab === 'changelog'" :checking-updates="checkingUpdates || isInstallingUpdate" @check-updates="emit('check-updates')" />
           <template v-else-if="selectedTab === 'app'">
             <div class="space-y-3">
@@ -546,7 +575,7 @@ watch(
           </template>
         </div>
 
-        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex items-center gap-1.5 self-start sm:mr-auto sm:self-center">
             <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
             <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
@@ -575,10 +604,13 @@ watch(
               </Button>
               <template v-else-if="isDownloadingUpdate">
                 <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
-                <Button class="w-52 shrink-0 tabular-nums" disabled>
-                  <Loader2 class="h-4 w-4 animate-spin" />
-                  {{ t("updates.downloading", { progress: downloadProgress ?? 0 }) }}
-                </Button>
+                <div class="flex w-52 shrink-0 flex-col gap-1">
+                  <span class="self-end text-xs tabular-nums text-muted-foreground">{{ downloadProgress === null ? t("updates.updating") : t("updates.downloading", { progress: downloadProgress }) }}</span>
+                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted" data-download-progress-track>
+                    <div v-if="downloadProgressWidth !== null" data-download-progress-fill class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${downloadProgressWidth}%` }" />
+                    <div v-else data-download-progress-indeterminate class="h-full w-1/2 animate-pulse rounded-full bg-primary/70" />
+                  </div>
+                </div>
               </template>
               <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('install-downloaded')">{{ t("updates.restartAndUpdate") }}</Button>
               <Button v-else-if="!checkingUpdates" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t(updateCheckFailed ? "updates.retryDownload" : "updates.downloadInBackground") }}</Button>
@@ -591,7 +623,7 @@ watch(
           </template>
         </DialogFooter>
 
-        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <template v-if="isAnyComponentUpdating">
             <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
             <Button class="shrink-0" disabled>

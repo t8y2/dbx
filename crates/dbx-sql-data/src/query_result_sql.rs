@@ -403,7 +403,14 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
             }
             ok(add_rownum_limit(&statement, safe_limit, safe_offset))
         }
-        TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
+        TablePaginationStrategy::AgentMaxRows
+        | TablePaginationStrategy::TeradataTop
+        | TablePaginationStrategy::Unbounded => {
+            // TeradataTop cannot appear for user queries (`pagination_strategy` routes
+            // Teradata user queries to AgentMaxRows, #14604), so the statement reaches
+            // the server exactly as written here too.
+            ok(format!("{statement};"))
+        }
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
             // Kingbase SQL Server compatibility mode and Xugu accept TOP as a real clause.
@@ -3429,6 +3436,23 @@ mod tests {
             });
             assert!(!paginated.ok, "{sql}");
         }
+    }
+
+    /// #14604: Teradata has no `LIMIT` clause, so a rewritten page is a syntax
+    /// error ("expected something between ... and the 'LIMIT' keyword"). The
+    /// statement has to reach the server exactly as the user wrote it.
+    #[test]
+    fn teradata_user_queries_reach_the_server_without_a_limit_clause() {
+        let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM employee".into(),
+            database_type: Some(DatabaseType::Teradata),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(paginated.ok, "Teradata user queries must not need a rewrite");
+        let sql = paginated.sql.expect("the untouched statement is returned");
+        assert!(!sql.to_uppercase().contains("LIMIT"), "{sql}");
+        assert_eq!(sql.trim_end_matches(';'), "SELECT id, name FROM employee");
     }
 
     #[test]

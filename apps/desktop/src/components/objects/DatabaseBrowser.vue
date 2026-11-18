@@ -2,7 +2,7 @@
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, Database, FilePlus2, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -11,10 +11,13 @@ import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
+import TableStructurePeekDialog from "@/components/editor/TableStructurePeekDialog.vue";
+import { useTableStructurePeek } from "@/composables/useTableStructurePeek";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -76,6 +79,7 @@ const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
+const { target: tableStructureTarget, columns: tableStructureColumns, loading: tableStructureLoading, error: tableStructureError, open: openTableStructurePeek, close: closeTableStructurePeek } = useTableStructurePeek();
 const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
@@ -233,12 +237,19 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         },
         icon: Copy,
       },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      {
+        sidebarActionId: "contextMenu.newQuery",
+        label: t("contextMenu.newQuery"),
+        action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }),
+        icon: FilePlus2,
+        shortcut: settingsStore.editorSettings.shortcuts.newQuery,
+      },
       { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
       { label: "", separator: true },
       {
         label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
         action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
+        disabled: isDefault && !canClearDefaultDatabase(props.connection.db_type),
         icon: Database,
       },
       { label: "", separator: true },
@@ -264,6 +275,11 @@ function removeUnsupportedDatabaseItems(items: ContextMenuItem[]): ContextMenuIt
 
 function openDatabaseFromSidebar(node: TreeNode) {
   if (node.database) openDatabase(node.database);
+}
+
+function openSidebarTableStructure(node: TreeNode) {
+  if (!node.connectionId) return;
+  void openTableStructurePeek(node);
 }
 
 function columnLabel(key: DatabaseBrowserColumnKey): string {
@@ -842,7 +858,26 @@ defineExpose({ focusSearch, refresh });
       </div>
     </div>
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
+    <SidebarTreeRuntimeHost
+      ref="sidebarRuntimeHost"
+      :node="sidebarRuntimeNode"
+      :depth="0"
+      @open-danger-dialog="openSidebarDangerDialog"
+      @open-data="openDatabaseFromSidebar"
+      @open-ddl="openDatabaseFromSidebar"
+      @peek-structure="openSidebarTableStructure"
+      @open-dialog-controller="sidebarDialogController = $event"
+    />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
+    <TableStructurePeekDialog
+      v-if="tableStructureTarget"
+      :table-name="tableStructureTarget.objectName || tableStructureTarget.label"
+      :schema="tableStructureTarget.schema"
+      :columns="tableStructureColumns"
+      :loading="tableStructureLoading"
+      :error="tableStructureError"
+      :insert-enabled="false"
+      @close="closeTableStructurePeek"
+    />
   </section>
 </template>

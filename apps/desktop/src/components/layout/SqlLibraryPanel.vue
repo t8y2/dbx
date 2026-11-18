@@ -4,7 +4,6 @@ import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ArrowDownAZ,
-  ArrowDownWideNarrow,
   ArrowRightLeft,
   ArrowUpAZ,
   ArrowUpDown,
@@ -15,24 +14,28 @@ import {
   Clock,
   Database,
   Download,
-  FilePlus,
+  FilePlus2,
   FileText,
   FolderCog,
   FolderClosed,
   FolderOpen,
   FolderPlus,
+  GripVertical,
   Layers,
   Library,
   Loader2,
   LocateFixed,
+  MoreHorizontal,
   Pencil,
   Play,
   Trash2,
+  Settings,
   Upload,
   X,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useSqlPanelSearchMode } from "@/composables/useSqlPanelSearchMode";
 import SidebarLocateButton from "@/components/sidebar/SidebarLocateButton.vue";
 import SqlPanelSearch from "@/components/layout/SqlPanelSearch.vue";
@@ -42,6 +45,7 @@ import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.v
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import SqlLibrarySearchSnippet from "@/components/layout/SqlLibrarySearchSnippet.vue";
+import SqlFileInteractionSettingsDialog from "@/components/layout/SqlFileInteractionSettingsDialog.vue";
 import type { SavedSqlLineMatch } from "@/lib/savedSql/savedSqlSearch";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -53,6 +57,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
+import { saveSqlFileOpenMode, useSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
@@ -61,7 +66,7 @@ import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
 import { getSavedSqlExpandedFolderIds, saveSavedSqlExpandedFolderIds } from "@/lib/savedSql/savedSqlUiState";
 import { ensureSqlExtension, extractCandidateDatabaseFromName, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
-import { buildSavedSqlTreeRows, savedSqlFolderBranchMatches, type SavedSqlTreeRow } from "@/lib/savedSql/savedSqlTreeRows";
+import { buildSavedSqlTreeRows, savedSqlFolderBranchMatches, type SavedSqlTreeRow, type SavedSqlTreeSortMode } from "@/lib/savedSql/savedSqlTreeRows";
 import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { uniqueSavedSqlExportFileName, exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { orderedListRangeAnchorIndex, orderedListSelectionIntent } from "@/lib/selection/orderedListSelection";
@@ -103,6 +108,7 @@ const searchMode = useSqlPanelSearchMode("library");
 const loadingSearchContent = ref(false);
 const unloadedSearchFiles = computed(() => savedSqlStore.allFiles.filter((file) => file.sqlLoaded === false));
 const contentSearchActive = computed(() => searchMode.value === "content" && !!searchQuery.value);
+let lastClickedKey: string | null = null;
 
 async function loadSearchContent() {
   if (searchInputPending.value || loadingSearchContent.value || !contentSearchActive.value || unloadedSearchFiles.value.length === 0) return;
@@ -119,17 +125,47 @@ async function loadSearchContent() {
 watch(
   () => [searchMode.value, searchQuery.value, searchInputPending.value, unloadedSearchFiles.value.map((file) => file.id).join("\n")],
   () => {
+    lastClickedKey = null;
     void loadSearchContent();
   },
 );
 
-// Sort mode: "folder" (manual sibling order) or "date" (updated date among siblings)
-const sortMode = ref<"folder" | "date">("folder");
+const sortMode = ref<SavedSqlTreeSortMode>("folder");
+const sortMenuOpen = ref(false);
+const sortOptions = computed(
+  () =>
+    [
+      { mode: "folder", label: t("sqlFileTree.sortManual"), icon: GripVertical },
+      { mode: "name-asc", label: t("sqlLibrary.sortNameAsc"), icon: ArrowDownAZ },
+      { mode: "name-desc", label: t("sqlLibrary.sortNameDesc"), icon: ArrowUpAZ },
+      { mode: "created", label: t("sqlLibrary.sortByDateCreated"), icon: Calendar },
+      { mode: "date", label: t("sqlLibrary.sortByDate"), icon: Clock },
+    ] as const,
+);
+const currentSortOption = computed(() => sortOptions.value.find((option) => option.mode === sortMode.value)!);
+const interactionSettingsOpen = ref(false);
+const openMode = useSqlFileOpenMode();
+const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
+
+function openInteractionSettings() {
+  openModeDraft.value = openMode.value;
+  interactionSettingsOpen.value = true;
+}
+
+function saveInteractionSettings() {
+  openMode.value = openModeDraft.value;
+  saveSqlFileOpenMode(openMode.value);
+  interactionSettingsOpen.value = false;
+}
 
 function getConnectionLabel(connectionId: string) {
   if (!connectionId) return t("sqlLibrary.unassociated");
   const conn = connectionStore.connections.find((c) => c.id === connectionId);
   return conn?.name || t("sqlLibrary.deletedConnection");
+}
+
+function connectionIconColor(connectionId: string) {
+  return connectionStore.getConfig(connectionId)?.color || undefined;
 }
 
 function folderPath(folder: SavedSqlFolder) {
@@ -165,7 +201,7 @@ async function exportSingleFile(file: SavedSqlFile) {
   try {
     const loadedFile = await savedSqlStore.ensureFileContent(file.id);
     if (!loadedFile) return;
-    const result = await exportSavedSqlFileContent(loadedFile.sql, file.name);
+    const result = await exportSavedSqlFileContent(loadedFile.sql, loadedFile.name);
     if (result === "saved") toast(t("sqlLibrary.exported"), 2000);
   } catch (e: any) {
     toast(t("sqlLibrary.exportFailed", { message: e?.message || String(e) }), 5000);
@@ -552,6 +588,7 @@ const libraryTree = ref<HTMLElement | null>(null);
 const currentSavedSqlFile = computed(() => (activeSavedSqlId.value ? savedSqlStore.getFile(activeSavedSqlId.value) : undefined));
 
 async function locateFile(fileId: string) {
+  lastClickedKey = null;
   const file = savedSqlStore.getFile(fileId);
   if (!file) return;
   if (searchInputPending.value || !treeRows.value.some((row) => row.type === "file" && row.file.id === file.id)) {
@@ -767,6 +804,7 @@ function clearSelection() {
 
 function clearPanelSelection() {
   clearSelection();
+  lastClickedKey = null;
   activeItemId.value = null;
   activeItemType.value = null;
 }
@@ -1023,6 +1061,7 @@ async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode,
 
 function handleMatchClick(file: SavedSqlFile, match: SavedSqlLineMatch) {
   if (suppressNextRowClick.value) return;
+  lastClickedKey = null;
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "file" && item.id === file.id);
   if (currentIndex >= 0) {
     clearSelection();
@@ -1040,6 +1079,9 @@ function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
   // Find current file index in unified list
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "file" && item.id === file.id);
   if (currentIndex < 0) return;
+  const itemKey = `file:${file.id}`;
+  const repeatedClick = event.detail > 1 && lastClickedKey === itemKey;
+  lastClickedKey = itemKey;
 
   if (selectionIntent === "range") {
     event.preventDefault();
@@ -1062,8 +1104,15 @@ function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
     clearSelection();
     lastClickedItemIndex.value = currentIndex;
     setActiveItem(file.id, "file");
-    openFile(file);
+    if (openMode.value === "single" && !repeatedClick) void openFile(file);
   }
+}
+
+function handleFileDoubleClick(file: SavedSqlFile, event: MouseEvent) {
+  event.stopPropagation();
+  if ((event.target as HTMLElement | null)?.closest("button, input, select, textarea, [contenteditable='true']")) return;
+  if (openMode.value !== "double" || orderedListSelectionIntent(event) !== "single" || event.altKey) return;
+  void openFile(file);
 }
 
 function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
@@ -1074,7 +1123,9 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
   // Find current folder index in unified list
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "folder" && item.id === folder.id);
   if (currentIndex < 0) return;
-
+  const itemKey = `folder:${folder.id}`;
+  const repeatedClick = event.detail > 1 && lastClickedKey === itemKey;
+  lastClickedKey = itemKey;
   if (selectionIntent === "range") {
     event.preventDefault();
     event.stopPropagation();
@@ -1096,8 +1147,15 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
     clearSelection();
     lastClickedItemIndex.value = currentIndex;
     setActiveItem(folder.id, "folder");
-    toggleFolder(folder.id);
+    if (openMode.value === "single" && !repeatedClick) toggleFolder(folder.id);
   }
+}
+
+function handleFolderDoubleClick(folder: SavedSqlFolder, event: MouseEvent) {
+  event.stopPropagation();
+  if ((event.target as HTMLElement | null)?.closest("button, input, select, textarea, [contenteditable='true']")) return;
+  if (openMode.value !== "double" || orderedListSelectionIntent(event) !== "single" || event.altKey) return;
+  toggleFolder(folder.id);
 }
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
@@ -1272,7 +1330,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     const hasSortOptions = unfiledFiles.length > 1 || rootFolders.length > 1 || savedSqlStore.allFiles.length > 1;
     return [
       { label: t("savedSql.newFolder"), action: openNewFolderInput, icon: FolderPlus },
-      { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus },
+      { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus2 },
       {
         label: t("savedSql.pasteFile"),
         action: () => pasteLibraryFiles("panel"),
@@ -1363,7 +1421,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   const directFolders = childFolders(target.id);
   return [
     { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
-    { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
+    { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus2 },
     {
       label: t("savedSql.pasteFile"),
       action: () => pasteLibraryFiles(target),
@@ -1531,6 +1589,7 @@ async function performDrop() {
   const targetType = dragState.targetType;
   const dropPosition = dragState.dropPosition;
   if (!draggedId || !draggedType || !targetId || !targetType || !dropPosition) return;
+  if (sortMode.value !== "folder" && dropPosition !== "inside") return;
 
   if (draggedType === "folder" && targetType === "folder" && dropPosition !== "inside") {
     await savedSqlStore.reorderFolders(draggedId, targetId, dropPosition);
@@ -1614,6 +1673,7 @@ function updateDropTarget(event: MouseEvent, targetId: string, targetType: DragI
     nextPosition = "inside";
   }
 
+  if (sortMode.value !== "folder" && nextPosition !== "inside") nextPosition = null;
   dragState.targetId = nextPosition ? targetId : null;
   dragState.targetType = nextPosition ? targetType : null;
   dragState.dropPosition = nextPosition;
@@ -1663,29 +1723,52 @@ defineExpose({
           <ChevronsDownUp class="h-3 w-3" />
         </Button>
       </LightTooltip>
-      <LightTooltip :text="sortMode === 'folder' ? t('sqlLibrary.sortByDate') : t('sqlLibrary.sortByFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
-          <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
-        </Button>
-      </LightTooltip>
+      <DropdownMenu v-model:open="sortMenuOpen">
+        <LightTooltip :text="currentSortOption.label" side="bottom" :delay="0" :close-delay="0" nowrap :disabled="sortMenuOpen">
+          <DropdownMenuTrigger as-child>
+            <Button data-sql-library-sort-btn variant="ghost" size="icon" class="h-5 w-5" :aria-label="currentSortOption.label">
+              <component :is="currentSortOption.icon" class="h-3 w-3" :class="{ 'text-primary': sortMode !== 'folder' }" />
+            </Button>
+          </DropdownMenuTrigger>
+        </LightTooltip>
+        <DropdownMenuContent align="end" class="w-max max-w-[calc(100vw-16px)]">
+          <DropdownMenuRadioGroup :model-value="sortMode" @update:model-value="sortMode = $event as SavedSqlTreeSortMode">
+            <DropdownMenuRadioItem v-for="option in sortOptions" :key="option.mode" :value="option.mode">
+              <component :is="option.icon" class="h-3.5 w-3.5" />
+              {{ option.label }}
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentSavedSqlFile" @locate="locateCurrentFile" />
       </LightTooltip>
-      <LightTooltip :text="t('savedSql.newFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="openNewFolderInput()">
-          <FolderPlus class="h-3 w-3" />
+      <LightTooltip :text="t('sqlFileTree.panelSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="openInteractionSettings">
+          <Settings class="h-3 w-3" />
         </Button>
       </LightTooltip>
-      <LightTooltip :text="t('sqlLibrary.importDirectory')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="importDirectoryIntoLibrary()">
-          <Download class="h-3 w-3" />
-        </Button>
-      </LightTooltip>
-      <LightTooltip :text="t('sqlLibrary.exportLibrary')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="exportFolderContents()">
-          <Upload class="h-3 w-3" />
-        </Button>
-      </LightTooltip>
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('common.more')" :title="t('common.more')">
+            <MoreHorizontal class="h-3.5 w-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="w-44">
+          <DropdownMenuItem @select="openNewFolderInput()">
+            <FolderPlus class="h-3.5 w-3.5" />
+            {{ t("savedSql.newFolder") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem @select="importDirectoryIntoLibrary()">
+            <Download class="h-3.5 w-3.5" />
+            {{ t("sqlLibrary.importDirectory") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem @select="exportFolderContents()">
+            <Upload class="h-3.5 w-3.5" />
+            {{ t("sqlLibrary.exportLibrary") }}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <LightTooltip :text="t('common.close')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
           <X class="h-3 w-3" />
@@ -1735,6 +1818,7 @@ defineExpose({
                 @mousemove="updateDropTarget($event, row.folder.id, 'folder')"
                 @mouseleave="clearDropTarget(row.folder.id)"
                 @click="handleFolderClick(row.folder, $event)"
+                @dblclick.stop="handleFolderDoubleClick(row.folder, $event)"
                 @contextmenu.capture="contextTarget = row.folder"
                 @contextmenu.prevent="
                   contextTarget = row.folder;
@@ -1743,7 +1827,7 @@ defineExpose({
               >
                 <div v-if="showDropBefore(row.folder.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                 <div v-if="showDropAfter(row.folder.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
+                <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" :style="{ color: connectionIconColor(row.folder.connectionId) }" />
                 <template v-if="isRenamingFolder(row.folder.id)">
                   <input
                     :ref="setRenameInputRef"
@@ -1787,6 +1871,7 @@ defineExpose({
                   @mousemove="updateDropTarget($event, row.file.id, 'file')"
                   @mouseleave="clearDropTarget(row.file.id)"
                   @click="handleFileClick(row.file, $event)"
+                  @dblclick.stop="handleFileDoubleClick(row.file, $event)"
                   @contextmenu.capture="contextTarget = row.file"
                   @contextmenu.prevent="
                     contextTarget = row.file;
@@ -1795,7 +1880,7 @@ defineExpose({
                 >
                   <div v-if="showDropBefore(row.file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(row.file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
+                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" :style="{ color: connectionIconColor(row.file.connectionId) }" />
                   <span v-if="isFileDirty(row.file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
                   <template v-if="isRenamingFile(row.file.id)">
                     <input
@@ -1832,6 +1917,8 @@ defineExpose({
         </template>
       </CustomContextMenu>
     </div>
+
+    <SqlFileInteractionSettingsDialog v-model:open="interactionSettingsOpen" v-model:open-mode="openModeDraft" open-mode-id="sql-library-open-mode" @save="saveInteractionSettings" />
 
     <Dialog v-model:open="showDeleteConfirm">
       <DialogContent class="sm:max-w-[380px]">

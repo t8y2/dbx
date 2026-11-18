@@ -184,8 +184,22 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     const target = selected ?? getTargetCompletion(view);
     const completionType = target?.type;
     if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
+    if (!target) return false;
     // Batch-selection rows own Space for checkbox toggling; this Prec.highest binding outranks their keymap.
     if (target?.dbxBatchColumnSelection || target?.dbxBatchColumnSelectionAction) return false;
+    // Space confirms what the user is typing, not an unrelated fuzzy match the popup
+    // happened to rank first (#14698): typing the JOIN keyword `on` opens the list with
+    // fuzzy matches like `tbml.FMEMONICCODE`, and committing the first row silently
+    // rewrites the statement. Only the segment after the last `.` is compared, so
+    // qualified columns (`tbml.` + `f` → `tbml.FMEMONICCODE`), an empty segment right
+    // after a dot, the original `select␣` → `SELECT` flow, and completions without a
+    // textual label keep accepting.
+    const typedLine = view.state.doc.lineAt(view.state.selection.main.head);
+    const typedSegment = /[\p{L}\p{N}_$#]+$/u.exec(typedLine.text.slice(0, view.state.selection.main.head - typedLine.from))?.[0] ?? "";
+    const completionText = typeof target.apply === "string" && target.apply ? target.apply : typeof target.label === "string" ? target.label : "";
+    const completionSegment = completionText.split(".").pop() ?? "";
+    const typedWordContinues = typedSegment === "" || completionSegment === "" || completionSegment.toLowerCase().startsWith(typedSegment.toLowerCase());
+    if (!typedWordContinues) return false;
     const accepted = selected ? (codeMirrorRuntime.codeMirrorAcceptCompletion?.(view) ?? false) : acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion);
     if (!accepted) return false;
 

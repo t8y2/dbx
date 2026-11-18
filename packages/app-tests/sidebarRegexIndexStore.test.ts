@@ -284,8 +284,9 @@ function connectionNodeWithTableGroups(...databases: string[]): { root: TreeNode
 
 function indexEnvelope(entries: Array<{ name: string; tableType: string; schema?: string }>, cachedAt = Date.now()) {
   return encodeSchemaTreeCache<TreeNode[]>([], cachedAt, {
-    // Version 3 includes both the owning schema and partition parent metadata.
-    version: 3,
+    // Version 4 keeps schema-less scopes unattributed (the stamped database
+    // name duplicated flat-engine tables in the search merge).
+    version: 4,
     complete: true,
     indexedAt: new Date(cachedAt).toISOString(),
     entries,

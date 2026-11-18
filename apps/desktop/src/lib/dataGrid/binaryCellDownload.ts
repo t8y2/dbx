@@ -58,6 +58,27 @@ export function binaryCellBytesToHexValue(bytes: Uint8Array): string {
   return hex;
 }
 
+export const BINARY_COLUMN_FORMATS = ["binary-hex", "binary-text", "binary-uuid", "binary-uuid-swapped"] as const;
+export type BinaryColumnFormat = (typeof BINARY_COLUMN_FORMATS)[number];
+
+export function isBinaryColumnFormat(value: unknown): value is BinaryColumnFormat {
+  return BINARY_COLUMN_FORMATS.some((format) => format === value);
+}
+
+export function formatBinaryColumnValue(value: CellValue, format: BinaryColumnFormat): string | undefined {
+  const bytes = parseBinaryCellBytes(value, "binary");
+  if (!bytes) return undefined;
+  const hex = binaryCellBytesToHexValue(bytes);
+  if (format === "binary-hex") return hex;
+  if (format === "binary-text") return printableUtf8Text(bytes) ?? hex;
+  if (bytes.length !== 16) return hex;
+  if (format === "binary-uuid") return decodeBinaryUuidText(hex, "uuid") ?? hex;
+  // MySQL UUID_TO_BIN(uuid, 1) stores the time fields high, middle, low.
+  const swapped = hex.slice(2);
+  const standard = swapped.slice(8, 16) + swapped.slice(4, 8) + swapped.slice(0, 4) + swapped.slice(16);
+  return decodeBinaryUuidText(`0x${standard}`, "uuid") ?? hex;
+}
+
 function openBinaryCellFileInBrowser(): Promise<Uint8Array | undefined> {
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");
@@ -116,6 +137,8 @@ const UUID_HEX_ASCII_RE = /^(?:0[xX])([0-9a-fA-F]{72})$/;
 const UUID_HEX_RAW_RE = /^(?:0[xX])([0-9a-fA-F]{32})$/;
 const UUID_CANONICAL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
+const ORACLE_RAW_TYPE_RE = /^raw(?:\s*\(\s*\d+\s*\))?$/i;
+const MAX_INLINE_ORACLE_RAW_BYTES = 16;
 const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
 const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
 const VARBINARY_TYPE_RE = /^varbinary(?:\b|\()/i;
@@ -263,6 +286,10 @@ export function binaryCellDisplayText(value: unknown, columnType?: string, origi
   if (uuidText !== null) return uuidText;
   const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || !isBinaryCellColumnType(columnType)) return null;
+  // SYS_GUID() is a complete 16-byte RAW value and fits as inline hex.
+  if (databaseType === "oracle" && ORACLE_RAW_TYPE_RE.test(columnType?.trim() ?? "") && bytes.length > 0 && bytes.length <= MAX_INLINE_ORACLE_RAW_BYTES && (originalBytes === undefined || originalBytes === bytes.length)) {
+    return binaryCellBytesToHexValue(bytes);
+  }
   if (isBinaryCellTextPreviewColumn(columnType, databaseType)) {
     const text = binaryCellTextPreviewBytes(bytes, columnType, databaseType);
     if (text !== null) return text;

@@ -477,6 +477,56 @@ describe("connectionStore database info", () => {
     expect(useLogicalTables).toBe(true);
   });
 
+  it("refreshes the database list after the detected MySQL server version changes", async () => {
+    const config = {
+      ...mysqlConnection(),
+      database_info: { productName: "MySQL", productVersion: "5.7.26" },
+    };
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    let useNewServer = false;
+    const listDatabases = vi.fn().mockImplementation(async () => [{ name: useNewServer ? "new_db" : "old_db" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listObjects: vi.fn().mockResolvedValue([]),
+      listTables: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo: vi.fn().mockImplementation(async () => {
+        useNewServer = true;
+      }),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    const databaseLabels = () => store.treeNodes[0]?.children?.filter((node) => node.type === "database").map((node) => node.label);
+    expect(databaseLabels()).toEqual(["old_db"]);
+
+    resolveDatabaseInfo({ productName: "MySQL", productVersion: "8.0.12" });
+
+    await vi.waitFor(() => {
+      expect(store.getConfig(config.id)?.database_info?.productVersion).toBe("8.0.12");
+      expect(databaseLabels()).toEqual(["new_db"]);
+    });
+    expect(listDatabases).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a successful connection when optional metadata refresh fails", async () => {
     const config = mysqlConnection();
 

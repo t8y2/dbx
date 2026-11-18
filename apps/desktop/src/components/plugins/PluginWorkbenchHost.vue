@@ -6,6 +6,7 @@ import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard, readImageFromClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { canWritePluginClipboardImage, writePluginClipboardImage } from "@/lib/plugins/pluginClipboardImage";
 import {
   PluginHostBridge,
   pluginSandboxDocument,
@@ -689,6 +690,7 @@ function createBridge() {
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       openUrl: (url) => (urlDialog.value ? urlDialog.value.request(url) : Promise.reject(new Error("Host URL consent is unavailable"))),
       copyText: (_pluginId, text) => copyToClipboard(text),
+      copyImage: canWritePluginClipboardImage() ? (_pluginId, data) => writePluginClipboardImage(data) : undefined,
       // Permission-gated in the bridge (host.clipboard:read); the helper
       // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
       clipboardRead: (_pluginId) => readTextFromClipboard(),

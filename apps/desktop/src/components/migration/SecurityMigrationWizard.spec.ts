@@ -5,6 +5,7 @@ import { useMigrationStore } from "@/stores/migrationStore";
 import Wizard from "./SecurityMigrationWizard.vue";
 const mocks = vi.hoisted(() => ({ save: vi.fn().mockRejectedValue(new Error("unavailable")) }));
 vi.mock("@/lib/backend/api", () => ({}));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/i18n", () => ({ setLocale: vi.fn() }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key, locale: "en" }) }));
 vi.mock("@/lib/export/saveTextFile", () => ({ saveTextFile: mocks.save }));
@@ -106,9 +107,9 @@ describe("migration failure actions", () => {
     app.mount(root);
     try {
       const labels = Array.from(root.querySelectorAll("button")).map((button) => button.textContent);
-      expect(root.textContent).toContain("migration.keyUnavailable");
+      expect(root.textContent).toContain("migration.recoveryIntro");
       expect(root.textContent).not.toContain("migration.failed");
-      expect(labels).toContain("migration.retryStatus");
+      expect(labels).toContain("migration.recheckKey");
       expect(labels).not.toContain("migration.start");
       expect(labels).not.toContain("migration.retryMigration");
       expect(root.querySelector("textarea")?.value).toContain('"keyRecoveryRequired": true');
@@ -116,4 +117,83 @@ describe("migration failure actions", () => {
       app.unmount();
     }
   });
+});
+
+it("requires the acknowledgement before resetting and keeps reset backups out of cleanup", async () => {
+  const recovery = {
+    migrationId: "secret-store-v1",
+    state: "succeeded" as const,
+    needsMigration: false,
+    keyRecoveryRequired: true,
+    credentialResetAllowed: true,
+    encryptedRecordCount: 19,
+    keyProviderAvailable: false,
+    databasePlaintextCount: 0,
+    connectionCount: 16,
+    pluginSecretCount: 0,
+    aiSecretCount: 0,
+    tunnelSecretCount: 0,
+    syncCredentialCount: 0,
+    legacyJsonFiles: [],
+    backupRequired: false,
+  };
+  const backend = {
+    migrationStatus: vi.fn().mockResolvedValue(recovery),
+    migrationStart: vi.fn(),
+    migrationRetry: vi.fn(),
+    migrationCleanupBackups: vi.fn(),
+    migrationPrepareCredentialReset: vi.fn().mockResolvedValue({ confirmationToken: "token", encryptedRecordCount: 19 }),
+    migrationResetCredentials: vi.fn().mockResolvedValue({ backupPath: "/tmp/reset-backup", clearedRecordCount: 19, state: "succeeded" }),
+  };
+  const store = useMigrationStore(backend);
+  await store.initialize();
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(Wizard, { store });
+  app.mount(root);
+  const button = (label: string) => Array.from(root.querySelectorAll("button")).find((b) => b.textContent === label)!;
+  try {
+    expect(root.textContent).not.toContain("migration.step1");
+    expect(root.textContent).not.toContain("migration.backupRequiredLabel");
+    expect(root.textContent).toContain("migration.encryptedRecordCountLabel 19");
+    button("migration.resetEntry").click();
+    await vi.waitFor(() => expect(root.querySelector('[role="alertdialog"]')).not.toBeNull());
+    await nextTick();
+    expect(document.activeElement).toBe(button("migration.cancel"));
+    expect(button("migration.resetConfirm").disabled).toBe(true);
+    const checkbox = root.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    checkbox.click();
+    await nextTick();
+    expect(button("migration.resetConfirm").disabled).toBe(false);
+    backend.migrationStatus.mockResolvedValue({ ...recovery, keyRecoveryRequired: false });
+    button("migration.resetConfirm").click();
+    await vi.waitFor(() => expect(root.textContent).toContain("migration.resetSuccessIntro"));
+    expect(root.textContent).toContain("/tmp/reset-backup");
+    expect(root.textContent).not.toContain("migration.deleteBackup");
+  } finally {
+    app.unmount();
+    root.remove();
+  }
+});
+
+it("shows postcheck failure and backup even when refreshed status allows entry", async () => {
+  const backend = { migrationStatus: vi.fn(), migrationStart: vi.fn(), migrationRetry: vi.fn(), migrationCleanupBackups: vi.fn() };
+  const store = useMigrationStore(backend);
+  store.state.loading = false;
+  store.state.step = 3;
+  store.state.resetFailure = { code: "CREDENTIAL_RESET_POSTCHECK_FAILED", stage: "postcheck", backupPath: "/tmp/retained-reset-backup" };
+  store.state.error = "resetFailed";
+  const root = document.createElement("div");
+  const app = createApp(Wizard, { store });
+  app.mount(root);
+  try {
+    expect(root.textContent).toContain("migration.resetReadyAfterFailure");
+    expect(root.textContent).toContain("CREDENTIAL_RESET_POSTCHECK_FAILED (postcheck)");
+    expect(root.textContent).toContain("/tmp/retained-reset-backup");
+    expect(root.textContent).not.toContain("migration.successTitle");
+    expect(root.textContent).not.toContain("migration.resetSuccessTitle");
+    expect(root.textContent).toContain("migration.enter");
+  } finally {
+    app.unmount();
+  }
 });

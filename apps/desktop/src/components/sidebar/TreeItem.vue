@@ -88,9 +88,9 @@ import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableRefer
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
+import { isDatabaseVGroupMember, isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
-import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
+import { resolveDatabaseVGroupDropTarget, resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId, tableVGroupDropTargetPosition } from "@/lib/sidebar/sidebarTableVGroupDrag";
 import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
 import { isCancelSearchShortcut, isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { connectionDetailRows, type ConnectionDetailRow } from "@/lib/connection/connectionDetailRows";
@@ -1235,6 +1235,9 @@ const {
     const targetGroupId = tableVGroupIdFromNodeId(targetId);
     // 落点回调是模块级单例，activeNode 未必是同容器的落点行，须用 targetId 现查。
     const targetNode = findTreeNodeById(connectionStore.treeNodes, targetId);
+    const sourceNode = findTreeNodeById(connectionStore.treeNodes, draggedId);
+    // Database folders are menu-managed for now; never let table-folder drag alter them.
+    if (sourceNode?.vgroupKind === "databases" || targetNode?.vgroupKind === "databases") return;
     if (draggedGroupId && targetGroupId && targetNode) connectionStore.reorderTableVGroupEntry(targetNode, draggedGroupId, targetGroupId, position);
     return;
   }
@@ -1289,6 +1292,7 @@ function updateTreeDragTarget(event: MouseEvent) {
     updateTarget(event, pinnedSortKey(), PINNED_TREE_NODE_DRAG_TYPE);
     return;
   }
+  if (activeNode.value.vgroupKind === "databases") return;
   updateTarget(event, activeNode.value.id, activeNode.value.type);
   // While the list is display-sorted, the underlying manual order used for
   // before/after positioning is invisible, so only moving into a different
@@ -1306,7 +1310,7 @@ const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 
 const canDragTableReference = computed(() => {
   if (props.referenceDragDisabled || !activeNode.value.connectionId) return false;
-  if (activeNode.value.type === "database") return typeof activeNode.value.database === "string" && activeNode.value.database.trim().length > 0;
+  if (isDatabaseVGroupMember(activeNode.value)) return true;
   if (activeNode.value.database == null) return false;
   if (activeNode.value.type === "table" || activeNode.value.type === "view" || activeNode.value.type === "materialized_view") return true;
   return activeNode.value.type === "column" && !!activeNode.value.tableName;
@@ -1319,6 +1323,7 @@ let pendingTableReferenceDrag: {
 } | null = null;
 
 let draggingTableReferencePayload: QueryEditorTableReferencePayload | null = null;
+let databaseDragSource: TreeNode | null = null;
 
 let referenceDragFeedback: TableReferenceDragFeedback | null = null;
 
@@ -1329,6 +1334,7 @@ function selectedTreeNodesInVisibleOrder(): TreeNode[] {
 }
 
 function tableReferenceDragLabel(payload: QueryEditorTableReferencePayload): string {
+  if (payload.referenceType === "database") return databaseDragSource?.label || payload.database;
   if (payload.referenceType === "column") {
     const names = payload.columnNames?.length ? payload.columnNames : payload.columnName ? [payload.columnName] : [];
     if (names.length <= 3) return names.join(", ");
@@ -1349,7 +1355,7 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
     databaseType: currentDatabaseType(),
     driverProfile: currentDriverProfile(),
   };
-  if (activeNode.value.type === "database") {
+  if (isDatabaseVGroupMember(activeNode.value)) {
     return createTableReferencePayload({
       connectionId: activeNode.value.connectionId,
       database: activeNode.value.database,
@@ -1396,6 +1402,7 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
 
 function startTableReferenceDrag(payload: QueryEditorTableReferencePayload) {
   draggingTableReferencePayload = payload;
+  databaseDragSource = isDatabaseVGroupMember(activeNode.value) ? { ...activeNode.value } : null;
   // 分组成员名单按可分组行类型收集（表/视图/物化视图/过程/函数/触发器/序列等）；
   // 无匹配容器的行由 scope 解析兜底拒绝，不会产生隐形脏数据。
   vgroupDragTableNames = selectedTableVGroupMoveTargets(activeNode.value, selectedTreeNodesInVisibleOrder())
@@ -1410,6 +1417,7 @@ function finishTableReferenceDrag() {
   clearActiveTableReferencePayload(draggingTableReferencePayload);
   pendingTableReferenceDrag = null;
   draggingTableReferencePayload = null;
+  databaseDragSource = null;
   vgroupDragTableNames = [];
   setTableVGroupDropTargetNodeId(null);
   referenceDragFeedback?.end();
@@ -1417,6 +1425,15 @@ function finishTableReferenceDrag() {
   window.dispatchEvent(createTableReferenceDragEndEvent());
   document.removeEventListener("mousemove", onTableReferenceMouseMove, true);
   document.removeEventListener("mouseup", onTableReferenceMouseUp, true);
+  document.removeEventListener("keydown", onTableReferenceDragKeydown, true);
+}
+
+function onTableReferenceDragKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  suppressNextTableReferenceClick = !!draggingTableReferencePayload;
+  finishTableReferenceDrag();
 }
 
 /** 本次拖拽要移动进分组的表名（拖拽开始时按选中区解析，见 startTableReferenceDrag）。 */
@@ -1440,7 +1457,9 @@ function onTableReferenceMouseMove(event: MouseEvent) {
     event.preventDefault();
     document.getSelection()?.removeAllRanges();
     referenceDragFeedback?.update(event.clientX, event.clientY);
-    setTableVGroupDropTargetNodeId(tableVGroupDropTargetFor(draggingTableReferencePayload, event)?.node.id ?? null);
+    const databaseTarget = databaseDragSource ? resolveDatabaseVGroupDropTarget(event.clientX, event.clientY, connectionStore.treeNodes, databaseDragSource, connectionStore.tableVGroupLayouts) : null;
+    const dropTarget = databaseDragSource ? databaseTarget : tableVGroupDropTargetFor(draggingTableReferencePayload, event);
+    setTableVGroupDropTargetNodeId(dropTarget?.node.id ?? null, databaseTarget?.position ?? "inside");
     // 仅查询编辑器消费 hover 光标线事件；AI 面板不监听。命中判定含覆盖层拦截时的几何回退。
     if (isOverSqlEditorTarget(event.clientX, event.clientY)) {
       window.dispatchEvent(createTableReferenceHoverEvent({ clientX: event.clientX, clientY: event.clientY }));
@@ -1452,12 +1471,15 @@ function onTableReferenceMouseUp(event: MouseEvent) {
   const payload = draggingTableReferencePayload;
   if (payload) {
     suppressNextTableReferenceClick = true;
-    const dropTarget = tableVGroupDropTargetFor(payload, event);
-    if (dropTarget) {
+    const databaseTarget = databaseDragSource ? resolveDatabaseVGroupDropTarget(event.clientX, event.clientY, connectionStore.treeNodes, databaseDragSource, connectionStore.tableVGroupLayouts) : null;
+    const dropTarget = databaseDragSource ? null : tableVGroupDropTargetFor(payload, event);
+    if (databaseTarget && databaseDragSource) {
+      connectionStore.moveTableToVGroup(databaseTarget.scope, databaseDragSource.database!, databaseTarget.groupId, databaseDragSource.type, { target: databaseTarget.node, position: databaseTarget.position });
+    } else if (dropTarget) {
       for (const tableName of vgroupDragTableNames) connectionStore.moveTableToVGroup(dropTarget.node, tableName, dropTarget.groupId, activeNode.value.type);
     } else {
       const target = document.elementFromPoint(event.clientX, event.clientY);
-      if (target instanceof Element && target.closest(`[data-query-editor-root], ${AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR}`)) {
+      if ((!databaseDragSource || databaseDragSource.type === "database") && target instanceof Element && target.closest(`[data-query-editor-root], ${AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR}`)) {
         window.dispatchEvent(
           createTableReferenceDropEvent({
             payload,
@@ -1480,10 +1502,12 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
   pendingTableReferenceDrag = { payload, startX: event.clientX, startY: event.clientY };
   document.addEventListener("mousemove", onTableReferenceMouseMove, true);
   document.addEventListener("mouseup", onTableReferenceMouseUp, true);
+  document.addEventListener("keydown", onTableReferenceDragKeydown, true);
 }
 
 function onRowMouseDown(event: MouseEvent) {
   if (canReorderTreeNode.value) {
+    if (activeNode.value.vgroupKind === "databases") return;
     startDrag(event, activeNode.value.id, activeNode.value.type);
   } else if (canDragTableReference.value) {
     startTableReferenceMouseDrag(event);
@@ -1662,7 +1686,7 @@ function onKeydown(event: KeyboardEvent) {
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
             'tree-item-highlight': highlighted,
-            'ring-1 ring-primary/50 bg-primary/5': dragVisual.showInside || tableVGroupDropTargetNodeId === node.id,
+            'ring-1 ring-primary/50 bg-primary/5': dragVisual.showInside || (tableVGroupDropTargetNodeId === node.id && tableVGroupDropTargetPosition === 'inside'),
           },
         ]"
         :tabindex="selectionVisual.selected || selectionVisual.multiSelected ? 0 : -1"
@@ -1679,8 +1703,8 @@ function onKeydown(event: KeyboardEvent) {
           handleMouseLeave();
         "
       >
-        <div v-if="dragVisual.showBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
-        <div v-if="dragVisual.showAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+        <div v-if="dragVisual.showBefore || (tableVGroupDropTargetNodeId === node.id && tableVGroupDropTargetPosition === 'before')" class="tree-item-drop-indicator absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
+        <div v-if="dragVisual.showAfter || (tableVGroupDropTargetNodeId === node.id && tableVGroupDropTargetPosition === 'after')" class="tree-item-drop-indicator absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
         <template v-if="canExpand">
           <button type="button" class="-m-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" @mousedown.stop="onToggleMouseDown" @click.stop="onToggleClick">
             <Loader2 v-if="node.isLoading" class="w-3.5 h-3.5 animate-spin" />
@@ -1977,9 +2001,16 @@ function onKeydown(event: KeyboardEvent) {
   pointer-events: none;
 }
 
-.tree-item-connection-tint > * {
+/* Insertion lines are overlays, not flex content. Keep the tint's content
+   positioning off them so their left/right offsets span the row. */
+.tree-item-connection-tint > :not(.tree-item-drop-indicator) {
   position: relative;
   z-index: 1;
+}
+
+.tree-item-drop-indicator {
+  position: absolute;
+  z-index: 2;
 }
 
 .tree-item-connection-tint:hover,

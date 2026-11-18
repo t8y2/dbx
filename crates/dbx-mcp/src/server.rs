@@ -1277,9 +1277,9 @@ impl DbxMcpServer {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                text(serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string()))
+                product_tool_result(serde_json::Value::Array(filtered))
             }
-            Ok(value) => text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())),
+            Ok(value) => product_tool_result(value),
             Err(error) => backend_tool_error("DBX_TOOL_ERROR", error),
         }
     }
@@ -6147,6 +6147,21 @@ fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
 }
 
+/// Product-provider (Nacos/Consul) tools already hold the complete JSON payload.
+/// Return it in `structuredContent` as well as the pretty-printed text block so
+/// MCP clients can consume the data without re-parsing text. Older MCP protocol
+/// revisions require `structuredContent` to be an object (newer ones accept any
+/// JSON), so arrays and scalars are wrapped as `{"result": ...}` - the same shape
+/// `dbx_execute_batch` uses for its per-statement results (see #9069, #15189).
+fn product_tool_result(value: serde_json::Value) -> CallToolResult {
+    let mut result = text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()));
+    result.structured_content = Some(match value {
+        serde_json::Value::Object(_) => value,
+        other => json!({ "result": other }),
+    });
+    result
+}
+
 async fn cancellable_tool_call(
     cancellation: tokio_util::sync::CancellationToken,
     operation: impl std::future::Future<Output = CallToolResult>,
@@ -9364,6 +9379,28 @@ mod tests {
             .await;
         let values: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
         assert_eq!(values, json!([{ "namespace": "dev" }]));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "result": [{ "namespace": "dev" }] }),
+        );
+    }
+
+    #[test]
+    fn product_tool_result_wraps_arrays_and_passes_objects_through() {
+        let array = product_tool_result(json!([{ "namespace": "" }]));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result_text(&array)).unwrap(),
+            json!([{ "namespace": "" }]),
+        );
+        assert_eq!(array.structured_content.as_ref().unwrap(), &json!({ "result": [{ "namespace": "" }] }));
+
+        let object = product_tool_result(json!({ "pageNo": 1, "namespaces": [] }));
+        assert!(result_text(&object).contains("\"pageNo\": 1"));
+        assert_eq!(object.structured_content.as_ref().unwrap(), &json!({ "pageNo": 1, "namespaces": [] }));
+
+        let null = product_tool_result(serde_json::Value::Null);
+        assert_eq!(result_text(&null), "null");
+        assert_eq!(null.structured_content.as_ref().unwrap(), &json!({ "result": null }));
     }
 
     #[test]
@@ -10037,6 +10074,10 @@ mod tests {
             }))
             .await;
         assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "ok": true, "operation": "kv_delete" }),
+        );
         {
             let approvals = backend.tool_approvals.lock().unwrap();
             assert_eq!(approvals.len(), 1);

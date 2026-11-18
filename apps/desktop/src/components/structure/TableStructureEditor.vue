@@ -4748,6 +4748,7 @@ function onColumnRowClick(column: EditableStructureColumn, event: MouseEvent) {
   columnContextMenuCtrlKey = false;
   columnPointerSelectionActive = false;
   if (!columnIsSelectable(column)) return;
+  if (!eventTargetUsesNativeClipboard(event)) structureScrollerElement(columnsScrollerRef.value)?.focus({ preventScroll: true });
   if (event.shiftKey) {
     selectColumnRangeFromAnchor(column);
     return;
@@ -4993,20 +4994,36 @@ function toggleCopySourceColumns() {
   selectedCopySourceColumnNames.value = allCopyableSourceColumnsSelected.value ? [] : [...copyableSourceColumnNames.value];
 }
 
-function applyPastedColumns(text: string) {
-  if (!pasteColumnsDialogOpen.value || !canPasteColumns.value || activeTab.value !== "columns") return;
+function applyColumnDefinitions(text: string, reportDiagnostics = false): boolean {
+  if (!canPasteColumns.value || activeTab.value !== "columns") return false;
   // Revalidate at commit time, including names of drop-marked columns. Import
   // must never implicitly replace a field or use a stale dialog preview.
   const result = parseTableColumnDefinitions(
     text,
     columns.value.map((column) => column.name),
   );
-  if (result.diagnostics.length || !result.columns.length) return;
+  const diagnostic = result.diagnostics[0];
+  if (diagnostic || !result.columns.length) {
+    if (diagnostic && reportDiagnostics) toast(t(`tableColumnPaste.${diagnostic.code}`), 5000);
+    return false;
+  }
   const drafts = createPastedColumnDrafts(result.columns, uuid);
   columns.value.splice(resolveInsertColumnIndex(columns.value, selectedColumnId.value), 0, ...drafts);
   selectSingleColumn(drafts[drafts.length - 1]);
   if (usesLocalTableColumnOrder.value) persistLocalColumnOrder(false);
-  pasteColumnsDialogOpen.value = false;
+  return true;
+}
+
+function applyPastedColumns(text: string) {
+  if (pasteColumnsDialogOpen.value && applyColumnDefinitions(text)) pasteColumnsDialogOpen.value = false;
+}
+
+function onColumnGridPaste(event: ClipboardEvent) {
+  if (event.defaultPrevented || !canPasteColumns.value || eventTargetUsesNativeClipboard(event)) return;
+  const text = event.clipboardData?.getData("text/plain");
+  if (!text?.trim()) return;
+  event.preventDefault();
+  applyColumnDefinitions(text, true);
 }
 
 function applyCopiedColumns() {
@@ -5734,6 +5751,55 @@ function dropOrRemoveColumns(targets: EditableStructureColumn[]) {
   }
 }
 
+function canCopyColumnDdl(targets: EditableStructureColumn[]): boolean {
+  const tableName = isCreateMode.value ? newTableName.value : props.tableName;
+  return canAddColumn.value && !!tableName.trim() && targets.length > 0 && targets.every((column) => !column.markedForDrop && !!column.name.trim() && !!column.dataType.trim());
+}
+
+async function copyColumnDdl(targets: EditableStructureColumn[]) {
+  if (!canCopyColumnDdl(targets)) return;
+  const options = structureChangeOptions();
+  const selectedIds = new Set(targets.map((column) => column.id));
+  const drafts = options.columns.filter((column) => selectedIds.has(column.id));
+  try {
+    const results = await Promise.all(
+      drafts.map((column) =>
+        api.buildSingleColumnAlterSql({
+          databaseType: options.databaseType,
+          driverProfile: options.driverProfile,
+          schema: options.schema,
+          tableName: options.tableName,
+          // Retain original metadata for generated column definitions.
+          column: { ...column, id: `ddl-preview:${column.id}` },
+        }),
+      ),
+    );
+    const warnings = results.flatMap((result) => result.warnings);
+    if (results.some((result) => result.statements.length === 0)) {
+      toast(warnings.join("\n") || t("customType.ddl.empty"), 5000);
+      return;
+    }
+    await copyToClipboard(
+      joinSqlStatementsForScript(
+        results.flatMap((result) => result.statements),
+        options.databaseType,
+      ),
+    );
+    toast(warnings.join("\n") || t("contextMenu.ddlCopied"), warnings.length ? 5000 : 2000);
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
+function onColumnGridKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || !isPlainClipboardShortcut(event, "c") || eventTargetUsesNativeClipboard(event)) return;
+  const targets = selectedColumnsInOrder();
+  if (!canCopyColumnDdl(targets)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) void copyColumnDdl(targets);
+}
+
 /**
  * Context menu for a column row. When the right-clicked row is part of the
  * multi-selection the actions apply to the whole selection; otherwise they
@@ -5755,6 +5821,7 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
       disabled: !canAddColumn.value,
       action: () => void copyColumnRows(targets),
     },
+    { label: t("grid.copyDdl"), icon: ClipboardList, disabled: !canCopyColumnDdl(targets), action: () => void copyColumnDdl(targets) },
     {
       label: isBatchContext ? t("structureEditor.dropSelectedColumns", { count }) : column.original ? t("structureEditor.drop") : t("structureEditor.remove"),
       icon: Trash2,
@@ -8748,6 +8815,9 @@ watch(
                 key-field="id"
                 item-class="structure-column-virtual-row"
                 list-class="structure-column-virtual-list"
+                tabindex="0"
+                @keydown="onColumnGridKeydown"
+                @paste="onColumnGridPaste"
                 @scroll.passive="onStructureContentScroll('columns', $event)"
                 @update="onColumnVirtualRowsUpdated"
               >

@@ -6585,7 +6585,11 @@ const largeValueRuntimeInstance = useDataGridLargeValues({
   displayRowCount,
   rowHeight: gridRowHeight,
   gridScrollerElement,
-  getScrollTop: () => (useCanvasGridRows.value ? canvasScrollTop.value : (gridScrollerElement()?.scrollTop ?? 0)),
+  getScrollTop: () => {
+    if (!useCanvasGridRows.value) return gridScrollerElement()?.scrollTop ?? 0;
+    const scroller = canvasScrollerElement();
+    return scroller ? canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight) : canvasScrollTop.value;
+  },
   displayItemAt,
   getRowItem,
   tableColumnForGridColumn,
@@ -9006,6 +9010,10 @@ function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
   if (isPanelResizing.value) return;
   syncCanvasViewportRaw(entries);
 }
+
+watch(gridRowHeight, () => {
+  if (useCanvasGridRows.value) syncCanvasViewport();
+});
 
 // During divider drags the ResizeObserver would fire every frame; re-measure
 // and redraw the canvas on a fixed step instead (same cadence as the SQL

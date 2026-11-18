@@ -847,7 +847,8 @@ export type MultiStatementDefaultView = (typeof MULTI_STATEMENT_DEFAULT_VIEWS)[n
 export const DEFAULT_EXPLAIN_VIEWS = ["canvas", "tree", "summary", "table", "raw"] as const;
 export type DefaultExplainView = (typeof DEFAULT_EXPLAIN_VIEWS)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
-export const TABLE_FONT_SIZE_MAX = 24;
+// Table font size has no product upper bound. The sentinel keeps the View Options controls unchanged.
+export const TABLE_FONT_SIZE_MAX = Number.POSITIVE_INFINITY;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
 export const SIDEBAR_FONT_SIZE_MIN = 9;
 export const SIDEBAR_FONT_SIZE_MAX = 24;
@@ -1856,7 +1857,7 @@ function normalizeDefaultExplainView(value: unknown): DefaultExplainView {
 
 function normalizeTableFontSize(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return TABLE_FONT_SIZE_DEFAULT;
-  return Math.min(TABLE_FONT_SIZE_MAX, Math.max(TABLE_FONT_SIZE_MIN, Math.round(value)));
+  return Math.max(TABLE_FONT_SIZE_MIN, Math.round(value));
 }
 
 function normalizeSidebarFontSize(value: unknown): number {

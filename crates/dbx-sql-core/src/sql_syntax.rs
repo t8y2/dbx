@@ -64,8 +64,14 @@ fn analyze_statement(sql: &str, dialect: &str) -> SqlEditorAnalysis {
     let diagnostic = missing_expression_diagnostic(sql, dialect)
         .or_else(|| analysis.as_ref().err().map(|error| diagnostic_for_error(sql, dialect, error)));
     match analysis {
-        Ok(references) => SqlEditorAnalysis { references: Some(references), parser_error: None, syntax: diagnostic.into_iter().collect() },
-        Err(error) => SqlEditorAnalysis { references: None, parser_error: Some(error), syntax: diagnostic.into_iter().collect() },
+        Ok(references) => SqlEditorAnalysis {
+            references: Some(references),
+            parser_error: None,
+            syntax: diagnostic.into_iter().collect(),
+        },
+        Err(error) => {
+            SqlEditorAnalysis { references: None, parser_error: Some(error), syntax: diagnostic.into_iter().collect() }
+        }
     }
 }
 
@@ -139,7 +145,6 @@ fn parser_location(message: &str) -> Option<Location> {
     }
     Some(Location { line, column })
 }
-
 
 fn end_location(sql: &str) -> Location {
     let mut line = 1_u64;

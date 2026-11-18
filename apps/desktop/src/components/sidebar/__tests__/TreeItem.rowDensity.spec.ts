@@ -144,7 +144,7 @@ describe("TreeItem connection icon style", () => {
     await nextTick();
     const badge = container.querySelector<HTMLElement>('[data-connection-badge="mysql"]');
     expect(badge?.dataset.connected).toBe("true");
-    expect(badge?.parentElement?.style.width).toBe("18px");
+    expect(badge?.parentElement?.style.width).toBe("16px");
 
     connectionStore.connectedIds.delete(node.id);
     mockSettings.editorSettings.sidebarDensity = "compact";
@@ -165,14 +165,14 @@ describe("TreeItem connection icon style", () => {
     const container = mountTreeItem(node);
     const badge = container.querySelector('[data-connection-badge="generic"]');
     expect(badge?.querySelector("svg")).not.toBeNull();
-    expect(badge?.parentElement?.style.width).toBe("18px");
+    expect(badge?.parentElement?.style.width).toBe("16px");
   });
 
   it("keeps connection group folders the same size as colored badges when density changes", async () => {
     mockSettings.editorSettings.sidebarConnectionIconStyle = "badge";
     const container = mountTreeItem({ id: "group", type: "connection-group", label: "Example group", isExpanded: true });
     const folder = container.querySelector("svg.lucide-folder-open");
-    expect(folder?.parentElement?.style.width).toBe("18px");
+    expect(folder?.parentElement?.style.width).toBe("16px");
 
     mockSettings.editorSettings.sidebarDensity = "compact";
     await nextTick();

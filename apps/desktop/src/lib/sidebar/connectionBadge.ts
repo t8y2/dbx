@@ -86,9 +86,8 @@ export function connectionBadge(connection?: Pick<ConnectionConfig, "db_type" | 
   };
 }
 
-export function sidebarTreeIconSize(nodeType: TreeNode["type"], connection: Pick<ConnectionConfig, "db_type"> | undefined, style: SidebarConnectionIconStyle, compact = false): number {
-  const sizedForDensity = compact ? 16 : 18;
-  if (nodeType === "connection-group") return sizedForDensity;
+export function sidebarTreeIconSize(nodeType: TreeNode["type"], connection: Pick<ConnectionConfig, "db_type"> | undefined, style: SidebarConnectionIconStyle): number {
+  if (nodeType === "connection-group") return 16;
   if (nodeType !== "connection" || style !== "badge" || !connection || connection.db_type === "plugin") return 14;
-  return sizedForDensity;
+  return 16;
 }

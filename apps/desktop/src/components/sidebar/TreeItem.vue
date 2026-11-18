@@ -945,7 +945,7 @@ const isConnecting = computed(() => activeNode.value.type === "connection" && !!
 const iconConnection = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
 const isConnectionConnected = computed(() => !!activeNode.value.connectionId && connectionStore.connectedIds.has(activeNode.value.connectionId));
 const connectionIconStyle = computed(() => settingsStore.editorSettings.sidebarConnectionIconStyle);
-const treeIconSize = computed(() => sidebarTreeIconSize(activeNode.value.type, iconConnection.value, connectionIconStyle.value, isCompactSidebar.value));
+const treeIconSize = computed(() => sidebarTreeIconSize(activeNode.value.type, iconConnection.value, connectionIconStyle.value));
 
 const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (mysqlDataCharsetEnabled(connectionStore.getConfig(activeNode.value.connectionId)) || (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false)));
 

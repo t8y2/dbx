@@ -23,8 +23,7 @@ describe("sidebar connection badges", () => {
         } else {
           expect(badge?.asset, `${driver.dbType}/${profile}`).toBe("generic");
         }
-        expect(sidebarTreeIconSize("connection", config, "badge")).toBe(18);
-        expect(sidebarTreeIconSize("connection", config, "badge", true)).toBe(16);
+        expect(sidebarTreeIconSize("connection", config, "badge")).toBe(16);
       }
     }
   });
@@ -53,7 +52,7 @@ describe("sidebar connection badges", () => {
   it("uses original artwork for basic adaptation and a safe glyph for unknown native types", () => {
     expect(connectionBadge(connection("kyuubi"))).toMatchObject({ src: "/icons/database/kyuubi.png", basic: true });
     expect(connectionBadge(connection("future-database"))).toMatchObject({ asset: "generic", color: "#315f9b", basic: true });
-    expect(sidebarTreeIconSize("connection", connection("future-database"), "badge")).toBe(18);
+    expect(sidebarTreeIconSize("connection", connection("future-database"), "badge")).toBe(16);
     expect(sidebarTreeIconSize("connection", connection("mysql"), "classic")).toBe(14);
     expect(connectionBadge(connection("future-database"))?.src).toBeUndefined();
     expect(connectionBadge(connection("plugin", "mysql"))).toBeUndefined();

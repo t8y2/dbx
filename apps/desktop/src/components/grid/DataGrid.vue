@@ -31,6 +31,7 @@ import {
   ShieldCheck,
   Code2,
   Copy,
+  ClipboardPaste,
   Loader2,
   X,
   Undo2,
@@ -10841,6 +10842,22 @@ async function pasteClipboardIntoSelection() {
   await pasteTextIntoGrid(text);
 }
 
+async function pasteClipboardTextIntoCell(rowId: number, columnIndex: number) {
+  const operation = dataGridResultLifecycle.beginOperation();
+  const lifecycle = gridClipboardLifecycle;
+  const version = pendingChangesVersion.value;
+  const isCurrent = () => gridClipboardActive && lifecycle === gridClipboardLifecycle && dataGridResultLifecycle.isCurrent(operation) && pendingChangesVersion.value === version;
+  try {
+    const text = await readTextFromClipboard();
+    if (!isCurrent() || isSaving.value || rowPreparationController || !canEditCellItem(getRowItem(rowId), columnIndex)) return;
+    if (!text || !clipboardWithinGridCapacity(text)) return;
+    applyCellValue(rowId, columnIndex, text, { preserveEmptyString: true });
+    toast(t("grid.pasted"));
+  } catch (error) {
+    if (isCurrent()) toast(t("grid.pasteCellTextFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 async function pasteClipboardAsNewRows() {
   if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
   const operation = dataGridResultLifecycle.beginOperation();
@@ -15418,6 +15435,7 @@ function exportSubmenu(): ContextMenuItem {
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const row = contextRowItem.value;
+  const cellColumn = contextCell.value?.col ?? -1;
   const rowLabels = rowActionLabels();
   const rowIdsForDelete = isMultiRow.value ? affectedRowIds() : row ? [row.id] : [];
   const deletableContextRowIds = deletableRowIds(rowIdsForDelete);
@@ -15599,6 +15617,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
       foreignKeyItem: contextForeignKeyMenuItem(),
       copySubmenu: copySubmenu(),
+      pasteCellItem:
+        !contextHeaderColumn.value && row && cellColumn >= 0 && canEditCellItem(row, cellColumn)
+          ? {
+              label: t("grid.pasteCellText"),
+              icon: ClipboardPaste,
+              action: () => void pasteClipboardTextIntoCell(row.id, cellColumn),
+              disabled: isSaving.value || !!rowPreparationProgress.value,
+            }
+          : null,
       clearSelectionItem: {
         label: t("grid.clearSelection"),
         action: clearCellSelection,

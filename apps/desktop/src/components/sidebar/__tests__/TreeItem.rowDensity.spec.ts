@@ -42,6 +42,7 @@ const connectionStore = {
   selectedTreeNodeIds: [] as string[],
   selectedTreeNodeIdsSet: new Set<string>(),
   sidebarTableSearchQueries: {},
+  sidebarLayout: { groups: [], order: [] },
   tableNameFilterForScope: () => undefined,
   treeNodes: [],
   treeSelectionAnchorId: null as string | null,
@@ -143,14 +144,14 @@ describe("TreeItem connection icon style", () => {
     await nextTick();
     const badge = container.querySelector<HTMLElement>('[data-connection-badge="mysql"]');
     expect(badge?.dataset.connected).toBe("true");
-    expect(badge?.parentElement?.style.width).toBe("20px");
+    expect(badge?.parentElement?.style.width).toBe("18px");
 
     connectionStore.connectedIds.delete(node.id);
     mockSettings.editorSettings.sidebarDensity = "compact";
     await nextTick();
     expect(badge?.dataset.connected).toBe("false");
     expect(badge?.style.backgroundColor).toBe("#737373");
-    expect(badge?.parentElement?.style.width).toBe("18px");
+    expect(badge?.parentElement?.style.width).toBe("16px");
 
     mockSettings.editorSettings.sidebarConnectionIconStyle = "classic";
     await nextTick();
@@ -164,7 +165,19 @@ describe("TreeItem connection icon style", () => {
     const container = mountTreeItem(node);
     const badge = container.querySelector('[data-connection-badge="generic"]');
     expect(badge?.querySelector("svg")).not.toBeNull();
-    expect(badge?.parentElement?.style.width).toBe("20px");
+    expect(badge?.parentElement?.style.width).toBe("18px");
+  });
+
+  it("keeps connection group folders the same size as colored badges when density changes", async () => {
+    mockSettings.editorSettings.sidebarConnectionIconStyle = "badge";
+    const container = mountTreeItem({ id: "group", type: "connection-group", label: "Example group", isExpanded: true });
+    const folder = container.querySelector("svg.lucide-folder-open");
+    expect(folder?.parentElement?.style.width).toBe("18px");
+
+    mockSettings.editorSettings.sidebarDensity = "compact";
+    await nextTick();
+    expect(folder?.parentElement?.style.width).toBe("16px");
+    expect(container.querySelector("[data-connection-badge]")).toBeNull();
   });
 
   it.each(["classic", "badge"] as const)("uses the plugin's own icon in %s mode", async (style) => {

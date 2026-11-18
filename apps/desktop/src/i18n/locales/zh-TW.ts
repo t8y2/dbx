@@ -9881,7 +9881,7 @@ export default withEnglishFallback({
     sidebarIndentDescription: "每個樹層級縮排的像素位移量。",
     sidebarFontSize: "側邊欄字型大小",
     sidebarFontSizeDescription: "側邊欄物件樹的字型大小（像素），獨立於編輯器字型大小。",
-    sidebarConnectionIconStyle: "連線圖示樣式",
+    sidebarConnectionIconStyle: "導覽列連線徽章樣式",
     sidebarConnectionIconStyleDescription: "彩色徽章方便快速辨識連線狀態：彩底白標表示已連線，灰底白標表示未連線。外掛沿用自己的圖示。",
     sidebarConnectionIconStyle_classic: "舊版徽章",
     sidebarConnectionIconStyle_badge: "彩色徽章",

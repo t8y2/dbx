@@ -152,7 +152,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition", "sidebarConnectionIconStyle"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -249,7 +249,6 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarIndent",
     "sidebarFontSize",
     "sidebarDensity",
-    "sidebarConnectionIconStyle",
     "sidebarHiddenTablePrefixes",
     "sidebarCopyTableNameSeparator",
     "sidebarCopyTableNameIncludeSchema",

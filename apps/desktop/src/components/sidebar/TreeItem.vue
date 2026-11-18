@@ -50,7 +50,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import ConnectionBadgeIcon from "@/components/icons/ConnectionBadgeIcon.vue";
 import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
-import { sidebarConnectionIconSize } from "@/lib/sidebar/connectionBadge";
+import { sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
@@ -945,7 +945,7 @@ const isConnecting = computed(() => activeNode.value.type === "connection" && !!
 const iconConnection = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
 const isConnectionConnected = computed(() => !!activeNode.value.connectionId && connectionStore.connectedIds.has(activeNode.value.connectionId));
 const connectionIconStyle = computed(() => settingsStore.editorSettings.sidebarConnectionIconStyle);
-const connectionIconSize = computed(() => sidebarConnectionIconSize(iconConnection.value, connectionIconStyle.value, isCompactSidebar.value));
+const treeIconSize = computed(() => sidebarTreeIconSize(activeNode.value.type, iconConnection.value, connectionIconStyle.value, isCompactSidebar.value));
 
 const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (mysqlDataCharsetEnabled(connectionStore.getConfig(activeNode.value.connectionId)) || (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false)));
 
@@ -1703,11 +1703,11 @@ function onKeydown(event: KeyboardEvent) {
           </button>
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
-        <span class="relative flex shrink-0" :style="{ width: `${connectionIconSize}px`, height: `${connectionIconSize}px` }" :class="{ 'overflow-visible': node.valid === false || isDisabledTrigger }">
+        <span class="relative flex shrink-0" :style="{ width: `${treeIconSize}px`, height: `${treeIconSize}px` }" :class="{ 'overflow-visible': node.valid === false || isDisabledTrigger }">
           <ConnectionBadgeIcon v-if="node.type === 'connection' && connectionIconStyle === 'badge'" :connection="iconConnection" :connected="isConnectionConnected" />
           <ConnectionIcon v-else-if="node.type === 'connection'" :connection="iconConnection" class="h-3.5 w-3.5 shrink-0" :class="node.connectionId && !isConnectionConnected ? 'saturate-50 opacity-70' : ''" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
-          <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
+          <component v-else :is="getIconInfo(node)?.icon || Database" class="size-full shrink-0" :class="databaseOpenVisual.iconClass" />
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
           <span
             v-if="isDisabledTrigger"

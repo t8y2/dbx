@@ -16,7 +16,7 @@ Connection-tree badges are resolved through `connectionBadge.ts` and rendered in
 | MongoDB | `#286746` | Leaf on forest green, transparent vein |
 | Snowflake | `#287f9e` | White snowflake on lake blue |
 
-The standard and compact sidebar icon slots are 20px and 18px. Background colors represent connection state independently of row selection. Database/provider aliases retain the same presentation, including PostgreSQL, SQLite Worker, MongoDB Legacy, Oracle Legacy/10g/OCI and SQL Server Legacy. Plugin connections continue to use their plugin logos. All native connection rows, including basic adaptations and unknown types, now reserve the same 20px / 18px slot. Types without a dedicated variant use their registered full-color artwork as a white mask. Types without a registered asset use a white generic database glyph on a blue tile when connected and a gray tile when disconnected. Legacy badges are the default and preserve the original 14px rendering and disconnected treatment.
+The standard and compact sidebar icon slots are 18px and 16px. Background colors represent connection state independently of row selection. Database/provider aliases retain the same presentation, including PostgreSQL, SQLite Worker, MongoDB Legacy, Oracle Legacy/10g/OCI and SQL Server Legacy. Plugin connections continue to use their plugin logos. All native connection rows, including basic adaptations and unknown types, now reserve the same 18px / 16px slot. Types without a dedicated variant use their registered full-color artwork as a white mask. Types without a registered asset use a white generic database glyph on a blue tile when connected and a gray tile when disconnected. Legacy badges are the default and preserve the original 14px rendering and disconnected treatment.
 
 ## Extended coverage
 
@@ -37,7 +37,8 @@ The additional vector files retain geometry from the same-named asset in the par
 - `postgres.svg`: filled white adaptation of the existing solid elephant paths in `../postgres.svg`, with original path geometry and facial cutouts retained and the viewBox centered. Replaces the previous thin white outline. [Official logo identity reference](https://wiki.postgresql.org/wiki/Logo).
 - `sqlite.svg`: original feather path from `../sqlite.svg`, page background removed and viewBox cropped. Identity reference: [SQLite official banner](https://sqlite.org/images/sqlite370_banner.svg).
 - `mariadb.svg`: monochrome version of the existing seal mark; Foundation / historical identity, not claimed to be the latest enterprise logo. [MariaDB Foundation](https://mariadb.org/about/).
-- `mongodb.svg`: monochrome version of the existing leaf mark; the original color boundary becomes a narrow transparent vein. [MongoDB brand resources](https://www.mongodb.com/company/newsroom/brand-resources).
+- `mongodb.svg`: solid leaf adapted from the original mark, with a broader silhouette and a transparent vein cut directly into the path. [MongoDB brand resources](https://www.mongodb.com/company/newsroom/brand-resources).
+- `clickhouse.svg`: straight bars and a separate dot based on the original mark, with spacing adjusted for the sidebar.
 - `snowflake.svg`: monochrome version of the existing snowflake mark, viewBox cropped to normalize visual size. [Snowflake brand guidelines](https://www.snowflake.com/brand-guidelines/).
 
 For existing assets, an official identity reference establishes the motif, not the exact provenance of the repository path data. Reference app screenshots inform dimensions and interaction; they are not vector or bitmap asset sources. Never trace a reference app's custom mark one-for-one.

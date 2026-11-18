@@ -2,7 +2,7 @@ import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { databaseIconAssetName, databaseIconAssetPath } from "@/lib/database/databaseIconAssets";
 import { databaseIconColors } from "@/lib/sidebar/databaseIconColors";
 import type { SidebarConnectionIconStyle } from "@/stores/settingsStore";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, TreeNode } from "@/types/database";
 
 const badges = {
   mysql: { asset: "mysql", color: "#28d43b" },
@@ -86,7 +86,9 @@ export function connectionBadge(connection?: Pick<ConnectionConfig, "db_type" | 
   };
 }
 
-export function sidebarConnectionIconSize(connection: Pick<ConnectionConfig, "db_type"> | undefined, style: SidebarConnectionIconStyle, compact = false): number {
-  if (style !== "badge" || !connection || connection.db_type === "plugin") return 14;
-  return compact ? 18 : 20;
+export function sidebarTreeIconSize(nodeType: TreeNode["type"], connection: Pick<ConnectionConfig, "db_type"> | undefined, style: SidebarConnectionIconStyle, compact = false): number {
+  const sizedForDensity = compact ? 16 : 18;
+  if (nodeType === "connection-group") return sizedForDensity;
+  if (nodeType !== "connection" || style !== "badge" || !connection || connection.db_type === "plugin") return 14;
+  return sizedForDensity;
 }

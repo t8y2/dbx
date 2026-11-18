@@ -2972,6 +2972,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
     editWelcomePageMode.value = DEFAULT_EDITOR_SETTINGS.welcomePageMode;
+    editSidebarConnectionIconStyle.value = DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
     editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
@@ -3031,7 +3032,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
     editSidebarDensity.value = DEFAULT_EDITOR_SETTINGS.sidebarDensity;
-    editSidebarConnectionIconStyle.value = DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
     editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
     editSidebarCopyTableNameSeparator.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameSeparator;
     editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
@@ -9725,6 +9725,32 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-connection-icon-style">{{ t("settings.sidebarConnectionIconStyle") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.sidebarConnectionIconStyleDescription") }}
+                  </p>
+                </div>
+                <Select
+                  :model-value="editSidebarConnectionIconStyle"
+                  @update:model-value="
+                    (value) => {
+                      if (isSidebarConnectionIconStyle(value)) editSidebarConnectionIconStyle = value;
+                    }
+                  "
+                >
+                  <SelectTrigger id="sidebar-connection-icon-style" class="h-8 w-36 shrink-0 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="end">
+                    <SelectItem v-for="style in SIDEBAR_CONNECTION_ICON_STYLES" :key="style" :value="style">
+                      {{ t(`settings.sidebarConnectionIconStyle_${style}`) }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <div v-if="!isWeb" class="settings-appearance-group" data-background-image-settings>
                 <Label>{{ t("settings.backgroundImage") }}</Label>
                 <p class="text-xs text-muted-foreground">{{ t("settings.backgroundImageDescription") }}</p>
@@ -10376,31 +10402,6 @@ onUnmounted(() => {
                   <SelectContent position="popper" align="end">
                     <SelectItem v-for="density in SIDEBAR_DENSITIES" :key="density" :value="density" class="text-xs">
                       {{ t(`settings.sidebarDensity_${density}`) }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="sidebar-connection-icon-style">{{ t("settings.sidebarConnectionIconStyle") }}</Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.sidebarConnectionIconStyleDescription") }}
-                  </p>
-                </div>
-                <Select
-                  :model-value="editSidebarConnectionIconStyle"
-                  @update:model-value="
-                    (value) => {
-                      if (isSidebarConnectionIconStyle(value)) editSidebarConnectionIconStyle = value;
-                    }
-                  "
-                >
-                  <SelectTrigger id="sidebar-connection-icon-style" class="h-8 w-36 shrink-0 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent position="popper" align="end">
-                    <SelectItem v-for="style in SIDEBAR_CONNECTION_ICON_STYLES" :key="style" :value="style">
-                      {{ t(`settings.sidebarConnectionIconStyle_${style}`) }}
                     </SelectItem>
                   </SelectContent>
                 </Select>

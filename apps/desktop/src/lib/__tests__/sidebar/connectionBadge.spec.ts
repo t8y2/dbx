@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { connectionBadge, sidebarConnectionIconSize } from "@/lib/sidebar/connectionBadge";
+import { connectionBadge, sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import { databaseIconAssetName, databaseIconAssetPath, databaseIconAssets } from "@/lib/database/databaseIconAssets";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -23,8 +23,8 @@ describe("sidebar connection badges", () => {
         } else {
           expect(badge?.asset, `${driver.dbType}/${profile}`).toBe("generic");
         }
-        expect(sidebarConnectionIconSize(config, "badge")).toBe(20);
-        expect(sidebarConnectionIconSize(config, "badge", true)).toBe(18);
+        expect(sidebarTreeIconSize("connection", config, "badge")).toBe(18);
+        expect(sidebarTreeIconSize("connection", config, "badge", true)).toBe(16);
       }
     }
   });
@@ -53,11 +53,11 @@ describe("sidebar connection badges", () => {
   it("uses original artwork for basic adaptation and a safe glyph for unknown native types", () => {
     expect(connectionBadge(connection("kyuubi"))).toMatchObject({ src: "/icons/database/kyuubi.png", basic: true });
     expect(connectionBadge(connection("future-database"))).toMatchObject({ asset: "generic", color: "#315f9b", basic: true });
-    expect(sidebarConnectionIconSize(connection("future-database"), "badge")).toBe(20);
-    expect(sidebarConnectionIconSize(connection("mysql"), "classic")).toBe(14);
+    expect(sidebarTreeIconSize("connection", connection("future-database"), "badge")).toBe(18);
+    expect(sidebarTreeIconSize("connection", connection("mysql"), "classic")).toBe(14);
     expect(connectionBadge(connection("future-database"))?.src).toBeUndefined();
     expect(connectionBadge(connection("plugin", "mysql"))).toBeUndefined();
     expect(connectionBadge()).toBeUndefined();
-    expect(sidebarConnectionIconSize(connection("plugin"), "badge")).toBe(14);
+    expect(sidebarTreeIconSize("connection", connection("plugin"), "badge")).toBe(14);
   });
 });

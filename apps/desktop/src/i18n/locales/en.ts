@@ -711,6 +711,7 @@ export default {
       urlDecode: "URL component decode",
       radix: "Integer base conversion",
       flattenLines: "Collapse lines to one",
+      unicodeEscape: "Text → Unicode escapes",
     },
     units: {
       auto: "Auto (10/13 digits)",

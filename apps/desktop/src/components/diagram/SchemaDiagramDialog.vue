@@ -1573,17 +1573,31 @@ async function appendSelectedTables() {
   pickerError.value = "";
   try {
     const loaded: DiagramTable[] = [];
+    const failed = new Set<string>();
     for (let offset = 0; offset < chosen.length; offset += METADATA_BATCH_SIZE) {
       if (generation !== pickerGeneration) return;
-      const batch = await Promise.all(
-        chosen.slice(offset, offset + METADATA_BATCH_SIZE).map(async (table) => {
-          const [columns, foreignKeys, indexes] = await Promise.all([api.getColumns(id, db, table.schema, table.name, catalog), api.listForeignKeys(id, db, table.schema, table.name, catalog), api.listIndexes(id, db, table.schema, table.name, catalog)]);
+      const selection = chosen.slice(offset, offset + METADATA_BATCH_SIZE);
+      const batch = await Promise.allSettled(
+        selection.map(async (table) => {
+          const [columns, foreignKeys, indexes] = await Promise.all([api.getColumns(id, db, table.schema, table.name, catalog), api.listForeignKeys(id, db, table.schema, table.name, catalog).catch(() => []), api.listIndexes(id, db, table.schema, table.name, catalog).catch(() => [])]);
           return { ...table, columns, foreignKeys, indexes: diagramIndexes(indexes) };
         }),
       );
-      loaded.push(...batch);
+      if (generation !== pickerGeneration) return;
+      for (const [index, result] of batch.entries()) {
+        if (result.status === "fulfilled") {
+          loaded.push(result.value);
+        } else {
+          const table = selection[index];
+          failed.add(diagramIdentityKey(table));
+          console.warn(`[diagram] failed to load table metadata: ${table.schema}.${table.name}`, result.reason);
+        }
+      }
     }
-    if (generation !== pickerGeneration) return;
+    if (failed.size) {
+      pickerError.value = t("diagram.partialError", { count: failed.size });
+      if (!loaded.length) return;
+    }
     const additions = applyLiveTablePatches(loaded, loadLiveTablePatches(id, db, effectiveSchemaKey.value), selectedSchemas.value[0]);
     let right = MARGIN;
     for (const position of Object.values(positions.value)) right = Math.max(right, position.x + CARD_WIDTH + GAP_X);
@@ -1600,7 +1614,13 @@ async function appendSelectedTables() {
     persistedTableSnapshot.push(...deepCloneJson(additions));
     tables.value = [...tables.value, ...additions];
     syncVueFlowNodes();
-    closePicker();
+    if (failed.size) {
+      const added = new Set(loaded.map(diagramIdentityKey));
+      candidates.value = candidates.value.filter((table) => !added.has(diagramIdentityKey(table)));
+      picked.value = [...failed];
+    } else {
+      closePicker();
+    }
   } catch (error) {
     if (generation === pickerGeneration) pickerError.value = String(error);
   } finally {

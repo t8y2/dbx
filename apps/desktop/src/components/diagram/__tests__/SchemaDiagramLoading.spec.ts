@@ -117,6 +117,41 @@ describe("diagram loading integration", () => {
     expect(state.tables.at(-1).columns).toHaveLength(15);
   });
 
+  it.each(["listForeignKeys", "listIndexes"] as const)("appends columns when %s fails", async (method) => {
+    const { state } = await mountDialog();
+    await state.openPicker();
+    state.picked = [JSON.stringify(["public", "unrelated"])];
+    mocks[method].mockRejectedValueOnce(new Error("optional metadata unavailable"));
+
+    await state.appendSelectedTables();
+
+    expect(state.tables.at(-1)).toMatchObject({ name: "unrelated", columns: [expect.objectContaining({ name: "id" })], foreignKeys: [], indexes: [] });
+    expect(state.picker).toBe(false);
+  });
+
+  it("appends successful tables and keeps only failed selections for retry", async () => {
+    const { state } = await mountDialog();
+    mocks.listTables.mockResolvedValueOnce(["unrelated", "restricted"].map((name) => ({ name, table_type: "TABLE" })));
+    await state.openPicker();
+    const restricted = JSON.stringify(["public", "restricted"]);
+    state.picked = [restricted, JSON.stringify(["public", "unrelated"])];
+    mocks.getColumns.mockRejectedValueOnce(new Error("columns unavailable"));
+
+    await state.appendSelectedTables();
+
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C", "unrelated"]);
+    expect(state.candidates.map((table: DiagramTable) => table.name)).toEqual(["restricted"]);
+    expect(state.picked).toEqual([restricted]);
+    expect(state.picker).toBe(true);
+    expect(state.pickerBusy).toBe(false);
+    expect(state.pickerError).toBe("diagram.partialError");
+
+    await state.appendSelectedTables();
+
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C", "unrelated", "restricted"]);
+    expect(state.picker).toBe(false);
+  });
+
   it("discards table metadata resolved after the picker closes", async () => {
     const { state } = await mountDialog();
     await state.openPicker();

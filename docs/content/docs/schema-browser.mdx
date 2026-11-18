@@ -137,6 +137,8 @@ Destructive actions are grouped more explicitly and appear or require confirmati
 
 In an ER diagram opened for selected tables, use **Add tables** to select other tables in the current schema scope. Appended tables keep the existing layout and selection intact. Table cards with more than ten fields initially show the first ten; expand a card to see the remaining fields without changing its relationships or exported schema.
 
+Tables and their fields can still be added when foreign keys or indexes are unavailable. If a table's fields cannot be loaded, the other loaded tables are added, and the failed table remains selected so you can retry it.
+
 ## Copy, Paste, and Drag
 
 - Copy connection, database, schema, table, column, or selected table names

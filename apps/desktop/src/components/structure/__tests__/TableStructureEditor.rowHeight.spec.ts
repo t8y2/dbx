@@ -74,25 +74,6 @@ vi.mock("@/components/ui/button", async () => {
     }),
   };
 });
-vi.mock("@/components/ui/input", async () => {
-  const { defineComponent, h } = await import("vue");
-  return {
-    Input: defineComponent({
-      name: "Input",
-      inheritAttrs: false,
-      props: { modelValue: { type: [String, Number], default: "" } },
-      emits: ["update:modelValue"],
-      setup:
-        (props, { attrs, emit }) =>
-        () =>
-          h("input", {
-            ...attrs,
-            value: props.modelValue,
-            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
-          }),
-    }),
-  };
-});
 vi.mock("@/components/ui/badge", async () => {
   const { defineComponent, h } = await import("vue");
   return {
@@ -392,6 +373,16 @@ describe("TableStructureEditor row height consistency (#13659)", () => {
     const rowTables = root.querySelectorAll(".structure-column-virtual-row-table") as NodeListOf<HTMLElement>;
     for (const table of Array.from(rowTables)) {
       expect(table.style.height).toBe("39px");
+    }
+
+    const nameInputs = root.querySelectorAll<HTMLInputElement>("[data-column-name-input]");
+    expect(nameInputs.length).toBe(2);
+    for (const input of Array.from(nameInputs)) {
+      expect(input.classList.contains("text-base")).toBe(false);
+      expect(input.classList.contains("md:text-sm")).toBe(false);
+      expect(input.classList.contains("text-[length:var(--structure-font-size)]")).toBe(true);
+      expect(input.classList.contains("md:text-[length:var(--structure-font-size)]")).toBe(true);
+      expect(input.classList.contains("leading-[var(--structure-control-height)]")).toBe(true);
     }
   });
 

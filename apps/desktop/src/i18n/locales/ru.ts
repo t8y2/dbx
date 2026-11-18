@@ -2461,6 +2461,7 @@ export default withEnglishFallback({
       findReplace: "Найти/Заменить",
       deleteEmptyLines: "Удалить пустые строки",
       selectAll: "Выбрать всё",
+      executeScriptFromHere: "Выполнить SQL-скрипт отсюда",
     },
     delimitedList: {
       title: "Преобразовать в список с разделителями",
@@ -2517,6 +2518,7 @@ export default withEnglishFallback({
     },
     fullscreenResultsPane: "Показать результаты на весь экран",
     exitFullscreenResultsPane: "Выйти из полноэкранного режима результатов",
+    executeScriptBoundaryMismatch: "Этот фрагмент зависит от предыдущего SQL-разделителя или границы пакета. Начните выполнение со строки с разделителем или выделите весь скрипт для выполнения.",
   },
   tabs: {
     sql: "SQL",

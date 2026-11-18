@@ -3312,6 +3312,7 @@ defineExpose({
                     @open-result-view="openPluginResultView"
                   >
                     <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                      <DataGridCopyFormatControl toolbar :compact="compact" :current-label="dataGridRef.defaultCopyPreferenceLabel" :current-value="dataGridRef.defaultCopyPreference" :items="dataGridRef.copyPreferenceMenuItems" @select="dataGridRef?.setDefaultCopyPreference($event)" />
                       <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="compact" :on-select="dataGridRef.selectExportMenuItem" />
                       <Button
                         v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"

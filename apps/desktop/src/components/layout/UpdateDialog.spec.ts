@@ -369,7 +369,8 @@ describe("UpdateDialog download progress", () => {
 
     const filler = document.body.querySelector<HTMLElement>("[data-download-progress-fill]");
     expect(filler?.style.width).toBe("9%");
-    expect(filler?.closest(".w-52")).not.toBeNull();
+    expect(filler?.closest("[data-download-progress]")).not.toBeNull();
+    expect(document.body.querySelector("[data-download-progress-group] [data-download-progress-track]")).not.toBeNull();
 
     state.downloadProgress = 100;
     await flushDialog();

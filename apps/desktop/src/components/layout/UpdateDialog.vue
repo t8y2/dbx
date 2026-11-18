@@ -575,7 +575,7 @@ watch(
           </template>
         </div>
 
-        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 flex-row flex-wrap items-center gap-x-2 gap-y-1.5 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 justify-end">
           <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex items-center gap-1.5 self-start sm:mr-auto sm:self-center">
             <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
             <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
@@ -589,7 +589,7 @@ watch(
             </Select>
           </div>
           <template v-if="appUpdateActionsVisible">
-            <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+            <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-2">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
                 {{ t("updates.ignoreVersion") }}
@@ -602,16 +602,16 @@ watch(
                 <Loader2 class="h-4 w-4 animate-spin" />
                 {{ t(isPreparingUpdate ? "updates.preparing" : "updates.installing") }}
               </Button>
-              <template v-else-if="isDownloadingUpdate">
+              <div v-else-if="isDownloadingUpdate" data-download-progress-group class="flex min-w-0 flex-1 items-center justify-end gap-2">
                 <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
-                <div class="flex w-52 shrink-0 flex-col gap-1">
-                  <span class="self-end text-xs tabular-nums text-muted-foreground">{{ downloadProgress === null ? t("updates.updating") : t("updates.downloading", { progress: downloadProgress }) }}</span>
-                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted" data-download-progress-track>
-                    <div v-if="downloadProgressWidth !== null" data-download-progress-fill class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${downloadProgressWidth}%` }" />
-                    <div v-else data-download-progress-indeterminate class="h-full w-1/2 animate-pulse rounded-full bg-primary/70" />
+                <div data-download-progress class="flex min-w-0 max-w-52 flex-1 items-center gap-2">
+                  <span data-download-progress-label class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">{{ downloadProgress === null ? t("updates.updating") : t("updates.downloading", { progress: downloadProgress }) }}</span>
+                  <div class="min-w-0 flex-1 overflow-hidden rounded-full bg-muted" data-download-progress-track>
+                    <div v-if="downloadProgressWidth !== null" data-download-progress-fill class="h-1.5 rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${downloadProgressWidth}%` }" />
+                    <div v-else data-download-progress-indeterminate class="h-1.5 w-1/2 animate-pulse rounded-full bg-primary/70" />
                   </div>
                 </div>
-              </template>
+              </div>
               <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('install-downloaded')">{{ t("updates.restartAndUpdate") }}</Button>
               <Button v-else-if="!checkingUpdates" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t(updateCheckFailed ? "updates.retryDownload" : "updates.downloadInBackground") }}</Button>
             </template>

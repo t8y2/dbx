@@ -52,6 +52,7 @@ fn change_options(table_name: &str, columns: Vec<EditableStructureColumn>) -> Ta
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        table_type: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
         primary_key_name: None,

@@ -1072,6 +1072,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: async () => {
         toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
         showDropDatabaseConfirm.value = false;
+        connectionStore.updateDatabaseVGroupMember(node);
         await refreshMongoTreeAfterDrop(node, () => connectionStore.loadMongoDatabases(connectionId));
       },
       onError: toastMutationError,
@@ -1157,6 +1158,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: async () => {
         toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
         showDropDatabaseConfirm.value = false;
+        connectionStore.updateDatabaseVGroupMember(node);
         await refreshMongoTreeAfterDrop(node, () => connectionStore.loadMilvusDatabases(connectionId));
       },
       onError: toastMutationError,

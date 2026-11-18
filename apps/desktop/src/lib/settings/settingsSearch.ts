@@ -344,6 +344,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "appearance-layout", category: "appearance", titleKey: "settings.appLayout", targetId: "appearance", keywordKeys: ["settings.appLayoutSeparated", "settings.appLayoutClassic", "settings.appLayoutSeparatedDescription", "settings.appLayoutClassicDescription"] },
   { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance", keywordKeys: ["settings.tabLayoutScroll", "settings.tabLayoutWrap", "settings.tabLayoutScrollDescription", "settings.tabLayoutWrapDescription"] },
+  { id: "appearance-cross-window-tabs", category: "appearance", titleKey: "settings.crossWindowTabDragPreview", descriptionKey: "settings.crossWindowTabDragPreviewDescription", targetId: "appearance" },
   {
     id: "appearance-tab-double-click-action",
     category: "appearance",
@@ -396,7 +397,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-reuse-data-tab", category: "navigation", titleKey: "settings.reuseDataTab", descriptionKey: "settings.reuseDataTabDescription", targetId: "navigation" },
   { id: "navigation-open-data-tabs-next-to-active", category: "navigation", titleKey: "settings.openDataTabsNextToActive", descriptionKey: "settings.openDataTabsNextToActiveDescription", targetId: "navigation" },
   { id: "navigation-open-tables-in-detached-window", category: "navigation", titleKey: "settings.openTablesInDetachedWindow", descriptionKey: "settings.openTablesInDetachedWindowDescription", targetId: "navigation" },
-  { id: "navigation-object-display", category: "navigation", titleKey: "settings.sidebarObjectDisplay", targetId: "navigation" },
+  { id: "navigation-object-display", category: "navigation", titleKey: "settings.sidebarObjectDisplay", targetId: "navigation", keywordKeys: ["settings.sidebarSimpleHideIndexes"] },
   {
     id: "navigation-object-info",
     category: "navigation",

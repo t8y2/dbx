@@ -136,6 +136,7 @@ export interface UseDataGridExportOptions {
   captureColumnFormatterDisplay?: () => (value: CellValue, columnIndex: number) => string;
   editValue?: (value: CellValue, columnIndex: number) => string;
   hasColumnFormatter?: (columnIndex: number) => boolean;
+  hasBinaryColumnFormatter?: (columnIndex: number) => boolean;
   applyColumnFormattersOnExport?: ComputedRef<boolean>;
   cellClipboardText?: (value: CellValue, columnIndex: number) => string | undefined;
   externalCellValue?: (value: CellValue, columnIndex: number) => CellValue;
@@ -881,6 +882,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function binaryClipboardCellValue(value: CellValue, columnIndex: number): CellValue {
+    const sourceIndex = visibleColumnIndexes.value[columnIndex] ?? columnIndex;
+    if (options.hasBinaryColumnFormatter?.(sourceIndex) && shouldApplyColumnFormatter(sourceIndex)) return value;
     return binaryCellClipboardText(value, columnTypes.value?.[columnIndex], databaseType.value) ?? value;
   }
 
@@ -1107,6 +1110,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     displayValue: options.displayValue,
     editValue: options.editValue,
     hasColumnFormatter: options.hasColumnFormatter,
+    hasBinaryColumnFormatter: options.hasBinaryColumnFormatter,
     applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     externalCellValue: (value, columnIndex) => {
       const externalValue = options.externalCellValue?.(value as CellValue, columnIndex);

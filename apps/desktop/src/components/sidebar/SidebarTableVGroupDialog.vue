@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
-import { tableVGroupNodeId } from "@/lib/table/tableVGroup";
+import { findDatabaseVGroupContainer, resolveTableVGroupScopeFromNode, tableVGroupNodeId } from "@/lib/table/tableVGroup";
 import { showTableVGroupDialog, tableVGroupName, tableVGroupDialogScope, tableVGroupDialogParentGroupId, tableVGroupDialogTableNames, showTableVGroupDeleteConfirm, tableVGroupDeleteTarget } from "./sidebarTreeDialogState";
 
 const { t } = useI18n();
@@ -30,6 +30,11 @@ function confirmCreate() {
   if (!scope || !name) return;
   const groupId = connectionStore.createTableVGroup(scope, name, tableVGroupDialogParentGroupId.value);
   if (groupId) {
+    const resolved = resolveTableVGroupScopeFromNode(connectionStore.treeNodes, scope);
+    if (resolved.objectType === "databases") {
+      const container = findDatabaseVGroupContainer(connectionStore.treeNodes, resolved);
+      if (container) container.isExpanded = true;
+    }
     if (scope && "isExpanded" in scope) {
       scope.isExpanded = true;
     }

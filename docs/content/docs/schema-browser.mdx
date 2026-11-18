@@ -42,6 +42,14 @@ The actual hierarchy follows the database model:
 
 Supported connection imports can retain group information. When sidebar layouts move between devices, DBX remaps connection IDs.
 
+## Database Virtual Groups
+
+Databases within a connection can also be organized into virtual groups. Right-click a connection with a loaded database list (or a Doris / StarRocks catalog) and choose **New Group**, or right-click a database and choose **Move to Group → Move to New Group**. This supports regular database nodes, Redis DBs, MongoDB databases, and Milvus databases. Schemas, connections, and tables retain their existing organization.
+
+Groups support nested folders, renaming, deletion, and hiding/showing from the owning connection or catalog. Hiding preserves membership; deleting a group returns its members to the parent level without deleting any database. Groups are confined to the same connection and catalog, and their layout survives refreshes and restarts.
+
+These groups are local DBX navigation layouts: they do not change server metadata and are not included in connection configuration exports or cloud sync. Manage membership and order through context menus or drag and drop: drop in the middle of a folder row to join it, or on its upper/lower insertion line to place the database before/after that node at its parent level. Dropping on the owning connection or catalog leaves all groups and places the database first in the database list. Manual order survives refreshes and restarts; while the group layout is enabled, name sorting and pin-state synchronization do not rearrange it. Valid targets are highlighted, and Escape cancels the drag. Cross-connection and cross-catalog drops are rejected; no database is transferred on the server.
+
 ## Expand, Collapse, and Pin
 
 - Click a node to expand or collapse it

@@ -1,7 +1,8 @@
 import { shallowRef } from "vue";
+import { dragSortDropPosition, type DropPosition } from "@/composables/useDragSort";
 import type { TreeNode } from "@/types/database";
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
-import { isTableVGroupContainerNode, tableVGroupDropAcceptsRow } from "@/lib/table/tableVGroup";
+import { isDatabaseVGroupContainer, isDatabaseVGroupMember, isTableVGroupContainerNode, resolveDatabaseVGroupScope, tableVGroupDropAcceptsRow, tableVGroupPathForTable, tableVGroupScopeKey, type TableVGroupLayout, type TableVGroupScope } from "@/lib/table/tableVGroup";
 
 /**
  * Shared drop feedback for dragging a table row onto a virtual group row.
@@ -10,14 +11,61 @@ import { isTableVGroupContainerNode, tableVGroupDropAcceptsRow } from "@/lib/tab
  * membership change on release.
  */
 export const tableVGroupDropTargetNodeId = shallowRef<string | null>(null);
+export const tableVGroupDropTargetPosition = shallowRef<DropPosition>("inside");
 
-export function setTableVGroupDropTargetNodeId(nodeId: string | null) {
+export function setTableVGroupDropTargetNodeId(nodeId: string | null, position: DropPosition = "inside") {
+  tableVGroupDropTargetPosition.value = nodeId ? position : "inside";
   if (tableVGroupDropTargetNodeId.value !== nodeId) tableVGroupDropTargetNodeId.value = nodeId;
 }
 
 export interface TableVGroupDropTarget {
   node: TreeNode;
   groupId: string | null;
+}
+
+export interface DatabaseVGroupDropTarget extends TableVGroupDropTarget {
+  position: DropPosition;
+  scope: TableVGroupScope;
+}
+
+/** Database moves change local membership only, never connection/catalog ownership. */
+export function databaseVGroupDropTarget(treeNodes: TreeNode[], source: TreeNode, target: TreeNode, layouts: Readonly<Record<string, TableVGroupLayout>>, position: DropPosition = "inside"): DatabaseVGroupDropTarget | null {
+  if (!isDatabaseVGroupMember(source) || source.id === target.id) return null;
+  const isGroup = target.type === "table-vgroup" && target.vgroupKind === "databases";
+  if (!isGroup && !isDatabaseVGroupContainer(target) && !isDatabaseVGroupMember(target)) return null;
+  const scope = resolveDatabaseVGroupScope(treeNodes, source, layouts);
+  const targetScope = resolveDatabaseVGroupScope(treeNodes, target, layouts);
+  if (!scope || !targetScope || tableVGroupScopeKey(scope) !== tableVGroupScopeKey(targetScope)) return null;
+  const layout = layouts[tableVGroupScopeKey(scope)!];
+  if (!layout || layout.enabled === false) return null;
+  if (isGroup && (!target.vgroupId || !layout.groups.some((group) => group.id === target.vgroupId))) return null;
+  const parentGroupOf = (entries: TableVGroupLayout["order"], parent: string | null = null): string | null | undefined => {
+    for (const entry of entries) {
+      if (entry.type !== "group") continue;
+      if (entry.id === target.vgroupId) return parent;
+      const found = parentGroupOf(entry.children ?? [], entry.id);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  // A folder's edges mean its parent level; only its middle means entering it.
+  const groupId = isGroup ? (position === "inside" ? target.vgroupId : parentGroupOf(layout.order)) : isDatabaseVGroupMember(target) ? (tableVGroupPathForTable(layout, target.database!, target.type).slice(-1)[0] ?? null) : null;
+  return { node: target, groupId: groupId ?? null, scope, position: isDatabaseVGroupContainer(target) ? "after" : position };
+}
+
+export function resolveDatabaseVGroupDropTarget(x: number, y: number, treeNodes: TreeNode[], source: TreeNode, layouts: Readonly<Record<string, TableVGroupLayout>>): DatabaseVGroupDropTarget | null {
+  const elements = typeof document.elementsFromPoint === "function" ? document.elementsFromPoint(x, y) : [];
+  for (const element of elements) {
+    const row = element.closest("[data-node-id]");
+    const id = row?.getAttribute("data-node-id");
+    if (!id) continue;
+    const target = findTreeNodeById(treeNodes, id);
+    // Stop at the first real row: an invalid foreground row must not expose a row behind it.
+    if (!target || !row) return null;
+    const position = dragSortDropPosition(y, row.getBoundingClientRect(), target.type === "table-vgroup" && target.vgroupKind === "databases");
+    return databaseVGroupDropTarget(treeNodes, source, target, layouts, position);
+  }
+  return null;
 }
 
 /**

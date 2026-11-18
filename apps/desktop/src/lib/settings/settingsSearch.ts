@@ -428,6 +428,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "navigation-sidebar-indent", category: "navigation", titleKey: "settings.sidebarIndent", descriptionKey: "settings.sidebarIndentDescription", targetId: "navigation" },
   { id: "navigation-sidebar-font-size", category: "navigation", titleKey: "settings.sidebarFontSize", descriptionKey: "settings.sidebarFontSizeDescription", targetId: "navigation" },
   { id: "navigation-sidebar-density", category: "navigation", titleKey: "settings.sidebarDensity", descriptionKey: "settings.sidebarDensityDescription", targetId: "navigation" },
+  { id: "navigation-sidebar-connection-icon-style", category: "navigation", titleKey: "settings.sidebarConnectionIconStyle", descriptionKey: "settings.sidebarConnectionIconStyleDescription", targetId: "navigation" },
   { id: "navigation-hidden-tables", category: "navigation", titleKey: "settings.sidebarHiddenTablePrefixes", descriptionKey: "settings.sidebarHiddenTablePrefixesDescription", targetId: "navigation" },
   { id: "history-retention", category: "data", titleKey: "settings.historyRetentionLimit", descriptionKey: "settings.historyRetentionDescription", targetId: "history-retention", keywordKeys: ["settings.historyRetentionUnlimited"] },
   { id: "mcp-history-retention", category: "data", titleKey: "settings.mcpHistoryRetentionLimit", descriptionKey: "settings.mcpHistoryRetentionDescription", targetId: "mcp-history-retention", keywordKeys: ["settings.historyRetentionUnlimited", "settings.mcpHistoryCleanup"] },

@@ -12,16 +12,19 @@ const manifest = JSON.parse(readFileSync(path.resolve("crates/dbx-core/assets/da
 };
 
 describe("sidebar connection badges", () => {
-  it("covers every native driver and profile with an existing asset and fixed slot size", () => {
+  it("covers every native driver and profile with a resolvable mark and fixed slot size", () => {
     for (const driver of manifest.drivers.filter((entry) => entry.dbType !== "plugin")) {
       for (const profile of [undefined, ...(driver.driverProfiles ?? []).map((entry) => entry.profile)]) {
         const config = connection(driver.dbType, profile);
         const badge = connectionBadge(config);
         expect(badge, `${driver.dbType}/${profile}`).toBeDefined();
-        expect(badge?.src, `${driver.dbType}/${profile}`).toBeTruthy();
-        expect(existsSync(path.join(publicDir, badge!.src!)), `${driver.dbType}/${profile}: ${badge?.src}`).toBe(true);
-        expect(sidebarConnectionIconSize(config)).toBe(20);
-        expect(sidebarConnectionIconSize(config, true)).toBe(18);
+        if (badge?.src) {
+          expect(existsSync(path.join(publicDir, badge.src)), `${driver.dbType}/${profile}: ${badge.src}`).toBe(true);
+        } else {
+          expect(badge?.asset, `${driver.dbType}/${profile}`).toBe("generic");
+        }
+        expect(sidebarConnectionIconSize(config, "badge")).toBe(20);
+        expect(sidebarConnectionIconSize(config, "badge", true)).toBe(18);
       }
     }
   });
@@ -49,10 +52,12 @@ describe("sidebar connection badges", () => {
 
   it("uses original artwork for basic adaptation and a safe glyph for unknown native types", () => {
     expect(connectionBadge(connection("kyuubi"))).toMatchObject({ src: "/icons/database/kyuubi.png", basic: true });
-    expect(connectionBadge(connection("future-database"))).toMatchObject({ asset: "generic", basic: true });
+    expect(connectionBadge(connection("future-database"))).toMatchObject({ asset: "generic", color: "#315f9b", basic: true });
+    expect(sidebarConnectionIconSize(connection("future-database"), "badge")).toBe(20);
+    expect(sidebarConnectionIconSize(connection("mysql"), "classic")).toBe(14);
     expect(connectionBadge(connection("future-database"))?.src).toBeUndefined();
     expect(connectionBadge(connection("plugin", "mysql"))).toBeUndefined();
     expect(connectionBadge()).toBeUndefined();
-    expect(sidebarConnectionIconSize(connection("plugin"))).toBe(14);
+    expect(sidebarConnectionIconSize(connection("plugin"), "badge")).toBe(14);
   });
 });

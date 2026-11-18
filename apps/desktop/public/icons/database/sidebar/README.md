@@ -1,6 +1,6 @@
 # Sidebar connection marks
 
-Connection-tree badges are resolved through `connectionBadge.ts` and rendered in white by `ConnectionBadgeIcon.vue` with a CSS mask. The shared original-artwork index (`databaseIconAssets.ts`) currently contains 127 database/provider aliases representing 97 distinct assets. All native entries and profiles in the 88-entry driver manifest are covered; plugin connections retain their plugin icon behavior. Connected tile colors are DBX presentation choices. Every supported disconnected connection uses the same neutral gray (`#737373`) with the same white mark.
+Connection-tree badges are resolved through `connectionBadge.ts` and rendered in white by `ConnectionBadgeIcon.vue` with a CSS mask. The shared original-artwork index (`databaseIconAssets.ts`) currently contains 127 database/provider aliases representing 97 distinct assets. All native entries and profiles in the 88-entry driver manifest are covered; plugin connections retain their plugin icon behavior. Connected tile colors are DBX presentation choices. With the optional Color-coded badges style, every native disconnected connection uses the same neutral gray (`#737373`) with the same white mark.
 
 ## Previously selected presentation
 
@@ -16,7 +16,7 @@ Connection-tree badges are resolved through `connectionBadge.ts` and rendered in
 | MongoDB | `#286746` | Leaf on forest green, transparent vein |
 | Snowflake | `#287f9e` | White snowflake on lake blue |
 
-The standard and compact sidebar icon slots are 20px and 18px. Background colors represent connection state independently of row selection. Database/provider aliases retain the same presentation, including PostgreSQL, SQLite Worker, MongoDB Legacy, Oracle Legacy/10g/OCI and SQL Server Legacy. Plugin connections continue to use their plugin logos. All native connection rows, including basic adaptations and unknown types, now reserve the same 20px / 18px slot. Unknown native types use a white generic database glyph.
+The standard and compact sidebar icon slots are 20px and 18px. Background colors represent connection state independently of row selection. Database/provider aliases retain the same presentation, including PostgreSQL, SQLite Worker, MongoDB Legacy, Oracle Legacy/10g/OCI and SQL Server Legacy. Plugin connections continue to use their plugin logos. All native connection rows, including basic adaptations and unknown types, now reserve the same 20px / 18px slot. Types without a dedicated variant use their registered full-color artwork as a white mask. Types without a registered asset use a white generic database glyph on a blue tile when connected and a gray tile when disconnected. Legacy badges are the default and preserve the original 14px rendering and disconnected treatment.
 
 ## Extended coverage
 

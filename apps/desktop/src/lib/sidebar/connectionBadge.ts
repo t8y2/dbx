@@ -1,6 +1,7 @@
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { databaseIconAssetName, databaseIconAssetPath } from "@/lib/database/databaseIconAssets";
 import { databaseIconColors } from "@/lib/sidebar/databaseIconColors";
+import type { SidebarConnectionIconStyle } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
 const badges = {
@@ -79,12 +80,13 @@ export function connectionBadge(connection?: Pick<ConnectionConfig, "db_type" | 
   const variant = asset && basicAssetVariants[asset];
   return {
     asset: asset?.replace(/\.[^.]+$/, "") || "generic",
-    color: (asset && databaseIconColors[asset]) || "#526174",
+    color: (asset && databaseIconColors[asset]) || "#315f9b",
     src: variant ? `/icons/database/sidebar/${variant}.svg` : databaseIconAssetPath(resolvedType),
     basic: true,
   };
 }
 
-export function sidebarConnectionIconSize(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined, compact = false): number {
-  return connectionBadge(connection) ? (compact ? 18 : 20) : 14;
+export function sidebarConnectionIconSize(connection: Pick<ConnectionConfig, "db_type"> | undefined, style: SidebarConnectionIconStyle, compact = false): number {
+  if (style !== "badge" || !connection || connection.db_type === "plugin") return 14;
+  return compact ? 18 : 20;
 }

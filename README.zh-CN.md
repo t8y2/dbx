@@ -478,8 +478,8 @@ environment:
 
 ### 环境要求
 
-- [Node.js](https://nodejs.org/) >= 18
-- [pnpm](https://pnpm.io/)
+- [Node.js](https://nodejs.org/) >= 22.13.0
+- [pnpm](https://pnpm.io/) 10.34.7
 - [Rust](https://www.rust-lang.org/tools/install) >= 1.88
 
 #### 系统依赖

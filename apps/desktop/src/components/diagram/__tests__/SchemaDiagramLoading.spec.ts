@@ -95,6 +95,40 @@ afterEach(() => {
 });
 
 describe("diagram loading integration", () => {
+  it("adds only checked tables without changing existing positions and toggles display without changing metadata", async () => {
+    const { state } = await mountDialog();
+    const previous = structuredClone(JSON.parse(JSON.stringify(state.positions)));
+    vi.clearAllMocks();
+    await state.openPicker();
+    expect(state.candidates.map((table: DiagramTable) => table.name)).toEqual(["unrelated"]);
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+    state.picked = [JSON.stringify(["public", "unrelated"])];
+    const column = { name: "field", data_type: "int", is_nullable: false, is_primary_key: false, column_default: null, extra: null };
+    mocks.getColumns.mockResolvedValueOnce(Array.from({ length: 15 }, (_, i) => ({ ...column, name: `field_${i}` })));
+    await state.appendSelectedTables();
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C", "unrelated"]);
+    expect(mocks.getColumns).toHaveBeenCalledExactlyOnceWith("c", "db", "public", "unrelated", "catalog");
+    for (const [key, position] of Object.entries(previous)) expect(state.positions[key]).toEqual(position);
+    const appended = state.nodes.find((node: { id: string }) => node.id === "unrelated");
+    expect(appended.data.fieldsExpanded).toBe(false);
+    expect(appended.data.table.columns).toHaveLength(15);
+    appended.data.toggleFields();
+    expect(state.nodes.find((node: { id: string }) => node.id === "unrelated").data.fieldsExpanded).toBe(true);
+    expect(state.tables.at(-1).columns).toHaveLength(15);
+  });
+
+  it("discards table metadata resolved after the picker closes", async () => {
+    const { state } = await mountDialog();
+    await state.openPicker();
+    state.picked = [JSON.stringify(["public", "unrelated"])];
+    const pending = deferred<never[]>();
+    mocks.getColumns.mockImplementationOnce(() => pending.promise);
+    const append = state.appendSelectedTables();
+    state.closePicker();
+    pending.resolve([]);
+    await append;
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C"]);
+  });
   it("loads the recursive closure without listing tables and passes catalog", async () => {
     const { state } = await mountDialog();
     expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C"]);

@@ -6,7 +6,7 @@ const diagramNamespaceSnapshots = new Map<string, { databases: string[]; schemas
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -43,7 +43,22 @@ import { saveDiagramBinaryExport, saveDiagramTextExport } from "@/lib/export/sav
 import { inferRelationships, filterByStorage } from "@/lib/diagram/match-engine";
 import { loadMatchConfirms, saveMatchConfirms, loadMatchIgnores, saveMatchIgnores, isAutoMatchEnabled } from "@/lib/diagram/match-storage";
 import { toVueFlowNodes, toVueFlowEdges, toDiagramEdges, toVueFlowLayerNodes, toAbsolutePosition, isTableCanvasVisible } from "@/lib/diagram/vue-flow-adapter";
-import { CARD_WIDTH, CARD_HEADER_HEIGHT, COLUMN_ROW_HEIGHT, CARD_BOTTOM_PADDING, GAP_X, GAP_Y, MARGIN, LAYER_CONTENT_PADDING, LAYER_HEADER_HEIGHT, DIAGRAM_HOVERED_EDGE_KEY, DIAGRAM_EDGE_OBSTACLES_KEY, diagramTableCardHeight } from "@/lib/diagram/diagram-constants";
+import {
+  CARD_WIDTH,
+  CARD_HEADER_HEIGHT,
+  COLUMN_ROW_HEIGHT,
+  CARD_BOTTOM_PADDING,
+  GAP_X,
+  GAP_Y,
+  MARGIN,
+  LAYER_CONTENT_PADDING,
+  LAYER_HEADER_HEIGHT,
+  DIAGRAM_HOVERED_EDGE_KEY,
+  DIAGRAM_EDGE_OBSTACLES_KEY,
+  diagramCanvasCardHeight,
+  diagramCardColumns,
+  COLLAPSED_DIAGRAM_COLUMNS,
+} from "@/lib/diagram/diagram-constants";
 import { sizeLayerToFit, findLayerAtPoint, placeNewLayer } from "@/lib/diagram/size-layer";
 import { computeLtrAutoLayout } from "@/lib/diagram/ltr-auto-layout";
 import { computeLayoutWithLayers } from "@/lib/diagram/elk-layout";
@@ -316,6 +331,19 @@ const selectedSchemas = ref<string[]>([]);
 const databases = ref<string[]>([]);
 const schemas = ref<string[]>([]);
 const tables = ref<DiagramTable[]>([]);
+const expandedFields = ref(new Set<string>());
+const picker = ref(false);
+const pickerBusy = ref(false);
+const pickerError = ref("");
+const pickerSearch = ref("");
+type TableCandidate = { name: string; schema: string; comment?: string | null };
+const candidates = ref<TableCandidate[]>();
+const picked = ref<string[]>([]);
+const matchingCandidates = computed(() => {
+  const query = pickerSearch.value.trim().toLowerCase();
+  return (candidates.value ?? []).filter(({ schema, name }) => `${schema}.${name}`.toLowerCase().includes(query));
+});
+let pickerGeneration = 0;
 const customRelationships = ref<CustomDiagramRelationship[]>([]);
 const tableSearch = ref("");
 const loadingDatabases = ref(false);
@@ -550,7 +578,7 @@ const matchRelationshipCount = computed(() => matchResult.value.relationships.le
 function tableHeight(table: DiagramTable): number {
   // Includes the rendered table/column comment lines so canvas bounds, layers,
   // edge routing and auto layout match the card height.
-  return diagramTableCardHeight(table);
+  return diagramCanvasCardHeight(table, expandedFields.value.has(diagramIdentityKey(table)));
 }
 
 const canvasSize = computed(() => {
@@ -999,11 +1027,35 @@ async function handleSyncedDraftTables(_names: string[]) {
 }
 
 function syncVueFlowNodes() {
+  const selected = new Set(nodes.value.filter((node) => node.selected).map((node) => node.id));
   const heights = tableHeightsMap();
   const tableNodes = toVueFlowNodes(visibleTables.value, positions.value, isMultiSchema.value);
   const layerNodes = toVueFlowLayerNodes(layerStore.layers);
   const vueEdges = toVueFlowEdges(visibleRelationships.value, positions.value, edgeWaypoints.value, heights, edgeHandleHints.value);
-  setNodes([...layerNodes, ...tableNodes]);
+  const displayNodes = tableNodes.map((node) => {
+    const table = node.data!.table;
+    const key = diagramIdentityKey(table);
+    const expanded = expandedFields.value.has(key);
+    const { total, canToggle } = diagramCardColumns(table, expanded);
+    return {
+      ...node,
+      selected: selected.has(node.id),
+      data: {
+        ...node.data,
+        fieldsExpanded: expanded,
+        fieldsToggleLabel: canToggle ? (expanded ? t("diagram.collapseFields") : t("diagram.showMoreFields", { count: total - COLLAPSED_DIAGRAM_COLUMNS })) : undefined,
+        toggleFields: canToggle
+          ? () => {
+              if (expandedFields.value.has(key)) expandedFields.value.delete(key);
+              else expandedFields.value.add(key);
+              clearWaypointsForTables([node.id]);
+              syncVueFlowNodes();
+            }
+          : undefined,
+      },
+    };
+  });
+  setNodes([...layerNodes.map((node) => ({ ...node, selected: selected.has(node.id) })), ...displayNodes]);
   setEdges(vueEdges);
 }
 
@@ -1470,8 +1522,95 @@ function diagramContextKey(): string {
   return JSON.stringify([connectionId.value, database.value, props.prefillCatalog, schema.value, selectedSchemas.value, focusedRoots.value]);
 }
 
+function closePicker() {
+  pickerGeneration++;
+  picker.value = false;
+  pickerBusy.value = false;
+}
+
+async function openPicker() {
+  const generation = ++pickerGeneration;
+  picker.value = true;
+  pickerBusy.value = true;
+  pickerError.value = pickerSearch.value = "";
+  candidates.value = undefined;
+  picked.value = [];
+  const id = connectionId.value;
+  const db = database.value;
+  const catalog = props.prefillCatalog;
+  const scope = isSchemaAware.value ? selectedSchemas.value : [db];
+  const existing = new Set(tables.value.map((table) => diagramIdentityKey({ ...table, schema: table.schema ?? scope[0] })));
+  try {
+    const all = new Map<string, TableCandidate>();
+    for (const sc of scope) {
+      if (generation !== pickerGeneration) return;
+      const list = await api.listTables(id, db, sc, undefined, undefined, undefined, undefined, catalog);
+      for (const table of list) {
+        if (table.table_type === "VIEW" || table.table_type === "MATERIALIZED_VIEW") continue;
+        const entry = { name: table.name, schema: sc, comment: table.comment };
+        const key = diagramIdentityKey(entry);
+        if (!existing.has(key)) all.set(key, entry);
+      }
+    }
+    if (generation === pickerGeneration) candidates.value = [...all.values()].sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name));
+  } catch (error) {
+    if (generation === pickerGeneration) pickerError.value = String(error);
+  } finally {
+    if (generation === pickerGeneration) pickerBusy.value = false;
+  }
+}
+
+async function appendSelectedTables() {
+  if (pickerBusy.value || !candidates.value) return;
+  const keys = new Set(picked.value);
+  const chosen = candidates.value.filter((table) => keys.has(diagramIdentityKey(table)));
+  if (!chosen.length) return;
+  const generation = pickerGeneration;
+  const id = connectionId.value;
+  const db = database.value;
+  const catalog = props.prefillCatalog;
+  pickerBusy.value = true;
+  pickerError.value = "";
+  try {
+    const loaded: DiagramTable[] = [];
+    for (let offset = 0; offset < chosen.length; offset += METADATA_BATCH_SIZE) {
+      if (generation !== pickerGeneration) return;
+      const batch = await Promise.all(
+        chosen.slice(offset, offset + METADATA_BATCH_SIZE).map(async (table) => {
+          const [columns, foreignKeys, indexes] = await Promise.all([api.getColumns(id, db, table.schema, table.name, catalog), api.listForeignKeys(id, db, table.schema, table.name, catalog), api.listIndexes(id, db, table.schema, table.name, catalog)]);
+          return { ...table, columns, foreignKeys, indexes: diagramIndexes(indexes) };
+        }),
+      );
+      loaded.push(...batch);
+    }
+    if (generation !== pickerGeneration) return;
+    const additions = applyLiveTablePatches(loaded, loadLiveTablePatches(id, db, effectiveSchemaKey.value), selectedSchemas.value[0]);
+    let right = MARGIN;
+    for (const position of Object.values(positions.value)) right = Math.max(right, position.x + CARD_WIDTH + GAP_X);
+    for (const layer of layerStore.layers) {
+      if (layer.position && layer.width !== undefined) right = Math.max(right, layer.position.x + layer.width + GAP_X);
+    }
+    let y = MARGIN;
+    const nextPositions = { ...positions.value };
+    for (const table of additions) {
+      nextPositions[getTableKey(table)] = { x: right, y };
+      y += tableHeight(table) + GAP_Y;
+    }
+    positions.value = nextPositions;
+    persistedTableSnapshot.push(...deepCloneJson(additions));
+    tables.value = [...tables.value, ...additions];
+    syncVueFlowNodes();
+    closePicker();
+  } catch (error) {
+    if (generation === pickerGeneration) pickerError.value = String(error);
+  } finally {
+    if (generation === pickerGeneration) pickerBusy.value = false;
+  }
+}
+
 async function loadDiagram(options: { mode?: DiagramLoadMode; force?: boolean } = {}): Promise<void> {
   if (!diagramReady.value) return;
+  closePicker();
   const generation = ++diagramLoadGeneration;
   const context = diagramContextKey();
   const active = () => open.value && generation === diagramLoadGeneration && context === diagramContextKey();
@@ -2135,6 +2274,8 @@ watch(
   diagramContextKey,
   () => {
     diagramLoadGeneration++;
+    closePicker();
+    expandedFields.value.clear();
     loadingDiagram.value = false;
   },
   { flush: "sync" },
@@ -2155,6 +2296,8 @@ watch(
       void setupFullscreenListeners();
     } else {
       diagramLoadGeneration++;
+      closePicker();
+      expandedFields.value.clear();
       initializationGeneration++;
       namespaceGeneration++;
       loadingDiagram.value = false;
@@ -2209,6 +2352,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   diagramLoadGeneration++;
+  closePicker();
   initializationGeneration++;
   namespaceGeneration++;
   window.removeEventListener("keydown", handleKeydown);
@@ -2264,6 +2408,7 @@ onUnmounted(() => {
         :is-fullscreen="isFullscreen"
         :draft-table-count="draftTableCount"
         :can-create-table="canCreateDraftTable"
+        :can-add-tables="diagramReady && loadedDiagramScope === 'focused'"
         :can-sync-to-database="canSyncStructure"
         @set-connection="setConnection"
         @set-database="setDatabase"
@@ -2282,8 +2427,39 @@ onUnmounted(() => {
         @toggle-fullscreen="toggleFullscreen"
         @auto-layout="applyAutoLayout"
         @create-table="showCreateTableDialog = true"
+        @add-tables="openPicker"
         @sync-to-database="showSyncDialog = true"
       />
+      <Dialog
+        :open="picker"
+        @update:open="
+          (value) => {
+            if (!value) closePicker();
+          }
+        "
+      >
+        <DialogContent class="flex max-h-[85dvh] flex-col sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{{ t("diagram.addTables") }}</DialogTitle>
+            <DialogDescription>{{ database }}</DialogDescription>
+          </DialogHeader>
+          <Input v-model="pickerSearch" :placeholder="t('diagram.searchTables')" :aria-label="t('diagram.searchTables')" />
+          <p v-if="pickerError" role="alert" class="break-words text-sm text-destructive">{{ pickerError }}</p>
+          <p v-if="pickerBusy" role="status" class="text-sm text-muted-foreground">{{ t("common.loading") }}</p>
+          <p v-else-if="!pickerError && !matchingCandidates.length" class="text-sm text-muted-foreground">{{ t("common.noResults") }}</p>
+          <div class="min-h-0 overflow-auto">
+            <label v-for="table in matchingCandidates" :key="diagramIdentityKey(table)" class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent">
+              <input v-model="picked" type="checkbox" :value="diagramIdentityKey(table)" :disabled="pickerBusy" />
+              <span class="break-all">{{ isSchemaAware ? `${table.schema}.${table.name}` : table.name }}</span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" @click="closePicker">{{ t("common.cancel") }}</Button>
+            <Button v-if="!candidates && pickerError" @click="openPicker">{{ t("common.refresh") }}</Button>
+            <Button v-else :disabled="pickerBusy || !picked.length" @click="appendSelectedTables">{{ t("diagram.addTables") }}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div class="flex min-h-0 flex-1 flex-col bg-muted/20">
         <div class="min-h-0 flex-1 flex overflow-hidden">

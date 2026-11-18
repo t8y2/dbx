@@ -6468,6 +6468,9 @@ export default withEnglishFallback({
     title: "テーブル構造を編集",
   },
   diagram: {
+    addTables: "テーブルを追加",
+    showMoreFields: "残り {count} 個の列を表示",
+    collapseFields: "列を折りたたむ",
     title: "リレーション図",
     open: "図を表示",
     selectConnection: "接続を選択",

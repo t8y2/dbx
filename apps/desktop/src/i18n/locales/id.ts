@@ -5860,6 +5860,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "Identity SQL Server hanya mendukung tinyint, smallint, int, bigint, dan decimal/numeric dengan skala 0",
   },
   diagram: {
+    addTables: "Tambah tabel",
+    showMoreFields: "Tampilkan {count} kolom lagi",
+    collapseFields: "Ciutkan kolom",
     title: "Diagram Relasi",
     open: "Lihat Diagram",
     selectConnection: "Pilih koneksi",

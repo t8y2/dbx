@@ -5930,6 +5930,9 @@ export default withEnglishFallback({
     title: "編輯資料表結構",
   },
   diagram: {
+    addTables: "新增資料表",
+    showMoreFields: "展開其餘 {count} 個欄位",
+    collapseFields: "收合欄位",
     title: "關係圖",
     open: "檢視關係圖",
     selectConnection: "選擇連線",

@@ -95,6 +95,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
+import { handleTextInputCaseShortcut } from "@/lib/editor/textInputCaseShortcut";
 import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
@@ -8305,7 +8306,13 @@ watch(
 </script>
 
 <template>
-  <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+  <div
+    ref="rootRef"
+    class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]"
+    :data-structure-density="localStructureDensity"
+    :style="structureDensityStyle"
+    @keydown="handleTextInputCaseShortcut($event, settingsStore.editorSettings.shortcuts)"
+  >
     <ObjectSourceDialog
       v-if="triggerSourceTarget"
       :key="JSON.stringify(triggerSourceTarget.target)"

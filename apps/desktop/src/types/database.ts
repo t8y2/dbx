@@ -2706,6 +2706,8 @@ export interface QueryTab {
     scrollTop: number;
     scrollLeft: number;
   };
+  /** One-based bookmarked lines, saved with the open SQL tab. */
+  editorBookmarks?: number[];
   editorSelection?: {
     anchor: number;
     head: number;

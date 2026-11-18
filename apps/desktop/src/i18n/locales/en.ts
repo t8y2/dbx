@@ -2775,6 +2775,14 @@ export default {
       drag: "Drag to move",
       empty: "No columns",
     },
+    bookmarks: {
+      workspaceTitle: "Bookmarks",
+      workspaceSearch: "Search files, SQL text or line numbers",
+      workspaceEmpty: "Bookmarks from all open SQL tabs appear here. Click the bookmark gutter beside a line number to add one.",
+      line: "Line {line}",
+      emptyLine: "(blank line)",
+      noMatches: "No matching bookmarks",
+    },
     gotoLine: {
       placeholder: "Line number",
       total: "{total} lines",

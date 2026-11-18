@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { queryEditorBookmarkLines } from "@/lib/editor/codemirrorBookmarks";
 import { createApp, h, nextTick, reactive, shallowRef } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
@@ -37,12 +38,16 @@ async function mountEditor(modelValue: string, overrides: Partial<QueryEditorPro
   const props = reactive<QueryEditorProps>({ modelValue, tabId: "bookmarks", databaseType: "mysql", dialect: "mysql", autoFocus: false, ...overrides });
   const editor = shallowRef<InstanceType<typeof QueryEditor>>();
   const host = document.createElement("div");
+  const bookmarkChanges = vi.fn((lines: number[], tabId?: string) => {
+    if (props.bookmarkLines !== undefined && tabId === props.tabId) props.bookmarkLines = lines;
+  });
   document.body.append(host);
   const app = createApp({
     render: () =>
       h(QueryEditor, {
         ...props,
         ref: editor,
+        onBookmarksChange: bookmarkChanges,
         "onUpdate:modelValue": (value: string) => {
           props.modelValue = value;
         },
@@ -57,7 +62,7 @@ async function mountEditor(modelValue: string, overrides: Partial<QueryEditorPro
   });
   await vi.waitFor(() => expect(host.querySelector(".cm-editor")).not.toBeNull(), { timeout: 5000 });
   const view = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
-  return { view, host, props, settingsStore };
+  return { view, host, props, settingsStore, editor, bookmarkChanges };
 }
 
 function pressBookmarkShortcut(view: EditorView, key: string, keyCode: number): KeyboardEvent {
@@ -76,6 +81,49 @@ function visibleBookmarkMarkerCount(host: HTMLElement): number {
 }
 
 describe("QueryEditor line bookmarks", () => {
+  it("restores persisted lines, tracks edits, and survives a fresh editor mount", async () => {
+    const first = await mountEditor("one\ntwo\nthree", { bookmarkLines: [2, 3] });
+    await nextTick();
+    expect(queryEditorBookmarkLines(first.view)).toEqual([2, 3]);
+    first.view.dispatch({ changes: { from: 0, insert: "new\n" } });
+    await nextTick();
+    expect(first.props.bookmarkLines).toEqual([3, 4]);
+    placeCursor(first.view, first.view.state.doc.line(3).from);
+    pressBookmarkShortcut(first.view, "b", 66);
+    await nextTick();
+    expect(first.props.bookmarkLines).toEqual([4]);
+    const restored = await mountEditor(first.props.modelValue, { bookmarkLines: [...first.props.bookmarkLines!] });
+    await nextTick();
+    expect(queryEditorBookmarkLines(restored.view)).toEqual([4]);
+  });
+
+  it("keeps saved lines while file content hydrates and isolates tab swaps", async () => {
+    const { view, props, bookmarkChanges } = await mountEditor("", { bookmarkLines: [3] });
+    expect(props.bookmarkLines).toEqual([3]);
+    props.modelValue = "one\ntwo\nthree";
+    await nextTick();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual([3]);
+    bookmarkChanges.mockClear();
+    Object.assign(props, { tabId: "second", modelValue: "other\nfile", bookmarkLines: [1] });
+    await nextTick();
+    expect(bookmarkChanges).not.toHaveBeenCalled();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual([1]);
+    Object.assign(props, { tabId: "bookmarks", modelValue: "one\ntwo\nthree", bookmarkLines: [3] });
+    await nextTick();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual([3]);
+    expect(view.state.doc.toString()).toBe("one\ntwo\nthree");
+  });
+
+  it("tracks an external prepend without collapsing bookmarks at the document end", async () => {
+    const { props } = await mountEditor("one\ntwo\nthree", { bookmarkLines: [2] });
+    props.modelValue = "new\none\ntwo\nthree";
+    await nextTick();
+    expect(props.bookmarkLines).toEqual([3]);
+  });
+
   const SQL = "one\ntwo\nthree\nfour";
   const lineStart = (lineNumber: number) =>
     SQL.split("\n")

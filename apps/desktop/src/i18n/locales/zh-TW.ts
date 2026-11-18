@@ -2434,6 +2434,14 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "讀取剪貼簿失敗：{message}",
       convertNamingStyle: "切換命名風格",
     },
+    bookmarks: {
+      workspaceTitle: "書籤",
+      workspaceSearch: "搜尋檔名、SQL 內容或行號",
+      workspaceEmpty: "所有已開啟 SQL 分頁的書籤會顯示在這裡。點擊編輯器行號左側的書籤欄即可新增。",
+      line: "第 {line} 行",
+      emptyLine: "（空白行）",
+      noMatches: "沒有符合的書籤",
+    },
     gotoLine: {
       placeholder: "行號",
       total: "共 {total} 行",

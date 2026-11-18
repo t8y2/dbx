@@ -2472,6 +2472,14 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "クリップボードの読み取りに失敗しました：{message}",
       convertNamingStyle: "命名スタイルの切り替え",
     },
+    bookmarks: {
+      workspaceTitle: "ブックマーク",
+      workspaceSearch: "ファイル名、SQL テキスト、行番号を検索",
+      workspaceEmpty: "開いているすべての SQL タブのブックマークが表示されます。行番号の横にあるブックマーク用の余白をクリックすると追加できます。",
+      line: "{line} 行目",
+      emptyLine: "（空行）",
+      noMatches: "一致するブックマークはありません",
+    },
     gotoLine: {
       placeholder: "行番号",
       total: "全 {total} 行",

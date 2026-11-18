@@ -2454,6 +2454,14 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
       convertNamingStyle: "Alternar estilo de nomenclatura",
     },
+    bookmarks: {
+      workspaceTitle: "Marcadores",
+      workspaceSearch: "Pesquisar arquivos, texto SQL ou números de linha",
+      workspaceEmpty: "Os marcadores de todas as abas SQL abertas aparecem aqui. Clique na margem de marcadores ao lado de um número de linha para adicionar um.",
+      line: "Linha {line}",
+      emptyLine: "(linha vazia)",
+      noMatches: "Nenhum marcador correspondente",
+    },
     gotoLine: {
       placeholder: "Número da linha",
       total: "{total} linhas",

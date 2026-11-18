@@ -2482,6 +2482,14 @@ export default withEnglishFallback({
       drag: "Перетащите, чтобы переместить",
       empty: "Нет столбцов",
     },
+    bookmarks: {
+      workspaceTitle: "Закладки",
+      workspaceSearch: "Поиск файлов, текста SQL или номеров строк",
+      workspaceEmpty: "Здесь отображаются закладки всех открытых вкладок SQL. Чтобы добавить закладку, нажмите на поле закладок рядом с номером строки.",
+      line: "Строка {line}",
+      emptyLine: "(пустая строка)",
+      noMatches: "Подходящие закладки не найдены",
+    },
     gotoLine: {
       placeholder: "Номер строки",
       total: "{total} строк",

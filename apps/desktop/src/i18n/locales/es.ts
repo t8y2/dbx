@@ -2545,6 +2545,14 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "Error al leer el portapapeles: {message}",
       convertNamingStyle: "Cambiar estilo de nomenclatura",
     },
+    bookmarks: {
+      workspaceTitle: "Marcadores",
+      workspaceSearch: "Buscar archivos, texto SQL o números de línea",
+      workspaceEmpty: "Aquí aparecen los marcadores de todas las pestañas SQL abiertas. Haz clic en el margen de marcadores junto a un número de línea para añadir uno.",
+      line: "Línea {line}",
+      emptyLine: "(línea vacía)",
+      noMatches: "No hay marcadores coincidentes",
+    },
     gotoLine: {
       placeholder: "Número de línea",
       total: "{total} líneas",

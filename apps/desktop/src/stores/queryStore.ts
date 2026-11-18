@@ -286,6 +286,7 @@ function snapshotClosedTab(tab: QueryTab): QueryTab {
     objectSource: tab.objectSource ? { ...tab.objectSource } : undefined,
     editorViewport: tab.editorViewport ? { ...tab.editorViewport } : undefined,
     editorSelection: tab.editorSelection ? { ...tab.editorSelection } : undefined,
+    editorBookmarks: tab.editorBookmarks ? [...tab.editorBookmarks] : undefined,
     uiState: tab.uiState ? cloneTabDraft(tab.uiState) : undefined,
   };
 }
@@ -3037,6 +3038,7 @@ export const useQueryStore = defineStore("query", () => {
       sql: t.sql,
       editorViewport: t.editorViewport,
       editorSelection: t.editorSelection,
+      editorBookmarks: t.editorBookmarks,
       savedSqlId: t.savedSqlId,
       isDefaultQuery: t.isDefaultQuery,
       externalSqlPath: t.externalSqlPath,
@@ -6340,6 +6342,20 @@ export const useQueryStore = defineStore("query", () => {
       tab.sql = sql;
       queueSavedSqlEditorPositionPersist(tab);
     }
+  }
+
+  function updateEditorBookmarks(id: string, lines: number[]) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab) return;
+    if (tab.editorBookmarks?.length === lines.length && tab.editorBookmarks.every((line, index) => line === lines[index])) return;
+    tab.editorBookmarks = [...lines];
+  }
+
+  function revealBookmark(id: string, line: number): boolean {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab?.editorBookmarks?.includes(line) || !activateTab(id)) return false;
+    tab.editorRevealRequest = { id: ++contentRevealSeq, line, column: 1 };
+    return true;
   }
 
   function updateDataGridLocalColumnFilters(id: string, filters: Record<string, string[]>) {
@@ -12304,6 +12320,8 @@ export const useQueryStore = defineStore("query", () => {
     rollbackConnectionTransactions,
     rollbackDatabaseTransactions,
     updateSql,
+    updateEditorBookmarks,
+    revealBookmark,
     updateDataGridLocalColumnFilters,
     updateDataGridHiddenColumnKeys,
     updateEditorViewport,

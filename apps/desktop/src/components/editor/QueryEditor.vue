@@ -222,6 +222,7 @@ const emit = defineEmits<{
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }, tabId?: string];
   selectionStateChange: [selection: { anchor: number; head: number }];
+  bookmarksChange: [lines: number[], tabId?: string];
   editorStateFlushed: [];
   editorRevealConsumed: [];
   sendSelectionToAi: [sql: string];
@@ -1089,6 +1090,7 @@ function resolvePreviewDmlCandidate(position?: number): string {
 function emitModelValue(currentView: EditorViewType): string {
   const sql = currentEditorDocText(currentView);
   emit("update:modelValue", sql);
+  documentState.recordBookmarks(currentView);
   return sql;
 }
 
@@ -2454,6 +2456,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           eventFilter: startsQueryEditorRectangularSelection,
         }),
         EditorView.updateListener.of((update) => {
+          if (!update.docChanged && bookmarkShortcuts?.changed(update)) documentState.recordBookmarks(update.view);
           if (update.focusChanged && update.view.hasFocus) {
             rememberFocusedQueryEditorView(update.view);
           }
@@ -2614,6 +2617,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           scrollDOM.removeEventListener("scroll", onEditorScroll);
           contextMenuPointerCleanup = null;
         };
+        documentState.restoreBookmarks();
         restoreEditorSelection(props.initialSelection, !props.initialViewport);
         restoreEditorViewport();
         performEditorReveal();
@@ -2734,8 +2738,9 @@ watch(
   () => props.revealRequest?.id,
   (id, previousId) => {
     if (!id || id === previousId) return;
-    performEditorReveal();
+    void nextTick(() => performEditorReveal());
   },
+  { flush: "post" },
 );
 
 watch(

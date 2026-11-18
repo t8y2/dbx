@@ -9,6 +9,7 @@ export interface QueryEditorProps {
   modelValue: string;
   /** Identity of the tab owning the document. Changing it swaps in that tab's cached editor state (fresh undo history on first visit). */
   tabId?: string;
+  bookmarkLines?: number[];
   connectionId?: string;
   catalog?: string;
   database?: string;

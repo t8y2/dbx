@@ -2633,6 +2633,14 @@ export default withEnglishFallback({
       drag: "ลากเพื่อย้าย",
       empty: "ไม่มีคอลัมน์",
     },
+    bookmarks: {
+      workspaceTitle: "บุ๊กมาร์ก",
+      workspaceSearch: "ค้นหาไฟล์ ข้อความ SQL หรือหมายเลขบรรทัด",
+      workspaceEmpty: "บุ๊กมาร์กจากแท็บ SQL ที่เปิดอยู่ทั้งหมดจะแสดงที่นี่ คลิกบริเวณบุ๊กมาร์กข้างหมายเลขบรรทัดเพื่อเพิ่มบุ๊กมาร์ก",
+      line: "บรรทัด {line}",
+      emptyLine: "(บรรทัดว่าง)",
+      noMatches: "ไม่พบบุ๊กมาร์กที่ตรงกัน",
+    },
     gotoLine: {
       placeholder: "หมายเลขบรรทัด",
       total: "{total} บรรทัด",

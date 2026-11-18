@@ -534,6 +534,9 @@ pub struct TabRuntimeCachePruneResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopSettings {
     pub show_tray_icon: bool,
+    /// Exposed to sync snapshots. The value is stored with app appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_theme_mode: Option<String>,
     #[serde(default = "default_linux_floating_frame_enabled")]
     pub linux_floating_frame_enabled: bool,
     pub icon_theme: DesktopIconTheme,
@@ -1167,6 +1170,7 @@ impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
             show_tray_icon: true,
+            app_theme_mode: None,
             linux_floating_frame_enabled: true,
             icon_theme: DesktopIconTheme::Default,
             quit_on_close: false,
@@ -6026,6 +6030,12 @@ impl Storage {
     pub async fn load_desktop_settings(&self) -> Result<DesktopSettings, String> {
         let settings = self.load_app_settings_json().await?;
         Ok(DesktopSettings {
+            app_theme_mode: settings
+                .get(APP_APPEARANCE_SETTINGS_KEY)
+                .and_then(|appearance| appearance.get("themeMode"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|mode| is_app_theme_mode(mode))
+                .map(str::to_owned),
             linux_floating_frame_enabled: settings
                 .get("linux_floating_frame_enabled")
                 .and_then(|value| value.as_bool())
@@ -10056,6 +10066,10 @@ fn merge_json_object_fields(
     serde_json::Value::Object(merged)
 }
 
+fn is_app_theme_mode(mode: &str) -> bool {
+    matches!(mode, "light" | "dark" | "system" | "soft-light" | "soft-dark" | "soft-system")
+}
+
 fn apply_desktop_settings_in_tx(
     tx: &Transaction<'_>,
     settings: &DesktopSettings,
@@ -10119,6 +10133,14 @@ fn apply_desktop_settings_in_tx(
             continue;
         }
         merged.insert(key, value);
+    }
+    let theme = settings.app_theme_mode.as_deref().filter(|mode| is_app_theme_mode(mode));
+    if let Some(theme) =
+        theme.filter(|_| selected_keys.is_none_or(|keys| keys.iter().any(|key| key == "app_theme_mode")))
+    {
+        let previous = merged.remove(APP_APPEARANCE_SETTINGS_KEY).unwrap_or_default();
+        let appearance = merge_json_object_fields(previous, serde_json::json!({"themeMode": theme}), None);
+        merged.insert(APP_APPEARANCE_SETTINGS_KEY.to_string(), appearance);
     }
     tx.execute(
         "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
@@ -14452,6 +14474,7 @@ mod tests {
         storage
             .save_desktop_settings(&DesktopSettings {
                 show_tray_icon: false,
+                app_theme_mode: None,
                 linux_floating_frame_enabled: true,
                 icon_theme: DesktopIconTheme::Black,
                 quit_on_close: true,
@@ -14477,6 +14500,7 @@ mod tests {
             storage.load_desktop_settings().await.unwrap(),
             DesktopSettings {
                 show_tray_icon: false,
+                app_theme_mode: None,
                 linux_floating_frame_enabled: true,
                 icon_theme: DesktopIconTheme::Black,
                 quit_on_close: true,

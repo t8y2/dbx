@@ -354,7 +354,13 @@ function validMongoDisplayTimeZone(timeZone: string | undefined): boolean {
 
 function formatMongoDocumentDates(value: unknown, formatter: MongoDateTimeFormatter): { value: unknown; changed: boolean } {
   const date = mongoExtendedJsonDateValue(value);
-  if (date !== undefined) return { value: applyColumnFormatter(date, formatter), changed: true };
+  if (date !== undefined) {
+    // Canonical Extended JSON stores dates as epoch milliseconds, even near
+    // the epoch where generic timestamp detection would infer seconds.
+    const epochMilliseconds = typeof date === "number" || /^-?\d+$/.test(date);
+    const dateFormatter = formatter.unit === "auto" && epochMilliseconds ? { ...formatter, unit: "milliseconds" as const } : formatter;
+    return { value: applyColumnFormatter(date, dateFormatter), changed: true };
+  }
   if (Array.isArray(value)) {
     let changed = false;
     const items = value.map((item) => {

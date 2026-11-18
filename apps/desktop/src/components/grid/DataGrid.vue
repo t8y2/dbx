@@ -183,6 +183,7 @@ import "@/lib/dataGrid/geometryMapPreview";
 import { isHexGeometry, looksLikeWkt, parseWktGeometry } from "@/lib/dataGrid/geometryPreview";
 import {
   BINARY_CELL_DOWNLOAD_MODES,
+  BINARY_COLUMN_FORMATS,
   BinaryCellImportTooLargeError,
   binaryCellBytesToHexValue,
   binaryCellDisplayText,
@@ -197,6 +198,7 @@ import {
   hasUnsafeOpaqueAggregateStatePredicate,
   isBinaryCellTextEditable,
   isBinaryCellColumnType,
+  isBinaryColumnFormat,
   isOpaqueAggregateStateColumnType,
   mergeOpaqueReadonlyColumnIndexes,
   openBinaryCellFile,
@@ -219,7 +221,7 @@ import {
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
-import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
+import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, resolveColumnFormatter, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import {
   BOOLEAN_CELL_EDITOR_VALUES,
@@ -251,6 +253,7 @@ import {
   isModRShortcut,
   isSaveShortcut,
   isToggleTransposeShortcut,
+  matchesShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import {
@@ -330,6 +333,7 @@ import {
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGridPageSizePreference, type DataGridPageSizePreference } from "@/lib/dataGrid/dataGridPageSizePreference";
+import { savedTableOpenPageSize, saveTableOpenPageSize, type TableOpenPageScope } from "@/lib/table/tableOpenPageLimit";
 import { continuousQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { allNullColumnIndexes, identicalValueColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems, type DataGridColumnLookupMatchMode } from "@/lib/dataGrid/dataGridColumnLookup";
@@ -472,6 +476,7 @@ import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useDataGridColumnFormatter } from "@/composables/useDataGridColumnFormatter";
 import { useDataGridTableMetadataLoaders } from "@/composables/useDataGridTableMetadataLoaders";
+import { useTableInfoHeaderLayout } from "@/composables/useTableInfoHeaderLayout";
 import { DATA_GRID_SERVER_COLUMN_FILTER_LIMIT, useDataGridColumnFilters } from "@/composables/useDataGridColumnFilters";
 import { useDataGridLargeValues, type LargeValueSnapshotDownloadTarget } from "@/composables/useDataGridLargeValues";
 import { useDataGridSaveConfirmation } from "@/composables/useDataGridSaveConfirmation";
@@ -488,6 +493,7 @@ const DataGridInsertRowsDialog = defineAsyncComponent(() => import("@/components
 const ExportProgressDialog = defineAsyncComponent(() => import("@/components/export/ExportProgressDialog.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
 const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
+const MONGO_PAGE_JSON_PREVIEW_MAX_LENGTH = 256 * 1024;
 let largeValueRuntime: ReturnType<typeof useDataGridLargeValues> | undefined;
 
 function scheduleVisibleLargeValuePreviewHydration(delay = 150) {
@@ -605,6 +611,7 @@ interface DataGridProps {
   context?: "results" | "table-data";
   pageSizePreference?: DataGridPageSizePreference;
   autoTransposeSingleRow?: boolean;
+  resultTransposeEnabled?: boolean;
   sourceColumns?: Array<string | undefined>;
   joinedWriteTargets?: import("@/types/database").QueryTab["queryWriteTargets"];
   queryMultiSource?: boolean;
@@ -745,6 +752,7 @@ interface DataGridProps {
 
 const props = withDefaults(defineProps<DataGridProps>(), {
   // Vue casts absent Boolean props to false unless a default is explicit.
+  resultTransposeEnabled: undefined,
   // Regular grids have exact totals; document stores opt into lower-bound totals.
   totalRowCountIsExact: true,
   inexactTotalRowCountMode: "at-least",
@@ -788,6 +796,7 @@ const emit = defineEmits<{
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
+  "update:resultTransposeEnabled": [value: boolean];
   "update:structuredOrderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
   changeQueryTimeout: [connectionId: string];
@@ -883,17 +892,17 @@ watch(
 watch(
   () => props.result,
   (result) => {
-    if (
-      !shouldAutoTransposeSingleRow({
+    const shouldOpen = () =>
+      props.resultTransposeEnabled ??
+      shouldAutoTransposeSingleRow({
         enabled: !!props.autoTransposeSingleRow,
         preserveTranspose: preserveTransposeOnNextResult.value,
         rowCount: result.rows.length,
         columnCount: result.columns.length,
-      })
-    )
-      return;
+      });
+    if (!shouldOpen() || result.rows.length === 0 || preserveTransposeOnNextResult.value) return;
     nextTick(() => {
-      if (props.result !== result || !props.autoTransposeSingleRow || result.rows.length !== 1 || result.columns.length <= 1) return;
+      if (props.result !== result || !shouldOpen()) return;
       applyTransposeState({ showTranspose: true, transposeRowIndex: 0 }, "start");
     });
   },
@@ -1232,6 +1241,7 @@ const hoveredDetailCell = ref<{ rowIndex: number; col: number } | null>(null);
 const quickDownloadMenuCell = ref<{ rowIndex: number; col: number } | null>(null);
 const showCellDetail = ref(false);
 const showMongoJsonPreview = ref(false);
+const mongoJsonPreviewScope = ref<"selected" | "page">("selected");
 const activeCellDetailTab = ref<CellDetailTab>(defaultCellDetailTab());
 const cellDetailDialogOpen = ref(false);
 const cellDetailDialogTarget = ref<{ rowIndex: number; col: number } | null>(null);
@@ -3823,8 +3833,22 @@ watch([localFilterScopeKey, localFilterRestoreKey], ([, restoreKey], [, previous
 
 // --- Pagination ---
 const pageSizePreference = computed(() => resolveDataGridPageSizePreference(props.context, props.pageSizePreference));
-const defaultPageSize = computed(() => preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value));
-const pageSize = ref(preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value, props.pageLimit));
+const tablePageSizeScope = computed<TableOpenPageScope | undefined>(() => {
+  if (props.context !== "table-data" || !props.connectionId || !props.tableMeta?.tableName) return undefined;
+  const database = props.tableMeta.database ?? props.database;
+  if (database === undefined) return undefined;
+  return { connectionId: props.connectionId, database, catalog: props.tableMeta.catalog, schema: props.tableMeta.schema ?? props.schema, tableName: props.tableMeta.tableName };
+});
+const tableDefaultPageSize = ref<number>();
+watch(
+  tablePageSizeScope,
+  (scope) => {
+    tableDefaultPageSize.value = scope ? savedTableOpenPageSize(scope) : undefined;
+  },
+  { immediate: true },
+);
+const defaultPageSize = computed(() => tableDefaultPageSize.value ?? preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value));
+const pageSize = ref(preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value, props.pageLimit ?? tableDefaultPageSize.value));
 const currentPage = ref(1);
 const pageSizeOptions = computed(() => resultPageSizeMenuOptions(pageSize.value));
 const customPageSizeInput = ref(String(pageSize.value));
@@ -4525,6 +4549,19 @@ function setDefaultPageSize() {
 function applyCustomPageSizeAndSetDefault() {
   applyCustomPageSize();
   setDefaultPageSize();
+}
+
+function applyCustomPageSizeAndSaveForTable() {
+  const scope = tablePageSizeScope.value;
+  if (!scope) return;
+  applyCustomPageSize();
+  if (saveTableOpenPageSize(scope, pageSize.value)) tableDefaultPageSize.value = pageSize.value;
+}
+
+function resetTableDefaultPageSize() {
+  const scope = tablePageSizeScope.value;
+  if (!scope) return;
+  if (saveTableOpenPageSize(scope)) tableDefaultPageSize.value = undefined;
 }
 
 function applyCustomPageSize() {
@@ -6286,6 +6323,7 @@ const {
   savedColumnFormatter,
   columnFormatter,
   columnHasFormatter,
+  canFormatBinaryColumn,
   openColumnFormatter,
   closeColumnFormatter,
   handleColumnFormatterOpenChange,
@@ -7623,6 +7661,13 @@ function exportSelectedColumnsSql() {
   return exportSql({ rowIds, columnIndexes });
 }
 
+const showSelectedColumnsUpdateExport = computed(() => hasColumnSelection.value && props.databaseType !== "mongodb" && !extractorUnavailableForDatabase("sql-updates", props.databaseType));
+
+function exportSelectedColumnsUpdateSql() {
+  if (!showSelectedColumnsUpdateExport.value) return;
+  return exportWithExtractor("sql-updates");
+}
+
 function exportSelectedColumnsTxt() {
   const columnIndexes = targetColumnIndexes();
   if (columnIndexes.length === 0) return;
@@ -7827,19 +7872,35 @@ const activeMongoJsonDocument = computed(() => {
   const item = displayItemAt(selectedCell.rowIndex);
   return item?.sourceIndex === undefined ? undefined : props.result.mongo_documents?.[item.sourceIndex];
 });
-const mongoJsonPreviewFullText = computed(() => {
-  const document = activeMongoJsonDocument.value;
-  if (document === undefined) return "";
+function formatMongoJsonPreview(limit = Infinity): string {
+  if (!mongoJsonPreviewOpen.value) return "";
   try {
-    // Relaxed Extended JSON (`{"$date": "…"}`) like Compass's JSON view, instead
-    // of the browser form's escaped `ISODate("…")` strings.
-    return JSON.stringify(mongoDocumentRelaxedExtendedJson(document), null, 2) ?? "";
+    if (mongoJsonPreviewScope.value === "selected") {
+      const document = activeMongoJsonDocument.value;
+      return document === undefined ? "" : (JSON.stringify(mongoDocumentRelaxedExtendedJson(document), null, 2) ?? "").slice(0, limit);
+    }
+    const documents = props.result.mongo_documents ?? [];
+    const parts = ["["];
+    let length = 1;
+    // Reuse the table's visible row order and stop formatting once the preview is full.
+    for (const row of displayRowRefs.value) {
+      if (!("sourceIndex" in row)) continue;
+      const json = JSON.stringify(mongoDocumentRelaxedExtendedJson(documents[row.sourceIndex]), null, 2);
+      if (json === undefined) continue;
+      const part = `${parts.length > 1 ? ",\n" : "\n"}${json.replace(/^/gm, "  ")}`;
+      parts.push(part.slice(0, limit - length));
+      length += part.length;
+      if (length >= limit) return parts.join("");
+    }
+    return parts.length > 1 ? `${parts.join("")}\n]`.slice(0, limit) : "[]";
   } catch {
     return "";
   }
-});
-const mongoJsonPreviewText = computed(() => mongoJsonPreviewFullText.value.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH));
-const mongoJsonPreviewTruncated = computed(() => mongoJsonPreviewText.value.length < mongoJsonPreviewFullText.value.length);
+}
+const mongoJsonPreviewLimit = computed(() => (mongoJsonPreviewScope.value === "page" ? MONGO_PAGE_JSON_PREVIEW_MAX_LENGTH : CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH));
+const mongoJsonPreview = computed(() => formatMongoJsonPreview(mongoJsonPreviewLimit.value + 1));
+const mongoJsonPreviewText = computed(() => mongoJsonPreview.value.slice(0, mongoJsonPreviewLimit.value));
+const mongoJsonPreviewTruncated = computed(() => mongoJsonPreviewText.value.length < mongoJsonPreview.value.length);
 const mongoJsonPreviewUsesCodeEditor = computed(() => !!mongoJsonPreviewText.value && !mongoJsonPreviewTruncated.value);
 
 watch(canShowMongoJsonPreview, (available) => {
@@ -8240,7 +8301,8 @@ function closeMongoJsonPreview() {
 }
 
 function copyMongoJsonPreview() {
-  if (mongoJsonPreviewFullText.value) copyText(mongoJsonPreviewFullText.value);
+  const text = mongoJsonPreviewTruncated.value ? formatMongoJsonPreview() : mongoJsonPreviewText.value;
+  if (text) copyText(text);
 }
 
 function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false) {
@@ -8533,6 +8595,13 @@ const CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH = 512;
 
 const resolvedColumnFormatters = computed(() => props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)));
 const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
+// BSON dates carry their type with each value. Mixed columns and subdocuments
+// may contain dates even when the column itself has no temporal type.
+const mongoDateDisplayFormatter = computed(() => {
+  if (!usesMongoDocumentGridValues.value) return undefined;
+  return resolveColumnFormatter(undefined, {}, { pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat, columnType: "datetime" });
+});
+const mongoDateDisplaySignature = computed(() => formatterSignature(mongoDateDisplayFormatter.value));
 const primitiveCellFormatCache = new Map<string, string>();
 let objectCellFormatCache = new WeakMap<object, Map<number, string>>();
 // 搜索用小写文本缓存：按行数组身份挂 WeakMap（工作集=当前结果行，GC 回收），
@@ -8569,7 +8638,7 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number, limitDisplay = true): string {
   const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
   if (usesMongoDocumentGridValues.value) {
-    const documentGridText = mongoDocumentGridDisplayText(value, formatter);
+    const documentGridText = mongoDocumentGridDisplayText(value, formatter ?? mongoDateDisplayFormatter.value);
     if (documentGridText !== undefined) return documentGridText;
   }
   if (formatter?.kind === "foreign-key-display" && columnIndex !== undefined) {
@@ -8595,6 +8664,8 @@ function formatCell(value: CellValue, columnIndex?: number, originalBytes?: numb
 }
 
 function formatCellCached(value: CellValue, columnIndex?: number, originalBytes?: number): string {
+  // A cache hit still needs to track changes to the column's display formatter.
+  void columnFormatterSignatures.value[columnIndex ?? -1];
   if (originalBytes === undefined && value !== null && typeof (value as unknown) === "object") {
     const objectValue = value as unknown as object;
     const cacheColumn = columnIndex ?? -1;
@@ -8618,7 +8689,7 @@ function formatCellCached(value: CellValue, columnIndex?: number, originalBytes?
     return formatCell(value, columnIndex, originalBytes);
   }
 
-  const key = `${primitiveCellFormatKey(value, columnIndex)}\u0000${originalBytes ?? ""}`;
+  const key = `${primitiveCellFormatKey(value, columnIndex)}\u0000${originalBytes ?? ""}\u0000${mongoDateDisplaySignature.value}`;
   const cached = primitiveCellFormatCache.get(key);
   if (cached !== undefined) return cached;
   return rememberPrimitiveCellFormat(key, formatCell(value, columnIndex, originalBytes));
@@ -8659,7 +8730,17 @@ function columnTypeCacheSignature(): string {
   return `${resultTypes}\u0001${tableTypes}`;
 }
 
-watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000"), columnTypeCacheSignature()], clearCellFormatCache);
+watch(
+  () => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000"), columnTypeCacheSignature()],
+  () => {
+    clearCellFormatCache();
+    scheduleCanvasDraw();
+  },
+);
+watch(mongoDateDisplaySignature, () => {
+  clearCellFormatCache();
+  scheduleCanvasDraw();
+});
 
 function quoteIdent(name: string): string {
   return quoteTableDataIdentifier(props.databaseType, name, connectionStore.connectionIdentifierQuote?.(props.connectionId));
@@ -10020,11 +10101,12 @@ const {
   captureColumnFormatterDisplay: () => {
     const formatters = resolvedColumnFormatters.value.map((formatter) => (formatter ? (JSON.parse(JSON.stringify(formatter)) as ColumnFormatterConfig) : undefined));
     const mongo = usesMongoDocumentGridValues.value;
+    const mongoDateFormatter = mongoDateDisplayFormatter.value;
     const foreignKeys = new Map([...foreignKeyDisplayLabels.value].map(([index, state]) => [index, { ...state, labels: new Map(state.labels) }]));
     return (value, index) => {
       const formatter = formatters[index];
       if (mongo) {
-        const text = mongoDocumentGridDisplayText(value, formatter);
+        const text = mongoDocumentGridDisplayText(value, formatter ?? mongoDateFormatter);
         if (text !== undefined) return text;
       }
       if (formatter?.kind === "foreign-key-display") {
@@ -10036,6 +10118,7 @@ const {
   },
   editValue: (value, index) => cellEditorTextForValue(value, index),
   hasColumnFormatter: (index: number) => Boolean(resolvedColumnFormatters.value[index]),
+  hasBinaryColumnFormatter: (index: number) => isBinaryColumnFormat(resolvedColumnFormatters.value[index]?.kind),
   applyColumnFormattersOnExport: computed(() => settingsStore.editorSettings.applyColumnFormattersOnExport),
   cellClipboardText: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridClipboardText(value) : undefined),
   externalCellValue: (value) => (usesMongoDocumentGridValues.value ? mongoDocumentGridExternalValue(value) : value),
@@ -10360,6 +10443,7 @@ const unrestrictedExportMenuItems = computed(() => {
           label: t("grid.exportSelectedColumnsHtml"),
         },
         { value: "selected-columns-sql", label: t("grid.exportSelectedColumnsSql") },
+        ...(showSelectedColumnsUpdateExport.value ? [{ value: "selected-columns-sql-updates", label: t("grid.exportSelectedColumnsSqlUpdates"), disabled: !canCopyWithExtractor("sql-updates") }] : []),
         { value: "selected-columns-txt", label: t("grid.exportSelectedColumnsTxt") },
       ]
     : [];
@@ -10511,6 +10595,7 @@ function selectExportMenuItem(value: string) {
     "selected-columns-markdown": exportSelectedColumnsMarkdown,
     "selected-columns-html": exportSelectedColumnsHtml,
     "selected-columns-sql": exportSelectedColumnsSql,
+    "selected-columns-sql-updates": exportSelectedColumnsUpdateSql,
     "selected-columns-txt": exportSelectedColumnsTxt,
     "selected-cells-csv": exportSelectedCellsCsv,
     "selected-cells-xlsx": exportSelectedCellsXlsx,
@@ -11610,6 +11695,18 @@ function scrollGridColumnIntoView(visibleColIdx: number) {
   if (useCanvasGridRows.value) syncCanvasViewport();
 }
 
+function selectAdjacentGridColumn(direction: -1 | 1): boolean {
+  const columnCount = visibleColumnIndexes.value.length;
+  const selected = [...selectedColumnIndexes.value];
+  const from = selected.length ? (direction === 1 ? Math.max(...selected) : Math.min(...selected)) : (selectionFocus.value?.colIndex ?? currentSelectedCellPosition()?.colIndex ?? (direction === 1 ? -1 : columnCount));
+  const next = from + direction;
+  if (next < 0 || next >= columnCount) return false;
+  invalidateContextMenuTarget();
+  selectColumn(next);
+  scrollGridColumnIntoView(next);
+  return true;
+}
+
 function scrollCanvasRowIntoView(rowIndex: number, block: DataGridScrollAlignment, previousPageRowIndex?: number) {
   const target = Math.max(0, Math.min(displayRowCount.value - 1, rowIndex));
   const scroller = canvasScrollerElement();
@@ -11717,6 +11814,7 @@ function toggleKeyboardTranspose(): boolean {
   }
   showTranspose.value = next.showTranspose;
   transposeRowIndex.value = next.transposeRowIndex;
+  rememberResultTranspose(next.showTranspose);
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
@@ -11725,6 +11823,21 @@ function toggleKeyboardTranspose(): boolean {
     scrollGridRowIntoView(requestedRowIndex);
   }
   return true;
+}
+
+const transposeToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
+  visible: props.context === "results",
+  disabled: displayRowCount.value === 0,
+  active: isTransposeMode.value,
+  label: t("grid.transpose"),
+  tooltip: t("settings.shortcutToggleTranspose"),
+  onTrigger: () => {
+    toggleKeyboardTranspose();
+  },
+}));
+
+function rememberResultTranspose(enabled: boolean) {
+  if (props.context === "results") emit("update:resultTransposeEnabled", enabled);
 }
 
 // Shared path that selects or extends to nextPosition and scrolls it into view.
@@ -12073,6 +12186,17 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (targetAllowsNativeClipboard) return;
+  if (target === gridRef.value && props.context === "table-data" && !editingCell.value && !isTransposeMode.value) {
+    const shortcuts = settingsStore.editorSettings.shortcuts;
+    const direction = matchesShortcut(event, shortcuts.selectNextGridColumn) ? 1 : matchesShortcut(event, shortcuts.selectPreviousGridColumn) ? -1 : 0;
+    if (direction) {
+      if (selectAdjacentGridColumn(direction)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
     const handled = event.shiftKey ? redoGridChange() : undoGridChange();
     if (handled) {
@@ -12944,7 +13068,10 @@ function closeTranspose(scrollToCurrentRecord = true) {
   const rowIndex = currentTransposeViewportRowIndex();
   showTranspose.value = false;
   transposeRowIndex.value = null;
-  if (scrollToCurrentRecord) scrollGridRowIntoView(rowIndex);
+  if (scrollToCurrentRecord) {
+    rememberResultTranspose(false);
+    scrollGridRowIntoView(rowIndex);
+  }
 }
 
 function openContextTranspose() {
@@ -12965,6 +13092,7 @@ function openContextTranspose() {
   });
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
+  rememberResultTranspose(next.showTranspose);
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
@@ -12977,6 +13105,7 @@ function toggleTranspose(rowIndex: number) {
   const next = nextTransposeState(showTranspose.value, transposeRowIndex.value, rowIndex);
   transposeRowIndex.value = next.transposeRowIndex;
   showTranspose.value = next.showTranspose;
+  rememberResultTranspose(next.showTranspose);
   if (next.showTranspose) {
     closeCellDetails();
     nextTick(updateTransposeViewport);
@@ -13590,6 +13719,8 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
 // Table info drawers are tied to a single grid instance. Keeping this state
 // module-global leaks the drawer into other kept-alive tabs.
 const showTableInfo = ref(false);
+const { tableInfoHeaderRef, tableInfoActionLabelsCompact, observeTableInfoHeader, disconnectTableInfoHeader } = useTableInfoHeaderLayout();
+void tableInfoHeaderRef;
 const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
 const canPinTableInfo = computed(() => props.context === "table-data");
 const tableInfoDrawerPinned = computed(() => settingsStore.editorSettings.tableInfoDrawerPinned);
@@ -13740,6 +13871,19 @@ watch([showCellDetail, showTableInfo], () => {
 watch(activeTableInfoTab, () => {
   searchQuery.value = "";
 });
+
+watch(
+  () => [showTableInfo.value, activeTableInfoTab.value, props.tableMeta?.tableName],
+  async ([shown]) => {
+    if (!shown) {
+      disconnectTableInfoHeader();
+      return;
+    }
+    await nextTick();
+    observeTableInfoHeader();
+  },
+  { immediate: true, flush: "post" },
+);
 
 watch([activeTableInfoTab, ddlLoading], ([tab, loading]) => {
   if (tab !== "ddl") return;
@@ -15228,6 +15372,7 @@ function exportSubmenu(): ContextMenuItem {
         action: exportSelectedColumnsHtml,
       },
       { label: t("grid.exportSelectedColumnsSql"), action: exportSelectedColumnsSql },
+      ...(showSelectedColumnsUpdateExport.value ? [{ label: t("grid.exportSelectedColumnsSqlUpdates"), action: exportSelectedColumnsUpdateSql, disabled: !canCopyWithExtractor("sql-updates") }] : []),
       { label: t("grid.exportSelectedColumnsTxt"), action: exportSelectedColumnsTxt },
       { label: "", separator: true },
     );
@@ -15755,6 +15900,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
             :delete-row="deleteRowToolbarCapability"
+            :transpose="transposeToolbarCapability"
             :layer-preview="layerPreviewToolbarCapability"
             :preview="previewToolbarCapability"
             :save="saveToolbarCapability"
@@ -16527,6 +16673,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                     <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
                                     <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
                                     <SelectItem value="number">{{ t("grid.formatterNumber") }}</SelectItem>
+                                    <template v-if="canFormatBinaryColumn(col.actualColIdx)">
+                                      <SelectItem v-for="kind in BINARY_COLUMN_FORMATS" :key="kind" :value="kind">{{ t(`grid.binaryColumnFormats.${kind}`) }}</SelectItem>
+                                    </template>
                                     <SelectItem value="foreign-key-display">{{ t("grid.formatterForeignKeyDisplay") }}</SelectItem>
                                     <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
                                   </SelectContent>
@@ -16882,7 +17031,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                    positioned) their own stacking context below the header, so their
                    `top`/`inset` offsets are measured from the body instead of from the
                    grid's outer relative container (which starts at the header row). -->
-              <div class="relative min-h-0 flex-1 flex flex-col overflow-hidden">
+              <div class="data-grid-scroll-body relative min-h-0 flex-1 flex flex-col overflow-hidden" :class="{ 'is-scrolling': isScrolling }">
                 <ProductionWatermark v-if="productionContext.active" />
                 <div v-if="!hasVisibleRows" class="relative min-h-0 flex-1">
                   <div class="data-grid-scroller h-full overflow-x-auto overflow-y-hidden overscroll-none" :class="{ 'is-scrolling': isScrolling }" @scroll="onScrollerScroll" @wheel="onDomGridWheel">
@@ -17412,9 +17561,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             @contextmenu="onDrawerContextMenu"
           >
             <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize" @mousedown.prevent="onDdlResizeStart" />
-            <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
-              <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
-              <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
+            <div ref="tableInfoHeaderRef" class="table-info-header flex min-w-0 items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9 overflow-hidden" :class="{ 'table-info-header--compact': tableInfoActionLabelsCompact }">
+              <TableProperties class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+              <span class="table-info-title min-w-0 flex-1 truncate text-xs font-medium">{{ tableMeta?.tableName }}</span>
               <div v-if="activeTableInfoTab === 'ddl'" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
                 <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :disabled="ddlLoading || !!ddlError || !ddlContent" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                   <Copy class="w-3 h-3" />
@@ -17684,7 +17833,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           </div>
           <DataGridMongoJsonPreview
             v-if="mongoJsonPreviewOpen"
-            :full-text="mongoJsonPreviewFullText"
+            v-model:scope="mongoJsonPreviewScope"
             :text="mongoJsonPreviewText"
             :uses-code-editor="mongoJsonPreviewUsesCodeEditor"
             :panel-style="mongoJsonPreviewStyle"
@@ -17794,6 +17943,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :can-export="result.columns.length > 0 && !(context === 'results' && hasResultToolbarActionsSlot && settingsStore.editorSettings.dataGridExportInToolbar)"
         :page-size="pageSize"
         :default-page-size="defaultPageSize"
+        :allow-table-page-size-default="!!tablePageSizeScope"
+        :has-table-page-size-default="tableDefaultPageSize !== undefined"
         :page-size-menu-items="pageSizeMenuItems"
         :export-menu-items="exportMenuItems"
         :export-warning="exportWarning"
@@ -17804,6 +17955,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         @select-page-size="selectPageSizeMenuItem"
         @apply-custom-page-size="applyCustomPageSize"
         @apply-custom-page-size-and-set-default="applyCustomPageSizeAndSetDefault"
+        @apply-custom-page-size-and-save-for-table="applyCustomPageSizeAndSaveForTable"
+        @reset-table-page-size-default="resetTableDefaultPageSize"
         @first-page="firstPage"
         @previous-page="prevPage"
         @next-page="nextPage"
@@ -18590,16 +18743,19 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 .data-grid-vertical-scrollbar {
   position: absolute;
   top: 10px;
-  right: 2px;
+  inset-inline-end: 2px;
   bottom: 14px;
   z-index: 30;
   width: 10px;
   cursor: pointer;
   touch-action: none;
+  pointer-events: none;
+  background: transparent;
 }
 
-:global(.dark) [data-grid-root] .data-grid-vertical-scrollbar {
-  background-color: var(--data-grid-background);
+.data-grid-vertical-scrollbar:hover,
+.data-grid-vertical-scrollbar--dragging {
+  pointer-events: auto;
 }
 
 .data-grid-vertical-scrollbar__thumb {
@@ -18609,17 +18765,28 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   min-height: 24px;
   border-radius: 999px;
   background: var(--data-grid-scrollbar-thumb);
+  opacity: 0.25;
+  pointer-events: auto;
   transition:
+    opacity 220ms ease 650ms,
     background-color 120ms ease,
     left 120ms ease,
     width 120ms ease;
 }
 
+.data-grid-scroll-body.is-scrolling .data-grid-vertical-scrollbar__thumb {
+  opacity: 0.8;
+  transition-duration: 80ms;
+  transition-delay: 0ms;
+}
+
 .data-grid-vertical-scrollbar:hover .data-grid-vertical-scrollbar__thumb,
-.data-grid-vertical-scrollbar--dragging .data-grid-vertical-scrollbar__thumb {
+.data-grid-vertical-scrollbar.data-grid-vertical-scrollbar--dragging .data-grid-vertical-scrollbar__thumb {
   left: 2px;
   width: 6px;
   background: var(--data-grid-scrollbar-thumb-hover);
+  opacity: 1;
+  transition-delay: 0ms;
 }
 
 .canvas-grid-surface {
@@ -18717,10 +18884,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   transition: none;
 }
 
-.table-info-drawer {
-  container-type: inline-size;
-}
-
 .table-info-action-button {
   gap: 0.25rem;
   max-width: 8rem;
@@ -18741,17 +18904,15 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     opacity 120ms ease;
 }
 
-@container (max-width: 360px) {
-  .table-info-action-button {
-    width: 1.5rem;
-    max-width: 1.5rem;
-    padding-inline: 0;
-  }
+.table-info-header--compact .table-info-action-button {
+  width: 1.5rem;
+  max-width: 1.5rem;
+  padding-inline: 0;
+}
 
-  .table-info-action-label {
-    max-width: 0;
-    opacity: 0;
-  }
+.table-info-header--compact .table-info-action-label {
+  max-width: 0;
+  opacity: 0;
 }
 
 .detail-drawer-resizing {

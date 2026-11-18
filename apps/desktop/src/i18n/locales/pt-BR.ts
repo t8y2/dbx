@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlEncode: "Codificar componente URL",
       urlDecode: "Decodificar componente URL",
       radix: "Conversão de base de inteiros",
+      flattenLines: "Compactar várias linhas em uma linha",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -889,6 +890,7 @@ export default withEnglishFallback({
     logoutConfirm: "Tem certeza de que deseja sair?",
   },
   toolbar: {
+    independentWindow: "Janela independente",
     fileEncoding: "Codificação do arquivo",
     encodingAuto: "Automática",
     immediateSync: "Sincronizar agora",
@@ -1238,6 +1240,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "O item não está disponível na barra lateral. Ele pode ter sido removido ou ocultado.",
     locateSqlFile: "Localizar na lista de arquivos SQL",
     locateActiveTab: "Localizar na barra lateral",
+    searchAllDatabases: "Pesquisar todos os bancos de dados",
   },
   savedSql: {
     openDefaultQuery: "Abrir consulta padrão",
@@ -1338,6 +1341,7 @@ export default withEnglishFallback({
     collapseMatches: "Recolher",
     searchContentIncomplete: "Resultados incompletos: não foi possível carregar o conteúdo de {count} arquivos.",
     matchPreviewLimit: "As prévias são limitadas às primeiras {limit} de {total} linhas correspondentes.",
+    sortByDateCreated: "Ordenar por data de criação",
   },
 
   connection: {
@@ -2510,6 +2514,8 @@ export default withEnglishFallback({
     previewChangesComment: "Pré-visualização de alterações (simulação): instrução {operation}",
     previewChangesFailed: "Falha ao pré-visualizar alterações.",
     previewChangesNoStatement: "Selecione ou coloque o cursor em uma instrução UPDATE / INSERT / DELETE para pré-visualizar as alterações.",
+    fullscreenResultsPane: "Exibir resultados em tela cheia",
+    exitFullscreenResultsPane: "Sair da tela cheia dos resultados",
   },
   tabs: {
     sql: "SQL",
@@ -2663,6 +2669,8 @@ export default withEnglishFallback({
     showLabels: "Mostrar valores",
   },
   grid: {
+    setTablePageSizeDefault: "Definir padrão para esta tabela",
+    resetTablePageSizeDefault: "Usar padrão global",
     exportSelectedRowsScope: "Linhas selecionadas",
     exportSelectedCellsScope: "Células selecionadas",
     exportSelectedColumnsScope: "Colunas selecionadas",
@@ -3699,6 +3707,15 @@ export default withEnglishFallback({
     filterActive: "Filtro aplicado",
     structuredFiltersActive: "{count} filtros de condição",
     rowJsonPreview: "Pré-visualização JSON",
+    mongoJsonPreviewSelected: "Documento selecionado",
+    mongoJsonPreviewPage: "Página atual",
+    exportSelectedColumnsSqlUpdates: "Exportar colunas selecionadas como SQL UPDATE",
+    binaryColumnFormats: {
+      "binary-hex": "Binário para hexadecimal",
+      "binary-text": "Binário para UTF-8",
+      "binary-uuid": "Binário para UUID",
+      "binary-uuid-swapped": "Binário para UUID (bits de tempo trocados)",
+    },
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",
@@ -4111,6 +4128,9 @@ export default withEnglishFallback({
     exitMultiSelect: "Sair da seleção múltipla",
   },
   databaseSearch: {
+    chooseObjects: "Escolher tabelas ou visões",
+    selectedObjects: "{count} objetos selecionados",
+    resetObjectScope: "Limpar seleção de objetos",
     title: "Pesquisar no Banco de Dados",
     open: "Pesquisar no Banco de Dados",
     keyword: "Palavra-chave",
@@ -4835,6 +4855,13 @@ export default withEnglishFallback({
     renameTab: "Renomear Aba",
     setTabSuffix: "Definir sufixo da aba",
     duplicateTab: "Duplicar Aba",
+    openTabInNewWindow: "Abrir aba em uma nova janela",
+    moveTabToAnotherWindow: "Mover aba para outra janela",
+    openTabGroupInNewWindow: "Abrir grupo em uma nova janela",
+    moveTabGroupToAnotherWindow: "Mover grupo para outra janela",
+    consolidateWorkspaceWindows: "Mesclar todas as janelas secundárias",
+    mainWindow: "Janela principal",
+    detachedWindow: "Janela {number}",
     splitRight: "Dividir à direita",
     splitDown: "Dividir para baixo",
     changeOrientation: "Alterar direção da divisão",
@@ -5239,6 +5266,8 @@ export default withEnglishFallback({
     detailActionLabel: 'Configurar bancos de dados visíveis para "{connection}"',
     description: 'Escolha quais bancos de dados são exibidos em "{connection}".',
     searchPlaceholder: "Pesquisar bancos de dados...",
+    searchWildcardHint: "A busca aceita o curinga %: app_% mostra apenas os bancos de dados que começam com app_",
+    searchMatchCount: "{count} correspondências",
     selectedCount: "{selected}/{total} selecionados",
     patternsPlaceholder: "Curingas, ex.: %n1%, separados por vírgula",
     patternsHint: "Bancos de dados que correspondem a estes padrões são sempre exibidos junto com os marcados; desmarque todos para exibir apenas as correspondências (% = quaisquer caracteres, _ = um caractere)",
@@ -5259,6 +5288,8 @@ export default withEnglishFallback({
     detailActionLabel: 'Configurar schemas visíveis para "{connection}"',
     description: 'Escolha quais schemas são exibidos em "{connection}".',
     searchPlaceholder: "Pesquisar schemas...",
+    searchWildcardHint: "A busca aceita o curinga %: app_% mostra apenas os esquemas que começam com app_",
+    searchMatchCount: "{count} correspondências",
     selectedCount: "{selected}/{total} selecionados",
     selectAll: "Selecionar todos",
     selectFiltered: "Selecionar resultados da pesquisa",
@@ -5470,6 +5501,7 @@ export default withEnglishFallback({
     scopeSequences: "sequências",
     scopeFunctions: "funções",
     stepSkipped: "Ignorado porque uma etapa anterior obrigatória falhou.",
+    selectedObjectsCount: "{count} objetos selecionados",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "As datas de jobs nesta versão do OceanBase aceitam apenas precisão de microssegundos. Defina como 0 os dígitos 7–9 dos segundos fracionários e gere a prévia novamente; a entrada original foi mantida.",
@@ -6016,6 +6048,11 @@ export default withEnglishFallback({
     copyAllAsTable: "Copiar todos os resultados filtrados como tabela",
     copyNamesSuccess: "Copiados {count} nomes",
     copyTableDataSuccess: "Copiadas {count} linhas de dados da tabela",
+    packageMembers: "Membros do pacote",
+    hidePackageMembers: "Recolher membros do pacote",
+    showPackageMembers: "Expandir membros do pacote",
+    packageFunctionAtLine: "Função {name}, linha {line}",
+    packageProcedureAtLine: "Procedimento {name}, linha {line}",
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabela",
@@ -7650,8 +7687,10 @@ export default withEnglishFallback({
       null: "NULL",
       raw: "SQL bruto",
     },
+    preserveQuotedBracedParameters: "Preservar os placeholders de modelo em strings entre aspas simples",
   },
   transfer: {
+    reviewBeforeStart: "Selecione Iniciar transferência para revisar o plano e confirmar antes de gravar dados.",
     log: {
       title: "Registro de execução",
       tableStarted: "Transferindo tabela {table} ({index}/{total})",
@@ -9058,6 +9097,8 @@ export default withEnglishFallback({
     tabLayoutScrollDescription: "As abas rolam horizontalmente quando excedem o espaço.",
     tabLayoutWrap: "Quebra em múltiplas linhas",
     tabLayoutWrapDescription: "As abas quebram em múltiplas linhas para exibir todas.",
+    crossWindowTabDragPreview: "Prévia de arrastar abas entre janelas",
+    crossWindowTabDragPreviewDescription: "Quando ativado, é possível arrastar abas para outra janela do DBX ou para uma nova janela. Desative para desligar este recurso experimental.",
     colorizeConnectionTabs: "Colorir abas por conexão",
     colorizeConnectionTabsDescription: "Usar a cor configurada de cada conexão nas abas do editor.",
     colorizeConnectionTabsScope: "Escopo de cores das abas",
@@ -10750,6 +10791,9 @@ export default withEnglishFallback({
     showConnectionGroupPath: "Mostrar caminho completo do grupo da conexão de consulta",
     showConnectionGroupPathDescription: "Quando ativado, o seletor de conexão no canto superior direito da página de consulta exibirá o caminho completo do grupo antes do nome da conexão; quando desativado, exibirá apenas o nome da conexão.",
     shortcutConvertSelectionToDelimited: "Converter conteúdo selecionado em lista delimitada",
+    shortcutSelectNextGridColumn: "Selecionar a próxima coluna dos dados da tabela",
+    shortcutSelectPreviousGridColumn: "Selecionar a coluna anterior dos dados da tabela",
+    sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

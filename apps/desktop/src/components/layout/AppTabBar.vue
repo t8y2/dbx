@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
+import { TAB_WINDOW_TRANSFER } from "@/composables/useTabWindowTransfer";
+import TabDragPreviewChip from "./TabDragPreviewChip.vue";
 import { tabDisplayTitle, tabDisplayTitles } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
 import "./appTabBar.css";
@@ -45,6 +47,8 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
+const tabWindowTransfer = inject(TAB_WINDOW_TRANSFER, null);
+const visibleTabWindowPreview = computed(() => tabWindowTransfer?.visibleTabWindowPreview.value);
 const isVerticalLayout = computed(() => ["left", "right"].includes(settingsStore.editorSettings.tabPlacement));
 const layoutClass = computed(() => {
   switch (settingsStore.editorSettings.tabPlacement) {
@@ -215,6 +219,14 @@ function handleCancelClose() {
 </script>
 
 <template>
+  <Teleport to="body">
+    <TabDragPreviewChip
+      v-if="visibleTabWindowPreview"
+      :title="tabWindowTransfer?.visibleTabWindowPreviewTitle.value ?? ''"
+      class="pointer-events-none fixed z-[9998]"
+      :style="{ left: `${visibleTabWindowPreview.left}px`, top: `${visibleTabWindowPreview.top}px`, width: `${visibleTabWindowPreview.width}px`, height: `${visibleTabWindowPreview.height}px` }"
+    />
+  </Teleport>
   <!-- Targets remain mounted while inactive so the original group bars can
        move here without losing their local presentation state. -->
   <div v-show="driverStoreActive || pluginCenterActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">

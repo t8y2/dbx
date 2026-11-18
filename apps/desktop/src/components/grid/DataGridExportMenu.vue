@@ -14,7 +14,7 @@ const props = defineProps<{
 }>();
 const { t } = useI18n();
 const open = ref(false);
-const formats = ["csv", "xlsx", "xlsx-with-sql", "json", "markdown", "html", "sql", "txt"];
+const formats = ["csv", "xlsx", "xlsx-with-sql", "json", "markdown", "html", "sql", "sql-updates", "txt"];
 
 // Every exportable scope is its own column. Each scope produces `<scope>-<format>`
 // items, so all of them belong in the same grid row as the format. Handling only
@@ -34,9 +34,10 @@ function scopeValue(scopeKey: string, format: string): string {
 const rows = computed(() =>
   formats.flatMap((format) => {
     const result = props.items.find((item) => item.value === format);
-    if (!result) return [];
     const scoped: Record<string, LightDropdownItem | undefined> = Object.fromEntries(scopes.map((scope) => [scope.key, props.items.find((item) => item.value === scopeValue(scope.key, format))]));
-    return [{ format, label: format === "xlsx-with-sql" ? t("grid.exportFormatXlsxWithSql") : format === "sql" ? "SQL INSERT" : format === "markdown" ? "Markdown" : format.toUpperCase(), scoped, result }];
+    if (!result && !Object.values(scoped).some(Boolean)) return [];
+    const formatLabels: Record<string, string> = { "xlsx-with-sql": t("grid.exportFormatXlsxWithSql"), sql: "SQL INSERT", "sql-updates": "SQL UPDATE", markdown: "Markdown" };
+    return [{ format, label: formatLabels[format] ?? format.toUpperCase(), scoped, result }];
   }),
 );
 const scopeColumns = computed(() => scopes.filter((scope) => rows.value.some((row) => row.scoped[scope.key])));
@@ -99,6 +100,7 @@ function onKeydown(event: KeyboardEvent) {
             <span v-else />
           </template>
           <button
+            v-if="row.result"
             type="button"
             class="flex h-8 items-center justify-center gap-1 rounded-sm text-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
             :disabled="row.result.disabled"
@@ -108,6 +110,7 @@ function onKeydown(event: KeyboardEvent) {
           >
             <Download class="h-3.5 w-3.5" />
           </button>
+          <span v-else />
         </template>
       </div>
       <p v-if="warning" role="note" class="mx-2 mb-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">{{ warning }}</p>

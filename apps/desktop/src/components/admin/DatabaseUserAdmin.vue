@@ -513,8 +513,8 @@ function authorizationSelectionsValid(selections: DatabaseAuthorizationSelection
   return selections.every((selection) => {
     if (selection.tables !== undefined && selection.tables.length === 0) return false;
     const targetScope = selection.tables === undefined && userProvider.authorizationModel !== "starrocks" ? "database" : "table";
-    const available = authorizationPrivileges(userProvider, targetScope);
-    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope).length > 0;
+    const available = authorizationPrivileges(userProvider, targetScope, selection.tables);
+    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope, selection.tables).length > 0;
     return available.some((privilege) => selection.privileges?.includes(privilege));
   });
 }

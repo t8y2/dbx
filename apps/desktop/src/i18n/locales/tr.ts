@@ -1915,6 +1915,8 @@ export default withEnglishFallback({
     showLabels: "Değerleri Göster",
   },
   grid: {
+    setTablePageSizeDefault: "Bu tablo için varsayılan yap",
+    resetTablePageSizeDefault: "Genel varsayılanı kullan",
     showStatusSql: "Alt Bilgide SQL Göster",
     showStatusSqlHint: "Tüm sorgu sonuçlarının ve tablo verilerinin alt bilgi çubuğunda SQL göster.",
     rows: "{count} satır",
@@ -3182,6 +3184,9 @@ export default withEnglishFallback({
     deselectGroup: "Grup seçimini kaldır",
   },
   databaseSearch: {
+    chooseObjects: "Tabloları veya görünümleri seç",
+    selectedObjects: "{count} nesne seçildi",
+    resetObjectScope: "Nesne seçimini temizle",
     title: "Veritabanında Ara",
     open: "Veritabanında Ara",
     keyword: "Anahtar sözcük",
@@ -4230,6 +4235,8 @@ export default withEnglishFallback({
     detailActionLabel: '"{connection}" için görünür veritabanlarını yapılandır',
     description: '"{connection}" altında hangi veritabanlarının gösterileceğini seçin.',
     searchPlaceholder: "Veritabanlarında ara...",
+    searchWildcardHint: "Arama % joker karakterini destekler: app_% yalnızca app_ ile başlayan veritabanlarını gösterir",
+    searchMatchCount: "{count} eşleşme",
     selectedCount: "{selected}/{total} seçildi",
     patternsPlaceholder: "Joker karakterler, örn. %n1%, virgülle ayrılmış",
     patternsHint: "Bu desenlerle eşleşen veritabanları, işaretlenenlerle birlikte her zaman gösterilir; yalnızca eşleşenleri göstermek için işaretleri temizleyin (% = herhangi bir karakter, _ = tek karakter)",
@@ -4250,6 +4257,8 @@ export default withEnglishFallback({
     detailActionLabel: '"{connection}" için görünür şemaları yapılandır',
     description: '"{connection}" altında hangi şemaların gösterileceğini seçin.',
     searchPlaceholder: "Şemalarda ara...",
+    searchWildcardHint: "Arama % joker karakterini destekler: app_% yalnızca app_ ile başlayan şemaları gösterir",
+    searchMatchCount: "{count} eşleşme",
     selectedCount: "{selected}/{total} seçildi",
     selectAll: "Tümünü seç",
     selectFiltered: "Arama sonuçlarını seç",
@@ -6410,6 +6419,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "Aktarımı Başlat'ı seçerek veriler yazılmadan önce aktarım planını inceleyip onaylayın.",
     log: {
       title: "Yürütme günlüğü",
       tableStarted: "{table} tablosu aktarılıyor ({index}/{total})",

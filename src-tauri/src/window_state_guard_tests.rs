@@ -11,6 +11,34 @@ use crate::window_state_guard::{
 };
 use tauri_plugin_window_state::StateFlags;
 
+#[test]
+fn custom_profiles_keep_geometry_in_their_data_directory() {
+    use tauri::test::{mock_builder, mock_context, noop_assets};
+    let temp = tempfile::tempdir().unwrap();
+    let mut profile = crate::data_dir::resolve_data_dir_with_mode(temp.path().join("default"));
+    profile.data_dir = temp.path().join("custom");
+    profile.mode = crate::data_dir::DataDirMode::EnvOverride;
+    profile.prepare().unwrap();
+    let app = mock_builder().manage(profile.clone()).build(mock_context(noop_assets())).unwrap();
+    assert_eq!(crate::window_state_guard::geometry_dir(app.handle()), Some(profile.data_dir.clone()));
+    let geometry = WindowGeometry { x: 10.0, y: 20.0, width: 1200.0, height: 800.0, scale_factor: 1.0 };
+    crate::window_state_guard::persist_logical_geometry(app.handle(), &geometry);
+    let loaded = crate::window_state_guard::load_main_window_geometry(app.handle()).unwrap();
+    assert_eq!(loaded.x, geometry.x);
+    assert_eq!(loaded.width, geometry.width);
+    assert!(profile.data_dir.join(".window-geometry.json").is_file());
+}
+
+#[test]
+fn default_profile_keeps_existing_geometry_location() {
+    use tauri::{
+        test::{mock_builder, mock_context, noop_assets},
+        Manager,
+    };
+    let app = mock_builder().build(mock_context(noop_assets())).unwrap();
+    assert_eq!(crate::window_state_guard::geometry_dir(app.handle()), app.path().app_config_dir().ok());
+}
+
 fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalWindowRect {
     PhysicalWindowRect { x, y, width, height }
 }

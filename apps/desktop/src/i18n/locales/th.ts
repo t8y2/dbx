@@ -6434,6 +6434,7 @@ export default withEnglishFallback({
     scopeFunctions: "Functions",
     stepSkipped: "ข้ามเนื่องจากขั้นตอนก่อนหน้าที่จำเป็นล้มเหลว",
     selectedObjectsCount: "เลือกแล้ว {count} รายการ",
+    generatePassword: "สร้างรหัสผ่าน",
   },
   xuguUserPermissions: {
     title: "ผู้ใช้และสิทธิ์ของ Xugu",

@@ -391,6 +391,60 @@ WHERE b.Workcenter_ID = :workcenter_ID`;
     );
   });
 
+  // #11330 / #15190: the repeated qualifier must stay exactly as typed. Oracle
+  // folds `ap` to AP, so quoting it as `"ap"` targets a different identifier.
+  it("keeps an unquoted Oracle batch qualifier unquoted", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id", "status"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT ap.| FROM orders ap", { columnsByTable }, { databaseType: "oracle" });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.length).toBeGreaterThan(0);
+    for (const item of columns) {
+      expect(item.batchSelectionQualifier).not.toContain('"');
+      // The semantic layer may fold the part to uppercase; both spellings are
+      // the same identifier on Oracle, a quoted one is not.
+      expect(item.batchSelectionQualifier?.toLowerCase()).toBe("ap");
+    }
+  });
+
+  it("keeps the quotes of a quoted Oracle batch qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion('SELECT "ap".| FROM orders "ap"', { columnsByTable }, { databaseType: "oracle" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === '"ap"')).toBe(true);
+  });
+
+  it("keeps an unquoted mixed-case PostgreSQL batch qualifier unquoted", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT MyAlias.| FROM orders MyAlias", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.length).toBeGreaterThan(0);
+    // Postgres folds the bare alias to lowercase, which is the same identifier;
+    // quoting it would not be.
+    expect(columns.every((item) => !item.batchSelectionQualifier?.includes('"'))).toBe(true);
+    expect(columns.every((item) => item.batchSelectionQualifier?.toLowerCase() === "myalias")).toBe(true);
+  });
+
+  it("still quotes a reserved-word PostgreSQL batch qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion('SELECT "select".| FROM orders "select"', { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === '"select"')).toBe(true);
+  });
+
+  it("still quotes a MySQL batch qualifier that needs backticks", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT `Order Alias`.| FROM orders AS `Order Alias`", { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === "`Order Alias`")).toBe(true);
+  });
+
   it("retains a typed table name when the referenced table also has an alias", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", ["id", "name"].map((name) => ({ name, table: "users" }))]]);
 

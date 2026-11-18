@@ -494,6 +494,7 @@ export default withEnglishFallback({
       urlDecode: "Декодировать компонент URL",
       radix: "Преобразование систем счисления",
       flattenLines: "Сжать несколько строк в одну",
+      unicodeEscape: "Текст → экранирование Unicode",
     },
     units: {
       auto: "Авто (10/13 цифр)",

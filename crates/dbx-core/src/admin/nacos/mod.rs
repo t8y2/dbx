@@ -181,6 +181,7 @@ mod tests {
             display_server_addr: "http://127.0.0.1:8848".to_string(),
             namespace: "public".to_string(),
             context_path: "/nacos".to_string(),
+            context_path_implied: false,
             managed_namespaces: Vec::new(),
             rnacos_console_addr: "http://127.0.0.1:10848".to_string(),
             rnacos_history_enabled: Some(true),

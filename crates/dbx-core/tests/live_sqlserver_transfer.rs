@@ -960,6 +960,7 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         schema: "dbo".to_string(),
         file_path: export_path.to_string_lossy().into_owned(),
         selected_tables: vec!["QRTZ_JOB_DETAILS".to_string(), "QRTZ_TRIGGERS".to_string()],
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -977,6 +978,9 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         insert_mode: Default::default(),
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
 
     let test_result = async {

@@ -3,6 +3,7 @@ import { Transaction } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
+import { resetQueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
 import type { ShallowRef, Ref } from "vue";
 import type { QueryEditorProps } from "./queryEditorTypes";
 
@@ -65,6 +66,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     if (latestViewport) emitEditorViewport(latestViewport);
   }, 150);
   let viewportRestoreFrame: number | null = null;
+  let viewportRestoreGeneration = 0;
   let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
   let lastEmittedViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
   let tabSwitchStateCaptured = false;
@@ -126,6 +128,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     const cached = tabId === undefined ? undefined : tabStateCache.get(tabId);
     if (!cached) {
       swapEditorDocument(doc);
+      resetQueryEditorBookmarks(currentView);
       // First activation in this editor instance (or a cache-evicted tab, e.g.
       // beyond MAX_CACHED_TAB_STATES): restore the tab's saved cursor and scroll
       // position exactly like the cached-state branch, otherwise the swapped-in
@@ -320,8 +323,18 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     if (latestViewport) emitEditorViewport(latestViewport);
   }
 
+  function cancelEditorViewportRestore() {
+    viewportRestoreGeneration++;
+    if (viewportRestoreFrame !== null) {
+      cancelAnimationFrame(viewportRestoreFrame);
+      viewportRestoreFrame = null;
+    }
+  }
+
   function restoreEditorViewport(viewport = props.initialViewport ?? latestViewport) {
     if (!view.value || !viewport) return;
+    cancelEditorViewportRestore();
+    const generation = viewportRestoreGeneration;
     const restoreScroll = () => {
       if (!view.value) return;
       view.value.scrollDOM.scrollTo({
@@ -332,9 +345,9 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
       view.value.scrollDOM.scrollLeft = viewport.scrollLeft;
     };
 
-    if (viewportRestoreFrame !== null) cancelAnimationFrame(viewportRestoreFrame);
     restoreScroll();
     nextTick(() => {
+      if (generation !== viewportRestoreGeneration) return;
       restoreScroll();
       let attempts = 0;
       const restoreNextFrame = () => {
@@ -374,13 +387,10 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
 
   function dispose() {
     viewportEmitTask.cancel();
-    if (viewportRestoreFrame !== null) {
-      cancelAnimationFrame(viewportRestoreFrame);
-      viewportRestoreFrame = null;
-    }
+    cancelEditorViewportRestore();
     view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
     window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
   }
 
-  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, recordSelection, flushBeforeDeactivation, attach, dispose };
+  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, cancelEditorViewportRestore, recordSelection, flushBeforeDeactivation, attach, dispose };
 }

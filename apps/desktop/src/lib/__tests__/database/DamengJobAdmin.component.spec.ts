@@ -1722,3 +1722,23 @@ describe("existing Dameng Job management entry", () => {
     expect(mocks.nativeJobApply).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Dameng job environment initialization", () => {
+  it("reports a repeated SP_INIT_JOB_SYS object-exists failure as an already ready environment", async () => {
+    // 8.1.3.12 初始化后没有 SYSJOB.USER_JOBS_VIEW，旧判据会一直返回 0，于是按钮永远可点、
+    // 每次点击都撞上 -2124。新判据按 SYSJOBS 判定，并把 -2124 收敛成“已就绪”。
+    mocks.executeQuery.mockResolvedValueOnce({ columns: ["CNT"], rows: [[0]], affected_rows: 0, execution_time_ms: 0 });
+    const root = await mount();
+    expect(root.textContent).toContain("damengJobAdmin.environmentMissingTitle");
+    button(root, "damengJobAdmin.initEnvironment").click();
+    await flush();
+    expect(root.querySelector('[data-dialog="true"]')?.textContent).toContain("SP_INIT_JOB_SYS(1);");
+    mocks.executeMulti.mockRejectedValueOnce(new Error("-2124 对象[SYSMAILINFO]已存在\n-2124: anonymous block line 826"));
+    button(root, "damengJobAdmin.applySql").click();
+    await flush();
+    expect(mocks.toast).toHaveBeenCalledWith("damengJobAdmin.environmentReady", 2500);
+    expect(mocks.toast).not.toHaveBeenCalledWith("damengJobAdmin.applyFailed", 5000);
+    expect(root.textContent).not.toContain("damengJobAdmin.environmentMissingTitle");
+    expect(mocks.nativeJobList).toHaveBeenCalled();
+  });
+});

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   executeTabSql: vi.fn(),
   getColumns: vi.fn(),
   invalidateCompletionTableCache: vi.fn(),
+  refreshTableColumnsTree: vi.fn(),
   listIndexes: vi.fn(),
   setErrorResult: vi.fn(),
   setTableMeta: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock("@/stores/connectionStore", () => ({
     connectionIdentifierQuote: () => undefined,
     metadataGenerationFor: () => 0,
     refreshObjectListTreeNode: vi.fn(),
+    refreshTableColumnsTree: mocks.refreshTableColumnsTree,
     invalidateCompletionTableCache: mocks.invalidateCompletionTableCache,
   }),
 }));
@@ -219,9 +221,29 @@ describe("useNavigationTargets openTableTarget", () => {
       tableName: target.tableName,
     });
 
+    expect(mocks.refreshTableColumnsTree).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.invalidateCompletionTableCache).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.getColumns).toHaveBeenCalledTimes(2);
     expect(mocks.tabs.map((tab) => tab.tableMeta?.primaryKeys)).toEqual([["fresh_id"], ["fresh_id"]]);
+  });
+
+  it("refreshes sidebar columns even without a data tab", async () => {
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await useNavigationTargets(dialogs).onStructureEditorSaved(vi.fn(), vi.fn(), target);
+    expect(mocks.refreshTableColumnsTree).toHaveBeenCalledWith("connection-1", "app", "users", "public", undefined);
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+  });
+
+  it("still refreshes data tab metadata if the sidebar reload fails", async () => {
+    const navigation = useNavigationTargets(dialogs);
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await navigation.openLineageTarget(target);
+    mocks.refreshTableColumnsTree.mockRejectedValueOnce(new Error("sidebar unavailable"));
+    mocks.getColumns.mockResolvedValueOnce([column("fresh_id")]);
+    const toast = vi.fn();
+    await navigation.onStructureEditorSaved(vi.fn(), toast, target);
+    expect(toast).toHaveBeenCalledWith("sidebar unavailable", 5000);
+    expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["fresh_id"]);
   });
 
   it("keeps row identity pending when shared metadata loading fails", async () => {
@@ -331,5 +353,37 @@ describe("useNavigationTargets openTableTarget", () => {
 
     // 无取消请求：元数据落地后按既有行为执行第二次查询
     expect(mocks.executeTabSql).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries without the synthetic row-id locator when the engine rejects system columns (Hologres, #12647)", async () => {
+    const { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
+    // Hologres-like: keyless PostgreSQL base table; the engine rejects every
+    // locator-bearing SELECT (tableoid/ctid/xmin do not exist there).
+    mocks.databaseType = "postgres";
+    mocks.getColumns.mockResolvedValue([{ ...column("payload"), is_primary_key: false }]);
+    mocks.listIndexes.mockResolvedValue([]);
+    mocks.buildTableSelectSql.mockImplementation(async ({ tableName, includeRowId }: { tableName: string; includeRowId?: boolean }) => (includeRowId ? `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM ${tableName}` : `SELECT * FROM ${tableName}`));
+    mocks.executeTabSql.mockImplementation(async (id: string, sql?: string) => {
+      const tab = mocks.tabs.find((item) => item.id === id);
+      if (!tab || typeof sql !== "string") return;
+      if (sql.includes("__DBX_ROWID")) {
+        tab.result = { columns: ["db error"], rows: [['ERROR: column "tableoid" does not exist']], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"];
+      } else {
+        tab.result = { columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as QueryTab["result"];
+      }
+    });
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    const executedSql = mocks.executeTabSql.mock.calls.map((call) => String(call[1]));
+    expect(executedSql.some((sql) => sql.includes("__DBX_ROWID"))).toBe(true);
+    // Same degradation contract as the sidebar open path: replay once without
+    // the locator so the table still opens (read-only), then remember the
+    // connection so later opens skip the locator up front.
+    expect(executedSql.some((sql) => !sql.includes("__DBX_ROWID") && sql.includes("FROM users"))).toBe(true);
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
+    resetRowIdLocatorStateForTests();
   });
 });

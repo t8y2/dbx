@@ -75,6 +75,19 @@ pub async fn reveal_path_in_file_manager(path: String) -> Result<(), String> {
     reveal_in_file_manager(&resolved)
 }
 
+/// Open an absolute file path with the OS default application. The path may use a
+/// leading `~` which is expanded via `dbx_core::path_utils::expand_tilde`.
+pub fn open_with_default_app(path: &Path) -> Result<(), String> {
+    tauri_plugin_opener::open_path(path, None::<&str>)
+        .map_err(|e| format!("failed to open file with default application: {e}"))
+}
+
+#[tauri::command]
+pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
+    let resolved = validate_path(&path)?;
+    open_with_default_app(&resolved)
+}
+
 #[tauri::command]
 pub async fn is_sqlite_database_file(path: String) -> Result<bool, String> {
     let resolved = validate_path(&path)?;
@@ -313,5 +326,13 @@ mod tests {
                 assert!(resolved.is_absolute());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn open_path_with_default_app_rejects_missing_file() {
+        let path = std::env::temp_dir().join(format!("dbx-missing-file-{}.xlsx", uuid::Uuid::new_v4()));
+        let result = open_path_with_default_app(path.to_string_lossy().to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("file does not exist"));
     }
 }

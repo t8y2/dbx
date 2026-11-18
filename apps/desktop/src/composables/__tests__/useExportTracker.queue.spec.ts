@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/backend/api", () => ({ cancelTableExport: vi.fn() }));
 vi.mock("@/lib/export/exportPath", () => ({ autoRevealExportedPathIfConfigured: vi.fn() }));
 vi.mock("@/lib/schema/oracleRoutineDeploy", () => ({}));
+vi.mock("@/lib/backend/browserAppStateStorage", () => ({
+  loadBrowserAppState: vi.fn(async () => null),
+  saveBrowserAppState: vi.fn(async () => undefined),
+}));
 
 function completion() {
   let finish!: (outcome: "settled" | "unknown") => void;

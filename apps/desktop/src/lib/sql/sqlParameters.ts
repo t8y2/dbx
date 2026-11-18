@@ -62,6 +62,7 @@ export interface SqlParameterOptions {
   compatibilityMode?: string;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
+  preserveQuotedBracedParameters?: boolean;
 }
 
 const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*$/u;
@@ -199,6 +200,27 @@ export function extractSqlParameters(sql: string, options?: SqlParameterOptions)
   return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
 }
 
+/** Analyze client-side scalar parameters as values, keeping source offsets intact. */
+export function maskSqlParametersForAnalysis(sql: string, options?: SqlParameterOptions): string {
+  let from = 0;
+  const parts: string[] = [];
+  for (const range of sqlParameterAnalysisRanges(sql, options)) {
+    parts.push(sql.slice(from, range.from), "0", sql.slice(range.from + 1, range.to).replace(/[^\r\n]/g, " "));
+    from = range.to;
+  }
+  if (!from) return sql;
+  parts.push(sql.slice(from));
+  return parts.join("");
+}
+
+export function sqlParameterAnalysisRanges(sql: string, options?: SqlParameterOptions): Array<{ from: number; to: number }> {
+  // Quoted interpolation is already valid SQL. MyBatis XML blocks need their
+  // own structural analysis rather than replacement with a scalar value.
+  return findSqlParameterOccurrences(sql, options)
+    .filter((occurrence) => !occurrence.replacement)
+    .map(({ start, end }) => ({ from: start, to: end }));
+}
+
 export function extractSqlParameterDescriptors(sql: string, options?: SqlParameterOptions): SqlParameterDescriptor[] {
   const names = new Set<string>();
   const descriptors: SqlParameterDescriptor[] = [];
@@ -232,6 +254,14 @@ export function extractSqlParameterDescriptors(sql: string, options?: SqlParamet
     }
   }
   return descriptors;
+}
+
+export function hasQuotedBracedSqlParameters(sql: string, options?: SqlParameterOptions): boolean {
+  return findSqlParameterOccurrences(sql, options).some((occurrence) => {
+    const body = occurrence.foreach?.body ?? occurrence.where?.body;
+    if (body) return hasQuotedBracedSqlParameters(body, options);
+    return (occurrence.syntax === "mybatis" || occurrence.syntax === "shell") && (occurrence.replacement === "quoted-string" || occurrence.replacement === "string-fragment");
+  });
 }
 
 export function substituteSqlParameters(sql: string, values: Record<string, SqlParameterInput>, options?: SqlParameterOptions): string {
@@ -418,6 +448,8 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     return true;
   };
+  const sqlServerModuleRanges = databaseType === "sqlserver" && isSyntaxEnabled("sqlserver") ? collectSqlServerModuleBatchRanges(sql) : [];
+  let sqlServerModuleIndex = 0;
   const databaseLinkStarts = isSyntaxEnabled("sqlserver") ? collectSqlDatabaseLinkStarts(sql, databaseType) : new Set<number>();
   const complexTypeFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") ? collectComplexTypeFieldSeparators(sql, databaseType) : new Set<number>();
   const duckDbStructFieldSeparators = supportsNamedParameters && isSyntaxEnabled("named") && databaseType === "duckdb" ? collectDuckDbStructFieldSeparators(sql) : new Set<number>();
@@ -475,7 +507,8 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
 
     if (ch === "'" || ch === '"') {
-      const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled);
+      const preserveBraces = ch === "'" && options?.preserveQuotedBracedParameters;
+      const quoted = preserveBraces ? null : tryReadQuotedBracedPlaceholder(sql, i, ch, isSyntaxEnabled);
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;
@@ -492,7 +525,7 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
       const quotedEnd = skipQuoted(sql, i, ch, databaseType);
       // Double quotes can delimit identifiers, so only ordinary single-quoted
       // values opt into embedded interpolation.
-      if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
+      if (ch === "'" && !preserveBraces && !hasSqlStringLiteralPrefix(sql, i)) {
         occurrences.push(...collectEmbeddedQuotedBracedPlaceholders(sql, i + 1, quotedEnd, isSyntaxEnabled));
       }
       i = quotedEnd;
@@ -603,7 +636,9 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     }
     if (ch === "@" && isSyntaxEnabled("sqlserver")) {
       const name = readParameterName(sql, i + 1);
-      if (name && next !== "@" && sql[i - 1] !== "@" && !databaseLinkStarts.has(i) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
+      while (sqlServerModuleIndex < sqlServerModuleRanges.length && i >= sqlServerModuleRanges[sqlServerModuleIndex].to) sqlServerModuleIndex += 1;
+      const insideSqlServerModule = sqlServerModuleIndex < sqlServerModuleRanges.length && i >= sqlServerModuleRanges[sqlServerModuleIndex].from;
+      if (name && next !== "@" && sql[i - 1] !== "@" && !insideSqlServerModule && !databaseLinkStarts.has(i) && !isJdbcxMcpScopedPackage(sql, i, i + 1 + name.length) && !nativeSqlServerParameters.declared.has(name.toLowerCase()) && !nativeSqlServerParameters.ignoredStarts.has(i)) {
         occurrences.push({
           key: name,
           name,
@@ -636,6 +671,41 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
   }
 
   return occurrences;
+}
+
+/** Procedural modules own their entire GO-delimited batch, including undeclared native variables. */
+function collectSqlServerModuleBatchRanges(sql: string): Array<{ from: number; to: number }> {
+  if (!/\b(?:create|alter)\b/i.test(sql)) return [];
+  const tokens = tokenizeSqlSemantic(sql, "sqlserver").filter((token) => token.kind !== "comment");
+  const ranges: Array<{ from: number; to: number }> = [];
+  let batchStart = 0;
+  const finishBatch = (end: number, to: number) => {
+    if (batchStart >= end) return;
+    const first = tokens[batchStart].normalized;
+    if (first !== "create" && first !== "alter") return;
+    let kindIndex = batchStart + 1;
+    if (first === "create" && tokens[kindIndex]?.normalized === "or" && tokens[kindIndex + 1]?.normalized === "alter") kindIndex += 2;
+    if (kindIndex < end && ["proc", "procedure", "function", "trigger"].includes(tokens[kindIndex].normalized)) ranges.push({ from: tokens[batchStart].span.start, to });
+  };
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.kind !== "word" || token.normalized !== "go") continue;
+    if (index > 0 && !/[\r\n]/.test(sql.slice(tokens[index - 1].span.end, token.span.start))) continue;
+    let nextIndex = index + 1;
+    let separatorEnd = token.span.end;
+    const count = tokens[nextIndex];
+    if (count?.kind === "number" && !/[\r\n]/.test(sql.slice(token.span.end, count.span.start)) && /^\d+$/.test(count.text)) {
+      nextIndex += 1;
+      separatorEnd = count.span.end;
+    }
+    if (tokens[nextIndex] && !/[\r\n]/.test(sql.slice(separatorEnd, tokens[nextIndex].span.start))) continue;
+    finishBatch(index, token.span.start);
+    batchStart = nextIndex;
+    index = nextIndex - 1;
+  }
+  finishBatch(tokens.length, sql.length);
+  return ranges;
 }
 
 function isMysqlRoutineLabelSeparator(sql: string, colonIndex: number, followingName: string, databaseType?: DatabaseType): boolean {

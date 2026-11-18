@@ -513,3 +513,21 @@ test("defaults and normalizes select-line-ends shortcut", () => {
   assert.equal(normalizeShortcutSettings({ selectLineEnds: "Shift+Alt+L" }).selectLineEnds, "Shift+Alt+L");
   assert.equal(shortcutToCodeMirrorKey(defaults.selectLineEnds), "Alt-Shift-i");
 });
+
+test("normalizeShortcutSettings serves repeated input from a cache without sharing mutable results", () => {
+  const input = { executeSql: "Shift+Mod+Enter" };
+  const first = normalizeShortcutSettings(input, "Win32");
+  first.executeSql = "mutated by a caller";
+  const second = normalizeShortcutSettings({ ...input }, "Win32");
+  assert.equal(second.executeSql, "Shift+Mod+Enter");
+  assert.notEqual(second, first);
+});
+
+test("normalizeShortcutSettings reflects changed settings and platform immediately", () => {
+  const before = normalizeShortcutSettings({ executeSql: "Shift+Mod+Enter" }, "Win32");
+  const after = normalizeShortcutSettings({ executeSql: "Mod+Alt+Enter" }, "Win32");
+  assert.equal(before.executeSql, "Shift+Mod+Enter");
+  assert.equal(after.executeSql, "Mod+Alt+Enter");
+  assert.deepEqual(normalizeShortcutSettings(undefined, "MacIntel"), normalizeShortcutSettings({}, "MacIntel"));
+  assert.notDeepEqual(normalizeShortcutSettings(undefined, "MacIntel"), normalizeShortcutSettings(undefined, "Win32"));
+});

@@ -436,6 +436,43 @@ describe("SQL completion trailing space insertion", () => {
   });
 });
 
+describe("SQL completion replacement ranges", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("replaces a keyword prefix on a later Doris partition line without changing earlier SQL", async () => {
+    const doc = [
+      "CREATE TABLE single_doris (",
+      "  order_date DATE NOT NULL,",
+      "  order_id BIGINT,",
+      "  region_id INT NOT NULL,",
+      "  status VARCHAR(20) NOT NULL,",
+      "  amount DECIMAL(18,2)",
+      ")DUPLICATE KEY (order_date,order_id)",
+      "PARTITION by range(order_date)",
+      "(",
+      '  PARTITION p20261101 values [("2026-11-01"),("2026-11-02"))',
+      '  PARTITION p20261102 value [("2026-11-02"),("2026-11-02"))',
+      ")distributed by hash(order_id) buckets 4",
+      "PROPERTIES",
+      "(",
+      '  "replication_num"="1"',
+      ");",
+    ].join("\n");
+    const expected = doc.replace("p20261102 value ", "p20261102 VALUES ");
+    const { provide, currentView } = createHarness({ databaseType: "doris", dialect: "doris", modelValue: doc }, undefined, true);
+    const cursor = doc.indexOf("p20261102 value ") + "p20261102 value".length;
+    currentView.dispatch({ selection: { anchor: cursor } });
+
+    const result = await provide(false);
+    const option = result?.options.find((candidate) => candidate.label === "VALUES");
+    expect(option).toBeDefined();
+    expect(result!.from).toBe(cursor - "value".length);
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+
+    expect(currentView.state.doc.toString()).toBe(expected);
+  });
+});
+
 describe("QueryEditor completion provider ownership", () => {
   it.each(["cursor", "document", "view", "composition", "mode"])("rejects asynchronous analysis after a %s change", async (change) => {
     let resolve!: (result: SqlCompletionAnalysisResult) => void;

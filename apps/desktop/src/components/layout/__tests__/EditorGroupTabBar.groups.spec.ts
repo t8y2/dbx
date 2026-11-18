@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { createApp, h, nextTick, reactive } from "vue";
+import { createApp, h, nextTick, reactive, ref } from "vue";
+import { TAB_WINDOW_TRANSFER, type useTabWindowTransfer } from "@/composables/useTabWindowTransfer";
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -48,13 +49,14 @@ async function settle() {
   await nextTick();
 }
 
-function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQueryStore>["tabs"]>[number][], activeTabId: string | null, activePinia: ReturnType<typeof createPinia>, extraProps: Record<string, unknown> = {}) {
+function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQueryStore>["tabs"]>[number][], activeTabId: string | null, activePinia: ReturnType<typeof createPinia>, extraProps: Record<string, unknown> = {}, windowTransfer?: ReturnType<typeof useTabWindowTransfer>) {
   const host = createHost();
   const activeTab = reactive({ id: activeTabId });
   const app = createApp({
     render: () => h(EditorGroupTabBar, { groupId, tabs, activeTabId: activeTab.id, ...extraProps }),
   });
   app.use(activePinia);
+  if (windowTransfer) app.provide(TAB_WINDOW_TRANSFER, windowTransfer);
   app.use(
     createI18n({
       legacy: false,
@@ -78,6 +80,8 @@ function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQuerySt
             closeTabGroup: "Close group",
             editTabGroup: "Edit group",
             resetTabGroup: "Reset group",
+            openTabGroupInNewWindow: "Open group in new window",
+            moveTabGroupToAnotherWindow: "Move group to another window",
             collapseAll: "Collapse all",
             expandAll: "Expand all",
             pinTab: "Pin",
@@ -153,6 +157,63 @@ describe("EditorGroupTabBar group behavior", () => {
     }));
     pinia = createPinia();
     setActivePinia(pinia);
+  });
+
+  it.each([
+    { groupMode: "connection", rows: "single", selector: '.tab-group-header[title="pg-1"]', otherDatabase: true },
+    { groupMode: "connection", rows: "two-row", selector: '.tab-group-header[title="pg-1"]', otherDatabase: true },
+    { groupMode: "sidebar", rows: "single", selector: '[data-tree-level="connection"][title="pg-1"]', otherDatabase: true },
+    { groupMode: "sidebar", rows: "single", selector: '[data-tree-level="database"]', otherDatabase: false },
+  ] as const)("opens the local $groupMode $rows group in one new window ($selector)", async ({ groupMode, rows, selector, otherDatabase }) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = groupMode;
+    settings.editorSettings.tabGroupRows = rows;
+    settings.editorSettings.tabPlacement = rows === "two-row" ? "top" : "left";
+    const first = store.createTab("pg-1", "app", "First");
+    const second = store.createTab("pg-1", "app", "Second");
+    const audit = store.createTab("pg-1", "audit", "Audit");
+    store.createTab("mysql-1", "app", "Unrelated");
+    const otherPane = store.createTab("pg-1", "app", "Other pane");
+    const mainGroupId = store.groups[0].id;
+    store.splitTabRight(otherPane);
+    store.focusGroup(mainGroupId);
+    const localTabs = store.groups[0].tabIds.map((id) => store.tabs.find((tab) => tab.id === id)!);
+    const coordinator = {
+      openTabsInNewWindow: vi.fn(async () => {}),
+      moveTabsToWindow: vi.fn(async () => {}),
+      otherTabWindows: ref([{ label: "dbx-tab-target", title: "Target" }]),
+      tabWindowTargetLabel: () => "Target",
+      refreshOtherTabWindows: vi.fn(async () => {}),
+    } as unknown as ReturnType<typeof useTabWindowTransfer>;
+    const { app, host } = mountBar(mainGroupId, localTabs, second, pinia, { canDetachTabs: true }, coordinator);
+    try {
+      await settle();
+      const header = otherDatabase ? host.querySelector<HTMLElement>(selector)! : (host.querySelector(`[data-tab-id="${first}"]`)!.closest(".tab-group-entry")!.previousElementSibling as HTMLElement);
+      expect(header).not.toBeNull();
+      header.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      await settle();
+      const open = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Open group in new window"));
+      expect(open).toBeDefined();
+      open!.click();
+      const sentTabs = vi.mocked(coordinator.openTabsInNewWindow).mock.calls[0][0];
+      expect(sentTabs.map((tab) => tab.id)).toEqual(otherDatabase ? [first, second, audit] : [first, second]);
+      expect(sentTabs.map((tab) => tab.id)).not.toContain(otherPane);
+
+      header.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      await settle();
+      const move = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Move group to another window"));
+      expect(move).toBeDefined();
+      move!.click();
+      await settle();
+      const target = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.trim() === "Target");
+      expect(target).toBeDefined();
+      target!.click();
+      expect(coordinator.moveTabsToWindow).toHaveBeenCalledWith(sentTabs, "dbx-tab-target");
+    } finally {
+      app.unmount();
+      host.remove();
+    }
   });
 
   it.each((["none", "connection"] as const).flatMap((groupMode) => (["top", "bottom"] as const).flatMap((placement) => (["wrap", "scroll"] as const).map((tabLayout) => ({ groupMode, placement, tabLayout })))))(
@@ -341,7 +402,7 @@ describe("EditorGroupTabBar group behavior", () => {
     settings.editorSettings.tabGroupMode = "connection";
     const pgA = store.createTab("pg-1", "app", "PG 1", "query");
     store.createTab("pg-1", "app", "PG 2", "query");
-    const my = store.createTab("mysql-1", "app", "MY 1", "query");
+    store.createTab("mysql-1", "app", "MY 1", "query");
     const mainGroup = store.groups[0];
     const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgA, pinia);
     await settle();
@@ -513,7 +574,7 @@ describe("EditorGroupTabBar group behavior", () => {
     settings.editorSettings.tabGroupMode = "database";
     const pgApp = store.createTab("pg-1", "app", "PG app", "query");
     store.createTab("mysql-1", "app", "MY app", "query");
-    const pgConn = store.createTab("pg-1", "", "PG conn", "query");
+    store.createTab("pg-1", "", "PG conn", "query");
     const mainGroup = store.groups[0];
     const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgApp, pinia);
     await settle();
@@ -698,16 +759,50 @@ describe("EditorGroupTabBar group behavior", () => {
       expect(host.querySelector(".tab-group-header img[src$='/pulsar.svg']")).toBeNull();
       expect(host.querySelector(`[data-tab-id="${queryTabId}"]`)).not.toBeNull();
       expect(host.querySelector(`[data-tab-id="${pluginTabId}"]`)).toBeNull();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
 
       pluginHeader.click();
       await settle();
       expect(host.querySelector(`[data-tab-id="${pluginTabId}"]`)).not.toBeNull();
       expect(host.querySelector(`[data-tab-id="${queryTabId}"]`)).toBeNull();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
 
       queryHeader.click();
       await settle();
       expect(host.querySelector(`[data-tab-id="${queryTabId}"]`)).not.toBeNull();
       expect(host.querySelector(`[data-tab-id="${pluginTabId}"]`)).toBeNull();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
+    } finally {
+      app.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps the tab overflow control available for every multi-tab group in two-row mode", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabGroupRows = "two-row";
+    settings.editorSettings.tabPlacement = "top";
+    const mysqlTabId = store.createTab("mysql-1", "app", "MySQL 1", "query");
+    store.createTab("mysql-1", "app", "MySQL 2", "query");
+    store.createTab("mongo-1", "app", "Mongo 1", "query");
+    store.createTab("mongo-1", "app", "Mongo 2", "query");
+    const { app, host, activeTab } = mountBar(store.groups[0]!.id, store.tabs.slice(), mysqlTabId, pinia, {
+      "onActivate-tab": (tabId: string) => {
+        activeTab.id = tabId;
+      },
+    });
+
+    try {
+      await settle();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
+
+      const mongoHeader = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-rail-scroll .tab-group-header")).find((header) => header.title === "mongo-1");
+      expect(mongoHeader).not.toBeUndefined();
+      mongoHeader!.click();
+      await settle();
+      expect(host.querySelector(".tab-overflow-control")).not.toBeNull();
     } finally {
       app.unmount();
       host.remove();
@@ -1020,6 +1115,49 @@ describe("EditorGroupTabBar group behavior", () => {
 
     app.unmount();
     host.remove();
+  });
+
+  it.each([
+    { placement: "left", groupMode: "database-type" },
+    { placement: "left", groupMode: "connection" },
+    { placement: "left", groupMode: "sidebar" },
+    { placement: "left", groupMode: "none" },
+    { placement: "right", groupMode: "sidebar" },
+    { placement: "top", groupMode: "connection" },
+    { placement: "bottom", groupMode: "connection" },
+  ] as const)("opens every tab type in a new window with $placement $groupMode navigation", async ({ placement, groupMode }) => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = placement;
+    settings.editorSettings.tabGroupMode = groupMode;
+    for (const mode of ["query", "data", "objects", "structure", "mongo"] as const) {
+      store.createTab("pg-1", "app", mode, mode);
+    }
+    store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server", connectionId: "pg-1", forceNew: true });
+    const coordinator = {
+      openTabInNewWindow: vi.fn(async () => {}),
+      otherTabWindows: ref([]),
+      refreshOtherTabWindows: vi.fn(async () => {}),
+    } as unknown as ReturnType<typeof useTabWindowTransfer>;
+    const detached = vi.fn();
+    const { app, host } = mountBar(store.groups[0].id, store.tabs.slice(), store.activeTabId, pinia, { canDetachTabs: true, "onDetach-tab": detached }, coordinator);
+    try {
+      await settle();
+      for (const tab of store.tabs) {
+        host.querySelector<HTMLElement>(`[data-tab-id="${tab.id}"]`)!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+        await settle();
+        const open = Array.from(document.body.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")).find((button) => button.textContent?.includes("Open in new window"));
+        expect(open, `${tab.mode} tab`).toBeDefined();
+        open!.click();
+        await settle();
+        expect(coordinator.openTabInNewWindow).toHaveBeenLastCalledWith(tab);
+      }
+      expect(coordinator.openTabInNewWindow).toHaveBeenCalledTimes(store.tabs.length);
+      expect(detached).not.toHaveBeenCalled();
+    } finally {
+      app.unmount();
+      host.remove();
+    }
   });
 
   it("renders plugin workbench tabs with the plugin icon instead of the code fallback", async () => {

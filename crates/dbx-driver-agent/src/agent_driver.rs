@@ -66,6 +66,7 @@ pub struct AgentRuntimeClient {
     child: Arc<Mutex<Child>>,
     child_reaper_started: Arc<AtomicBool>,
     child_reaped: Arc<AtomicBool>,
+    process_exit_confirmed: AtomicBool,
     startup_exit: Option<StartupChildExit>,
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, PendingAgentResponse>>>,
@@ -114,6 +115,7 @@ impl AgentRuntimeClient {
             child: Arc::new(Mutex::new(child)),
             child_reaper_started: Arc::new(AtomicBool::new(false)),
             child_reaped: Arc::new(AtomicBool::new(false)),
+            process_exit_confirmed: AtomicBool::new(false),
             startup_exit,
             stdin: Arc::new(Mutex::new(stdin)),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -482,11 +484,15 @@ impl AgentRuntimeClient {
     pub(crate) async fn wait_for_exit(&self, timeout_duration: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout_duration;
         loop {
-            if self.startup_exit.as_ref().is_some_and(StartupChildExit::is_confirmed) {
+            if self.process_exit_confirmed.load(Ordering::Acquire)
+                || self.startup_exit.as_ref().is_some_and(StartupChildExit::is_confirmed)
+            {
                 return true;
             }
             if let Ok(mut child) = self.child.try_lock() {
                 if matches!(child.try_wait(), Ok(Some(_))) {
+                    // The reaper flag also records failed waits; cache only a confirmed child status.
+                    self.process_exit_confirmed.store(true, Ordering::Release);
                     self.child_reaped.store(true, Ordering::Release);
                     if let Some(exit) = &self.startup_exit {
                         exit.wait_finished(true);
@@ -1349,6 +1355,7 @@ impl AgentHandshake {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCapability {
+    ZooKeeperEndpointRoutes,
     ExactMetadataIdentityV1,
     BlobBindStatementsV1,
     Connect,
@@ -1462,7 +1469,8 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
+        Self::ZooKeeperEndpointRoutes,
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1500,6 +1508,7 @@ impl AgentCapability {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ZooKeeperEndpointRoutes => "zookeeper_endpoint_routes",
             Self::ExactMetadataIdentityV1 => "exact_metadata_identity_v1",
             Self::BlobBindStatementsV1 => "blob_bind_statements_v1",
             Self::NativeJobLegacyV1 => "native_job_legacy_v1",
@@ -2254,6 +2263,7 @@ impl AgentDriverClient {
         timeout_duration: Option<Duration>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<T, AgentCallError> {
+        validate_zookeeper_route_capability(self.handshake.as_ref(), method, &params)?;
         if let Some(runtime) = &self.shared_runtime {
             let agent_session_id = self.agent_session_id.clone();
             let mut params = params;
@@ -3812,10 +3822,25 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
         || error.contains("method not found: handshake")
 }
 
+fn validate_zookeeper_route_capability(
+    handshake: Option<&AgentHandshake>,
+    method: &str,
+    params: &Value,
+) -> Result<(), String> {
+    if matches!(method, "connect" | "test_connection" | "open_session")
+        && params.get("zookeeper_endpoint_routes").is_some()
+        && !agent_supports_capability(handshake, AgentCapability::ZooKeeperEndpointRoutes)
+    {
+        return Err("The installed ZooKeeper driver does not support tunneled ensemble routing. Update the ZooKeeper driver and reconnect.".to_owned());
+    }
+    Ok(())
+}
+
 pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability: AgentCapability) -> bool {
     if matches!(
         capability,
-        AgentCapability::ExactMetadataIdentityV1
+        AgentCapability::ZooKeeperEndpointRoutes
+            | AgentCapability::ExactMetadataIdentityV1
             | AgentCapability::BlobBindStatementsV1
             | AgentCapability::Kv
             | AgentCapability::KvTtl
@@ -4401,6 +4426,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn zookeeper_routing_requires_explicit_agent_capability_before_dispatch() {
+        let params = serde_json::json!({"zookeeper_endpoint_routes": {"zk:2181": "127.0.0.1:31001"}});
+        let mut handshake = AgentHandshake {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            agent_protocol_version: AGENT_PROTOCOL_VERSION,
+            capabilities: vec!["connect".into()],
+            pl_debug: None,
+        };
+        for method in ["connect", "test_connection", "open_session"] {
+            assert!(super::validate_zookeeper_route_capability(None, method, &params)
+                .unwrap_err()
+                .contains("Update the ZooKeeper driver"));
+            assert!(super::validate_zookeeper_route_capability(Some(&handshake), method, &params).is_err());
+        }
+        handshake.capabilities.push("zookeeper_endpoint_routes".into());
+        assert!(super::validate_zookeeper_route_capability(Some(&handshake), "connect", &params).is_ok());
+        assert!(super::validate_zookeeper_route_capability(None, "connect", &serde_json::json!({})).is_ok());
+    }
 
     #[test]
     fn kingbase_connection_info_and_pool_preserve_reported_mode() {
@@ -6734,7 +6779,7 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::NativeJobSessionV1.as_str(), "native_job_session_v1");
         assert_eq!(AgentCapability::NativeJobLegacyObV1.as_str(), "native_job_legacy_ob_v1");
         assert_eq!(AgentCapability::ExactMetadataIdentityV1.as_str(), "exact_metadata_identity_v1");
-        assert_eq!(AgentCapability::ALL.len(), 33);
+        assert_eq!(AgentCapability::ALL.len(), 34);
     }
 
     #[test]

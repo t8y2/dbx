@@ -208,4 +208,3 @@ test("drawBooleanCheckbox renders checked and unchecked state with clean backgro
   assert.ok(calls.some((c) => c.method === "strokeRect"));
   assert.ok(calls.some((c) => c.method === "stroke"));
 });
-

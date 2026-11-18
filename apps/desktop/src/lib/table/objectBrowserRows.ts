@@ -27,9 +27,23 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  /** MySQL AUTO_INCREMENT as returned by the server: a string, since BIGINT UNSIGNED values exceed 2^53. */
+  autoIncrement?: string | null;
+  characterSet?: string | null;
+  collation?: string | null;
+  /** PostgreSQL foreign table (`relkind = 'f'`). Kept apart from `type` because
+   * `normalizeObjectBrowserType` folds every unknown kind into "TABLE", and a
+   * foreign table must be dropped with `DROP FOREIGN TABLE` (#14717). */
+  foreignTable?: boolean;
 };
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
+/** True when the backend-reported object type is a PostgreSQL foreign table. */
+export function isForeignTableObjectType(objectType: string | null | undefined): boolean {
+  if (!objectType) return false;
+  return objectType.toUpperCase().replace(/[\s-]+/g, "_") === "FOREIGN_TABLE";
+}
+
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
@@ -207,6 +221,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         displayName,
         schema,
         type,
+        foreignTable: isForeignTableObjectType(object.object_type) || undefined,
         valid: object.valid,
         signature,
         comment: object.comment,
@@ -430,7 +445,7 @@ export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrows
 }
 
 export function initialObjectBrowserSortDirection(key: ObjectBrowserSortKey): ObjectBrowserSortDirection {
-  return key === "created_at" || key === "updated_at" || key === "estimatedRows" || key === "totalBytes" ? "desc" : "asc";
+  return key === "created_at" || key === "updated_at" || key === "estimatedRows" || key === "totalBytes" || key === "autoIncrement" ? "desc" : "asc";
 }
 
 export function formatObjectBrowserTimestamp(value: string | null | undefined): string {
@@ -445,6 +460,13 @@ export function formatObjectBrowserTimestamp(value: string | null | undefined): 
 export function formatObjectBrowserCount(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
   return new Intl.NumberFormat().format(value);
+}
+
+/** Groups the digits like the row count does, without losing precision on values past 2^53 (BIGINT UNSIGNED). */
+export function formatObjectBrowserAutoIncrement(value: string | null | undefined): string {
+  const text = value?.trim();
+  if (!text) return "";
+  return /^\d+$/.test(text) ? new Intl.NumberFormat().format(BigInt(text)) : text;
 }
 
 export function formatObjectBrowserBytes(value: number | null | undefined): string {

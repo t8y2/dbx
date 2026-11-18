@@ -455,13 +455,12 @@ a {
 }
 
 /* 固定铺满整个着陆页，沉到内容与 .landing::after 噪点层之下，仅在 .landing 背景之上。
-   fixed 层不随滚动，形成稳定的深空背景；上下轻微淡出避免硬边 */
+   fixed 层不随滚动，形成稳定的深空背景；上下淡出由 Starfield 按星点 alpha 实现，
+   避免整屏 mask 合成额外占用 GPU */
 .landing-starfield--page {
   position: fixed;
   inset: 0;
   z-index: -1;
-  mask-image: linear-gradient(180deg, transparent 0%, black 8%, black 92%, transparent 100%);
-  -webkit-mask-image: linear-gradient(180deg, transparent 0%, black 8%, black 92%, transparent 100%);
 }
 
 .landing-starfield-canvas {

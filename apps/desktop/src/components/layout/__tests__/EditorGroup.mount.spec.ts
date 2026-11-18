@@ -96,7 +96,7 @@ describe("EditorGroup mount contract", () => {
 
   it.each(["query", "data"] as const)("reuses hot %s tabs and remounts evicted surfaces", async (mode) => {
     const store = useQueryStore();
-    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d"];
+    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d", "tab-e", "tab-f", "tab-g"];
     store.tabs = tabIds.map((tabId) => tab(tabId, mode));
     const activeTabId = ref("tab-a");
     const host = createHost();
@@ -126,36 +126,35 @@ describe("EditorGroup mount contract", () => {
     app.mount(host);
     await nextTick();
 
-    activeTabId.value = "tab-b";
-    await nextTick();
+    for (const tabId of ["tab-b", "tab-c", "tab-d", "tab-e", "tab-f"]) {
+      activeTabId.value = tabId;
+      await nextTick();
+    }
+    expect(lifecycle.surfaceCreated).toBe(6);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
     activeTabId.value = "tab-a";
     await nextTick();
-
-    expect(lifecycle.surfaceCreated).toBe(2);
+    expect(lifecycle.surfaceCreated).toBe(6);
     expect(lifecycle.surfaceUnmounted).toBe(0);
 
-    activeTabId.value = "tab-c";
+    activeTabId.value = "tab-g";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(3);
-    expect(lifecycle.surfaceUnmounted).toBe(0);
-
-    activeTabId.value = "tab-d";
-    await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceCreated).toBe(7);
     expect(lifecycle.surfaceUnmounted).toBe(1);
 
     activeTabId.value = "tab-a";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceCreated).toBe(7);
     expect(lifecycle.surfaceUnmounted).toBe(1);
 
     activeTabId.value = "tab-b";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(5);
+    expect(lifecycle.surfaceCreated).toBe(8);
     expect(lifecycle.surfaceUnmounted).toBe(2);
 
     app.unmount();
-    expect(lifecycle.surfaceUnmounted).toBe(5);
+    expect(lifecycle.surfaceUnmounted).toBe(8);
     host.remove();
   });
 

@@ -1,4 +1,4 @@
-import { reactive, computed } from "vue";
+import { reactive, computed, watch } from "vue";
 import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
@@ -6,6 +6,7 @@ import { formatQueryDuration } from "@/lib/format/duration";
 import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
 import { releaseManualExport, submitManualExport, type ManualExportMode } from "@/lib/export/manualExportQueue";
 import { acceptOraclePackageTransferApproval, acceptOraclePackageTransferPreflight, acceptOracleRoutineDeploymentOperation, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
+import { loadPersistedExportTasks, savePersistedExportTasks } from "@/lib/export/exportTaskPersistence";
 
 export type BackgroundTaskKind = "table-export" | "table-copy" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Queued" | "Unknown" | "PreparingSnapshot" | "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
@@ -31,6 +32,16 @@ export interface SqlFileFailureContext {
   fileName?: string;
 }
 
+export interface DataTransferTaskOptions {
+  onStarted?: () => void;
+  onDone?: () => void | Promise<void>;
+  onOpen?: () => void;
+  openTask?: (taskId: string) => void;
+  onRemove?: () => void;
+  oracleRoutineDeployment?: OracleRoutineDeployment;
+  formatOverlapError?: (tables: string[]) => string;
+}
+
 export interface ExportTask {
   exportId: string;
   kind: BackgroundTaskKind;
@@ -46,6 +57,9 @@ export interface ExportTask {
    * 终态摘要，供进度对话框的「执行日志」区展示。按时间正序追加，超上限丢头部。
    */
   logLines?: BackgroundTaskLogLine[];
+  dataTransferRequest?: api.TransferRequest;
+  dataTransferLabel?: string;
+  dataTransferOptions?: DataTransferTaskOptions;
   databaseExportSource?: DatabaseExportSource;
   currentObject?: string;
   preparing?: boolean;
@@ -104,6 +118,8 @@ export interface ExportTask {
   canCancel?: boolean;
   canRemove?: boolean;
   canRecoverCancellation?: boolean;
+  /** Restored from the previous session's snapshot (#14696); no live handle exists. */
+  restored?: boolean;
   manualExportRootId?: string;
   removed?: boolean;
   copyPhase?: "preparing" | "structure" | "data" | "refreshing" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown";
@@ -221,6 +237,47 @@ function clearCancellationRecovery(exportId: string) {
 const transferFailureStates = new Map<string, TransferFailureState>();
 const sqlFileFailureStates = new Map<string, SqlFileFailureState>();
 const textEncoder = new TextEncoder();
+
+let exportTaskPersistenceStarted = false;
+let exportTaskPersistQueued = false;
+
+/**
+ * Coalesce the burst of progress updates produced by one IPC tick into a single
+ * write, without owning a timer: the export progress popover asserts on the
+ * number of pending timers, and a long-lived debounce timer would both leak
+ * into those assertions and keep running after the last task finished.
+ */
+function scheduleExportTaskPersist() {
+  if (exportTaskPersistQueued) return;
+  exportTaskPersistQueued = true;
+  queueMicrotask(() => {
+    exportTaskPersistQueued = false;
+    void savePersistedExportTasks([...taskMap.values()]);
+  });
+}
+
+function ensureExportTaskPersistence() {
+  if (exportTaskPersistenceStarted) return;
+  exportTaskPersistenceStarted = true;
+  watch(taskMap, scheduleExportTaskPersist, { deep: true });
+}
+
+/**
+ * Restore the background tasks left behind by the previous session (#14696).
+ * Tasks that were running when the page went away come back as `Unknown` with
+ * their execution log, because the reload has no handle on the original run.
+ */
+export async function restoreExportTasksFromStorage(): Promise<void> {
+  ensureExportTaskPersistence();
+  const restored = await loadPersistedExportTasks();
+  let changed = false;
+  for (const task of restored) {
+    if (taskMap.has(task.exportId)) continue;
+    taskMap.set(task.exportId, task);
+    changed = true;
+  }
+  if (changed) scheduleExportTaskPersist();
+}
 
 function utf8ByteLength(value: string): number {
   return textEncoder.encode(value).length;
@@ -430,6 +487,10 @@ function finishExportTask(task: ExportTask) {
   }
 }
 
+export function canReexecuteDataTransferTask(task: ExportTask): boolean {
+  return task.kind === "data-transfer" && Boolean(task.dataTransferRequest) && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled");
+}
+
 // Implementation lives in @/lib/format/duration (shared with the DataGrid
 // footer / history elapsed hints); the data-transfer name is kept for the
 // export/multi-db call sites.
@@ -459,9 +520,13 @@ function findActiveOverlappingTransfer(request: api.TransferRequest): string[] {
 }
 
 export function useExportTracker() {
+  ensureExportTaskPersistence();
   const tasks = computed(() => Array.from(taskMap.values()));
 
-  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Queued" || t.status === "Unknown" || t.status === "PreparingSnapshot" || t.status === "Running" || t.status === "Writing" || t.status === "Cancelling").length);
+  // Restored tasks have no live handle: they must not count as active, or the
+  // "tasks are running, wait before updating" guard would block app updates
+  // forever after a crash (#14696).
+  const activeCount = computed(() => tasks.value.filter((t) => !t.restored && (t.status === "Queued" || t.status === "Unknown" || t.status === "PreparingSnapshot" || t.status === "Running" || t.status === "Writing" || t.status === "Cancelling")).length);
 
   const hasActive = computed(() => activeCount.value > 0);
 
@@ -747,22 +812,7 @@ export function useExportTracker() {
     if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
 
-  function startDataTransferTask(
-    request: api.TransferRequest,
-    label: string,
-    options: {
-      onStarted?: () => void;
-      onDone?: () => void | Promise<void>;
-      onOpen?: () => void;
-      onRemove?: () => void;
-      oracleRoutineDeployment?: OracleRoutineDeployment;
-      formatOverlapError?: (tables: string[]) => string;
-    } = {},
-  ): ExportTask {
-    const existingTask = taskMap.get(request.transferId);
-    const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
-    task.onOpen = options.onOpen;
-    task.startedAt ??= Date.now();
+  function executeTransferRun(task: ExportTask, request: api.TransferRequest, options: DataTransferTaskOptions): ExportTask {
     task.targetConnectionId = request.targetConnectionId;
     task.targetCatalog = request.targetCatalog;
     task.targetDatabase = request.targetDatabase;
@@ -831,6 +881,23 @@ export function useExportTracker() {
     return task;
   }
 
+  function startDataTransferTask(request: api.TransferRequest, label: string, options: DataTransferTaskOptions = {}): ExportTask {
+    const existingTask = taskMap.get(request.transferId);
+    const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
+    task.dataTransferRequest = {
+      ...JSON.parse(JSON.stringify(request)),
+      dropTargetConfirmed: false,
+    };
+    task.dataTransferLabel = label;
+    task.dataTransferOptions = {
+      ...options,
+      oracleRoutineDeployment: undefined,
+    };
+    task.onOpen = () => (options.openTask ? options.openTask(task.exportId) : options.onOpen?.());
+    task.startedAt ??= Date.now();
+    return executeTransferRun(task, request, options);
+  }
+
   function updateTableExportTask(exportId: string, progress: api.TableExportProgress) {
     const task = taskMap.get(exportId);
     if (!task) return;
@@ -872,6 +939,17 @@ export function useExportTracker() {
     const task = taskMap.get(exportId);
     if (!task || task.kind !== "table-export" || task.status === "Done" || task.status === "Error" || task.status === "Cancelled") return;
     task.status = "Cancelling";
+  }
+
+  function markDataTransferTaskCancelling(transferId: string) {
+    const task = taskMap.get(transferId);
+    if (!task || task.kind !== "data-transfer" || task.status !== "Running") return;
+    task.status = "Cancelling";
+  }
+
+  function restoreDataTransferTaskRunning(transferId: string) {
+    const task = taskMap.get(transferId);
+    if (task?.kind === "data-transfer" && task.status === "Cancelling") task.status = "Running";
   }
 
   function restoreDatabaseExportTaskRunning(exportId: string) {
@@ -921,7 +999,10 @@ export function useExportTracker() {
     }
     const nextStatus = normalizeTransferStatus(progress.status, progress.terminal);
     const hadError = task.status === "Error";
-    task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
+    // A cancel request is only acknowledged by the backend at its next checkpoint (between
+    // metadata reads or tables); keep showing "Cancelling" until a terminal event arrives.
+    if (task.status === "Cancelling" && nextStatus === "Running") task.status = "Cancelling";
+    else task.status = hadError && nextStatus === "Done" ? "Error" : nextStatus;
     task.errorMessage = progress.error || task.errorMessage || null;
     task.tableIndex = progress.tableIndex;
     task.totalTables = progress.totalTables;
@@ -1050,7 +1131,13 @@ export function useExportTracker() {
       } else if (task?.kind === "sql-file") {
         await api.cancelSqlFileExecution(exportId);
       } else if (task?.kind === "data-transfer") {
-        await api.cancelTransfer(exportId);
+        markDataTransferTaskCancelling(exportId);
+        try {
+          await api.cancelTransfer(exportId);
+        } catch (error) {
+          restoreDataTransferTaskRunning(exportId);
+          throw error;
+        }
       } else {
         markTableExportTaskCancelling(exportId);
         await api.cancelTableExport(exportId);
@@ -1087,6 +1174,7 @@ export function useExportTracker() {
     addMultiDbExecutionTask,
     updateMultiDbExecutionTask,
     startDataTransferTask,
+    canReexecuteDataTransferTask,
     updateTableExportTask,
     updateDatabaseExportTask,
     markDatabaseExportTaskCancelling,

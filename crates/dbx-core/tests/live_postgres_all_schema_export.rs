@@ -138,6 +138,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             schema: String::new(),
             file_path: export_path.display().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,
@@ -155,6 +156,9 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            row_limit_per_table: None,
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
         },
         move |event| progress_sink.lock().expect("progress mutex poisoned").push(event),
     )

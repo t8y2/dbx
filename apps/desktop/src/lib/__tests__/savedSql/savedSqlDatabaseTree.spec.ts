@@ -114,6 +114,20 @@ describe("database saved SQL tree", () => {
     expect(stripDatabaseSavedSqlTreeNodes(decorated)).toEqual([{ ...database, children: [] }]);
   });
 
+  it("strips nested saved SQL nodes without cloning subtrees that have none", () => {
+    const table: TreeNode = { id: "t", label: "t", type: "table", children: [] };
+    const root: TreeNode = { id: "root", label: "SQL", type: "saved-sql-root" };
+    const group: TreeNode = { id: "g", label: "g", type: "group-tables", children: [table, root], hiddenChildren: [table] };
+    const plain: TreeNode = { id: "plain", label: "plain", type: "group-views", children: [table] };
+
+    const stripped = stripDatabaseSavedSqlTreeNodes([group, plain]);
+
+    expect(stripped[0]).toEqual({ ...group, children: [table], hiddenChildren: [table] });
+    expect(stripped[0]).not.toBe(group);
+    expect(group.children).toHaveLength(2);
+    expect(stripped[1]).toBe(plain);
+  });
+
   it("renders a saved SQL only below its exact catalog database", () => {
     const catalogFiles = [file({ id: "hive", name: "hive.sql", connectionId: "conn-1", catalog: "hive", database: "app" })];
     const defaultRoot = buildDatabaseSavedSqlRootNode(database, catalogFiles);

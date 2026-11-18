@@ -29,6 +29,7 @@ export interface StarRocksPhysicalOptionsDraft {
   bucketCount: string;
 }
 export interface CreateTableDialectOptions {
+  mysqlTableCharset?: import("@/lib/table/tableStructureEditorSql").MysqlTableCharsetChange;
   postgresForeignTable?: import("@/lib/table/postgresForeignTable").PostgresForeignTableCreateOptions;
   starrocks?: {
     timePartition?: { columnId: string; granularity: StarRocksTimeGranularity; interval?: number; additionalColumnIds: string[] };

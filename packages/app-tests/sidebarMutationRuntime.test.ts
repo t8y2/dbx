@@ -99,6 +99,16 @@ test("all locales define the object drop refresh warning with its message placeh
   }
 });
 
+test("object rename dialog prefills the current object name instead of a stale draft (#14158)", () => {
+  const open = functionBody("openRenameObjectDialog");
+  // The preview watcher updates currentSidebarViewRenameTargetKey on every selection change, so it
+  // cannot tell whether the dialog was last opened for this object.
+  assert.doesNotMatch(open, /currentSidebarViewRenameTargetKey/);
+  assert.match(open, /if \(targetKey !== renameObjectDialogTargetKey\) renameObjectName\.value = node\.objectName \|\| node\.label;/);
+  assert.match(open, /renameObjectDialogTargetKey = targetKey;/);
+  assert.match(functionBody("openRenameDatabaseDialog"), /renameObjectDialogTargetKey = "";/);
+});
+
 test("database rename uses a maintenance connection and mutates state only after guarded script execution", () => {
   const rename = functionBody("confirmRenameObject");
   assert.ok(rename.includes("databaseRenameMaintenanceDatabase(connectionStore.getConfig(node.connectionId)?.database, node.label)"));

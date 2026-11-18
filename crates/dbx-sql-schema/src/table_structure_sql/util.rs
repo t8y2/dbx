@@ -301,6 +301,77 @@ pub(super) fn is_temporal_expression(value: &str) -> bool {
     trimmed.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
+/// Splits a MySQL temporal default that the structure editor's preset field
+/// stores as one string, e.g. `CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+/// into its default and on-update expressions. Rendering the whole value as a
+/// string literal produced
+/// `DEFAULT 'CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'`, which MySQL
+/// rejects with `ERROR 1067 (42000): Invalid default value` (#14166).
+fn split_mysql_temporal_on_update(value: &str) -> Option<(&str, &str)> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let keyword = "on update";
+    let index = lower.find(keyword)?;
+    let before = &trimmed[..index];
+    let after_index = index + keyword.len();
+    let after = &trimmed[after_index..];
+    // The keyword must stand alone: a default text such as `'on update'` or
+    // `foo_on_update_bar` is not a clause.
+    if !before.chars().last().is_some_and(char::is_whitespace) || !after.chars().next().is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let default_expr = before.trim();
+    let on_update_expr = after.trim();
+    if default_expr.is_empty() || on_update_expr.is_empty() {
+        return None;
+    }
+    // MySQL only accepts CURRENT_TIMESTAMP[(precision)] after ON UPDATE. The
+    // default side may also be a string literal, e.g.
+    // `'2020-01-01 00:00:00' ON UPDATE CURRENT_TIMESTAMP`.
+    if !is_mysql_current_timestamp_expression(on_update_expr) {
+        return None;
+    }
+    let safe_default = is_sql_string_literal(default_expr) || is_safe_mysql_temporal_expression(default_expr);
+    if !safe_default {
+        return None;
+    }
+    Some((default_expr, on_update_expr))
+}
+
+fn is_mysql_current_timestamp_expression(expr: &str) -> bool {
+    let lower = expr.trim().to_ascii_lowercase();
+    if lower == "current_timestamp" {
+        return true;
+    }
+    let Some(rest) = lower.strip_prefix("current_timestamp(") else {
+        return false;
+    };
+    let Some(precision) = rest.strip_suffix(')') else {
+        return false;
+    };
+    precision.parse::<u8>().is_ok_and(|value| value <= 6)
+}
+
+/// Bare temporal expressions are passed through unquoted. Reject quotes,
+/// comments and statement separators so a default text cannot escape the
+/// column clause.
+fn is_safe_mysql_temporal_expression(expr: &str) -> bool {
+    is_temporal_expression(expr)
+        && !expr.contains('\'')
+        && !expr.contains('"')
+        && !expr.contains(';')
+        && !expr.contains("--")
+        && !expr.contains("/*")
+}
+
+/// Whether a MySQL temporal default value already contains an `ON UPDATE`
+/// clause, so the caller must not append the separate `extra`-driven clause and
+/// emit `ON UPDATE` twice.
+pub(super) fn mysql_temporal_default_carries_on_update(value: &str) -> bool {
+    split_mysql_temporal_on_update(value).is_some()
+}
+
 pub(super) fn is_string_type_for_default(dialect: StructureDialect, base_type: &str) -> bool {
     let normalized = base_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
     match dialect {
@@ -390,6 +461,15 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
     }
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
     if is_temporal_type_for_default(dialect, base_type) {
+        if dialect == StructureDialect::Mysql {
+            if let Some((default_expr, on_update_expr)) = split_mysql_temporal_on_update(default_value) {
+                return format!(
+                    "{} ON UPDATE {}",
+                    mysql_temporal_default_with_column_precision(dialect, data_type, default_expr),
+                    mysql_temporal_default_with_column_precision(dialect, data_type, on_update_expr)
+                );
+            }
+        }
         if is_temporal_expression(default_value) {
             return mysql_temporal_default_with_column_precision(dialect, data_type, default_value);
         }

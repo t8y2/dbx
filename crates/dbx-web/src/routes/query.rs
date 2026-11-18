@@ -44,6 +44,8 @@ pub struct ExecuteQueryRequest {
     /// ROLLBACK. Defaults to the historical cleanup when omitted.
     #[serde(default)]
     pub preserve_explicit_transaction: bool,
+    #[serde(default)]
+    pub report_compilation_errors: bool,
 }
 
 #[derive(Deserialize)]
@@ -705,6 +707,7 @@ pub async fn execute_multi(
             continue_on_error: req.continue_on_error.unwrap_or(false),
             execution_mode: req.execution_mode.unwrap_or_default(),
             preserve_explicit_transaction: req.preserve_explicit_transaction,
+            report_compilation_errors: req.report_compilation_errors,
         },
     )
     .await;
@@ -1400,6 +1403,12 @@ pub async fn build_executable_object_source_sql(
 
 pub async fn build_editable_object_source(Json(req): Json<BuildExecutableObjectSourceRequest>) -> Json<String> {
     Json(dbx_core::object_source_sql::build_editable_object_source(req.input))
+}
+
+pub async fn build_oracle_object_export_sql(
+    Json(req): Json<BuildExecutableObjectSourceRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::object_source_sql::build_oracle_object_export_sql(req.input).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_routine_rename_object_source_statements(

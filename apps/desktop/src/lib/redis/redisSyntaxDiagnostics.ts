@@ -35,19 +35,28 @@ function lineSpan(lineIndex: number, startColumn: number, endColumn: number): Sq
   };
 }
 
-/**
- * Build diagnostics for the whole editor source (multi-line). Each non-empty,
- * non-comment line is parsed as one Redis command.
- */
-export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnostic[] {
-  const diagnostics: SqlSemanticDiagnostic[] = [];
-  const lines = source.split(/\r?\n/);
+export interface RedisLineRange {
+  startLine: number;
+  endLine: number;
+}
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-    const rawLine = lines[lineIndex];
-    const lineNo = lineIndex + 1; // 1-based line number for SqlTextSpan
-    if (!rawLine || !rawLine.trim()) continue;
-    if (isRedisCommentLine(rawLine)) continue;
+export type RedisDiagnosticSource = string | { lines: number; line(n: number): { text: string } };
+
+/**
+ * Build diagnostics for editor source (multi-line). Each non-empty,
+ * non-comment line is parsed as one Redis command. When lineRanges is
+ * provided, only lines intersecting those ranges are analyzed.
+ */
+export function buildRedisSyntaxDiagnostics(source: RedisDiagnosticSource, lineRanges?: readonly RedisLineRange[]): SqlSemanticDiagnostic[] {
+  const diagnostics: SqlSemanticDiagnostic[] = [];
+  const isDoc = typeof source !== "string";
+  const lineCount = isDoc ? source.lines : 0;
+  const lines = isDoc ? undefined : source.split(/\r?\n/);
+  const totalLines = isDoc ? lineCount : lines!.length;
+
+  const checkLine = (lineNo: number, rawLine: string) => {
+    if (!rawLine || !rawLine.trim()) return;
+    if (isRedisCommentLine(rawLine)) return;
 
     const { argv, unclosedQuote, unclosedQuoteStart } = tokenizeRedisLine(rawLine);
 
@@ -58,10 +67,10 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
         message: "Unclosed quote",
         severity: "error",
       });
-      continue; // further checks are unreliable without a clean parse
+      return;
     }
 
-    if (argv.length === 0) continue;
+    if (argv.length === 0) return;
 
     const upper = argv.map((token) => token.value.toUpperCase());
     const spec = resolveRedisCommandSpec(upper);
@@ -73,7 +82,7 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
         message: `Unknown command '${argv[0].value}'`,
         severity: "error",
       });
-      continue;
+      return;
     }
 
     if (!aritySatisfied(spec.arity, argv.length)) {
@@ -82,8 +91,7 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
         message: `Wrong number of arguments for '${argv[0].value}': expected ${describeArity(spec.arity)}, got ${argv.length - 1}`,
         severity: "error",
       });
-      // Don't also emit a safety marker on the same token — arity error is clearer.
-      continue;
+      return;
     }
 
     if (spec.safety === "blocked") {
@@ -99,6 +107,30 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
         severity: "warning",
       });
     }
+  };
+
+  const getLine = (lineNo: number): string => {
+    if (isDoc) {
+      return source.line(lineNo).text;
+    }
+    return lines![lineNo - 1] ?? "";
+  };
+
+  if (lineRanges && lineRanges.length > 0) {
+    const checked = new Set<number>();
+    for (const range of lineRanges) {
+      const start = Math.max(1, range.startLine);
+      const end = Math.min(totalLines, range.endLine);
+      for (let lineNo = start; lineNo <= end; lineNo++) {
+        if (checked.has(lineNo)) continue;
+        checked.add(lineNo);
+        checkLine(lineNo, getLine(lineNo));
+      }
+    }
+  } else {
+    for (let lineNo = 1; lineNo <= totalLines; lineNo++) {
+      checkLine(lineNo, getLine(lineNo));
+    }
   }
 
   return diagnostics;
@@ -109,7 +141,16 @@ export function buildRedisSyntaxDiagnostics(source: string): SqlSemanticDiagnost
  * current line, to avoid transient "Unknown command" noise. Mirrors the intent
  * of `shouldRunSqlSemanticDiagnostics`.
  */
-export function shouldRunRedisDiagnostics(source: string, cursor: number): boolean {
+export function shouldRunRedisDiagnostics(source: string | { lineAt(pos: number): { text: string; from: number }; length: number }, cursor: number): boolean {
+  if (typeof source !== "string") {
+    if (source.length === 0) return false;
+    const clampedPos = Math.max(0, Math.min(cursor, source.length));
+    const line = source.lineAt(clampedPos);
+    const lineText = line.text.slice(0, clampedPos - line.from);
+    const trimmed = lineText.trimStart();
+    if (trimmed.length > 0 && !/\s/.test(trimmed)) return false;
+    return true;
+  }
   if (!source.trim()) return false;
   // Find the line the cursor is on.
   const upto = source.slice(0, cursor);

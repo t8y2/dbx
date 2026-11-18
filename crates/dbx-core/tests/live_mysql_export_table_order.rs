@@ -92,6 +92,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         schema: database.clone(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: false,
@@ -109,6 +110,9 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
 
     let test_result = async {

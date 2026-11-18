@@ -960,6 +960,30 @@ test("indexed entries keep partition parents, case-distinct names, normalized ty
   );
 });
 
+test("collapses partition groups for a matching parent while preserving explicit expansion", () => {
+  const partitionGroup: TreeNode = {
+    id: "orders:__partitions",
+    label: "tree.partitions",
+    type: "group-partitions",
+    isExpanded: true,
+    children: [
+      { id: "orders:2024", label: "orders_2024", type: "table", isExpanded: false, children: [] },
+      { id: "orders:2025", label: "orders_2025", type: "table", isExpanded: false, children: [] },
+    ],
+  };
+  const table: TreeNode = { id: "orders", label: "orders", type: "table", isExpanded: true, children: [partitionGroup] };
+
+  const collapsedByDefault = filterSidebarTree([table], "orders", new Set(), undefined, { searchExpandedIds: new Set() });
+  assert.equal(collapsedByDefault[0]?.children?.[0]?.isExpanded, false);
+
+  const explicitlyExpanded = filterSidebarTree([table], "orders", new Set(), undefined, { searchExpandedIds: new Set([partitionGroup.id]) });
+  assert.equal(explicitlyExpanded[0]?.children?.[0]?.isExpanded, true);
+
+  const directPartitionSearch = filterSidebarTree([table], "orders_2024", new Set(), undefined, { searchExpandedIds: new Set() });
+  assert.equal(directPartitionSearch[0]?.children?.[0]?.isExpanded, true);
+  assert.equal(directPartitionSearch[0]?.children?.[0]?.children?.[0]?.label, "orders_2024");
+});
+
 test("does not resurrect a removed connection from an old index manifest", () => {
   const merged = mergeSidebarRegexIndexScopes([], [{ parentNodeId: "gone:db:__tables", connectionId: "gone", database: "db", nodeType: "group-tables", entries: [{ name: "orders", table_type: "TABLE" }] }]);
   assert.deepEqual(merged, []);

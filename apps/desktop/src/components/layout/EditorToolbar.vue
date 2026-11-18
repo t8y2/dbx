@@ -33,8 +33,9 @@ import {
   RefreshCw,
   UserRound,
   Copy,
+  MessageSquareText,
 } from "@lucide/vue";
-import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
+import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -44,6 +45,7 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
+import ConnectionGroupPath from "@/components/connection/ConnectionGroupPath.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -51,7 +53,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
-import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
@@ -60,7 +62,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
-import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
+import { canSaveRoutineToDatabase } from "@/lib/table/routineDefinitionSave";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
@@ -73,7 +75,9 @@ import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
 const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
-  executableSql: string;
+  hasExecutableSql: boolean;
+  /** The executable SQL contains a DML statement; fallback for the preview button when `canPreviewChanges` is not provided. */
+  executableSqlMayContainDml: boolean;
   /** 来自 QueryEditor 的实时“当前语句是否为可预览 DML”信号；未提供时退回可编辑文档启发式。 */
   canPreviewChanges?: boolean;
   explainMode?: string;
@@ -115,9 +119,11 @@ const emit = defineEmits<{
   formatSql: [];
   compressSql: [];
   foldAll: [];
+  toggleLineComment: [];
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
+  saveRoutineToDatabase: [tabId: string];
   "change-encoding": [value: NonNullable<QueryTab["externalSqlEncoding"]>];
   openSql: [];
   importResultArchive: [];
@@ -148,6 +154,16 @@ const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? 
 
 function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+async function copyDatabaseName(database: string) {
+  if (!database) return;
+  try {
+    await copyToClipboard(database);
+    toast(t("connection.copied"));
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
 }
 
 async function copyGeneratedMongoShell() {
@@ -278,10 +294,10 @@ const activeConnectionValue = computed(() => props.activeConnection?.id || "");
 const activeConnectionDetailRows = computed(() => (props.activeConnection ? connectionDetailRows(props.activeConnection, t) : []));
 const activeConnectionGroupPath = computed(() => {
   const connection = props.activeConnection;
-  if (!connection) return "";
-  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id)?.join(" / ") || "";
+  if (!connection) return [];
+  return findConnectionGroupPath(connectionStore.sidebarLayout, connection.id) ?? [];
 });
-const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value : ""));
+const visibleConnectionGroupPath = computed(() => (settingsStore.editorSettings.showConnectionGroupPath ? activeConnectionGroupPath.value.join("/") : ""));
 const activeSchemaValue = computed(() => props.activeTab.schema || "");
 // Salesforce identity badge. A Salesforce tab talks to one live org and every grid
 // save is a real REST write, so the signed-in user stays visible next to the
@@ -351,6 +367,7 @@ const saveTooltip = computed(() => {
 });
 const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.explainPlan"), settingsStore.editorSettings.shortcuts.explainSql));
 const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
+const lineCommentTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutToggleLineComment"), settingsStore.editorSettings.shortcuts.toggleLineComment));
 const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
 const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
@@ -364,11 +381,7 @@ const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStor
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
 const executeAllShortcutTooltip = computed(() => formatShortcutTooltip(t("toolbar.executeAllSql"), settingsStore.editorSettings.shortcuts.executeAllSql));
 const executeInNewResultTabTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutExecuteSqlInNewResultTab"), settingsStore.editorSettings.shortcuts.executeSqlInNewResultTab));
-// executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
-// 具体"当前语句"由编辑器（QueryEditor）按执行模式解析。
-const DML_KEYWORD_RE = /(^|\s)(update|insert|delete)\s/i;
-const canPreviewDml = computed(() => looksLikeDmlStatement(props.executableSql) || DML_KEYWORD_RE.test(props.executableSql));
-const previewButtonVisible = computed(() => props.canPreviewChanges ?? canPreviewDml.value);
+const previewButtonVisible = computed(() => props.canPreviewChanges ?? props.executableSqlMayContainDml);
 // DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
 // plan (SET STATISTICS XML); all three execute the statement.
 const supportsExplainAnalyze = computed(() => {
@@ -382,6 +395,8 @@ const explainAnalyzeTooltip = computed(() => {
   return t("toolbar.autotrace");
 });
 const canSaveSql = computed(() => canSaveSqlTab(props.activeTab));
+const showSaveRoutineToDatabase = computed(() => canSaveRoutineToDatabase(props.activeTab, props.activeConnection));
+watch(showSaveRoutineToDatabase, () => void nextTick(scheduleToolbarMeasurement));
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
 const wordWrapEnabled = computed(() => props.activeTab.forceWordWrap === true || settingsStore.editorSettings.wordWrap);
@@ -446,7 +461,7 @@ const canMultiExecute = computed(() => {
   if (!supportsQueryExecution(props.activeConnection?.db_type)) return false;
   if (props.activeTab.isExecuting || props.activeTab.isExplaining || props.activeTab.isCancelling) return false;
   if (isTransactionActive.value) return false;
-  return !!props.executableSql.trim();
+  return props.hasExecutableSql;
 });
 
 const schemaSelectorAvailable = computed(() => {
@@ -523,12 +538,16 @@ watchEffect(() => {
 });
 
 const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeConnection, activeDatabaseValue.value));
+const isDefaultDatabaseReadOnly = computed(() => isActiveDatabaseDefault.value && !canClearDefaultDatabase(props.activeConnection?.db_type));
 
 // Narrow panes (multi-group splits) condense the toolbar by measured width
 // instead of overflowing or scrolling. See resolveEditorToolbarTier for the
 // tier contract.
 
 const showOverflowMenu = computed(() => toolbarTier.value >= 1);
+// A boolean computed keeps keystrokes from re-rendering the toolbar: it only
+// notifies when the editor flips between empty and non-empty.
+const hasSqlText = computed(() => /\S/.test(props.activeTab.sql));
 const canFormatSql = computed(() => canFormatSqlForDatabaseType(props.activeConnection?.db_type));
 const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value < 2);
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
@@ -637,7 +656,7 @@ defineExpose({
             size="icon"
             class="h-6 w-6"
             :class="executeButtonClass"
-            :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !executableSql.trim())"
+            :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !hasExecutableSql)"
             @mousedown.prevent="onExecutePointerDown"
             @click="onExecuteClick"
           >
@@ -666,7 +685,7 @@ defineExpose({
       </Tooltip>
       <Tooltip>
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6" :class="executeAllButtonClass" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.executeAllSql')" @click="onExecuteAllClick">
+          <Button variant="ghost" size="icon" class="h-6 w-6" :class="executeAllButtonClass" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.executeAllSql')" @click="onExecuteAllClick">
             <FastForward class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -678,7 +697,7 @@ defineExpose({
             variant="ghost"
             size="icon"
             class="h-6 w-6 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
-            :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !executableSql.trim()"
+            :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !hasExecutableSql"
             :aria-label="t('settings.shortcutExecuteSqlInNewResultTab')"
             @mousedown.prevent="onExecutePointerDown"
             @click="onExecuteInNewResultTabClick"
@@ -703,7 +722,7 @@ defineExpose({
             size="icon"
             class="h-6 w-6"
             :class="activeTab.isExplaining ? '' : 'text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200'"
-            :disabled="activeTab.isExecuting || (!activeTab.isExplaining && !executableSql.trim())"
+            :disabled="activeTab.isExecuting || (!activeTab.isExplaining && !hasExecutableSql)"
             @click="activeTab.isExplaining ? emit('cancel') : emit('explain')"
           >
             <Square v-if="activeTab.isExplaining" class="h-3.5 w-3.5 fill-current" />
@@ -730,9 +749,25 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="canFormatSql">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground"
+            :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText"
+            :aria-label="t('settings.shortcutToggleLineComment')"
+            @mousedown.prevent
+            @click="emit('toggleLineComment')"
+          >
+            <MessageSquareText class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ lineCommentTooltip }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="showFormatButton">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('formatSql')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('formatSql')">
             <AlignLeft class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -740,7 +775,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showCompressButton">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @click="emit('compressSql')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -748,7 +783,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showFoldButtons">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
             <FoldVertical class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -756,7 +791,7 @@ defineExpose({
       </Tooltip>
       <Tooltip v-if="showFoldButtons">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
             <UnfoldVertical class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -841,6 +876,18 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.blockDangerousRedisCommands") }}</TooltipContent>
       </Tooltip>
+      <Button
+        v-if="showSaveRoutineToDatabase"
+        variant="ghost"
+        size="sm"
+        class="h-6 shrink-0 gap-1 px-2 text-xs text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
+        :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining"
+        :aria-label="t('toolbar.saveRoutineToDatabase')"
+        @click="emit('saveRoutineToDatabase', props.activeTab.id)"
+      >
+        <Save class="h-3.5 w-3.5" />
+        {{ t("toolbar.saveRoutineToDatabase") }}
+      </Button>
       <Tooltip>
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200" :disabled="!canSaveSql" @click="emit('saveSql', props.activeTab.id)">
@@ -904,15 +951,15 @@ defineExpose({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" class="w-max min-w-56 max-w-[calc(100vw-1rem)]">
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('compressSql')">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
             {{ t("toolbar.compressSql") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('foldAll')">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('foldAll')">
             <FoldVertical class="h-3.5 w-3.5" />
             {{ t("toolbar.foldAll") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('unfoldAll')">
+          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('unfoldAll')">
             <UnfoldVertical class="h-3.5 w-3.5" />
             {{ t("toolbar.unfoldAll") }}
           </DropdownMenuItem>
@@ -955,7 +1002,7 @@ defineExpose({
             {{ t("settings.showInsertValueHints") }}
           </DropdownMenuCheckboxItem>
           <template v-if="toolbarTier >= 2">
-            <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('formatSql')">
+            <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('formatSql')">
               <AlignLeft class="h-3.5 w-3.5" />
               {{ t("toolbar.formatSql") }}
             </DropdownMenuItem>
@@ -963,7 +1010,7 @@ defineExpose({
               <X class="h-3.5 w-3.5" />
               {{ t("editor.clearDatabase") }}
             </DropdownMenuItem>
-            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" :disabled="isDefaultDatabaseReadOnly" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
               <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
               {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
             </DropdownMenuItem>
@@ -1036,7 +1083,6 @@ defineExpose({
     </div>
     <div class="flex shrink-0 items-center gap-2">
       <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
-        <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
         <LightTooltip text="" :disabled="connectionPickerOpen || !activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
           <ConnectionTreeSelect
             ref="connectionPickerRef"
@@ -1054,16 +1100,25 @@ defineExpose({
             @update:open="(open: boolean) => (connectionPickerOpen = open)"
           >
             <template #trigger-label="{ label }">
-              <div v-if="activeConnection" class="flex min-w-0 items-center gap-1.5">
+              <div v-if="activeConnection" class="flex min-w-0 items-center gap-0.5">
                 <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-                <span v-if="visibleConnectionGroupPath" data-connection-group-path class="min-w-0 max-w-[50%] shrink truncate text-muted-foreground">{{ visibleConnectionGroupPath }} /</span>
-                <span :class="visibleConnectionGroupPath ? 'min-w-0 shrink truncate' : 'min-w-0 flex-1 truncate'">{{ label }}</span>
+                <ConnectionGroupPath v-if="visibleConnectionGroupPath" :segments="activeConnectionGroupPath" :connection-name="label" />
+                <span v-else class="min-w-0 flex-1 truncate">{{ label }}</span>
                 <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
               </div>
               <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>
             </template>
           </ConnectionTreeSelect>
-          <template #content><ConnectionDetailContent :rows="activeConnectionDetailRows" /></template>
+          <template #content>
+            <ConnectionDetailContent :rows="activeConnectionDetailRows" :class="['max-w-[min(22rem,calc(100vw-24px))]', visibleConnectionGroupPath ? 'max-h-[min(32rem,calc(100vh-24px))] overflow-y-auto overscroll-contain' : undefined]">
+              <template v-if="visibleConnectionGroupPath" #header>
+                <div class="mb-1 grid grid-cols-[max-content_minmax(0,1fr)] gap-2 text-xs leading-5">
+                  <div class="text-muted-foreground">{{ t("connection.groupPath") }}</div>
+                  <div data-connection-detail-group-path class="whitespace-pre-wrap font-mono text-foreground/90 [overflow-wrap:anywhere]">{{ visibleConnectionGroupPath }}</div>
+                </div>
+              </template>
+            </ConnectionDetailContent>
+          </template>
         </LightTooltip>
       </div>
       <div v-if="showCatalogSelector" class="flex shrink-0 items-center gap-1">
@@ -1142,6 +1197,20 @@ defineExpose({
               <ProductionContextBadge v-if="databaseOptionIsProduction(option)" compact />
             </div>
           </template>
+          <template #option-action="{ option }">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+              :data-copy-database-name="option"
+              :aria-label="`${t('contextMenu.copyName')}: ${option}`"
+              :title="`${t('contextMenu.copyName')}: ${option}`"
+              @click.stop="copyDatabaseName(option)"
+            >
+              <Copy class="h-3.5 w-3.5" />
+            </Button>
+          </template>
         </SearchableSelect>
         <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue && !isSingleDb">
           <TooltipTrigger as-child>
@@ -1151,7 +1220,7 @@ defineExpose({
           </TooltipTrigger>
           <TooltipContent>{{ t("editor.clearDatabase") }}</TooltipContent>
         </Tooltip>
-        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" :disabled="isDefaultDatabaseReadOnly" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
           <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
           {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
         </Button>
@@ -1166,6 +1235,7 @@ defineExpose({
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
           :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          :clearable="activeConnection?.db_type === 'postgres' && activeTab.mode === 'query'"
           :clear-selected-option="supportsClearableQuerySchema(activeConnection?.db_type)"
           trigger-variant="ghost"
           trigger-class="gap-1.5"

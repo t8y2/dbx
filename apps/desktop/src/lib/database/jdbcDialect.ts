@@ -39,7 +39,7 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
   { type: "postgres", patterns: [/jdbc:postgresql:/i, /postgres/i] },
   { type: "sqlserver", patterns: [/jdbc:sqlserver:/i, /sqlserver/i, /mssql/i] },
-  { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i] },
+  { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i, /ojdbc/i] },
   { type: "clickhouse", patterns: [/jdbc:clickhouse:/i, /clickhouse/i] },
   { type: "tdengine", patterns: [/jdbc:taos(?:-rs|-ws)?:/i, /taosdata/i, /tdengine/i] },
   { type: "h2", patterns: [/jdbc:h2:/i, /\bh2\b/i] },
@@ -61,8 +61,12 @@ export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseTy
   if (!connection || connection.db_type !== "jdbc") return undefined;
   if (isGbase8sProfile(connection.driver_profile)) return undefined;
   const connectionString = connection.connection_string?.trim() ?? "";
-  if (isSavedCredential(connectionString) && connection.jdbc_dialect === "oceanbase-oracle") return "oceanbase-oracle";
+  if (isSavedCredential(connectionString)) {
+    if (connection.jdbc_dialect === "oceanbase-oracle") return "oceanbase-oracle";
+    if (connection.jdbc_dialect === "oracle") return "oracle";
+  }
   if (/^jdbc:oceanbase:oracle:\/\//i.test(connectionString)) return "oceanbase-oracle";
+  if (/^jdbc:oracle:/i.test(connectionString)) return "oracle";
   const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
     .filter(Boolean)
     .join("\n");

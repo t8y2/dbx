@@ -202,6 +202,7 @@ fn generate_schema_sync_sql_mysql_output_format() {
         target_ddl: None,
         source_table_comment: None,
         target_table_comment: None,
+        table_charset: None,
         sync_sql: None,
     }];
 
@@ -226,6 +227,7 @@ fn generate_schema_sync_sql_postgres_output_format() {
         target_ddl: None,
         source_table_comment: None,
         target_table_comment: None,
+        table_charset: None,
         sync_sql: None,
     }];
 
@@ -249,6 +251,7 @@ fn generate_schema_sync_sql_sqlite_output_format() {
         target_ddl: None,
         source_table_comment: None,
         target_table_comment: None,
+        table_charset: None,
         sync_sql: None,
     }];
 

@@ -17,6 +17,8 @@ vi.mock("@codemirror/autocomplete", async (importOriginal) => {
     autocompletion: (config: Parameters<typeof actual.autocompletion>[0]) =>
       actual.autocompletion({
         ...config,
+        // These cases verify key routing after a completion is ready.
+        interactionDelay: 0,
         override: [(context) => ({ from: context.pos, options: [{ label: "candidate" }] })],
       }),
   };

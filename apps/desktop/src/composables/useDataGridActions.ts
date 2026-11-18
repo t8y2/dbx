@@ -8,7 +8,7 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions, tableDataPreviewRowBudget } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
-import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { editablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
@@ -124,7 +124,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
     // 已确认该连接拒绝合成行定位器（如 Hologres 拒绝 tableoid，#12647）时不再注入，
     // 避免无主键表每次打开都报错。
-    const useRowId = includeRowId ?? (shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId));
+    const useRowId = includeRowId ?? (shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId) && !postgresTupleLocatorUnsupportedEngine(config));
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
@@ -544,6 +544,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         pendingDataReloads.delete(tab);
       }
     }
+    const refreshOptions = {
+      ...refreshActiveResultRunOptions(tab),
+      ...(tab.mode === "query" && (intent === "refresh" || intent === "auto-refresh") ? { publicationOrigin: "refresh" as const } : {}),
+    };
     if ((intent === "refresh" || intent === "auto-refresh" || intent === "row-identifier-change") && tab.mode === "query" && (tab.results?.length ?? 0) > 1) {
       const resultGroupSql = tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
       if (!resultGroupSql.trim()) return;
@@ -554,7 +558,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.resultSortedSql = undefined;
       await queryStore.executeTabSql(tab.id, resultGroupSql, {
         ...activeQueryTargetOptions(tab),
-        ...refreshActiveResultRunOptions(tab),
+        ...refreshOptions,
         resultBaseSql: resultGroupSql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -567,7 +571,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const rebuildHiddenKeySort = !!tab.result?.hidden_column_indexes?.length && tab.resultSortMode === "database" && !!tab.resultSortDirection && !!tab.resultSortColumn && !!sortColumns;
       await queryStore.executeTabSql(tab.id, rebuildHiddenKeySort ? (tab.resultBaseSql ?? tab.sql) : tab.resultSortedSql, {
         ...activeQueryTargetOptions(tab),
-        ...refreshActiveResultRunOptions(tab),
+        ...refreshOptions,
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         ...(rebuildHiddenKeySort
           ? {
@@ -588,7 +592,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const hasMultiResults = tab.mode === "query" && (tab.results?.length ?? 0) > 1;
       await queryStore.executeTabSql(tab.id, sql, {
         ...(tab.mode === "query" ? activeQueryTargetOptions(tab) : {}),
-        ...refreshActiveResultRunOptions(tab),
+        ...refreshOptions,
         resultBaseSql: sql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -793,11 +797,19 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.orderByInput = headerOrderBy;
       const sql = await buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset });
       queryStore.updateSql(tab.id, sql);
-      await queryStore.executeTabSql(tab.id, sql, {
+      const sortOptions = {
         pagination,
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
-      });
+      };
+      // 行定位器被服务端拒绝时的降级（Greenplum AO 表 / 视图，#14922）：
+      // 与重载/翻页同一降级契约——带定位器的排序失败后去掉定位器重试一次，
+      // 表仍可排序浏览（只读）；成功后才记住该连接。
+      if (sql.includes("__DBX_ROWID")) {
+        await executeTableDataSqlWithRowIdFallback(tab, sql, sortOptions, () => buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset, includeRowId: false }));
+      } else {
+        await queryStore.executeTabSql(tab.id, sql, sortOptions);
+      }
       return;
     }
 

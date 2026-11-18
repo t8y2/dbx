@@ -37,6 +37,8 @@ interface CodeMirrorBindings {
   buildSqlSignatureExtension: (() => import("@codemirror/state").Extension) | null;
   buildSqlCompletionExtension: (() => import("@codemirror/state").Extension) | null;
   buildSqlLanguageExtension: (() => import("@codemirror/state").Extension) | null;
+  /** Parses one bounded statement or window with the full Lezer grammar, for documents past the syntax budget. */
+  parseSqlWindowTree: ((text: string) => import("@/lib/editor/codemirrorSqlWindowTree").SqlWindowTree) | null;
   buildSqlSemanticHighlightExtension: (() => import("@codemirror/state").Extension) | null;
   codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snippetCompletion;
   codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null;
@@ -193,6 +195,7 @@ export function createQueryEditorCodeMirrorRuntime() {
     buildSqlSignatureExtension: null,
     buildSqlCompletionExtension: null,
     buildSqlLanguageExtension: null,
+    parseSqlWindowTree: null,
     buildSqlSemanticHighlightExtension: null,
     codeMirrorSnippetCompletion: undefined!,
     codeMirrorCompletionStatus: null,

@@ -1,7 +1,7 @@
 import { StateEffect, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import { matchDollarQuoteTag } from "@/lib/sql/semantic/tokens";
-import { buildInsertValueHints, expandToSqlStatementWindow, findEnclosingDollarQuoteStartInText, insertValueHintsNeedTableColumns, parseInsertValuesClauses, type InsertValueHint, type InsertValuesClause, type TextRange } from "@/lib/sql/insertValueHints";
+import { supportsInsertValueHints, buildInsertValueHints, expandToSqlStatementWindow, findEnclosingDollarQuoteStartInText, insertValueHintsNeedTableColumns, parseInsertValuesClauses, type InsertValueHint, type InsertValuesClause, type TextRange } from "@/lib/sql/insertValueHints";
 
 export const refreshInsertValueHintsEffect = StateEffect.define<null>();
 
@@ -64,15 +64,6 @@ function decorationsForHints(hints: readonly InsertValueHint[]): DecorationSet {
 }
 
 /** @internal Exported for unit tests. */
-/**
- * Whether a database type runs SQL-family statements, where INSERT column
- * hints (and their SELECT extension) apply. NoSQL/document stores are excluded;
- * keep this list in sync instead of re-inlining it at call sites.
- */
-export function supportsInsertValueHints(databaseType: string | undefined | null): boolean {
-  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "solr" && databaseType !== "couchdb" && databaseType !== "victoriametrics" && databaseType !== "salesforce";
-}
-
 export function buildInsertValueHintDecorations(hints: readonly InsertValueHint[]): DecorationSet {
   return decorationsForHints(hints);
 }
@@ -128,6 +119,9 @@ function parseClausesNearView(view: EditorView, dialectId: string): InsertValues
     }
     if (sliceTo <= sliceFrom) continue;
     const slice = doc.sliceString(sliceFrom, sliceTo);
+    // Cheap reject before lexing: a statement window is a substring of the slice, so no INSERT in
+    // the slice means none in the window.
+    if (!/insert/i.test(slice)) continue;
     const window = expandToSqlStatementWindow(slice, range.from - sliceFrom, range.to - sliceFrom, dialectId);
     if (window.to <= window.from) continue;
     const absStart = sliceFrom + window.from;
@@ -261,4 +255,4 @@ export function requestInsertValueHintsRefresh(view: EditorView) {
   });
 }
 
-export { insertValueHintsNeedTableColumns };
+export { insertValueHintsNeedTableColumns, supportsInsertValueHints };

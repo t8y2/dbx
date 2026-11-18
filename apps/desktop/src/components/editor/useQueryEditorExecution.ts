@@ -181,6 +181,7 @@ export function useQueryEditorExecution(options: QueryEditorExecutionOptions) {
       cursorPos: selection.head,
       selectionFrom: selection.from,
       selectionTo: selection.to,
+      ...(props.databaseType === "jdbc" ? { syntaxDialect: sqlStatementParameterOptions()?.syntaxDialect } : {}),
     };
   }
 
@@ -191,6 +192,7 @@ export function useQueryEditorExecution(options: QueryEditorExecutionOptions) {
       cursorPos: currentView.state.selection.main.head,
       selectionFrom: range.from,
       selectionTo: range.to,
+      ...(props.databaseType === "jdbc" ? { syntaxDialect: sqlStatementParameterOptions()?.syntaxDialect } : {}),
     };
   }
 

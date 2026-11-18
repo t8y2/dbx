@@ -48,6 +48,7 @@ const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
 interface SqlExecutionOptions {
   openInNewResultTab?: boolean;
   editorViewportRequestId?: number;
+  syntaxDialect?: SqlExecutionSnapshot["syntaxDialect"];
   /** Tab that owns this execution request; resolved once, never re-read from the global active tab. */
   tabId?: string;
 }
@@ -330,7 +331,12 @@ export function useSqlExecution(deps: {
     }
     const { sql, sourceOffset, editorViewportRequestId: snapshotRequestId } = await resolvedExecutableSql(sqlOverride, context);
     const editorViewportRequestId = snapshotRequestId ?? options.editorViewportRequestId;
-    const executionOptions = { ...options, editorViewportRequestId, tabId: context.tabId };
+    const executionOptions = {
+      ...options,
+      editorViewportRequestId,
+      syntaxDialect: isSqlExecutionSnapshot(sqlOverride) ? sqlOverride.syntaxDialect : options.syntaxDialect,
+      tabId: context.tabId,
+    };
     if (!sql.trim()) {
       cancelEditorViewportRequest(editorViewportRequestId);
       return notStarted("empty-sql", context.tabId);
@@ -570,11 +576,11 @@ export function useSqlExecution(deps: {
         }
       }
     }
-    const statementCount = splitSqlStatementRanges(
-      sql,
-      executionDatabaseType,
-      sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
-    ).length;
+    const sqlStatementParameterOptions = {
+      ...sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
+      syntaxDialect: options.syntaxDialect,
+    };
+    const statementCount = splitSqlStatementRanges(sql, executionDatabaseType, sqlStatementParameterOptions).length;
     const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
     // A single write/DDL statement has no result grid to show while it runs, so
     // it starts on the summary tab where the in-flight status is rendered
@@ -594,6 +600,7 @@ export function useSqlExecution(deps: {
       ...(isRedis ? { skipRedisSafetyCheck: deps.blockDangerousRedisCommands?.value === false } : {}),
       ...(sourceOffset !== undefined ? { sourceOffset } : {}),
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
+      ...(options.syntaxDialect ? { syntaxDialect: options.syntaxDialect } : {}),
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
     });
     if (producedResult === false) {

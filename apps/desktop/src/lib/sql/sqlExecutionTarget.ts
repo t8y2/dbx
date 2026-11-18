@@ -1,6 +1,7 @@
 import * as api from "@/lib/backend/api";
 import { mongoCommandRangeAtCursor, statementRangeAtCursor } from "@/lib/sql/sqlStatementRanges";
 import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
+import type { SqlStatementSyntaxDialect } from "./sqlParameters";
 import type { DatabaseType } from "@/types/database";
 
 export type ExecuteMode = "all" | "current";
@@ -11,6 +12,7 @@ export interface SqlExecutionSnapshot {
   cursorPos: number;
   selectionFrom: number;
   selectionTo: number;
+  syntaxDialect?: SqlStatementSyntaxDialect;
   editorViewportRequestId?: number;
 }
 

@@ -2718,6 +2718,31 @@ describe("hasMultipleExecutionTargets", () => {
     const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
   });
+
+  it("uses the selected PostgreSQL comment policy for generic JDBC ranges", () => {
+    const sql = "/* outer /* inner */ SELECT 1; */ SELECT 2;";
+    const parameterOptions = { syntaxDialect: "postgres" as const };
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 2"]);
+    expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 2"), "jdbc", parameterOptions)?.sql.trim()).toBe("SELECT 2");
+  });
+
+  it("uses the selected ClickHouse line-comment policy for generic JDBC ranges", () => {
+    const sql = "// region comment\nSELECT 1;\nSELECT 2;";
+    const parameterOptions = { syntaxDialect: "clickhouse" as const };
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 2"), "jdbc", parameterOptions)?.sql.trim()).toBe("SELECT 2");
+  });
+
+  it("keeps nested comments in PostgreSQL EXPLAIN prefixes with the target", () => {
+    const sql = "EXPLAIN /* outer /* inner */ note */\nSELECT 1;";
+    const expected = sql.slice(0, -1);
+
+    expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 1"), "postgres")?.sql.trim()).toBe(expected);
+  });
 });
 
 describe("supportsExecutionTargetPicker", () => {

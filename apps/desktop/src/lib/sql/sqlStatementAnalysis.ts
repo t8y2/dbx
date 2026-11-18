@@ -20,7 +20,11 @@ export interface SqlStatementAnalysisRequest {
 export type SqlStatementAnalysisResult = Omit<ExecutableStatementRangeCache, "doc"> & { folds?: Map<number, FoldRange> };
 
 export function analyzeSqlStatements(request: SqlStatementAnalysisRequest): SqlStatementAnalysisResult {
-  const { doc: _doc, ...result } = executableStatementRangeCacheForDoc(null, Text.of(request.sql.split("\n")), request.databaseType, request.parameterOptions);
+  const parameterOptions = {
+    ...request.parameterOptions,
+    ...(request.databaseType === "jdbc" && request.syntaxDialect ? { syntaxDialect: request.syntaxDialect } : {}),
+  };
+  const { doc: _doc, ...result } = executableStatementRangeCacheForDoc(null, Text.of(request.sql.split("\n")), request.databaseType, parameterOptions);
   if (request.includeFolds) {
     const dialect = createDbxCodeMirrorSqlDialect(langSql, request.syntaxDialect ?? "mysql", request.databaseType, request.driverProfile);
     const state = EditorState.create({ doc: request.sql, extensions: [langSql.sql({ dialect }), sqlRegionDialect.of(sqlRegionDialectSpec(dialect, request.syntaxDialect ?? "mysql", request.databaseType))] });

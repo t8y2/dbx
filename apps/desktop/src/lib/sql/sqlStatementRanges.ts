@@ -616,7 +616,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     }
 
     // Line comments consume up to (and including) the newline.
-    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       pendingMysqlDirectiveStart = -1;
       pendingMysqlDirectiveLineEnd = -1;
       const newline = sql.indexOf("\n", i);
@@ -634,7 +634,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (ch === "/" && next === "*") {
       const hintMarker = sql[i + 2];
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
-      const close = sqlBlockCommentEnd(sql, i, databaseType);
+      const close = sqlBlockCommentEnd(sql, i, databaseType, parameterOptions?.syntaxDialect);
       if (statementStart === -1) {
         if (databaseType === "mysql") {
           if (pendingMysqlDirectiveStart === -1 || i > pendingMysqlDirectiveLineEnd) {
@@ -1203,7 +1203,7 @@ function skipSqlTrivia(sql: string, from: number, to: number, databaseType?: Dat
       continue;
     }
     if (startsBlockComment(sql, index)) {
-      const close = sqlBlockCommentEnd(sql, index, databaseType);
+      const close = sqlBlockCommentEnd(sql, index, databaseType, parameterOptions?.syntaxDialect);
       if (close === -1 || close + 2 > to) return to;
       index = close + 2;
       continue;
@@ -1222,7 +1222,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let blockDepth = 0;
-  const nestedComments = sqlSupportsNestedBlockComments(databaseType);
+  const nestedComments = sqlSupportsNestedBlockComments(databaseType, parameterOptions?.syntaxDialect);
   let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let parenDepth = 0;
@@ -1335,7 +1335,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
     }
 
     // state === "none"
-    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       state = "lineComment";
       i += 2;
       continue;
@@ -1484,7 +1484,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let blockDepth = 0;
-  const nestedComments = sqlSupportsNestedBlockComments(databaseType);
+  const nestedComments = sqlSupportsNestedBlockComments(databaseType, parameterOptions?.syntaxDialect);
   let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let parenDepth = 0;
@@ -1577,7 +1577,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
       continue;
     }
 
-    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       state = "lineComment";
       i += 2;
       continue;
@@ -1680,7 +1680,7 @@ function nextSqlWordToken(sql: string, pos: number, databaseType?: DatabaseType,
       i += 1;
       continue;
     }
-    if ((sql[i] === "-" && sql[i + 1] === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((sql[i] === "-" && sql[i + 1] === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       i += 2;
       while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
       continue;
@@ -1691,7 +1691,7 @@ function nextSqlWordToken(sql: string, pos: number, databaseType?: DatabaseType,
       continue;
     }
     if (sql[i] === "/" && sql[i + 1] === "*") {
-      const commentEnd = sqlBlockCommentEnd(sql, i, databaseType);
+      const commentEnd = sqlBlockCommentEnd(sql, i, databaseType, parameterOptions?.syntaxDialect);
       if (commentEnd < 0) return null;
       i = commentEnd + 2;
       continue;
@@ -1733,7 +1733,7 @@ function parseExplainLikePrefixAt(sql: string, pos: number, databaseType?: Datab
         continue;
       }
       if (startsBlockComment(sql, i)) {
-        const commentEnd = sql.indexOf("*/", i + 2);
+        const commentEnd = sqlBlockCommentEnd(sql, i, databaseType, parameterOptions?.syntaxDialect);
         if (commentEnd === -1) return false;
         i = commentEnd + 2;
         continue;
@@ -1819,7 +1819,7 @@ function parseExplainLikePrefixAt(sql: string, pos: number, databaseType?: Datab
 function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
   let state: "none" | "single" | "double" | "lineComment" | "blockComment" = "none";
   let blockDepth = 0;
-  const nestedComments = sqlSupportsNestedBlockComments(databaseType);
+  const nestedComments = sqlSupportsNestedBlockComments(databaseType, parameterOptions?.syntaxDialect);
   let singleQuoteBackslashEscapes = false;
   let depth = 0;
   let i = pos;
@@ -1874,7 +1874,7 @@ function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseTyp
       continue;
     }
 
-    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       state = "lineComment";
       i += 2;
       continue;
@@ -1913,7 +1913,7 @@ function skipBalancedParens(sql: string, pos: number, databaseType?: DatabaseTyp
 }
 
 export function startsLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  return (sql[pos] === "-" && sql[pos + 1] === "-") || sqlStartsSlashLineComment(sql, pos, databaseType) || startsHashLineComment(sql, pos, databaseType, parameterOptions);
+  return (sql[pos] === "-" && sql[pos + 1] === "-") || sqlStartsSlashLineComment(sql, pos, databaseType, parameterOptions?.syntaxDialect) || startsHashLineComment(sql, pos, databaseType, parameterOptions);
 }
 
 export function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
@@ -1954,7 +1954,7 @@ function trimRangeEnd(sql: string, from: number, to: number): number {
 function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryFrom: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number {
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let blockDepth = 0;
-  const nestedComments = sqlSupportsNestedBlockComments(databaseType);
+  const nestedComments = sqlSupportsNestedBlockComments(databaseType, parameterOptions?.syntaxDialect);
   let singleQuoteBackslashEscapes = false;
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let dollarTag = "";
@@ -2058,7 +2058,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
       continue;
     }
 
-    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       state = "lineComment";
       i += 2;
       continue;
@@ -2342,7 +2342,7 @@ function mysqlRoutineTokens(
   const tokens: MysqlRoutineToken[] = [];
   let state: MysqlRoutineLexState = initialState;
   let blockDepth = initialBlockDepth;
-  const nestedComments = sqlSupportsNestedBlockComments(databaseType);
+  const nestedComments = sqlSupportsNestedBlockComments(databaseType, parameterOptions?.syntaxDialect);
   let i = fromIndex;
 
   while (i < toIndex) {
@@ -2406,7 +2406,7 @@ function mysqlRoutineTokens(
       continue;
     }
 
-    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType)) {
+    if ((ch === "-" && next === "-") || sqlStartsSlashLineComment(sql, i, databaseType, parameterOptions?.syntaxDialect)) {
       state = "lineComment";
       i += 2;
       continue;

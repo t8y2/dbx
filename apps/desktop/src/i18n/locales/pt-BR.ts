@@ -3160,6 +3160,7 @@ export default withEnglishFallback({
     addRow: "Adicionar Linha",
     insertMultipleRows: "Inserir várias linhas…",
     pasteAsNewRows: "Colar como novas linhas",
+    pasteAsNewRowsAwaitingPaste: "Este navegador não permite ler a área de transferência diretamente. Pressione Ctrl+V (⌘V no macOS) na tabela para colar como novas linhas.",
     insertRowsTitle: "Inserir várias linhas",
     insertRowsDescription: "Cria este número de linhas de rascunho não salvas. Linhas vazias são ignoradas ao salvar; após salvar, a ordem de exibição segue a consulta atual.",
     insertRowCountLabel: "Número de linhas",

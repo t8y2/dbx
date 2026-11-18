@@ -3657,6 +3657,7 @@ export default withEnglishFallback({
     addRow: "新增行",
     insertMultipleRows: "插入多行…",
     pasteAsNewRows: "粘贴为新行",
+    pasteAsNewRowsAwaitingPaste: "当前浏览器不允许直接读取剪贴板。请在表格中按 Ctrl+V（macOS 为 ⌘V）粘贴为新行。",
     insertRowsTitle: "新增多行",
     insertRowsDescription: "创建指定数量的未保存草稿行。保存时未填写的空行会被忽略；保存后的显示位置由当前查询排序决定。",
     insertRowCountLabel: "行数",

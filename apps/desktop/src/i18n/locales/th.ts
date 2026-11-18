@@ -3557,6 +3557,7 @@ export default withEnglishFallback({
     addRow: "เพิ่มแถว",
     insertMultipleRows: "แทรกหลายแถว…",
     pasteAsNewRows: "วางเป็นแถวใหม่",
+    pasteAsNewRowsAwaitingPaste: "เบราว์เซอร์นี้ไม่อนุญาตให้อ่านคลิปบอร์ดโดยตรง กด Ctrl+V (⌘V บน macOS) ในตารางเพื่อวางเป็นแถวใหม่",
     insertRowsTitle: "แทรกหลายแถว",
     insertRowsDescription: "สร้างแถวฉบับร่างที่ยังไม่ได้บันทึกจำนวนนี้ แถวว่างจะถูกละเว้นเมื่อบันทึก หลังบันทึก ลำดับการแสดงผลจะเป็นไปตาม Query ปัจจุบัน",
     insertRowCountLabel: "จำนวนแถว",

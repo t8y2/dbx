@@ -3285,6 +3285,7 @@ export default withEnglishFallback({
     addRow: "행 추가",
     insertMultipleRows: "여러 행 삽입…",
     pasteAsNewRows: "새 행으로 붙여넣기",
+    pasteAsNewRowsAwaitingPaste: "이 브라우저에서는 클립보드를 직접 읽을 수 없습니다. 표에서 Ctrl+V(macOS는 ⌘V)를 눌러 새 행으로 붙여넣으세요.",
     insertRowsTitle: "여러 행 삽입",
     insertRowsDescription: "저장되지 않은 초안 행을 지정한 개수만큼 만듭니다. 저장 시 비어 있는 행은 무시되며, 저장 후 표시 순서는 현재 쿼리를 따릅니다.",
     insertRowCountLabel: "행 수",

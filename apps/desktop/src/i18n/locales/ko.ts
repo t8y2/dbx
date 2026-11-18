@@ -3670,6 +3670,8 @@ export default withEnglishFallback({
       "binary-uuid": "바이너리를 UUID로",
       "binary-uuid-swapped": "바이너리를 UUID로 (시간 비트 교환)",
     },
+    pasteCellText: "이 셀에 텍스트 붙여넣기",
+    pasteCellTextFailed: "셀에 텍스트를 붙여넣을 수 없습니다: {message}",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

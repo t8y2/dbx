@@ -3801,6 +3801,8 @@ export default withEnglishFallback({
       "binary-uuid": "Бинарные данные в UUID",
       "binary-uuid-swapped": "Бинарные данные в UUID (с перестановкой битов времени)",
     },
+    pasteCellText: "Вставить текст в эту ячейку",
+    pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

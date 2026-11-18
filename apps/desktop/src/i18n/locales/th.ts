@@ -3978,6 +3978,8 @@ export default withEnglishFallback({
       "binary-uuid": "ไบนารีเป็น UUID",
       "binary-uuid-swapped": "ไบนารีเป็น UUID (สลับบิตเวลา)",
     },
+    pasteCellText: "วางข้อความลงในเซลล์นี้",
+    pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

@@ -3740,6 +3740,8 @@ export default withEnglishFallback({
       "binary-uuid": "バイナリ→UUID",
       "binary-uuid-swapped": "バイナリ→UUID（時間ビット交換）",
     },
+    pasteCellText: "このセルにテキストを貼り付け",
+    pasteCellTextFailed: "セルにテキストを貼り付けできません：{message}",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

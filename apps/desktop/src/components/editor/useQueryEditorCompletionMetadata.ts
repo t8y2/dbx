@@ -254,7 +254,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const scopedDatabase = scope && scope.database !== props.database ? scope.database : undefined;
     const database = supportsDatabaseSchemaQualifierCompletion() ? (table.database ?? scopedDatabase) : undefined;
     const baseKey = schema ? `${database ? `${database}.` : ""}${schema}.${table.name}` : table.name;
-    if (props.databaseType !== "postgres" || (!table.nameQuoted && !table.schemaQuoted)) return baseKey;
+    if ((props.databaseType !== "postgres" && props.databaseType !== "dameng") || (!table.nameQuoted && !table.schemaQuoted)) return baseKey;
     return `${baseKey}:quoted:s=${table.schemaQuoted ? "1" : "0"}:t=${table.nameQuoted ? "1" : "0"}`;
   }
 
@@ -401,6 +401,15 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   async function findExactSemanticDiagnosticTable(table: SqlTableReference, scope?: CompletionMetadataScope): Promise<SqlCompletionTable | null> {
+    const match = await findScopedSemanticDiagnosticTable(table, scope);
+    if (match || table.schema || table.database || (props.databaseType !== "oracle" && props.databaseType !== "oceanbase-oracle")) return match;
+
+    // Bare Oracle names fall back to public synonyms after the current schema.
+    // Searching arbitrary schemas would accept inaccessible unqualified names.
+    return findScopedSemanticDiagnosticTable({ ...table, schema: "PUBLIC" }, scope);
+  }
+
+  async function findScopedSemanticDiagnosticTable(table: SqlTableReference, scope?: CompletionMetadataScope): Promise<SqlCompletionTable | null> {
     if (!props.connectionId || props.database == null) return null;
     const target = completionMetadataTarget(table, scope);
     if (!target) return null;

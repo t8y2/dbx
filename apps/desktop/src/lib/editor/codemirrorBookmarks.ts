@@ -120,10 +120,6 @@ export function createQueryEditorBookmarks(options: QueryEditorBookmarkOptions):
       alignItems: "center",
       justifyContent: "center",
       cursor: "pointer",
-      borderRadius: "3px",
-    },
-    ".cm-bookmark-gutter .cm-gutterElement:hover": {
-      backgroundColor: "color-mix(in srgb, var(--foreground) 8%, transparent)",
     },
     ".cm-bookmark-marker": {
       display: "inline-flex",

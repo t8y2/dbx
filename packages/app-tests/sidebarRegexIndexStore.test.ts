@@ -282,8 +282,11 @@ function connectionNodeWithTableGroups(...databases: string[]): { root: TreeNode
   return { root, groups };
 }
 
-function indexEnvelope(entries: Array<{ name: string; tableType: string }>, cachedAt = Date.now()) {
+function indexEnvelope(entries: Array<{ name: string; tableType: string; schema?: string }>, cachedAt = Date.now()) {
   return encodeSchemaTreeCache<TreeNode[]>([], cachedAt, {
+    // Version 4 keeps schema-less scopes unattributed (the stamped database
+    // name duplicated flat-engine tables in the search merge).
+    version: 4,
     complete: true,
     indexedAt: new Date(cachedAt).toISOString(),
     entries,
@@ -673,7 +676,9 @@ test("global and per-database searches share one build, then reuse memory and pe
     store.connectedIds.add("conn-1");
     const { root, groups } = connectionNodeWithTableGroups("app");
     store.treeNodes.push(root);
-    const rows = Array.from({ length: 501 }, (_, index) => ({ name: `table_${index}`, table_type: "TABLE" }));
+    // Indexed rows carry the schema that owns them, so a `schema.table` query can be
+    // answered from the persisted index without falling back to `parent_schema`.
+    const rows = Array.from({ length: 501 }, (_, index) => ({ name: `table_${index}`, table_type: "TABLE", schema: "public" }));
     listTablesMock.mockImplementation(async (_connectionId: string, _database: string, _schema: string, _filter: unknown, limit: number, offset: number) => rows.slice(offset, offset + limit));
     const global = store.ensureSidebarTableSearchIndex(groups.app.id, "t", undefined, { connectedOnly: true });
     const local = store.ensureSidebarTableSearchIndex(groups.app.id, "table");
@@ -725,7 +730,7 @@ test("keeps a completed index in memory when persistence is unavailable", async 
     store.addEphemeralConnection(conn("conn-1"));
     const { root, groups } = connectionNodeWithTableGroups("app");
     store.treeNodes.push(root);
-    const rows = [{ name: "orders", table_type: "TABLE" }];
+    const rows = [{ name: "orders", table_type: "TABLE", schema: "public" }];
     listTablesMock.mockResolvedValue(rows);
     saveSchemaCacheMock.mockRejectedValue(new Error("disk full"));
     expect(await store.ensureSidebarTableSearchIndex(groups.app.id, "ord")).toEqual(rows);
@@ -766,7 +771,7 @@ test("refresh invalidates a first build before it has registered a persisted sco
     const { root, groups } = connectionNodeWithTableGroups("app");
     store.treeNodes.push(root);
     let finishOld!: (rows: Array<{ name: string; table_type: string }>) => void;
-    const fresh = [{ name: "renamed_orders", table_type: "TABLE" }];
+    const fresh = [{ name: "renamed_orders", table_type: "TABLE", schema: "public" }];
     listTablesMock
       .mockImplementationOnce(
         () =>

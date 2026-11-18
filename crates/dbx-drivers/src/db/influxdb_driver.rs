@@ -187,6 +187,11 @@ struct InfluxQueryResult {
     #[serde(default)]
     #[allow(dead_code)]
     statement_id: usize,
+    /// InfluxDB 2.x answers InfluxQL requests for buckets without a DBRP
+    /// mapping with HTTP 200 and a per-statement `error` in the body.
+    #[serde(default)]
+    #[allow(dead_code)]
+    error: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     series: Vec<InfluxSeries>,
@@ -297,8 +302,37 @@ async fn influx_query(client: &InfluxdbClient, sql: &str, database: Option<&str>
         return handle_influx_error(resp).await;
     }
     let response_text = resp.text().await.unwrap_or_default();
-    serde_json::from_str::<InfluxJsonResult>(&response_text)
-        .map_err(|e| format!("InfluxDB parse error: {e}; response: {response_text}"))
+    let json = serde_json::from_str::<InfluxJsonResult>(&response_text)
+        .map_err(|e| format!("InfluxDB parse error: {e}; response: {response_text}"))?;
+    if let Some(message) = influx_query_error_message(client, &json.results) {
+        log::warn!("[influxdb] query failed: {message}");
+        return Err(message);
+    }
+    Ok(json)
+}
+
+/// InfluxDB reports statement-level failures (a rejected InfluxQL query, an
+/// unmapped bucket in 2.x) with HTTP 200 and an `error` field on the result
+/// entry. Dropping that field made the grid report "query executed successfully"
+/// with zero rows, so a real failure looked like a healthy empty table (#14622).
+fn influx_query_error_message(client: &InfluxdbClient, results: &[InfluxQueryResult]) -> Option<String> {
+    let error = results
+        .iter()
+        .find_map(|result| result.error.as_deref().map(str::trim).filter(|message| !message.is_empty()))?;
+    // A multi-statement script can fail one statement while another still
+    // returns rows. Prefer the rows over a hard error so a working query never
+    // turns into a false failure; the statement failure stays in the log.
+    if results.iter().any(|result| !result.series.is_empty()) {
+        log::warn!("[influxdb] statement error alongside returned rows: {error}");
+        return None;
+    }
+    let mut message = format!("InfluxDB query error: {error}");
+    if client.version == InfluxdbApiVersion::V2 && error.to_ascii_lowercase().contains("database not found") {
+        message.push_str(
+            ". InfluxDB 2.x may require a DBRP mapping to serve InfluxQL for a bucket; map the bucket to a database and retention policy, or run a Flux query instead.",
+        );
+    }
+    Some(message)
 }
 
 async fn influx_v2_buckets(client: &InfluxdbClient, timeout: Duration) -> Result<Vec<InfluxBucket>, String> {
@@ -958,6 +992,19 @@ mod tests {
         }
     }
 
+    fn v2_client() -> InfluxdbClient {
+        InfluxdbClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:8086".to_string(),
+            username: None,
+            password: Some("token-value".to_string()),
+            url_params: None,
+            default_database: None,
+            version: InfluxdbApiVersion::V2,
+            org: Some("DBX Org".to_string()),
+        }
+    }
+
     #[test]
     fn describes_measurement_with_tags_and_fields() {
         let tags = [series(&["tagKey"], vec![vec![json!("host")], vec![json!("region")]])];
@@ -1165,6 +1212,47 @@ mod tests {
 
         assert_eq!(client.version, InfluxdbApiVersion::V2);
         assert_eq!(client.org.as_deref(), Some("alias-org"));
+    }
+
+    #[test]
+    fn surfaces_per_statement_errors_from_a_two_hundred_response() {
+        let body = r#"{"results":[{"statement_id":0,"error":"database not found: \"wpg-表计\""}]}"#;
+        let json: InfluxJsonResult = serde_json::from_str(body).unwrap();
+        let message = influx_query_error_message(&v2_client(), &json.results).expect("statement error must surface");
+        assert!(message.contains("database not found"));
+        assert!(message.contains("DBRP mapping"));
+    }
+
+    #[test]
+    fn accepts_responses_that_carry_no_statement_error() {
+        let with_empty_series: InfluxJsonResult =
+            serde_json::from_str(r#"{"results":[{"statement_id":0,"series":[]}]}"#).unwrap();
+        assert_eq!(influx_query_error_message(&v1_client(), &with_empty_series.results), None);
+        let without_results: InfluxJsonResult = serde_json::from_str(r#"{"results":[]}"#).unwrap();
+        assert_eq!(influx_query_error_message(&v1_client(), &without_results.results), None);
+    }
+
+    #[test]
+    fn keeps_v1_error_messages_free_of_the_v2_mapping_hint() {
+        let json: InfluxJsonResult =
+            serde_json::from_str(r#"{"results":[{"statement_id":0,"error":"  database not found  "}]}"#).unwrap();
+        assert_eq!(
+            influx_query_error_message(&v1_client(), &json.results).as_deref(),
+            Some("InfluxDB query error: database not found")
+        );
+    }
+
+    #[test]
+    fn prefers_returned_rows_over_a_statement_error_in_a_script() {
+        let body = r#"{"results":[{"statement_id":0,"error":"boom"},{"statement_id":1,"series":[{"name":"m","columns":["time"],"values":[["2026-01-01T00:00:00Z"]]}]}]}"#;
+        let json: InfluxJsonResult = serde_json::from_str(body).unwrap();
+        assert_eq!(influx_query_error_message(&v2_client(), &json.results), None);
+    }
+
+    #[test]
+    fn ignores_blank_statement_errors() {
+        let json: InfluxJsonResult = serde_json::from_str(r#"{"results":[{"statement_id":0,"error":"   "}]}"#).unwrap();
+        assert_eq!(influx_query_error_message(&v1_client(), &json.results), None);
     }
 
     #[test]

@@ -80,6 +80,7 @@ function mountShell() {
   const isSpecialPageActive = ref(false);
   const settingsStore = { isEditorSettingsLoaded: true, editorSettings: { toolbarItems: { exclusiveRightSidebarPanels: false } } };
   const deps = {
+    isDetachedWindowContext: false,
     ref,
     watch,
     RIGHT_SIDEBAR_PANEL_IDS,

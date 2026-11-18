@@ -69,10 +69,13 @@ vi.mock("@/components/objects/MySqlEventEditor.vue", () => ({
   }),
 }));
 
+// Postgres keeps these event-editor cases on the single-pass metadata read; the
+// MySQL two-phase browser adds an automatic details request and is covered by
+// ObjectBrowser.statisticsRefresh.component.spec.ts.
 const connection = {
-  id: "mysql-events",
-  name: "MySQL",
-  db_type: "mysql",
+  id: "pg-events",
+  name: "Postgres",
+  db_type: "postgres",
   database: "app",
   driver_profile: null,
   url_params: null,

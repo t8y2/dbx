@@ -64,13 +64,17 @@ func TestRoutineSourceSharesDeadlineAcrossCapabilityAndLegacyFallbacks(t *testin
 	s := newServer()
 	s.db = db
 	started := time.Now()
-	source, err := s.getObjectSourceWithSignature("public", "unique_name", "PROCEDURE", "", stringPtr("value integer"))
+	emptySignature := ""
+	source, err := s.getObjectSourceWithSignature("public", "unique_name", "PROCEDURE", "", &emptySignature)
 	finished := time.Now()
 	if err != nil || source["source"] != "CREATE PROCEDURE recovered_source" {
 		t.Fatalf("fallback chain failed before deadline verification: source=%v err=%v", source, err)
 	}
 	if len(queries) != 8 || !strings.Contains(queries[len(queries)-1], "DBMS_METADATA.GET_PROCEDURE_DDL") {
 		t.Fatalf("expected kind, identity and source fallbacks followed by legacy validation: %v", queries)
+	}
+	if !strings.Contains(queries[len(queries)-2], "coalesce(length(oidvectortypes(p.proargtypes)), 0) = 0") {
+		t.Fatalf("legacy source must validate the explicit empty signature before opening DDL: %v", queries)
 	}
 	deadline, ok := contexts[0].Deadline()
 	if !ok || deadline.Before(started.Add(metadataTimeout)) || deadline.After(finished.Add(metadataTimeout)) {

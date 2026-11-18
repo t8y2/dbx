@@ -48,6 +48,8 @@ public final class KafkaAgent {
     private static final int GROUPS_PER_QUERY_ADMIN = 16;
     private static final int MAX_PEEK_MESSAGE_COUNT = 100;
     private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
+    // 最新优先回扫时每批向窗口左侧推进的记录数，凑满配额或扫到窗口起点即停。
+    private static final int REVERSE_PEEK_BATCH_RECORDS = 500;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
@@ -1702,7 +1704,13 @@ public final class KafkaAgent {
         PeekStartPosition startPosition = peekStartPosition(params);
         boolean explicitStartPosition = stringOrNull(params, "startPosition") != null;
         Long startTimestamp = longOrNull(params, "timestamp");
-        validatePeekRequest(startPosition, explicitStartPosition, partition, offset, startTimestamp);
+        Long endTimestamp = longOrNull(params, "endTimestamp");
+        String sortOrder = stringOrNull(params, "sortOrder");
+        validatePeekRequest(
+            startPosition, explicitStartPosition, partition, offset, startTimestamp, endTimestamp, sortOrder
+        );
+        // 时间窗口 + 最新优先时，读取方向改为从截止时间一侧倒序回扫。
+        boolean newestFirst = startPosition == PeekStartPosition.TIMESTAMP && "newest".equals(sortOrder);
         boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
@@ -1734,11 +1742,24 @@ public final class KafkaAgent {
                 timestampOffsets = peekTimestampOffsets(consumer.offsetsForTimes(byTime, requestTimeout));
             }
 
+            // An end timestamp narrows each partition's snapshot boundary to the first
+            // record after the requested window, so the read never leaves the time range.
+            Map<TopicPartition, Long> timestampEndOffsets = Collections.emptyMap();
+            if (endTimestamp != null) {
+                Map<TopicPartition, Long> byEndTime = new LinkedHashMap<>();
+                for (TopicPartition tp : candidatePartitions) {
+                    byEndTime.put(tp, endTimestamp == Long.MAX_VALUE ? Long.MAX_VALUE : endTimestamp + 1);
+                }
+                timestampEndOffsets = peekTimestampOffsets(consumer.offsetsForTimes(byEndTime, requestTimeout));
+            }
+            Map<TopicPartition, Long> boundedEndOffsets =
+                boundedPeekEndOffsets(endOffsets, timestampEndOffsets);
+
             List<TopicPartition> readablePartitions = new ArrayList<>();
             Map<TopicPartition, Long> seekOffsets = new LinkedHashMap<>();
             for (TopicPartition tp : candidatePartitions) {
                 long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
-                long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                long endOffset = boundedEndOffsets.getOrDefault(tp, beginningOffset);
                 Long requestedOffset = startPosition == PeekStartPosition.TIMESTAMP
                     ? timestampOffsets.get(tp)
                     : requestedPeekOffset(
@@ -1768,14 +1789,27 @@ public final class KafkaAgent {
             if (startPosition == PeekStartPosition.LATEST) {
                 for (TopicPartition tp : readablePartitions) {
                     long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
-                    long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                    long endOffset = boundedEndOffsets.getOrDefault(tp, beginningOffset);
                     seekOffsets.put(tp, recentPeekStartOffset(
                         beginningOffset, endOffset, messagesPerPartition
                     ));
                 }
             }
             for (TopicPartition tp : readablePartitions) {
-                snapshotEndOffsets.put(tp, endOffsets.getOrDefault(tp, 0L));
+                snapshotEndOffsets.put(tp, boundedEndOffsets.getOrDefault(tp, 0L));
+            }
+
+            // 最新优先回扫：初始 seek 挪到窗口右侧靠前的一批，收集阶段按批向左回退。
+            Map<TopicPartition, Long> reverseWindowStarts = new LinkedHashMap<>();
+            Map<TopicPartition, Long> reverseWindowEnds = new LinkedHashMap<>();
+            if (newestFirst) {
+                for (TopicPartition tp : readablePartitions) {
+                    long floor = seekOffsets.get(tp);
+                    long windowEnd = boundedEndOffsets.getOrDefault(tp, floor);
+                    reverseWindowStarts.put(tp, floor);
+                    reverseWindowEnds.put(tp, windowEnd);
+                    seekOffsets.put(tp, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
+                }
             }
 
             consumer.assign(readablePartitions);
@@ -1785,6 +1819,8 @@ public final class KafkaAgent {
 
             long deadlineNs = System.nanoTime() + requestTimeout.toNanos();
             Duration pollTimeout = Duration.ofMillis(Math.min(500L, requestTimeout.toMillis()));
+            PeekRecordFilter windowFilter = record -> recordIsBeforeEndOffset(record, snapshotEndOffsets)
+                && recordIsWithinEndTimestamp(record, endTimestamp);
             PeekCollectionState collection;
             if (startPosition == PeekStartPosition.LATEST) {
                 collection = collectLatestPeekedMessages(
@@ -1799,6 +1835,21 @@ public final class KafkaAgent {
                     pollTimeout
                 );
                 collection.incomplete = collection.incomplete || latestBudgetLimited;
+            } else if (newestFirst) {
+                collection = new PeekCollectionState(readablePartitions, messagesPerPartition);
+                collection.incomplete = !collectPeekedMessagesNewestFirst(
+                    timeout -> consumer.poll(timeout),
+                    consumer::position,
+                    consumer::seek,
+                    windowFilter,
+                    readablePartitions,
+                    reverseWindowStarts,
+                    reverseWindowEnds,
+                    collection,
+                    scanLimit,
+                    deadlineNs,
+                    pollTimeout
+                );
             } else {
                 PeekCollectionCompletionChecker snapshotComplete = state -> allPeekPartitionsComplete(
                     readablePartitions,
@@ -1810,7 +1861,7 @@ public final class KafkaAgent {
                 collection.incomplete = !collectPeekedMessages(
                     timeout -> consumer.poll(timeout),
                     snapshotComplete,
-                    record -> recordIsBeforeEndOffset(record, snapshotEndOffsets),
+                    windowFilter,
                     collection,
                     scanLimit,
                     deadlineNs,
@@ -1818,7 +1869,7 @@ public final class KafkaAgent {
                 );
             }
             List<Map<String, Object>> messages = sortAndLimitPeekedMessages(
-                collection.messages, count, startPosition
+                collection.messages, count, newestFirst ? PeekStartPosition.LATEST : startPosition
             );
             return peekMessagesResult(messages, collection.incomplete);
         }
@@ -1946,6 +1997,139 @@ public final class KafkaAgent {
             }
         }
         return completionChecker.isComplete(collection);
+    }
+
+    /**
+     * Time-window queries with newest sort order need the newest records first, but Kafka
+     * only consumes forward. The read therefore starts near the window's right edge and
+     * seeks one fixed batch backward whenever the current batch is fully consumed, stopping
+     * when the page quota is met or the window's left edge is reached.
+     */
+    static List<Map<String, Object>> collectPeekedMessagesNewestFirst(
+        PeekRecordPoller poller,
+        PeekBatchPositionReader positionReader,
+        PeekBatchSeeker seeker,
+        PeekRecordFilter recordFilter,
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> windowEndOffsets,
+        int messagesPerPartition,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        PeekCollectionState collection = new PeekCollectionState(partitions, messagesPerPartition);
+        collectPeekedMessagesNewestFirst(
+            poller,
+            positionReader,
+            seeker,
+            recordFilter,
+            partitions,
+            windowStartOffsets,
+            windowEndOffsets,
+            collection,
+            maxScanRecords,
+            deadlineNs,
+            pollTimeout
+        );
+        return collection.messages;
+    }
+
+    private static boolean collectPeekedMessagesNewestFirst(
+        PeekRecordPoller poller,
+        PeekBatchPositionReader positionReader,
+        PeekBatchSeeker seeker,
+        PeekRecordFilter recordFilter,
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> windowEndOffsets,
+        PeekCollectionState collection,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        Map<TopicPartition, Long> batchStarts = new HashMap<>();
+        Map<TopicPartition, Long> batchEnds = new HashMap<>();
+        for (TopicPartition partition : partitions) {
+            long floor = windowStartOffsets.getOrDefault(partition, 0L);
+            long windowEnd = windowEndOffsets.getOrDefault(partition, floor);
+            batchStarts.put(partition, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
+            batchEnds.put(partition, windowEnd);
+        }
+        while (System.nanoTime() < deadlineNs) {
+            if (allReversePeekPartitionsExhausted(
+                partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
+            )) {
+                return true;
+            }
+            long remainingNs = deadlineNs - System.nanoTime();
+            if (remainingNs <= 0) {
+                break;
+            }
+            Duration timeout = pollTimeout.toNanos() > remainingNs
+                ? Duration.ofNanos(remainingNs)
+                : pollTimeout;
+            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            for (ConsumerRecord<String, byte[]> record : records) {
+                if (collection.scannedRecords >= maxScanRecords) {
+                    return false;
+                }
+                collection.scannedRecords++;
+                TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
+                if (remaining <= 0 || !recordFilter.include(record)) {
+                    continue;
+                }
+                collection.messages.add(peekedMessageFromRecord(record));
+                collection.remainingByPartition.put(partition, remaining - 1);
+            }
+            // Seek backward only after the current batch is fully consumed; seeking earlier
+            // would drop buffered records that poll has not returned yet.
+            for (TopicPartition partition : partitions) {
+                if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                    continue;
+                }
+                long floor = windowStartOffsets.getOrDefault(partition, 0L);
+                long batchStart = batchStarts.get(partition);
+                if (positionReader.position(partition) < batchEnds.get(partition) || batchStart <= floor) {
+                    continue;
+                }
+                long previousStart = Math.max(floor, batchStart - REVERSE_PEEK_BATCH_RECORDS);
+                batchEnds.put(partition, batchStart);
+                batchStarts.put(partition, previousStart);
+                seeker.seek(partition, previousStart);
+            }
+        }
+        return allReversePeekPartitionsExhausted(
+            partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
+        );
+    }
+
+    /**
+     * A partition is done when its page quota is satisfied; otherwise it needs its current
+     * batch fully consumed and its batch start sitting on the window's left edge.
+     */
+    static boolean allReversePeekPartitionsExhausted(
+        List<TopicPartition> partitions,
+        PeekCollectionState collection,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> batchStarts,
+        Map<TopicPartition, Long> batchEnds,
+        PeekBatchPositionReader positionReader
+    ) {
+        for (TopicPartition partition : partitions) {
+            if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                continue;
+            }
+            long floor = windowStartOffsets.getOrDefault(partition, 0L);
+            if (batchStarts.getOrDefault(partition, floor) > floor) {
+                return false;
+            }
+            if (positionReader.position(partition) < batchEnds.getOrDefault(partition, 0L)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -2102,6 +2286,14 @@ public final class KafkaAgent {
         return endOffset != null && record.offset() < endOffset;
     }
 
+    /** Guards the time window even when a partition's timestamps are not monotonic. */
+    private static boolean recordIsWithinEndTimestamp(
+        ConsumerRecord<String, byte[]> record,
+        Long endTimestamp
+    ) {
+        return endTimestamp == null || record.timestamp() <= endTimestamp;
+    }
+
     private static Map<TopicPartition, Long> currentPeekPositions(
         KafkaConsumer<String, byte[]> consumer,
         List<TopicPartition> partitions
@@ -2165,6 +2357,16 @@ public final class KafkaAgent {
     @FunctionalInterface
     interface PeekRecordFilter {
         boolean include(ConsumerRecord<String, byte[]> record);
+    }
+
+    @FunctionalInterface
+    interface PeekBatchPositionReader {
+        long position(TopicPartition partition);
+    }
+
+    @FunctionalInterface
+    interface PeekBatchSeeker {
+        void seek(TopicPartition partition, long offset);
     }
 
     private static final class PeekCollectionState {
@@ -2261,15 +2463,45 @@ public final class KafkaAgent {
         return resolved;
     }
 
+    /**
+     * Clamps each partition's log end offset to the first record after the requested end
+     * time. Partitions without a timestamp match keep their log end offset, because every
+     * retained record is already inside the window.
+     */
+    static Map<TopicPartition, Long> boundedPeekEndOffsets(
+        Map<TopicPartition, Long> logEndOffsets,
+        Map<TopicPartition, Long> timestampEndOffsets
+    ) {
+        Map<TopicPartition, Long> bounded = new LinkedHashMap<>(logEndOffsets);
+        timestampEndOffsets.forEach((tp, timeEndOffset) ->
+            bounded.computeIfPresent(tp, (ignored, logEndOffset) -> Math.min(logEndOffset, timeEndOffset))
+        );
+        return bounded;
+    }
+
     static void validatePeekRequest(
         PeekStartPosition startPosition,
         boolean explicitStartPosition,
         Integer partition,
         Long offset,
-        Long timestamp
+        Long timestamp,
+        Long endTimestamp,
+        String sortOrder
     ) {
+        if (startPosition != PeekStartPosition.TIMESTAMP && sortOrder != null) {
+            throw new IllegalArgumentException("sortOrder is only supported when startPosition is timestamp");
+        }
+        if (startPosition == PeekStartPosition.TIMESTAMP
+            && sortOrder != null
+            && !"newest".equals(sortOrder)
+            && !"oldest".equals(sortOrder)) {
+            throw new IllegalArgumentException("Unsupported peek sortOrder: " + sortOrder);
+        }
         if (startPosition != PeekStartPosition.TIMESTAMP && timestamp != null) {
             throw new IllegalArgumentException("timestamp is only supported when startPosition is timestamp");
+        }
+        if (startPosition != PeekStartPosition.TIMESTAMP && endTimestamp != null) {
+            throw new IllegalArgumentException("endTimestamp is only supported when startPosition is timestamp");
         }
         if (startPosition == PeekStartPosition.TIMESTAMP) {
             if (timestamp == null) {
@@ -2277,6 +2509,16 @@ public final class KafkaAgent {
             }
             if (timestamp < 0) {
                 throw new IllegalArgumentException("timestamp must be a non-negative epoch millisecond value");
+            }
+            if (endTimestamp != null) {
+                if (endTimestamp < 0) {
+                    throw new IllegalArgumentException(
+                        "endTimestamp must be a non-negative epoch millisecond value"
+                    );
+                }
+                if (endTimestamp < timestamp) {
+                    throw new IllegalArgumentException("endTimestamp must not be earlier than timestamp");
+                }
             }
         }
         if (partition != null && partition < 0) {

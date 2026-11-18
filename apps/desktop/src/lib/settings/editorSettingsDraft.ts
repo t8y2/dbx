@@ -5,6 +5,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
 import { normalizeSqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { normalizeTableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
@@ -34,6 +35,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "showConnectionGroupPath",
   "autoAliasTables",
+  "qualifyColumnCompletions",
   "batchColumnSelectionIncludeComments",
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
@@ -59,6 +61,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "aiSqlApplyTargetMode",
   "welcomePageMode",
   "appLayout",
+  "crossWindowTabDragPreviewEnabled",
   "webLogoPosition",
   "tabLayout",
   "tabPlacement",
@@ -88,6 +91,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridToolbarLayout",
   "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
+  "dataGridOrderByVisible",
+  "dataGridWhereRatio",
   "defaultAutoKeepResults",
   "pinResultTabOnClick",
   "multiStatementDefaultView",
@@ -118,19 +123,24 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "shortcuts",
   "sqlFormatter",
   "sidebarActivation",
+  "sidebarColumnDoubleClickAction",
   "sidebarObjectDisplay",
+  "sidebarSimpleHideIndexes",
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "sidebarSearchOpenedDatabasesOnly",
   "autoSelectActiveSidebarNode",
   "sidebarPinDefaultDatabase",
   "sidebarBrowseObjectsOnDatabaseActivation",
+  "sidebarAutoExpandOnDatabaseActivation",
+  "sidebarTableClickNavigation",
   "openTabsRestoreMode",
   "autoReloadRestoredDataTabsOnOpen",
   "disconnectTabHandlingMode",
   "deleteConnectionTabHandlingMode",
   "rememberConnectionDatabaseOnDelete",
   "deepLinkConnectionConfirmMode",
+  "duplicateTabTitleMode",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
   "openTablesInDetachedWindow",
@@ -180,6 +190,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "updateDownloadSource",
   "updateChannel",
   "toolbarItems",
+  "toolbarItemOrder",
   "snippets",
   "sqlShortcuts",
   "sqlVariableSubstitutionEnabled",
@@ -188,6 +199,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "clickTableNavigationTarget",
   "objectBrowserAutoOpenDetailPanel",
   "completionTriggerMode",
+  "completionMatchMode",
   "excludedCompletionItems",
   "defaultTransactionMode",
   "keepExplicitTransactionInAutoCommit",
@@ -197,6 +209,17 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];
 export type EditorSettingsDraft = Pick<EditorSettings, EditorSettingsDraftKey>;
+
+/**
+ * Settings imported from a transfer file may contain a partial toolbar object:
+ * older files predate some toolbar switches, and Web files intentionally omit
+ * desktop-only entries. Those missing nested keys must stay untouched in the
+ * current draft instead of being filled with defaults during import.
+ */
+export type EditorSettingsImportPatch = Omit<Partial<EditorSettings>, "toolbarItems" | "toolbarItemOrder"> & {
+  toolbarItems?: Partial<EditorSettings["toolbarItems"]>;
+  toolbarItemOrder?: EditorSettings["toolbarItemOrder"];
+};
 
 function cloneDraftValue<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
@@ -218,6 +241,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "completionMatchMode") return normalizeCompletionMatchMode(value);
   if (key === "excludedCompletionItems") return normalizeExcludedCompletionItems(value);
   if (key === "tableCompletionSchemaQualification") return normalizeSqlTableCompletionSchemaQualification(value);
   if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);
@@ -253,7 +277,7 @@ export function editorSettingsDraftFromSettings(settings: EditorSettings): Edito
  * `settings`. Used for partial updates (e.g. settings import) where keys the
  * input does not contain must leave the target state untouched.
  */
-export function editorSettingsDraftPatchFromSettings(settings: Partial<EditorSettings>): Partial<EditorSettingsDraft> {
+export function editorSettingsDraftPatchFromSettings(settings: EditorSettingsImportPatch): Partial<EditorSettingsDraft> {
   const patch: Partial<EditorSettingsDraft> = {};
   for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
     if (!(key in settings)) continue;

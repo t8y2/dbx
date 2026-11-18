@@ -17,8 +17,17 @@ export function isScriptFilePath(path: string): boolean {
   return /\.(sql|js)$/i.test(path.trim());
 }
 
+/**
+ * Extensions the SQL file panel, quick-open and startup restore treat as
+ * editable scripts instead of handing them to the OS default application.
+ * Beyond `.sql`/`.ddl` this covers the per-engine suffixes commonly used in
+ * version-controlled database repos (#14204): PostgreSQL `.psql`/`.plpgsql`/`.sqlpg`,
+ * Oracle `.prc`/`.fnc`/`.pkb`/`.pks`/`.pck`/`.pls`/`.plsql`/`.tps`/`.tpb`/`.trg`,
+ * SQL Server `.tsql`/`.spc`, MySQL/MariaDB `.trg`/`.rout`, plus JS/Mongo scripts.
+ * Keep in sync with `DEFAULT_FILE_FILTER` in src-tauri `list_sql_files.rs`.
+ */
 export function isSqlOrScriptFilePath(path: string): boolean {
-  return /\.(sql|ddl|js)$/i.test(path.trim());
+  return /\.(sql|ddl|psql|plpgsql|sqlpg|prc|fnc|pkb|pks|pck|pls|plsql|tps|tpb|trg|tsql|spc|rout|js|mjs)$/i.test(path.trim());
 }
 
 export function isSpreadsheetFilePath(path: string): boolean {

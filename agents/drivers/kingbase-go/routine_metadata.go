@@ -89,18 +89,28 @@ WHERE n.nspname = %s AND %s ORDER BY p.proname, signature`, kind, identity, cata
 	defer rows.Close()
 	result := []objectInfo{}
 	for rows.Next() {
-		var name, kind, signature string
-		var comment sql.NullString
+		var name, kind string
+		var comment, signature sql.NullString
 		if err := rows.Scan(&name, &kind, &comment, &signature); err != nil {
 			return nil, err
 		}
-		// Empty identifies the zero-argument overload and must survive JSON.
-		result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment), Signature: &signature})
+		// A NULL identity represents the zero-argument overload. Keep its empty signature in JSON.
+		result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: schema, Comment: nullStringPtr(comment), Signature: &signature.String})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func routineSignaturePredicate(identity, signature string) string {
+	if signature == "" {
+		// Kingbase can interpret an empty string literal as NULL in Oracle mode.
+		// The identity argument expression itself can therefore be NULL for a
+		// zero-argument routine; normalize it before applying the predicate.
+		return "coalesce(length(" + identity + "), 0) = 0"
+	}
+	return identity + " = " + quoteLiteral(signature)
 }
 
 func (s *server) getRoutineSource(schema, name, kind string, signature *string) (string, error) {
@@ -114,7 +124,7 @@ func (s *server) getRoutineSource(schema, name, kind string, signature *string) 
 	querySource := func(definitionFunction string) (string, error) {
 		rows, err := s.routineQueryContext(ctx, signature != nil, func(kindExpression, filter, identity string) string {
 			if signature != nil {
-				filter += " AND " + identity + " = " + quoteLiteral(*signature)
+				filter += " AND " + routineSignaturePredicate(identity, *signature)
 			}
 			return fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s AND (%s)=%s AND %s ORDER BY p.oid LIMIT 2", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name), kindExpression, quoteLiteral(kind), filter)
 		})
@@ -162,7 +172,7 @@ func (s *server) getLegacyRoutineSource(ctx context.Context, schema, name, kind 
 	countMatches := func(matchSignature bool) (int, error) {
 		rows, err := s.routineQueryContext(ctx, matchSignature, func(kindExpression, filter, identity string) string {
 			if matchSignature {
-				filter += " AND " + identity + " = " + quoteLiteral(*signature)
+				filter += " AND " + routineSignaturePredicate(identity, *signature)
 			}
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s AND (%s)=%s AND %s", catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name), kindExpression, quoteLiteral(kind), filter)
 		})

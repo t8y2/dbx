@@ -84,7 +84,7 @@ function backendField<T>(settings: Record<string, unknown>, camelCase: string, s
   return value as T | undefined;
 }
 
-function setLocalAppearance(patch: AppAppearanceSettingsPatch) {
+export function setLocalAppearance(patch: AppAppearanceSettingsPatch) {
   if (nonEmptyString(patch.locale)) safeLocalStorageSet("dbx-locale", patch.locale);
   if (validThemeMode(patch.themeMode)) safeLocalStorageSet(APP_THEME_STORAGE_KEY, patch.themeMode);
   if (validThemePalette(patch.themePalette)) safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, patch.themePalette);
@@ -165,11 +165,19 @@ export async function hydrateAppAppearance(): Promise<void> {
 export function persistAppAppearancePatch(patch: AppAppearanceSettingsPatch) {
   setLocalAppearance(patch);
   if (!isTauriRuntime()) return;
-  enqueuePersistence(() => invokeTauri("update_app_appearance_settings", { patch }), "save");
+  enqueuePersistence(async () => {
+    await invokeTauri("update_app_appearance_settings", { patch });
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("dbx:appearance-changed", patch);
+  }, "save");
 }
 
 export function persistAppLocale(locale: string) {
   setLocalAppearance({ locale });
   if (!isTauriRuntime()) return;
-  enqueuePersistence(() => invokeTauri("set_app_locale", { locale }), "locale");
+  enqueuePersistence(async () => {
+    await invokeTauri("set_app_locale", { locale });
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("dbx:appearance-changed", { locale });
+  }, "locale");
 }

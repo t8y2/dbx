@@ -2,18 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { createQueryEditorSearchKeymap, replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 
 describe("QueryEditor search shortcuts", () => {
-  it("opens search and replace in editable editors", () => {
+  it("binds only the replace fallback — search is owned by the configurable Find shortcut (#14623)", () => {
     const openSearch = vi.fn(() => true);
     const openReplace = vi.fn(() => true);
     const bindings = createQueryEditorSearchKeymap({ openSearch, openReplace, isReadOnly: () => false }, "Win32");
 
-    expect(bindings.map(({ key, preventDefault }) => ({ key, preventDefault }))).toEqual([
-      { key: "Mod-f", preventDefault: true },
-      { key: "Mod-h", preventDefault: true },
-    ]);
+    expect(bindings.map(({ key, preventDefault }) => ({ key, preventDefault }))).toEqual([{ key: "Mod-h", preventDefault: true }]);
     expect(bindings[0]?.run?.({} as never)).toBe(true);
-    expect(bindings[1]?.run?.({} as never)).toBe(true);
-    expect(openSearch).toHaveBeenCalledOnce();
+    expect(openSearch).not.toHaveBeenCalled();
     expect(openReplace).toHaveBeenCalledOnce();
   });
 
@@ -25,11 +21,8 @@ describe("QueryEditor search shortcuts", () => {
     // ⌘H must stay unbound: the webview's preventDefault would keep AppKit's
     // Hide key equivalent from ever firing (#9068).
     expect(bindings.map(({ key }) => key)).not.toContain("Mod-h");
-    expect(bindings.map(({ key, preventDefault }) => ({ key, preventDefault }))).toEqual([
-      { key: "Mod-f", preventDefault: true },
-      { key: "Alt-Mod-f", preventDefault: true },
-    ]);
-    expect(bindings[1]?.run?.({} as never)).toBe(true);
+    expect(bindings.map(({ key, preventDefault }) => ({ key, preventDefault }))).toEqual([{ key: "Alt-Mod-f", preventDefault: true }]);
+    expect(bindings[0]?.run?.({} as never)).toBe(true);
     expect(openReplace).toHaveBeenCalledOnce();
   });
 
@@ -37,8 +30,8 @@ describe("QueryEditor search shortcuts", () => {
     const openReplace = vi.fn(() => true);
     const bindings = createQueryEditorSearchKeymap({ openSearch: vi.fn(() => true), openReplace, isReadOnly: () => true }, "MacIntel");
 
-    expect(bindings[1]?.key).toBe("Alt-Mod-f");
-    expect(bindings[1]?.run?.({} as never)).toBe(true);
+    expect(bindings[0]?.key).toBe("Alt-Mod-f");
+    expect(bindings[0]?.run?.({} as never)).toBe(true);
     expect(openReplace).not.toHaveBeenCalled();
   });
 
@@ -53,9 +46,10 @@ describe("QueryEditor search shortcuts", () => {
     const openReplace = vi.fn(() => true);
     const bindings = createQueryEditorSearchKeymap({ openSearch, openReplace, isReadOnly: () => true }, "Win32");
 
+    // Without the hardcoded Mod-f binding, the fallback consumes replace only;
+    // search stays owned by the configurable Find shortcut.
     expect(bindings[0]?.run?.({} as never)).toBe(true);
-    expect(bindings[1]?.run?.({} as never)).toBe(true);
-    expect(openSearch).toHaveBeenCalledOnce();
+    expect(openSearch).not.toHaveBeenCalled();
     expect(openReplace).not.toHaveBeenCalled();
   });
 });

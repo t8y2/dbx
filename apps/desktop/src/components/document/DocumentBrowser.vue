@@ -41,6 +41,7 @@ import {
   documentFieldPathOptionsFromDocuments,
   documentFieldPathTreeFromDocuments,
   flattenDocumentFieldPathTree,
+  mongoFilterDateSamplesByPathFromDocuments,
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptionsFor,
@@ -106,6 +107,7 @@ import {
   type MongoDocumentQueryKind,
 } from "@/lib/mongo/mongoCompletion";
 import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
+import { handleMongoQueryInputBrackets } from "@/lib/mongo/mongoQueryInputBrackets";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
@@ -199,6 +201,8 @@ const viewMode = computed<ViewMode>({
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
 const filterEnabled = ref(restoredDocumentBrowserState?.filterEnabled ?? true);
+const elasticsearchTextSearch = ref(restoredDocumentBrowserState?.elasticsearchTextSearch ?? "");
+const elasticsearchTextInput = ref(elasticsearchTextSearch.value);
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
 const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
@@ -394,6 +398,7 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
   saveDocumentBrowserState(props.stateKey, {
     filterInput: filterInput.value,
     filterEnabled: filterEnabled.value,
+    elasticsearchTextSearch: elasticsearchTextSearch.value || undefined,
     sortInput: sortInput.value,
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
@@ -418,7 +423,7 @@ function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFi
 // changed query means the local-filter snapshot no longer describes what the
 // user is looking at.
 watch(
-  [filterInput, filterEnabled, sortInput, appliedDocumentFilter],
+  [filterInput, filterEnabled, elasticsearchTextSearch, sortInput, appliedDocumentFilter],
   () => {
     localColumnFilters.value = {};
     localColumnFilterColumns.value = undefined;
@@ -525,6 +530,11 @@ const DOCUMENT_FILTER_IME_COMPOSITION_END_GRACE_MS = 120;
 const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
+});
+const documentViewerText = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb" || selectedIdx.value === null || !mongoCopyDocumentsAvailable.value) return editJson.value;
+  const document = copyDocuments.value[selectedIdx.value];
+  return document ? formatMongoShellLiteral(document, { pretty: true }) : editJson.value;
 });
 const selectedDocumentIdLabel = computed(() => {
   if (isNew.value) return "New";
@@ -821,6 +831,12 @@ const documentFilterFieldOptions = computed(() => {
 });
 const documentFilterFieldRows = computed<DocumentFilterFieldTreeRow[]>(() => visibleDocumentFilterFieldRows(documentFilterFieldTree.value));
 const documentFilterFieldByPath = computed(() => new Map(flattenDocumentFieldPathTree(documentFilterFieldTree.value).map((node) => [node.path, node])));
+const mongoFilterDateSamplesByPath = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb" || !mongoCopyDocumentsAvailable.value) return new Map<string, unknown>();
+  // Display documents represent BSON dates as text. Use the paired Extended JSON
+  // for date inference and keep the existing inference for other BSON types.
+  return mongoFilterDateSamplesByPathFromDocuments(copyDocuments.value);
+});
 const documentStructuredFilterCount = computed(() => {
   if (!appliedDocumentFilter.value) return 0;
   if (documentStoreProvider.value.kind !== "elasticsearch") return 1;
@@ -1048,8 +1064,13 @@ function resetElasticsearchPagination() {
 }
 
 function currentDocumentFilter(): string | undefined {
-  const filter = filterEnabled.value ? currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind) : undefined;
-  if (documentStoreProvider.value.kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
+  const kind = documentStoreProvider.value.kind;
+  const filter = filterEnabled.value ? currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, kind) : undefined;
+  if (kind === "elasticsearch" && elasticsearchTextSearch.value) {
+    const textFilter = elasticsearchStructuredFilter({ query_string: { query: elasticsearchTextSearch.value, lenient: true } });
+    return JSON.stringify(filter ? { $and: [JSON.parse(filter), textFilter] } : textFilter);
+  }
+  if (kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
   const parsed = filter ? JSON.parse(filter) : {};
   return JSON.stringify({ ...parsed, $index: dynamodbIndexName.value });
 }
@@ -1127,6 +1148,7 @@ const documentQueryCompletionActiveDescendant = computed(() => (documentQueryCom
 // Guards the field lookup: a keystroke that lands while a previous refresh is
 // still awaiting fields must win, and a dismiss must cancel both.
 let documentQueryCompletionRequestId = 0;
+let documentQueryCompletionSelectionVersion = 0;
 
 function documentQueryCompletionKind(target: DocumentQueryCompletionTarget): MongoDocumentQueryKind {
   return target === "filter" ? "filter" : "sortKeys";
@@ -1190,18 +1212,27 @@ async function refreshDocumentQueryCompletions(target: DocumentQueryCompletionTa
   }
 
   const requestId = ++documentQueryCompletionRequestId;
+  const selectionVersion = documentQueryCompletionSelectionVersion;
+  let displayedLocalItems = false;
+  const publishItems = (fields: MongoCompletionField[]) => {
+    const selectedLabel = displayedLocalItems && selectionVersion !== documentQueryCompletionSelectionVersion ? documentQueryCompletionItems.value[documentQueryCompletionIndex.value]?.label : undefined;
+    const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
+    if (items.length === 0) return false;
+    documentQueryCompletionTarget.value = target;
+    documentQueryCompletionItems.value = items;
+    documentQueryCompletionIndex.value = Math.max(
+      0,
+      items.findIndex((item) => item.label === selectedLabel),
+    );
+    updateDocumentQueryCompletionPosition(target);
+    return true;
+  };
+  // A partially typed field can use the loaded page immediately. Sampling may
+  // take seconds on a remote collection and only needs to enrich these items.
+  if (context.prefix && mongoCompletionNeedsFields(context.mode)) displayedLocalItems = publishItems(documentQueryCompletionLocalFields.value);
   const fields = mongoCompletionNeedsFields(context.mode) ? await documentQueryCompletionFields() : [];
   if (requestId !== documentQueryCompletionRequestId) return;
-
-  const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
-  if (items.length === 0) {
-    dismissDocumentQueryCompletions();
-    return;
-  }
-  documentQueryCompletionTarget.value = target;
-  documentQueryCompletionItems.value = items;
-  documentQueryCompletionIndex.value = 0;
-  updateDocumentQueryCompletionPosition(target);
+  if (!publishItems(fields)) dismissDocumentQueryCompletions();
 }
 
 /**
@@ -1239,6 +1270,7 @@ watch(documentQueryCompletionOpen, (open) => {
 
 function selectDocumentQueryCompletion(index: number) {
   if (index < 0 || index >= documentQueryCompletionItems.value.length) return;
+  documentQueryCompletionSelectionVersion++;
   documentQueryCompletionIndex.value = index;
   void nextTick(() => {
     const listbox = document.getElementById(documentQueryCompletionListboxId);
@@ -1382,6 +1414,10 @@ function onDocumentQueryKeydown(event: KeyboardEvent, target: DocumentQueryCompl
   if (event.isComposing) return;
 
   if (documentQueryCompletionEnabled.value) {
+    if (handleMongoQueryInputBrackets(event, settingsStore.editorSettings.autoCloseBrackets)) {
+      void nextTick(() => refreshDocumentQueryCompletions(target));
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
       event.preventDefault();
       void refreshDocumentQueryCompletions(target, { force: true });
@@ -1456,7 +1492,7 @@ async function applyDocumentStructuredFilters() {
         rule,
         condition: buildDocumentFilterCondition(rule, {
           kind: documentStoreProvider.value.kind,
-          sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
+          sampleValue: mongoFilterDateSamplesByPath.value.get(rule.fieldName) ?? documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
         }),
       }))
       .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
@@ -2147,6 +2183,12 @@ function applyFilter() {
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals();
   if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbPagination();
   void load();
+}
+
+function applyElasticsearchTextSearch(text = elasticsearchTextInput.value) {
+  elasticsearchTextSearch.value = text.trim();
+  elasticsearchTextInput.value = elasticsearchTextSearch.value;
+  applyFilter();
 }
 
 async function paginate(offset: number, limit: number) {
@@ -3010,6 +3052,16 @@ defineExpose({ focusSearch });
       </Popover>
     </div>
 
+    <form v-if="documentStoreProvider.kind === 'elasticsearch'" class="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5" @submit.prevent="applyElasticsearchTextSearch()">
+      <Input v-model="elasticsearchTextInput" :placeholder="t('grid.elasticsearchTextSearch')" :aria-label="t('grid.elasticsearchTextSearch')" class="h-7 min-w-0 max-w-md text-xs" />
+      <Button type="submit" variant="outline" size="icon-sm" class="h-7 w-7 shrink-0" :disabled="loading" :aria-label="t('grid.applyElasticsearchTextSearch')">
+        <Search class="h-3.5 w-3.5" />
+      </Button>
+      <Button v-if="elasticsearchTextInput || elasticsearchTextSearch" type="button" variant="ghost" size="icon-sm" class="h-7 w-7 shrink-0" :disabled="loading" :aria-label="t('grid.clearElasticsearchTextSearch')" @click="applyElasticsearchTextSearch('')">
+        <X class="h-3.5 w-3.5" />
+      </Button>
+    </form>
+
     <!-- Table view -->
     <QueryLoadingState
       v-if="viewMode === 'table' && loading && gridResult.columns.length === 0"
@@ -3469,7 +3521,7 @@ defineExpose({ focusSearch });
             </div>
 
             <div v-else data-document-json-viewer class="flex-1 min-h-0 select-text bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
-              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
+              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="documentViewerText" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">

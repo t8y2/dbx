@@ -39,6 +39,7 @@ export interface UseDataGridColumnResizeOptions {
   compactColumnHeaderActions: ComputedRef<boolean>;
   columnIndexIndicators?: ComputedRef<readonly boolean[]>;
   cacheKey?: ComputedRef<string | undefined>;
+  resultKey?: ComputedRef<string | undefined>;
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
@@ -62,6 +63,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
   function columnWidthStateIdentity() {
     return {
       cacheKey: options.cacheKey?.value,
+      resultKey: options.resultKey?.value,
       structureSignature: options.columnStructureSignature.value,
       measurementSignature: createDataGridColumnMeasurementSignature(density.value, compactColumnHeaderActions.value, options.headerMeasurementKey?.value),
     };
@@ -323,7 +325,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     () => columnIndexes.value.join("\0"),
     () => initColumnWidths(),
   );
-  watch([() => options.cacheKey?.value, options.columnStructureSignature], () => {
+  watch([() => options.cacheKey?.value, () => options.resultKey?.value, options.columnStructureSignature], () => {
     columnWidths.value = [];
     previousColumnIndexes = [];
     manualColumnIndexes.value = new Set();

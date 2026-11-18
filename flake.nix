@@ -217,8 +217,8 @@
                 "sha256-8lWgsdTuLTgOmzP7tXmA9LnomOE0wjxXsCBw9NEMt2o=";
               "git+https://github.com/t8y2/mysql_async.git?rev=2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec#2be6e392eb9b06d20dcd2d8ed8eae748d413c9ec" =
                 "sha256-tMFvmypIBh1GHg3cLFWmLf6N1wrwKPlzx2G/MHwtlFM=";
-              "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=115f9fef10f0fc3669b5337955e4eb461fc349a6#115f9fef10f0fc3669b5337955e4eb461fc349a6" =
-                "sha256-HRbYVSD7iIwG3m1tOGoIZy0xAZwALWIpTtakVSYPIYI=";
+              "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89" =
+                "sha256-NkSST+xuE8NCVobwmX5j87WY+zXU6aWHMSR0LFjn8UA=";
             };
           };
 

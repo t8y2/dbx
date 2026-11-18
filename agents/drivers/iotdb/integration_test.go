@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/apache/iotdb-client-go/v2/client"
 )
 
 func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
@@ -405,4 +408,150 @@ func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.builder.String()
+}
+
+// #13935 review round 3: self-contained live verification against IoTDB 1.3.7.
+//
+// Preconditions: a real IoTDB server reachable via DBX_IOTDB_HOST/PORT with
+//   query_timeout_threshold = 1   (1 ms, in conf/iotdb-system.properties)
+// The test creates its own database/timeseries, asserts the tightened server
+// timeout is actually in effect (a nil-timeout read must fail with the server
+// timeout error), then proves that:
+//   * timeoutSecs=0 (the 100-year no-limit budget) survives every paged fetch
+//     on the agent's session path (executeQueryPage/fetchQueryPage), and
+//   * a cancelled context stops a paged read instead of waiting for the
+//     blocking fetch RPC (client-level NextWithContext).
+func TestLiveIoTDBNoLimitQueryCarriesBudgetThroughFetchPages(t *testing.T) {
+	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
+		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")
+	}
+	database := fmt.Sprintf("root.dbx_timeout_%d", os.Getpid())
+	device := database + ".d1"
+	seedRows := 50000
+
+	admin := liveIoTDBServer(t, connectParams{})
+	mustExecuteNonQuery(t, admin, "CREATE DATABASE "+database, "")
+	defer func() { _ = admin.executeNonQuery("DELETE DATABASE "+database, "", 0) }()
+	mustExecuteNonQuery(t, admin, "CREATE TIMESERIES "+device+".s0 WITH DATATYPE=INT64, ENCODING=RLE", "")
+	admin.disconnect()
+
+	// Seed 50000 rows through a direct client session so every paged read spans
+	// fetchSize 1000 → 50 fetch pages.
+	seedSession := client.NewSession(&client.Config{
+		Host:      envOr("DBX_IOTDB_HOST", "127.0.0.1"),
+		Port:      strconv.Itoa(envIntOr("DBX_IOTDB_PORT", defaultIoTDBPort)),
+		UserName:  envOr("DBX_IOTDB_USER", "root"),
+		Password:  envOr("DBX_IOTDB_PASSWORD", "root"),
+		FetchSize: 1000,
+		TimeZone:  client.DefaultTimeZone,
+	})
+	if err := seedSession.Open(false, 10000); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	defer func() { _ = seedSession.Close() }()
+	tabletRows := 5000
+	tablet, tabletErr := client.NewTablet(device, []*client.MeasurementSchema{
+		{Measurement: "s0", DataType: client.INT64},
+	}, tabletRows)
+	if tabletErr != nil {
+		t.Fatalf("seed tablet: %v", tabletErr)
+	}
+	for batch := 0; batch < seedRows/tabletRows; batch++ {
+		for index := 0; index < tabletRows; index++ {
+			tablet.SetTimestamp(int64(batch)*int64(tabletRows)+int64(index), index)
+			if err := tablet.SetValueAt(int64(batch*tabletRows+index), 0, index); err != nil {
+				t.Fatalf("seed value: %v", err)
+			}
+		}
+		tablet.RowSize = tabletRows
+		if err := seedSession.InsertTablet(tablet, true); err != nil {
+			t.Fatalf("seed tablet %d: %v", batch, err)
+		}
+		tablet.Reset()
+	}
+
+	server := liveIoTDBServer(t, connectParams{Database: database})
+	defer server.disconnect()
+
+	// 1. Precondition check: a nil (absent) timeout falls back to the server's
+	// query_timeout_threshold. With the documented 1 ms value this paged read
+	// must be aborted by the server; otherwise the environment is misconfigured
+	// and the comparison below proves nothing.
+	started := time.Now()
+	_, err := server.executeQuery(queryOptions{SQL: "SELECT s0 FROM " + device, MaxRows: seedRows, TimeoutSecs: -1})
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatalf("server query_timeout_threshold is not tightened: a nil-timeout %d-row read succeeded in %v; set query_timeout_threshold = 1 in conf/iotdb-system.properties", seedRows, elapsed)
+	}
+	lowered := strings.ToLower(err.Error())
+	if !strings.Contains(lowered, "time out") && !strings.Contains(lowered, "timeout") {
+		t.Fatalf("expected the server timeout error for a nil-timeout read, got: %v", err)
+	}
+	t.Logf("precondition ok: nil-timeout paged read failed after %v with: %v", elapsed, err)
+
+	// 2. timeoutSecs=0 maps to the 100-year budget: the same paged read now
+	// returns every row, and each fetch page carries that budget.
+	started = time.Now()
+	result, err := server.executeQuery(queryOptions{SQL: "SELECT s0 FROM " + device, MaxRows: seedRows, TimeoutSecs: 0})
+	if err != nil {
+		t.Fatalf("timeoutSecs=0 must carry the budget through every fetch page: %v", err)
+	}
+	if len(result.Rows) != seedRows {
+		t.Fatalf("expected %d rows through all fetch pages, got %d", seedRows, len(result.Rows))
+	}
+	t.Logf("queryValues path: %d rows in %v", len(result.Rows), time.Since(started))
+
+	// 3. The agent's session pagination path (executeQueryPage/fetchQueryPage)
+	// must also survive the tightened threshold page after page.
+	page, err := server.executeQueryPage(queryOptions{SQL: "SELECT s0 FROM " + device, MaxRows: seedRows, TimeoutSecs: 0}, 5000)
+	if err != nil {
+		t.Fatalf("executeQueryPage with timeoutSecs=0 failed: %v", err)
+	}
+	totalRows := len(page.Rows)
+	pagesRead := 1
+	for page.HasMore {
+		if page.SessionID == nil || *page.SessionID == "" {
+			t.Fatalf("page %d reported more data without a session id", pagesRead)
+		}
+		page, err = server.fetchQueryPage(*page.SessionID, 5000)
+		if err != nil {
+			t.Fatalf("fetchQueryPage (page %d) failed: %v", pagesRead+1, err)
+		}
+		pagesRead++
+		totalRows += len(page.Rows)
+	}
+	if totalRows != seedRows {
+		t.Fatalf("session pagination read %d rows over %d pages, want %d", totalRows, pagesRead, seedRows)
+	}
+	t.Logf("session pagination path: %d rows over %d pages", totalRows, pagesRead)
+
+	// 4. Cancellation: NextWithContext must stop a paged read promptly once the
+	// context is cancelled, instead of waiting for the blocking fetch RPC.
+	// The probe read must carry the same no-limit budget as the agent path;
+	// a nil timeout would be aborted by the tightened server threshold first.
+	noLimitBudget := int64(100 * 365 * 24 * time.Hour / time.Millisecond)
+	dataset, err := seedSession.ExecuteQueryStatement("SELECT s0 FROM "+device, &noLimitBudget)
+	if err != nil {
+		t.Fatalf("cancel probe query failed: %v", err)
+	}
+	defer func() { _ = dataset.Close() }()
+	readRows := 0
+	for readRows < 1000 {
+		hasNext, err := dataset.NextWithContext(context.Background())
+		if err != nil || !hasNext {
+			t.Fatalf("cancel probe read %d rows: err=%v hasNext=%v", readRows, err, hasNext)
+		}
+		readRows++
+	}
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started = time.Now()
+	_, err = dataset.NextWithContext(cancelCtx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled paged read must return context.Canceled, got: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancellation took %v, expected a prompt return", elapsed)
+	}
+	t.Logf("cancel probe: context.Canceled returned in %v after %d rows", time.Since(started), readRows)
 }

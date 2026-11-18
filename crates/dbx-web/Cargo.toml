@@ -14,6 +14,10 @@ duckdb-sidecar = ["dbx-core/duckdb-sidecar", "dbx-mcp/duckdb-sidecar"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin", "dbx-mcp/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
+# `--no-default-features` runs (skip DuckDB and SQLCipher) must re-add a SQLite
+# source via `--features sqlite-bundled`, otherwise tests/bins link the system
+# SQLite, which Windows does not ship.
+sqlite-bundled = ["dbx-core/sqlite-bundled", "dbx-mcp/sqlite-bundled"]
 system-fonts = ["dbx-core/system-fonts"]
 # Pass-through so CI feature lanes can compile-check the vendored ATTENTION
 # path; the web server never executes manual transactions, so it stays off by

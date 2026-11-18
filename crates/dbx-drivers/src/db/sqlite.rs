@@ -585,7 +585,14 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_network_path(path: &str) -> bool {
+/// Whether SQLite will be asked to open `path` as a network (UNC/WSL) file.
+///
+/// Public because the MCP target guard (`dbx_core::persistence::mcp_target_guard`)
+/// must refuse exactly the host forms this driver opens through the URI path:
+/// they can alias this machine's own drives (`\\localhost\c$`,
+/// `\\wsl.localhost\<distro>\mnt\c`, `\\<hostname>\c$`) while canonicalizing to
+/// a `\\?\UNC\...` form that never equals a drive-letter path.
+pub fn is_network_path(path: &str) -> bool {
     path.starts_with("\\\\") || path.starts_with("//") || path.contains("wsl.localhost") || path.contains("wsl$")
 }
 

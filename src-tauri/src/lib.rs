@@ -3311,6 +3311,7 @@ pub fn run() {
             commands::mq_cmd::mq_get_backlog,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_cluster_info,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_broker_config,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_topic_route,

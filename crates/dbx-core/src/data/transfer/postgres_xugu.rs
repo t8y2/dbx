@@ -460,7 +460,11 @@ pub(super) fn project_page(sql: &str, columns: &[db::ColumnInfo], order: &[Strin
     let projection = columns.iter().map(|column| {
         let name = quote(&column.name);
         let reference = format!("dbx_pg_source.{name}");
-        if column.data_type == "bytea" {
+        if matches!(source_base(&column.data_type).as_str(), "real" | "float4") {
+            format!("pg_catalog.encode(pg_catalog.float4send({reference}),'hex') AS {name}")
+        } else if matches!(source_base(&column.data_type).as_str(), "double precision" | "float8") {
+            format!("pg_catalog.encode(pg_catalog.float8send({reference}),'hex') AS {name}")
+        } else if column.data_type == "bytea" {
             format!("CASE WHEN {reference} IS NULL THEN NULL ELSE '0x'||pg_catalog.encode({reference},'hex') END AS {name}")
         } else if is_zoned(&column.data_type) && source_base(&column.data_type).starts_with("timestamp") {
             let utc = format!("({reference} AT TIME ZONE 'UTC')");
@@ -503,6 +507,55 @@ pub(super) fn project_page(sql: &str, columns: &[db::ColumnInfo], order: &[Strin
     // Page in native PostgreSQL types BEFORE casting. Ordering an output alias
     // after ::text would put 10 before 2 and silently skip keyset pages.
     Ok(format!("SELECT {projection}{cursor} FROM ({sql}) AS dbx_pg_source{order}"))
+}
+
+/// Decode PostgreSQL's network-order IEEE-754 representation before validation,
+/// cursor advancement and writing. Unlike float::text this is independent of
+/// the source session's extra_float_digits and does not mutate the session.
+pub(super) fn decode_float_rows(columns: &[db::ColumnInfo], rows: &mut [Vec<serde_json::Value>]) -> Result<(), String> {
+    for row in rows {
+        if row.len() != columns.len() {
+            return Err("Incomplete PostgreSQL transfer row".into());
+        }
+        for (column, value) in columns.iter().zip(row) {
+            let size = match source_base(&column.data_type).as_str() {
+                "real" | "float4" => 4,
+                "double precision" | "float8" => 8,
+                _ => continue,
+            };
+            if value.is_null() {
+                continue;
+            }
+            let encoded = value.as_str().ok_or("Invalid PostgreSQL float binary representation")?;
+            if encoded.len() != size * 2 || !encoded.is_ascii() {
+                return Err("Invalid PostgreSQL float binary representation".into());
+            }
+            let bytes = encoded
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let pair =
+                        std::str::from_utf8(pair).map_err(|_| "Invalid PostgreSQL float binary representation")?;
+                    u8::from_str_radix(pair, 16).map_err(|_| "Invalid PostgreSQL float binary representation")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let text = if size == 4 {
+                let n = f32::from_bits(u32::from_be_bytes(bytes.try_into().map_err(|_| "Invalid float4 length")?));
+                if !n.is_finite() {
+                    return Err(format!("PostgreSQL column '{}' contains a non-finite value", column.name));
+                }
+                n.to_string()
+            } else {
+                let n = f64::from_bits(u64::from_be_bytes(bytes.try_into().map_err(|_| "Invalid float8 length")?));
+                if !n.is_finite() {
+                    return Err(format!("PostgreSQL column '{}' contains a non-finite value", column.name));
+                }
+                n.to_string()
+            };
+            *value = serde_json::Value::String(text);
+        }
+    }
+    Ok(())
 }
 
 fn unsafe_predicate(column: &db::ColumnInfo) -> Result<Option<String>, String> {

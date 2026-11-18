@@ -288,6 +288,115 @@ async fn live_postgres_xugu_lost_insert_reply() {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL and Xugu connections and the installed Xugu agent"]
+async fn live_postgres_xugu_adjacent_float_keys_keep_precision() {
+    let source = config("DBX_LIVE_PG_XUGU_SOURCE_CONFIG", "pg-float-source");
+    let target = config("DBX_LIVE_PG_XUGU_TARGET_CONFIG", "pg-float-target");
+    assert_eq!(source.db_type, DatabaseType::Postgres);
+    assert_eq!(target.db_type, DatabaseType::Xugu);
+    let target_schema = std::env::var("DBX_LIVE_PG_XUGU_TARGET_SCHEMA").expect("target test schema");
+    let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    let source_schema = format!("dbx_float_{suffix}");
+    let dir = std::env::temp_dir().join(format!("dbx-pg-float-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+    let agent_dir = PathBuf::from(std::env::var("DBX_LIVE_PG_XUGU_AGENT_DIR").expect("installed agent directory"));
+    let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+        storage,
+        dir.join("plugins"),
+        agent_dir,
+        env!("CARGO_PKG_VERSION"),
+    ));
+    {
+        let mut configs = state.configs.write().await;
+        configs.insert(source.id.clone(), source.clone());
+        configs.insert(target.id.clone(), target.clone());
+    }
+    let source_pool = state.get_or_create_pool(&source.id, source.database.as_deref()).await.unwrap();
+    if let Some(dbx_core::connection::PoolKind::Postgres(pool)) = state.pool_handle(&source_pool).await {
+        pool.resize(1);
+    }
+    let target_pool = state.get_or_create_pool(&target.id, target.database.as_deref()).await.unwrap();
+    execute_on_pool(&state, &source_pool, &format!("CREATE SCHEMA {}", quote(&source_schema))).await.unwrap();
+
+    for (setting, label) in [("0", "zero"), ("-2", "negative")] {
+        execute_on_pool(&state, &source_pool, &format!("SET extra_float_digits = {setting}")).await.unwrap();
+        assert_eq!(scalar(&state, &source_pool, "SHOW extra_float_digits").await, json!(setting));
+        for (kind, values, factor, base, expected_bits) in [
+            ("real", "1.2345678, 1.2345679", "8388608", "10356304", ["3f9e0651", "3f9e0652"]),
+            (
+                "double precision",
+                "1.2345678901234567, 1.2345678901234569",
+                "4503599627370496",
+                "5559999489923578",
+                ["3ff3c0ca428c59fb", "3ff3c0ca428c59fc"],
+            ),
+        ] {
+            let tag = if kind == "real" { "f4" } else { "f8" };
+            let table = format!("dbx_{tag}_{label}_{suffix}");
+            let src = format!("{}.{}", quote(&source_schema), quote(&table));
+            let dst = format!("{}.{}", quote(&target_schema), quote(&table));
+            execute_on_pool(&state, &source_pool, &format!("CREATE TABLE {src} (\"id\" {kind} PRIMARY KEY)"))
+                .await
+                .unwrap();
+            execute_on_pool(
+                &state,
+                &source_pool,
+                &format!("INSERT INTO {src} SELECT unnest(ARRAY[{values}]::{kind}[])"),
+            )
+            .await
+            .unwrap();
+            let send = if kind == "real" { "float4send" } else { "float8send" };
+            let rows = execute_read_on_pool(
+                &state,
+                &source_pool,
+                &format!("SELECT encode({send}(\"id\"),'hex') FROM {src} ORDER BY \"id\""),
+            )
+            .await
+            .unwrap()
+            .rows;
+            assert_eq!(rows, expected_bits.map(|v| vec![json!(v)]));
+            let mut transfer = request(&source, &target, &source_schema, &target_schema, &table);
+            transfer.batch_size = 1;
+            let result = transfer_table_with_result(
+                &state,
+                &transfer,
+                &table,
+                0,
+                &source.db_type,
+                &target.db_type,
+                &source_pool,
+                &target_pool,
+                &HashMap::new(),
+                &mut Vec::new(),
+                None,
+                false,
+                |_| {},
+                |_| {},
+            )
+            .await
+            .expect("float transfer");
+            assert_eq!(result.moved_rows, 2);
+            assert_eq!(
+                scalar(&state, &target_pool, &format!("SELECT CAST(COUNT(*) AS VARCHAR(20)) FROM {dst}")).await,
+                json!("2")
+            );
+            // Values lie in [1,2): scaling by 2^mantissa_bits is exact; the
+            // subtraction keeps the integer conversion within a small range.
+            let delta =
+                format!("CAST((CAST(\"id\" AS DOUBLE)*CAST({factor} AS DOUBLE))-CAST({base} AS DOUBLE) AS INT)");
+            let min_delta = format!("SELECT CAST(MIN({delta}) AS VARCHAR(20)) FROM {dst}");
+            let max_delta = format!("SELECT CAST(MAX({delta}) AS VARCHAR(20)) FROM {dst}");
+            assert_eq!(scalar(&state, &target_pool, &min_delta).await, json!("1"));
+            assert_eq!(scalar(&state, &target_pool, &max_delta).await, json!("2"));
+            execute_on_pool(&state, &target_pool, &format!("DROP TABLE {dst}")).await.unwrap();
+        }
+        assert_eq!(scalar(&state, &source_pool, "SHOW extra_float_digits").await, json!(setting));
+    }
+    execute_on_pool(&state, &source_pool, &format!("DROP SCHEMA {} CASCADE", quote(&source_schema))).await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires disposable DBX_LIVE_PG_XUGU_SOURCE_CONFIG / TARGET_CONFIG and installed Xugu agent"]
 async fn live_postgres_xugu_types_pages_and_overwrite_protection() {
     let mut source = config("DBX_LIVE_PG_XUGU_SOURCE_CONFIG", "pg-xugu-source");

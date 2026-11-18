@@ -312,6 +312,45 @@ fn defaults_do_not_silently_drop_expressions_or_sequences() {
 }
 
 #[test]
+fn float_wire_values_preserve_bits_and_reject_invalid_encodings() {
+    let columns = [col("f4", "real"), col("f8", "double precision")];
+    let f4 = 1.2345678_f32;
+    let f8 = 1.2345678901234567_f64;
+    let mut rows = vec![vec![json!(format!("{:08x}", f4.to_bits())), json!(format!("{:016x}", f8.to_bits()))]];
+    decode_float_rows(&columns, &mut rows).unwrap();
+    assert_eq!(rows[0][0].as_str().unwrap().parse::<f32>().unwrap().to_bits(), f4.to_bits());
+    assert_eq!(rows[0][1].as_str().unwrap().parse::<f64>().unwrap().to_bits(), f8.to_bits());
+    assert!(validate_rows(&columns, &rows).is_ok());
+    for bad in ["", "gggggggg", "7f800000", "7fc00000", "0000"] {
+        assert!(decode_float_rows(&[col("x", "real")], &mut [vec![json!(bad)]]).is_err(), "{bad}");
+    }
+    let mut nulls = vec![vec![json!(null), json!(null)]];
+    decode_float_rows(&columns, &mut nulls).unwrap();
+    assert_eq!(nulls, vec![vec![json!(null), json!(null)]]);
+    let sql = project_page("SELECT \"f4\", \"f8\" FROM \"s\".\"t\" LIMIT 2", &columns, &[]).unwrap();
+    assert!(sql.contains("pg_catalog.float4send"));
+    assert!(sql.contains("pg_catalog.float8send"));
+}
+
+#[test]
+fn float_primary_keys_advance_one_row_pages_without_rounding() {
+    for (kind, bits) in
+        [("real", vec!["3f9e064b", "3f9e064c"]), ("double precision", vec!["3ff3c0ca428c59fb", "3ff3c0ca428c59fc"])]
+    {
+        let columns = [col("id", kind)];
+        let mut cursor = Vec::new();
+        let mut seen = Vec::new();
+        for encoded in bits {
+            let mut page = vec![vec![json!(encoded)]];
+            decode_float_rows(&columns, &mut page).unwrap();
+            super::super::advance_keyset_cursor(&mut cursor, &page, &[0], "t").unwrap();
+            seen.push(cursor[0].clone());
+        }
+        assert_ne!(seen[0], seen[1], "{kind} cursor lost precision");
+    }
+}
+
+#[test]
 fn wire_projection_casts_after_native_keyset_order_and_preserves_ctid_cursor() {
     let columns = [col("id", "bigint"), col("payload", "bytea")];
     let sql = "SELECT \"id\", \"payload\" FROM \"src\".\"table\" WHERE \"id\">9 ORDER BY \"id\" LIMIT 2";

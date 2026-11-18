@@ -14171,6 +14171,7 @@ where
                 None => None,
             };
             if postgres_to_xugu {
+                postgres_xugu::decode_float_rows(&writable_columns, &mut result.rows)?;
                 postgres_xugu::validate_rows(&writable_columns, &result.rows)?;
             }
 

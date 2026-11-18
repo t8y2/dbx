@@ -6468,6 +6468,7 @@ export default {
     title: "Users & Privileges",
     unsupported: "MySQL-compatible and PostgreSQL-compatible connections are supported. SQL Server, Oracle, and other permission models can be added next.",
     newUser: "New User",
+    generatePassword: "Generate password",
     anonymous: "Anonymous",
     roleName: "Role name",
     allowLogin: "Allow login",

@@ -6440,6 +6440,7 @@ export default withEnglishFallback({
     title: "用户与权限",
     unsupported: "当前支持 MySQL 兼容与 PostgreSQL 兼容连接。SQL Server、Oracle 等会按各自权限模型继续扩展。",
     newUser: "新建用户",
+    generatePassword: "生成密码",
     anonymous: "匿名用户",
     roleName: "角色名",
     allowLogin: "允许登录",

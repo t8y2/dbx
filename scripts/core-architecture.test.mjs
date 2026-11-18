@@ -16,6 +16,8 @@ const metadata = JSON.parse(
 );
 const members = new Map(metadata.packages.filter((pkg) => metadata.workspace_members.includes(pkg.id)).map((pkg) => [pkg.name, pkg]));
 const allowedDependencies = {
+  // Auth abstraction layer: depends on no workspace crate (storage is injected from the upper layer via a trait).
+  "dbx-auth": [],
   "dbx-types": [],
   "dbx-platform": [],
   "dbx-formats": [],

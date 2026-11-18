@@ -9,7 +9,7 @@ mod ssh_prompt;
 mod state;
 mod web_mcp;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ const AUTH_BODY_LIMIT_BYTES: usize = 64 * 1024;
 use axum::http::{Request, StatusCode, Uri};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use dbx_core::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
@@ -572,21 +572,36 @@ async fn serve() -> Result<(), String> {
 
     app_state.set_honor_fixed_ssh_local_ports(true);
 
-    // Password hash: env var takes priority, then database
+    // Authentication bootstrap: legacy single-admin password (app_settings
+    // password hash / DBX_PASSWORD env) migrates into the `auth_users` table
+    // so the old deployment keeps working unchanged.
     let password_disabled = std::env::var("DBX_DISABLE_PASSWORD")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
     let password_viewer_enabled =
         password_viewer_enabled_from_env(std::env::var("DBX_DISABLE_PASSWORD_VIEWER").ok().as_deref());
 
-    let password_hash = if password_disabled {
-        None
-    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
-        let salt = SaltString::generate(&mut OsRng);
-        Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
-    } else {
-        app_state.storage.load_password_hash().await.unwrap_or(None)
-    };
+    if !password_disabled {
+        match app_state.storage.migrate_legacy_password_admin().await {
+            Ok(true) => log::info!("Migrated legacy admin password into multi-user auth store"),
+            Ok(false) => {}
+            Err(error) => log::error!("Legacy admin password migration failed: {error}"),
+        }
+        // The DBX_PASSWORD env var overwrites the admin password on every startup (same semantics as before).
+        if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+            let salt = SaltString::generate(&mut OsRng);
+            let hash = Argon2::default()
+                .hash_password(pw.as_bytes(), &salt)
+                .expect("Failed to hash password")
+                .to_string();
+            app_state
+                .storage
+                .upsert_local_admin_password(auth::handlers::LOCAL_ADMIN_SETUP_USERNAME, &hash)
+                .await
+                .expect("Failed to upsert admin password from DBX_PASSWORD");
+        }
+    }
+    let auth_user_count = app_state.storage.count_auth_users().await.unwrap_or(0);
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
@@ -604,9 +619,19 @@ async fn serve() -> Result<(), String> {
 
     let demo_mode = demo::demo_mode_from_env();
 
+    // Auth provider registry: the built-in local provider plus external providers merged from
+    // the DB table and env config (see auth::providers).
+    let auth_users: Arc<dyn dbx_auth::AuthUserStore> = Arc::new(auth::StorageAuthUserStore::new(app_state.clone()));
+    let auth_registry = Arc::new(dbx_auth::AuthRegistry::new());
+
+    let session_ttl_secs = std::env::var("DBX_WEB_SESSION_TTL_SECS").ok().and_then(|raw| raw.trim().parse::<u64>().ok());
+    if let Some(secs) = session_ttl_secs {
+        log::info!("Web session TTL enabled: {secs}s");
+    }
+
     let migration_ready = storage_migration_ready(&app_state).await;
     let web_mcp = Arc::new(if migration_ready {
-        WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
+        WebMcpRuntime::load(&app_state.storage, !password_disabled && auth_user_count > 0)
             .await
             .map_err(web_mcp_startup_error)?
     } else {
@@ -620,8 +645,9 @@ async fn serve() -> Result<(), String> {
         demo_mode,
         password_disabled,
         password_viewer_enabled,
-        password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        sessions: Arc::new(dbx_auth::SessionStore::new(session_ttl_secs.map(std::time::Duration::from_secs))),
+        auth_registry,
+        auth_users,
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
@@ -629,7 +655,7 @@ async fn serve() -> Result<(), String> {
         sql_file_failure_logs: Default::default(),
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        login_rate_limit: auth::LoginRateLimiter::new(),
         captchas: captcha::CaptchaStore::new(),
         captcha_mode: tokio::sync::RwLock::new(captcha_mode),
         captcha_env_locked,
@@ -642,6 +668,11 @@ async fn serve() -> Result<(), String> {
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
     routes::sql_file::start_sql_file_cleanup(&web_state);
     routes::connection::start_connection_idle_sweeper(&web_state);
+    auth::start_session_sweeper(&web_state);
+    // External auth provider assembly (a failure only degrades to local login, never blocks startup).
+    if let Err(error) = auth::assemble_registry(&web_state).await {
+        log::error!("Auth provider assembly failed: {error}");
+    }
 
     let backup_root = std::env::var_os("DBX_BACKUP_ROOT")
         .map(std::path::PathBuf::from)
@@ -670,6 +701,15 @@ async fn serve() -> Result<(), String> {
         .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/providers", get(auth::providers))
+        .route("/auth/oidc/{provider_id}/authorize", get(auth::oidc_authorize))
+        .route("/auth/oidc/{provider_id}/callback", get(auth::oidc_callback))
+        // Admin (admin role): provider configuration, user management, active sessions.
+        .route("/auth/admin/providers", get(auth::list_providers).put(auth::save_providers).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/admin/providers/test", post(auth::test_provider).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/admin/users", get(auth::list_users).post(auth::create_user).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/admin/users/{id}", patch(auth::update_user).delete(auth::delete_user).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/admin/sessions", get(auth::list_sessions))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))
@@ -1719,7 +1759,11 @@ async fn serve() -> Result<(), String> {
     });
 
     let shutdown_wait = server_shutdown.clone();
-    let serve_future = axum::serve(listener, app).with_graceful_shutdown(async move {
+    let serve_future = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
         shutdown_wait.cancelled().await;
     });
 

@@ -2600,11 +2600,8 @@ done
         let (state, dir) = test_web_state().await;
         let db_path = dir.join("a.db").to_string_lossy().to_string();
         std::fs::File::create(&db_path).unwrap();
-        {
-            let mut sessions = state.sessions.write().await;
-            sessions.insert("token-a".to_string());
-            sessions.insert("token-b".to_string());
-        }
+        state.sessions.register_anonymous("token-a").await;
+        state.sessions.register_anonymous("token-b").await;
         let headers_a = cookie_headers("token-a");
 
         let mut config = sqlite_config("conn-a", &db_path);

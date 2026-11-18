@@ -1,0 +1,32 @@
+# One-shot OpenLDAP test container for verifying DBX's LDAP auth provider.
+#
+#   docker compose -f deploy/docker-compose.ldap-test.yml up -d
+#
+# Seeded directory (dc=example,dc=org):
+#   alice / alicepass   — member of cn=dbx-admins   → maps to DBX role admin
+#   bob   / bobpass     — no group                  → maps to DBX role member
+#
+# Configure the provider in DBX (Settings → Security → Authentication providers):
+#   URL:            ldap://127.0.0.1:1389
+#   Base DN:        dc=example,dc=org
+#   User filter:    (uid={username})
+#   Username attr:  uid
+#   Group attr:     memberOf
+#   Role map:       dbx-admins=admin  /  *=member
+#
+# The memberOf overlay is enabled by the custom LDIF below. Group→role mapping
+# without memberOf (e.g. plain groupOfNames directories) needs a group-search
+# provider extension — group mapping is covered by unit tests meanwhile.
+services:
+  openldap:
+    image: bitnami/openldap:2.6
+    container_name: dbx-ldap-test
+    environment:
+      - LDAP_ROOT=dc=example,dc=org
+      - LDAP_ADMIN_USERNAME=admin
+      - LDAP_ADMIN_PASSWORD=adminpassword
+      - LDAP_CUSTOM_LDIF_DIR=/ldifs
+    volumes:
+      - ./ldap-test/seed.ldif:/ldifs/00-seed.ldif:ro
+    ports:
+      - "1389:1389"

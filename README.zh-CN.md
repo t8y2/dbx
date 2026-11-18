@@ -474,6 +474,19 @@ environment:
 
 浏览器访问 `http://localhost:4224`。支持 amd64 / arm64 双架构镜像。
 
+### 多用户与 SSO 登录
+
+除单一共享管理员密码外，DBX Web 还支持多用户登录与可插拔认证提供者：本地账号（由管理员管理）、LDAP、OIDC/SSO（Keycloak、Auth0、Casdoor 或任何标准 OIDC 服务器）、用于对接自建认证系统的通用 HTTP 回调，以及受信任的反向代理身份头。提供者可以在 Web 界面（`设置 → 安全`）中管理，也可以在容器部署中以声明式配置：
+
+```yaml
+environment:
+  # 登录用户（本地管理员会从 DBX_PASSWORD 自动迁移）
+  - DBX_WEB_SESSION_TTL_SECS=86400
+  - DBX_AUTH_CONFIG_FILE=/app/auth-providers.json
+```
+
+`auth-providers.json` 声明 LDAP / OIDC / HTTP 回调 / 代理身份头提供者（含分组→角色映射）；完整 schema 与管理 API 见 [docs/content/docs/web-api.cn.mdx](docs/content/docs/web-api.cn.mdx)。环境变量声明的条目在 UI 中只读，`id` 相同时优先于 UI 管理的条目。通过 UI 输入的机密会加密存储。部署在反向代理后时，请设置 `DBX_PUBLIC_URL` 以正确推导 OIDC 回调地址。
+
 ## 快速开始
 
 ### 环境要求

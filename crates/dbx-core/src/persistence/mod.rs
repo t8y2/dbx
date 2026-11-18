@@ -1,3 +1,5 @@
+pub mod auth_providers;
+pub mod auth_users;
 pub mod cloud_sync;
 pub mod config;
 pub mod history;

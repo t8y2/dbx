@@ -804,7 +804,7 @@ mod tests {
     /// these tests authenticate the same way the Web client does: a session that
     /// exists in `WebState::sessions` plus its `dbx_session` cookie.
     async fn authenticated_state(state: &WebState, token: &str) -> HeaderMap {
-        state.sessions.write().await.insert(token.to_string());
+        state.sessions.register_anonymous(token).await;
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, format!("dbx_session={token}").parse().unwrap());
         headers

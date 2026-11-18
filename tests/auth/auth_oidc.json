@@ -1,0 +1,7 @@
+[{"id":"sso","kind":"oidc","label":"Mock SSO","enabled":true,"config":{
+  "issuer":"http://127.0.0.1:8111",
+  "client_id":"demo-client","client_secret":"demo-secret",
+  "groups_claim":"groups",
+  "role_map":{"admins":"admin","ops-admin":"admin","*":"member"},
+  "default_role":"member","timeout_secs":5
+}}]

@@ -37,15 +37,23 @@ GET /api/auth/check
 {
   "authenticated": false,
   "required": true,
-  "setup_required": false
+  "setup_required": false,
+  "providers": [
+    { "id": "local", "kind": "local", "label": "Local", "mode": "form", "requires_username": false },
+    { "id": "corp-ldap", "kind": "ldap", "label": "Corp LDAP", "mode": "form", "requires_username": true },
+    { "id": "sso", "kind": "oidc", "label": "Corp SSO", "mode": "redirect", "requires_username": false }
+  ],
+  "user": { "username": "alice", "role": "admin", "provider_id": "local" }
 }
 ```
 
 | 字段 | 含义 |
 | --- | --- |
 | `required` | 已启用密码保护 |
-| `setup_required` | 仍需首次设置密码 |
+| `setup_required` | 仍需完成首次设置（存在外部登录方式时跳过） |
 | `authenticated` | 当前请求已持有有效会话 |
+| `providers` | 登录页可用的登录方式（向后兼容的新增字段，可选） |
+| `user` | 已登录时返回的当前身份（向后兼容的新增字段，可选） |
 
 ### 首次设置密码
 
@@ -69,15 +77,47 @@ Content-Type: application/json
 }
 ```
 
+多用户部署需提交 `username`（启用多个本地用户或 LDAP/callback 提供者时必填），并可通过 `provider` 选择登录方式：
+
+```json
+{ "username": "alice", "password": "your-password", "provider": "corp-ldap" }
+```
+
 登录成功后，响应会返回 `Set-Cookie: dbx_session=...`。后续请求带上这个 Cookie 即可。
 
-连续 5 次登录失败会触发约 60 秒锁定。会话保存在当前 Web 进程内，进程重启后需要重新登录；Cookie 使用 `HttpOnly` 和 `SameSite=Lax`，路径会跟随 `DBX_PUBLIC_BASE_PATH`。
+同一账号连续 5 次登录失败会触发约 60 秒锁定。会话保存在当前 Web 进程内，进程重启后需要重新登录；Cookie 使用 `HttpOnly` 和 `SameSite=Lax`，路径会跟随 `DBX_PUBLIC_BASE_PATH`。
+
+### SSO（OIDC）
+
+```http
+GET /api/auth/oidc/{provider}/authorize?next=/connections   # 302 跳转到身份提供者
+GET /api/auth/oidc/{provider}/callback                      # 身份提供者回跳地址；创建会话后跳转回 `next`
+```
+
+流程使用 Authorization Code + PKCE(S256) + state + nonce，并使用提供者的 JWKS 校验 `id_token`。`next` 查询参数是登录完成后浏览器返回的站内路径。角色来自配置的 groups claim，经提供者的角色映射转换。
+
+### 管理接口（需要 admin 角色）
+
+| 路由 | 用途 |
+| --- | --- |
+| `GET /api/auth/providers` | 登录页使用的公开启用提供者列表 |
+| `GET /api/auth/admin/providers` · `PUT /api/auth/admin/providers` | 列出 / 整体替换数据库管理的提供者（环境变量声明的条目只读） |
+| `POST /api/auth/admin/providers/test` | 保存前的连通性测试 |
+| `GET /api/auth/admin/users` · `POST /api/auth/admin/users` | 列出 / 创建本地用户 |
+| `PATCH /api/auth/admin/users/{id}` · `DELETE /api/auth/admin/users/{id}` | 修改角色、禁用、重置密码、删除 |
+| `GET /api/auth/admin/sessions` | 活跃会话列表（永不返回会话令牌） |
 
 ### 退出登录
 
 ```http
 POST /api/auth/logout
 Cookie: dbx_session=...
+```
+
+销毁当前会话并清除 Cookie。SSO（OIDC redirect）会话的响应还会携带 `logout_url`：身份提供者的 end-session 端点（已附带 `client_id` 和 `post_logout_redirect_uri`），浏览器应跳转到该地址，否则 IdP 侧的 SSO 会话会在下一次授权跳转时静默重新登录。表单/传统登录的响应保持原来的 `{ "ok": true }` 形状。
+
+```json
+{ "ok": true, "logout_url": "https://idp.example.com/logout?client_id=dbx&post_logout_redirect_uri=https%3A%2F%2Fdbx.example.com%2Flogin" }
 ```
 
 ### 环境变量
@@ -89,11 +129,50 @@ Cookie: dbx_session=...
 | `DBX_PORT` | 修改监听端口，默认 `4224` |
 | `DBX_DATA_DIR` | 存放 `dbx.db` 的数据目录 |
 | `DBX_PUBLIC_BASE_PATH` | 在子路径下提供服务，例如 `/dbx` |
+| `DBX_PUBLIC_URL` | 部署在反向代理后时，用于推导 OIDC 回调地址的外部可见地址 |
+| `DBX_WEB_SESSION_TTL_SECS` | 可选的服务端会话有效期；不设置则保持浏览器会话行为 |
+| `DBX_AUTH_CONFIG` | 以内联 JSON 数组声明认证提供者（见下文） |
+| `DBX_AUTH_CONFIG_FILE` | 指向同样 JSON 的文件路径，适合挂载场景 |
 | `DBX_MAX_UPLOAD_MB` | 调整通用请求及上传文件大小上限，默认 1024 MB；multipart 路由会额外预留固定的协议开销（如需上传 4 GiB 文件，请设为至少 `4096`） |
 | `DBX_AGENT_DIR` | 覆盖 Web 端 Agent/驱动目录，默认位于数据目录下的 `agents` |
 | `DBX_STATIC_DIR` | 覆盖 Web 静态文件目录 |
 | `RUST_LOG` | 配置 Rust 后端日志过滤；默认值为 `dbx_web=info,tower_http=info` |
 | `RUST_BACKTRACE=1` | 错误包含 Rust 回溯时输出 backtrace |
+
+### 声明式认证提供者（`DBX_AUTH_CONFIG`）
+
+```json
+[
+  {
+    "id": "corp-ldap",
+    "kind": "ldap",
+    "label": "Corp LDAP",
+    "enabled": true,
+    "config": {
+      "url": "ldaps://ldap.corp.example:636",
+      "base_dn": "dc=corp,dc=example,dc=com",
+      "user_filter": "(&(objectClass=user)(sAMAccountName={username}))",
+      "username_attr": "sAMAccountName",
+      "group_attr": "memberOf",
+      "role_map": { "ops-admin": "admin", "*": "member" }
+    }
+  },
+  {
+    "id": "sso",
+    "kind": "oidc",
+    "label": "Corp SSO",
+    "config": {
+      "issuer": "https://authsvr.example:8001",
+      "client_id": "dbx",
+      "client_secret": "...",
+      "groups_claim": "roles",
+      "role_map": { "super_admin": "admin", "*": "member" }
+    }
+  }
+]
+```
+
+支持的 `kind`：`ldap`、`oidc`、`http_callback`（通用登录式 API，支持响应字段映射）和 `proxy_header`（受信任的反向代理身份头，如 `X-Forwarded-User`）。此处声明的条目在设置对话框中只读；UI 管理的提供者保存在数据库中，按 `id` 与环境变量条目合并，环境变量条目优先。通过 UI 配置的机密（`bind_password`、`client_secret`、`shared_secret`）会加密存储。
 
 ## 日志与问题排查
 

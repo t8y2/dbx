@@ -166,3 +166,90 @@ describe("LoginPage captcha", () => {
     app.unmount();
   });
 });
+
+describe("LoginPage provider selection", () => {
+  // Mirrors what /api/auth/check returns for a deployment with local accounts plus an LDAP provider.
+  const LOCAL_AND_LDAP = [
+    { id: "local", kind: "local", label: "Local", mode: "form", requires_username: false },
+    { id: "ldap", kind: "ldap", label: "Mock LDAP", mode: "form", requires_username: true },
+  ];
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    // 204 = no captcha challenge, so payloads stay down to username/password/provider.
+    fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/captcha")) return new Response(null, { status: 204 });
+      return jsonResponse({ ok: true });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = "";
+  });
+
+  function mountWith(providers: unknown[]): { root: HTMLElement; app: App } {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(LoginPage, { providers });
+    app.mount(root);
+    return { root, app };
+  }
+
+  function loginBody(): Record<string, unknown> | undefined {
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/auth/login"));
+    return call ? JSON.parse(String((call[1] as RequestInit).body)) : undefined;
+  }
+
+  it("renders a selector for multiple form providers and sends the default pick", async () => {
+    const { root, app } = mountWith(LOCAL_AND_LDAP);
+    await flush();
+
+    const options = root.querySelectorAll<HTMLButtonElement>('[data-testid^="provider-option-"]');
+    expect(options.length).toBe(2);
+    // First provider is selected initially; it needs no username, so the field stays hidden.
+    expect(root.querySelector('[data-testid="login-username"]')).toBeNull();
+    typeInto(root.querySelector<HTMLInputElement>('input[type="password"]')!, "secret");
+    await nextTick();
+    root.querySelector("form")!.dispatchEvent(new Event("submit"));
+    await flush();
+
+    expect(loginBody()).toEqual({ password: "secret", provider: "local" });
+    app.unmount();
+  });
+
+  it("switches provider from the selector and includes the username for the picked one", async () => {
+    const { root, app } = mountWith(LOCAL_AND_LDAP);
+    await flush();
+
+    root.querySelector<HTMLButtonElement>('[data-testid="provider-option-ldap"]')!.click();
+    await nextTick();
+    const usernameInput = root.querySelector<HTMLInputElement>('[data-testid="login-username"]');
+    expect(usernameInput).not.toBeNull();
+    typeInto(usernameInput!, "alice");
+    typeInto(root.querySelector<HTMLInputElement>('input[type="password"]')!, "secret");
+    await nextTick();
+    root.querySelector("form")!.dispatchEvent(new Event("submit"));
+    await flush();
+
+    expect(loginBody()).toEqual({ username: "alice", password: "secret", provider: "ldap" });
+    app.unmount();
+  });
+
+  it("keeps the legacy payload when only one form provider exists", async () => {
+    const { root, app } = mountWith([LOCAL_AND_LDAP[0]]);
+    await flush();
+
+    expect(root.querySelector('[data-testid="provider-option-local"]')).toBeNull();
+    typeInto(root.querySelector<HTMLInputElement>('input[type="password"]')!, "secret");
+    await nextTick();
+    root.querySelector("form")!.dispatchEvent(new Event("submit"));
+    await flush();
+
+    expect(loginBody()).toEqual({ password: "secret" });
+    app.unmount();
+  });
+});

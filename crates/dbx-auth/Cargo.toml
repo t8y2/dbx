@@ -1,0 +1,25 @@
+[package]
+name = "dbx-auth"
+version = "0.6.70"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+argon2 = "0.5"
+base64 = "0.22"
+http = "1"
+jsonwebtoken = "9"
+ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+serde_json = "1.0"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["json", "http1", "tokio"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }

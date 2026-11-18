@@ -1,17 +1,14 @@
+use dbx_auth::{AuthRegistry, AuthUserStore, SessionStore};
 use dbx_core::connection::AppState;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tokio_util::sync::CancellationToken;
 
+use crate::auth::LoginRateLimiter;
 use crate::sse::TransferProgressChannel;
-
-pub struct LoginRateLimit {
-    pub fail_count: u32,
-    pub locked_until: Option<std::time::Instant>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebExportFile {
@@ -41,8 +38,12 @@ pub struct WebState {
     pub password_viewer_enabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
     pub demo_mode: bool,
-    pub password_hash: RwLock<Option<String>>,
-    pub sessions: RwLock<HashSet<String>>,
+    /// In-memory session store: token → session record (carrying the user identity).
+    pub sessions: Arc<SessionStore>,
+    /// Auth provider registry (local/LDAP/OIDC/callback/proxy), swappable as a whole by the admin UI.
+    pub auth_registry: Arc<AuthRegistry>,
+    /// User-store adapter (dbx-core Storage implements dbx-auth's `AuthUserStore`).
+    pub auth_users: Arc<dyn AuthUserStore>,
     pub sse_channels: RwLock<HashMap<String, broadcast::Sender<String>>>,
     pub transfer_progress_channels: RwLock<HashMap<String, Arc<TransferProgressChannel>>>,
     pub table_import_channels: RwLock<HashMap<String, watch::Sender<String>>>,
@@ -52,7 +53,8 @@ pub struct WebState {
     pub sql_file_failure_logs: dbx_core::sql_file_import::SqlFileFailureLogRegistry,
     pub managed_sql_previews: crate::routes::sql_file::ManagedSqlPreviews,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
-    pub login_rate_limit: Mutex<LoginRateLimit>,
+    /// Login-failure rate limiter (by provider + username).
+    pub login_rate_limit: LoginRateLimiter,
     /// Single-use image challenges gating `auth::login`.
     pub captchas: crate::captcha::CaptchaStore,
     /// When `auth::login` demands a challenge. Editable from `设置 → 安全`
@@ -73,9 +75,18 @@ impl WebState {
         self.sse_channels.write().await.remove(id);
     }
 
+    /// Whether auth is configured (not disabled and at least one user account exists). Equivalent to the legacy
+    /// `!password_disabled && password_hash.is_some()`。
+    pub async fn auth_configured(&self) -> bool {
+        !self.password_disabled && self.auth_users.count_users().await.unwrap_or(0) > 0
+    }
+
     /// Test helper: full field set so new WebState fields don't break scattered test fixtures.
     #[cfg(test)]
     pub fn for_tests(app: Arc<AppState>, data_dir: PathBuf) -> Self {
+        let auth_users: Arc<dyn AuthUserStore> = Arc::new(crate::auth::StorageAuthUserStore::new(app.clone()));
+        let registry = Arc::new(AuthRegistry::new());
+        registry.set_providers(vec![Arc::new(dbx_auth::providers::LocalAuthProvider::new(auth_users.clone()))]);
         Self {
             app,
             data_dir,
@@ -84,8 +95,9 @@ impl WebState {
             password_disabled: false,
             password_viewer_enabled: true,
             demo_mode: false,
-            password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
+            sessions: Arc::new(SessionStore::new(None)),
+            auth_registry: registry,
+            auth_users,
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
@@ -93,7 +105,7 @@ impl WebState {
             sql_file_executions: RwLock::new(HashMap::new()),
             managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),
-            login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
+            login_rate_limit: LoginRateLimiter::new(),
             captchas: crate::captcha::CaptchaStore::new(),
             captcha_mode: tokio::sync::RwLock::new(crate::captcha::CaptchaMode::Auto),
             captcha_env_locked: false,

@@ -1360,6 +1360,12 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         scope_key TEXT PRIMARY KEY,
         layout_json TEXT NOT NULL
     )",
+    // Web login users (local password accounts and external provider JIT identities), see persistence/auth_users.rs.
+    super::auth_users::AUTH_USERS_SCHEMA,
+    super::auth_users::AUTH_USERS_SCHEMA_INDEX_LOGIN,
+    super::auth_users::AUTH_USERS_SCHEMA_INDEX_PROVIDER_SUBJECT,
+    // External auth provider configuration, see persistence/auth_providers.rs.
+    super::auth_providers::AUTH_PROVIDERS_SCHEMA,
     "CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         settings_json TEXT NOT NULL
@@ -2733,7 +2739,7 @@ impl Storage {
         .await
     }
 
-    async fn with_conn<T, F>(&self, f: F) -> Result<T, String>
+    pub(crate) async fn with_conn<T, F>(&self, f: F) -> Result<T, String>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,

@@ -802,11 +802,11 @@ fn secure_managed_key_permissions(path: &std::path::Path) -> Result<(), String> 
     if path.symlink_metadata().map_or(true, |metadata| metadata.file_type().is_symlink() || !metadata.is_file()) {
         return Err("KEY_FILE_UNAVAILABLE".to_string());
     }
-    let parent = path.parent().ok_or_else(|| "KEY_FILE_UNAVAILABLE".to_string())?;
+    let _parent = path.parent().ok_or_else(|| "KEY_FILE_UNAVAILABLE".to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(_parent, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;

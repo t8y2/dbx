@@ -1,25 +1,30 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
-import { Lock, Loader2, ShieldCheck, ShieldQuestion } from "@lucide/vue";
+import { Lock, Loader2, ShieldCheck, ShieldQuestion, User } from "@lucide/vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import { apiUrl } from "@/lib/common/webPath";
 import { translateBackendError } from "@/i18n/backend-errors";
+import type { StartupAuthProvider } from "@/lib/startup/startupAuthentication";
 
 const props = withDefaults(
   defineProps<{
     setupMode?: boolean;
+    /** Auth methods returned by `auth/check`; empty for single-local-account deployments. */
+    providers?: StartupAuthProvider[];
   }>(),
-  { setupMode: false },
+  { setupMode: false, providers: () => [] },
 );
 
 const emit = defineEmits<{ authenticated: [] }>();
 const { t } = useI18n();
 
 const password = ref("");
+const username = ref("");
 const confirmPassword = ref("");
 const captchaCode = ref("");
 const captchaRequired = ref(false);
@@ -28,6 +33,41 @@ const captchaImage = ref("");
 const captchaLoading = ref(false);
 const error = ref("");
 const loading = ref(false);
+
+const redirectProviders = computed(() => props.providers.filter((provider) => provider.mode === "redirect"));
+const formProviders = computed(() => props.providers.filter((provider) => provider.mode === "form"));
+// Two or more form providers (e.g. the built-in local accounts plus LDAP) need an explicit
+// choice; with a single one the backend resolves it and the page keeps the legacy look.
+const needsProviderChoice = computed(() => formProviders.value.length > 1);
+const selectedProviderId = ref("");
+const selectedProvider = computed(() => formProviders.value.find((provider) => provider.id === selectedProviderId.value) ?? formProviders.value[0]);
+const requiresUsername = computed(() => selectedProvider.value?.requires_username === true);
+
+// A replaced provider list (auth/check refetch) invalidates the picked id.
+watch(
+  () => props.providers,
+  () => {
+    selectedProviderId.value = "";
+  },
+);
+
+/** Failed OIDC callbacks redirect to /login?error=...; translate the error code here. */
+function readCallbackError() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("error");
+  if (!code) return;
+  error.value = translateBackendError(t, code) || t("auth.loginFailed");
+  history.replaceState(null, "", window.location.pathname);
+}
+
+/**
+ * Redirect provider: navigates the whole page to the server-side authorize endpoint (the server builds
+ * the IdP authorization URL with state/PKCE); on success the callback endpoint plants the session cookie and returns to the site.
+ */
+function startSso(provider: StartupAuthProvider) {
+  const next = window.location.pathname + window.location.search;
+  window.location.href = apiUrl(`/api/auth/oidc/${encodeURIComponent(provider.id)}/authorize?next=${encodeURIComponent(next)}`);
+}
 
 // The auth routes report failures as `{"error": "..."}`, so unwrap that before
 // translating; anything else is treated as a plain-text message.
@@ -97,11 +137,18 @@ async function submit() {
   error.value = "";
   try {
     const url = apiUrl(props.setupMode ? "/api/auth/setup" : "/api/auth/login");
-    const payload = props.setupMode ? { password: password.value } : captchaRequired.value ? { password: password.value, captcha_id: captchaId.value, captcha_code: captchaCode.value } : { password: password.value };
+    const usernameValue = requiresUsername.value ? username.value.trim() : "";
+    const basePayload: Record<string, unknown> = props.setupMode ? { password: password.value } : { password: password.value };
+    if (!props.setupMode && usernameValue) basePayload.username = usernameValue;
+    if (!props.setupMode && needsProviderChoice.value && selectedProvider.value) basePayload.provider = selectedProvider.value.id;
+    if (!props.setupMode && captchaRequired.value) {
+      basePayload.captcha_id = captchaId.value;
+      basePayload.captcha_code = captchaCode.value;
+    }
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(basePayload),
     });
     if (res.ok) {
       emit("authenticated");
@@ -119,6 +166,7 @@ async function submit() {
 
 onMounted(() => {
   void refreshCaptcha();
+  readCallbackError();
 });
 </script>
 
@@ -139,6 +187,28 @@ onMounted(() => {
         <div v-if="setupMode" class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
           <ShieldCheck class="w-4 h-4" />
           <span>{{ t("auth.setupTitle") }}</span>
+        </div>
+        <div v-if="!setupMode && needsProviderChoice" class="space-y-1.5">
+          <Label class="text-xs font-normal text-muted-foreground">{{ t("auth.loginMethod") }}</Label>
+          <div class="grid grid-cols-2 gap-2" role="radiogroup" :aria-label="t('auth.loginMethod')">
+            <Button
+              v-for="provider in formProviders"
+              :key="provider.id"
+              type="button"
+              :variant="provider.id === selectedProvider?.id ? 'default' : 'outline'"
+              class="h-11 text-sm"
+              role="radio"
+              :aria-checked="provider.id === selectedProvider?.id"
+              :data-testid="`provider-option-${provider.id}`"
+              @click="selectedProviderId = provider.id"
+            >
+              {{ provider.label }}
+            </Button>
+          </div>
+        </div>
+        <div v-if="requiresUsername" class="relative">
+          <User class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input v-model="username" :placeholder="t('auth.enterUsername')" class="pl-10 h-11" autocomplete="username" data-testid="login-username" />
         </div>
         <div class="relative">
           <Lock class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -172,6 +242,17 @@ onMounted(() => {
           {{ loading ? t("auth.processing") : setupMode ? t("auth.setPassword") : t("auth.login") }}
         </Button>
       </form>
+
+      <div v-if="redirectProviders.length > 0" class="space-y-3">
+        <div class="flex items-center gap-3 text-xs text-muted-foreground">
+          <span class="h-px flex-1 bg-border"></span>
+          {{ t("auth.ssoDivider") }}
+          <span class="h-px flex-1 bg-border"></span>
+        </div>
+        <Button v-for="provider in redirectProviders" :key="provider.id" type="button" variant="outline" class="w-full h-11 text-sm" data-testid="sso-button" @click="startSso(provider)">
+          {{ t("auth.ssoLoginWith", { provider: provider.label }) }}
+        </Button>
+      </div>
 
       <p class="text-center text-xs text-muted-foreground/50">Powered by DBX</p>
     </div>

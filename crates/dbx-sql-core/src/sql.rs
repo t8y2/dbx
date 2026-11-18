@@ -209,6 +209,9 @@ struct SqlDialectProfile {
     supports_postgres_dollar_quoted_routines: bool,
     supports_hana_script_blocks: bool,
     supports_firebird_routine_blocks: bool,
+    /// SQLite `CREATE TRIGGER ... BEGIN ...; END;`: the body's semicolons do not
+    /// end the statement.
+    supports_sqlite_trigger_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
     /// Whether a top-level T-SQL control-flow batch (`IF`/`WHILE` with a block
@@ -241,6 +244,7 @@ impl Default for SqlDialectProfile {
             supports_postgres_dollar_quoted_routines: false,
             supports_hana_script_blocks: false,
             supports_firebird_routine_blocks: false,
+            supports_sqlite_trigger_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
             keeps_sqlserver_control_flow_batches: false,
@@ -329,6 +333,13 @@ impl SqlDialectProfile {
 
         if matches!(db_type, DatabaseType::Jdbc | DatabaseType::Hive) {
             return Self { supports_oracle_style_routine_bodies: true, ..Self::default() };
+        }
+
+        if matches!(
+            db_type,
+            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        ) {
+            return Self { supports_sqlite_trigger_blocks: true, ..Self::default() };
         }
 
         Self::default()
@@ -989,6 +1000,13 @@ impl SqlStatementSplitter {
                         if firebird_routine_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
+                    } else if self.options.profile.supports_sqlite_trigger_blocks
+                        && starts_with_sqlite_trigger_block(&self.buffer)
+                    {
+                        self.buffer.push(ch);
+                        if sqlite_trigger_block_is_complete(&self.buffer) {
+                            self.push_current_statement(&mut statements);
+                        }
                     } else if keeps_sqlserver_control_flow_batch(self.options, &self.buffer) {
                         // T-SQL does not end a control-flow batch at a semicolon
                         // (#9336, #13051, #13514): the inner `;` stays in the
@@ -1501,6 +1519,9 @@ fn split_statement_range_at_blank_lines(
     if options.profile.supports_firebird_routine_blocks && starts_with_firebird_routine_block(&statement.text) {
         return vec![statement.clone()];
     }
+    if options.profile.supports_sqlite_trigger_blocks && starts_with_sqlite_trigger_block(&statement.text) {
+        return vec![statement.clone()];
+    }
 
     let mut ranges = Vec::new();
     let mut scanner = SqlScanner::with_profile(options.profile);
@@ -1773,6 +1794,14 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                         && starts_with_firebird_routine_block(&sql[start..i])
                     {
                         if !firebird_routine_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else if options.profile.supports_sqlite_trigger_blocks
+                        && starts_with_sqlite_trigger_block(&sql[start..i])
+                    {
+                        if !sqlite_trigger_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -4181,43 +4210,60 @@ impl FirebirdRoutineBlock {
     }
 
     fn is_complete(&self) -> bool {
-        if !self.starts_block() {
-            return false;
-        }
-
-        let mut block_depth = 0usize;
-        let mut case_depth = 0usize;
-        let mut saw_begin = false;
-
-        for (index, token) in self.tokens.iter().enumerate() {
-            if token.is_word("BEGIN") {
-                if previous_adjacent_word(&self.tokens, index).is_some_and(|previous| previous == "END") {
-                    continue;
-                }
-                block_depth += 1;
-                saw_begin = true;
-                continue;
-            }
-            if token.is_word("CASE") {
-                if previous_adjacent_word(&self.tokens, index).is_none_or(|previous| previous != "END") {
-                    case_depth += 1;
-                }
-                continue;
-            }
-            if token.is_word("END") {
-                if case_depth > 0 {
-                    case_depth -= 1;
-                } else {
-                    block_depth = block_depth.saturating_sub(1);
-                }
-            }
-        }
-
-        saw_begin
-            && block_depth == 0
-            && case_depth == 0
-            && self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon)
+        self.starts_block() && begin_end_block_is_closed(&self.tokens)
     }
+}
+
+/// Whether a `BEGIN ... END` body (with `CASE ... END` expressions inside it)
+/// has closed and the statement ends with `;`.
+fn begin_end_block_is_closed(tokens: &[OraclePlSqlToken]) -> bool {
+    let mut block_depth = 0usize;
+    let mut case_depth = 0usize;
+    let mut saw_begin = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.is_word("BEGIN") {
+            if previous_adjacent_word(tokens, index).is_some_and(|previous| previous == "END") {
+                continue;
+            }
+            block_depth += 1;
+            saw_begin = true;
+            continue;
+        }
+        if token.is_word("CASE") {
+            if previous_adjacent_word(tokens, index).is_none_or(|previous| previous != "END") {
+                case_depth += 1;
+            }
+            continue;
+        }
+        if token.is_word("END") {
+            if case_depth > 0 {
+                case_depth -= 1;
+            } else {
+                block_depth = block_depth.saturating_sub(1);
+            }
+        }
+    }
+
+    saw_begin && block_depth == 0 && case_depth == 0 && tokens.last().is_some_and(OraclePlSqlToken::is_semicolon)
+}
+
+/// SQLite `CREATE [TEMP | TEMPORARY] TRIGGER ...`; its body is `BEGIN ... END`.
+fn starts_with_sqlite_trigger_block(sql: &str) -> bool {
+    let tokens = oracle_plsql_tokens(sql);
+    let mut words = tokens.iter().take(3).map(OraclePlSqlToken::as_word);
+    if words.next().flatten() != Some("CREATE") {
+        return false;
+    }
+    match words.next().flatten() {
+        Some("TRIGGER") => true,
+        Some("TEMP" | "TEMPORARY") => words.next().flatten() == Some("TRIGGER"),
+        _ => false,
+    }
+}
+
+fn sqlite_trigger_block_is_complete(sql: &str) -> bool {
+    starts_with_sqlite_trigger_block(sql) && begin_end_block_is_closed(&oracle_plsql_tokens(sql))
 }
 
 /// The BEGIN/END scope walk behind [`OraclePlSqlBlock::is_complete`], kept resumable so
@@ -6691,6 +6737,32 @@ SELECT 2 FROM RDB$DATABASE;";
                 "CREATE OR ALTER TRIGGER \"WL_FYD_TP_AU\" FOR \"WL_FYD\" ACTIVE\nAFTER UPDATE\nas\nbegin\n  /* Trigger text */\n  IF ( COALESCE(NEW.QSTPS,0) <> COALESCE(OLD.QSTPS,0) ) THEN\n  BEGIN\n    UPDATE WL_FYD SET ZT='完成' WHERE ID= NEW.ID;\n  END\nend;",
                 "SELECT 2 FROM RDB$DATABASE"
             ]
+        );
+    }
+
+    #[test]
+    fn sqlite_split_keeps_trigger_block_together() {
+        let trigger = "CREATE TRIGGER orders_audit AFTER INSERT ON orders\nBEGIN\n  INSERT INTO audit VALUES (NEW.id, CASE WHEN NEW.total > 100 THEN 'big' ELSE 'small' END);\n  UPDATE stats SET n = n + 1;\nEND;";
+        let sql = format!("CREATE TABLE orders(id INTEGER PRIMARY KEY, total REAL);\n{trigger}\nINSERT INTO orders(total) VALUES (9.5);");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Sqlite),
+            vec![
+                "CREATE TABLE orders(id INTEGER PRIMARY KEY, total REAL)",
+                trigger,
+                "INSERT INTO orders(total) VALUES (9.5)"
+            ]
+        );
+        let cursor = sql.find("UPDATE stats").unwrap();
+        assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Sqlite), trigger);
+    }
+
+    #[test]
+    fn sqlite_split_keeps_temp_trigger_block_together() {
+        let sql = "CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END; SELECT 1;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Sqlite),
+            vec!["CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END;", "SELECT 1"]
         );
     }
 

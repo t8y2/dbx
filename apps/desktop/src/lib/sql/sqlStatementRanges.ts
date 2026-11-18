@@ -728,7 +728,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         const isOraclePlSql = typeof resolvedOraclePlSqlStatementEnd === "number";
         const isSapHanaScriptBlock = isSapHanaScriptBlockDatabase(databaseType) && statementStart !== -1 && startsWithSapHanaScriptBlock(sql.slice(statementStart, i));
         const isFirebirdRoutineBlock = isFirebirdRoutineBlockDatabase(databaseType) && statementStart !== -1 && startsWithFirebirdRoutineBlock(sql.slice(statementStart, i));
-        if (isOraclePlSql || isSapHanaScriptBlock || isFirebirdRoutineBlock) {
+        const isSqliteTriggerBlock = isSqliteTriggerBlockDatabase(databaseType) && statementStart !== -1 && startsWithSqliteTriggerBlock(sql.slice(statementStart, i));
+        if (isOraclePlSql || isSapHanaScriptBlock || isFirebirdRoutineBlock || isSqliteTriggerBlock) {
           markContent(i);
           if (isOraclePlSql && i + 1 < resolvedOraclePlSqlStatementEnd) {
             i += 1;
@@ -739,6 +740,10 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
             continue;
           }
           if (isFirebirdRoutineBlock && !firebirdRoutineBlockIsComplete(sql.slice(statementStart, i + 1))) {
+            i += 1;
+            continue;
+          }
+          if (isSqliteTriggerBlock && !sqliteTriggerBlockIsComplete(sql.slice(statementStart, i + 1))) {
             i += 1;
             continue;
           }
@@ -869,6 +874,7 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   if (keepsOracleStyleBlockTogether(statement.sql, databaseType, parameterOptions)) return [statement];
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
   if (isFirebirdRoutineBlockStatement(statement.sql, databaseType)) return [statement];
+  if (isSqliteTriggerBlockDatabase(databaseType) && startsWithSqliteTriggerBlock(statement.sql)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
   if (databaseType === "sqlserver" && startsWithSqlServerModuleDdl(sql, statement.from, parameterOptions)) return [statement];
@@ -2159,6 +2165,10 @@ function isFirebirdRoutineBlockDatabase(databaseType?: DatabaseType): boolean {
   return databaseType === "firebird";
 }
 
+function isSqliteTriggerBlockDatabase(databaseType?: DatabaseType): boolean {
+  return databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1";
+}
+
 function isFirebirdRoutineBlockStatement(sql: string, databaseType?: DatabaseType): boolean {
   return isFirebirdRoutineBlockDatabase(databaseType) && startsWithFirebirdRoutineBlock(sql);
 }
@@ -2596,8 +2606,22 @@ function startsWithFirebirdRoutineBlock(sql: string): boolean {
 }
 
 function firebirdRoutineBlockIsComplete(sql: string): boolean {
-  if (!startsWithFirebirdRoutineBlock(sql)) return false;
+  return startsWithFirebirdRoutineBlock(sql) && beginEndBlockIsClosed(sql);
+}
 
+/** SQLite `CREATE [TEMP | TEMPORARY] TRIGGER ...`; its body is `BEGIN ... END`. */
+function startsWithSqliteTriggerBlock(sql: string): boolean {
+  const [first, second, third] = oraclePlSqlWords(sql);
+  if (first !== "CREATE") return false;
+  return second === "TRIGGER" || ((second === "TEMP" || second === "TEMPORARY") && third === "TRIGGER");
+}
+
+function sqliteTriggerBlockIsComplete(sql: string): boolean {
+  return startsWithSqliteTriggerBlock(sql) && beginEndBlockIsClosed(sql);
+}
+
+/** Whether a `BEGIN ... END` body (with `CASE ... END` inside it) has closed and the statement ends with `;`. */
+function beginEndBlockIsClosed(sql: string): boolean {
   const tokens = oraclePlSqlTokens(sql);
   let blockDepth = 0;
   let caseDepth = 0;

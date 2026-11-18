@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<!-- Monochrome sidebar adaptation of ../kingbase.svg. Original vector geometry retained; foreground extraction / transparent detail treatment only. -->
+<defs><mask id="kingbase-mono" x="0.0" y="0.0" width="1024.0" height="1024.0" maskUnits="userSpaceOnUse" mask-type="luminance">
+<path xmlns="http://www.w3.org/2000/svg" fill="white" d="M339.2 204.8v236.083l-148.531 73.421 148.48 69.99v239.104h130.457V650.342L833.28 823.398V687.872L469.606 514.304 833.28 338.381V209.05L469.606 377.702V204.8z" />
+</mask></defs><rect x="0.0" y="0.0" width="1024.0" height="1024.0" fill="white" mask="url(#kingbase-mono)"/>
+</svg>

@@ -805,6 +805,13 @@ export type SidebarDensity = (typeof SIDEBAR_DENSITIES)[number];
 export function isSidebarDensity(value: unknown): value is SidebarDensity {
   return typeof value === "string" && (SIDEBAR_DENSITIES as readonly string[]).includes(value);
 }
+export const SIDEBAR_CONNECTION_ICON_STYLES = ["classic", "badge"] as const;
+export type SidebarConnectionIconStyle = (typeof SIDEBAR_CONNECTION_ICON_STYLES)[number];
+
+export function isSidebarConnectionIconStyle(value: unknown): value is SidebarConnectionIconStyle {
+  return value === "classic" || value === "badge";
+}
+
 const DATA_GRID_COLUMN_WIDTH_MODES = ["fill", "content"] as const;
 export type DataGridColumnWidthMode = (typeof DATA_GRID_COLUMN_WIDTH_MODES)[number];
 const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
@@ -1262,6 +1269,7 @@ export interface EditorSettings {
   sidebarIndent: number;
   sidebarFontSize: number;
   sidebarDensity: SidebarDensity;
+  sidebarConnectionIconStyle: SidebarConnectionIconStyle;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
   globalDateTimeDisplayFormat: string;
@@ -1663,6 +1671,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
   sidebarDensity: "default",
+  sidebarConnectionIconStyle: "classic",
   columnFormatters: {},
   customColumnFormatters: {},
   globalDateTimeDisplayFormat: "",
@@ -1871,6 +1880,10 @@ function normalizeSidebarIndent(value: unknown): number {
 
 function normalizeSidebarDensity(value: unknown): SidebarDensity {
   return isSidebarDensity(value) ? value : DEFAULT_EDITOR_SETTINGS.sidebarDensity;
+}
+
+function normalizeSidebarConnectionIconStyle(value: unknown): SidebarConnectionIconStyle {
+  return isSidebarConnectionIconStyle(value) ? value : DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
 }
 
 function normalizeUpdateDownloadSource(value: unknown): UpdateDownloadSource {
@@ -2472,6 +2485,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
     sidebarDensity: normalizeSidebarDensity(settings.sidebarDensity),
+    sidebarConnectionIconStyle: normalizeSidebarConnectionIconStyle(settings.sidebarConnectionIconStyle),
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
@@ -3464,6 +3478,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
     if (partial.sidebarFontSize !== undefined) editorSettings.value.sidebarFontSize = normalizeSidebarFontSize(partial.sidebarFontSize);
     if (partial.sidebarDensity !== undefined) editorSettings.value.sidebarDensity = normalizeSidebarDensity(partial.sidebarDensity);
+    if (partial.sidebarConnectionIconStyle !== undefined) editorSettings.value.sidebarConnectionIconStyle = normalizeSidebarConnectionIconStyle(partial.sidebarConnectionIconStyle);
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);

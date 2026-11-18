@@ -1482,7 +1482,8 @@ const structureDensityStyle = computed(() => {
     "--structure-line-height": String(metric.lineHeight),
   };
 });
-const structureControlClass = "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
+const structureControlClass =
+  "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] md:text-[length:var(--structure-font-size)] leading-[var(--structure-control-height)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
 const structureMonoControlClass = `${structureControlClass} font-mono`;
 const structureToolbarButtonClass = "h-[var(--structure-control-height)] gap-1 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]";
 const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
@@ -10653,6 +10654,8 @@ watch(
   max-height: var(--structure-control-height);
   padding-top: 0;
   padding-bottom: 0;
+  font-size: var(--structure-font-size);
+  line-height: var(--structure-control-height);
   border-color: transparent;
   border-radius: 0;
   background-color: transparent;
@@ -10665,6 +10668,8 @@ watch(
   max-height: var(--structure-control-height);
   padding-top: 0;
   padding-bottom: 0;
+  font-size: var(--structure-font-size);
+  line-height: var(--structure-control-height);
 }
 
 .structure-edit-grid > tbody > tr > td:hover,

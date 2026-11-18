@@ -32,8 +32,8 @@ export function normalizeConnectionTimeouts(config: ConnectionConfig, connectTim
  * `port` is numeric on `ConnectionConfig`, so form whitespace is already parsed away.
  */
 export function normalizeConnectionIdentityFields(config: ConnectionConfig): void {
-  if (!connectionHostIsFilePath(config.db_type)) config.host = config.host.trim();
-  config.username = config.username.trim();
+  if (typeof config.host === "string" && !connectionHostIsFilePath(config.db_type)) config.host = config.host.trim();
+  if (typeof config.username === "string") config.username = config.username.trim();
   config.database = config.database?.trim() || undefined;
 }
 

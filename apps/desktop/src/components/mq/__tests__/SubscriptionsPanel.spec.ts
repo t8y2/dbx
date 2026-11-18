@@ -234,6 +234,43 @@ describe("SubscriptionsPanel message peek", () => {
     expect(panel.textContent).toContain("payments message");
     expect(panel.textContent).not.toContain("orders message");
   });
+
+  it("keeps peeked payloads raw by default and decodes thrift.TBinaryProtocol when toggled on", async () => {
+    const rawPayloadText = "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000";
+    backend.mqPeekMessages.mockResolvedValueOnce({
+      messages: [
+        {
+          position: 1,
+          messageId: "thrift-1",
+          payloadBase64: "CwABAAAABWhlbGxvAA==",
+          payloadText: rawPayloadText,
+          properties: {},
+          headers: {},
+        },
+      ],
+      incomplete: false,
+    });
+    const panel = await mountPanel({ mqSystemKind: "rabbitmq" });
+
+    buttonByText(panel, "mqSubscriptions.peek").click();
+    await flushUi();
+
+    const decodeToggle = panel.querySelector<HTMLInputElement>('[data-testid="peek-decode-payload"]');
+    if (!decodeToggle) throw new Error("Peek decode payload checkbox not found");
+    const payloadEl = () => panel.querySelector<HTMLElement>(".peek-payload");
+    expect(decodeToggle.checked).toBe(false);
+    expect(payloadEl()?.textContent).toBe(rawPayloadText);
+
+    decodeToggle.click();
+    await flushUi();
+    expect(decodeToggle.checked).toBe(true);
+    expect(payloadEl()?.textContent).toBe('{\n  "1": "hello"\n}');
+
+    decodeToggle.click();
+    await flushUi();
+    expect(decodeToggle.checked).toBe(false);
+    expect(payloadEl()?.textContent).toBe(rawPayloadText);
+  });
 });
 
 describe("SubscriptionsPanel clear backlog", () => {

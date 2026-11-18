@@ -210,6 +210,16 @@ describe("FrontendPluginRegistry", () => {
     expect(registry.findUiContribution("com.example.plugin", "example.graph")).toBeUndefined();
   });
 
+  it("filters incompatible connection providers while retaining diagnostics", () => {
+    const plugin = installedPlugin("io.dbx.k8s", [connectionProvider({ id: "io.dbx.k8s.connection" })]);
+    plugin.compatibility = { compatible: false, errors: ["Plugin requires DBX >=0.6.63, but 0.6.63-beta.20261101.3 is installed"] };
+
+    const registry = createFrontendPluginRegistry([plugin]);
+
+    expect(registry.listConnectionProviders()).toHaveLength(0);
+    expect(registry.listPlugins()[0]?.diagnostics).toEqual(plugin.compatibility.errors);
+  });
+
   it("keeps declarative context-menu actions as context-menu metadata, not commands", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("com.example.plugin", [

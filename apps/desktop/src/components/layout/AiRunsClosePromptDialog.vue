@@ -7,10 +7,15 @@ defineProps<{ count: number }>();
 const open = defineModel<boolean>("open", { required: true });
 const emit = defineEmits<{ cancel: []; quit: [] }>();
 const { t } = useI18n();
+
+function handleOpenChange(value: boolean) {
+  open.value = value;
+  if (!value) emit("cancel");
+}
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent class="sm:max-w-[440px]" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle>{{ t("ai.closeWithRunsTitle") }}</DialogTitle>

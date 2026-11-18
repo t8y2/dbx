@@ -221,15 +221,8 @@ impl BackupService {
         let mut included_count = 0;
         for (db_index, database) in databases.iter().enumerate() {
             check_cancel(stop)?;
-            let schemas = if postgres {
-                schema::list_schemas_core(state, &job.config.connection_id, database)
-                    .await?
-                    .into_iter()
-                    .filter(|s| s != "information_schema" && !s.starts_with("pg_"))
-                    .collect::<Vec<_>>()
-            } else {
-                vec![database.clone()]
-            };
+            let schemas =
+                database_export::list_database_backup_schemas_core(state, &job.config.connection_id, database).await?;
             if schemas.is_empty() {
                 return Err(format!("Database {database} has no exportable schemas"));
             }
@@ -360,6 +353,7 @@ impl BackupService {
                         schema: schema_name.clone(),
                         file_path: file.file_path,
                         selected_tables: selected_tables.clone(),
+                        selected_objects: None,
                         excluded_tables: excluded_tables.clone(),
                         include_structure: job.config.include_structure,
                         include_data: job.config.include_data,
@@ -367,6 +361,7 @@ impl BackupService {
                         include_create_database: false,
                         drop_table_if_exists: job.config.drop_table_if_exists,
                         omit_auto_increment: false,
+                        omit_database_qualifier: false,
                         preserve_original_language: false,
                         fail_on_error: true,
                         prevent_overwrite: true,
@@ -380,6 +375,11 @@ impl BackupService {
                         snapshot_session_id: Some(snapshot.session_id.clone()),
                         batch_size: 1000,
                         split_max_mb: None,
+                        // Scheduled backups stay full-table exports; the manual
+                        // dialog's rows-per-table preference must never shrink them (#14750).
+                        row_limit_per_table: None,
+                        row_limit_sort_column: None,
+                        row_limit_sort_descending: false,
                     };
                     let terminal_cancelled = std::sync::atomic::AtomicBool::new(false);
                     let created = Arc::new(std::sync::atomic::AtomicBool::new(false));

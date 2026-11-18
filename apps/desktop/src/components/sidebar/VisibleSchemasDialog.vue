@@ -7,10 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { filterSchemaNamesForVisiblePicker, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { filterSchemaNamesForVisiblePicker, normalizeVisibleSchemaSelection, visibleNameMatchesSearch } from "@/lib/database/visibleDatabases";
 import type { DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { addVisibleSchemas, initialVisibleSchemaSelection, resolveVisibleSchemaSaveAction, selectVisibleSchemas } from "./visibleSchemasDialogState";
+import { initialVisibleSchemaSelection, resolveVisibleSchemaSaveAction, selectVisibleSchemas } from "./visibleSchemasDialogState";
 
 const props = defineProps<{
   open: boolean;
@@ -53,10 +53,8 @@ const listedSchemaNames = computed(() => (showSystemSchemas.value ? allSchemaNam
 const hasSystemSchemas = computed(() => filterSchemaNamesForVisiblePicker(allSchemaNames.value, connection.value).length < allSchemaNames.value.length);
 
 const filteredSchemaNames = computed(() => {
-  const query = searchText.value.trim().toLowerCase();
-  const names = listedSchemaNames.value;
-  if (!query) return names;
-  return names.filter((name) => name.toLowerCase().includes(query));
+  const query = searchText.value;
+  return listedSchemaNames.value.filter((name) => visibleNameMatchesSearch(name, query));
 });
 const filteredSchemaItems = computed(() => filteredSchemaNames.value.map((name) => ({ name })));
 const selectedCount = computed(() => selectedNames.value.size);
@@ -135,7 +133,8 @@ function selectAll() {
 }
 
 function selectFiltered() {
-  selectedNames.value = addVisibleSchemas(selectedNames.value, filteredSchemaNames.value);
+  // 与可见数据库弹窗一致：直接选中当前搜索结果，省掉“先取消全选再逐个勾选”（#15109）。
+  selectedNames.value = new Set(filteredSchemaNames.value);
 }
 
 function clearSelection() {
@@ -207,8 +206,11 @@ async function saveSelection() {
 
       <div class="flex items-center gap-2 rounded-md border bg-background px-2">
         <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="searchText" :placeholder="t('visibleSchemas.searchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingState || !!errorMessageState" />
+        <Input v-model="searchText" data-visible-schema-search :placeholder="t('visibleSchemas.searchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingState || !!errorMessageState" />
       </div>
+      <p class="px-1 text-xs text-muted-foreground" data-visible-schema-search-hint>
+        {{ t("visibleSchemas.searchWildcardHint") }}<template v-if="isSearching"> · {{ t("visibleSchemas.searchMatchCount", { count: filteredSchemaNames.length }) }}</template>
+      </p>
 
       <div class="flex items-center justify-between text-xs text-muted-foreground">
         <span>{{ t("visibleSchemas.selectedCount", { selected: selectedCount, total: totalCount }) }}</span>
@@ -249,7 +251,12 @@ async function saveSelection() {
         </div>
       </div>
       <RecycleScroller v-else v-slot="{ item }" class="h-72 rounded-md border bg-background/50 p-1" :items="filteredSchemaItems" :item-size="32" key-field="name" :buffer="160">
-        <button type="button" class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none" @click="toggleSchema(item.name)">
+        <button
+          type="button"
+          class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+          :data-visible-schema-row="item.name"
+          @click="toggleSchema(item.name)"
+        >
           <CheckSquare v-if="selectedNames.has(item.name)" class="h-4 w-4 shrink-0 text-primary" />
           <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
           <span class="truncate">{{ item.name }}</span>

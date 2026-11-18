@@ -34,7 +34,7 @@ vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getCon
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: mocks.settings }) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
-vi.mock("@/lib/export/exportExecutionMode", () => ({ showExportExecutionModeDialog: mocks.mode }));
+vi.mock("@/lib/export/exportExecutionMode", () => ({ getDefaultExportExecutionMode: mocks.mode }));
 vi.mock("@/lib/export/exportPath", () => ({ promptExportSavePath: mocks.save, autoRevealExportedPathIfConfigured: vi.fn() }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key, locale: ref("en-US") }) }));
 vi.mock("@/i18n", () => ({ default: { install() {} } }));
@@ -82,7 +82,7 @@ beforeEach(() => {
   mocks.menu = [];
   operations.length = 0;
   mocks.settings.exportBatchSize = 123;
-  mocks.mode.mockResolvedValue("queued");
+  mocks.mode.mockReturnValue("queued");
   mocks.save.mockResolvedValue("C:/exports/orders.csv");
   mocks.cancel.mockResolvedValue(undefined);
   mocks.query.mockReset().mockResolvedValue({ columns: ["ID"], rows: [[7]], affected_rows: 0, execution_time_ms: 0 });

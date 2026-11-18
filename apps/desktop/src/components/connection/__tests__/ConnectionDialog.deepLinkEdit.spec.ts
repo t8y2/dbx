@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 import { CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
-import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider } from "@/lib/connection/connectionDeepLink";
 
 const visibleTab = vi.hoisted(() => ({ value: "connection" }));
 
@@ -43,6 +43,7 @@ const { store, settings, backend, actualStoreHolder } = vi.hoisted(() => ({
     redisListDatabases: vi.fn(),
     listSchemas: vi.fn(),
     testConnectionWithInfo: vi.fn(),
+    connectionParameters: vi.fn(),
     listDatabases: vi.fn(),
     listPlugins: vi.fn(),
     listJdbcDrivers: vi.fn(),
@@ -88,7 +89,7 @@ vi.mock("@/components/ui/dialog", async () => {
       () =>
         props.open ? h("section", [h("button", { "data-testid": "dismiss-dialog", onClick: () => emit("update:open", false) }, "Dismiss"), slots.default?.()]) : null,
   });
-  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogFooter: passthrough };
+  return { Dialog, DialogContent: passthrough, DialogHeader: passthrough, DialogTitle: passthrough, DialogDescription: passthrough, DialogFooter: passthrough };
 });
 vi.mock("@/components/ui/button", async () => {
   const { defineComponent, h } = await import("vue");
@@ -210,8 +211,8 @@ async function mountDialog(config: ConnectionConfig, url = "", initiallyOpen = t
   return props;
 }
 
-async function mountNewDialog(url?: string) {
-  const props = reactive({ open: true, prefillConfig: url ? parseConnectionDeepLink(url) : null });
+async function mountNewDialog(url?: string, draft?: ConnectionDeepLinkDraft | null) {
+  const props = reactive({ open: true, prefillConfig: draft ?? (url ? parseConnectionDeepLink(url) : null) });
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -296,6 +297,40 @@ describe.each([
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  it("auto-submits a one-time DB2 link without dropping proxy JDBC properties", async () => {
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "db2", installed: true }]);
+    const params = new URLSearchParams({
+      type: "db2",
+      host: "127.0.0.1",
+      port: "5525",
+      user: "selector",
+      password: "proxy-secret",
+      database: "SAMPLE",
+      ssl: "false",
+      url_params: "securityMechanism=3;sslConnection=false;",
+      one_time: "true",
+    });
+
+    await mountNewDialog(`dbx://connection/new?${params}`);
+
+    await vi.waitFor(() => expect(store.addConnection).toHaveBeenCalledOnce());
+    expect(store.addConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "db2",
+        driver_profile: "db2",
+        host: "127.0.0.1",
+        port: 5525,
+        username: "selector",
+        password: "proxy-secret",
+        database: "SAMPLE",
+        ssl: false,
+        url_params: "securityMechanism=3;sslConnection=false;",
+        one_time: true,
+      }),
+      null,
+    );
+  });
+
   it.each([false, true])("prefills Kafka brokers and only saves on confirmation (SASL: %s)", async (sasl) => {
     store.connect.mockResolvedValue(undefined);
     backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "kafka", installed: true }]);
@@ -835,6 +870,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
     jdbcOption!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await settle();
+    expect(document.querySelector("#connection-parameters-open")).toBeTruthy();
     const url = [...document.querySelectorAll<HTMLInputElement>("input")].find((input) => input.placeholder.startsWith("jdbc:"));
     expect(url).toBeTruthy();
     url!.value = "jdbc:example://host/db";
@@ -1033,5 +1069,152 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
 
     expect(store.updateConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("JDBC connection parameter entry and driver metadata", () => {
+  it("uses the current unsaved JAR selection and applies a driver property to the connection draft", async () => {
+    backend.connectionParameters.mockResolvedValue({
+      available: true,
+      parameters: [{ name: "ApplicationName", type: "string", source: "driver", description: "Application name reported to the server." }],
+    });
+    await mountDialog(
+      savedConnection({
+        db_type: "jdbc",
+        driver_profile: "jdbc",
+        driver_label: "JDBC",
+        host: "",
+        port: 0,
+        connection_string: "jdbc:postgresql://localhost/example",
+        jdbc_driver_class: "org.postgresql.Driver",
+        jdbc_driver_paths: ["/old/driver.jar"],
+        url_params: "unknown=%2f",
+      }),
+    );
+    const classpath = document.querySelector<HTMLTextAreaElement>(`textarea[placeholder="${i18n.global.t("connection.jdbcDriverPathsPlaceholder")}"]`);
+    expect(classpath).toBeTruthy();
+    classpath!.value = " /new/postgresql.jar \n/new/helper.jar";
+    classpath!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const entry = document.querySelector<HTMLButtonElement>("#connection-parameters-open");
+    expect(entry).toBeTruthy();
+    entry!.click();
+    await settle();
+    expect(backend.connectionParameters).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "jdbc",
+        connection_string: "jdbc:postgresql://localhost/example",
+        jdbc_driver_class: "org.postgresql.Driver",
+        jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
+      }),
+    );
+    const property = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "ApplicationName");
+    expect(property).toBeTruthy();
+    property!.click();
+    await settle();
+    const input = document.getElementById("connection-parameter-value") as HTMLInputElement;
+    input.value = "DBX metadata";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const click = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === text)!.click();
+    click("Apply");
+    await settle();
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    click("Save");
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url_params: "unknown=%2f&ApplicationName=DBX%20metadata",
+        jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
+      }),
+    );
+  });
+});
+
+describe("ConnectionDialog plugin connection deep links", () => {
+  const sshProvider: ConnectionDeepLinkPluginProvider = {
+    pluginId: "io.dbx.ssh",
+    providerId: "io.dbx.ssh.connection",
+    label: "SSH server",
+    databaseType: "ssh",
+    defaultPort: 22,
+  };
+
+  const sshPlugin = {
+    manifest: {
+      id: "io.dbx.ssh",
+      name: "SSH",
+      version: "0.7.13",
+      contributions: [
+        {
+          type: "connection-provider",
+          id: "io.dbx.ssh.connection",
+          label: "SSH server",
+          database_type: "ssh",
+          fields: [
+            { key: "display_name", label: "Name", type: "text", binding: "name", required: true, default: "SSH server" },
+            { key: "host", label: "Host", type: "text", binding: "host", required: true, default: "127.0.0.1" },
+            { key: "port", label: "Port", type: "number", binding: "port", required: true, default: 22 },
+            { key: "username", label: "User", type: "text", binding: "username", required: true, default: "root" },
+            { key: "password", label: "Password", type: "password", binding: "password" },
+          ],
+        },
+      ],
+    },
+    compatibility: { compatible: true, errors: [] },
+  };
+
+  function sshDraft(): ConnectionDeepLinkDraft {
+    const draft = parseConnectionDeepLink("dbx://connection/new?v=1&type=ssh&host=10.0.0.9&port=2222&user=deploy&name=Prod%20SSH&one_time=true", { pluginProviders: [sshProvider] });
+    expect(draft?.pluginProvider).toBeTruthy();
+    return draft!;
+  }
+
+  it("selects the plugin provider and persists the prefilled endpoint as a plugin connection", async () => {
+    backend.listPlugins.mockResolvedValue([sshPlugin]);
+
+    await mountNewDialog(undefined, sshDraft());
+    await settle();
+
+    expect(store.addConnection).toHaveBeenCalledTimes(1);
+    expect(store.addConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        db_type: "plugin",
+        driver_profile: "plugin",
+        driver_label: "SSH server",
+        plugin_id: "io.dbx.ssh",
+        plugin_connection_provider: "io.dbx.ssh.connection",
+        plugin_connection_type: "ssh",
+        name: "Prod SSH",
+        host: "10.0.0.9",
+        port: 2222,
+        username: "deploy",
+      }),
+      null,
+    );
+  });
+
+  it("waits for the plugin list before persisting a one-time plugin link", async () => {
+    let resolvePlugins: (value: unknown) => void = () => {};
+    backend.listPlugins.mockReturnValue(new Promise((resolve) => (resolvePlugins = resolve as (value: unknown) => void)));
+
+    await mountNewDialog(undefined, sshDraft());
+    await settle();
+    // 插件表还没返回：不能提前存一条没有 provider 的连接。
+    expect(store.addConnection).not.toHaveBeenCalled();
+
+    resolvePlugins([sshPlugin]);
+    await settle();
+    expect(store.addConnection).toHaveBeenCalledWith(expect.objectContaining({ plugin_id: "io.dbx.ssh", host: "10.0.0.9" }), null);
+  });
+
+  it("keeps the draft open without persisting when the provider's plugin is not installed", async () => {
+    backend.listPlugins.mockResolvedValue([]);
+
+    const props = await mountNewDialog(undefined, sshDraft());
+    await settle();
+
+    expect(store.addConnection).not.toHaveBeenCalled();
+    expect(props.open).toBe(true);
   });
 });

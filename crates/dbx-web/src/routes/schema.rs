@@ -34,6 +34,8 @@ pub struct SchemaQuery {
     pub execution_id: Option<String>,
     pub identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     pub exact_identity: Option<bool>,
+    pub lightweight: Option<bool>,
+    pub page_table_roots: Option<bool>,
     pub separate_indexes: Option<bool>,
     pub explicit_owner: Option<String>,
 }
@@ -278,6 +280,20 @@ pub async fn list_tables(
         )
         .await
         .map_err(AppError::from)?
+    } else if q.page_table_roots.unwrap_or(false) {
+        dbx_core::schema::list_table_roots_page_core(
+            &state.app,
+            &q.connection_id,
+            database,
+            schema,
+            q.filter.as_deref(),
+            q.limit,
+            q.offset,
+            object_types.as_deref(),
+            table_name_filter.as_ref(),
+        )
+        .await
+        .map_err(AppError::from)?
     } else {
         dbx_core::schema::list_tables_core(
             &state.app,
@@ -361,7 +377,7 @@ pub async fn list_objects(
                 })
                 .collect::<Vec<_>>())
         } else {
-            dbx_core::schema::list_objects_core_with_options(
+            dbx_core::schema::list_objects_core_with_loading_options(
                 &state.app,
                 &connection_id,
                 &database,
@@ -372,6 +388,7 @@ pub async fn list_objects(
                 object_types.as_deref(),
                 table_name_filter.as_ref(),
                 &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog },
+                q.lightweight,
             )
             .await
         }
@@ -1279,6 +1296,17 @@ pub async fn list_event_triggers(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn object_loading_mode_is_optional_on_the_wire() {
+        let legacy: super::SchemaQuery = serde_json::from_value(serde_json::json!({"connection_id":"test"})).unwrap();
+        assert_eq!(legacy.lightweight, None);
+        for value in [true, false] {
+            let request: super::SchemaQuery =
+                serde_json::from_value(serde_json::json!({"connection_id":"test", "lightweight":value})).unwrap();
+            assert_eq!(request.lightweight, Some(value));
+        }
+    }
+
     use super::*;
 
     #[test]

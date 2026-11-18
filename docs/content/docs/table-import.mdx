@@ -31,7 +31,7 @@ Create-table mode accepts multiple files at once. Excel workbooks are expanded i
 | Parquet | `.parquet` files, available when the target connection is DuckDB |
 | Navicat backup | `.nb3` archives, available from the database-level entry of MySQL and PostgreSQL connections; see [Navicat Backups](#navicat-backups) |
 
-SQL import accepts only literal `INSERT INTO ... VALUES` rows. Expressions, `REPLACE`, `INSERT IGNORE`, `INSERT ... SELECT`, and other constructs that cannot be rewritten losslessly are rejected so data and statement semantics are preserved.
+SQL import accepts only literal `INSERT INTO ... VALUES` rows. Expressions, `REPLACE`, `INSERT IGNORE`, `INSERT ... SELECT`, and other constructs that cannot be rewritten losslessly are rejected so data and statement semantics are preserved. When a file cannot be previewed because it is not a single-table `INSERT` dump — a full-database export, for example, carries `CREATE` and `INSERT` statements for many tables — the dialog says so and offers **Execute SQL File**, which streams the script in chunks and suits large files.
 
 SQL import streams the script in chunks instead of loading it into memory, so there is no file-size limit and memory use stays flat on large dumps. The total row count is only known once the script has been scanned to the end, so progress during import is reported by bytes read and the row count appears when the import finishes. Because rows are written while the script is still being scanned, a statement that fails half-way leaves the rows already written in the target table; the preview step parses the entire script first, so a malformed dump is normally rejected before any data is written. Values written with date functions such as `TO_DATE` and `TO_TIMESTAMP` are imported as the text of their first argument, and the target column must be able to parse that format.
 
@@ -132,6 +132,10 @@ DBX exposes Table Import through the driver capability manifest. Only connection
 Being able to connect does not imply Table Import support. If the action is absent, check the database type, driver mode, and DBX version before treating it as a privilege problem.
 
 ## Failure and Cancellation
+
+### Continue After Failed Rows
+
+By default a failed statement aborts the whole import. **Continue after failed rows** changes that: a failed multi-row batch is retried row by row, and the import keeps going while every failed row is reported with its target table, source row number, and error. The summary shows "imported N rows, M failed", and the failed-row list (up to the first 1000 entries) can be copied for a follow-up fix. Rows in a failing batch are written one by one, so imports with errors run slower. The option is off by default.
 
 - Parsing failures usually indicate an incorrect encoding, delimiter, title row, JSON shape, or worksheet setting
 - Write failures usually come from type mismatches, required columns, key conflicts, privileges, or target schema differences

@@ -10,7 +10,7 @@ describe("mysqlConnectionOptions", () => {
   });
 
   it("enables the canonical cleartext password auth param and removes aliases", () => {
-    expect(setMysqlCleartextPasswordAuthEnabled("allowCleartextPasswords=true&charset=utf8mb4", true)).toBe("charset=utf8mb4&enable_cleartext_plugin=true");
+    expect(setMysqlCleartextPasswordAuthEnabled("allowCleartextPasswords=true&charset=utf8mb4", true)).toBe("enable_cleartext_plugin=true&charset=utf8mb4");
   });
 
   it("disables cleartext password auth params while preserving unrelated params", () => {

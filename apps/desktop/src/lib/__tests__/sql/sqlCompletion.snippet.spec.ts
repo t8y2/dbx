@@ -203,6 +203,26 @@ describe("buildSnippetItems", () => {
     expect(items[0].apply).toBe("SELECT *\nFROM ${table}\nLIMIT 7;");
   });
 
+  it.each([
+    ["single-line select for SQL Server", { ...BUILTIN_SELECT, body: "SELECT * FROM table LIMIT 100;" }, "sqlserver", "SELECT TOP 100 * FROM table;", "SELECT TOP 100 * FROM ${table};"],
+    ["single-line select for MySQL", { ...BUILTIN_SELECT, body: "SELECT * FROM table LIMIT 100;" }, "mysql", "SELECT * FROM table LIMIT 100;", "SELECT * FROM ${table} LIMIT 100;"],
+    ["re-wrapped select for Oracle", { ...BUILTIN_SELECT, body: "SELECT * FROM table\n  LIMIT 100;" }, "oracle", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
+    ["CRLF select for Oracle", { ...BUILTIN_SELECT, body: "SELECT *\r\nFROM table\r\nLIMIT 100;" }, "oracle", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
+    ["single-line update for ClickHouse", { ...BUILTIN_UPDATE, body: "UPDATE table SET column = value WHERE condition;" }, "clickhouse", "ALTER TABLE table UPDATE column = value WHERE condition;", "ALTER TABLE ${table} UPDATE ${column} = ${value} WHERE ${condition};"],
+    [
+      "re-indented CTE",
+      { ...BUILTIN_CTE, body: "WITH name AS (\n    SELECT columns\n    FROM table\n)\nSELECT *\nFROM name;" },
+      "oracle",
+      "WITH name AS (\n    SELECT columns\n    FROM table\n)\nSELECT *\nFROM name;",
+      "WITH ${name} AS (\n    SELECT ${columns}\n    FROM ${table}\n)\nSELECT *\nFROM ${name};",
+    ],
+  ] as const)("adapts a layout-only edit of a built-in snippet: %s", (_case, snippet, databaseType, detail, apply) => {
+    const items = buildSnippetItemsForTest(snippet.prefix, [snippet], undefined, databaseType);
+
+    expect(items[0].detail).toBe(detail);
+    expect(items[0].apply).toBe(apply);
+  });
+
   it("replaces placeholder words but preserves uppercase SQL keywords", () => {
     const items = buildSnippetItemsForTest("ct", [BUILTIN_CREATE_TABLE]);
 

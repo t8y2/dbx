@@ -87,6 +87,7 @@ const driverStoreTab = computed({
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { DriverStorePathInfo } from "@/lib/backend/api";
 import { driverRuntimeProtocolLabel } from "./driverRuntimeDisplay";
+import { showsInstalledJreRows } from "@/lib/driverStore/javaRuntimePanel";
 const settingsStore = useSettingsStore();
 
 type DriverStoreDirKind = "plugin" | "agent";
@@ -1595,7 +1596,7 @@ watch(driverStoreTab, (tab) => {
                 </Button>
               </div>
 
-              <div v-if="installedJres.length > 0" class="divide-y rounded-lg border bg-background/50">
+              <div v-if="showsInstalledJreRows(javaRuntimeConfig.mode, installedJres.length)" class="divide-y rounded-lg border bg-background/50">
                 <div v-for="jre in installedJres" :key="jre.key" class="flex items-center justify-between gap-3 px-3 py-2.5">
                   <div class="min-w-0">
                     <div class="text-sm font-medium">{{ t("driverStore.jreRuntimeTitle", { jre: jre.key }) }}</div>

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch, useId } from "vue";
 import { useI18n } from "vue-i18n";
-import { FolderOpen, FolderClosed, FileCode, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, ArrowDownAZ, ArrowUpAZ, GripVertical, Check } from "@lucide/vue";
+import { FolderOpen, FolderClosed, FileCode, FileSpreadsheet, FileText, ExternalLink, FolderPlus, ChevronRight, ChevronDown, X, Trash2, RefreshCw, FolderSearch, Copy, Play, ChevronsUpDown, ChevronsDownUp, Settings, FilePlus, Pencil, ArrowDownAZ, ArrowUpAZ, GripVertical, Check } from "@lucide/vue";
+
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -24,16 +25,18 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { forgetExternalSqlFileTarget, forgetExternalSqlFolderTargets, moveExternalSqlFileTarget, moveExternalSqlFolderTargets, resolveExternalSqlFileTargetForActiveTab } from "@/lib/sql/externalSqlFileTarget";
-import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath, normalizeExternalSqlPath, queryTabExternalFilePath, relocateExternalSqlPathWithinFolder } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath, isSqlOrScriptFilePath, isSpreadsheetFilePath, normalizeExternalSqlPath, queryTabExternalFilePath, relocateExternalSqlPathWithinFolder } from "@/lib/sql/sqlFileOpen";
+
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
 import { getSqlFileFoldersUiState, saveSqlFileFoldersUiState, type SqlFileFolderUiState } from "@/lib/sqlFile/sqlFileUiState";
 import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
-import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
+import { saveSqlFileOpenMode, useSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { getSqlFileOrder, saveSqlFileOrder, reorderSqlFiles, remapSqlFileOrder, sqlFileParentPath, type SqlFileOrder } from "@/lib/sqlFile/sqlFileOrder";
 import { useSqlFileReorder } from "@/composables/useSqlFileReorder";
+import SqlFileInteractionSettingsDialog from "@/components/layout/SqlFileInteractionSettingsDialog.vue";
 
 const props = defineProps<{ locateRequest?: { id: number; path: string } | null }>();
 
@@ -79,7 +82,7 @@ const currentFilePath = computed(() => {
 });
 const filterSettingsOpen = ref(false);
 const fileFilterDraft = ref(getSqlFileFilter());
-const openMode = ref<SqlFileOpenMode>(getSqlFileOpenMode());
+const openMode = useSqlFileOpenMode();
 const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
 const foldersRevision = ref(0);
 const treeId = useId();
@@ -134,6 +137,7 @@ const userCollapsedDuringSearch = ref<Set<string>>(new Set());
 
 watch([searchQuery, searchMode], () => {
   userCollapsedDuringSearch.value.clear();
+  lastClickedKey = null;
 });
 
 function setSortOrder(order: SqlFileSortOrder) {
@@ -208,6 +212,7 @@ function findFileTarget(filePath: string) {
 }
 
 async function locateFileTarget(path: string) {
+  lastClickedKey = null;
   if (disposed) return;
   const target = findFileTarget(path);
   if (!target) return;
@@ -312,6 +317,7 @@ async function locateCurrentFile() {
 }
 
 async function locateFile(path: string) {
+  lastClickedKey = null;
   if (disposed) return;
   if (findFileTarget(path)) {
     await locateFileTarget(path);
@@ -585,8 +591,28 @@ function collectDirPaths(entries: SqlFileEntry[], into: Set<string>) {
   }
 }
 
+async function openFileWithDefaultApp(path: string) {
+  if (!isTauriRuntime()) {
+    toast(t("sqlFileTree.desktopOnly"), 3000);
+    return;
+  }
+  try {
+    await api.openPathWithDefaultApp(path);
+  } catch (e: any) {
+    toast(t("sqlFileTree.openWithDefaultAppFailed", { message: translateBackendError(t, e) }), 5000);
+  }
+}
+
 async function openFile(path: string, reveal?: { line: number; column: number }) {
-  if (!isTauriRuntime()) return;
+  if (!isTauriRuntime()) {
+    toast(t("sqlFileTree.desktopOnly"), 3000);
+    return;
+  }
+  if (!isSqlOrScriptFilePath(path)) {
+    await openFileWithDefaultApp(path);
+    return;
+  }
+
   try {
     const snapshot = await api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
     const target = resolveExternalSqlFileTargetForActiveTab(path, queryStore.tabs, queryStore.activeTabId, (connectionId) => connectionStore.getConfig(connectionId));
@@ -602,6 +628,7 @@ async function openFile(path: string, reveal?: { line: number; column: number })
 }
 
 function handleSearchMatch(rootPath: string, path: string, match: SavedSqlLineMatch) {
+  lastClickedKey = null;
   const key = nodeKey(rootPath, "file", path);
   selectedKeys.value = new Set();
   activeKey.value = key;
@@ -907,7 +934,10 @@ function handlePathClick(rootPath: string, path: string, type: NodeKind, event: 
 
 function handlePanelClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null;
-  if (!target?.closest("[data-sql-file-row='true']")) clearSelection();
+  if (!target?.closest("[data-sql-file-row='true']")) {
+    clearSelection();
+    lastClickedKey = null;
+  }
 }
 
 function normalizedSqlFileName(name: string) {
@@ -1202,10 +1232,14 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
   }
 
   // file
-  const items: ContextMenuItem[] = [{ label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode }];
-  if (isSqlFilePath(target.entry.name)) {
-    items.push({ label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play });
-  }
+  const isScript = isSqlOrScriptFilePath(target.entry.name);
+  const items: ContextMenuItem[] = isScript
+    ? [
+        { label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode },
+        ...(isSqlFilePath(target.entry.name) ? [{ label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play }] : []),
+        { label: t("sqlFileTree.openWithDefaultApp"), action: () => openFileWithDefaultApp(target.entry.path), icon: ExternalLink },
+      ]
+    : [{ label: t("sqlFileTree.openWithDefaultApp"), action: () => openFileWithDefaultApp(target.entry.path), icon: ExternalLink }];
   items.push(
     { label: "", separator: true },
     { label: t("sqlFileTree.revealInFileManager"), action: () => revealInFileManager(target.entry.path), icon: FolderSearch },
@@ -1330,7 +1364,7 @@ function clearContextTarget() {
           @contextmenu.capture="contextTarget = { kind: 'panel' }"
           @contextmenu.prevent="
             contextTarget = { kind: 'panel' };
-            onContextMenu($event);
+            onContextMenu($event, contextMenuItems);
           "
         >
           <div v-if="folders.length === 0" class="flex-1 flex flex-col items-center justify-center gap-2 p-4 text-xs text-muted-foreground">
@@ -1356,10 +1390,10 @@ function clearContextTarget() {
                   contextTarget = { kind: 'folderHeader', folderPath: folder.path };
                   activeKey = nodeKey(folder.path, 'folderHeader', folder.path);
                 "
-                @contextmenu.prevent="
+                @contextmenu.prevent.stop="
                   contextTarget = { kind: 'folderHeader', folderPath: folder.path };
                   activeKey = nodeKey(folder.path, 'folderHeader', folder.path);
-                  onContextMenu($event);
+                  onContextMenu($event, contextMenuItems);
                 "
               >
                 <ChevronRight v-if="!isFolderContentVisible(folder)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1433,7 +1467,7 @@ function clearContextTarget() {
                       @contextmenu.prevent="
                         contextTarget = entry.is_dir ? { kind: 'dir', folderPath: folder.path, entry } : { kind: 'file', folderPath: folder.path, entry };
                         activeKey = nodeKey(folder.path, entry.is_dir ? 'dir' : 'file', entry.path);
-                        onContextMenu($event);
+                        onContextMenu($event, contextMenuItems);
                       "
                     >
                       <div v-if="fileDropTarget?.root === folder.path && fileDropTarget.path === entry.path" class="pointer-events-none absolute left-2 right-2 border-primary" :class="fileDropTarget.position === 'before' ? 'top-0 border-t-2' : 'bottom-0 border-b-2'" />
@@ -1445,7 +1479,9 @@ function clearContextTarget() {
                       </template>
                       <template v-else>
                         <span class="w-3.5 shrink-0" />
-                        <FileCode class="h-4 w-4 shrink-0 text-blue-500" />
+                        <FileSpreadsheet v-if="isSpreadsheetFilePath(entry.name)" class="h-4 w-4 shrink-0 text-emerald-500" />
+                        <FileCode v-else-if="isSqlOrScriptFilePath(entry.name)" class="h-4 w-4 shrink-0 text-blue-500" />
+                        <FileText v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
                       </template>
                       <span class="truncate ml-1 flex-1">{{ entry.name }}</span>
                       <template v-if="entry.is_dir">
@@ -1502,28 +1538,12 @@ function clearContextTarget() {
       </template>
     </CustomContextMenu>
 
-    <Dialog v-model:open="filterSettingsOpen">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{{ t("sqlFileTree.panelSettings") }}</DialogTitle>
-        </DialogHeader>
-        <div class="grid gap-2 py-2">
-          <Label for="sql-file-open-mode">{{ t("sqlFileTree.openMode") }}</Label>
-          <select id="sql-file-open-mode" v-model="openModeDraft" class="h-8 rounded-md border border-input bg-background px-2 text-sm">
-            <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
-            <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
-          </select>
-          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
-          <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
-          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
-          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" @click="filterSettingsOpen = false">{{ t("common.cancel") }}</Button>
-          <Button type="button" @click="saveFileFilter">{{ t("common.save") }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <SqlFileInteractionSettingsDialog v-model:open="filterSettingsOpen" v-model:open-mode="openModeDraft" @save="saveFileFilter">
+      <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
+      <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
+      <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
+      <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
+    </SqlFileInteractionSettingsDialog>
 
     <Dialog :open="showCreateDialog" @update:open="(open) => (showCreateDialog = open)">
       <DialogContent class="sm:max-w-[380px]">

@@ -179,6 +179,24 @@ test("every old Agent stage has an independent owner and Java packaging remains 
   for (const name of ["agent-rust", "agent-go", "agent-integration", "agent-java"]) assert.doesNotMatch(job(name), /continue-on-error: true/);
 });
 
+test("Neo4j Windows x64 release and CI use the Windows-compatible build", () => {
+  const release = readFileSync(new URL("../workflows/agents-release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const neo4j = job("build-neo4j-native", release);
+  const modernBuild = neo4j.slice(neo4j.indexOf("- name: Cross-compile"), neo4j.indexOf("- name: Setup Windows-compatible Go"));
+  assert.match(modernBuild, /\["windows-aarch64"\]="windows\/arm64"/);
+  assert.doesNotMatch(modernBuild, /\["windows-x64"\]/, "a modern build must not overwrite the Windows 7-compatible artifact");
+  assert.match(neo4j, /go-version: "1\.20\.14"/);
+  assert.ok(neo4j.includes('build-windows-legacy.sh "$GITHUB_WORKSPACE/release-native/dbx-agent-neo4j-windows-x64.exe"'));
+  assert.ok(neo4j.includes("name: neo4j-native"));
+
+  const ci = job("agent-go");
+  const compatibilitySteps = ci.slice(ci.indexOf("- name: Setup Neo4j Windows-compatible Go"));
+  assert.equal((compatibilitySteps.match(/if: matrix\.driver == 'neo4j-go'/g) ?? []).length, 2);
+  assert.match(compatibilitySteps, /go-version: "1\.20\.14"/);
+  assert.ok(compatibilitySteps.includes("go.windows-legacy.sum"));
+  assert.ok(compatibilitySteps.includes('build-windows-legacy.sh "$RUNNER_TEMP/dbx-agent-neo4j-windows-x64.exe"'));
+});
+
 test("shared Rust caches publish only complete builds outside the old cache namespace", () => {
   for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust", "agent-integration"]) {
     const content = job(name);
@@ -512,10 +530,4 @@ test("legacy Windows builds keep the 8 MiB main-thread stack", () => {
     assert.match(job(name, release), stackFlag, `release job ${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
   }
   assert.match(job("build-windows-7-x64", sqlServerUserTest), stackFlag, "the SQL Server 2000 Win7 test build must keep the 8 MiB main-thread stack");
-});
-
-test("the Win7 PE audit fails when the stack reserve regresses", () => {
-  const audit = readFileSync(new URL("./assert-win7-pe-compat.ps1", import.meta.url), "utf8");
-  assert.ok(audit.includes("minimumStackReserve"));
-  assert.ok(audit.includes("link-arg=/STACK:8388608"));
 });

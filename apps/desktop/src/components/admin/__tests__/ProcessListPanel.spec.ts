@@ -183,6 +183,17 @@ const oracleConnection: ConnectionConfig = {
   password: "",
 };
 
+const oracleJdbcConnection: ConnectionConfig = {
+  id: "oracle-jdbc-1",
+  name: "Oracle JDBC",
+  db_type: "jdbc",
+  connection_string: "jdbc:oracle:thin:@localhost:1521:xe",
+  host: "localhost",
+  port: 1521,
+  username: "APP",
+  password: "",
+};
+
 const oceanbaseConnection: ConnectionConfig = {
   id: "oceanbase-1",
   name: "OceanBase",
@@ -920,6 +931,13 @@ describe("ProcessListPanel batch terminate", () => {
     const managedSession = (lockQuery?.[5] as { clientSessionId?: string } | undefined)?.clientSessionId;
     expect(managedSession).toBeTruthy();
     expect(mocks.executeQuery.mock.calls.filter((call) => String(call[2]).includes("GV$SESSION")).every((call) => (call[5] as { clientSessionId?: string })?.clientSessionId === managedSession)).toBe(true);
+  });
+
+  it("mounts and renders process list for Oracle JDBC connections", async () => {
+    app = createApp(ProcessListPanel, { connection: oracleJdbcConnection });
+    app.mount(root!);
+    await vi.waitFor(() => expect(root?.querySelector("tbody")?.textContent).toContain("21"));
+    expect(mocks.executeQuery.mock.calls.some((call) => String(call[2]).includes("GV$SESSION"))).toBe(true);
   });
 
   it("terminates every selected session one by one after confirmation", async () => {

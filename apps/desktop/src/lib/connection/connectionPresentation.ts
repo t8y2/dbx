@@ -37,6 +37,13 @@ export function connectionEndpointLabel(connection?: ConnectionPresentationConfi
   return endpoint.host || connection.database || "";
 }
 
+export function connectionEndpointUserLabel(connection?: ConnectionPresentationConfig & Pick<ConnectionConfig, "username">): string {
+  const endpoint = connectionEndpointLabel(connection);
+  if (!endpoint) return "";
+  const username = connection?.username?.trim() ?? "";
+  return username ? `${endpoint}@${username}` : endpoint;
+}
+
 function normalizedPresentationEndpoint(connection: ConnectionPresentationConfig): { host: string; port: number } {
   if (connection.db_type !== "gaussdb") return { host: connection.host, port: connection.port };
   return serializeGaussdbHosts(parseGaussdbHosts(connection.host, connection.port));
@@ -223,6 +230,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
 
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";
+
+    case "databend":
+      return "databend://user:password@host:443/default?warehouse=default";
 
     case "sqlserver":
       return "mssql://user:password@host:port/database";

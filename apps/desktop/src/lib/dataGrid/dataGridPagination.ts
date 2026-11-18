@@ -142,7 +142,17 @@ export function hasCompleteLocalDataGridResult(options: CompleteLocalDataGridRes
   if (options.pageHasMore === false) return true;
 
   const pageLimit = Math.max(1, options.pageLimit);
-  if (options.rowCount < pageLimit) return true;
+  if (options.rowCount < pageLimit) {
+    // A short first page is normally the last page, but a known total that
+    // exceeds the rows already loaded means more data is still pending (the
+    // count and the loaded page disagree). Treating that as complete would
+    // make "export all" write only the loaded page instead of the full
+    // result. Keep this consistent with canGoNextDataGridPage, which uses
+    // totalRowCount the same way.
+    const shortPageTotal = options.totalRowCount;
+    if (typeof shortPageTotal === "number" && Number.isFinite(shortPageTotal) && shortPageTotal > options.rowCount) return false;
+    return true;
+  }
 
   const totalRowCount = options.totalRowCount;
   return typeof totalRowCount === "number" && Number.isFinite(totalRowCount) && totalRowCount >= 0 && options.rowCount >= totalRowCount;

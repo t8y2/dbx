@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, nextTick, shallowRef } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { dispatch, findAll, findOne, hostText, mountComponent, type HostNode } from "./vueHostHarness";
+import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
 const settingsMock = vi.hoisted(() => ({ store: null as any }));
@@ -200,7 +200,10 @@ describe("DataGridSearchBar", () => {
 });
 
 describe("DataGridPagination", () => {
-  it("shows average beside the existing selection summary values", () => {
+  beforeEach(() => {
+    settingsMock.store.editorSettings.dataGridSelectionSummaryMetric = "sum";
+  });
+  it("defaults the compact footer to sum and keeps other metrics in the popover", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
       selectionSummarySumText: "10",
@@ -218,13 +221,51 @@ describe("DataGridPagination", () => {
     });
 
     const summaryText = hostText(mounted.root);
-    expect(summaryText).toContain("grid.selectionSum");
-    expect(summaryText).toContain("grid.selectionAverage");
-    expect(summaryText).toContain("grid.selectionCells");
-    expect(summaryText).toContain("grid.rows");
+    expect(summaryText).toContain("grid.selectionStatisticsSum");
+    expect(summaryText).toContain("grid.selectionStatisticsAverage");
+    expect(summaryText).toContain("grid.selectionStatisticsCells");
+    expect(summaryText).toContain("grid.selectionStatisticsRows");
   });
 
-  it("shows min, max, count and distinct beside sum and average when numbers are selected (#13286)", () => {
+  it("saves the chosen footer metric and shares it with newly mounted grids", async () => {
+    const props = {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      selectionSummaryMinText: "1",
+      selectionSummaryMaxText: "4",
+      loadAllRowsActive: false,
+      loadAllRowsEnabled: true,
+      canLoadAllRows: true,
+      defaultPageSize: 100,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    };
+    const mounted = mountComponent(DataGridPagination, props);
+    const trigger = findOne(mounted.root, (node) => node.props["data-selection-summary-trigger"] === "");
+    expect(hostText(trigger)).toBe("grid.selectionStatisticsSum: 10");
+
+    const displaySelect = findOne(mounted.root, (node) => node.props["data-selection-summary-display-control"] === "");
+    mocks.updateSettings.mockImplementationOnce((partial) => Object.assign(settingsMock.store.editorSettings, partial));
+    displaySelect.props["onUpdate:modelValue"]("average");
+    await nextTick();
+    expect(mocks.updateSettings).toHaveBeenCalledWith({ dataGridSelectionSummaryMetric: "average" });
+    expect(displaySelect.props["model-value"]).toBe("average");
+    expect(hostText(trigger)).toBe("grid.selectionStatisticsAverage: 2.5");
+
+    const secondGrid = mountComponent(DataGridPagination, props);
+    const secondTrigger = findOne(secondGrid.root, (node) => node.props["data-selection-summary-trigger"] === "");
+    expect(hostText(secondTrigger)).toBe("grid.selectionStatisticsAverage: 2.5");
+  });
+
+  it("shows all metrics as labeled rows inside the statistics popover (#13286)", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
       selectionSummarySumText: "10",
@@ -246,10 +287,10 @@ describe("DataGridPagination", () => {
     });
 
     const summaryText = hostText(mounted.root);
-    expect(summaryText).toContain("grid.selectionMin");
-    expect(summaryText).toContain("grid.selectionMax");
-    expect(summaryText).toContain("grid.selectionCount");
-    expect(summaryText).toContain("grid.selectionDistinct");
+    expect(summaryText).toContain("grid.selectionStatisticsMin");
+    expect(summaryText).toContain("grid.selectionStatisticsMax");
+    expect(summaryText).toContain("grid.selectionStatisticsCount");
+    expect(summaryText).toContain("grid.selectionStatisticsDistinct");
   });
 
   it("keeps the loading icon mounted with a constant footprint and only animates while loading", async () => {
@@ -478,12 +519,16 @@ describe("DataGridPagination", () => {
     expect(exportMenus).toHaveLength(1);
   });
 
-  it("copies each aggregate value on click, and only the values", () => {
+  it("keeps metric selection separate from full-width copy rows", () => {
     const copySelectionSummary = vi.fn();
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
       selectionSummarySumText: "10",
       selectionSummaryAverageText: "2.5",
+      selectionSummaryMinText: "1",
+      selectionSummaryMaxText: "4",
+      selectionSummaryCount: 4,
+      selectionSummaryDistinctCount: 3,
       loading: false,
       infiniteScrollEnabled: false,
       infiniteScrollAllLoaded: false,
@@ -503,18 +548,25 @@ describe("DataGridPagination", () => {
     // the complete button interaction model on a clickable text span.
     expect(sum.type).toBe("button");
     expect(average.type).toBe("button");
-    expect(sum.props.title).toBe("grid.copyValue: grid.selectionSum");
+    expect(sum.props.title).toBe("grid.copyValue: grid.selectionStatisticsSum: 10");
     expect(hostText(sum)).toContain("grid.copyValue");
 
-    dispatch(sum, "click");
-    expect(copySelectionSummary).toHaveBeenCalledWith("10");
-
-    dispatch(average, "click");
-    expect(copySelectionSummary).toHaveBeenLastCalledWith("2.5");
-    expect(copySelectionSummary).toHaveBeenCalledTimes(2);
+    const expectedValues = { sum: "10", average: "2.5", min: "1", max: "4", count: "4", distinct: "3", cells: "4", rows: "2" };
+    for (const [key, value] of Object.entries(expectedValues)) {
+      const row = findOne(mounted.root, (node) => node.props["data-selection-summary-copy"] === key);
+      expect(row.type).toBe("button");
+      dispatch(row, "click");
+      expect(copySelectionSummary).toHaveBeenLastCalledWith(value);
+    }
+    expect(copySelectionSummary).toHaveBeenCalledTimes(8);
+    expect(findAll(mounted.root, (node) => node.props.type === "radio")).toHaveLength(0);
+    const displaySelect = findOne(mounted.root, (node) => node.props["data-selection-summary-display-control"] === "");
+    expect(findAll(mounted.root, (node) => node.type === "select")).toHaveLength(0);
+    displaySelect.props["onUpdate:modelValue"]("sum");
+    expect(copySelectionSummary).toHaveBeenCalledTimes(8);
   });
 
-  it("lets long aggregates shrink so load-all and export stay in the footer (#13468)", () => {
+  it("caps the chosen aggregate width and keeps full values readable in the popover (#13468)", () => {
     const longValue = "2026102710000008194";
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 1, rowCount: 1 },
@@ -537,27 +589,23 @@ describe("DataGridPagination", () => {
       canJumpLastPage: true,
     });
 
-    const classes = (node: HostNode) => String(node.props.class).split(/\s+/);
-    const sum = findOne(mounted.root, (node) => node.props["data-selection-summary-sum"] === "");
-    const summaryGroup = sum.parent!;
-    const bar = summaryGroup.parent!;
-    // The status bar caps this column at the space left over, so the bar itself must be
-    // allowed to be narrower than its content instead of forcing max-content width.
-    expect(classes(bar)).toContain("min-w-0");
-    expect(classes(bar)).not.toContain("min-w-max");
+    const trigger = findOne(mounted.root, (node) => node.props["data-selection-summary-trigger"] === "");
+    expect(hostText(trigger)).toBe(`grid.selectionStatisticsSum: ${longValue}`);
+    expect(hostText(trigger)).not.toContain("grid.selectionStatisticsAverage");
+    expect(trigger.props.title).toContain(longValue);
+    expect(trigger.props["aria-label"]).toBe("grid.selectionStatistics");
 
-    const aggregates = ["sum", "average", "min", "max"].map((key) => findOne(mounted.root, (node) => node.props[`data-selection-summary-${key}`] === ""));
+    const details = findOne(mounted.root, (node) => node.props["data-selection-summary-details"] === "");
+    expect(details.props.side).toBe("top");
+    expect(findAll(details, (node) => node.type === "dt")).toHaveLength(8);
+    expect(findAll(details, (node) => node.type === "dd")).toHaveLength(8);
+    const aggregates = ["sum", "average", "min", "max"].map((key) => findOne(details, (node) => node.props[`data-selection-summary-${key}`] === ""));
     for (const aggregate of aggregates) {
-      expect(classes(aggregate)).toEqual(expect.arrayContaining(["min-w-0", "truncate"]));
-      expect(classes(aggregate)).not.toContain("shrink-0");
+      expect(hostText(aggregate)).toContain(longValue);
     }
-    expect(classes(summaryGroup)).toEqual(expect.arrayContaining(["min-w-0", "overflow-hidden"]));
-    expect(classes(summaryGroup)).not.toContain("shrink-0");
-    // Truncated text stays readable on hover.
-    expect(sum.props.title).toBe("grid.copyValue: grid.selectionSum");
 
     const loadAll = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow");
-    expect(classes(loadAll)).toContain("shrink-0");
+    expect(loadAll.props.disabled).toBe(false);
   });
 
   it("keeps the aggregate values non-copyable while the selection drag is pending", () => {
@@ -584,6 +632,10 @@ describe("DataGridPagination", () => {
     // Pending aggregate placeholders retain their layout but expose no copy action.
     expect(sum.props.title).toBeUndefined();
     expect(sum.props.disabled).toBe(true);
+    const count = findOne(mounted.root, (node) => node.props["data-selection-summary-value"] === "count");
+    const distinct = findOne(mounted.root, (node) => node.props["data-selection-summary-value"] === "distinct");
+    expect(hostText(count)).toBe("…");
+    expect(hostText(distinct)).toBe("…");
 
     dispatch(sum, "click");
     expect(copySelectionSummary).not.toHaveBeenCalled();
@@ -1535,6 +1587,88 @@ describe("DataGridQueryControls", () => {
     expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
+  it("summarizes complete structured rules per field and drops one from its × (#14969)", async () => {
+    const removeRule = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["order_no", "status"],
+      conditionColumns: ["order_no", "status"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: true,
+      filterButtonCount: 2,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [
+        { id: "r1", columnName: "order_no", mode: "equals", rawValue: "1001", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "status", mode: "between", rawValue: "1", rawEndValue: "9", conjunction: "AND" },
+        // An incomplete rule (no value yet) must not show up in the summary.
+        { id: "r3", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" },
+        // A disabled rule is not part of the active filter either.
+        { id: "r4", columnName: "order_no", mode: "equals", rawValue: "x", rawEndValue: "", conjunction: "AND", disabled: true },
+      ],
+      filteredColumns: ["order_no", "status"],
+      modeOptions: [
+        { value: "equals", labelKey: "grid.filterBuilderEquals" },
+        { value: "between", labelKey: "grid.filterBuilderBetween" },
+      ],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onRemoveRule: removeRule,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.structuredFiltersActive");
+    expect(hostText(mounted.root)).toContain("order_no");
+    expect(hostText(mounted.root)).toContain("grid.filterBuilderEquals");
+    expect(hostText(mounted.root)).toContain("1001");
+    // Range conditions summarize both bounds.
+    expect(hostText(mounted.root)).toContain("1 ~ 9");
+
+    // Each field row's × removes exactly that rule.
+    const fieldRows = findAll(mounted.root, (node) => node.type === "div" && String(node.props.class ?? "").includes("border-sky-500/10"));
+    expect(fieldRows).toHaveLength(2);
+    const dropButton = findOne(fieldRows[0], (node) => node.type === "button");
+    dispatch(dropButton, "click");
+    expect(removeRule).toHaveBeenCalledExactlyOnceWith("r1");
+  });
+
+  it("omits the structured summary block when no rule is active (#14969)", () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "grid.filterBuilderEquals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    expect(hostText(mounted.root)).not.toContain("grid.structuredFiltersActive");
+  });
+
   it("forwards database value suggestions in the quick filter popover", () => {
     const openValueSuggestions = vi.fn();
     const closeValueSuggestions = vi.fn();
@@ -1690,6 +1824,75 @@ describe("DataGridQueryControls", () => {
     dispatch(filterButtons[0], "click");
     expect(updateFilterBuilderOpen).toHaveBeenCalledWith(true);
     expect(ensureRule).toHaveBeenCalledOnce();
+  });
+
+  it("hides order by pane and expands where pane when showOrderBy is false", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      showOrderBy: false,
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    const wherePane = findOne(mounted.root, (node) => String(node.props.class).includes("flex flex-1 items-center gap-1"));
+    expect(wherePane.props.style).toEqual({ flex: "1 1 100%", width: "100%" });
+    const resizeButton = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "Resize WHERE and ORDER BY");
+    expect(resizeButton).toHaveLength(0);
+    const sortButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderTitle");
+    expect(sortButtons).toHaveLength(0);
+    const orderInputs = findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridConditionEditor" && node.props.kind === "orderBy");
+    expect(orderInputs).toHaveLength(0);
+  });
+
+  it("applies custom wherePaneRatio to where pane style", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      showOrderBy: true,
+      wherePaneRatio: 0.6,
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    const wherePane = findOne(mounted.root, (node) => String(node.props.class).includes("flex flex-1 items-center gap-1"));
+    expect(String(wherePane.props.style?.flex)).toContain("60%");
   });
 });
 

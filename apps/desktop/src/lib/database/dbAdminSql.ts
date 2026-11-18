@@ -1,7 +1,10 @@
 import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
+import { tableDataCopyColumnOptions } from "@/lib/table/tableClipboard";
+import { isMissingKingbaseCatalogOid, isUnsupportedKingbaseTableComment } from "./kingbaseCatalogCompatibility";
 import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseTableClone";
 
 export interface DropObjectSqlOptions {
@@ -25,6 +28,31 @@ export interface TableAdminSqlOptions {
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
    * table-data SQL options. */
   identifierQuote?: string;
+  /** The relation is a foreign table (PostgreSQL `relkind = 'f'`). PostgreSQL rejects `DROP TABLE`
+   * for those and needs `DROP FOREIGN TABLE`, so the drop statement follows the relation kind. */
+  foreignTable?: boolean;
+}
+
+/**
+ * Table admin SQL options for one Object Browser row.
+ *
+ * Lives here rather than inline in the component so the row → statement mapping is
+ * testable without mounting the browser. The foreign-table flag must come from the
+ * row's preserved `foreignTable` field, never from `row.type`: the row type
+ * normalizer folds a PostgreSQL foreign table into "TABLE", so a type check would
+ * miss it and the drop would fall back to `DROP TABLE`, which the server rejects
+ * (#14717 review).
+ */
+export function tableAdminSqlOptionsForRow(options: { row: { name: string; schema?: string | null; foreignTable?: boolean }; databaseType?: DatabaseType; schema?: string | null; identifierQuote?: string; cascade?: boolean }): TableAdminSqlOptions {
+  const result: TableAdminSqlOptions = {
+    databaseType: options.databaseType,
+    schema: options.schema,
+    tableName: options.row.name,
+    identifierQuote: options.identifierQuote,
+  };
+  if (options.cascade) result.cascade = true;
+  if (options.row.foreignTable) result.foreignTable = true;
+  return result;
 }
 
 export interface VacuumTableSqlOptions {
@@ -101,12 +129,15 @@ export interface DuplicateTableStructurePlanOptions extends DuplicateTableStruct
   database: string;
   catalog?: string;
   sourceColumns?: ColumnInfo[];
+  copyData?: boolean;
 }
 
 export interface DuplicateTableStructurePlan {
   sql: string;
   sourceColumns?: ColumnInfo[];
   executeAsScript: boolean;
+  /** True when the clone ran without enough Kingbase metadata to guarantee comment preservation. */
+  commentMetadataIncomplete?: boolean;
   oceanbaseClone?: OceanbaseTableClone;
 }
 
@@ -168,14 +199,6 @@ export function oracleDuplicateTableCreateOptions(options: { schema?: string | n
   };
 }
 
-function damengDuplicateTableName(targetName: string): string {
-  const hasLower = /[a-z]/.test(targetName);
-  const hasUpper = /[A-Z]/.test(targetName);
-  const hasSpecial = /[^a-zA-Z0-9_$#]/.test(targetName);
-  const hasInvalidStart = !/^[a-zA-Z_]/.test(targetName);
-  return (hasLower && hasUpper) || hasSpecial || hasInvalidStart ? targetName : targetName.toUpperCase();
-}
-
 function damengCloneIndexName(targetName: string, index: number): string {
   const normalized =
     targetName
@@ -200,7 +223,7 @@ export function damengDuplicateTableCreateOptions(options: { schema?: string | n
   return {
     databaseType: "dameng",
     schema: options.schema || undefined,
-    tableName: damengDuplicateTableName(options.targetName),
+    tableName: options.targetName,
     tableComment: options.tableComment || undefined,
     columns: createColumnDrafts(options.columns, "dameng").map((column, index) => ({
       ...column,
@@ -329,20 +352,52 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     return { sql, sourceColumns: columns, executeAsScript: primaryKeyColumns.length > 0 || !!tableComment?.trim() || columnComments.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
-  let sourceColumns = options.sourceColumns;
-  if (options.databaseType === "vastbase" || options.databaseType === "oscar") {
-    sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+  const isKingbase = options.databaseType === "kingbase";
+  const copyColumnComments = options.databaseType === "vastbase" || options.databaseType === "oscar" || isKingbase;
+  const schema = options.schema || "";
+  const columns = options.sourceColumns;
+  let commentMetadataIncomplete = false;
+  const loadColumns = async () => {
+    if (columns || !copyColumnComments) return columns;
+    try {
+      return await api.getColumns(options.connectionId, options.database, schema, options.sourceName, options.catalog);
+    } catch (error) {
+      if (isKingbase && !options.copyData && isMissingKingbaseCatalogOid(error)) {
+        commentMetadataIncomplete = true;
+        return undefined;
+      }
+      throw error;
+    }
+  };
+  const tableCommentPromise =
+    isKingbase && options.tableComment == null
+      ? api.getTableComment(options.connectionId, options.database, schema, options.sourceName, options.catalog).catch((error) => {
+          if (isUnsupportedKingbaseTableComment(error)) {
+            commentMetadataIncomplete = true;
+            return null;
+          }
+          throw error;
+        })
+      : options.tableComment;
+  const [sourceColumns, tableComment] = await Promise.all([loadColumns(), tableCommentPromise]);
+  if (isKingbase && options.copyData && tableDataCopyColumnOptions("kingbase", sourceColumns ?? []).columns.length === 0) {
+    throw new Error("No writable columns available for table data copy.");
   }
   const sql = await buildDuplicateTableStructureSql({
     databaseType: options.databaseType,
     schema: options.schema,
     sourceName: options.sourceName,
     targetName: options.targetName,
-    tableComment: options.tableComment,
-    columnComments: options.databaseType === "vastbase" || options.databaseType === "oscar" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
+    tableComment,
+    columnComments: copyColumnComments ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
-  return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
+  return {
+    sql,
+    sourceColumns,
+    executeAsScript: duplicateTableStructureRequiresScript(sql),
+    ...(commentMetadataIncomplete ? { commentMetadataIncomplete: true } : {}),
+  };
 }
 
 export interface CopyTableDataSqlOptions {
@@ -462,6 +517,15 @@ export function buildSetSchemaCommentSql(options: SchemaCommentSqlOptions): stri
 
 export function buildDuplicateTableStructureSql(options: DuplicateTableStructureSqlOptions): Promise<string> {
   return api.buildDuplicateTableStructureSql(options);
+}
+
+export function kingbaseDuplicateStructureTransaction(plan: DuplicateTableStructurePlan, { databaseType, connectionId, database, schema, catalog }: Pick<DuplicateTableStructurePlanOptions, "databaseType" | "connectionId" | "database" | "schema" | "catalog">) {
+  if (databaseType !== "kingbase" || !plan.executeAsScript) return undefined;
+
+  return () => {
+    const statements = splitSqlStatementRanges(plan.sql, "kingbase").map(({ sql }) => sql);
+    return api.executeInTransaction(connectionId, database, statements, schema ?? undefined, catalog);
+  };
 }
 
 export function duplicateTableStructureRequiresScript(sql: string): boolean {

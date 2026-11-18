@@ -24,6 +24,11 @@ linker = "rust-lld"
 # paths pull in deep serde/driver call stacks. This embeds the size in the PE.
 rustflags = ["-C", "link-arg=/STACK:8388608"]
 
+# Native ARM64 builds need the same main-thread stack as x64. Without this,
+# opening a query can exhaust the linker's 1 MiB default stack (#13917).
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
 # The legacy Windows 7 / Server 2012 R2 target keeps the same 8 MiB main-thread
 # stack. CI builds it with an explicit RUSTFLAGS env (static CRT), which
 # replaces this table, so the same link arg is repeated in those workflows and

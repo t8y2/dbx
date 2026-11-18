@@ -19,8 +19,8 @@ describe("MySQL data charset", () => {
   it("round trips edits and removes only its own option for default", () => {
     const saved = setMysqlDataCharset("?charset=utf8mb4&timeout=10", "gbk");
     expect(mysqlDataCharset(saved)).toBe("GBK");
-    expect(setMysqlDataCharset(saved, "default")).toBe("charset=utf8mb4&timeout=10");
-    expect(setMysqlDataCharset("DATACHARSET=gbk&dataCharset=big5&timeout=10", "GB18030")).toBe("timeout=10&dataCharset=GB18030");
+    expect(setMysqlDataCharset(saved, "default")).toBe("?charset=utf8mb4&timeout=10");
+    expect(setMysqlDataCharset("DATACHARSET=gbk&dataCharset=big5&timeout=10", "GB18030")).toBe("dataCharset=GB18030&timeout=10");
   });
   it.each(["GBK", "gb18030", "bIg5"])("accepts explicit %s without changing session settings", (codec) => {
     expect(mysqlDataCharsetValidation({ db_type: "mysql", url_params: `dataCharset=${codec}` })).toBeUndefined();

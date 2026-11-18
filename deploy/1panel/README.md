@@ -18,4 +18,4 @@ Supported databases: MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHou
 
 - GitHub: https://github.com/t8y2/dbx
 - Discord: https://discord.gg/W7NyVDRt6a
-- QQ 群: 1087880322
+- QQ 群: 244975070

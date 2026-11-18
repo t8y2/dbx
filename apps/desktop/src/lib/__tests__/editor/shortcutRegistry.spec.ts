@@ -14,6 +14,7 @@ import {
   MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
   normalizeShortcutSettings,
+  readNormalizedShortcutSettings,
   resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
   selectLineEndsDefaultShortcut,
@@ -52,6 +53,17 @@ describe("shortcutRegistry editor actions", () => {
     "unfoldAll",
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
+
+  it("registers convert-selection-to-delimited as an editor shortcut", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "convertSelectionToDelimited")).toMatchObject({
+      id: "convertSelectionToDelimited",
+      labelKey: "settings.shortcutConvertSelectionToDelimited",
+      scope: "editor",
+      defaultShortcut: "Mod+Alt+,",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.convertSelectionToDelimited).toBe("Mod+Alt+,");
+    expect(shortcutToCodeMirrorKey("Mod+Alt+,")).toBe("Mod-Alt-,");
+  });
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -227,6 +239,22 @@ describe("shortcutRegistry editor actions", () => {
     expect(start).toMatchObject({ labelKey: "settings.shortcutStatementStart", scope: "editor", defaultShortcut: "Alt+Home" });
 
     for (const id of ["previousStatement", "nextStatement", "statementStart"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
+  it("registers conflict-free line bookmark shortcuts", () => {
+    const toggle = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleBookmark");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextBookmark");
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousBookmark");
+
+    expect(toggle).toMatchObject({ labelKey: "settings.shortcutToggleBookmark", scope: "editor", defaultShortcut: "Mod+F2" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextBookmark", scope: "editor", defaultShortcut: "F2" });
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousBookmark", scope: "editor", defaultShortcut: "Shift+F2" });
+
+    for (const id of ["toggleBookmark", "nextBookmark", "previousBookmark"] as const) {
       expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
       expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
       expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
@@ -837,5 +865,44 @@ describe("shortcutRegistry editor actions", () => {
       const settings = settingsWith({ globalSearch: "Mod+Alt+F" });
       expect(findShortcutConflict("quickOpen", "Alt Alt", settings, "Win32")).toBeNull();
     });
+  });
+});
+
+describe("normalized shortcut table cache", () => {
+  const platform = "Win32";
+
+  it("returns a fresh, mutable copy on every call", () => {
+    const first = normalizeShortcutSettings({}, platform);
+    first.executeSql = "Mod+Alt+Shift+9";
+    expect(normalizeShortcutSettings({}, platform).executeSql).not.toBe("Mod+Alt+Shift+9");
+  });
+
+  it("follows in-place edits of the same settings object", () => {
+    const settings: Partial<ShortcutSettings> = { executeSql: "Mod+Alt+7" };
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe("Mod+Alt+7");
+    settings.executeSql = "Mod+Alt+8";
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe("Mod+Alt+8");
+    delete settings.executeSql;
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe(normalizeShortcutSettings({}, platform).executeSql);
+  });
+
+  it("keeps platform-specific results apart", () => {
+    const settings: Partial<ShortcutSettings> = {};
+    const win = readNormalizedShortcutSettings(settings, "Win32");
+    const mac = readNormalizedShortcutSettings(settings, "MacIntel");
+    expect(win).toEqual(normalizeShortcutSettings(settings, "Win32"));
+    expect(mac).toEqual(normalizeShortcutSettings(settings, "MacIntel"));
+  });
+
+  it("shares one frozen table between read-only callers", () => {
+    const settings: Partial<ShortcutSettings> = { executeSql: "Mod+Alt+6" };
+    const shared = readNormalizedShortcutSettings(settings, platform);
+    expect(readNormalizedShortcutSettings({ ...settings }, platform)).toBe(shared);
+    expect(Object.isFrozen(shared)).toBe(true);
+  });
+
+  it("treats non-string configured values as unset", () => {
+    const withBogus = { executeSql: 42 } as unknown as Partial<ShortcutSettings>;
+    expect(normalizeShortcutSettings(withBogus, platform)).toEqual(normalizeShortcutSettings({}, platform));
   });
 });

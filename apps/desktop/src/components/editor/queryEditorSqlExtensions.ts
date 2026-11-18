@@ -5,15 +5,18 @@ import { type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, statementGutterStartIndexHasStartAt } from "@/lib/sql/executableStatementRangeCache";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
-import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
+import { expandToBoundedSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
-import { getSqlFunctionSignatureHelp } from "@/lib/sql/sqlCompletion";
+import { buildSqlProcedureSignatureHelp, getSqlFunctionSignatureHelp } from "@/lib/sql/sqlCompletion";
 import { shellLineCommentTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom } from "@/lib/editor/codemirrorStatementGutter";
 import { compareSqlCompletions } from "@/lib/editor/sqlCompletionPresentation";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlights";
+import { elasticsearchLanguage } from "@/lib/elasticsearch/elasticsearchLanguage";
 import { createDbxCodeMirrorSqlDialect, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
+import { createLargeDocumentSqlLanguage } from "@/lib/editor/codemirrorLargeDocumentSqlLanguage";
+import { createSqlWindowTreeParser } from "@/lib/editor/codemirrorSqlWindowTree";
 import { graphQueryLanguage, isGraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
 import { getGraphFunctionSignatureHelp } from "@/lib/graph/graphSignatureHelp";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
@@ -57,10 +60,27 @@ interface QueryEditorSqlExtensionsOptions {
   executeSqlStatementFromGutter: (view: EditorViewType, line: { from: number; to: number }, event: Event) => boolean;
   signatureHelpWindowChars: number;
   boundedAnalysisEnabled: () => boolean;
+  /** False once the document is too large for the full Lezer grammar; a lighter stream tokenizer takes over. */
+  syntaxParsingEnabled: () => boolean;
 }
 
 export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensionsOptions) {
-  const { props, runtime: codeMirrorRuntime, settingsStore, t, sqlBehaviorDialect, sqlDriverProfile, sqlStatementParameterOptions, queryEditorSelectionLanguage, cache, batchSelection, currentExecutableStatementRange, executeSqlStatementFromGutter, boundedAnalysisEnabled } = options;
+  const {
+    props,
+    runtime: codeMirrorRuntime,
+    settingsStore,
+    t,
+    sqlBehaviorDialect,
+    sqlDriverProfile,
+    sqlStatementParameterOptions,
+    queryEditorSelectionLanguage,
+    cache,
+    batchSelection,
+    currentExecutableStatementRange,
+    executeSqlStatementFromGutter,
+    boundedAnalysisEnabled,
+    syntaxParsingEnabled,
+  } = options;
   const { EditorView, Decoration, StateField, StateEffect, GutterMarker, RangeSet, lineNumberMarkers, gutter, showTooltip, autocompletion, ViewPlugin, highlightingFor, syntaxTree, langSql, Prec, EditorState, ensureSyntaxTree, layer, RectangleMarker } = options.modules;
   const { provideSqlCompletions } = options.completion;
   const { renderBatchColumnSelectionActionMarker, renderBatchColumnSelectionCheckbox } = batchSelection;
@@ -69,6 +89,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   const SQL_SIGNATURE_HELP_WINDOW_CHARS = options.signatureHelpWindowChars;
 
   const diagnosticTheme = EditorView.baseTheme({
+    ".cm-sql-error.cm-sql-error.cm-sql-error, .cm-sql-error.cm-sql-error.cm-sql-error *": {
+      color: "var(--dbx-editor-diagnostic-error, var(--dbx-sql-unknown-object-color, #e5484d)) !important",
+    },
     ".cm-sql-error": {
       textDecoration: "underline wavy var(--dbx-editor-diagnostic-error, var(--destructive))",
       textUnderlineOffset: "3px",
@@ -299,16 +322,84 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   codeMirrorRuntime.buildSqlSignatureExtension = () => {
     if (!supportsQueryEditorSqlLanguage(props.databaseType)) return [];
-    return showTooltip.compute(["doc", "selection"], (currentState) => {
+    const { getProcedureCall, loadProcedureSignatures } = options.completion;
+    const readCall = (currentState: import("@codemirror/state").EditorState) => {
       const cursor = currentState.selection.main.head;
       // Signature detection only scans backward from the cursor, so window the
       // text instead of materializing the whole document prefix on every
       // keystroke — doc.toString() was O(document) per key on large scripts.
       const windowFrom = Math.max(0, cursor - SQL_SIGNATURE_HELP_WINDOW_CHARS);
       const source = currentState.doc.sliceString(windowFrom, cursor);
+      return { cursor, source, truncatedPrefix: windowFrom > 0 };
+    };
+    const readProcedure = (state: import("@codemirror/state").EditorState) => {
+      const { source, truncatedPrefix } = readCall(state);
+      const call = isGraphQueryDatabase(props.databaseType) ? null : getProcedureCall(source, truncatedPrefix);
+      return call && { call, source };
+    };
+    const procedureCall = StateField.define({
+      create: readProcedure,
+      update: (previous, transaction) => (transaction.docChanged || transaction.selection ? readProcedure(transaction.state) : previous),
+    });
+    type ProcedureSignatures = { name: string; signatures: string[] };
+    const setProcedureSignatures = StateEffect.define<ProcedureSignatures>();
+    const procedureSignatures = StateField.define<ProcedureSignatures | null>({
+      create: () => null,
+      update(previous, transaction) {
+        for (const effect of transaction.effects) {
+          if (effect.is(setProcedureSignatures)) return effect.value;
+        }
+        return previous;
+      },
+    });
+    const procedureLookup = ViewPlugin.fromClass(
+      class {
+        private pending: { name: string } | null = null;
+
+        constructor(view: EditorViewType) {
+          this.lookup(view);
+        }
+
+        update(update: import("@codemirror/view").ViewUpdate) {
+          if (update.docChanged || update.selectionSet || update.focusChanged) this.lookup(update.view);
+        }
+
+        destroy() {
+          this.pending = null;
+        }
+
+        private lookup(view: EditorViewType) {
+          const procedure = view.state.field(procedureCall);
+          if (!procedure || !view.hasFocus) {
+            this.pending = null;
+            return;
+          }
+          const { call, source } = procedure;
+          if (this.pending?.name === call.name) return;
+          this.pending = null;
+          if (view.state.field(procedureSignatures)?.name === call.name) return;
+          const request = { name: call.name };
+          this.pending = request;
+          void loadProcedureSignatures(call, source)
+            .then((signatures) => {
+              if (this.pending !== request) return;
+              this.pending = null;
+              if (!signatures) return;
+              view.dispatch({ effects: setProcedureSignatures.of({ name: request.name, signatures }) });
+            })
+            .catch(() => {
+              if (this.pending === request) this.pending = null;
+            });
+        }
+      },
+    );
+    const tooltip = showTooltip.compute(["doc", "selection", procedureCall, procedureSignatures], (currentState) => {
+      const { cursor, source, truncatedPrefix } = readCall(currentState);
+      const procedure = currentState.field(procedureCall);
+      const loaded = currentState.field(procedureSignatures);
       const signature = isGraphQueryDatabase(props.databaseType)
-        ? getGraphFunctionSignatureHelp(source, cursor - windowFrom, props.databaseType, { truncatedPrefix: windowFrom > 0 })
-        : getSqlFunctionSignatureHelp(source, cursor - windowFrom, options.sqlFunctionDatabaseType?.() ?? props.databaseType, sqlDriverProfile.value, { truncatedPrefix: windowFrom > 0 });
+        ? getGraphFunctionSignatureHelp(source, source.length, props.databaseType, { truncatedPrefix })
+        : ((procedure && loaded?.name === procedure.call.name ? buildSqlProcedureSignatureHelp(procedure.call, loaded.signatures) : null) ?? getSqlFunctionSignatureHelp(source, source.length, options.sqlFunctionDatabaseType?.() ?? props.databaseType, sqlDriverProfile.value, { truncatedPrefix }));
       if (!signature) return null;
       return {
         pos: cursor,
@@ -317,6 +408,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
         create: () => ({ dom: createSqlSignatureTooltipDom(signature) }),
       };
     });
+    return [procedureCall, procedureSignatures, procedureLookup, tooltip];
   };
 
   codeMirrorRuntime.buildSqlCompletionExtension = () => {
@@ -339,16 +431,25 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
 
+  codeMirrorRuntime.parseSqlWindowTree = createSqlWindowTreeParser(langSql, {
+    key: () => `${options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect}|${props.databaseType}|${sqlDriverProfile.value}`,
+    dialect: () => createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+  });
+
   codeMirrorRuntime.buildSqlLanguageExtension = () => {
     const commentDatabaseType = queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);
     return [
-      isGraphQueryDatabase(props.databaseType)
-        ? graphQueryLanguage(props.databaseType)
-        : supportsQueryEditorSqlLanguage(props.databaseType)
-          ? langSql.sql({
-              dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
-            })
-          : [],
+      props.databaseType === "elasticsearch" || props.databaseType === "easysearch"
+        ? elasticsearchLanguage(createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value).language.parser, () => !boundedAnalysisEnabled())
+        : isGraphQueryDatabase(props.databaseType)
+          ? graphQueryLanguage(props.databaseType)
+          : supportsQueryEditorSqlLanguage(props.databaseType)
+            ? syntaxParsingEnabled()
+              ? langSql.sql({
+                  dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value, sqlStatementParameterOptions()),
+                })
+              : createLargeDocumentSqlLanguage(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlStatementParameterOptions())
+            : [],
       // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
       // comment marker that toggleLineComment reads from language data.
       Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(commentDatabaseType) }])),
@@ -449,7 +550,9 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
                 continue;
               }
 
-              const next = expandToSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
+              // Colouring only needs the neighbourhood of what is on screen; the exact window would
+              // re-lex and re-tokenize a whole 100k-value IN list or INSERT on every typing pause.
+              const next = expandToBoundedSqlStatementWindow(sql, visibleRange.from, visibleRange.to, dialectId);
               const cachedWindow = this.cachedWindows.find((candidate) => candidate.from <= next.from && candidate.to >= next.to);
               if (cachedWindow) {
                 if (!windows.includes(cachedWindow)) windows.push(cachedWindow);
@@ -514,7 +617,7 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
 
   function createViewDecorations() {
     const currentStatementFrameExtension = currentStatementFrameLayer(
-      { layer, RectangleMarker },
+      { layer, RectangleMarker, ViewPlugin },
       (view) => {
         if (!settingsStore.editorSettings.showCurrentStatementFrame) return null;
         if (view.state.selection.ranges.some((range) => !range.empty)) return null;

@@ -1,4 +1,5 @@
 import type { AppSupportInfo } from "@/lib/backend/tauri";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
 
 export interface AppSupportInfoLabels {
   appVersion: string;
@@ -71,7 +72,7 @@ export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupport
     {
       key: "appVersion",
       label: labels.appVersion,
-      value: normalizeSupportInfoVersion(info.appVersion, labels.unknown),
+      value: normalizeSupportInfoVersion(displayAppVersion(info.appVersion), labels.unknown),
     },
     {
       key: "runtime",
@@ -92,7 +93,13 @@ export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupport
 }
 
 export function formatAppSupportInfoForClipboard(info: AppSupportInfo, labels: AppSupportInfoLabels): string {
-  const rows = buildAppSupportInfoRows(info, labels).map((row) => `${row.label}: ${row.value}`);
+  // Bug reports need the exact build, so a promoted beta keeps its build number
+  // next to the stable version shown elsewhere.
+  const rows = buildAppSupportInfoRows(info, labels).map((row) => {
+    const buildVersion = info.appVersion?.trim();
+    const showsBuild = row.key === "appVersion" && buildVersion && row.value !== normalizeSupportInfoVersion(buildVersion, labels.unknown);
+    return `${row.label}: ${showsBuild ? `${row.value} (${buildVersion})` : row.value}`;
+  });
   const extraRows: Array<[string, string | null | undefined]> = [];
   if (info.userAgent?.trim()) extraRows.push([labels.userAgent, info.userAgent]);
   if (info.databaseTypes?.length) extraRows.push([labels.databaseTypes, info.databaseTypes.join(", ")]);

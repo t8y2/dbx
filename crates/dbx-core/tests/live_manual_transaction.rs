@@ -320,6 +320,7 @@ async fn live_postgres_backup_snapshot_exports_wide_jsonb_then_next_table_inner(
         schema: schema.clone(),
         file_path: export_path.to_string_lossy().to_string(),
         selected_tables: vec!["audit_ops".to_string(), "zz_next".to_string()],
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -327,6 +328,7 @@ async fn live_postgres_backup_snapshot_exports_wide_jsonb_then_next_table_inner(
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -336,6 +338,9 @@ async fn live_postgres_backup_snapshot_exports_wide_jsonb_then_next_table_inner(
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
     let terminal_rows = AtomicU64::new(u64::MAX);
     let export_result = export_database_sql_core(&state, &request, |progress| {
@@ -438,6 +443,7 @@ async fn live_postgres_backup_snapshot_cancel_interrupts_pending_row_inner() {
         schema: schema.clone(),
         file_path: export_path.to_string_lossy().to_string(),
         selected_tables: vec!["slow_rows".to_string()],
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: false,
         include_data: true,
@@ -445,6 +451,7 @@ async fn live_postgres_backup_snapshot_cancel_interrupts_pending_row_inner() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -454,6 +461,9 @@ async fn live_postgres_backup_snapshot_cancel_interrupts_pending_row_inner() {
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 1,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
     let rows_seen = Arc::new(AtomicU64::new(0));
     let terminal_status = Arc::new(AtomicU64::new(0));
@@ -558,6 +568,7 @@ async fn live_mysql_database_backup_refreshes_an_idle_snapshot_before_export() {
         schema: database.clone(),
         file_path: export_path.to_string_lossy().to_string(),
         selected_tables: vec!["t_0001".to_string()],
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -565,6 +576,7 @@ async fn live_mysql_database_backup_refreshes_an_idle_snapshot_before_export() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -574,6 +586,9 @@ async fn live_mysql_database_backup_refreshes_an_idle_snapshot_before_export() {
         snapshot_session_id: Some(snapshot.session_id.clone()),
         batch_size: 100,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
     let export_result = export_database_sql_core(&state, &request, |_| {}).await;
     let rollback_result = rollback_manual_transaction(&state, &snapshot.session_id).await;

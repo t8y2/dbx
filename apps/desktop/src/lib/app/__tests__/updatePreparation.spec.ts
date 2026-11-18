@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { effectScope } from "vue";
-import { acquireUpdateBarrier, beginUpdateSensitiveOperation, prepareUpdateWithDraftRecovery, UPDATE_RESTORE_KEY, assertUpdateAllowsCommand, assertUpdateSafe, setupUpdatePreparation, useUpdateBlocker } from "../updatePreparation";
+import { acquireUpdateBarrier, beginUpdateSensitiveOperation, prepareUpdateWithDraftRecovery, isUpdatePreparationError, UPDATE_RESTORE_KEY, assertUpdateAllowsCommand, assertUpdateSafe, setupUpdatePreparation, UpdatePreparationError, useUpdateBlocker } from "../updatePreparation";
 import i18n, { loadLocaleMessages } from "@/i18n";
 
 const bus = vi.hoisted(() => ({ label: "main", members: ["main"] as string[], listeners: new Map<string, Set<{ label: string; callback: (event: any) => unknown }>>() }));
@@ -128,6 +128,33 @@ describe("update restart preparation", () => {
     await expect(main.prepare()).rejects.toThrow("disk full");
     expect(() => assertUpdateAllowsCommand("execute_query")).not.toThrow();
     main.dispose();
+  });
+  it("keeps the blocking reason and code when another window holds a dialog open", async () => {
+    const previousLocale = i18n.global.locale.value;
+    await loadLocaleMessages("zh-CN");
+    i18n.global.locale.value = "zh-CN";
+    bus.members = ["main", "detached-tab-one"];
+    const main = await setupUpdatePreparation({ assertSafe() {}, persist: async () => {}, translate: (key) => i18n.global.t(key) });
+    bus.label = "detached-tab-one";
+    const detached = await setupUpdatePreparation({
+      assertSafe() {
+        throw new UpdatePreparationError("请先关闭「数据传输」后再更新。", "config");
+      },
+      persist: async () => {},
+    });
+    try {
+      const failure = await main.prepare().catch((error: unknown) => error);
+      expect(isUpdatePreparationError(failure)).toBe(true);
+      expect((failure as UpdatePreparationError).code).toBe("config");
+      // The raw message must survive the webview hop without a "Error: " prefix.
+      expect((failure as Error).message.startsWith("请先关闭「数据传输」后再更新。")).toBe(true);
+      // And the user must learn the dialog is not in the window showing the error.
+      expect((failure as Error).message).toContain("另一个 DBX 窗口");
+    } finally {
+      i18n.global.locale.value = previousLocale;
+      main.dispose();
+      detached.dispose();
+    }
   });
   it("fails if a new window appears while saving", async () => {
     const main = await setupUpdatePreparation({

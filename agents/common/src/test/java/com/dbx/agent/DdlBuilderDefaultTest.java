@@ -52,4 +52,23 @@ class DdlBuilderDefaultTest {
         Assertions.assertTrue(ddl.contains("(\"customer_id\", \"created_at\")"), ddl);
         Assertions.assertFalse(ddl.contains(" ASC"), "ASC is the default and must stay implicit: " + ddl);
     }
+
+    @Test
+    void spannerSearchIndexesRenderAsCreateSearchIndex() {
+        IndexInfo searchIndex = new IndexInfo(
+            "idx_search", List.of("tokenfull", "tokenngram"), false, false,
+            null, "SEARCH", null, null, null
+        );
+        IndexInfo uniqueIndex = new IndexInfo(
+            "idx_unique", List.of("code"), true, false,
+            null, null, null, null, null
+        );
+
+        String ddl = DdlBuilder.buildTableDdl("root", "demo", List.of(), List.of(searchIndex, uniqueIndex), List.of());
+
+        Assertions.assertTrue(ddl.contains("CREATE SEARCH INDEX \"idx_search\" ON \"root\".\"demo\" (\"tokenfull\", \"tokenngram\");"), ddl);
+        Assertions.assertFalse(ddl.contains("UNIQUE SEARCH"), "Spanner has no CREATE UNIQUE SEARCH INDEX grammar: " + ddl);
+        Assertions.assertFalse(ddl.contains("USING SEARCH"), "Spanner has no CREATE INDEX ... USING clause: " + ddl);
+        Assertions.assertTrue(ddl.contains("CREATE UNIQUE INDEX \"idx_unique\""), ddl);
+    }
 }

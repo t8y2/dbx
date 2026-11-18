@@ -46,3 +46,16 @@ it("preserves a choice made while saved settings are still loading", async () =>
   expect(store.editorSettings.sidebarSearchMatchMode).toBe("contains");
   expect(backend.saveEditorSettings.mock.calls.at(-1)![0].sidebarSearchMatchMode).toBe("contains");
 });
+
+it("persists and restores exact-name matching", async () => {
+  const store = useSettingsStore();
+  await store.initEditorSettings();
+  await store.updateEditorSettingsAndPersist({ sidebarSearchMatchMode: "exact" });
+  const saved = backend.saveEditorSettings.mock.calls.at(-1)![0];
+  expect(saved.sidebarSearchMatchMode).toBe("exact");
+  backend.loadEditorSettings.mockResolvedValue(saved);
+  setActivePinia(createPinia());
+  const restored = useSettingsStore();
+  await restored.initEditorSettings();
+  expect(restored.editorSettings.sidebarSearchMatchMode).toBe("exact");
+});

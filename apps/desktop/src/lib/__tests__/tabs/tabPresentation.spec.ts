@@ -541,6 +541,86 @@ describe("tab group presentation", () => {
     expect(titles.get("tab-query-2")).toBe("test 2");
   });
 
+  describe("duplicate tab title mode", () => {
+    const dataTab = (id: string, connectionId: string, overrides: Partial<QueryTab> = {}) => queryTab({ id, connectionId, mode: "data", title: "users", tableMeta: { schema: "public", tableName: "users", columns: [], primaryKeys: [] }, ...overrides });
+
+    beforeEach(() => {
+      useConnectionStore().connections = [{ id: "conn-prod", name: "prod-db", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig, { id: "conn-stage", name: "staging-db", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+      // Compact titles make the base just the object name ("users"), which is
+      // where duplicate tabs across connections are most common.
+      useSettingsStore().editorSettings.compactTabTitle = true;
+    });
+
+    it("uses numbers by default so existing tab strips are unchanged", () => {
+      const tabs = [dataTab("tab-1", "conn-prod"), dataTab("tab-2", "conn-stage")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("users 1");
+      expect(titles.get("tab-2")).toBe("users 2");
+    });
+
+    it("shows the connection name instead of a number when the mode is connection", () => {
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "connection";
+      const tabs = [dataTab("tab-1", "conn-prod"), dataTab("tab-2", "conn-stage")];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("users prod-db");
+      expect(titles.get("tab-2")).toBe("users staging-db");
+    });
+
+    it("switches the suffix without renumbering the tabs", () => {
+      const tabs = [dataTab("tab-1", "conn-prod"), dataTab("tab-2", "conn-stage")];
+      syncTabTitleNumbers(tabs, translate);
+      expect(tabDisplayTitles(tabs, translate).get("tab-1")).toBe("users 1");
+
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "connection";
+      expect(tabDisplayTitles(tabs, translate).get("tab-1")).toBe("users prod-db");
+      expect(tabDisplayTitles(tabs, translate).get("tab-2")).toBe("users staging-db");
+
+      // The stored numbers must survive the switch so going back restores the labels.
+      expect(tabs[0]!.titleNumber).toBe(1);
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "ordinal";
+      expect(tabDisplayTitles(tabs, translate).get("tab-1")).toBe("users 1");
+    });
+
+    it("falls back to numbers when duplicate tabs share one connection", () => {
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "connection";
+      const tabs = [dataTab("tab-1", "conn-prod"), dataTab("tab-2", "conn-prod"), dataTab("tab-3", "conn-prod")];
+
+      expect([...titlesWithNumbers(tabs).values()]).toEqual(["users 1", "users 2", "users 3"]);
+    });
+
+    it("falls back to numbers when the base title already contains the connection name", () => {
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "connection";
+      useSettingsStore().editorSettings.compactTabTitle = false;
+      const tabs = [queryTab({ id: "query-1", connectionId: "conn-prod" }), queryTab({ id: "query-2", connectionId: "conn-prod" })];
+
+      // Full titles are "prod-db@db"; appending "prod-db" again would read "prod-db@db prod-db".
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("query-1")).toBe("prod-db@db 1");
+      expect(titles.get("query-2")).toBe("prod-db@db 2");
+    });
+
+    it("leaves unique titles and custom suffixes untouched", () => {
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "connection";
+      const tabs = [dataTab("tab-1", "conn-prod", { titleSuffix: "pending" }), dataTab("tab-2", "conn-stage", { tableMeta: { schema: "public", tableName: "orders", columns: [], primaryKeys: [] } })];
+
+      const titles = titlesWithNumbers(tabs);
+      expect(titles.get("tab-1")).toBe("users pending");
+      expect(titles.get("tab-2")).toBe("orders");
+    });
+
+    it("splits the connection name into the untruncated suffix part and detects suffix collisions", () => {
+      useSettingsStore().editorSettings.duplicateTabTitleMode = "connection";
+      const tabs = [dataTab("tab-1", "conn-prod"), dataTab("tab-2", "conn-stage")];
+      syncTabTitleNumbers(tabs, translate);
+
+      expect(tabDisplayTitleParts(tabs, translate).get("tab-1")).toEqual({ base: "users", suffix: "prod-db" });
+      expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "prod-db", translate)?.id).toBe("tab-1");
+      expect(findTabWithSameTitleSuffix(tabs, tabs[1]!, "1", translate)).toBeUndefined();
+    });
+  });
+
   describe("custom title suffix", () => {
     const dataTab = (id: string, overrides: Partial<QueryTab> = {}) => queryTab({ id, mode: "data", title: "ticket_bug", tableMeta: { schema: "feedback_v2", tableName: "ticket_bug", columns: [], primaryKeys: [] }, ...overrides });
 
@@ -970,6 +1050,51 @@ describe("statement execution markers", () => {
       { from: 0, status: "success", successCount: 1, errorCount: 0 },
       { from: secondFrom, status: "error", successCount: 0, errorCount: 1 },
     ]);
+  });
+
+  it.each(["oracle", "mysql", "postgres", "sqlite", "dameng", "db2", "sqlserver", "turso", "cloudflare-d1"] as const)("projects unindexed %s selection results using preserved editor ranges", (databaseType) => {
+    const sql = "SELECT 0;\nSELECT 1;\nSELECT bad;\nSELECT 3;";
+    const first = sql.indexOf("SELECT 1");
+    const second = sql.indexOf("SELECT bad");
+    const submitted = sql.slice(first, sql.indexOf("SELECT 3"));
+    expect(
+      statementExecutionMarkers(
+        sql,
+        [
+          { columns: ["Error"], rows: [["failed"]], affected_rows: 0, execution_time_ms: 1, execution_error: true, sourceStatement: "SELECT bad", sourceFrom: second, sourceTo: second + "SELECT bad".length },
+          { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", sourceFrom: first, sourceTo: first + "SELECT 1".length },
+          { columns: ["message"], rows: [["server output"]], affected_rows: 0, execution_time_ms: 1, server_message: true, sourceStatement: "SELECT 1", sourceFrom: first, sourceTo: first + "SELECT 1".length },
+        ],
+        databaseType,
+        submitted,
+      ),
+    ).toEqual([
+      { from: first, status: "success", successCount: 1, errorCount: 0 },
+      { from: second, status: "error", successCount: 0, errorCount: 1 },
+    ]);
+  });
+
+  it("keeps duplicate unindexed statements on the selected occurrence", () => {
+    const sql = "SELECT 1;\nSELECT 1;\nSELECT 2;";
+    const from = sql.lastIndexOf("SELECT 1");
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", sourceFrom: from, sourceTo: from + "SELECT 1".length }], "oracle", sql.slice(from))).toEqual([
+      { from, status: "success", successCount: 1, errorCount: 0 },
+    ]);
+  });
+
+  it("does not guess a selection's document position from a relative statement index", () => {
+    const sql = "SELECT 1;\nSELECT 1;\nSELECT 2;";
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 0, sourceStatement: "SELECT 1" }], "oracle", sql.slice(sql.lastIndexOf("SELECT 1")))).toEqual([]);
+  });
+
+  it.each([{}, { sourceFrom: -1, sourceTo: 7 }, { sourceFrom: NaN, sourceTo: 8 }, { sourceFrom: 0, sourceTo: 7 }, { sourceFrom: 0, sourceTo: 100 }])("omits unindexed results without a valid matching editor range: %j", (range) => {
+    const sql = "SELECT 1;\nSELECT 2;";
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", ...range }], "oracle", sql)).toEqual([]);
+  });
+
+  it("omits ranges whose statement was not submitted", () => {
+    const sql = "SELECT 0;\nSELECT 1;\nSELECT 2;";
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[0]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 0", sourceFrom: 0, sourceTo: 8 }], "oracle", sql.slice(sql.indexOf("SELECT 1")))).toEqual([]);
   });
 
   it("omits unindexed query-level errors and legacy single-statement results without live state", () => {

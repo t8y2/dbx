@@ -14,13 +14,13 @@ concurrency:
 
 jobs:
   update:
+    # 这条流水线依赖上游的 owner PAT，推送会改写仓库 main；fork 不该跑它，
+    # 否则 fork 的 main 会被推离上游镜像（同 sync-mirrors.yml）。
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
-      # main 的 ruleset 要求改动走 PR，默认 GITHUB_TOKEN 直推会被 GH013 拒掉；
-      # 用 owner PAT 后 push 以 admin 身份命中 ruleset 的 bypass（同 mcp-release.yml）。
-      - uses: actions/checkout@v7
-        with:
-          token: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
+      # 这个检查必须排在 checkout 之前：checkout 用的是同一个 token，缺 token 时
+      # 会先在 checkout 报 "Input required and not supplied: token"，看不出是令牌问题。
       - name: Verify push token
         # 快照抓取要打好几页 GitHub API，先用一步廉价检查把缺 token 的情况挡在前面，
         # 否则要等到最后 push 才以 GH013 报错，很难看出是令牌问题。
@@ -31,7 +31,12 @@ jobs:
             echo "::error::No owner PAT configured; the default GITHUB_TOKEN cannot push to the protected main branch."
             exit 1
           fi
-      - uses: actions/setup-node@v6
+      # main 的 ruleset 要求改动走 PR，默认 GITHUB_TOKEN 直推会被 GH013 拒掉；
+      # 用 owner PAT 后 push 以 admin 身份命中 ruleset 的 bypass（同 mcp-release.yml）。
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: pnpm/action-setup@v6

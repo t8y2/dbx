@@ -33,6 +33,9 @@ const mocks = vi.hoisted(() => ({
   listMongoCompletionFields: vi.fn().mockResolvedValue([{ name: "email", type: "string" }]),
   loadMongoCollections: vi.fn().mockResolvedValue(undefined),
   loadMongoDatabases: vi.fn().mockResolvedValue(undefined),
+  loadMilvusDatabases: vi.fn().mockResolvedValue(undefined),
+  updateDatabaseVGroupMember: vi.fn(),
+  vectorDropDatabase: vi.fn().mockResolvedValue(undefined),
   removeTreeNode: vi.fn(),
   mongoCreateIndex: vi.fn().mockResolvedValue({ name: "email_1" }),
   mongoCloneCollection: vi.fn().mockResolvedValue({ documents_copied: 2, indexes_copied: 1 }),
@@ -62,6 +65,7 @@ vi.mock("@/lib/backend/api", () => ({
   mongoCloneCollection: (...args: unknown[]) => mocks.mongoCloneCollection(...args),
   mongoDropCollection: (...args: unknown[]) => mocks.mongoDropCollection(...args),
   mongoDropDatabase: (...args: unknown[]) => mocks.mongoDropDatabase(...args),
+  vectorDropDatabase: (...args: unknown[]) => mocks.vectorDropDatabase(...args),
   mongoDropIndexes: (...args: unknown[]) => mocks.mongoDropIndexes(...args),
   mongoRenameCollection: vi.fn(),
   nacosCreateNamespace: vi.fn(),
@@ -182,6 +186,8 @@ function runtime(activeNode: TreeNode) {
       listMongoCompletionFields: mocks.listMongoCompletionFields,
       loadMongoCollections: mocks.loadMongoCollections,
       loadMongoDatabases: mocks.loadMongoDatabases,
+      loadMilvusDatabases: mocks.loadMilvusDatabases,
+      updateDatabaseVGroupMember: mocks.updateDatabaseVGroupMember,
       removeTreeNode: mocks.removeTreeNode,
       treeNodes: [indexesGroup],
     } as any,
@@ -374,6 +380,11 @@ describe("MongoDB sidebar mutation runtime", () => {
       ],
       unique: true,
       sparse: false,
+      expireAfterSeconds: "",
+      partialFilterExpression: "",
+      background: false,
+      bucketSize: "",
+      hidden: false,
     };
     await feature.confirmCreateMongoIndex();
 
@@ -395,6 +406,7 @@ describe("MongoDB sidebar mutation runtime", () => {
       partialFilterExpression: '{"active":true}',
       background: true,
       bucketSize: "32",
+      hidden: true,
     };
     mongoCreateIndexError.value = "previous failure";
 
@@ -932,7 +944,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmDropMongoIndex();
 
     expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
-    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), 5000);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), { persistent: true });
   });
 
   it("reports partial index deletion after forcing a metadata refresh", async () => {
@@ -948,7 +960,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmDropAllMongoIndexes();
 
     expect(mocks.loadIndexes).toHaveBeenCalledOnce();
-    expect(mocks.toast).toHaveBeenCalledWith('contextMenu.dropIndexesPartialFailure:{"success":1,"failed":1}', 5000);
+    expect(mocks.toast).toHaveBeenCalledWith('contextMenu.dropIndexesPartialFailure:{"success":1,"failed":1}', { persistent: true });
   });
 
   it("executes Legacy delete operations and refreshes their MongoDB metadata", async () => {
@@ -960,6 +972,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await databaseFeature.confirmDropMongoDatabase();
 
     expect(mocks.mongoDropDatabase).toHaveBeenCalledWith("conn-1", "app");
+    expect(mocks.updateDatabaseVGroupMember).toHaveBeenCalledWith(databaseNode);
     expect(mocks.loadMongoDatabases).toHaveBeenCalledWith("conn-1");
 
     const collectionNode = mongoCollectionNode();
@@ -980,6 +993,24 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
   });
 
+  it.each(["mongodb", "milvus"])("updates database membership and refreshes only after a successful %s drop", async (kind) => {
+    const milvus = kind === "milvus";
+    mocks.getConfig.mockReturnValue(milvus ? milvusConfig() : mongoConfig());
+    const node = milvus ? milvusDatabaseNode("app") : mongoDatabaseNode();
+    const feature = runtime(node);
+    sidebarDangerTarget.value = node;
+    const drop = milvus ? mocks.vectorDropDatabase : mocks.mongoDropDatabase;
+    const reload = milvus ? mocks.loadMilvusDatabases : mocks.loadMongoDatabases;
+    const confirm = milvus ? feature.confirmDropMilvusDatabase : feature.confirmDropMongoDatabase;
+    drop.mockRejectedValueOnce(new Error("permission denied"));
+    await confirm();
+    expect(mocks.updateDatabaseVGroupMember).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    await confirm();
+    expect(mocks.updateDatabaseVGroupMember).toHaveBeenCalledExactlyOnceWith(node);
+    expect(reload).toHaveBeenCalledExactlyOnceWith("conn-1");
+  });
+
   it("keeps a completed collection drop successful when metadata refresh fails", async () => {
     const node = mongoCollectionNode();
     const feature = runtime(node);
@@ -993,8 +1024,8 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(showDropMongoCollectionConfirm.value).toBe(false);
     expect(mocks.removeTreeNode).toHaveBeenCalledWith(node.id);
     expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.dropCollectionSuccess"), 3000);
-    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.objectDropRefreshFailed"), 5000);
-    expect(mocks.toast).not.toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), 5000);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.objectDropRefreshFailed"), { persistent: true });
+    expect(mocks.toast).not.toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), { persistent: true });
   });
 
   it("does not send a default _id_ index deletion request", async () => {
@@ -1024,7 +1055,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmCreateMongoIndex();
 
     expect(mocks.mongoCreateIndex).toHaveBeenCalledOnce();
-    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.mongoIndexRefreshFailed"), 5000);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.mongoIndexRefreshFailed"), { persistent: true });
   });
 
   it("does not issue a create request when production confirmation is cancelled", async () => {

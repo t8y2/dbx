@@ -64,6 +64,7 @@ const emit = defineEmits<{
 
 defineSlots<{
   "trigger-label"?(props: { value: string; label: string; loading: boolean }): any;
+  "option-action"?(props: { option: string; label: string }): any;
   "option-label"?(props: { option: string; label: string }): any;
   "custom-option-label"?(props: { value: string }): any;
 }>();
@@ -404,33 +405,34 @@ defineExpose({
               {{ loadingText }}
             </div>
             <template v-else-if="filteredOptions.length">
-              <button
-                v-for="(option, index) in filteredOptions"
-                :key="option"
-                type="button"
-                tabindex="-1"
-                :title="optionTooltip(option) ? undefined : optionTitle(option)"
-                :class="
-                  cn(
-                    'group flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
-                    props.itemClass,
-                    index === highlightIndex && 'bg-accent text-accent-foreground',
-                  )
-                "
-                @pointerenter="activateHelpForOption(option)"
-                @click="selectOrClearOption(option)"
-              >
-                <span class="relative h-3.5 w-3.5 shrink-0">
-                  <Check :class="cn('absolute inset-0 h-3.5 w-3.5', option !== modelValue ? 'opacity-0' : clearSelectedOption ? 'opacity-100 group-hover:opacity-0 group-focus-visible:opacity-0' : 'opacity-100')" />
-                  <X v-if="clearSelectedOption && option === modelValue" class="absolute inset-0 h-3.5 w-3.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
-                </span>
-                <!-- Keep custom labels inside the flex row so long content cannot overlap adjacent UI. -->
-                <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
-                  <slot name="option-label" :option="option" :label="displayName?.(option)">
-                    <span class="block truncate">{{ displayName?.(option) }}</span>
-                  </slot>
-                </div>
-              </button>
+              <div v-for="(option, index) in filteredOptions" :key="option" class="flex min-w-0 items-center">
+                <button
+                  type="button"
+                  tabindex="-1"
+                  :title="optionTooltip(option) ? undefined : optionTitle(option)"
+                  :class="
+                    cn(
+                      'group flex h-8 w-full flex-1 min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
+                      props.itemClass,
+                      index === highlightIndex && 'bg-accent text-accent-foreground',
+                    )
+                  "
+                  @pointerenter="activateHelpForOption(option)"
+                  @click="selectOrClearOption(option)"
+                >
+                  <span class="relative h-3.5 w-3.5 shrink-0">
+                    <Check :class="cn('absolute inset-0 h-3.5 w-3.5', option !== modelValue ? 'opacity-0' : clearSelectedOption ? 'opacity-100 group-hover:opacity-0 group-focus-visible:opacity-0' : 'opacity-100')" />
+                    <X v-if="clearSelectedOption && option === modelValue" class="absolute inset-0 h-3.5 w-3.5 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />
+                  </span>
+                  <!-- Keep custom labels inside the flex row so long content cannot overlap adjacent UI. -->
+                  <div class="dbx-searchable-select-option-label min-w-0 flex-1 overflow-hidden">
+                    <slot name="option-label" :option="option" :label="displayName?.(option)">
+                      <span class="block truncate">{{ displayName?.(option) }}</span>
+                    </slot>
+                  </div>
+                </button>
+                <slot name="option-action" :option="option" :label="displayName?.(option)" />
+              </div>
               <button
                 v-if="canSelectCustom"
                 type="button"

@@ -1,6 +1,8 @@
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import type { AppThemeMode } from "@/lib/app/appTheme";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
 import { Channel } from "@tauri-apps/api/core";
 import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/snapshotCompletion";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
@@ -88,7 +90,7 @@ function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> 
   return tauriInvoke<T>(command, args);
 }
 
-import type { MigrationPreflight, MigrationReport } from "./migration";
+import type { MigrationPreflight, MigrationReport, CredentialResetPreparation, CredentialResetReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
 export const migrationStatus = (retry = false): Promise<MigrationPreflight> => invoke("migration_status", { retry });
 export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
@@ -388,6 +390,7 @@ export interface DriverRuntimeSummary {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  app_theme_mode?: AppThemeMode;
   linux_floating_frame_enabled?: boolean;
   icon_theme: "default" | "black";
   quit_on_close: boolean;
@@ -1132,8 +1135,8 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
-  return invoke("save_editor_settings", { settings });
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  return invoke("save_editor_settings", { settings, ...(patch ? { patch } : {}) });
 }
 
 export interface GlobalSearchSettings {
@@ -1214,8 +1217,12 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   return invoke("save_transfer_task_library", { library });
 }
 
-export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
-  return invoke("complete_app_close", { action });
+export async function completeAppClose(action: "quit" | "hide", quitRequestId?: string): Promise<void> {
+  return invoke("complete_app_close", { action, ...(quitRequestId ? { quitRequestId } : {}) });
+}
+
+export async function completeWindowClose(): Promise<void> {
+  return invoke("complete_window_close");
 }
 
 export async function requestAppClose(): Promise<void> {
@@ -1472,6 +1479,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -1536,6 +1545,8 @@ export interface GlobalSearchRequest {
    * (Quick Open behavior).
    */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -1549,8 +1560,22 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
   return invoke("global_search", { request });
+}
+
+export async function cancelGlobalSearch(searchId: string): Promise<void> {
+  return invoke("cancel_global_search", { searchId });
 }
 
 // --- AI Conversations ---
@@ -1560,7 +1585,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked" | "outputTruncated";
   /** Set on the assistant message whose generation failed; persisted (mirrors dbx-core `AiChatMessage.failed`). */
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
@@ -1706,6 +1731,10 @@ export async function readUserSkills(ids: string[], settings: UserSkillRootSetti
 
 export async function testConnection(config: ConnectionConfig): Promise<string> {
   return invokeBackend("test_connection", { config });
+}
+
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return invokeBackend("connection_parameters", { config });
 }
 
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
@@ -1920,6 +1949,7 @@ export async function listTables(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   exactIdentity?: boolean,
+  pageTableRoots?: boolean,
 ): Promise<TableInfo[]> {
   return invoke("list_tables", {
     connectionId,
@@ -1932,6 +1962,7 @@ export async function listTables(
     catalog,
     tableNameFilter,
     ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(pageTableRoots ? { pageTableRoots: true } : {}),
   });
 }
 
@@ -1976,6 +2007,7 @@ export async function listObjects(
     tableNameFilter,
     executionId,
     ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
+    ...(readOptions?.lightweight !== undefined ? { lightweight: readOptions.lightweight } : {}),
     ...(options === true ? { exactIdentity: true } : {}),
   });
 }
@@ -2190,6 +2222,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   const diagnosticsEnabled = isDebugLoggingEnabled();
@@ -2264,6 +2298,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -2409,6 +2445,7 @@ export async function executeInManualTransaction(
   timeoutSecs?: number,
   boundStatements?: BlobBoundStatement[],
   deferLobs?: boolean,
+  reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2424,6 +2461,7 @@ export async function executeInManualTransaction(
     timeoutSecs,
     boundStatements,
     deferLobs,
+    reportCompilationErrors,
   });
 }
 
@@ -2646,6 +2684,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
 
 export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return invoke("build_editable_object_source", { input });
+}
+
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return invoke("build_oracle_object_export_sql", { input });
 }
 
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
@@ -2992,7 +3034,7 @@ export async function listDialectDataTypes(dialectName: string): Promise<string[
   return invoke("list_dialect_data_types", { dialectName });
 }
 
-export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean): Promise<string> {
+export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: DatabaseType, targetSchema?: string, functionDiffs?: FunctionDiff[], sequenceDiffs?: SequenceDiff[], ruleDiffs?: RuleDiff[], ownerDiffs?: OwnerDiff[], cascadeDelete?: boolean, compareCharset?: boolean): Promise<string> {
   return invoke("generate_schema_sync_sql", {
     diffs,
     databaseType,
@@ -3002,6 +3044,7 @@ export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: Da
     ruleDiffs: ruleDiffs ?? [],
     ownerDiffs: ownerDiffs ?? [],
     cascadeDelete: cascadeDelete ?? false,
+    compareCharset: compareCharset ?? true,
   });
 }
 
@@ -3555,23 +3598,30 @@ export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null>
 }
 
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
-  return invoke("save_saved_sql_folder", { folder });
+  const saved = await invoke<SavedSqlFolder>("save_saved_sql_folder", { folder });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function deleteSavedSqlFolder(id: string): Promise<void> {
-  return invoke("delete_saved_sql_folder", { id });
+  await invoke("delete_saved_sql_folder", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
-  return invoke("save_saved_sql_file", { file });
+  const saved = await invoke<SavedSqlFile>("save_saved_sql_file", { file });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
-  return invoke("save_default_query_content", { id, sql, updatedAt });
+  await invoke("save_default_query_content", { id, sql, updatedAt });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
-  return invoke("delete_saved_sql_file", { id });
+  await invoke("delete_saved_sql_file", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function savedSqlStorageDir(): Promise<string> {
@@ -3584,6 +3634,10 @@ export async function openSavedSqlStorageDir(dir?: string | null): Promise<void>
 
 export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
+}
+
+export async function openPathWithDefaultApp(path: string): Promise<void> {
+  return invoke("open_path_with_default_app", { path });
 }
 
 export async function deleteDatabaseBackupFiles(paths: string[], allowedRoots: string[] = []): Promise<number> {
@@ -3636,9 +3690,14 @@ export interface UpdateInfo {
   release_name: string;
   release_url: string;
   release_notes: string;
+  channel?: "stable" | "beta";
+  release_tag?: string;
+  is_promoted?: boolean;
+  promoted_from?: string;
 }
 
 export type UpdateDownloadSource = "official" | "cnb";
+export type UpdateChannel = "stable" | "beta";
 
 export interface DownloadedUpdate {
   cache_id: string;
@@ -3647,6 +3706,9 @@ export interface DownloadedUpdate {
   release_url: string;
   release_notes: string;
   downloaded_at: number;
+  channel?: UpdateChannel;
+  release_tag?: string;
+  is_promoted?: boolean;
 }
 
 export interface UpdateDownloadProgress {
@@ -3706,20 +3768,28 @@ export async function uninstallNpmMcpServer(): Promise<string> {
   return invoke("uninstall_npm_mcp_server");
 }
 
-export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
-  return invoke("check_for_updates", { locale, source });
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource, channel: UpdateChannel = "stable"): Promise<UpdateInfo> {
+  return invoke("check_for_updates", { locale, source, channel });
 }
 
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
   return invoke("fetch_changelog", { lang });
 }
 
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  return invoke("fetch_changelog_index", { lang });
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  return invoke("fetch_changelog_release", { lang, tag });
+}
+
 export async function getSystemProxyUrl(): Promise<string | null> {
   return invoke("get_system_proxy_url");
 }
 
-export async function downloadUpdate(source: UpdateDownloadSource, latestVersion: string, attemptId: string, releaseNotes?: string): Promise<DownloadedUpdate> {
-  return invoke("download_update", { source, latestVersion, attemptId, releaseNotes });
+export async function downloadUpdate(source: UpdateDownloadSource, latestVersion: string, attemptId: string, releaseNotes?: string, channel: UpdateChannel = "stable", releaseTag?: string): Promise<DownloadedUpdate> {
+  return invoke("download_update", { source, channel, latestVersion, attemptId, releaseNotes, releaseTag });
 }
 
 export async function cancelUpdateDownload(): Promise<void> {
@@ -6677,6 +6747,13 @@ export async function cancelMongodbExport(exportId: string): Promise<boolean> {
 }
 
 // --- Database Export ---
+/** An object picked in the object browser for "export selected". */
+export interface DatabaseExportSelectedObject {
+  objectType: string;
+  name: string;
+  signature?: string;
+}
+
 export interface DatabaseExportRequest {
   exportId: string;
   connectionId: string;
@@ -6684,6 +6761,8 @@ export interface DatabaseExportRequest {
   schema: string;
   filePath: string;
   selectedTables?: string[];
+  /** Typed object browser selection; takes precedence over `selectedTables`, and an empty list is rejected. */
+  selectedObjects?: DatabaseExportSelectedObject[];
   excludedTables?: string[];
   includeStructure: boolean;
   includeData: boolean;
@@ -6691,6 +6770,7 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  omitDatabaseQualifier?: boolean;
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;
@@ -6700,6 +6780,19 @@ export interface DatabaseExportRequest {
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
+  /**
+   * Cap each exported table at this many data rows (#14750). `undefined` keeps
+   * the unlimited behavior; the backend rejects zero.
+   */
+  rowLimitPerTable?: number;
+  /**
+   * Sort column the per-table cap takes the first/last N rows by (review on
+   * #14799). `undefined`/empty keeps the export's existing read order; the
+   * backend falls back per table with a dump comment when the column is absent.
+   */
+  rowLimitSortColumn?: string;
+  /** `true` takes the newest rows by `rowLimitSortColumn`; only sent with a column. */
+  rowLimitSortDescending?: boolean;
 }
 
 export interface DatabaseBackupSnapshot {
@@ -6738,6 +6831,7 @@ export interface TableExportRequest {
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   insertMode?: SqlInsertMode;
   insertDialect?: SqlInsertDialect;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6777,6 +6871,7 @@ export interface TableCsvExportOptions {
   columns?: string[];
   pageSize?: number;
   timeoutSecs?: number;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6805,6 +6900,7 @@ export interface QueryResultExportRequest {
   filePath: string;
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -7040,13 +7136,14 @@ export async function resolveDamengDumpTool(binDir: string, kind: DamengDumpKind
   return invoke("resolve_dameng_dump_tool", { binDir, kind });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
       csvQuoteMode,
+      csvWithoutBom,
       ...(nullLiteral === undefined ? {} : { nullLiteral }),
     },
   });
@@ -7147,3 +7244,6 @@ export * from "@/lib/backend/nacos-tauri";
 export async function openQueryResultTempFile(path: string): Promise<void> {
   return invoke("open_query_result_temp_file", { path });
 }
+
+export const migrationPrepareCredentialReset = (): Promise<CredentialResetPreparation> => invoke("migration_prepare_credential_reset");
+export const migrationResetCredentials = (confirmationToken: string, confirmed: boolean): Promise<CredentialResetReport> => invoke("migration_reset_credentials", { confirmationToken, confirmed });

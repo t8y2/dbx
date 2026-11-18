@@ -142,6 +142,7 @@ test("old Win7 Rust paths remain candidates through the dependency graph", () =>
 test("Win7 infrastructure changes remain candidates outside the Cargo graph", () => {
   for (const file of [
     ".github/scripts/assert-win7-pe-compat.ps1",
+    ".github/scripts/assert-windows-stack-reserve.ps1",
     ".github/scripts/assert-webview2-win7-loader.ps1",
     ".github/scripts/assert-win7-installer-content.ps1",
     ".github/scripts/assert-webview2-win7-runtime.ps1",
@@ -170,6 +171,14 @@ test("Win7 infrastructure changes remain candidates outside the Cargo graph", ()
     assert.equal(result.windows_win7_candidate, true, file);
     assert.equal(result.windows_standard, true, file);
     assert.equal(result.windows_win7_bundle, true, file);
+  }
+});
+
+test("Windows stack test changes run the standard Windows checks", () => {
+  for (const file of [".github/scripts/assert-windows-stack-reserve.test.ps1", ".github/scripts/test-windows-stack-reserve.ps1"]) {
+    const result = plan([file]);
+    assert.equal(result.windows_standard, true, file);
+    assert.equal(result.windows_win7_bundle, false, file);
   }
 });
 

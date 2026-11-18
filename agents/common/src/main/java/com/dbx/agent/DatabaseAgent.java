@@ -42,6 +42,10 @@ public interface DatabaseAgent {
 
     boolean testConnection(ConnectParams params);
 
+    default List<Map<String, Object>> describeConnectionParameters(ConnectParams params) {
+        return Collections.emptyList();
+    }
+
     default Map<String, Object> testConnectionWithInfo(ConnectParams params) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("ok", testConnection(params));

@@ -49,7 +49,7 @@ export function databaseVGroupDropTarget(treeNodes: TreeNode[], source: TreeNode
     return undefined;
   };
   // A folder's edges mean its parent level; only its middle means entering it.
-  const groupId = isGroup ? (position === "inside" ? target.vgroupId : parentGroupOf(layout.order)) : isDatabaseVGroupMember(target) ? (tableVGroupPathForTable(layout, target.database!, target.type).at(-1) ?? null) : null;
+  const groupId = isGroup ? (position === "inside" ? target.vgroupId : parentGroupOf(layout.order)) : isDatabaseVGroupMember(target) ? (tableVGroupPathForTable(layout, target.database!, target.type).slice(-1)[0] ?? null) : null;
   return { node: target, groupId: groupId ?? null, scope, position: isDatabaseVGroupContainer(target) ? "after" : position };
 }
 

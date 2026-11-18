@@ -66,8 +66,8 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { resolveContextMenuExportSql } from "@/lib/sql/contextMenuExportSql";
-import { executableStatementRanges, statementParsingDatabaseType, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
-import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableScriptFromStatement, executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { statementNavigationTarget, type StatementNavigationDirection } from "@/lib/sql/statementNavigation";
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
@@ -1050,19 +1050,12 @@ function executeScriptFromContextPosition() {
     toast(t("editor.noExecutableStatementAtCursor"), 3000);
     return;
   }
-  const remaining = cache.ranges.slice(start);
-  const line = doc.lineAt(position);
-  const mysql = statementParsingDatabaseType(cache.databaseType, cache.parameterOptions) === "mysql";
-  const from = mysql && line.to <= remaining[0].from && /^\s*delimiter(?:[ \t]+\S.*|;)\s*$/i.test(line.text) ? line.from : remaining[0].from;
-  const sql = doc.sliceString(from);
-  // Slicing can lose an earlier client directive. Only dispatch when the
-  // suffix still has the same statement boundaries as the original script.
-  const ranges = executableStatementRanges(sql, cache.databaseType, cache.parameterOptions);
-  if (ranges.length !== remaining.length || ranges.some((range, index) => from + range.from !== remaining[index].from || from + range.to !== remaining[index].to)) {
+  const range = executableScriptFromStatement(cache, start, position);
+  if (!range) {
     toast(t("editor.executeScriptBoundaryMismatch"), 5000);
     return;
   }
-  emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, { sql, from, to: doc.length }));
+  emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, range));
   focusEditor();
 }
 

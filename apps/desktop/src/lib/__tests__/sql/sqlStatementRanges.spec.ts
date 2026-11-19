@@ -1131,6 +1131,32 @@ END;`;
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "firebird"))).toEqual([procedure, "SELECT 1 FROM RDB$DATABASE"]);
   });
 
+  it("keeps Firebird procedures with IF, FOR and WHILE bodies together", () => {
+    const procedure = `CREATE OR ALTER PROCEDURE SP_FLAGS
+RETURNS (N INT)
+AS
+DECLARE VARIABLE I INT = 0;
+BEGIN
+  IF (I = 0) THEN
+  BEGIN
+    N = 1;
+  END
+  ELSE
+    N = 2;
+  FOR SELECT ID FROM USERS INTO :N DO
+  BEGIN
+    SUSPEND;
+  END
+  WHILE (I < 3) DO
+  BEGIN
+    I = I + 1;
+  END
+END;`;
+    const sql = `${procedure}\nSELECT 1 FROM RDB$DATABASE;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "firebird"))).toEqual([procedure, "SELECT 1 FROM RDB$DATABASE"]);
+  });
+
   it("keeps Firebird EXECUTE BLOCK anonymous blocks together (#12407)", () => {
     const block = `EXECUTE BLOCK
 RETURNS (OUT_ID INT)

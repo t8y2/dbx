@@ -6792,6 +6792,17 @@ SELECT 1 FROM RDB$DATABASE;";
     }
 
     #[test]
+    fn firebird_split_keeps_if_for_while_bodies_together() {
+        let procedure = "CREATE OR ALTER PROCEDURE SP_FLAGS\nRETURNS (N INT)\nAS\nDECLARE VARIABLE I INT = 0;\nBEGIN\n  IF (I = 0) THEN\n  BEGIN\n    N = 1;\n  END\n  ELSE\n    N = 2;\n  FOR SELECT ID FROM USERS INTO :N DO\n  BEGIN\n    SUSPEND;\n  END\n  WHILE (I < 3) DO\n  BEGIN\n    I = I + 1;\n  END\nEND;";
+        let sql = format!("{procedure}\nSELECT 1 FROM RDB$DATABASE;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Firebird),
+            vec![procedure, "SELECT 1 FROM RDB$DATABASE"]
+        );
+    }
+
+    #[test]
     fn firebird_split_keeps_execute_block_together() {
         let sql = "\
 EXECUTE BLOCK

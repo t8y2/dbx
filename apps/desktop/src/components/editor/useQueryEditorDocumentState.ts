@@ -190,9 +190,10 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
         changes: bookmarkDocumentChange(previousDoc, doc),
       });
     }
-    // Saved lines may still refer to the old cached document. Keep the mapped
-    // markers unless this is initial hydration, where only the saved lines exist.
-    if ((!documentChanged || hydrating) && props.bookmarkLines !== undefined) restoreBookmarks();
+    // Store-mapped positions take precedence over a cached editor's net diff:
+    // several inactive updates may have already deleted/replaced an anchor.
+    // Legacy/unhydrated saved lines can still refer to the old document.
+    if ((!documentChanged || hydrating || props.bookmarkDocument === doc) && props.bookmarkLines !== undefined) restoreBookmarks();
     scheduleDocumentSearchUpdate();
     invalidateSemanticDiagnosticsForDocumentChange();
     if (props.initialSelection !== undefined) {
@@ -229,7 +230,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
       changingDocument = true;
       try {
         view.value.dispatch({ changes: bookmarkDocumentChange(currentEditorDocText(view.value), val) });
-        if (hydrating) restoreBookmarks();
+        if (hydrating || props.bookmarkDocument === val) restoreBookmarks();
       } finally {
         changingDocument = false;
       }

@@ -10,6 +10,8 @@ export interface QueryEditorProps {
   /** Identity of the tab owning the document. Changing it swaps in that tab's cached editor state (fresh undo history on first visit). */
   tabId?: string;
   bookmarkLines?: number[];
+  /** When present, identifies the document these persisted lines already map to. */
+  bookmarkDocument?: string;
   connectionId?: string;
   catalog?: string;
   database?: string;

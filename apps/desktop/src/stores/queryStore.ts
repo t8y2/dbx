@@ -5069,6 +5069,10 @@ export const useQueryStore = defineStore("query", () => {
   function applyExternalSqlFileSnapshot(id: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
+    // The workspace panel reads inactive tabs directly, before their editor can
+    // map its cached markers. Publish positions for the new document atomically.
+    if (tab.editorBookmarks?.length && tab.sql !== sql) tab.editorBookmarks = mapPersistedBookmarks(tab.sql, sql, tab.editorBookmarks);
+    if (tab.editorBookmarks !== undefined) tab.editorBookmarksDocument = sql;
     tab.sql = sql;
     tab.originalSql = sql;
     tab.externalSqlFileVersion = version;
@@ -6348,6 +6352,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateEditorBookmarks(id: string, lines: number[]) {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab) return;
+    tab.editorBookmarksDocument = tab.sql;
     if (tab.editorBookmarks?.length === lines.length && tab.editorBookmarks.every((line, index) => line === lines[index])) return;
     tab.editorBookmarks = [...lines];
   }

@@ -2708,6 +2708,8 @@ export interface QueryTab {
   };
   /** One-based bookmarked lines, saved with the open SQL tab. */
   editorBookmarks?: number[];
+  /** Runtime-only document associated with mapped bookmark lines; not session data. */
+  editorBookmarksDocument?: string;
   editorSelection?: {
     anchor: number;
     head: number;

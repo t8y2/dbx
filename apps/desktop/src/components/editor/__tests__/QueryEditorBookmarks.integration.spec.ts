@@ -10,6 +10,9 @@ import QueryEditor from "../QueryEditor.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { QueryEditorProps } from "../queryEditorTypes";
+import { workspaceBookmarkCases } from "@/lib/editor/__tests__/workspaceBookmarkCases";
+import { useQueryStore } from "@/stores/queryStore";
+import WorkspaceBookmarksPanel from "@/components/layout/WorkspaceBookmarksPanel.vue";
 
 vi.mock("@/lib/common/clipboard", () => ({
   copyToClipboard: vi.fn().mockResolvedValue(undefined),
@@ -80,7 +83,118 @@ function visibleBookmarkMarkerCount(host: HTMLElement): number {
   return [...host.querySelectorAll<HTMLElement>(".cm-bookmark-gutter .cm-gutterElement")].filter((element) => element.style.visibility !== "hidden" && element.querySelector(".cm-bookmark-marker")).length;
 }
 
+async function mountWorkspace(before: string, saved: number[]) {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  useSettingsStore().editorSettings.showExecutionTargetPicker = false;
+  const store = useQueryStore();
+  const first = store.openExternalSqlFile("", "", "/synthetic/first.sql", before);
+  store.updateEditorBookmarks(first, saved);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({
+    render() {
+      const tab = store.tabs.find((tab) => tab.id === store.activeTabId)!;
+      return h("div", [
+        h(QueryEditor, {
+          tabId: tab.id,
+          modelValue: tab.sql,
+          bookmarkLines: tab.editorBookmarks,
+          bookmarkDocument: tab.editorBookmarksDocument,
+          databaseType: "mysql",
+          dialect: "mysql",
+          autoFocus: false,
+          revealRequest: tab.editorRevealRequest,
+          onBookmarksChange: (lines: number[], owner?: string) => store.updateEditorBookmarks(owner ?? tab.id, lines),
+          "onUpdate:modelValue": (sql: string) => store.updateSql(tab.id, sql),
+          onEditorRevealConsumed: () => {
+            tab.editorRevealRequest = undefined;
+          },
+        }),
+        h(WorkspaceBookmarksPanel),
+      ]);
+    },
+  });
+  app.use(pinia);
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.mount(host);
+  cleanups.push(() => {
+    app.unmount();
+    host.remove();
+  });
+  await vi.waitFor(() => expect(host.querySelector(".cm-editor")).not.toBeNull(), { timeout: 5000 });
+  const view = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+  await nextTick();
+  const second = store.openExternalSqlFile("", "", "/synthetic/second.sql", "other\nfile");
+  store.updateEditorBookmarks(second, [2]);
+  await nextTick();
+  await nextTick();
+  return { store, first, second, host, view };
+}
+
 describe("QueryEditor line bookmarks", () => {
+  it("keeps active external reloads and subsequent editor edits in sync", async () => {
+    const { store, first, view } = await mountWorkspace("a\nb\nc", [2]);
+    store.switchTab(first);
+    await nextTick();
+    store.applyExternalSqlFileSnapshot(first, "new\na\nb\nc", { sizeBytes: 9, modifiedNs: "1", contentHash: "changed" });
+    await nextTick();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual([3]);
+    view.dispatch({ changes: { from: 0, insert: "typed\n" } });
+    await nextTick();
+    const tab = store.tabs.find((tab) => tab.id === first)!;
+    expect(tab.editorBookmarks).toEqual([4]);
+    expect(tab.editorBookmarksDocument).toBe(tab.sql);
+  });
+
+  it("keeps successive inactive file updates authoritative when the cached editor returns", async () => {
+    const { store, first, host, view } = await mountWorkspace("a\nb\nc", [2]);
+    store.applyExternalSqlFileSnapshot(first, "a\nc", { sizeBytes: 3, modifiedNs: "1", contentHash: "first" });
+    await nextTick();
+    store.applyExternalSqlFileSnapshot(first, "new\na\nb\nc", { sizeBytes: 9, modifiedNs: "2", contentHash: "second" });
+    await nextTick();
+    const tab = store.tabs.find((tab) => tab.id === first)!;
+    expect(tab.editorBookmarks).toEqual([4]); // deleted b mapped to c, which remains the anchor
+    host.querySelector<HTMLButtonElement>(`[data-bookmark-tab="${first}"] [data-bookmark-line="4"]`)!.click();
+    await nextTick();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual([4]);
+    expect(tab.editorBookmarks).toEqual([4]);
+    expect(view.state.selection.main.head).toBe(view.state.doc.line(4).from);
+  });
+
+  it.each([{ name: "prepend", before: "a\nb\nc", after: "new\na\nb\nc", saved: [2], expected: [3] }, { name: "delete", before: "a\nb\nc", after: "b\nc", saved: [3], expected: [2] }, ...workspaceBookmarkCases])(
+    "updates inactive store/panel positions before clicking a bookmark after $name",
+    async ({ before, after, saved, expected }) => {
+      const { store, first, second, host, view } = await mountWorkspace(before, saved);
+      const tab = store.tabs.find((tab) => tab.id === first)!;
+      store.applyExternalSqlFileSnapshot(first, after, { sizeBytes: after.length, modifiedNs: "1", contentHash: "changed" });
+      // The panel must already be correct, without first reactivating the editor.
+      expect(store.activeTabId).toBe(second);
+      expect(tab.editorBookmarks).toEqual(expected);
+      await nextTick();
+      expect(view.state.doc.toString()).toBe("other\nfile");
+      const rows = [...host.querySelectorAll<HTMLButtonElement>(`[data-bookmark-tab="${first}"] [data-bookmark-line]`)];
+      expect(rows.map((row) => Number(row.dataset.bookmarkLine))).toEqual(expected);
+      for (const [index, row] of rows.entries()) expect(row.textContent).toContain(after.split("\n")[expected[index] - 1]);
+      rows.at(-1)!.click();
+      await nextTick();
+      await nextTick();
+      expect(store.activeTabId).toBe(first);
+      expect(view.state.doc.toString()).toBe(after);
+      expect(queryEditorBookmarkLines(view)).toEqual(expected);
+      expect(tab.editorBookmarks).toEqual(expected); // no double mapping on activation
+      expect(view.state.selection.main.head).toBe(view.state.doc.line(expected.at(-1)!).from);
+      expect(store.tabs.find((tab) => tab.id === second)!.editorBookmarks).toEqual([2]);
+      store.switchTab(second);
+      await nextTick();
+      store.switchTab(first);
+      await nextTick();
+      expect(queryEditorBookmarkLines(view)).toEqual(expected);
+    },
+  );
+
   it("restores persisted lines, tracks edits, and survives a fresh editor mount", async () => {
     const first = await mountEditor("one\ntwo\nthree", { bookmarkLines: [2, 3] });
     await nextTick();
@@ -124,31 +238,31 @@ describe("QueryEditor line bookmarks", () => {
     expect(props.bookmarkLines).toEqual([3]);
   });
 
-  it.each([
-    { name: "insertion", before: "one\ntwo\nthree", after: "new\none\ntwo\nthree", saved: [2], expected: [3] },
-    { name: "deletion", before: "one\ntwo\nthree", after: "two\nthree", saved: [3], expected: [2] },
-  ])("persists mapped bookmarks after an inactive cached tab receives a line $name", async ({ before, after, saved, expected }) => {
-    const { view, props, bookmarkChanges } = await mountEditor(before, { bookmarkLines: saved });
-    await nextTick();
-    Object.assign(props, { tabId: "other", modelValue: "other\nfile", bookmarkLines: [1] });
-    await nextTick();
-    await nextTick();
-    bookmarkChanges.mockClear();
+  it.each([...workspaceBookmarkCases, { name: "insertion", before: "one\ntwo\nthree", after: "new\none\ntwo\nthree", saved: [2], expected: [3] }, { name: "deletion", before: "one\ntwo\nthree", after: "two\nthree", saved: [3], expected: [2] }])(
+    "persists mapped bookmarks after an inactive cached tab receives a line $name",
+    async ({ before, after, saved, expected }) => {
+      const { view, props, bookmarkChanges } = await mountEditor(before, { bookmarkLines: saved });
+      await nextTick();
+      Object.assign(props, { tabId: "other", modelValue: "other\nfile", bookmarkLines: [1] });
+      await nextTick();
+      await nextTick();
+      bookmarkChanges.mockClear();
 
-    // The stored lines still refer to the cached document, as with an external file reload.
-    Object.assign(props, { tabId: "bookmarks", modelValue: after, bookmarkLines: saved });
-    await nextTick();
-    await nextTick();
-    expect(queryEditorBookmarkLines(view)).toEqual(expected);
-    expect(props.bookmarkLines).toEqual(expected);
-    expect(bookmarkChanges).toHaveBeenLastCalledWith(expected, "bookmarks");
-    expect(bookmarkChanges.mock.calls.every(([, owner]) => owner === "bookmarks")).toBe(true);
+      // The stored lines still refer to the cached document, as with an external file reload.
+      Object.assign(props, { tabId: "bookmarks", modelValue: after, bookmarkLines: saved });
+      await nextTick();
+      await nextTick();
+      expect(queryEditorBookmarkLines(view)).toEqual(expected);
+      expect(props.bookmarkLines).toEqual(expected);
+      expect(bookmarkChanges).toHaveBeenLastCalledWith(expected, "bookmarks");
+      expect(bookmarkChanges.mock.calls.every(([, owner]) => owner === "bookmarks")).toBe(true);
 
-    const persisted = [...props.bookmarkLines!];
-    const remounted = await mountEditor(after, { bookmarkLines: persisted });
-    await nextTick();
-    expect(queryEditorBookmarkLines(remounted.view)).toEqual(expected);
-  });
+      const persisted = [...props.bookmarkLines!];
+      const remounted = await mountEditor(after, { bookmarkLines: persisted });
+      await nextTick();
+      expect(queryEditorBookmarkLines(remounted.view)).toEqual(expected);
+    },
+  );
 
   it("restores saved bookmarks when an empty cached tab hydrates while inactive", async () => {
     const { view, props } = await mountEditor("", { bookmarkLines: [3] });

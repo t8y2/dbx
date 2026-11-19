@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SavedSqlFile } from "@/types/database";
+import { workspaceBookmarkCases } from "@/lib/editor/__tests__/workspaceBookmarkCases";
 
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
@@ -50,6 +51,7 @@ describe("queryStore reopenClosedTab", () => {
   }
 
   it.each([
+    ...workspaceBookmarkCases,
     { name: "unchanged SQL", before: "one\ntwo\nthree", after: "one\ntwo\nthree", saved: [2], expected: [2] },
     { name: "a prepended line", before: "one\ntwo\nthree", after: "new\none\ntwo\nthree", saved: [2], expected: [3] },
     { name: "a removed line", before: "one\ntwo\nthree", after: "two\nthree", saved: [3], expected: [2] },

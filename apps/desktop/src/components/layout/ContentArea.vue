@@ -2442,6 +2442,7 @@ defineExpose({
                   :initial-viewport="activeTab.editorViewport"
                   :initial-selection="activeTab.editorSelection"
                   :bookmark-lines="activeTab.editorBookmarks"
+                  :bookmark-document="activeTab.editorBookmarksDocument"
                   :reveal-request="activeTab.editorRevealRequest"
                   :force-word-wrap="activeTab.forceWordWrap"
                   :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"

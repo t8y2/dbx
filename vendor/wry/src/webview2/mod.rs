@@ -570,6 +570,30 @@ impl InnerWebView {
       };
     }
 
+    // DBX: keep precision-touchpad pinch events available to custom canvases.
+    // IsPinchZoomEnabled=false suppresses this input before DOM wheel handlers.
+    // Cancel page scaling in JS instead, without stopping event propagation.
+    // Register before navigation (and for subframes), not after app startup.
+    if !attributes.zoom_hotkeys_enabled && !attributes.javascript_disabled {
+      Self::add_script_to_execute_on_document_created(
+        &webview,
+        r#"(() => {
+          const options = { capture: true, passive: false };
+          window.addEventListener('wheel', event => {
+            if (event.ctrlKey) event.preventDefault();
+          }, options);
+          // Preserve the page-scale lock for touchscreens as well. Custom
+          // touch handlers still receive the events and own their viewport.
+          const preventPagePinch = event => {
+            if (event.touches.length > 1) event.preventDefault();
+          };
+          window.addEventListener('touchstart', preventPagePinch, options);
+          window.addEventListener('touchmove', preventPagePinch, options);
+        })();"#
+          .to_string(),
+      )?;
+    }
+
     // Initialize main and subframe scripts
     for init_script in attributes.initialization_scripts {
       Self::add_script_to_execute_on_document_created(&webview, init_script.script)?;
@@ -677,7 +701,12 @@ impl InnerWebView {
     }
 
     if let Ok(settings5) = settings.cast::<ICoreWebView2Settings5>() {
-      settings5.SetIsPinchZoomEnabled(attributes.zoom_hotkeys_enabled)?;
+      // DBX: browser hotkeys and custom canvas pinch are separate concerns.
+      // When scripts are enabled, the document-created guard above blocks
+      // default page scaling while allowing pinch-generated wheel events.
+      settings5.SetIsPinchZoomEnabled(
+        attributes.zoom_hotkeys_enabled || !attributes.javascript_disabled,
+      )?;
     }
 
     if let Ok(settings6) = settings.cast::<ICoreWebView2Settings6>() {

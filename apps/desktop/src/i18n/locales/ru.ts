@@ -6810,6 +6810,8 @@ export default withEnglishFallback({
     showPackageMembers: "Развернуть элементы пакета",
     packageFunctionAtLine: "Функция {name}, строка {line}",
     packageProcedureAtLine: "Процедура {name}, строка {line}",
+    selectedObjects: "Выбрано объектов: {count}",
+    dropPackageBodyHint: "При удалении спецификации пакета также будет удалено существующее тело пакета.",
   },
   postgresForeignTable: {
     tableKind: "Тип таблицы",

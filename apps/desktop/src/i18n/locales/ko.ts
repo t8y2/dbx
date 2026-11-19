@@ -6326,6 +6326,8 @@ export default withEnglishFallback({
     showPackageMembers: "패키지 멤버 펼치기",
     packageFunctionAtLine: "함수 {name}, {line}번째 줄",
     packageProcedureAtLine: "프로시저 {name}, {line}번째 줄",
+    selectedObjects: "{count}개 개체가 선택되었습니다",
+    dropPackageBodyHint: "패키지 사양을 삭제하면 기존 패키지 본문도 삭제됩니다.",
   },
   postgresForeignTable: {
     tableKind: "테이블 유형",

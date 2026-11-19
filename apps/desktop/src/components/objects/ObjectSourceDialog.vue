@@ -30,7 +30,8 @@ import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { DatabaseType, ObjectSourceKind, OracleTriggerMetadata } from "@/types/database";
+import type { DatabaseType, ObjectSourceKind, OracleTriggerMetadata, PackageMemberFocus } from "@/types/database";
+import { findOraclePackageMember } from "@/lib/sql/oraclePackageMembers";
 const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
 
 const props = withDefaults(
@@ -52,6 +53,8 @@ const props = withDefaults(
     initialEditing?: boolean;
     initialSection?: ObjectDetailsSection;
     createTrigger?: OracleTriggerSqlBinding;
+    /** 树上选中的包成员：源码到位后把光标放到它的实现上。 */
+    focusMember?: PackageMemberFocus;
   }>(),
   {
     initialEditing: false,
@@ -170,7 +173,26 @@ const title = computed(() => `${props.createTrigger && !triggerSnapshot.value?.e
 const hasRoutineMetadata = computed(() => !!routineMetadata.value && (routineMetadata.value.parameters.length > 0 || !!routineMetadata.value.returnType));
 
 watch(
-  () => [props.open, props.connectionId, props.database, props.schema, props.catalog, props.executionSchema, props.name, props.relationName, props.signature, props.objectType, props.triggerIdentityMode, props.databaseType, props.initialEditing, props.initialSection] as const,
+  () =>
+    [
+      props.open,
+      props.connectionId,
+      props.database,
+      props.schema,
+      props.catalog,
+      props.executionSchema,
+      props.name,
+      props.relationName,
+      props.signature,
+      props.objectType,
+      props.triggerIdentityMode,
+      props.databaseType,
+      props.initialEditing,
+      props.initialSection,
+      props.focusMember?.name,
+      props.focusMember?.kind,
+      props.focusMember?.signature,
+    ] as const,
   () => {
     triggerDiagnosticOpen.value = false;
     sourceRevealRequest.value = undefined;
@@ -181,6 +203,19 @@ watch(
   },
   { immediate: true, flush: "sync" },
 );
+
+/**
+ * 把光标放到包成员的实现上。行号按**弹窗里显示的那份文本**解析（展示用的源码经过
+ * 格式化，行号与服务端的 ALL_SOURCE 并不一致），所以解析和定位始终自洽。
+ * 包里没有这个子程序时停在文件开头，不猜位置。
+ */
+function revealFocusMember(displayed: string) {
+  const focus = props.focusMember;
+  if (!focus || !displayed) return;
+  const member = findOraclePackageMember(displayed, focus);
+  if (!member) return;
+  sourceRevealRequest.value = { id: ++sourceRevealSequence, line: member.line, column: 1 };
+}
 
 async function loadSource(nextEditing = props.initialEditing && canEdit.value, readCreatedTarget = false) {
   const serial = ++loadSerial;
@@ -264,6 +299,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value, r
     content.value = formatted;
     draft.value = nextEditing && canEdit.value ? resolveObjectSourceEditDraft(props.databaseType, resolvedType, formatted, editable) : "";
     editing.value = nextEditing && canEdit.value;
+    revealFocusMember(editing.value ? draft.value : formatted);
     if (nextEditing && !canEdit.value) {
       toast(t("objects.sourceReadOnly"), 3000);
     }

@@ -30,6 +30,7 @@ import type {
   ObjectBrowserViewport,
   ObjectSource,
   ObjectSourceKind,
+  PackageMemberFocus,
   QueryResult,
   QueryResultSourceColumnRef,
   QueryTab,
@@ -109,6 +110,7 @@ import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
+import { findOraclePackageMember } from "@/lib/sql/oraclePackageMembers";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import {
@@ -339,6 +341,8 @@ interface OpenPendingObjectSourceTabOptions {
   initialEditing?: boolean;
   initialSection?: NonNullable<QueryTab["objectDetails"]>["section"];
   request: ObjectSourceRequestIdentity;
+  /** 源码落地后要定位到的包成员；见 `QueryTab.objectSourceFocusMember`。 */
+  focusMember?: PackageMemberFocus;
 }
 
 /**
@@ -3498,6 +3502,8 @@ export const useQueryStore = defineStore("query", () => {
     if (loaded) {
       loaded.sourceView = true;
       loaded.objectDetails = sourceDetails(options, options.request, options.initialSection);
+      loaded.objectSourceFocusMember = options.focusMember;
+      revealPendingPackageMember(loaded.id);
       switchTab(loaded.id);
       // 这条路径不经过 ensureConnected，但树上的动作会把该连接设为当前连接
       useConnectionStore().activeConnectionId = options.connectionId;
@@ -3508,6 +3514,7 @@ export const useQueryStore = defineStore("query", () => {
     const existing = findPendingObjectSourceTab(options);
     if (existing) {
       existing.objectDetails = sourceDetails(options, options.request, options.initialSection);
+      existing.objectSourceFocusMember = options.focusMember;
       switchTab(existing.id);
       // 再次点击同一对象 = 再试一次，不新开 tab、不重复占用一个 tab 位
       if (existing.sourceLoad?.error) retryObjectSourceTab(existing.id);
@@ -3517,6 +3524,8 @@ export const useQueryStore = defineStore("query", () => {
     const readOnlyLoaded = findLoadedReadOnlySourceTab(options);
     if (readOnlyLoaded) {
       readOnlyLoaded.objectDetails = sourceDetails(options, options.request, options.initialSection);
+      readOnlyLoaded.objectSourceFocusMember = options.focusMember;
+      revealPendingPackageMember(readOnlyLoaded.id);
       switchTab(readOnlyLoaded.id);
       useConnectionStore().activeConnectionId = options.connectionId;
       // 复用即刷新；有未保存修改时只切换，不覆盖用户内容
@@ -3532,9 +3541,30 @@ export const useQueryStore = defineStore("query", () => {
     if (tab) {
       tab.sourceLoad = { startedAt: Date.now(), initialEditing: options.initialEditing, request: { ...options.request } };
       tab.objectDetails = sourceDetails(options, options.request, options.initialSection);
+      tab.objectSourceFocusMember = options.focusMember;
     }
     void loadObjectSourceIntoTab(id);
     return id;
+  }
+
+  /**
+   * 把光标放到源码里那个包成员的子程序头上（树上选中包成员时才有定位意图）。
+   * 走编辑器既有的 reveal 通道，和全局搜索跳转同一条路。
+   *
+   * 一次性消费：定位发生后意图就清掉，否则这个 tab 之后的每次刷新、每次重新
+   * 挂载都会把用户自己挪开的光标重新拽回子程序头。源码还没到（`sql` 为空）时
+   * 保留意图，等取源落地后由 `applyLoadedObjectSource` 再调一次。
+   */
+  function revealPendingPackageMember(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    const focus = tab?.objectSourceFocusMember;
+    if (!tab || !focus || !tab.sql) return;
+    tab.objectSourceFocusMember = undefined;
+    const member = findOraclePackageMember(tab.sql, focus);
+    // 包里没有这个子程序（例如只拿到了包头、或者包体里是另一个重载）：停在文件
+    // 开头，不要把光标丢到一个猜出来的位置上——跳错比不跳更难发现。
+    if (!member) return;
+    tab.editorRevealRequest = { id: ++contentRevealSeq, line: member.line, column: 1 };
   }
 
   /**
@@ -3777,6 +3807,8 @@ export const useQueryStore = defineStore("query", () => {
         const snapshot = getObjectSourceIdentitySnapshot(existing);
         if (snapshot) assertSourceIdentity(snapshot);
         clearObjectSourceLoad(tab);
+        // 定位意图跟着内容走：占位 tab 马上就被关掉，光标该落在接手的那个 tab 上。
+        if (tab.objectSourceFocusMember) existing.objectSourceFocusMember = tab.objectSourceFocusMember;
         closeTab(id);
         existing.sourceView = true;
         if (managedType && loaded.initialEditing === true) existing.typeSourceEditing = true;
@@ -3786,6 +3818,7 @@ export const useQueryStore = defineStore("query", () => {
           updateSql(existing.id, loaded.editableSource);
           markTabClean(existing);
         }
+        revealPendingPackageMember(existing.id);
         return;
       }
       updateSql(id, loaded.editableSource);
@@ -3802,6 +3835,7 @@ export const useQueryStore = defineStore("query", () => {
       updateSql(id, keptTriggerDraft);
     } else markTabClean(tab);
     clearObjectSourceLoad(tab);
+    revealPendingPackageMember(id);
   }
 
   /**
@@ -12274,6 +12308,7 @@ export const useQueryStore = defineStore("query", () => {
     createTab,
     openObjectSourceTab,
     openObjectSourceTabPending,
+    revealPendingPackageMember,
     retryObjectSourceTab,
     refreshObjectSourceTab,
     loadDdlViewerTab,

@@ -53,7 +53,7 @@ import {
 } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { DEFAULT_DATABASE_TREE_LABEL, hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { objectSourceTargetForTreeNode, packageMemberFocusForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { exactOracleTriggerNodeMetadata } from "@/lib/database/oracleTriggerIdentity";
 import { supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -206,6 +206,7 @@ const sidebarDdlDatabaseType = computed(() => {
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
 });
 const sidebarObjectSourceResolvedTarget = computed(() => (sidebarObjectSourceTarget.value ? objectSourceTargetForTreeNode(sidebarObjectSourceTarget.value.node) : null));
+const sidebarObjectSourceFocusMember = computed(() => (sidebarObjectSourceTarget.value ? packageMemberFocusForTreeNode(sidebarObjectSourceTarget.value.node) : null));
 const sidebarObjectSourceType = computed(() => sidebarObjectSourceResolvedTarget.value?.objectType ?? null);
 const sidebarObjectSourceDatabaseType = computed(() => {
   const connectionId = sidebarObjectSourceTarget.value?.node.connectionId;
@@ -3461,6 +3462,7 @@ defineExpose({
       :format-dialect="sidebarObjectSourceFormatDialect"
       :initial-editing="sidebarObjectSourceTarget.initialEditing"
       :initial-section="sidebarObjectSourceTarget.initialSection"
+      :focus-member="sidebarObjectSourceFocusMember ?? undefined"
       :create-trigger="sidebarObjectSourceTarget.createTrigger?.payload"
       :execution-schema="sidebarObjectSourceTarget.node.schema || sidebarObjectSourceTarget.node.database"
       :trigger-identity-mode="exactOracleTriggerNodeMetadata(sidebarObjectSourceTarget.node) ? 'exact' : undefined"

@@ -101,6 +101,7 @@ import {
   isSqlObjectNavigationRoutineType,
   normalizeOracleNavigationTarget,
   sqlObjectNavigationContextTarget,
+  sqlObjectNavigationPackageMember,
   sqlObjectNavigationSourceKind,
   sqlObjectNavigationSourceName,
   sqlObjectNavigationSourceSchema,
@@ -124,7 +125,7 @@ import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, resolveExternalSqlFileTargetForActiveTab, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
 import { defaultSavedQueryFileName, externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePath, isSqlOrScriptFilePath, queryTabExternalFilePath, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 
-import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, PackageMemberFocus, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
 import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
 import { createFrontendPluginRegistry, pluginConnectionProviderDefaultPort } from "@/lib/plugins/frontendPlugin";
@@ -647,6 +648,7 @@ const queryEditorObjectSourceTarget = ref<{
   initialEditing: boolean;
   signature?: string;
   relationName?: string;
+  focusMember?: PackageMemberFocus;
 } | null>(null);
 const showSaveSqlDialog = ref(false);
 const saveSqlDialogTabId = ref<string | null>(null);
@@ -3776,6 +3778,10 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
   if (!target || !objectType) return;
   const sourceName = sqlObjectNavigationSourceName(navigation);
   const sourceSchema = sqlObjectNavigationSourceSchema(navigation, target.schema || target.database);
+  // `PKG.MEMBER` 打开的是整个包体，成员身份只用来定位光标：它不属于包体的取源
+  // 身份，混进去会让后端按重载去匹配一个不存在的独立子程序。
+  const focusMember = sqlObjectNavigationPackageMember(navigation);
+  const sourceSignature = focusMember ? undefined : navigation.signature;
   try {
     // Keep the editor navigation path aligned with the sidebar: create a visible
     // pending tab first, then let the store own connection/source loading.
@@ -3787,7 +3793,8 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
         schema: sourceSchema || target.database,
         catalog: target.catalog,
         initialEditing,
-        request: { name: sourceName, objectType, signature: navigation.signature },
+        request: { name: sourceName, objectType, signature: sourceSignature },
+        ...(focusMember ? { focusMember } : {}),
       });
       return;
     }
@@ -3802,7 +3809,8 @@ function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: bo
       name: sourceName,
       objectType,
       initialEditing,
-      signature: navigation.signature,
+      signature: sourceSignature,
+      ...(focusMember ? { focusMember } : {}),
     };
     showQueryEditorObjectSourceDialog.value = true;
   } catch (e: any) {
@@ -6425,6 +6433,7 @@ onUnmounted(() => {
         :relation-name="queryEditorObjectSourceTarget.relationName"
         :object-type="queryEditorObjectSourceTarget.objectType"
         :initial-editing="queryEditorObjectSourceTarget.initialEditing"
+        :focus-member="queryEditorObjectSourceTarget.focusMember"
         :database-type="queryEditorObjectSourceDatabaseType"
         :dialect="queryEditorObjectSourceDialect"
         :format-dialect="queryEditorObjectSourceFormatDialect"

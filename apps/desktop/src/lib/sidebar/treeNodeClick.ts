@@ -1,4 +1,4 @@
-import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectSourceKind, PackageMemberFocus, TreeNode, TreeNodeType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { supportsConnectionQueryActions } from "@/lib/database/databaseFeatureSupport";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
@@ -132,13 +132,21 @@ export interface TreeNodeObjectSourceTarget {
   signature?: string;
 }
 
+/**
+ * 包成员打开的是**包体**：实现在那里，光标才能落到子程序上（DataGrip 同行为）。
+ * 只有包头、没有包体的包（纯常量/类型声明）由取源的 PACKAGE_BODY→PACKAGE 回退
+ * 兜底（`loadObjectSourceWithRoutineFallback`），不会因此打不开。
+ *
+ * 成员签名**不进**取源身份：它描述的是成员而不是这个包体，带上去既会让后端按
+ * 重载去匹配一个不存在的独立子程序，又会让同一个包体的每个成员各开一个 tab。
+ * 成员身份另走 `packageMemberFocusForTreeNode`，只用于把光标放到实现上。
+ */
 export function objectSourceTargetForTreeNode(node: TreeNode): TreeNodeObjectSourceTarget | null {
   if ((node.type === "procedure" || node.type === "function") && node.parentType === "package" && node.parentName) {
     return {
       name: node.parentName,
       schema: node.parentSchema || node.schema,
-      objectType: "PACKAGE",
-      signature: node.signature,
+      objectType: "PACKAGE_BODY",
     };
   }
   const objectType = objectSourceKindForTreeNode(node.type);
@@ -149,6 +157,14 @@ export function objectSourceTargetForTreeNode(node: TreeNode): TreeNodeObjectSou
     objectType,
     signature: node.signature,
   };
+}
+
+/** 树上选中的包成员身份；非包成员返回 null。打开包体后据此把光标放到实现上。 */
+export function packageMemberFocusForTreeNode(node: TreeNode): PackageMemberFocus | null {
+  if ((node.type !== "procedure" && node.type !== "function") || node.parentType !== "package" || !node.parentName) return null;
+  const name = node.objectName || node.label;
+  if (!name) return null;
+  return { name, kind: node.type, ...(node.signature ? { signature: node.signature } : {}) };
 }
 
 export function isDocumentBrowserTreeNode(type: TreeNodeType): boolean {

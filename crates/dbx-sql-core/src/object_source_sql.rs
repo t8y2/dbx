@@ -3753,6 +3753,7 @@ mod tests {
             schema: Some("APP".to_string()),
             name: "ACTIVE_ORDERS".to_string(),
             source: "SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+            identifier_quote: None,
         });
         assert_eq!(
             editable,
@@ -3765,6 +3766,7 @@ mod tests {
             schema: Some("APP".to_string()),
             name: "ACTIVE_ORDERS".to_string(),
             source: "CREATE VIEW \"APP\".\"ACTIVE_ORDERS\" AS SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(
@@ -3778,6 +3780,7 @@ mod tests {
             schema: Some("_SYS_BIC".to_string()),
             name: "pkg/CALC_ORDERS".to_string(),
             source: String::new(),
+            identifier_quote: None,
         });
         assert_eq!(empty_editable, "");
     }

@@ -34,6 +34,7 @@ use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -4148,6 +4149,159 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     })
 }
 
+/// Batch-scoped observation state for the native batch paths (MySQL
+/// multi-statement pipeline and SQL Server agent GO batches).
+///
+/// A batch publishes one `query.started` and a `query.finished` per statement
+/// from the progress callback. Because a native batch can fail before the
+/// driver reports anything (read-only rejection, pool start failure,
+/// cancellation before the first statement), the terminal
+/// `query.finished` with `batchComplete: true` is published by
+/// [`BatchObservation::finish`] on every exit path, so observers never keep an
+/// execution open.
+struct BatchObservation {
+    bus: crate::observability::HostObservationBus,
+    execution_id: Option<String>,
+    connection_id: String,
+    database: String,
+    statement_count: usize,
+    started_at: std::time::Instant,
+    completed_statements: Arc<AtomicUsize>,
+}
+
+impl BatchObservation {
+    fn start(
+        bus: &crate::observability::HostObservationBus,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+        schema: Option<&str>,
+        statement_count: usize,
+        execution_id: Option<String>,
+    ) -> Self {
+        let (batch_sql, batch_sql_truncated) = cap_observation_text(sql);
+        bus.publish(
+            KIND_QUERY_STARTED,
+            Some(connection_id.to_string()),
+            Some(database.to_string()),
+            serde_json::json!({
+                "executionId": execution_id,
+                "sql": batch_sql,
+                "sqlTruncated": batch_sql_truncated,
+                "schema": schema,
+                "statementCount": statement_count,
+                "batch": true,
+            }),
+        );
+        Self {
+            bus: bus.clone(),
+            execution_id,
+            connection_id: connection_id.to_string(),
+            database: database.to_string(),
+            statement_count,
+            started_at: std::time::Instant::now(),
+            completed_statements: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Wraps the caller's progress callback so every reported statement also
+    /// produces a `query.finished` observation.
+    fn progress_callback(
+        &self,
+        statements: Vec<String>,
+        original: Option<ExecuteMultiProgressCallback>,
+    ) -> ExecuteMultiProgressCallback {
+        let bus = self.bus.clone();
+        let execution_id = self.execution_id.clone();
+        let connection_id = self.connection_id.clone();
+        let database = self.database.clone();
+        let completed_statements = self.completed_statements.clone();
+        Arc::new(move |item: ExecuteMultiProgress| {
+            completed_statements.fetch_add(1, Ordering::Relaxed);
+            let mut payload = serde_json::json!({
+                "executionId": execution_id,
+                "statementIndex": item.statement_index,
+                "statementTotal": item.total,
+                "durationMs": item.execution_time_ms as u64,
+                "affectedRows": item.affected_rows,
+                "batch": true,
+            });
+            // The generic loop reports `statement_index + offset` for grouped
+            // statements; `get` tolerates a report that runs past the split.
+            if let Some(statement_sql) = statements.get(item.statement_index) {
+                let (sql_text, sql_truncated) = cap_observation_text(statement_sql);
+                payload["sql"] = serde_json::json!(sql_text);
+                payload["sqlTruncated"] = serde_json::json!(sql_truncated);
+            }
+            payload["status"] = serde_json::json!(if item.success { "ok" } else { "error" });
+            if let Some(error) = &item.error {
+                // `BackendError` models structured failures and has no Display
+                // impl; its JSON form is the same shape the frontend receives.
+                let message = serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}"));
+                let (message, message_truncated) = cap_observation_text(&message);
+                payload["error"] = serde_json::json!(message);
+                payload["errorTruncated"] = serde_json::json!(message_truncated);
+            }
+            bus.publish(KIND_QUERY_FINISHED, Some(connection_id.clone()), Some(database.clone()), payload);
+            if let Some(original) = &original {
+                original(item);
+            }
+        })
+    }
+
+    /// Publishes the batch terminal event. Exactly one call per started batch.
+    fn finish(&self, status: &str, failed_statements: usize, error: Option<String>) {
+        let mut payload = serde_json::json!({
+            "executionId": self.execution_id,
+            "batch": true,
+            "batchComplete": true,
+            "status": status,
+            "statementCount": self.statement_count,
+            "completedStatements": self.completed_statements.load(Ordering::Relaxed),
+            "failedStatements": failed_statements,
+            "durationMs": self.started_at.elapsed().as_millis() as u64,
+        });
+        if let Some(error) = error {
+            let (message, truncated) = cap_observation_text(&error);
+            payload["error"] = serde_json::json!(message);
+            payload["errorTruncated"] = serde_json::json!(truncated);
+        }
+        self.bus.publish(KIND_QUERY_FINISHED, Some(self.connection_id.clone()), Some(self.database.clone()), payload);
+    }
+}
+
+/// Terminal status for a native batch.
+///
+/// The outer `Result` alone is not enough: MySQL connection acquisition and
+/// other pre-statement failures return `Ok` with a single `execution_error`
+/// result, and `continue_on_error` batches return `Ok` results that still
+/// contain failures. Cancellation wins over statement errors because the user
+/// stopped the run; `failedStatements` still tells consumers whether any
+/// statement had failed before that.
+fn batch_terminal_status(
+    outcome: &Result<Vec<ExecuteMultiResult>, QueryExecutionError>,
+    cancelled: bool,
+) -> (&'static str, usize, Option<String>) {
+    match outcome {
+        Err(error) => ("error", 0, Some(error.to_string())),
+        Ok(results) => {
+            let failed = results.iter().filter(|result| result.execution_error).count();
+            let error = results
+                .iter()
+                .find(|result| result.execution_error)
+                .and_then(|result| result.error.as_ref())
+                .map(|error| serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}")));
+            if cancelled {
+                ("cancelled", failed, error)
+            } else if failed > 0 {
+                ("error", failed, error)
+            } else {
+                ("ok", 0, None)
+            }
+        }
+    }
+}
+
 async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     state: &AppState,
     connection_id: &str,
@@ -4310,182 +4464,150 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
     // `execute_sql_statement_with_options_typed` for each statement and is
     // already covered by the funnel; wrapping it again would double count.
     let native_batch = mysql_pool.is_some() || complete_sqlserver_agent_batch;
-    let observe_batch = native_batch && state.host_observations.subscriber_count() > 0;
-    let progress = if observe_batch {
-        let batch_execution_id = options.execution_id.clone();
-        let (batch_sql, batch_sql_truncated) = cap_observation_text(sql);
-        state.host_observations.publish(
-            KIND_QUERY_STARTED,
-            Some(connection_id.to_string()),
-            Some(database.to_string()),
-            serde_json::json!({
-                "executionId": batch_execution_id,
-                "sql": batch_sql,
-                "sqlTruncated": batch_sql_truncated,
-                "schema": schema,
-                "statementCount": statements.len(),
-                "batch": true,
-            }),
-        );
-        let bus = state.host_observations.clone();
-        let observed_connection_id = connection_id.to_string();
-        let observed_database = database.to_string();
-        let statements = statements.clone();
-        let original = progress;
-        let observed: ExecuteMultiProgressCallback = Arc::new(move |item: ExecuteMultiProgress| {
-            let mut payload = serde_json::json!({
-                "executionId": batch_execution_id,
-                "statementIndex": item.statement_index,
-                "statementTotal": item.total,
-                "durationMs": item.execution_time_ms as u64,
-                "affectedRows": item.affected_rows,
-                "batch": true,
-            });
-            // The generic loop reports `statement_index + offset` for grouped
-            // statements; `get` tolerates a report that runs past the split.
-            if let Some(statement_sql) = statements.get(item.statement_index) {
-                let (sql_text, sql_truncated) = cap_observation_text(statement_sql);
-                payload["sql"] = serde_json::json!(sql_text);
-                payload["sqlTruncated"] = serde_json::json!(sql_truncated);
-            }
-            payload["status"] = serde_json::json!(if item.success { "ok" } else { "error" });
-            if let Some(error) = &item.error {
-                // `BackendError` models structured failures and has no Display
-                // impl; its JSON form is the same shape the frontend receives.
-                let message = serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}"));
-                let (message, message_truncated) = cap_observation_text(&message);
-                payload["error"] = serde_json::json!(message);
-                payload["errorTruncated"] = serde_json::json!(message_truncated);
-            }
-            bus.publish(
-                KIND_QUERY_FINISHED,
-                Some(observed_connection_id.clone()),
-                Some(observed_database.clone()),
-                payload,
-            );
-            if let Some(original) = &original {
-                original(item);
-            }
-        });
-        Some(observed)
+    let batch_observation = if native_batch && state.host_observations.subscriber_count() > 0 {
+        Some(BatchObservation::start(
+            &state.host_observations,
+            connection_id,
+            database,
+            sql,
+            schema,
+            statements.len(),
+            options.execution_id.clone(),
+        ))
     } else {
-        progress
+        None
+    };
+    let progress = match &batch_observation {
+        Some(observation) => Some(observation.progress_callback(statements.clone(), progress)),
+        None => progress,
     };
 
-    if let Some((pool, mode)) = mysql_pool {
+    // Early failures (read-only rejection, pool start failure, cancellation
+    // before the first statement) never reach the progress callback, so the
+    // batch terminal is published here for every exit path.
+    let cancel_token_for_observation = cancel_token.clone();
+    let outcome: Result<Vec<ExecuteMultiResult>, QueryExecutionError> = if let Some((pool, mode)) = mysql_pool {
         // Read-only check for MySQL batch path
-        check_read_only_for_connection_multi(state, &pool_key, &statements).await?;
-        let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-        let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
-        return execute_multi_mysql(
-            state,
-            &pool_key,
-            db_type,
-            &pool,
-            mode,
-            mysql_dialect,
-            mysql_catalog_dialect,
-            database,
-            &statements,
-            cancel_token,
-            options,
-            progress.as_ref(),
-        )
-        .await
-        .map_err(Into::into);
-    }
-
-    // Some Agent drivers cannot execute another statement while a paged result
-    // cursor remains open on the same physical connection. Multi-result execution
-    // therefore reads a bounded first page without retaining those cursors.
-    let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
-    let mut results = Vec::with_capacity(statements.len());
-    for (statement_index, stmt) in statements.iter().enumerate() {
-        if is_canceled(&cancel_token) {
-            let error = canceled_query_execution_error();
-            results.push(ExecuteMultiResult::execution_error_with_backend(
-                error_query_result(error.clone().into_legacy_string()),
-                Some(statement_index),
-                error.into_backend_error(),
-            ));
-            break;
+        match check_read_only_for_connection_multi(state, &pool_key, &statements).await {
+            Err(error) => Err(error.into()),
+            Ok(()) => {
+                let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+                let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
+                execute_multi_mysql(
+                    state,
+                    &pool_key,
+                    db_type,
+                    &pool,
+                    mode,
+                    mysql_dialect,
+                    mysql_catalog_dialect,
+                    database,
+                    &statements,
+                    cancel_token,
+                    options,
+                    progress.as_ref(),
+                )
+                .await
+                .map_err(Into::into)
+            }
         }
-        let execution = if complete_sqlserver_agent_batch {
-            Box::pin(sqlserver_agent_batch::execute(
-                state,
-                &pool_key,
-                database,
-                stmt,
-                schema,
-                cancel_token.clone(),
-                statement_options.clone(),
-            ))
-            .await
-        } else {
-            execute_sql_statement_with_options_typed(
-                state,
-                connection_id,
-                database,
-                stmt,
-                schema,
-                cancel_token.clone(),
-                statement_options.clone(),
-            )
-            .await
-            .map(|result| vec![result])
-        };
-        match execution {
-            Ok(batch_results) => {
-                for result in batch_results {
+    } else {
+        // Some Agent drivers cannot execute another statement while a paged result
+        // cursor remains open on the same physical connection. Multi-result execution
+        // therefore reads a bounded first page without retaining those cursors.
+        let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
+        let mut results = Vec::with_capacity(statements.len());
+        for (statement_index, stmt) in statements.iter().enumerate() {
+            if is_canceled(&cancel_token) {
+                let error = canceled_query_execution_error();
+                results.push(ExecuteMultiResult::execution_error_with_backend(
+                    error_query_result(error.clone().into_legacy_string()),
+                    Some(statement_index),
+                    error.into_backend_error(),
+                ));
+                break;
+            }
+            let execution = if complete_sqlserver_agent_batch {
+                Box::pin(sqlserver_agent_batch::execute(
+                    state,
+                    &pool_key,
+                    database,
+                    stmt,
+                    schema,
+                    cancel_token.clone(),
+                    statement_options.clone(),
+                ))
+                .await
+            } else {
+                execute_sql_statement_with_options_typed(
+                    state,
+                    connection_id,
+                    database,
+                    stmt,
+                    schema,
+                    cancel_token.clone(),
+                    statement_options.clone(),
+                )
+                .await
+                .map(|result| vec![result])
+            };
+            match execution {
+                Ok(batch_results) => {
+                    for result in batch_results {
+                        report_execute_multi_progress(
+                            progress.as_ref(),
+                            statement_index,
+                            statements.len(),
+                            &result,
+                            true,
+                            None,
+                        );
+                        results.push(if complete_sqlserver_agent_batch {
+                            // One GO batch can contain several statements/results;
+                            // do not label every result as its first statement.
+                            ExecuteMultiResult::success_with_optional_server_large_values(
+                                result,
+                                options.table_data_preview,
+                            )
+                        } else {
+                            ExecuteMultiResult::success_with_index_and_optional_server_large_values(
+                                result,
+                                statement_index,
+                                options.table_data_preview,
+                            )
+                        });
+                    }
+                }
+                Err(error) => {
+                    let action = query_execution_error_action(db_type, stmt, &error);
+                    let result = error_query_result(error.clone().into_legacy_string());
+                    let backend_error = error.into_backend_error();
                     report_execute_multi_progress(
                         progress.as_ref(),
                         statement_index,
                         statements.len(),
                         &result,
-                        true,
-                        None,
+                        false,
+                        Some(backend_error.clone()),
                     );
-                    results.push(if complete_sqlserver_agent_batch {
-                        // One GO batch can contain several statements/results;
-                        // do not label every result as its first statement.
-                        ExecuteMultiResult::success_with_optional_server_large_values(
-                            result,
-                            options.table_data_preview,
-                        )
-                    } else {
-                        ExecuteMultiResult::success_with_index_and_optional_server_large_values(
-                            result,
-                            statement_index,
-                            options.table_data_preview,
-                        )
-                    });
-                }
-            }
-            Err(error) => {
-                let action = query_execution_error_action(db_type, stmt, &error);
-                let result = error_query_result(error.clone().into_legacy_string());
-                let backend_error = error.into_backend_error();
-                report_execute_multi_progress(
-                    progress.as_ref(),
-                    statement_index,
-                    statements.len(),
-                    &result,
-                    false,
-                    Some(backend_error.clone()),
-                );
-                results.push(ExecuteMultiResult::execution_error_with_backend(
-                    result,
-                    Some(statement_index),
-                    backend_error,
-                ));
-                if !should_continue_batch_after_error(continue_on_error, action) {
-                    break;
+                    results.push(ExecuteMultiResult::execution_error_with_backend(
+                        result,
+                        Some(statement_index),
+                        backend_error,
+                    ));
+                    if !should_continue_batch_after_error(continue_on_error, action) {
+                        break;
+                    }
                 }
             }
         }
+        Ok(results)
+    };
+    if let Some(observation) = &batch_observation {
+        let (status, failed, error) = batch_terminal_status(&outcome, is_canceled(&cancel_token_for_observation));
+        observation.finish(status, failed, error);
     }
-
-    Ok(results)
+    outcome
 }
 
 /// Split a batch script into the statements the core will execute, using the
@@ -15320,5 +15442,113 @@ for line in sys.stdin:
         });
 
         assert!(!mysql_error_is_syntax_error(&polardbx_non_parser_error));
+    }
+}
+
+#[cfg(test)]
+mod batch_observation_tests {
+    use super::*;
+
+    fn progress(statement_index: usize, total: usize) -> ExecuteMultiProgress {
+        ExecuteMultiProgress {
+            statement_index,
+            completed: statement_index + 1,
+            total,
+            success: true,
+            execution_time_ms: 5,
+            affected_rows: 0,
+            error: None,
+        }
+    }
+
+    /// A batch that fails before the driver reports anything (read-only
+    /// rejection, pool start failure, cancel) must still close its execution,
+    /// otherwise observers keep a `query.started` open forever.
+    #[tokio::test]
+    async fn batch_terminal_is_published_when_no_statement_reported() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let observation = BatchObservation::start(
+            &bus,
+            "conn-1",
+            "db",
+            "insert into t values (1); delete from t",
+            Some("public"),
+            2,
+            Some("exec-1".into()),
+        );
+        observation.finish("error", 0, Some("read-only connection".into()));
+
+        let started = receiver.recv().await.expect("query.started");
+        assert_eq!(started.kind, KIND_QUERY_STARTED);
+        assert_eq!(started.payload["batch"], true);
+        assert_eq!(started.payload["statementCount"], 2);
+        assert_eq!(started.payload["sql"], "insert into t values (1); delete from t");
+
+        let terminal = receiver.recv().await.expect("batch terminal");
+        assert_eq!(terminal.kind, KIND_QUERY_FINISHED);
+        assert_eq!(terminal.payload["batchComplete"], true);
+        assert_eq!(terminal.payload["status"], "error");
+        assert_eq!(terminal.payload["completedStatements"], 0);
+        assert_eq!(terminal.payload["error"], "read-only connection");
+    }
+
+    #[tokio::test]
+    async fn batch_terminal_counts_reported_statements() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let observation = BatchObservation::start(&bus, "conn-1", "db", "select 1; select 2", None, 2, None);
+        let callback = observation.progress_callback(vec!["select 1".into(), "select 2".into()], None);
+        callback(progress(0, 2));
+        callback(progress(1, 2));
+        observation.finish("ok", 0, None);
+
+        let _started = receiver.recv().await.expect("query.started");
+        for index in 0..2 {
+            let statement = receiver.recv().await.expect("statement finished");
+            assert_eq!(statement.kind, KIND_QUERY_FINISHED);
+            assert_eq!(statement.payload["batch"], true);
+            assert_eq!(statement.payload["statementIndex"], index);
+            assert_eq!(statement.payload["status"], "ok");
+        }
+        let terminal = receiver.recv().await.expect("batch terminal");
+        assert_eq!(terminal.payload["batchComplete"], true);
+        assert_eq!(terminal.payload["status"], "ok");
+        assert_eq!(terminal.payload["completedStatements"], 2);
+        assert_eq!(terminal.payload["failedStatements"], 0);
+        assert!(terminal.payload.get("error").is_none());
+    }
+
+    /// MySQL connection acquisition returns `Ok` with one `execution_error`
+    /// result and never reaches the progress callback, so the outer `Result`
+    /// alone would report a failed batch as successful.
+    #[test]
+    fn batch_status_treats_execution_error_results_as_failure() {
+        let outcome = Ok(vec![ExecuteMultiResult::execution_error(error_query_result("connect failed".into()))]);
+        let (status, failed, error) = batch_terminal_status(&outcome, false);
+        assert_eq!(status, "error");
+        assert_eq!(failed, 1);
+        assert!(error.is_some());
+    }
+
+    #[test]
+    fn batch_status_reports_partial_failures_and_cancellation() {
+        let outcome = Ok(vec![
+            ExecuteMultiResult::success_with_index(error_query_result("ok".into()), 0),
+            ExecuteMultiResult::execution_error_with_index(error_query_result("syntax error".into()), 1),
+        ]);
+        let (status, failed, error) = batch_terminal_status(&outcome, false);
+        assert_eq!(status, "error");
+        assert_eq!(failed, 1);
+        assert!(error.is_some());
+
+        // Cancellation wins over statement errors, but the failed count is kept
+        // so consumers can still see that a statement had failed.
+        let (status, failed, _) = batch_terminal_status(&outcome, true);
+        assert_eq!(status, "cancelled");
+        assert_eq!(failed, 1);
+
+        let all_ok = Ok(vec![ExecuteMultiResult::success_with_index(error_query_result("ok".into()), 0)]);
+        assert_eq!(batch_terminal_status(&all_ok, false).0, "ok");
     }
 }

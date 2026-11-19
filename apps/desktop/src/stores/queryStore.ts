@@ -3274,7 +3274,7 @@ export const useQueryStore = defineStore("query", () => {
       const file = await api.loadSavedSqlFile(restoredTab.savedSqlId).catch(() => undefined);
       if (file) {
         restoredTab.title = restoredTab.customTitle ? restoredTab.title : file.name;
-        restoredTab.sql = file.sql;
+        setTabSql(restoredTab, file.sql);
         restoredTab.originalSql = file.sql;
       }
     }
@@ -5069,11 +5069,7 @@ export const useQueryStore = defineStore("query", () => {
   function applyExternalSqlFileSnapshot(id: string, sql: string, version: NonNullable<QueryTab["externalSqlFileVersion"]>) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.externalSqlPath) return;
-    // The workspace panel reads inactive tabs directly, before their editor can
-    // map its cached markers. Publish positions for the new document atomically.
-    if (tab.editorBookmarks?.length && tab.sql !== sql) tab.editorBookmarks = mapPersistedBookmarks(tab.sql, sql, tab.editorBookmarks);
-    if (tab.editorBookmarks !== undefined) tab.editorBookmarksDocument = sql;
-    tab.sql = sql;
+    setTabSql(tab, sql);
     tab.originalSql = sql;
     tab.externalSqlFileVersion = version;
     tab.externalSqlIgnoredFileVersion = undefined;
@@ -5203,14 +5199,14 @@ export const useQueryStore = defineStore("query", () => {
     }
     if (tab.mode !== "query") return false;
     if (tab.originalSql !== undefined) {
-      tab.sql = tab.originalSql;
+      setTabSql(tab, tab.originalSql);
       return true;
     }
     if (tab.savedSqlId) {
-      tab.sql = "";
+      setTabSql(tab, "");
       return true;
     }
-    tab.sql = "";
+    setTabSql(tab, "");
     tab.originalSql = "";
     return true;
   }
@@ -5221,7 +5217,7 @@ export const useQueryStore = defineStore("query", () => {
     // Its unbacked scratch SQL must be cleared too; restoring its original SQL
     // would make it look unsaved again and reopen the same confirmation loop.
     if (tab?.mode === "query" && !tab.savedSqlId && !tab.externalSqlPath && !tab.objectSource) {
-      tab.sql = "";
+      setTabSql(tab, "");
       tab.originalSql = "";
     }
   }
@@ -6340,11 +6336,23 @@ export const useQueryStore = defineStore("query", () => {
     rollbackTabsWhere((tab) => tab.connectionId === connectionId && tab.database === database, { resetAutoCommit: true });
   }
 
-  function updateSql(id: string, sql: string) {
+  function setTabSql(tab: QueryTab, sql: string, source: "replacement" | "editor" = "replacement") {
+    // Store-driven replacements must update inactive panel/reveal positions too.
+    // CodeMirror transactions already map markers and publish bookmarksChange
+    // immediately after the SQL event; diffing those again is both redundant
+    // and ambiguous for edits amongst repeated lines.
+    if (source === "replacement" && tab.editorBookmarks !== undefined) {
+      if (tab.editorBookmarks.length && tab.sql !== sql) tab.editorBookmarks = mapPersistedBookmarks(tab.sql, sql, tab.editorBookmarks);
+      tab.editorBookmarksDocument = sql;
+    }
+    tab.sql = sql;
+  }
+
+  function updateSql(id: string, sql: string, source: "replacement" | "editor" = "replacement") {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
       if (tab.isDefaultQuery && tab.originalSql === undefined) tab.originalSql = "";
-      tab.sql = sql;
+      setTabSql(tab, sql, source);
       queueSavedSqlEditorPositionPersist(tab);
     }
   }
@@ -6902,7 +6910,7 @@ export const useQueryStore = defineStore("query", () => {
       existing.isDefaultQuery = file.isDefaultQuery === true;
       persistSavedSqlEditorPosition(existing);
       if (!existing.sql && file.sql && existing.originalSql === undefined) {
-        existing.sql = file.sql;
+        setTabSql(existing, file.sql);
         existing.originalSql = file.sql;
         const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
         existing.editorSelection = restored.selection;
@@ -6953,10 +6961,13 @@ export const useQueryStore = defineStore("query", () => {
       if (tab.savedSqlId) tab.isDefaultQuery = savedSqlStore.getFile(tab.savedSqlId)?.isDefaultQuery === true;
     }
     for (const tab of linkedTabs) {
-      const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
-      if (!file) continue;
+      const savedSqlId = tab.savedSqlId!;
+      const file = await savedSqlStore.ensureFileContent(savedSqlId);
+      // Loading can yield to typing, an AI replacement, relinking or tab close.
+      // Only hydrate the same still-empty snapshot selected above.
+      if (!file || !tabs.value.includes(tab) || tab.savedSqlId !== savedSqlId || tab.sql !== "" || tab.originalSql !== undefined) continue;
       tab.title = tab.customTitle ? tab.title : file.name;
-      tab.sql = file.sql;
+      setTabSql(tab, file.sql);
       tab.originalSql = file.sql;
       const restored = restoreSavedSqlEditorPosition(file.id, file.sql);
       tab.editorSelection = restored.selection;

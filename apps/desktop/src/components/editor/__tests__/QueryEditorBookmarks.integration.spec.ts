@@ -13,6 +13,8 @@ import type { QueryEditorProps } from "../queryEditorTypes";
 import { workspaceBookmarkCases } from "@/lib/editor/__tests__/workspaceBookmarkCases";
 import { useQueryStore } from "@/stores/queryStore";
 import WorkspaceBookmarksPanel from "@/components/layout/WorkspaceBookmarksPanel.vue";
+import * as bookmarkMapping from "@/lib/editor/workspaceBookmarks";
+import { insertNewline, deleteCharBackward, undo, redo, isolateHistory } from "@codemirror/commands";
 
 vi.mock("@/lib/common/clipboard", () => ({
   copyToClipboard: vi.fn().mockResolvedValue(undefined),
@@ -106,7 +108,7 @@ async function mountWorkspace(before: string, saved: number[]) {
           autoFocus: false,
           revealRequest: tab.editorRevealRequest,
           onBookmarksChange: (lines: number[], owner?: string) => store.updateEditorBookmarks(owner ?? tab.id, lines),
-          "onUpdate:modelValue": (sql: string) => store.updateSql(tab.id, sql),
+          "onUpdate:modelValue": (sql: string) => store.updateSql(tab.id, sql, "editor"),
           onEditorRevealConsumed: () => {
             tab.editorRevealRequest = undefined;
           },
@@ -133,11 +135,12 @@ async function mountWorkspace(before: string, saved: number[]) {
 }
 
 describe("QueryEditor line bookmarks", () => {
-  it("keeps active external reloads and subsequent editor edits in sync", async () => {
+  it.each(["external", "store"])("keeps active %s reloads and subsequent editor edits in sync", async (path) => {
     const { store, first, view } = await mountWorkspace("a\nb\nc", [2]);
     store.switchTab(first);
     await nextTick();
-    store.applyExternalSqlFileSnapshot(first, "new\na\nb\nc", { sizeBytes: 9, modifiedNs: "1", contentHash: "changed" });
+    if (path === "store") store.updateSql(first, "new\na\nb\nc");
+    else store.applyExternalSqlFileSnapshot(first, "new\na\nb\nc", { sizeBytes: 9, modifiedNs: "1", contentHash: "changed" });
     await nextTick();
     await nextTick();
     expect(queryEditorBookmarkLines(view)).toEqual([3]);
@@ -148,11 +151,12 @@ describe("QueryEditor line bookmarks", () => {
     expect(tab.editorBookmarksDocument).toBe(tab.sql);
   });
 
-  it("keeps successive inactive file updates authoritative when the cached editor returns", async () => {
+  it.each(["external", "store"])("keeps successive inactive %s updates authoritative when the cached editor returns", async (path) => {
     const { store, first, host, view } = await mountWorkspace("a\nb\nc", [2]);
-    store.applyExternalSqlFileSnapshot(first, "a\nc", { sizeBytes: 3, modifiedNs: "1", contentHash: "first" });
+    const replace = (sql: string) => (path === "store" ? store.updateSql(first, sql) : store.applyExternalSqlFileSnapshot(first, sql, { sizeBytes: sql.length, modifiedNs: "1", contentHash: sql }));
+    replace("a\nc");
     await nextTick();
-    store.applyExternalSqlFileSnapshot(first, "new\na\nb\nc", { sizeBytes: 9, modifiedNs: "2", contentHash: "second" });
+    replace("new\na\nb\nc");
     await nextTick();
     const tab = store.tabs.find((tab) => tab.id === first)!;
     expect(tab.editorBookmarks).toEqual([4]); // deleted b mapped to c, which remains the anchor
@@ -164,12 +168,13 @@ describe("QueryEditor line bookmarks", () => {
     expect(view.state.selection.main.head).toBe(view.state.doc.line(4).from);
   });
 
-  it.each([{ name: "prepend", before: "a\nb\nc", after: "new\na\nb\nc", saved: [2], expected: [3] }, { name: "delete", before: "a\nb\nc", after: "b\nc", saved: [3], expected: [2] }, ...workspaceBookmarkCases])(
-    "updates inactive store/panel positions before clicking a bookmark after $name",
-    async ({ before, after, saved, expected }) => {
+  it.each([{ name: "prepend", before: "a\nb\nc", after: "new\na\nb\nc", saved: [2], expected: [3] }, { name: "delete", before: "a\nb\nc", after: "b\nc", saved: [3], expected: [2] }, ...workspaceBookmarkCases].flatMap((test) => ["external", "store"].map((path) => ({ ...test, path }))))(
+    "updates inactive store/panel positions before clicking a bookmark after $path $name",
+    async ({ before, after, saved, expected, path }) => {
       const { store, first, second, host, view } = await mountWorkspace(before, saved);
       const tab = store.tabs.find((tab) => tab.id === first)!;
-      store.applyExternalSqlFileSnapshot(first, after, { sizeBytes: after.length, modifiedNs: "1", contentHash: "changed" });
+      if (path === "store") store.updateSql(first, after);
+      else store.applyExternalSqlFileSnapshot(first, after, { sizeBytes: after.length, modifiedNs: "1", contentHash: "changed" });
       // The panel must already be correct, without first reactivating the editor.
       expect(store.activeTabId).toBe(second);
       expect(tab.editorBookmarks).toEqual(expected);
@@ -194,6 +199,41 @@ describe("QueryEditor line bookmarks", () => {
       expect(queryEditorBookmarkLines(view)).toEqual(expected);
     },
   );
+
+  it.each(["a\nb\nc", "repeat\nrepeat\nend"])("uses editor transaction markers for typing, Enter, Backspace, undo and redo without a second store diff: %s", async (sql) => {
+    const { store, first, view, host } = await mountWorkspace(sql, [2]);
+    store.switchTab(first);
+    await nextTick();
+    await nextTick();
+    const mapping = vi.spyOn(bookmarkMapping, "mapPersistedBookmarks");
+    const tab = store.tabs.find((tab) => tab.id === first)!;
+    const assertLine = async (line: number) => {
+      await nextTick();
+      expect(tab.sql).toBe(view.state.doc.toString());
+      expect(tab.editorBookmarks).toEqual([line]);
+      expect(queryEditorBookmarkLines(view)).toEqual([line]);
+      expect(tab.editorBookmarksDocument).toBe(tab.sql);
+      expect(host.querySelector(`[data-bookmark-tab="${first}"] [data-bookmark-line="${line}"]`)?.textContent).toContain(sql.split("\n")[1]);
+      expect(mapping).not.toHaveBeenCalled();
+    };
+    view.dispatch({ changes: { from: 0, insert: "typed" }, userEvent: "input.type", annotations: isolateHistory.of("full") });
+    await assertLine(2);
+    placeCursor(view, 0);
+    expect(insertNewline(view)).toBe(true);
+    await assertLine(3);
+    expect(undo(view)).toBe(true);
+    await assertLine(2);
+    expect(redo(view)).toBe(true);
+    await assertLine(3);
+    placeCursor(view, 1);
+    expect(deleteCharBackward(view)).toBe(true);
+    await assertLine(2);
+    store.switchTab(store.tabs.find((item) => item.id !== first)!.id);
+    await nextTick();
+    store.switchTab(first);
+    await nextTick();
+    await assertLine(2);
+  });
 
   it("restores persisted lines, tracks edits, and survives a fresh editor mount", async () => {
     const first = await mountEditor("one\ntwo\nthree", { bookmarkLines: [2, 3] });

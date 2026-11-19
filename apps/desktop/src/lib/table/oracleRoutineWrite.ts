@@ -9,6 +9,47 @@ export type PreparedOracleRoutineSave = (() => Promise<OracleRoutineOperation>) 
 // source editor. Database readback alone must not release an unresolved write.
 const pendingSaves = new Map<string, { input: OracleRoutineSaveInput; operation: OracleRoutineOperation }>();
 
+/**
+ * The backend answers `executeOracleRoutineOperation` after at most 30s, whether or not
+ * its worker has finished: preflight readbacks, the DDL and the verification readback
+ * together routinely take longer than that on a slow catalog. The record is then still
+ * `running` — the write is in flight, not failed. Reporting that as a failure told the
+ * user "save failed" for a save that committed a few seconds later, and left the next
+ * click as a mere status check.
+ *
+ * So keep watching the original operation until its worker is done. This only reads the
+ * operation registry (no database round trip, never a replay); `unproven` is not waited
+ * on because nothing will ever move it.
+ *
+ * "Done" is not the same as "left `running`": the worker records the write as terminal
+ * with an empty readback the moment the DDL returns, then spends the long part reading
+ * the object back, and only then fills the readback in. Stopping at the first terminal
+ * record reports "not verified" for a save whose verification simply had not finished.
+ */
+function operationStillInFlight(operation: OracleRoutineOperation): boolean {
+  return operation.lifecycle === "running" || (operation.lifecycle === "terminal" && operation.readback === null);
+}
+
+const RUNNING_OPERATION_POLL_MS = 1500;
+const RUNNING_OPERATION_MAX_WAIT_MS = 5 * 60 * 1000;
+
+async function settleRunningOperation(operation: OracleRoutineOperation): Promise<OracleRoutineOperation> {
+  const deadline = Date.now() + RUNNING_OPERATION_MAX_WAIT_MS;
+  let current = operation;
+  while (operationStillInFlight(current) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, RUNNING_OPERATION_POLL_MS));
+    try {
+      const observed = await api.observeOracleRoutineOperation(current.operationId, false);
+      if (!observed?.operation) break;
+      current = observed.operation;
+    } catch {
+      // The registry is unreachable; fall back to the pending report for this ID.
+      break;
+    }
+  }
+  return current;
+}
+
 export class OracleRoutineWriteError extends Error {
   constructor(
     public readonly operationId: string,
@@ -124,6 +165,7 @@ export async function prepareOracleRoutineSourceSave(input: OracleRoutineSaveInp
         throw new OracleRoutineWriteError(approval.operationId, approval, i18n.global.t("objects.routineWritePending", { operationId: approval.operationId }));
       }
     }
+    operation = await settleRunningOperation(operation);
     if (pendingSaves.get(key)?.operation.operationId === approval.operationId) {
       if (operation.lifecycle === "terminal") {
         pendingSaves.delete(key);

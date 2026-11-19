@@ -144,6 +144,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.clipboard:read` 允许工作台 UI 读取系统剪贴板（见 [系统剪贴板](#系统剪贴板)）。写剪贴板不需要权限；读取会把用户数据（密码、令牌）交给插件代码，因此需要门控。
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.connections:read` 允许通过 `window.dbxPlugin.getConnections()` 或 `window.dbxPlugin.connections.list()` 获取当前所有已配置连接的只读脱敏信息（见 [连接信息读取](#连接信息读取)）。
+- `host.connections:edit` 允许工作台[预填已保存连接的编辑表单](#预填已保存连接的编辑表单)，由用户确认保存。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 64 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `host.openUrl:http(s)://host[:port]` 允许请求打开指定站点，最多 8 个精确 origin；与网络权限独立，不允许路径、凭据、通配符或尾部斜杠。使用标准化的 `URL.origin`（默认端口应省略）；IPv6 地址使用方括号。
 
@@ -583,6 +584,25 @@ if (window.dbxPlugin.capabilities.connectionsApi) {
 - `database` / `schema`: 默认数据库或模式（如有）。
 
 > **安全边界**：返回列表完全脱敏，不包含密码、用户名、主机、端口或连接串等敏感凭据。
+
+### 预填已保存连接的编辑表单
+
+工作台可为已保存的 MySQL、PostgreSQL 或 SQL Server 字段模式连接提供新凭证，并打开 DBX 的连接编辑表单。在 manifest 中声明 `host.connections:edit`。如果工作台还需要列出目标连接，另行声明 `host.connections:read`。该功能属于 Host API 1.5（`"engines": { "host_api": "^1.5" }`）。在 `ready` 后检查 `capabilities.connectionEditApi`，用于桌面主窗口的工作台。
+
+```js
+await window.dbxPlugin.ready;
+// 在用户点击刷新凭证后调用。
+if (window.dbxPlugin.capabilities.connectionEditApi) {
+  await window.dbxPlugin.connections.openEdit({
+    connectionId: selectedConnectionId,
+    fields: { username: freshUsername, password: freshPassword },
+  });
+}
+```
+
+`username` 和 `password` 至少传入一项，每项为不超过 4096 个字符的字符串。省略字段时沿用原值，空字符串清除该字段。连接 ID 须与已保存连接的 ID 完全一致，最多 256 个字符。
+
+宿主桥将凭证直接送入 DBX 编辑草稿。返回 `{ opened: true }` 表示已打开表单。即使开启了深链自动保存，用户也需要检查草稿并点击「保存」。取消会丢弃草稿。响应只包含打开状态。目标无效、字段超出允许范围或已有连接表单打开时，调用会被拒绝。
 
 ### 系统剪贴板
 

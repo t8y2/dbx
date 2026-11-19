@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 import { CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider } from "@/lib/connection/connectionDeepLink";
+import type { ConnectionEditPrefill } from "@/lib/connection/connectionDeepLinkUpdate";
 
 const visibleTab = vi.hoisted(() => ({ value: "connection" }));
 
@@ -188,8 +189,9 @@ async function settle() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 
-async function mountDialog(config: ConnectionConfig, url = "", initiallyOpen = true) {
-  const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill: url ? parseConnectionDeepLinkUpdate(url) : null });
+async function mountDialog(config: ConnectionConfig, prefill: string | ConnectionEditPrefill = "", initiallyOpen = true) {
+  const updatePrefill = typeof prefill === "string" ? parseConnectionDeepLinkUpdate(prefill) : prefill;
+  const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill });
   store.getConfig.mockReturnValue(config);
   const container = document.createElement("div");
   document.body.append(container);
@@ -1062,6 +1064,33 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
 
     expect(store.updateConnection).toHaveBeenCalledTimes(1);
     expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", host: "new.example.test" }));
+  });
+
+  it.each(["dismiss", "save"])("keeps a plugin credential draft pending user action even with auto-save enabled (%s)", async (action) => {
+    settings.editorSettings.deepLinkConnectionConfirmMode = "all";
+    const saved = savedConnection();
+    const patch = { username: "new-jumpserver-user", password: "fresh-secret+&" };
+    const props = await mountDialog(saved, { connectionId: saved.id, patch, requireConfirmation: true });
+
+    expect(props.open).toBe(true);
+    expect([...document.querySelectorAll("input")].map((input) => input.value)).toEqual(expect.arrayContaining([patch.username, patch.password, saved.host]));
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    expect(backend.testConnectionWithInfo).not.toHaveBeenCalled();
+
+    const button = action === "dismiss" ? document.querySelector<HTMLButtonElement>('[data-testid="dismiss-dialog"]') : [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "Save");
+    expect(button).toBeTruthy();
+    button!.click();
+    await settle();
+
+    if (action === "save") {
+      expect(store.updateConnection).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: saved.id, host: saved.host, port: saved.port, ...patch }));
+    } else {
+      expect(store.updateConnection).not.toHaveBeenCalled();
+    }
+    expect(props.open).toBe(false);
+    expect(store.addConnection).not.toHaveBeenCalled();
+    expect(store.connect).not.toHaveBeenCalled();
+    expect(saved.password).toBe("old-password");
   });
 
   it("keeps an id update link open for confirmation in the default mode", async () => {

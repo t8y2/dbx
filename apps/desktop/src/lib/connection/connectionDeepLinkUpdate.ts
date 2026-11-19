@@ -1,18 +1,24 @@
+import type { InjectionKey } from "vue";
 import type { ConnectionConfig } from "@/types/database";
+import type { PluginConnectionEditRequest } from "@/types/pluginConnection";
 import type { ConnectionDeepLinkUpdate } from "./connectionDeepLink";
+
+export type ConnectionEditPrefill = ConnectionDeepLinkUpdate & { requireConfirmation?: true };
+
+export const OPEN_PLUGIN_CONNECTION_EDIT: InjectionKey<(request: PluginConnectionEditRequest) => void> = Symbol("open-plugin-connection-edit");
 
 function validateUpdateConfig(config: Omit<ConnectionConfig, "id">) {
   if (!["mysql", "postgres", "sqlserver"].includes(config.db_type) || (config.driver_profile && config.driver_profile !== config.db_type) || config.connection_string?.trim()) {
-    throw new Error("Update links support built-in MySQL, PostgreSQL and SQL Server field-based connections only.");
+    throw new Error("Connection updates support built-in MySQL, PostgreSQL and SQL Server field-based connections only.");
   }
 }
 
 /** Resolve only a saved connection. An invalid update must never become a create. */
 export function resolveConnectionDeepLinkUpdate(update: ConnectionDeepLinkUpdate, connections: readonly ConnectionConfig[], dialogOpen: boolean): ConnectionConfig {
-  if (dialogOpen) throw new Error("Close the current connection dialog before opening an update link.");
+  if (dialogOpen) throw new Error("Close the current connection dialog first.");
   const config = connections.find((connection) => connection.id === update.connectionId);
-  if (!config) throw new Error("The connection specified by the update link was not found.");
-  if (config.one_time) throw new Error("Update links require a saved connection, not a one-time connection.");
+  if (!config) throw new Error("The connection to update was not found.");
+  if (config.one_time) throw new Error("A saved connection is required for updates.");
   validateUpdateConfig(config);
   return config;
 }

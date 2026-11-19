@@ -12,6 +12,15 @@ export const PLUGIN_CONNECTIONS_READ_PERMISSION = "host.connections:read";
 /** Capability advertised by the bridge when connection listing is available. */
 export const PLUGIN_CONNECTIONS_CAPABILITY = "connectionsApi";
 
+/** Opens a host-owned edit draft for user review. */
+export const PLUGIN_CONNECTION_EDIT_PERMISSION = "host.connections:edit";
+export const PLUGIN_CONNECTION_EDIT_CAPABILITY = "connectionEditApi";
+
+export interface PluginConnectionEditRequest {
+  connectionId: string;
+  fields: { username?: string; password?: string };
+}
+
 export interface PluginConnectionSummary {
   id: string;
   name: string;

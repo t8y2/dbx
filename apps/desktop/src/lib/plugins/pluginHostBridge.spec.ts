@@ -130,6 +130,39 @@ describe("PluginHostBridge", () => {
     });
   });
 
+  it.each([
+    { permissions: ["host.connections:read"], available: true, error: /host\.connections:edit/ },
+    { permissions: ["host.connections:edit"], available: false, error: /unavailable/ },
+  ])("rejects edit requests without the permission and a dialog host ($permissions, $available)", async ({ permissions, available, error }) => {
+    const postMessage = vi.fn();
+    const target = { postMessage } as unknown as Window;
+    const openConnectionEdit = vi.fn();
+    const bridge = new PluginHostBridge(plugin(permissions), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), openConnectionEdit: available ? openConnectionEdit : undefined });
+    bridge.sendInit();
+    expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ capabilities: expect.objectContaining({ connectionEditApi: false }) }), "*");
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "edit", method: "host.openConnectionEdit", params: { connectionId: "conn-1", fields: { password: "fresh-secret" } } } } as MessageEvent);
+    await vi.waitFor(() => expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ id: "edit", error: expect.stringMatching(error) }), "*"));
+    expect(openConnectionEdit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { connectionId: "", fields: { password: "fresh-secret" } },
+    { connectionId: "conn-1", fields: {} },
+    { connectionId: "conn-1", fields: { password: "fresh-secret", host: "elsewhere.test" } },
+    { connectionId: "conn-1", fields: { username: 42, password: "fresh-secret" } },
+    { connectionId: "conn-1", fields: { password: "fresh-secret".repeat(400) } },
+    { connectionId: "conn-1", fields: { password: "fresh-secret" }, autoSave: true },
+  ])("rejects malformed or out-of-scope connection edits without exposing credentials (%#)", async (params) => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const openConnectionEdit = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.connections:edit"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), openConnectionEdit });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "invalid-edit", method: "host.openConnectionEdit", params } } as MessageEvent);
+    await vi.waitFor(() => expect(messages[0]).toMatchObject({ id: "invalid-edit", error: expect.any(String) }));
+    expect(openConnectionEdit).not.toHaveBeenCalled();
+    expect(JSON.stringify(messages)).not.toContain("fresh-secret");
+  });
+
   it("streams downloads under the owning plugin, scopes cancellation and reports native capability", async () => {
     const messages: any[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -1843,6 +1876,7 @@ describe("plugin SDK source", () => {
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
       getTableMetadata: (context: unknown) => Promise<unknown>;
+      connections: { openEdit: (request: unknown) => Promise<unknown> };
       setTitle: (title: string | null) => Promise<unknown>;
       getTitle: () => Promise<unknown>;
       workbench: {
@@ -1892,6 +1926,25 @@ describe("plugin SDK source", () => {
     if (!request) throw new Error("SDK posted no request message");
     return request as { type: string; method: string; params: { method: string; params: Record<string, unknown> } };
   }
+
+  it("passes only the requested credentials from the SDK and responds with opening status", async () => {
+    const sdkMessages: unknown[] = [];
+    const sdk = loadSdk(sdkMessages);
+    const postMessage = vi.fn(sdk.receiveHostMessage);
+    const target = { postMessage } as unknown as Window;
+    const openConnectionEdit = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.connections:edit"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), openConnectionEdit });
+    bridge.sendInit();
+    await sdk.dbxPlugin!.ready;
+    expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ capabilities: expect.objectContaining({ connectionEditApi: true }) }), "*");
+
+    const request = { connectionId: "conn-1", fields: { username: "", password: " fresh-secret+& " } };
+    const result = sdk.dbxPlugin!.connections.openEdit(request);
+    expect(bridge.handleWindowMessage({ source: target, data: firstRequest(sdkMessages) } as MessageEvent)).toBe(true);
+    await expect(result).resolves.toEqual({ opened: true });
+    expect(openConnectionEdit).toHaveBeenCalledExactlyOnceWith(request);
+    expect(JSON.stringify(postMessage.mock.calls)).not.toContain("fresh-secret");
+  });
 
   it("plainifies reactive (Proxy) params before postMessage", () => {
     const posted: unknown[] = [];

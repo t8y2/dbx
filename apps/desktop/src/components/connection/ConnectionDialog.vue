@@ -100,7 +100,7 @@ import {
   supportsIdleTimeout,
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate, type ConnectionEditPrefill } from "@/lib/connection/connectionDeepLinkUpdate";
 import {
   connectionDeepLinkServiceHydrationValue,
   parseConnectionDeepLink,
@@ -351,7 +351,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
-  updatePrefill?: ConnectionDeepLinkUpdate | null;
+  updatePrefill?: ConnectionEditPrefill | null;
   pluginProvider?: PluginCenterFocus | null;
   initialTab?: ConfigTab;
 }>();
@@ -3494,9 +3494,9 @@ watch(
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
-      if (props.updatePrefill) {
+      if (connectionUpdate) {
         finishApplyingConnectionUpdate();
-        submitUpdateIfAutoConfirmed(props.updatePrefill);
+        if (!connectionUpdate.requireConfirmation) submitUpdateIfAutoConfirmed(connectionUpdate);
       }
       // Form/profile watchers normalize derived fields in this flush. Capture
       // the saved baseline afterwards so those initial changes are not treated

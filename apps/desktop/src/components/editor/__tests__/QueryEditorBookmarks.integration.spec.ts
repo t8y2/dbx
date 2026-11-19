@@ -124,6 +124,44 @@ describe("QueryEditor line bookmarks", () => {
     expect(props.bookmarkLines).toEqual([3]);
   });
 
+  it.each([
+    { name: "insertion", before: "one\ntwo\nthree", after: "new\none\ntwo\nthree", saved: [2], expected: [3] },
+    { name: "deletion", before: "one\ntwo\nthree", after: "two\nthree", saved: [3], expected: [2] },
+  ])("persists mapped bookmarks after an inactive cached tab receives a line $name", async ({ before, after, saved, expected }) => {
+    const { view, props, bookmarkChanges } = await mountEditor(before, { bookmarkLines: saved });
+    await nextTick();
+    Object.assign(props, { tabId: "other", modelValue: "other\nfile", bookmarkLines: [1] });
+    await nextTick();
+    await nextTick();
+    bookmarkChanges.mockClear();
+
+    // The stored lines still refer to the cached document, as with an external file reload.
+    Object.assign(props, { tabId: "bookmarks", modelValue: after, bookmarkLines: saved });
+    await nextTick();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual(expected);
+    expect(props.bookmarkLines).toEqual(expected);
+    expect(bookmarkChanges).toHaveBeenLastCalledWith(expected, "bookmarks");
+    expect(bookmarkChanges.mock.calls.every(([, owner]) => owner === "bookmarks")).toBe(true);
+
+    const persisted = [...props.bookmarkLines!];
+    const remounted = await mountEditor(after, { bookmarkLines: persisted });
+    await nextTick();
+    expect(queryEditorBookmarkLines(remounted.view)).toEqual(expected);
+  });
+
+  it("restores saved bookmarks when an empty cached tab hydrates while inactive", async () => {
+    const { view, props } = await mountEditor("", { bookmarkLines: [3] });
+    Object.assign(props, { tabId: "other", modelValue: "other", bookmarkLines: [1] });
+    await nextTick();
+    await nextTick();
+    Object.assign(props, { tabId: "bookmarks", modelValue: "one\ntwo\nthree", bookmarkLines: [3] });
+    await nextTick();
+    await nextTick();
+    expect(queryEditorBookmarkLines(view)).toEqual([3]);
+    expect(props.bookmarkLines).toEqual([3]);
+  });
+
   const SQL = "one\ntwo\nthree\nfour";
   const lineStart = (lineNumber: number) =>
     SQL.split("\n")

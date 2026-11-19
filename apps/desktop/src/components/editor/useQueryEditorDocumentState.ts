@@ -180,14 +180,19 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     applyEditorShortcutKeymaps();
     applyEditorIndentExtension();
     applyEditorCompletionExtension();
-    if (doc !== currentView.state.doc.toString()) {
+    const previousDoc = currentView.state.doc.toString();
+    const documentChanged = doc !== previousDoc;
+    const hydrating = !previousDoc.length && !!props.bookmarkLines?.length;
+    if (documentChanged) {
       // Content changed while the tab was inactive (external file change, AI
       // edit, another split group): apply it as a regular undoable edit.
       currentView.dispatch({
-        changes: bookmarkDocumentChange(currentView.state.doc.toString(), doc),
+        changes: bookmarkDocumentChange(previousDoc, doc),
       });
     }
-    if (props.bookmarkLines !== undefined) restoreBookmarks();
+    // Saved lines may still refer to the old cached document. Keep the mapped
+    // markers unless this is initial hydration, where only the saved lines exist.
+    if ((!documentChanged || hydrating) && props.bookmarkLines !== undefined) restoreBookmarks();
     scheduleDocumentSearchUpdate();
     invalidateSemanticDiagnosticsForDocumentChange();
     if (props.initialSelection !== undefined) {
@@ -201,17 +206,20 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     syncContextMenuState(currentView);
     emit("previewChangesAvailable", !!previewContextSql.value);
     scheduleSemanticDiagnostics();
+    return documentChanged;
   }
 
   watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) => {
     if (!view.value) return;
     if (tabId !== prevTabId) {
+      let bookmarksMapped = false;
       changingDocument = true;
       try {
-        activateTabDocument(prevTabId, tabId, val);
+        bookmarksMapped = activateTabDocument(prevTabId, tabId, val) === true;
       } finally {
         changingDocument = false;
       }
+      if (bookmarksMapped) recordBookmarks(view.value);
       if (props.autoFocus) restoreEditorFocus();
       return;
     }

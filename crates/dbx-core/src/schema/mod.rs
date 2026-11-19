@@ -1993,7 +1993,30 @@ async fn external_driver_oracle_columns_via_sql(
     oracle_columns_via_metadata_query(&mut query, schema, table).await
 }
 
+fn oracle_column_lookup_table_candidates(table: &str) -> Vec<String> {
+    let exact = table.to_string();
+    let uppercase = table.trim().to_uppercase();
+    if uppercase.is_empty() || uppercase == exact {
+        return vec![exact];
+    }
+    vec![exact, uppercase]
+}
+
 async fn oracle_columns_via_metadata_query(
+    query: &mut OracleMetadataQuery<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    for candidate in oracle_column_lookup_table_candidates(table) {
+        let columns = oracle_columns_via_metadata_query_exact(query, schema, &candidate).await?;
+        if !columns.is_empty() {
+            return Ok(columns);
+        }
+    }
+    Ok(Vec::new())
+}
+
+async fn oracle_columns_via_metadata_query_exact(
     query: &mut OracleMetadataQuery<'_>,
     schema: &str,
     table: &str,
@@ -7016,6 +7039,13 @@ for line in sys.stdin:
     #[test]
     fn oracle_columns_sql_first_handles_current_schema_editor_sessions() {
         assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("tab-1")));
+    }
+
+    #[test]
+    fn oracle_column_lookup_table_candidates_try_exact_then_uppercase_fallback() {
+        assert_eq!(super::oracle_column_lookup_table_candidates("EMP"), vec!["EMP"]);
+        assert_eq!(super::oracle_column_lookup_table_candidates("emp"), vec!["emp", "EMP"]);
+        assert_eq!(super::oracle_column_lookup_table_candidates("MixedCase"), vec!["MixedCase", "MIXEDCASE"]);
     }
 
     #[test]

@@ -186,6 +186,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     completionObjectsForScope,
     usesOracleSessionCompletionColumns,
     completionCacheKey,
+    getCachedColumnsForTable,
     completionQualifiedTableTarget,
     completionTablesMatch,
     lookupCachedPrefixColumns,
@@ -1327,7 +1328,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       const target = insertCompletionMetadataTarget(insertTable, scope);
       const insertKey = completionCacheKey(insertTable, scope);
       const insertColumns =
-        cachedColumnsByTable.get(insertKey) ?? (usesOracleSessionCompletionColumns(target.schema) ? [] : connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, insertTable.name, target.schema, target.catalog, completionColumnRequestContext(insertTable)));
+        getCachedColumnsForTable(insertTable, scope) ?? (usesOracleSessionCompletionColumns(target.schema) ? [] : connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, insertTable.name, target.schema, target.catalog, completionColumnRequestContext(insertTable)));
       if (insertColumns.length > 0) {
         columnsByTable.set(insertKey, insertColumns);
       }
@@ -1336,23 +1337,23 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     const qualifiedColumnTarget = completionQualifiedTableTarget(completionContext);
     if (qualifiedColumnTarget) {
       const reference = completionContext.referencedTables.find((table) => completionTablesMatch(table, qualifiedColumnTarget));
-      const qualifiedCacheTable = { ...qualifiedColumnTarget, nameQuoted: reference?.nameQuoted, schemaQuoted: reference?.schemaQuoted };
+      const qualifiedCacheTable = { ...qualifiedColumnTarget, nameQuoted: reference?.nameQuoted ?? qualifiedColumnTarget.nameQuoted, schemaQuoted: reference?.schemaQuoted ?? qualifiedColumnTarget.schemaQuoted };
       const cacheKey = completionCacheKey(qualifiedCacheTable, scope);
       const cachedPrefix = completionContext.prefix.length >= 2 && (props.databaseType === "postgres" || props.databaseType === "mysql") ? lookupCachedPrefixColumns(qualifiedCacheTable, scope, completionContext.prefix) : undefined;
-      const cached = cachedPrefix ?? cachedColumnsByTable.get(cacheKey);
+      const cached = cachedPrefix ?? getCachedColumnsForTable(qualifiedCacheTable, scope);
       if (cached) {
         columnsByTable.set(cacheKey, cached);
       } else {
-        const target = completionMetadataTarget(qualifiedColumnTarget, scope);
+        const target = completionMetadataTarget(qualifiedCacheTable, scope);
         const prefixColumns =
           target && completionContext.prefix.length >= 2 && (props.databaseType === "postgres" || props.databaseType === "mysql")
-            ? connectionStore.lookupLocalCompletionColumnsByPrefix(props.connectionId, target.database, qualifiedColumnTarget.name, target.schema, completionContext.prefix, target.catalog, completionColumnRequestContext(reference))
+            ? connectionStore.lookupLocalCompletionColumnsByPrefix(props.connectionId, target.database, qualifiedColumnTarget.name, target.schema, completionContext.prefix, target.catalog, completionColumnRequestContext(qualifiedCacheTable))
             : [];
         const localColumns =
           prefixColumns.length > 0
             ? prefixColumns
             : target && !usesOracleSessionCompletionColumns(target.schema)
-              ? connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, qualifiedColumnTarget.name, target.schema, target.catalog, completionColumnRequestContext(reference))
+              ? connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, qualifiedColumnTarget.name, target.schema, target.catalog, completionColumnRequestContext(qualifiedCacheTable))
               : [];
         if (localColumns.length > 0) {
           columnsByTable.set(cacheKey, localColumns);
@@ -1391,14 +1392,15 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         (refTable.alias?.toLowerCase() === completionContext.qualifier.toLowerCase() || refTable.name.toLowerCase() === completionContext.qualifier.toLowerCase())
           ? completionContext.prefix
           : undefined;
-      const cached = (prefixCompletion ? lookupCachedPrefixColumns(refTable, scope, prefixCompletion) : undefined) ?? cachedColumnsByTable.get(cacheKey);
+      const cached = (prefixCompletion ? lookupCachedPrefixColumns(refTable, scope, prefixCompletion) : undefined) ?? getCachedColumnsForTable(refTable, scope);
       if (cached) {
         columnsByTable.set(cacheKey, cached);
         continue;
       }
       const target = completionMetadataTarget(refTable, scope);
-      const prefixColumns = target && prefixCompletion ? connectionStore.lookupLocalCompletionColumnsByPrefix(props.connectionId, target.database, refTable.name, target.schema, prefixCompletion, target.catalog, refTable) : [];
-      const localColumns = prefixColumns.length > 0 ? prefixColumns : target && !usesOracleSessionCompletionColumns(target.schema) ? connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, refTable.name, target.schema, target.catalog, refTable) : [];
+      const refColumnContext = completionColumnRequestContext(refTable);
+      const prefixColumns = target && prefixCompletion ? connectionStore.lookupLocalCompletionColumnsByPrefix(props.connectionId, target.database, refTable.name, target.schema, prefixCompletion, target.catalog, refColumnContext) : [];
+      const localColumns = prefixColumns.length > 0 ? prefixColumns : target && !usesOracleSessionCompletionColumns(target.schema) ? connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, refTable.name, target.schema, target.catalog, refColumnContext) : [];
       if (localColumns.length > 0) {
         columnsByTable.set(cacheKey, localColumns);
       }
@@ -1520,36 +1522,63 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (!onDemandOnlyColumns && completionContext.insertTable) {
       const insertTable = insertCompletionTable(completionContext);
       const target = insertCompletionMetadataTarget(insertTable, scope);
+      const insertCacheKey = completionCacheKey(insertTable, scope);
+      const hadCachedColumns = !!getCachedColumnsForTable(insertTable, scope);
+      const refreshEpoch = completionEpoch;
       void refreshCompletionColumnsForEditor(connectionId, target.database, insertTable.name, target.schema, target.catalog, insertTable)
         .then((columns) => {
-          cachedColumnsByTable.set(completionCacheKey(insertTable, scope), columns);
+          cachedColumnsByTable.set(insertCacheKey, columns);
+          if (!hadCachedColumns && columns.length > 0 && refreshEpoch === completionEpoch) {
+            void refreshActiveSqlCompletion(fullDoc, position, completionContext);
+          }
         })
         .catch(() => {});
     }
     const qualifiedColumnTarget = completionQualifiedTableTarget(completionContext);
-    const qualifiedColumnCacheKey = qualifiedColumnTarget ? completionCacheKey(qualifiedColumnTarget, scope) : undefined;
-    if (!onDemandOnlyColumns && qualifiedColumnTarget && qualifiedColumnCacheKey && !cachedColumnsByTable.has(qualifiedColumnCacheKey)) {
-      const target = completionMetadataTarget(qualifiedColumnTarget, scope);
+    const qualifiedColumnReference = qualifiedColumnTarget ? completionContext.referencedTables.find((table) => completionTablesMatch(table, qualifiedColumnTarget)) : undefined;
+    const qualifiedCacheTable = qualifiedColumnTarget ? { ...qualifiedColumnTarget, nameQuoted: qualifiedColumnReference?.nameQuoted ?? qualifiedColumnTarget.nameQuoted, schemaQuoted: qualifiedColumnReference?.schemaQuoted ?? qualifiedColumnTarget.schemaQuoted } : undefined;
+    const qualifiedColumnCacheKey = qualifiedCacheTable ? completionCacheKey(qualifiedCacheTable, scope) : undefined;
+    if (!onDemandOnlyColumns && qualifiedCacheTable && qualifiedColumnCacheKey && !getCachedColumnsForTable(qualifiedCacheTable, scope)) {
+      const target = completionMetadataTarget(qualifiedCacheTable, scope);
       if (target) {
-        void refreshCompletionColumnsForEditor(connectionId, target.database, qualifiedColumnTarget.name, target.schema, target.catalog)
+        const refreshEpoch = completionEpoch;
+        void refreshCompletionColumnsForEditor(connectionId, target.database, qualifiedCacheTable.name, target.schema, target.catalog, qualifiedCacheTable)
           .then((columns) => {
-            if (columns.length > 0) cachedColumnsByTable.set(qualifiedColumnCacheKey, columns);
+            if (columns.length > 0) {
+              cachedColumnsByTable.set(qualifiedColumnCacheKey, columns);
+              if (refreshEpoch === completionEpoch) void refreshActiveSqlCompletion(fullDoc, position, completionContext);
+            }
           })
           .catch(() => {});
       }
     }
     if (!onDemandOnlyColumns && !tableNameCompletion) {
+      const refreshEpoch = completionEpoch;
       for (const refTable of completionContext.referencedTables) {
         if (isVirtualCompletionTableReference(refTable)) continue;
         if (refTable.columns && refTable.columns.length > 0) continue;
-        const cacheKey = completionCacheKey(refTable, scope);
+        let resolvedRef = refTable;
+        if (!usesOracleSessionCompletionColumns(resolvedRef.schema) && !resolvedRef.schema) {
+          const cachedTable =
+            completionMetadata.cachedTables.find((table) => table.name.toLowerCase() === resolvedRef.name.toLowerCase()) ??
+            connectionStore.lookupLocalCompletionTables(connectionId, scope.database, resolvedRef.name, 20, undefined, props.catalog).find((table) => table.name.toLowerCase() === resolvedRef.name.toLowerCase());
+          if (cachedTable?.schema) {
+            resolvedRef = { ...resolvedRef, schema: cachedTable.schema };
+          }
+        }
+        const cacheKey = completionCacheKey(resolvedRef, scope);
         if (cacheKey === qualifiedColumnCacheKey) continue;
-        if (cachedColumnsByTable.has(cacheKey)) continue;
-        const target = completionMetadataTarget(refTable, scope);
+        if (getCachedColumnsForTable(resolvedRef, scope)) continue;
+        const target = completionMetadataTarget(resolvedRef, scope);
         if (!target) continue;
-        void refreshCompletionColumnsForEditor(connectionId, target.database, refTable.name, target.schema, target.catalog, refTable)
+        const rawCacheKey = completionCacheKey(refTable, scope);
+        void refreshCompletionColumnsForEditor(connectionId, target.database, resolvedRef.name, target.schema, target.catalog, resolvedRef)
           .then((columns) => {
-            if (columns.length > 0) cachedColumnsByTable.set(cacheKey, columns);
+            if (columns.length > 0) {
+              cachedColumnsByTable.set(cacheKey, columns);
+              if (rawCacheKey !== cacheKey) cachedColumnsByTable.set(rawCacheKey, columns);
+              if (refreshEpoch === completionEpoch) void refreshActiveSqlCompletion(fullDoc, position, completionContext);
+            }
           })
           .catch(() => {});
       }
@@ -1906,7 +1935,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           const cacheKey = completionCacheKey(refTable, scope);
           const prefixCompletion = hasQualifiedColumnPrefix ? completionContext.prefix : undefined;
           const prefixCacheKey = prefixCompletion ? completionPrefixCacheKey(refTable, scope, prefixCompletion) : undefined;
-          if (prefixCompletion ? lookupCachedPrefixColumns(refTable, scope, prefixCompletion) : cachedColumnsByTable.has(cacheKey)) return;
+          if (prefixCompletion ? lookupCachedPrefixColumns(refTable, scope, prefixCompletion) : getCachedColumnsForTable(refTable, scope)) return;
           try {
             const target = completionMetadataTarget(refTable, scope);
             if (!target) return;
@@ -1959,7 +1988,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
           (refTable.alias?.toLowerCase() === completionContext.qualifier.toLowerCase() || refTable.name.toLowerCase() === completionContext.qualifier.toLowerCase())
             ? completionContext.prefix
             : undefined;
-        const cached = (prefixCompletion ? lookupCachedPrefixColumns(refTable, scope, prefixCompletion) : undefined) ?? cachedColumnsByTable.get(cacheKey);
+        const cached = (prefixCompletion ? lookupCachedPrefixColumns(refTable, scope, prefixCompletion) : undefined) ?? getCachedColumnsForTable(refTable, scope);
         if (cached) {
           columnsByTable.set(cacheKey, cached);
         }

@@ -160,6 +160,28 @@ describe("Oracle routine source save", () => {
     expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps watching an operation that is still running when the bounded response returns", async () => {
+    // The backend answers after 30s even if its worker is mid-write. That is progress,
+    // not failure: the save must wait for the original operation instead of reporting
+    // "pending" for a write that commits moments later.
+    const { prepareOracleRoutineSourceSave } = await import("@/lib/table/oracleRoutineWrite");
+    const save = await prepareOracleRoutineSourceSave(input());
+    vi.mocked(api.executeOracleRoutineOperation).mockResolvedValue(record({ lifecycle: "running", acknowledged: false, readback: null }));
+    vi.mocked(api.observeOracleRoutineOperation)
+      .mockResolvedValueOnce({ operation: record({ lifecycle: "running", acknowledged: false, readback: null }), lifecycle: "running", error: null })
+      // The worker marks the write terminal before its verification readback lands;
+      // that intermediate record must not be mistaken for the final answer.
+      .mockResolvedValueOnce({ operation: record({ readback: null }), lifecycle: "terminal", error: null })
+      .mockResolvedValueOnce({ operation: record(), lifecycle: "terminal", error: null });
+
+    const settled = await save();
+    expect(settled.lifecycle).toBe("terminal");
+    expect(settled.readback?.state).toBe("verified");
+    // Status reads only: the DDL is dispatched once and readback is never re-run here.
+    expect(api.executeOracleRoutineOperation).toHaveBeenCalledTimes(1);
+    expect(api.observeOracleRoutineOperation).toHaveBeenCalledWith("original-operation", false);
+  });
+
   it("verification requires terminal lifecycle, write acknowledgement, and full readback", async () => {
     const { oracleRoutineOperationVerified } = await import("@/lib/table/oracleRoutineWrite");
     expect(oracleRoutineOperationVerified(record())).toBe(true);

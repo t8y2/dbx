@@ -72,7 +72,7 @@ function appendSqlHoverHorizontalScrollbar(root: HTMLElement, sqlContent: HTMLEl
   };
 
   const handleWheel = (event: WheelEvent) => {
-    const horizontalDelta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+    const horizontalDelta = event.deltaX || (event.shiftKey || event.altKey ? event.deltaY : 0);
     if (!horizontalDelta) return;
     const maxScroll = Math.max(0, sqlContent.scrollWidth - sqlContent.clientWidth);
     const nextScrollLeft = Math.min(Math.max(sqlContent.scrollLeft + horizontalDelta, 0), maxScroll);

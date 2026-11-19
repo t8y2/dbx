@@ -132,6 +132,8 @@ pub fn psql_allow_failure(container: &DockerPostgres, sql: &str) -> bool {
 
 pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
     ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -157,6 +159,8 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         connect_timeout_secs: 5,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),
@@ -176,10 +180,16 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
+        redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
         external_config: None,
+        plugin_id: None,
+        plugin_connection_provider: None,
+        plugin_connection_type: None,
+        connection_secrets: Default::default(),
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
@@ -187,7 +197,12 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
+        sidebar_auto_load_all_tables: false,
+        show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }

@@ -50,7 +50,7 @@ const { t } = useI18n();
         <template v-else>
           <div v-if="detailError" class="panel-error">{{ detailError }}</div>
           <div v-if="resendSuccess" class="panel-success">
-            {{ t("mqMessages.sendSuccess", { partition: resendSuccess.partition, offset: resendSuccess.offset }) }}
+            {{ t("mqMessages.sendSuccessRocketmq") }}
           </div>
           <div v-if="resendError" class="panel-error">{{ resendError }}</div>
 

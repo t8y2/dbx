@@ -86,6 +86,32 @@ export interface EngineeringDiagram {
   };
 }
 
+export interface EngineeringDiagramLine {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+export interface EngineeringDiagramConnections {
+  attributeLines: EngineeringDiagramLine[];
+  relationshipLines: EngineeringDiagramLine[];
+}
+
+export interface EngineeringDiagramViewport {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface EngineeringDiagramRenderSlice extends EngineeringDiagramConnections {
+  entities: EngineeringEntityNode[];
+  attributes: EngineeringAttributeNode[];
+  relationships: EngineeringRelationshipNode[];
+}
+
 function attributeWidth(label: string): number {
   return Math.min(ATTRIBUTE_MAX_WIDTH, Math.max(ATTRIBUTE_MIN_WIDTH, label.length * 10 + 30));
 }
@@ -250,8 +276,8 @@ function orderedTableRows(tables: DiagramTable[], positions: Record<string, Diag
 }
 
 function normalizeDiagram(diagram: Omit<EngineeringDiagram, "canvas">): EngineeringDiagram {
-  const rects = [...diagram.entities, ...diagram.attributes, ...diagram.relationships];
-  if (rects.length === 0) {
+  const groups: ReadonlyArray<Array<{ x: number; y: number; width: number; height: number }>> = [diagram.entities, diagram.attributes, diagram.relationships];
+  if (groups.every((group) => group.length === 0)) {
     return {
       ...diagram,
       canvas: {
@@ -261,27 +287,97 @@ function normalizeDiagram(diagram: Omit<EngineeringDiagram, "canvas">): Engineer
     };
   }
 
-  const minX = Math.min(...rects.map((rect) => rect.x));
-  const minY = Math.min(...rects.map((rect) => rect.y));
-  const maxX = Math.max(...rects.map((rect) => rect.x + rect.width));
-  const maxY = Math.max(...rects.map((rect) => rect.y + rect.height));
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const group of groups) {
+    for (const rect of group) {
+      minX = Math.min(minX, rect.x);
+      minY = Math.min(minY, rect.y);
+      maxX = Math.max(maxX, rect.x + rect.width);
+      maxY = Math.max(maxY, rect.y + rect.height);
+    }
+  }
   const dx = CANVAS_PADDING - minX;
   const dy = CANVAS_PADDING - minY;
 
-  const shift = <T extends { x: number; y: number }>(node: T): T => ({
-    ...node,
-    x: node.x + dx,
-    y: node.y + dy,
-  });
+  for (const group of groups) {
+    for (const rect of group) {
+      rect.x += dx;
+      rect.y += dy;
+    }
+  }
 
   return {
-    entities: diagram.entities.map(shift),
-    attributes: diagram.attributes.map(shift),
-    relationships: diagram.relationships.map(shift),
+    ...diagram,
     canvas: {
       width: maxX + dx + CANVAS_PADDING,
       height: maxY + dy + CANVAS_PADDING,
     },
+  };
+}
+
+function nodeIntersectsViewport(node: { x: number; y: number; width: number; height: number }, viewport: EngineeringDiagramViewport): boolean {
+  return node.x <= viewport.right && node.x + node.width >= viewport.left && node.y <= viewport.bottom && node.y + node.height >= viewport.top;
+}
+
+function lineIntersectsViewport(line: EngineeringDiagramLine, viewport: EngineeringDiagramViewport): boolean {
+  return Math.min(line.x1, line.x2) <= viewport.right && Math.max(line.x1, line.x2) >= viewport.left && Math.min(line.y1, line.y2) <= viewport.bottom && Math.max(line.y1, line.y2) >= viewport.top;
+}
+
+export function buildEngineeringDiagramConnections(diagram: EngineeringDiagram): EngineeringDiagramConnections {
+  const entityMap = new Map(diagram.entities.map((entity) => [entity.name, entity]));
+  const attributeMap = new Map(diagram.attributes.map((attribute) => [`${attribute.tableName}:${attribute.columnName}`, attribute]));
+  const attributeLines: EngineeringDiagramLine[] = [];
+  for (const attribute of diagram.attributes) {
+    const entity = entityMap.get(attribute.tableName);
+    if (!entity) continue;
+    attributeLines.push({
+      id: `attribute:${attribute.id}`,
+      x1: entity.x + entity.width / 2,
+      y1: entity.y + entity.height / 2,
+      x2: attribute.x + attribute.width / 2,
+      y2: attribute.y + attribute.height / 2,
+    });
+  }
+  const relationshipLines: EngineeringDiagramLine[] = [];
+  for (const relationship of diagram.relationships) {
+    const source = attributeMap.get(`${relationship.sourceTable}:${relationship.sourceColumn}`) ?? entityMap.get(relationship.sourceTable);
+    const target = attributeMap.get(`${relationship.targetTable}:${relationship.targetColumn}`) ?? entityMap.get(relationship.targetTable);
+    if (!source || !target) continue;
+    const relationshipCenter = {
+      x: relationship.x + relationship.width / 2,
+      y: relationship.y + relationship.height / 2,
+    };
+    relationshipLines.push(
+      {
+        id: `relationship:${relationship.id}:source`,
+        x1: source.x + source.width / 2,
+        y1: source.y + source.height / 2,
+        x2: relationshipCenter.x,
+        y2: relationshipCenter.y,
+      },
+      {
+        id: `relationship:${relationship.id}:target`,
+        x1: relationshipCenter.x,
+        y1: relationshipCenter.y,
+        x2: target.x + target.width / 2,
+        y2: target.y + target.height / 2,
+      },
+    );
+  }
+
+  return { attributeLines, relationshipLines };
+}
+
+export function sliceEngineeringDiagramForViewport(diagram: EngineeringDiagram, connections: EngineeringDiagramConnections, viewport: EngineeringDiagramViewport): EngineeringDiagramRenderSlice {
+  return {
+    entities: diagram.entities.filter((entity) => nodeIntersectsViewport(entity, viewport)),
+    attributes: diagram.attributes.filter((attribute) => nodeIntersectsViewport(attribute, viewport)),
+    relationships: diagram.relationships.filter((relationship) => nodeIntersectsViewport(relationship, viewport)),
+    attributeLines: connections.attributeLines.filter((line) => lineIntersectsViewport(line, viewport)),
+    relationshipLines: connections.relationshipLines.filter((line) => lineIntersectsViewport(line, viewport)),
   };
 }
 

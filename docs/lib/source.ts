@@ -33,6 +33,7 @@ const pageIcons: Record<string, keyof typeof icons> = {
   "web-api": "Webhook",
   contributing: "GitPullRequest",
   plugins: "Plug",
+  "plugin-development": "Puzzle",
   "driver-management": "Package",
   "sql-formatter": "AlignLeft",
   "keyboard-shortcuts": "Keyboard",

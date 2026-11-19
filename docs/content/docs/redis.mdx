@@ -42,6 +42,23 @@ List, Set, Hash, Sorted Set, and Stream member details provide the same Decompre
 
 Large collection types load in pages and display total and loaded counts where available.
 
+## Plugin Decoding
+
+For application-specific binary values, install a native plugin declaring the
+`redis-value-codec-v1` capability. In String or collection-member details, choose
+**Plugin** in the Decode row, then select a decoder. Its JSON tree or text
+appears in the existing value viewer.
+
+Only the explicitly selected decoder receives the current bytes; it gets no
+database credentials or connection configuration. Input and serialized output
+are each limited to 2 MiB, calls time out after 10 seconds, and truncated
+previews cannot be decoded. Errors stay visible; choose a built-in decoder to
+return to the raw view.
+
+Decoded previews are read-only and are not serialized back into Redis. See the
+[Redis codec protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md#redis-value-codec-capability)
+for plugin development.
+
 ## Create and Edit Keys
 
 Choose a data type and initial content when creating a key. Set a positive TTL or choose a persistent key.
@@ -109,10 +126,21 @@ Key statistics and Slowlog require additional Redis commands. Limit scope and en
 
 - Delete selected keys
 - Delete keys loaded under the current group
+- Set a relative TTL, a local absolute expiration time, or no expiry on selected keys
 - Flush the active Redis database
 - Run supported bulk field/member operations
 
 Flush, bulk delete, and `FLUSH*` operations cannot be undone. Read-only connections reject writes, while production and dangerous-command checks remain active.
+
+## Live MONITOR
+
+![Live Redis MONITOR logs](/screenshots/redis-monitor.png)
+
+Run `MONITOR` on its own in the Redis query editor to receive live command logs instead of only the initial `OK`. Monitoring covers all databases on the connected node, regardless of the database selected in the editor.
+
+Use **Stop listening**, the execution toolbar's stop button, or close the tab to release the dedicated connection. The result retains the latest 1,000 entries, with each entry limited to 16,384 characters. Stopping preserves the displayed results.
+
+Direct Redis node connections, including their TLS and tunnel settings, are supported. For Sentinel or Cluster, create a direct connection to the node to inspect; logs are not aggregated across nodes. The Redis account needs permission to execute `MONITOR`, which adds server overhead while active.
 
 ## Safety and Performance Guidance
 

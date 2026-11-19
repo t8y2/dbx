@@ -7,6 +7,7 @@ services:
       - "4224:4224"
     environment:
       - DBX_PASSWORD=changeme
+      - DBX_BACKUP_ROOT=/app/backups
       # Native Streamable HTTP MCP is served by this same Web listener at /mcp.
       # Set the host authority clients use (including its externally mapped port).
       # - DBX_WEB_MCP_TOKEN=replace-with-a-long-random-secret
@@ -15,9 +16,20 @@ services:
       # - DBX_WEB_MCP_ALLOWED_ORIGINS=https://mcp-client.example.com
       # Uncomment when publishing DBX under a reverse-proxy subpath, e.g. https://example.com/dbx/
       # - DBX_PUBLIC_BASE_PATH=/dbx
+      # Optional production override. The default key is /app/data/.dbx/secret.key.
+      # - DBX_SECRET_KEY_FILE=/run/secrets/dbx_secret_key
+    # secrets:
+    #   - dbx_secret_key
     volumes:
       - dbx-data:/app/data
+      - dbx-backups:/app/backups
+    stop_grace_period: 90s
     restart: unless-stopped
 
 volumes:
   dbx-data:
+  dbx-backups:
+
+# secrets:
+#   dbx_secret_key:
+#     file: ./dbx_secret_key

@@ -1,8 +1,13 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const lifecycle = vi.hoisted(() => ({
+  surfaceCreated: 0,
+  surfaceUnmounted: 0,
+}));
 
 vi.mock("@/components/layout/EditorGroupTabBar.vue", () => ({
   default: {
@@ -23,6 +28,12 @@ vi.mock("@/components/layout/QueryEditorSurface.vue", () => ({
   default: {
     name: "QueryEditorSurfaceStub",
     props: ["activeTab", "autoFocus"],
+    created() {
+      lifecycle.surfaceCreated += 1;
+    },
+    unmounted() {
+      lifecycle.surfaceUnmounted += 1;
+    },
     template: `<div data-test="query-editor">{{ activeTab.id }}</div>`,
   },
 }));
@@ -30,6 +41,12 @@ vi.mock("@/components/layout/QueryEditorSurface.vue", () => ({
 vi.mock("@/components/layout/ContentArea.vue", () => ({
   default: {
     name: "ContentAreaStub",
+    created() {
+      lifecycle.surfaceCreated += 1;
+    },
+    unmounted() {
+      lifecycle.surfaceUnmounted += 1;
+    },
     template: `<div data-test="content-area" />`,
   },
 }));
@@ -43,14 +60,14 @@ import EditorGroup from "../EditorGroup.vue";
 import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useQueryStore } from "@/stores/queryStore";
 
-function tab(id: string) {
+function tab(id: string, mode: "query" | "data" = "query") {
   return {
     id,
     title: id,
     connectionId: "conn-1",
     database: "db",
     sql: "SELECT 1",
-    mode: "query",
+    mode,
   } as const;
 }
 
@@ -66,6 +83,8 @@ describe("EditorGroup mount contract", () => {
 
   beforeEach(() => {
     document.body.innerHTML = "";
+    lifecycle.surfaceCreated = 0;
+    lifecycle.surfaceUnmounted = 0;
     pinia = createPinia();
     setActivePinia(pinia);
     i18n = createI18n({
@@ -73,6 +92,70 @@ describe("EditorGroup mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it.each(["query", "data"] as const)("reuses hot %s tabs and remounts evicted surfaces", async (mode) => {
+    const store = useQueryStore();
+    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d", "tab-e", "tab-f", "tab-g"];
+    store.tabs = tabIds.map((tabId) => tab(tabId, mode));
+    const activeTabId = ref("tab-a");
+    const host = createHost();
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(EditorGroup, {
+            groupId: "group-1",
+            tabIds,
+            activeTabId: activeTabId.value,
+            activeTab: tab(activeTabId.value, mode),
+            activeConnection: undefined,
+            executableSql: "SELECT 1",
+            activeOutputView: "result",
+            formatSqlRequest: null,
+            compressSqlRequest: null,
+            keywordCaseRequest: null,
+            selectedSql: "",
+            cursorPos: 0,
+            blockDangerousRedisCommands: false,
+          });
+      },
+    });
+    const app = createApp(root);
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    for (const tabId of ["tab-b", "tab-c", "tab-d", "tab-e", "tab-f"]) {
+      activeTabId.value = tabId;
+      await nextTick();
+    }
+    expect(lifecycle.surfaceCreated).toBe(6);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
+    activeTabId.value = "tab-a";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(6);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
+    activeTabId.value = "tab-g";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(7);
+    expect(lifecycle.surfaceUnmounted).toBe(1);
+
+    activeTabId.value = "tab-a";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(7);
+    expect(lifecycle.surfaceUnmounted).toBe(1);
+
+    activeTabId.value = "tab-b";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(8);
+    expect(lifecycle.surfaceUnmounted).toBe(2);
+
+    app.unmount();
+    expect(lifecycle.surfaceUnmounted).toBe(8);
+    host.remove();
   });
 
   it("passes the group active tab to the query editor surface instead of the global active tab", async () => {
@@ -91,6 +174,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -115,9 +199,14 @@ describe("EditorGroup mount contract", () => {
 
     const actions: EditorToolbarActions = {
       ...createNoopEditorToolbarActions(),
+      captureExecutionSnapshot: vi.fn(),
+      toolbarExecute: vi.fn(),
+      toolbarExecuteAll: vi.fn(),
+      toolbarExecuteInNewResultTab: vi.fn(),
       cancelExecution: vi.fn(),
       explain: vi.fn(),
       saveSql: vi.fn(),
+      toggleSqlKeywordCase: vi.fn(),
     };
 
     const host = createHost();
@@ -131,6 +220,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -146,13 +236,25 @@ describe("EditorGroup mount contract", () => {
     expect(toolbar?.textContent).toBe(queryId);
 
     // Toolbar events flow to the injected actions with the group's tab id.
+    (toolbar as any).__vueParentComponent.emit("executePointerDown");
+    (toolbar as any).__vueParentComponent.emit("toolbarExecute", "pointer");
+    (toolbar as any).__vueParentComponent.emit("toolbarExecuteAll", "pointer");
+    (toolbar as any).__vueParentComponent.emit("toolbarExecuteInNewResultTab", "pointer");
     (toolbar as any).__vueParentComponent.emit("cancel");
     (toolbar as any).__vueParentComponent.emit("explain");
     (toolbar as any).__vueParentComponent.emit("saveSql", queryId);
+    // #11828: the keyword-case toggle must carry the acting tab, otherwise App
+    // cannot tell which editor to re-case (the button used to take no tab).
+    (toolbar as any).__vueParentComponent.emit("toggleSqlKeywordCase");
     await nextTick();
+    expect(actions.captureExecutionSnapshot).toHaveBeenCalledWith(queryId);
+    expect(actions.toolbarExecute).toHaveBeenCalledWith("pointer", queryId);
+    expect(actions.toolbarExecuteAll).toHaveBeenCalledWith("pointer", queryId);
+    expect(actions.toolbarExecuteInNewResultTab).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.cancelExecution).toHaveBeenCalledWith(queryId);
     expect(actions.explain).toHaveBeenCalledWith(queryId);
     expect(actions.saveSql).toHaveBeenCalledWith(queryId);
+    expect(actions.toggleSqlKeywordCase).toHaveBeenCalledWith(queryId);
 
     // Data tab: no SQL toolbar — the data grid carries its own built-in bar.
     app.unmount();
@@ -166,6 +268,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,

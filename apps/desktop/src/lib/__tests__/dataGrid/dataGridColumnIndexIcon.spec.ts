@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildColumnIndexMap, columnIndexMetadataRequestCurrent, columnIndexNameKey, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
+import { buildColumnIndexMap, columnIndexCacheAction, columnIndexMetadataRequestCurrent, columnIndexNameKey, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import type { IndexInfo } from "@/types/database";
 
 function indexInfo(overrides: Partial<IndexInfo>): IndexInfo {
@@ -66,5 +66,34 @@ describe("column index metadata request guard", () => {
         currentIdentity: orders,
       }),
     ).toBe(false);
+  });
+});
+
+describe("column index cache action", () => {
+  const users = columnIndexTableIdentity({
+    connectionId: "c1",
+    database: "db",
+    schema: "public",
+    tableName: "users",
+  });
+  const orders = columnIndexTableIdentity({
+    connectionId: "c1",
+    database: "db",
+    schema: "public",
+    tableName: "orders",
+  });
+
+  it("resets only when the table actually changes", () => {
+    expect(columnIndexCacheAction(users, orders, true)).toBe("reset");
+    expect(columnIndexCacheAction(undefined, users, false)).toBe("reset");
+  });
+
+  it("keeps loaded indexes visible while the same table refreshes", () => {
+    // 手动刷新重新发布 tableMeta 时不能清空索引，否则表头标识会闪断（#12093）。
+    expect(columnIndexCacheAction(users, users, true)).toBe("keep-refresh");
+  });
+
+  it("does nothing while the same table's first load is still pending", () => {
+    expect(columnIndexCacheAction(users, users, false)).toBe("unchanged");
   });
 });

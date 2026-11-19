@@ -7,7 +7,6 @@ import type { DocsLang } from "@/lib/i18n";
 const TOGGLE_LABEL: Record<DocsLang, { less: string; more: string }> = {
   en: { less: "Show fewer databases", more: "Show all databases" },
   cn: { less: "收起数据库列表", more: "展开全部数据库" },
-  tr: { less: "Daha az veritabanı göster", more: "Tüm veritabanlarını göster" },
 };
 
 export function ExpandableDatabaseGrid({ children, lang }: { children: ReactNode; lang: DocsLang }) {

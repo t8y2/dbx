@@ -6,7 +6,7 @@ import { DEFAULT_QUERY_TIMEOUT_SECS, frontendQueryTimeoutSecsForSql, queryTimeou
 const contentAreaSource = readFileSync("apps/desktop/src/components/layout/ContentArea.vue", "utf8");
 
 test("queryTimeoutSecsForConnection falls back to the default timeout", () => {
-  assert.equal(DEFAULT_QUERY_TIMEOUT_SECS, 30);
+  assert.equal(DEFAULT_QUERY_TIMEOUT_SECS, 60);
   assert.equal(queryTimeoutSecsForConnection(undefined), DEFAULT_QUERY_TIMEOUT_SECS);
   assert.equal(queryTimeoutSecsForConnection({ query_timeout_secs: -1 }), DEFAULT_QUERY_TIMEOUT_SECS);
   assert.equal(queryTimeoutSecsForConnection({ query_timeout_secs: 0 }), 0);
@@ -14,10 +14,10 @@ test("queryTimeoutSecsForConnection falls back to the default timeout", () => {
 });
 
 test("frontend query timeout scales with SQL statement count", () => {
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1)", "mysql", 30), 60);
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2);", "mysql", 30), 120);
-  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2); INSERT INTO users VALUES (3);", "mysql", 10), 180);
-  assert.equal(frontendQueryTimeoutSecsForSql("/* prep */\nINSERT INTO users VALUES (1);\n-- keep batching\nINSERT INTO users VALUES (2);", "mysql", 30), 120);
+  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1)", "mysql", 30), 30);
+  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2);", "mysql", 30), 60);
+  assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2); INSERT INTO users VALUES (3);", "mysql", 10), 30);
+  assert.equal(frontendQueryTimeoutSecsForSql("/* prep */\nINSERT INTO users VALUES (1);\n-- keep batching\nINSERT INTO users VALUES (2);", "mysql", 30), 60);
   assert.equal(frontendQueryTimeoutSecsForSql("INSERT INTO users VALUES (1); INSERT INTO users VALUES (2);", "mysql", 0), 0);
 });
 

@@ -132,20 +132,7 @@ async function ensureRedisContainer(options) {
     await run("docker", ["inspect", options.container]);
     await run("docker", ["start", options.container]);
   } catch {
-    await run("docker", [
-      "run",
-      "-d",
-      "--name",
-      options.container,
-      "-p",
-      `${options.host}:${options.port}:6379`,
-      options.image,
-      "redis-server",
-      "--save",
-      "",
-      "--appendonly",
-      "no",
-    ]);
+    await run("docker", ["run", "-d", "--name", options.container, "-p", `${options.host}:${options.port}:6379`, options.image, "redis-server", "--save", "", "--appendonly", "no"]);
   }
 
   const deadline = Date.now() + 15_000;

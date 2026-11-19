@@ -16,48 +16,28 @@ const i18n = {
     qiniuSponsorAction: "Visit",
     rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
     rainyunSponsorAction: "Visit",
+    jumpserverSponsorDesc: "JumpServer is a widely popular open-source bastion host.",
+    jumpserverSponsorAction: "Visit",
+    taiyiSponsorDesc: "面向央国企的私有化智能体平台，采用 1+N+N 架构：1 个平台、N 个终端、N 个场景；私有化部署、全程留痕可审计。",
+    taiyiSponsorAction: "Visit",
     easysearchSponsorDesc: "Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.",
     easysearchSponsorAction: "Visit",
-    atlasCloudSponsorDesc: "Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.",
-    atlasCloudSponsorAction: "Visit",
     trustasiaSponsorDesc: "TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.",
     trustasiaSponsorAction: "Visit",
-    jalapenoSponsorDesc: "Jalapeño Cloud is an AI infrastructure and token compute platform, with an exclusive DBX entry offering free credits and top-up bonuses.",
-    jalapenoSponsorAction: "Visit",
     astraflowSponsorDesc: "UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.",
     astraflowSponsorAction: "Visit",
+    packyapiSponsorDesc: "Access leading AI models with one endpoint and one API key.",
+    packyapiSponsorAction: "Visit",
     onepanelSponsorDesc: "1Panel is a modern open-source Linux server management panel and lightweight AI management platform, offering an intuitive web interface for one-stop management of AI agents, local LLMs, websites, databases, containers, files, and more.",
     onepanelSponsorAction: "Visit",
     hualongSponsorDesc: "HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.",
     hualongSponsorAction: "Visit",
+    hiapiSponsorDesc: "A developer-focused API platform for image, video, audio, and text models.",
+    hiapiSponsorAction: "Visit",
+    aicodemirrorSponsorDesc: "AICodeMirror is a high-stability relay service for Claude Code / Codex / Gemini CLI with enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support; sign up through this link for ¥8 in new-user credit and 20% off your first top-up, up to 25% off for enterprise.",
+    aicodemirrorSponsorAction: "Visit",
     becomeTitle: "Sponsorship inquiries",
     becomeDesc: "If you would like to support DBX with funding, infrastructure, developer tools, or services, tell us about the idea and how to reach you.",
-  },
-  tr: {
-    title: "Sponsorlar ve İş Ortakları",
-    desc: "DBX'i finansman, kaynak, hizmet ve iş birliğiyle destekleyen sponsorlara ve iş ortaklarına teşekkür ederiz.",
-    sponsorsTitle: "❤️ Sponsorlar",
-    partnersTitle: "🤝 İş Ortakları",
-    qiniuSponsorDesc: "Qiniu Cloud, DBX'e nesne depolama, CDN ve diğer bulut altyapı kaynaklarını sağlıyor.",
-    qiniuSponsorAction: "Ziyaret edin",
-    rainyunSponsorDesc: "RainYun; bulut sunucular, fiziksel sunucular, oyun barındırma ve geliştirici dostu altyapı hizmetleri sunan bir bulut servis sağlayıcısıdır.",
-    rainyunSponsorAction: "Ziyaret edin",
-    easysearchSponsorDesc: "Easysearch, Elasticsearch API'leriyle uyumlu kurumsal düzeyde dağıtık bir arama motorudur; tam metin, vektör ve coğrafi aramayı, gerçek zamanlı analitiği ve yapay zekâ yeteneklerini tek platformda birleştirir.",
-    easysearchSponsorAction: "Ziyaret edin",
-    atlasCloudSponsorDesc: "Atlas Cloud, geliştiricilere sohbet, görsel, video ve ses alanlarında 400+ yapay zekâ modeli için tek ve birleşik bir API sunar.",
-    atlasCloudSponsorAction: "Ziyaret edin",
-    trustasiaSponsorDesc: "TrustAsia, DBX için bulut tabanlı kod imzalama hizmeti sağlayarak otomatik CI/CD derlemeleriyle güvenilir yazılım üretilmesini sağlıyor.",
-    trustasiaSponsorAction: "Ziyaret edin",
-    jalapenoSponsorDesc: "Jalapeño Cloud, yapay zekâ altyapısı ve belirteç hesaplama platformudur; DBX'e özel giriş noktasıyla ücretsiz kredi ve yükleme bonusu sunar.",
-    jalapenoSponsorAction: "Ziyaret edin",
-    astraflowSponsorDesc: "UCloud, Çin'in STAR Market borsasına kote ilk genel bulut sağlayıcısıdır; 28 küresel bölgede bulut sunucu, veritabanı ve CDN hizmeti verir. AstraFlow platformu 200+ yaygın büyük dil modeline tek tıklamayla erişim sağlar.",
-    astraflowSponsorAction: "Ziyaret edin",
-    onepanelSponsorDesc: "1Panel, modern, açık kaynaklı bir Linux sunucu yönetim paneli ve hafif yapay zekâ yönetim platformudur; yapay zekâ ajanları, yerel büyük dil modelleri, web siteleri, veritabanları, konteynerler ve dosyaları tek web arayüzünden yönetir.",
-    onepanelSponsorAction: "Ziyaret edin",
-    hualongSponsorDesc: "HuaLongAI, yoğun yapay zekâ geliştiricileri için bir model API aktarıcısıdır; %100 resmî kaynaktan Codex ve Claude modelleri, şeffaf belirteç düzeyinde faturalandırma, kurumsal sözleşme ve fatura sunar.",
-    hualongSponsorAction: "Ziyaret edin",
-    becomeTitle: "Sponsorluk başvurusu",
-    becomeDesc: "DBX'i finansman, altyapı, geliştirici araçları veya hizmetlerle desteklemek isterseniz fikrinizi ve size nasıl ulaşabileceğimizi yazın.",
   },
   cn: {
     title: "赞助商与合作伙伴",
@@ -68,20 +48,26 @@ const i18n = {
     qiniuSponsorAction: "访问",
     rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
     rainyunSponsorAction: "访问",
+    jumpserverSponsorDesc: "广受欢迎的开源堡垒机",
+    jumpserverSponsorAction: "访问",
+    taiyiSponsorDesc: "面向央国企的私有化智能体平台，采用 1+N+N 架构：1 个平台、N 个终端、N 个场景；私有化部署、全程留痕可审计。",
+    taiyiSponsorAction: "访问",
     easysearchSponsorDesc: "Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。",
     easysearchSponsorAction: "访问",
-    atlasCloudSponsorDesc: "Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。",
-    atlasCloudSponsorAction: "访问",
     trustasiaSponsorDesc: "由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。",
     trustasiaSponsorAction: "访问",
-    jalapenoSponsorDesc: "Jalapeño Cloud 是 AI 基础设施与 Token 算力平台，通过 DBX 专属入口可享新用户免费额度与充值加赠。",
-    jalapenoSponsorAction: "访问",
     astraflowSponsorDesc: "UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。",
     astraflowSponsorAction: "访问",
+    packyapiSponsorDesc: "稳定高效的 API 中转服务商，一句话接入主流大模型。",
+    packyapiSponsorAction: "访问",
     onepanelSponsorDesc: "1Panel 是现代化的开源 Linux 服务器运维管理面板与轻量级 AI 管理平台，提供直观易用的 Web 界面，支持 AI 智能体、本地大模型、网站、数据库、容器、文件等核心场景的一站式管理。",
     onepanelSponsorAction: "访问",
     hualongSponsorDesc: "HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。",
     hualongSponsorAction: "访问",
+    hiapiSponsorDesc: "面向开发者的图片、视频、音频及文本模型 API 平台。",
+    hiapiSponsorAction: "访问",
+    aicodemirrorSponsorDesc: "AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票与 7×24 专属技术支持；通过此链接注册可享新人 ¥8 免费额度与首充 8 折，企业客户最高可享 7.5 折。",
+    aicodemirrorSponsorAction: "访问",
     becomeTitle: "赞助合作",
     becomeDesc: "如果你愿意通过资金、基础设施、开发工具或服务资源支持 DBX，请留下联系方式和合作说明。",
   },
@@ -106,58 +92,82 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
   const t = i18n[locale];
   const sponsorItems = [
     {
+      name: "JumpServer",
+      href: "https://www.jumpserver.org/",
+      logo: "/sponsors/jumpserver-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.jumpserverSponsorDesc,
+      action: t.jumpserverSponsorAction,
+    },
+    {
+      name: "AICodeMirror",
+      href: "https://www.aicodemirror.ai/register?invitecode=9A50BU",
+      logo: "/sponsors/aicodemirror-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.aicodemirrorSponsorDesc,
+      action: t.aicodemirrorSponsorAction,
+    },
+    {
       name: "RainYun",
       href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
-      logo: "https://www.rainyun.com/img/logo.d193755d.png",
-      logoClass: "h-12 w-auto max-w-[150px]",
+      logo: "/sponsors/rainyun-tight.png",
+      logoClass: "max-h-12 w-auto max-w-full object-contain",
       description: t.rainyunSponsorDesc,
       action: t.rainyunSponsorAction,
+    },
+    {
+      name: "HuaLongAI",
+      href: "https://dbx.hualong.online/",
+      logo: "/sponsors/hualong-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.hualongSponsorDesc,
+      action: t.hualongSponsorAction,
+    },
+    {
+      name: "HiAPI",
+      href: "https://www.hiapi.ai/invite/dbx?utm_source=dbx&utm_medium=affiliate&utm_campaign=backlink&utm_content=website",
+      logo: "/sponsors/hiapi-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.hiapiSponsorDesc,
+      action: t.hiapiSponsorAction,
+    },
+    {
+      name: "AstraFlow",
+      href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
+      logo: "/sponsors/astraflow-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.astraflowSponsorDesc,
+      action: t.astraflowSponsorAction,
+    },
+    {
+      name: "PackyCode",
+      href: "https://www.packyapi.ai/register?aff=wyDA",
+      logo: "/sponsors/packyapi-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.packyapiSponsorDesc,
+      action: t.packyapiSponsorAction,
+    },
+    {
+      name: "太一企业版",
+      href: "https://mate.vip/ee/",
+      logo: "/sponsors/taiyi-tight.png",
+      logoClass: "w-full object-contain",
+      description: t.taiyiSponsorDesc,
+      action: t.taiyiSponsorAction,
     },
     {
       name: "TrustAsia",
       href: "https://www.trustasia.com/ssl/trustasia/code-signing",
       logo: "/sponsors/trustasia.png",
-      logoClass: "w-full max-w-[160px] object-contain",
+      logoClass: "w-full object-contain",
       description: t.trustasiaSponsorDesc,
       action: t.trustasiaSponsorAction,
-    },
-    {
-      name: "Jalapeño Cloud",
-      href: "https://www.jalapeno-cloud.ai/DBX",
-      logo: "/sponsors/jalapeno-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
-      description: t.jalapenoSponsorDesc,
-      action: t.jalapenoSponsorAction,
-    },
-    {
-      name: "AstraFlow",
-      href: "https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx",
-      logo: "/sponsors/astraflow-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
-      description: t.astraflowSponsorDesc,
-      action: t.astraflowSponsorAction,
-    },
-    {
-      name: "HuaLongAI",
-      href: "https://api.hualong.online/",
-      logo: "/sponsors/hualong-card.png",
-      logoClass: "w-full max-w-[160px] object-contain",
-      description: t.hualongSponsorDesc,
-      action: t.hualongSponsorAction,
-    },
-    {
-      name: "Atlas Cloud",
-      href: "https://www.atlascloud.ai/?ref=6YYXWA",
-      logo: "https://www.atlascloud.ai/logo.svg",
-      logoClass: "w-full max-w-[136px] object-contain",
-      description: t.atlasCloudSponsorDesc,
-      action: t.atlasCloudSponsorAction,
     },
     {
       name: locale === "cn" ? "七牛云" : "Qiniu Cloud",
       href: "https://www.qiniu.com/",
       logo: "https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg",
-      logoClass: "h-16 w-16 object-contain",
+      logoClass: "max-h-14 w-auto max-w-full object-contain",
       description: t.qiniuSponsorDesc,
       action: t.qiniuSponsorAction,
     },
@@ -166,8 +176,8 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
     {
       name: "1Panel",
       href: "https://1panel.cn/",
-      logo: "/sponsors/1panel-card.png",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logo: "/sponsors/1panel-tight.png",
+      logoClass: "w-full object-contain",
       description: t.onepanelSponsorDesc,
       action: t.onepanelSponsorAction,
     },
@@ -175,24 +185,25 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
       name: "Easysearch",
       href: "https://easysearch.cn",
       logo: "/sponsors/easysearch.png",
-      logoClass: "w-full max-w-[136px] object-contain",
+      logoClass: "w-full object-contain",
       description: t.easysearchSponsorDesc,
       action: t.easysearchSponsorAction,
     },
   ];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={locale} active="sponsors" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">
-        <h1 className="text-4xl font-[820] tracking-tight">{t.title}</h1>
-        <p className="mt-3 max-w-[700px] text-landing-muted text-lg leading-relaxed">{t.desc}</p>
+        {/* 视觉隐藏：页面不再展示大标题，但保留语义 landmark 与 SEO */}
+        <h1 className="sr-only">{t.title}</h1>
+        <p className="mx-auto max-w-[700px] text-center text-landing-muted text-lg leading-relaxed">{t.desc}</p>
 
         <h2 className="mt-10 text-2xl font-[760]">{t.sponsorsTitle}</h2>
         <div className="mt-5 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
           {sponsorItems.map((sponsor) => (
-            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="block rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
+            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="flex flex-col justify-center rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
               <div className="flex items-center gap-6 max-[640px]:block">
                 <div className="flex h-24 w-44 shrink-0 items-center justify-center rounded-lg bg-white px-5 shadow-[0_10px_30px_rgba(15,23,42,0.08)] max-[640px]:w-max">
                   <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />
@@ -215,7 +226,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
         <h2 className="mt-12 text-2xl font-[760]">{t.partnersTitle}</h2>
         <div className="mt-5 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
           {partnerItems.map((sponsor) => (
-            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="block rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
+            <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="flex flex-col justify-center rounded-xl border border-landing-line bg-landing-panel p-6 transition-colors hover:border-landing-blue">
               <div className="flex items-center gap-6 max-[640px]:block">
                 <div className="flex h-24 w-44 shrink-0 items-center justify-center rounded-lg bg-white px-5 shadow-[0_10px_30px_rgba(15,23,42,0.08)] max-[640px]:w-max">
                   <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />

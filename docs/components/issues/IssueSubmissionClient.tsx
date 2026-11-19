@@ -32,58 +32,6 @@ type SubmitResponse = {
 };
 
 const copy = {
-  tr: {
-    draftStep: "Sorunu anlatın",
-    previewStep: "Issue önizlemesi",
-    descriptionLabel: "Ne oldu?",
-    descriptionHint: "Ne yaptığınızı, ne gördüğünüzü ve ne beklediğinizi yazın. Sürüm veya ortam ayrıntısını bilmiyorsanız tahmin etmeyin.",
-    descriptionPlaceholder: "Örnek: macOS'ta bir PostgreSQL şemasını genişletince hata vermeden sürekli yükleniyor. Yeniden başlatmak ve yeniden bağlanmak işe yaramadı.",
-    attachments: "Ekran görüntüleri (isteğe bağlı)",
-    attachmentHint: "Ekran görüntülerini buraya seçin, sürükleyin ya da yapıştırın. PNG, JPEG veya WebP; en fazla 3 görsel ve her biri 5 MB.",
-    addImages: "Ekran görüntüsü ekle",
-    generate: "Issue taslağı hazırla",
-    generateAgain: "Yeniden hazırla",
-    generating: "Taslak hazırlanıyor",
-    type: "Tür",
-    titleLabel: "Başlık",
-    bodyLabel: "GitHub gövdesi",
-    bodyHint: "Tümüyle düzenlenebilir. Gönderim sırasında görseller ve anonim kaynak notu sona eklenir.",
-    summary: "Taslak özeti",
-    confirm: "Başlığı, gövdeyi ve ekran görüntülerini inceledim; bunların GitHub'da herkese açık görüneceğini anlıyorum.",
-    submit: "Onayla ve herkese açık Issue oluştur",
-    submitting: "Issue oluşturuluyor",
-    publicWarning: "Göndermeden önce",
-    publicNotice: "Parola, belirteç, bağlantı dizesi, maskelenmemiş IP, müşteri verisi veya kişisel veri yüklemeyin. Issue ve görseller herkese açık olacak.",
-    successTitle: "Issue oluşturuldu",
-    successText: (number: number) => `GitHub Issue #${number} oluşturuldu. Sonraki gelişmeler o herkese açık sayfada kaydedilecek.`,
-    openIssue: "GitHub Issue'yu aç",
-    another: "Bir tane daha gönder",
-    removeImage: "Görseli kaldır",
-    errors: {
-      DESCRIPTION_REQUIRED: "Önce sorunu anlatın.",
-      DESCRIPTION_TOO_SHORT: "Açıklama en az 4 karakter içermelidir.",
-      DESCRIPTION_TOO_LONG: "Açıklamayı 6.000 karakterin altında tutun.",
-      TOO_MANY_IMAGES: "En fazla 3 görsel yükleyebilirsiniz.",
-      IMAGE_TOO_LARGE: "Her görsel en fazla 5 MB olmalıdır.",
-      IMAGES_TOO_LARGE: "Görsellerin toplamı en fazla 12 MB olmalıdır.",
-      IMAGE_TYPE_UNSUPPORTED: "Yalnızca gerçek PNG, JPEG ve WebP görselleri desteklenir.",
-      RATE_LIMITED: "Çok fazla taslak denemesi yapıldı. Lütfen daha sonra tekrar deneyin.",
-      AI_NOT_CONFIGURED: "Yapay zekâ taslak servisi henüz yapılandırılmadı.",
-      AI_REQUEST_FAILED: "Yapay zekâ servisi geçici olarak kullanılamıyor. Daha sonra tekrar deneyin.",
-      AI_REQUEST_TIMEOUT: "Ekran görüntüsü çözümlemesi çok uzun sürdü. Tekrar deneyin ya da daha az görsel ekleyin.",
-      AI_RESPONSE_INVALID: "Yapay zekâ geçersiz bir taslak döndürdü. Yeniden üretin.",
-      DRAFT_EXPIRED: "Bu taslağın süresi doldu. Yenisini üretin.",
-      DRAFT_SUBMITTING: "Bu taslak zaten gönderiliyor.",
-      DRAFT_IMAGES_CHANGED: "Taslak üretildikten sonra ekran görüntüleri değişti. Taslağı yeniden üretin.",
-      ISSUE_SESSION_EXPIRED: "Geçici oturumun süresi doldu. Taslağı yeniden üretin.",
-      GITHUB_ISSUE_CREATE_FAILED: "GitHub Issue'yu oluşturamadı. Daha sonra tekrar deneyin.",
-      ISSUE_IMAGE_UPLOAD_FAILED: "Ekran görüntüleri yüklenemedi. Daha sonra tekrar deneyin.",
-      ISSUE_REQUEST_FAILED: "Gönderim başarısız. Daha sonra tekrar deneyin.",
-    },
-    genericError: "İstek başarısız oldu. Daha sonra tekrar deneyin.",
-    clientImageError: "En fazla 3 PNG, JPEG veya WebP görseli kullanın; her biri en çok 5 MB.",
-    retryAfter: (minutes: number) => `Yaklaşık ${minutes} dakika sonra tekrar deneyin.`,
-  },
   cn: {
     draftStep: "问题描述",
     previewStep: "Issue 预览",
@@ -123,6 +71,7 @@ const copy = {
       AI_NOT_CONFIGURED: "AI 草稿服务尚未配置，请联系维护者。",
       AI_REQUEST_FAILED: "AI 服务暂时不可用，请稍后重试。",
       AI_REQUEST_TIMEOUT: "截图分析时间较长，请重试；如果仍然超时，可以减少截图数量。",
+      AI_TIMEOUT_TEXT_ONLY: "AI 服务响应超时，请稍后重试。",
       AI_RESPONSE_INVALID: "AI 返回的草稿格式异常，请重新生成。",
       DRAFT_EXPIRED: "草稿已过期，请重新生成。",
       DRAFT_SUBMITTING: "这个草稿正在提交，请不要重复点击。",
@@ -175,6 +124,7 @@ const copy = {
       AI_NOT_CONFIGURED: "The AI drafting service has not been configured yet.",
       AI_REQUEST_FAILED: "The AI service is temporarily unavailable. Try again later.",
       AI_REQUEST_TIMEOUT: "Screenshot analysis took too long. Try again, or attach fewer screenshots.",
+      AI_TIMEOUT_TEXT_ONLY: "The AI service timed out. Please try again later.",
       AI_RESPONSE_INVALID: "The AI returned an invalid draft. Generate it again.",
       DRAFT_EXPIRED: "This draft expired. Generate a new one.",
       DRAFT_SUBMITTING: "This draft is already being submitted.",
@@ -197,9 +147,20 @@ const issuePrefixes: Record<IssueType, string> = {
   compatibility: "[Compatibility]",
 };
 
-function responseErrorMessage(lang: DocsLang, code: string, retryAfter?: number): string {
+class ResponseError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+  ) {
+    super(message);
+    this.name = "ResponseError";
+  }
+}
+
+function responseErrorMessage(lang: DocsLang, code: string, retryAfter?: number, hasImages = false): string {
   const t = copy[lang];
-  const base = t.errors[code as keyof typeof t.errors] ?? t.genericError;
+  const key = code === "AI_REQUEST_TIMEOUT" && !hasImages ? "AI_TIMEOUT_TEXT_ONLY" : code;
+  const base = t.errors[key as keyof typeof t.errors] ?? t.genericError;
   if (code !== "RATE_LIMITED" || !retryAfter) return base;
   return `${base} ${t.retryAfter(Math.max(1, Math.ceil(retryAfter / 60)))}`;
 }
@@ -292,7 +253,7 @@ export function IssueSubmissionClient({ lang }: { lang: DocsLang }) {
     setConfirmed(false);
   }
 
-  async function parseResponse<T>(response: Response): Promise<T> {
+  async function parseResponse<T>(response: Response, hasImages = false): Promise<T> {
     let data: Record<string, unknown> = {};
     try {
       data = (await response.json()) as Record<string, unknown>;
@@ -302,22 +263,36 @@ export function IssueSubmissionClient({ lang }: { lang: DocsLang }) {
     if (!response.ok) {
       const code = typeof data.error === "string" ? data.error : "ISSUE_REQUEST_FAILED";
       const retryAfter = typeof data.retryAfter === "number" ? data.retryAfter : undefined;
-      throw new Error(responseErrorMessage(lang, code, retryAfter));
+      throw new ResponseError(responseErrorMessage(lang, code, retryAfter, hasImages), code);
     }
     return data as T;
+  }
+
+  async function requestDraft(): Promise<DraftResponse> {
+    const form = new FormData();
+    form.set("description", description);
+    form.set("language", lang);
+    imagesRef.current.forEach((image) => form.append("images", image.file));
+    const response = await fetch("/api/issues/draft", { method: "POST", body: form });
+    return parseResponse<DraftResponse>(response, imagesRef.current.length > 0);
   }
 
   async function generateDraft() {
     setLoading("draft");
     setError("");
     setSuccess(null);
-    const form = new FormData();
-    form.set("description", description);
-    form.set("language", lang);
-    images.forEach((image) => form.append("images", image.file));
     try {
-      const response = await fetch("/api/issues/draft", { method: "POST", body: form });
-      const data = await parseResponse<DraftResponse>(response);
+      let data: DraftResponse;
+      try {
+        data = await requestDraft();
+      } catch (requestError) {
+        // The AI gateway is slow to admit requests far more often than it is
+        // down, so a timed-out text-only draft gets one silent retry. Timed-out
+        // drafts with screenshots are not retried: 90s already elapsed and the
+        // timeout message offers removing screenshots instead.
+        if (!(requestError instanceof ResponseError) || requestError.code !== "AI_REQUEST_TIMEOUT" || imagesRef.current.length > 0) throw requestError;
+        data = await requestDraft();
+      }
       setDraftId(data.draftId);
       setDraftExpiresAt(data.expiresAt);
       setIssueType(data.preview.type);

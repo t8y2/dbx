@@ -8,6 +8,36 @@ export function canBuildRedisFuzzyTree(loadedKeyCount: number): boolean {
   return loadedKeyCount <= REDIS_FUZZY_TREE_MAX_KEYS;
 }
 
+/**
+ * Membership of the "no expiry" filter.
+ *
+ * An unknown expiry means the expiry is *unknown*, not "it expires": rows
+ * loaded without inline metadata (the "fetch all" sweep skips TYPE/TTL for
+ * large keyspaces) must stay in the projection until a metadata backfill
+ * resolves them. Dropping them here would silently hide every unresolved key
+ * instead of showing it as "not yet known".
+ *
+ * The unknown TTL arrives in two shapes and both mean the same thing: the
+ * payload leaves the field out entirely (`undefined`) and the Rust side uses
+ * -2 as its "no answer" sentinel. They are normalised here so the predicate
+ * and the metadata backfill agree on what "unresolved" looks like.
+ */
+export function redisKeyPassesNoExpiryFilter(key: Pick<RedisKeyInfo, "ttl">): boolean {
+  const ttl = key.ttl ?? -2;
+  return ttl === -1 || ttl === -2;
+}
+
+export const REDIS_KEY_TYPE_FILTER_OPTIONS = ["all", "string", "hash", "list", "set", "zset", "json", "stream", "timeseries"] as const;
+export type RedisKeyTypeFilter = (typeof REDIS_KEY_TYPE_FILTER_OPTIONS)[number];
+
+export function redisKeyMatchesType(keyType: string | undefined, filter: RedisKeyTypeFilter): boolean {
+  if (filter === "all") return true;
+  const type = keyType?.toLowerCase();
+  if (filter === "json") return type === "json" || type === "rejson-rl";
+  if (filter === "timeseries") return type === "timeseries" || type === "tsdb-type" || type === "tdis-type";
+  return type === filter;
+}
+
 export interface RedisKeyTreeLeafNode {
   kind: "leaf";
   id: string;
@@ -309,6 +339,7 @@ export async function buildRedisKeySnapshotCooperatively(
     expandAll: boolean;
     expandedGroupIds: ReadonlySet<string>;
     noExpiryOnly?: boolean;
+    keyTypeFilter?: RedisKeyTypeFilter;
   },
   options: CooperativeRedisKeySnapshotOptions = {},
 ): Promise<RedisKeySnapshot | null> {
@@ -323,6 +354,9 @@ export async function buildRedisKeySnapshotCooperatively(
   const flatKeyByRaw = new Map<string, RedisKeyInfo>();
   const loadedKeyRaws = new Set<string>();
   let filteredKeyCount = 0;
+  const keyTypeFilter = config.keyTypeFilter ?? "all";
+  const hasFilter = config.noExpiryOnly || keyTypeFilter !== "all";
+  const matchesFilter = (key: RedisKeyInfo) => redisKeyMatchesType(key.key_type, keyTypeFilter) && (!config.noExpiryOnly || redisKeyPassesNoExpiryFilter(key));
   const treeState: MutableTreeBuildState | null = config.flatRows
     ? null
     : {
@@ -331,7 +365,7 @@ export async function buildRedisKeySnapshotCooperatively(
         addedGroupIds: new Set(),
       };
   const filteredTreeState: MutableTreeBuildState | null =
-    !config.flatRows && config.noExpiryOnly
+    !config.flatRows && hasFilter
       ? {
           index: { root: [], groupById: new Map(), leafByKeyRaw: new Map(), ancestorGroupIdsByKeyRaw: new Map() },
           touchedLevels: new Set(),
@@ -349,9 +383,10 @@ export async function buildRedisKeySnapshotCooperatively(
         flatKeyByRaw.set(key.key_raw, key);
         loadedKeyRaws.add(key.key_raw);
         flatKeys.push(key);
-        if (!config.noExpiryOnly || key.ttl === -1) filteredKeyCount++;
+        const matches = !hasFilter || matchesFilter(key);
+        if (matches) filteredKeyCount++;
         if (treeState) appendRedisKeyUnsorted(treeState, key, config.db, separator);
-        if (filteredTreeState && key.ttl === -1) appendRedisKeyUnsorted(filteredTreeState, key, config.db, separator);
+        if (filteredTreeState && matches) appendRedisKeyUnsorted(filteredTreeState, key, config.db, separator);
       }
       controller.recordCompleted(end - offset);
     }
@@ -396,7 +431,7 @@ export async function buildRedisKeySnapshotCooperatively(
       const end = Math.min(offset + chunkSize, flatKeys.length);
       for (let index = offset; index < end; index++) {
         const key = flatKeys[index];
-        if (!config.noExpiryOnly || key.ttl === -1) visibleRows.push(redisKeyToFlatTreeRow(key, config.db));
+        if (!hasFilter || matchesFilter(key)) visibleRows.push(redisKeyToFlatTreeRow(key, config.db));
       }
       controller.recordCompleted(end - offset);
     }

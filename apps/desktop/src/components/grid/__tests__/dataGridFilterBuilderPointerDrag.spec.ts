@@ -7,7 +7,7 @@ import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilt
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@lucide/vue", () => {
   const icon = defineComponent({ setup: () => () => h("span") });
-  return { Check: icon, Eye: icon, EyeOff: icon, GripVertical: icon, Plus: icon, Search: icon, Trash2: icon, X: icon };
+  return { Check: icon, Eye: icon, EyeOff: icon, Focus: icon, GripVertical: icon, Plus: icon, Search: icon, Trash2: icon, X: icon };
 });
 
 function passthrough(tag = "div") {

@@ -12,12 +12,12 @@ const settingsStore = useSettingsStore();
 const { isDark, themePalette } = useTheme();
 
 const props = defineProps<{
-  fullText: string;
   text: string;
   usesCodeEditor: boolean;
   panelStyle?: Record<string, string>;
   resizing: boolean;
 }>();
+const scope = defineModel<"selected" | "page">("scope", { required: true });
 
 const emit = defineEmits<{
   copy: [];
@@ -39,6 +39,9 @@ watch(previewContainer, async (element) => {
       appPalette: () => themePalette.value,
       fontSize: () => settingsStore.editorSettings.fontSize,
       fontFamily: () => settingsStore.editorSettings.tableFontFamily,
+      lineWrapping: () => settingsStore.editorSettings.wordWrap,
+      lineNumbers: true,
+      folding: true,
     });
     await previewEditor.create(element, props.text, "json");
   } else if (!element && previewEditor) {
@@ -54,13 +57,21 @@ watch(
 </script>
 
 <template>
-  <div class="relative col-start-3 row-start-1 flex min-w-0 flex-col border-l bg-background" :class="{ 'detail-drawer-resizing': resizing }" :style="panelStyle" @contextmenu="emit('contextMenu', $event)">
+  <div class="relative col-start-4 row-start-1 flex min-w-0 flex-col border-l bg-background" :class="{ 'detail-drawer-resizing': resizing }" :style="panelStyle" @contextmenu="emit('contextMenu', $event)">
     <div class="absolute bottom-0 left-0 top-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="emit('resizeStart', $event)" />
     <div class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
       <Code2 class="h-3.5 w-3.5 text-muted-foreground" />
       <span class="min-w-0 flex-1 truncate text-xs font-medium">{{ t("grid.mongoJsonPreview") }}</span>
-      <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!fullText" :title="t('grid.copyJson')" @click="emit('copy')"><Copy class="h-3 w-3" /></Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')"><X class="h-3 w-3" /></Button>
+      <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!text" :title="t('grid.copyJson')" @click="emit('copy')"><Copy class="h-3 w-3" /></Button>
+      <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('common.close')" @click="emit('close')"><X class="h-3 w-3" /></Button>
+    </div>
+    <div class="flex shrink-0 flex-wrap gap-1 border-b p-1.5" role="group" :aria-label="t('grid.mongoJsonPreview')">
+      <Button :variant="scope === 'selected' ? 'secondary' : 'ghost'" size="sm" class="h-6 text-xs" :aria-pressed="scope === 'selected'" @click="scope = 'selected'">
+        {{ t("grid.mongoJsonPreviewSelected") }}
+      </Button>
+      <Button :variant="scope === 'page' ? 'secondary' : 'ghost'" size="sm" class="h-6 text-xs" :aria-pressed="scope === 'page'" @click="scope = 'page'">
+        {{ t("grid.mongoJsonPreviewPage") }}
+      </Button>
     </div>
     <div v-if="text" class="flex min-h-0 flex-1 flex-col overflow-hidden p-2">
       <div v-if="usesCodeEditor" ref="previewContainer" data-cell-detail-editor-root class="min-h-0 flex-1 overflow-hidden" />

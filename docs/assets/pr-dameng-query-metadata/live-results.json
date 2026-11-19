@@ -1,0 +1,369 @@
+{
+  "date": "2026-10-14",
+  "environment": {
+    "database": "DM8",
+    "driver": "DmJdbcDriver8 8.1.5.45",
+    "runtime": "JDK 21",
+    "tableColumns": 301,
+    "tableRows": 10000,
+    "returnedRows": 100,
+    "scope": "actual queryStore with a thin JSON-RPC adapter to the current-source Dameng agent; no Web/Tauri UI or Rust HTTP transport"
+  },
+  "before": [
+    {
+      "name": "normal-cold",
+      "metadataDelayMs": 0,
+      "autoCommit": true,
+      "resultElapsedMs": 87.56,
+      "rows": 100,
+      "primaryKeys": [
+        "ID"
+      ],
+      "events": [
+        {
+          "operation": "columns:start",
+          "elapsed": 4.7
+        },
+        {
+          "operation": "indexes:start",
+          "elapsed": 4.87
+        },
+        {
+          "operation": "indexes:done",
+          "elapsed": 63.35
+        },
+        {
+          "operation": "columns:done",
+          "elapsed": 71.24
+        },
+        {
+          "operation": "execute:start",
+          "elapsed": 72.96,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 83.05,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    },
+    {
+      "name": "normal-cold-warm",
+      "resultElapsedMs": 6.61,
+      "rows": 100,
+      "hiddenColumnIndexes": [
+        4
+      ],
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 0.63,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 5.31,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-cold",
+      "metadataDelayMs": 2000,
+      "autoCommit": true,
+      "resultElapsedMs": 1022.49,
+      "rows": 100,
+      "primaryKeys": [
+        "ID"
+      ],
+      "editability": "primary-key-not-returned",
+      "events": [
+        {
+          "operation": "columns:start",
+          "elapsed": 0.58
+        },
+        {
+          "operation": "indexes:start",
+          "elapsed": 0.65
+        },
+        {
+          "operation": "indexes:done",
+          "elapsed": 19.07
+        },
+        {
+          "operation": "execute:start",
+          "elapsed": 1003.38,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 1019.46,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "columns:done",
+          "elapsed": 2021.75
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-cold-warm",
+      "resultElapsedMs": 18.82,
+      "rows": 100,
+      "hiddenColumnIndexes": [
+        4
+      ],
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 0.89,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 17.18,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-manual",
+      "metadataDelayMs": 2000,
+      "autoCommit": false,
+      "resultElapsedMs": 1028.66,
+      "rows": 100,
+      "primaryKeys": [
+        "ID"
+      ],
+      "editability": "primary-key-not-returned",
+      "events": [
+        {
+          "operation": "columns:start",
+          "elapsed": 0.93
+        },
+        {
+          "operation": "indexes:start",
+          "elapsed": 1.05
+        },
+        {
+          "operation": "indexes:done",
+          "elapsed": 17.26
+        },
+        {
+          "operation": "execute:start",
+          "elapsed": 1019.33,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 1026.43,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "columns:done",
+          "elapsed": 2018.76
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-manual-warm",
+      "resultElapsedMs": 14.67,
+      "rows": 100,
+      "hiddenColumnIndexes": [
+        4
+      ],
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 1.77,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 12,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "name": "normal-cold",
+      "metadataDelayMs": 0,
+      "autoCommit": true,
+      "resultElapsedMs": 49.94,
+      "rows": 100,
+      "primaryKeys": [
+        "ID"
+      ],
+      "editability": "primary-key-not-returned",
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 3.91,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 44.78,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "columns:start",
+          "elapsed": 49.72
+        },
+        {
+          "operation": "indexes:start",
+          "elapsed": 49.92
+        },
+        {
+          "operation": "indexes:done",
+          "elapsed": 78.93
+        },
+        {
+          "operation": "columns:done",
+          "elapsed": 86.36
+        }
+      ]
+    },
+    {
+      "name": "normal-cold-warm",
+      "resultElapsedMs": 6.32,
+      "rows": 100,
+      "hiddenColumnIndexes": [
+        4
+      ],
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 0.93,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 5,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-cold",
+      "metadataDelayMs": 2000,
+      "autoCommit": true,
+      "resultElapsedMs": 5.58,
+      "rows": 100,
+      "primaryKeys": [
+        "ID"
+      ],
+      "editability": "primary-key-not-returned",
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 0.45,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 4.46,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "columns:start",
+          "elapsed": 5.47
+        },
+        {
+          "operation": "indexes:start",
+          "elapsed": 5.56
+        },
+        {
+          "operation": "indexes:done",
+          "elapsed": 25.31
+        },
+        {
+          "operation": "columns:done",
+          "elapsed": 2027.28
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-cold-warm",
+      "resultElapsedMs": 19.43,
+      "rows": 100,
+      "hiddenColumnIndexes": [
+        4
+      ],
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 1.27,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 17.63,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-manual",
+      "metadataDelayMs": 2000,
+      "autoCommit": false,
+      "resultElapsedMs": 21.89,
+      "rows": 100,
+      "primaryKeys": [
+        "ID"
+      ],
+      "editability": "primary-key-not-returned",
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 12.76,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 19.18,
+          "sql": "SELECT C1, C2, C3, C4 FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "columns:start",
+          "elapsed": 21.63
+        },
+        {
+          "operation": "indexes:start",
+          "elapsed": 21.85
+        },
+        {
+          "operation": "indexes:done",
+          "elapsed": 62.53
+        },
+        {
+          "operation": "columns:done",
+          "elapsed": 2064.44
+        }
+      ]
+    },
+    {
+      "name": "delayed-metadata-manual-warm",
+      "resultElapsedMs": 13.84,
+      "rows": 100,
+      "hiddenColumnIndexes": [
+        4
+      ],
+      "events": [
+        {
+          "operation": "execute:start",
+          "elapsed": 0.8,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        },
+        {
+          "operation": "execute:done",
+          "elapsed": 12.25,
+          "sql": "SELECT C1, C2, C3, C4, \"ID\" AS \"__DBX_PK_0\" FROM SYSDBA.T10308W FETCH FIRST 100 ROWS ONLY"
+        }
+      ]
+    }
+  ]
+}

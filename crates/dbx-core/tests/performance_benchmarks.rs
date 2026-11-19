@@ -18,6 +18,7 @@ fn generate_tables(count: usize, prefix: &str) -> Vec<TableInfo> {
         .map(|i| TableInfo {
             name: format!("{}_{}", prefix, i),
             table_type: "BASE TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -35,6 +36,8 @@ fn generate_details(tables: &[TableInfo], columns_per_table: usize) -> Vec<Table
                     name: format!("col_{}", j),
                     data_type: if j % 3 == 0 { "int".to_string() } else { "varchar(64)".to_string() },
                     resolved_schema: None,
+                    resolved_table: None,
+                    resolved_object_type: None,
                     is_nullable: j % 2 == 0,
                     column_default: if j == 0 { Some("0".to_string()) } else { None },
                     is_primary_key: j == 0,
@@ -47,6 +50,7 @@ fn generate_details(tables: &[TableInfo], columns_per_table: usize) -> Vec<Table
                     enum_values: None,
                     character_set: None,
                     collation: None,
+                    metadata_capabilities: None,
                 })
                 .collect(),
             indexes: vec![],
@@ -261,6 +265,7 @@ fn benchmark_dependency_graph_build() {
         .map(|i| TableInfo {
             name: format!("tgt_{}", i),
             table_type: "BASE TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

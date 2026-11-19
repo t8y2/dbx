@@ -40,8 +40,10 @@ import {
   type XuguTablespaceSummary,
   type XuguTransactionSummary,
 } from "@/lib/database/xuguServerStatus";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{ connectionId: string }>();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ refreshSeconds?: number }>({}, "XuguServerDashboard");
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 
@@ -72,8 +74,10 @@ const availability = reactive({
   lockModes: false,
   tablespaces: false,
 });
-const refreshSeconds = ref(5);
+const refreshSeconds = ref([0, 5, 10, 30].includes(restoredUiState.refreshSeconds ?? -1) ? restoredUiState.refreshSeconds! : 5);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+trackUiState(() => ({ refreshSeconds: refreshSeconds.value }));
 
 const connection = computed(() => connectionStore.getConfig(props.connectionId));
 const connectionName = computed(() => connection.value?.name ?? "");
@@ -176,13 +180,14 @@ async function query(sql: string, maxRows: number) {
   return api.executeQuery(props.connectionId, "", sql, undefined, undefined, { maxRows });
 }
 
-async function load() {
+async function load(options: { passive?: boolean } = {}) {
   if (!supported.value) return;
   loading.value = true;
   error.value = "";
   partialErrors.value = [];
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    // 首屏/自动刷新是后台路径：失败后退避，避免每次 tick 都新建连接。手动刷新不传 passive。
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true, passive: options.passive === true });
     const requests = [
       ["version", XUGU_VERSION_SQL, 1],
       ["nodes", XUGU_CLUSTER_NODES_SQL, 500],
@@ -267,7 +272,7 @@ function startAutoRefresh() {
   stopAutoRefresh();
   if (refreshSeconds.value <= 0) return;
   refreshTimer = setInterval(() => {
-    if (!document.hidden) void load();
+    if (!document.hidden) void load({ passive: true });
   }, refreshSeconds.value * 1000);
 }
 
@@ -277,7 +282,7 @@ function changeRefresh(value: string) {
 }
 
 onMounted(async () => {
-  await load();
+  await load({ passive: true });
   startAutoRefresh();
 });
 

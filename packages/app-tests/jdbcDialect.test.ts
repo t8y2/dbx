@@ -85,6 +85,7 @@ test("loads driver-reported identifier quotes for compatible JDBC connections", 
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.opengauss.Driver" }), true);
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "jdbc", jdbc_driver_class: "org.postgresql.Driver" }), true);
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" }), true);
+  assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "kyuubi" }), true);
   assert.equal(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" }), true);
 });
 

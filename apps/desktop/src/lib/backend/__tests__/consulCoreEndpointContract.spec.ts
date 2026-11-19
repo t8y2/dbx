@@ -106,7 +106,7 @@ const contracts: Contract[] = [
 
 const sourceCache = new Map<string, string>();
 function source(file: string): string {
-  if (!sourceCache.has(file)) sourceCache.set(file, readFileSync(join(process.cwd(), "crates/dbx-core/src/consul", file), "utf8"));
+  if (!sourceCache.has(file)) sourceCache.set(file, readFileSync(join(process.cwd(), "crates/dbx-core/src/admin/consul", file), "utf8"));
   return sourceCache.get(file)!;
 }
 

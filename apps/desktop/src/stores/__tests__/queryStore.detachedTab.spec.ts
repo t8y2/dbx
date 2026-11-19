@@ -71,15 +71,15 @@ describe("queryStore adoptDetachedTab", () => {
     expect(queryStore.isTabDirty(tab)).toBe(false);
   });
 
-  it("does not touch the backend when the handoff already carries unsaved edits", async () => {
+  it.each(["SELECT 2;", ""])("does not replace unsaved edits %j with file content", async (sql) => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
 
-    const tabId = await queryStore.adoptDetachedTab(handoffFor({ sql: "SELECT 2;", originalSql: "SELECT 1;" }));
+    const tabId = await queryStore.adoptDetachedTab(handoffFor({ sql, originalSql: "SELECT 1;" }));
 
     expect(mocks.loadSavedSqlFile).not.toHaveBeenCalled();
     const tab = queryStore.tabs.find((candidate) => candidate.id === tabId)!;
-    expect(tab.sql).toBe("SELECT 2;");
+    expect(tab.sql).toBe(sql);
     expect(queryStore.isTabDirty(tab)).toBe(true);
   });
 

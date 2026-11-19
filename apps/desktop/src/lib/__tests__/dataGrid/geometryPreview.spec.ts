@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { parseWktGeometry, renderGeometryOnCanvas, wktToGeoJson } from "@/lib/dataGrid/geometryPreview";
+import { looksLikeWkt, parseWktGeometry, renderGeometryOnCanvas, wktToGeoJson } from "@/lib/dataGrid/geometryPreview";
+
+describe("looksLikeWkt", () => {
+  it("accepts real WKT shapes including SRID prefixes, EMPTY and Z variants", () => {
+    expect(looksLikeWkt("POINT(1 2)")).toBe(true);
+    expect(looksLikeWkt("SRID=4326;POINT(1 2)")).toBe(true);
+    expect(looksLikeWkt("MULTIPOLYGON EMPTY")).toBe(true);
+    expect(looksLikeWkt("LINESTRING Z (1 2 3, 4 5 6)")).toBe(true);
+    expect(looksLikeWkt("point(1 2)")).toBe(true);
+  });
+
+  it("rejects ordinary text that the lenient parser would accept", () => {
+    expect(parseWktGeometry("No records (0)")).not.toBeNull();
+    expect(looksLikeWkt("No records (0)")).toBe(false);
+    expect(looksLikeWkt("FY report (2024)")).toBe(false);
+    expect(looksLikeWkt("result is empty")).toBe(false);
+    expect(looksLikeWkt("empty")).toBe(false);
+    expect(looksLikeWkt("Meeting notes (see attached 3 items)")).toBe(false);
+  });
+});
 
 describe("wktToGeoJson", () => {
   it("preserves polygon interior rings", () => {

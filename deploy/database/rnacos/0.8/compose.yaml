@@ -1,6 +1,6 @@
 services:
   database:
-    image: docker.cnb.cool/znb/images/rnacos:v0.8.5
+    image: docker.cnb.cool/znb/images/rnacos:v0.8.7
     container_name: dbx-rnacos-0.8
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11100}:8848"

@@ -1,8 +1,12 @@
 package com.dbx.agent.mongodb;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,7 +16,14 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoCommandException;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.ServerAddress;
+import com.mongodb.connection.ClusterConnectionMode;
+import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.BulkWriteResult;
+import com.mongodb.bulk.WriteConcernError;
 import com.mongodb.client.AggregateIterable;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.ListCollectionsIterable;
@@ -26,22 +37,47 @@ import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
 import com.mongodb.client.model.InsertManyOptions;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.model.DeleteManyModel;
+import com.mongodb.client.model.DeleteOneModel;
+import com.mongodb.client.model.InsertOneModel;
+import com.mongodb.client.model.ReplaceOneModel;
+import com.mongodb.client.model.UpdateManyModel;
+import com.mongodb.client.model.UpdateOneModel;
+import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
+import java.io.InputStream;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.Security;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLServerSocket;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import org.bson.BsonDocument;
+import org.bson.BsonRegularExpression;
 import org.bson.Document;
+import org.bson.types.Binary;
 import org.bson.types.ObjectId;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -99,6 +135,11 @@ class MongoAgentTest {
         Files.writeString(clientKeyPath, pkcs8Pem);
     }
 
+    @AfterEach
+    void resetFindCursors() {
+        MongoAgent.resetFindCursorsForTests();
+    }
+
     // ─── existing tests ───
 
     @Test
@@ -128,6 +169,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_FIND_CURSOR));
     }
 
     @Test
@@ -150,6 +192,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_FIND_CURSOR));
     }
 
     @Test
@@ -894,6 +937,10 @@ class MongoAgentTest {
         assertEquals("12", batches.get(0).get(1).getString("refid"));
         assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS));
         assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_FIND_CURSOR));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_START_FIND_CURSOR));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_FETCH_FIND_CURSOR));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_CLOSE_FIND_CURSOR));
     }
 
     @Test
@@ -940,6 +987,293 @@ class MongoAgentTest {
     }
 
     @Test
+    void documentForWritePreservesExtendedJsonBsonTypes() {
+        Document document = MongoAgent.documentForWrite(
+            "{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},"
+                + "\"count\":{\"$numberLong\":\"9007199254740993\"},"
+                + "\"when\":{\"$date\":\"2020-01-02T03:04:05.000Z\"}}"
+        );
+
+        assertEquals(new ObjectId("507f1f77bcf86cd799439011"), document.getObjectId("_id"));
+        assertEquals(9007199254740993L, document.get("count"));
+        assertTrue(document.get("when") instanceof Date);
+        assertEquals(Date.from(java.time.Instant.parse("2020-01-02T03:04:05.000Z")), document.getDate("when"));
+    }
+
+    @Test
+    void insertDocumentsRpcHonoursExplicitUnorderedInserts() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        List<Boolean> ordered = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches, ordered);
+
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", "users");
+        params.addProperty("docs_json", "[{\"name\":\"Ada\"}]");
+        params.addProperty("ordered", false);
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", 44);
+        request.addProperty("method", "insert_documents");
+        request.add("params", params);
+
+        JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(List.of(false), ordered);
+        assertEquals(1, response.getAsJsonObject("result").get("affected_rows").getAsInt());
+    }
+
+    @Test
+    void insertDocumentsRpcPreservesExtendedJsonTypesInTheInsertManyBatch() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches);
+        String documents = "[{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},"
+            + "\"count\":{\"$numberLong\":\"9007199254740993\"}}]";
+
+        JsonObject response = insertDocumentsRpc(client, 45, "users", documents);
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, batches.size());
+        Document written = batches.get(0).get(0);
+        assertEquals(new ObjectId("507f1f77bcf86cd799439011"), written.getObjectId("_id"));
+        assertEquals(9007199254740993L, written.get("count"));
+        assertTrue(written.get("count") instanceof Long);
+    }
+
+    @Test
+    void insertDocumentsRpcParsesCanonicalBinaryAndRegularExpression() {
+        List<List<Document>> batches = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(new ArrayList<>(), batches);
+        String documents = "[{\"bin\":{\"$binary\":{\"base64\":\"AQID\",\"subType\":\"00\"}},"
+            + "\"re\":{\"$regularExpression\":{\"pattern\":\"^test$\",\"options\":\"i\"}}}]";
+
+        JsonObject response = insertDocumentsRpc(client, 46, "users", documents);
+
+        assertFalse(response.has("error"), response.toString());
+        Document written = batches.get(0).get(0);
+        assertTrue(written.get("bin") instanceof Binary, String.valueOf(written.get("bin")));
+        Binary binary = (Binary) written.get("bin");
+        assertEquals(0, binary.getType());
+        assertArrayEquals(new byte[] {1, 2, 3}, binary.getData());
+        assertTrue(written.get("re") instanceof BsonRegularExpression, String.valueOf(written.get("re")));
+        BsonRegularExpression regex = (BsonRegularExpression) written.get("re");
+        assertEquals("^test$", regex.getPattern());
+        assertEquals("i", regex.getOptions());
+    }
+
+    @Test
+    void bulkInsertResultKeepsInsertedCountAndPerDocumentErrors() {
+        BulkWriteResult writeResult = BulkWriteResult.acknowledged(1, 0, 0, 0, List.of());
+        MongoBulkWriteException error = new MongoBulkWriteException(
+            writeResult,
+            List.of(new BulkWriteError(11000, "E11000 duplicate key", new BsonDocument(), 1)),
+            null,
+            new ServerAddress()
+        );
+
+        Map<String, Object> result = MongoAgent.bulkInsertResult(error);
+
+        assertEquals(1, result.get("affected_rows"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) result.get("errors");
+        assertEquals(1, errors.size());
+        assertEquals(1, errors.get(0).get("index"));
+        assertEquals(11000, errors.get(0).get("code"));
+        assertEquals("E11000 duplicate key", errors.get(0).get("message"));
+    }
+
+    @Test
+    void bulkInsertResultReportsWriteConcernFailures() {
+        // The driver raises MongoBulkWriteException with no write errors when only the write
+        // concern failed, so the batch must not come back looking successful.
+        MongoBulkWriteException error = new MongoBulkWriteException(
+            BulkWriteResult.acknowledged(0, 0, 0, 0, List.of()),
+            List.of(),
+            new WriteConcernError(64, "WriteConcernFailed", "waiting for replication timed out", new BsonDocument()),
+            new ServerAddress()
+        );
+
+        Map<String, Object> result = MongoAgent.bulkInsertResult(error);
+
+        assertEquals(0, result.get("affected_rows"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) result.get("errors");
+        assertEquals(1, errors.size());
+        assertEquals(64, errors.get(0).get("code"));
+        assertEquals("waiting for replication timed out", errors.get(0).get("message"));
+        assertFalse(errors.get(0).containsKey("index"));
+    }
+
+    @Test
+    void findCursorRpcPagesExtendedJsonDocumentsThenExhausts() {
+        List<String> calls = new ArrayList<>();
+        List<Document> documents = List.of(
+            new Document("_id", new ObjectId("507f1f77bcf86cd799439011"))
+                .append("n", 1L)
+                .append("bin", new Binary((byte) 0, new byte[] {1, 2, 3}))
+                .append("re", new BsonRegularExpression("^test$", "i")),
+            new Document("_id", new ObjectId("507f1f77bcf86cd799439012")).append("n", 2L)
+        );
+        MongoClient client = recordingFindMongoClient(calls, documents);
+
+        JsonObject start = findCursorRpc(client, 50, "start_find_cursor", cursorParams("users", 1, null));
+        assertFalse(start.has("error"), start.toString());
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+        assertEquals(1, start.getAsJsonObject("result").get("batch_size").getAsInt());
+
+        JsonObject first = findCursorRpc(client, 51, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        assertFalse(first.has("error"), first.toString());
+        assertEquals(1, first.getAsJsonObject("result").getAsJsonArray("documents").size());
+        assertFalse(first.getAsJsonObject("result").get("exhausted").getAsBoolean());
+        JsonObject firstDocument = first.getAsJsonObject("result").getAsJsonArray("documents").get(0).getAsJsonObject();
+        assertEquals(
+            "507f1f77bcf86cd799439011",
+            firstDocument.getAsJsonObject("_id").get("$oid").getAsString()
+        );
+        assertEquals("1", firstDocument.getAsJsonObject("n").get("$numberLong").getAsString());
+        JsonObject binary = firstDocument.getAsJsonObject("bin").getAsJsonObject("$binary");
+        assertEquals("AQID", binary.get("base64").getAsString(), firstDocument.toString());
+        assertEquals("00", binary.get("subType").getAsString(), firstDocument.toString());
+        JsonObject regex = firstDocument.getAsJsonObject("re").getAsJsonObject("$regularExpression");
+        assertEquals("^test$", regex.get("pattern").getAsString(), firstDocument.toString());
+        assertEquals("i", regex.get("options").getAsString(), firstDocument.toString());
+
+        JsonObject second = findCursorRpc(client, 52, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        assertFalse(second.has("error"), second.toString());
+        assertEquals(1, second.getAsJsonObject("result").getAsJsonArray("documents").size());
+        assertTrue(second.getAsJsonObject("result").get("exhausted").getAsBoolean());
+
+        JsonObject missing = findCursorRpc(client, 53, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        assertTrue(missing.has("error"), missing.toString());
+        assertEquals("Find cursor not found", missing.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(calls.contains("find"));
+        assertTrue(calls.contains("batchSize:1"));
+        assertTrue(calls.contains("iterator"));
+        assertTrue(calls.contains("close"));
+    }
+
+    @Test
+    void closeFindCursorRpcIsIdempotent() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindMongoClient(calls, List.of(new Document("n", 1)));
+        JsonObject start = findCursorRpc(client, 54, "start_find_cursor", cursorParams("users", 10, null));
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+
+        JsonObject closed = findCursorRpc(client, 55, "close_find_cursor", cursorParams(null, 0, cursorId));
+        JsonObject again = findCursorRpc(client, 56, "close_find_cursor", cursorParams(null, 0, cursorId));
+
+        assertFalse(closed.has("error"), closed.toString());
+        assertFalse(again.has("error"), again.toString());
+        assertEquals(1, calls.stream().filter("close"::equals).count());
+    }
+
+    @Test
+    void bsonToCanonicalExtendedJsonKeepsInt64DistinctFromJsonNumber() {
+        JsonObject json = MongoAgent.bsonToCanonicalExtendedJson(
+            new Document("n", 5L)
+                .append("bin", new Binary((byte) 0, new byte[] {1, 2, 3}))
+                .append("re", new BsonRegularExpression("^test$", "i"))
+        );
+
+        assertEquals("5", json.getAsJsonObject("n").get("$numberLong").getAsString());
+        assertFalse(json.get("n").isJsonPrimitive(), json.toString());
+        JsonObject binary = json.getAsJsonObject("bin").getAsJsonObject("$binary");
+        assertEquals("AQID", binary.get("base64").getAsString(), json.toString());
+        assertEquals("00", binary.get("subType").getAsString(), json.toString());
+        assertFalse(json.getAsJsonObject("bin").has("$type"), json.toString());
+        JsonObject regex = json.getAsJsonObject("re").getAsJsonObject("$regularExpression");
+        assertEquals("^test$", regex.get("pattern").getAsString(), json.toString());
+        assertEquals("i", regex.get("options").getAsString(), json.toString());
+        assertFalse(json.getAsJsonObject("re").has("$regex"), json.toString());
+    }
+
+    @Test
+    void disconnectClosesOpenFindCursors() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindMongoClient(calls, List.of(new Document("n", 1L)));
+        JsonObject start = findCursorRpc(client, 57, "start_find_cursor", cursorParams("users", 10, null));
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+
+        JsonObject disconnect = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":58,\"method\":\"disconnect\",\"params\":{}}"
+        )).getAsJsonObject();
+        JsonObject fetch = findCursorRpc(client, 59, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+
+        assertFalse(disconnect.has("error"), disconnect.toString());
+        assertTrue(fetch.has("error"), fetch.toString());
+        assertEquals("Find cursor not found", fetch.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(calls.contains("close"));
+    }
+
+    @Test
+    void fetchFailureReleasesTheCursorSlot() {
+        List<String> calls = new ArrayList<>();
+        MongoCursor<Document> failing = new MongoCursor<>() {
+            @Override
+            public void close() {
+                calls.add("close");
+            }
+
+            @Override
+            public boolean hasNext() {
+                throw new IllegalStateException("cursor id 42 not found");
+            }
+
+            @Override
+            public Document next() {
+                throw new IllegalStateException("cursor id 42 not found");
+            }
+
+            @Override
+            public Document tryNext() {
+                throw new IllegalStateException("cursor id 42 not found");
+            }
+
+            @Override
+            public ServerAddress getServerAddress() {
+                return new ServerAddress();
+            }
+
+            @Override
+            public com.mongodb.ServerCursor getServerCursor() {
+                return null;
+            }
+        };
+        MongoClient client = findMongoClientWithCursor(calls, failing);
+
+        JsonObject start = findCursorRpc(client, 60, "start_find_cursor", cursorParams("users", 10, null));
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+        JsonObject fetch = findCursorRpc(client, 61, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        JsonObject again = findCursorRpc(client, 62, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+
+        assertTrue(fetch.has("error"), fetch.toString());
+        assertTrue(calls.contains("close"));
+        // A dead cursor is dropped, so the slot is free again instead of being held until disconnect.
+        assertEquals("Find cursor not found", again.getAsJsonObject("error").get("message").getAsString());
+    }
+
+    @Test
+    void startFindCursorEnforcesPerOwnerBudget() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindMongoClient(calls, List.of(new Document("n", 1)));
+
+        for (int index = 0; index < 16; index++) {
+            JsonObject started = findCursorRpc(client, 100 + index, "start_find_cursor", cursorParams("users", 100, null));
+            assertFalse(started.has("error"), started.toString());
+        }
+        JsonObject rejected = findCursorRpc(client, 200, "start_find_cursor", cursorParams("users", 100, null));
+
+        assertTrue(rejected.has("error"), rejected.toString());
+        assertEquals(
+            "MongoDB find cursor limit reached: 16",
+            rejected.getAsJsonObject("error").get("message").getAsString()
+        );
+    }
+
+    @Test
     void updateDocumentsRpcUsesDocumentOverloads() {
         List<String> calls = new ArrayList<>();
         MongoClient client = recordingMongoClient(calls);
@@ -982,12 +1316,172 @@ class MongoAgentTest {
     }
 
     @Test
+    void parsesUpsertUpdateOption() {
+        assertTrue(MongoAgent.updateOptionsForWrite("{\"upsert\":true}").isUpsert());
+        assertFalse(MongoAgent.updateOptionsForWrite("{\"upsert\":false}").isUpsert());
+        assertFalse(MongoAgent.updateOptionsForWrite("{}").isUpsert());
+    }
+
+    @Test
+    void parsesUpsertAlongsideArrayFilters() {
+        UpdateOptions options = MongoAgent.updateOptionsForWrite(
+            "{\"upsert\":true,\"arrayFilters\":[{\"item.id\":322678}]}"
+        );
+
+        assertTrue(options.isUpsert());
+        assertEquals(1, options.getArrayFilters().size());
+    }
+
+    @Test
+    void rejectsNonBooleanUpsertUpdateOption() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.updateOptionsForWrite("{\"upsert\":\"yes\"}")
+        );
+        assertEquals("upsert must be a boolean", error.getMessage());
+    }
+
+    @Test
+    void replaceDocumentMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"replace_document\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"filter_json\":\"{\\\"_id\\\":1}\","
+                + "\"replacement_json\":\"{\\\"name\\\":\\\"new\\\"}\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(11, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_REPLACE_DOCUMENT));
+    }
+
+    @Test
+    void bulkWriteMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"bulk_write\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\","
+                + "\"operations_json\":\"[{\\\"insertOne\\\":{\\\"document\\\":{\\\"a\\\":1}}}]\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(12, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_BULK_WRITE));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_BULK_WRITE));
+    }
+
+    @Test
+    void buildsBulkWriteModelsForEveryOperationKind() {
+        List<WriteModel<Document>> models = MongoAgent.bulkWriteModelsForWrite(
+            "[{\"insertOne\":{\"document\":{\"sku\":\"A1\"}}},"
+                + "{\"updateOne\":{\"filter\":{\"sku\":\"A1\"},\"update\":{\"$inc\":{\"stock\":1}},\"upsert\":true}},"
+                + "{\"updateMany\":{\"filter\":{},\"update\":[{\"$set\":{\"stock\":0}}]}},"
+                + "{\"replaceOne\":{\"filter\":{\"sku\":\"B2\"},\"replacement\":{\"sku\":\"B2\"}}},"
+                + "{\"deleteOne\":{\"filter\":{\"sku\":\"C3\"}}},"
+                + "{\"deleteMany\":{\"filter\":{\"stock\":{\"$lt\":0}}}}]");
+
+        assertEquals(6, models.size());
+        assertTrue(models.get(0) instanceof InsertOneModel);
+        assertTrue(models.get(1) instanceof UpdateOneModel);
+        assertTrue(((UpdateOneModel<Document>) models.get(1)).getOptions().isUpsert());
+        assertTrue(models.get(2) instanceof UpdateManyModel);
+        assertNotNull(((UpdateManyModel<Document>) models.get(2)).getUpdatePipeline());
+        assertTrue(models.get(3) instanceof ReplaceOneModel);
+        assertTrue(models.get(4) instanceof DeleteOneModel);
+        assertTrue(models.get(5) instanceof DeleteManyModel);
+    }
+
+    @Test
+    void rejectsMalformedBulkWriteOperations() {
+        for (String[] item : new String[][] {
+            {"[]", "non-empty array"},
+            {"[{\"insertOne\":{},\"deleteOne\":{}}]", "exactly one operation key"},
+            {"[{\"upsertOne\":{\"document\":{}}}]", "unsupported operation upsertOne"},
+            {"[{\"insertOne\":{}}]", "requires a document document"},
+            {"[{\"updateOne\":{\"filter\":{},\"update\":{\"a\":1}}}]", "update operators such as $set"},
+            {"[{\"updateOne\":{\"filter\":{},\"update\":{\"$set\":{\"a\":1}},\"upsert\":1}}]", "upsert must be a boolean"},
+            {"[{\"replaceOne\":{\"filter\":{},\"replacement\":{\"$set\":{\"a\":1}}}}]", "must not contain update operators"},
+        }) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteModelsForWrite(item[0]), item[0]);
+            assertTrue(error.getMessage().contains(item[1]), item[0] + " -> " + error.getMessage());
+        }
+    }
+
+    @Test
+    void renameCollectionMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"rename_collection\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"new_name\":\"orders_2024\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(13, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_RENAME_COLLECTION));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_RENAME_COLLECTION));
+    }
+
+    @Test
+    void rejectsUnrenameableCollectionNames() {
+        MongoAgent.requireRenameableCollectionNames("orders", "orders_2024");
+        for (String[] item : new String[][] {
+            {"", "x", "Collection name is required"},
+            {"orders", "", "New collection name is required"},
+            {"orders", "orders", "must differ"},
+            {"system.users", "x", "System collections cannot be renamed"},
+            {"orders", "system.x", "System collections cannot be renamed"},
+        }) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> MongoAgent.requireRenameableCollectionNames(item[0], item[1]));
+            assertTrue(error.getMessage().contains(item[2]), error.getMessage());
+        }
+    }
+
+    @Test
+    void parsesBulkWriteOptions() {
+        assertTrue(MongoAgent.bulkWriteOptionsForWrite(null).isOrdered());
+        assertTrue(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":true}").isOrdered());
+        assertFalse(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":false}").isOrdered());
+        IllegalArgumentException unsupported = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteOptionsForWrite("{\"writeConcern\":{}}"));
+        assertEquals("Unsupported bulkWrite option: writeConcern", unsupported.getMessage());
+        IllegalArgumentException notBoolean = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":\"yes\"}"));
+        assertEquals("ordered must be a boolean", notBoolean.getMessage());
+    }
+
+    @Test
+    void parsesReplaceOptions() {
+        assertTrue(MongoAgent.replaceOptionsForWrite("{\"upsert\":true}").isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite("{\"upsert\":false}").isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite(null).isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite("{}").isUpsert());
+
+        IllegalArgumentException unsupported = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.replaceOptionsForWrite("{\"arrayFilters\":[]}")
+        );
+        assertEquals("Unsupported replace option: arrayFilters", unsupported.getMessage());
+        IllegalArgumentException notBoolean = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.replaceOptionsForWrite("{\"upsert\":\"yes\"}")
+        );
+        assertEquals("upsert must be a boolean", notBoolean.getMessage());
+    }
+
+    @Test
+    void rejectsReplacementDocumentsWithUpdateOperators() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.requireReplacementDocument(Document.parse("{\"$set\":{\"a\":1}}"))
+        );
+        assertEquals("Replacement document must not contain update operators such as $set", error.getMessage());
+        // A plain document, including one with nested `$`-keys inside values, is fine.
+        MongoAgent.requireReplacementDocument(Document.parse("{\"name\":\"new\",\"meta\":{\"$ref\":\"x\"}}"));
+    }
+
+    @Test
     void rejectsUnsupportedUpdateOptions() {
         IllegalArgumentException error = assertThrows(
             IllegalArgumentException.class,
-            () -> MongoAgent.updateOptionsForWrite("{\"upsert\":true}")
+            () -> MongoAgent.updateOptionsForWrite("{\"collation\":{\"locale\":\"en\"}}")
         );
-        assertEquals("Unsupported update option: upsert", error.getMessage());
+        assertEquals("Unsupported update option: collation", error.getMessage());
     }
 
     @Test
@@ -1042,6 +1536,118 @@ class MongoAgentTest {
         connection.addProperty("database", "gray_lite_twin_fat");
 
         assertEquals("admin", MongoAgent.authenticationDatabase(connection));
+    }
+
+    // ─── Direct connection: configureBuilder directConnection parsing ───
+
+    @Test
+    void configureBuilderWithDirectConnectionTrueSetsSingleModeAndKeepsReplicaSetName() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&directConnection=true&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithCaseInsensitiveDirectConnectionSetsSingleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&DirectConnection=TRUE&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithReplicaSetWithoutDirectConnectionDefaultsToMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderWithDirectConnectionFalseAndReplicaSetLeavesMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?directConnection=false&replicaSet=cardetail&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void configureBuilderSingleHostNoOptionsRemainsUnchanged() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty("connection_string", "mongodb://127.0.0.1:27017");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+    }
+
+    @Test
+    void configureBuilderTwoHostsWithDirectConnectionTrueRemainsMultipleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017,127.0.0.1:27018/?replicaSet=cardetail&directConnection=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.MULTIPLE, settings.getClusterSettings().getMode());
+    }
+
+    @Test
+    void configureBuilderWithPercentEncodedDirectConnectionSetsSingleMode() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://u:p@127.0.0.1:27017/admin?replicaSet=cardetail&%64irect%43onnection=%74rue&authSource=admin");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(ClusterConnectionMode.SINGLE, settings.getClusterSettings().getMode());
+        assertEquals("cardetail", settings.getClusterSettings().getRequiredReplicaSetName());
+    }
+
+    @Test
+    void hasDirectConnectionTrueHandlesVariousQueryFormats() {
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?DirectConnection=TRUE"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directconnection=true&other=1"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?other=1&directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=false&directConnection=true"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true#fragment"));
+        assertTrue(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?%64irect%43onnection=%74rue"));
+
+        assertFalse(MongoAgent.hasDirectConnectionTrue(null));
+        assertFalse(MongoAgent.hasDirectConnectionTrue(""));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017?"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?replicaSet=rs"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=false"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=1"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection="));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/?directConnection=true&directConnection=false"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://127.0.0.1:27017/#fragment?directConnection=true"));
+        assertFalse(MongoAgent.hasDirectConnectionTrue("mongodb://directConnection=true@127.0.0.1:27017/db"));
     }
 
     // ─── TLS: configureBuilder JSON parsing ───
@@ -1148,6 +1754,377 @@ class MongoAgentTest {
             caPemPath.toString(), clientPemPath.toString(), clientKeyPath.toString());
 
         assertNotNull(ctx);
+    }
+
+    // ─── TLS: URL params and timeouts (issue #10657) ───
+
+    @Test
+    void formModeWithTlsAllowInvalidCertificatesEnablesSslAndTrustsSelfSignedCert() throws Exception {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        // Only tlsInsecure skips hostname verification; cert-only skips just the chain check.
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate selfSignedCert;
+        try (InputStream is = new FileInputStream(caPemPath.toFile())) {
+            selfSignedCert = (X509Certificate) cf.generateCertificate(is);
+        }
+        TrustManager[] trustManagers = MongoAgent.createTrustAllTrustManagers();
+        assertNotNull(trustManagers);
+        assertTrue(trustManagers.length > 0);
+        assertInstanceOf(X509TrustManager.class, trustManagers[0]);
+        X509TrustManager tm = (X509TrustManager) trustManagers[0];
+        assertDoesNotThrow(() -> tm.checkServerTrusted(new X509Certificate[] {selfSignedCert}, "RSA"));
+        assertDoesNotThrow(() -> tm.checkClientTrusted(new X509Certificate[] {selfSignedCert}, "RSA"));
+        assertEquals(0, tm.getAcceptedIssuers().length);
+    }
+
+    @Test
+    void formModeWithoutInvalidCertParamKeepsDefaultVerification() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void formModeWithTruthyUrlParamVariants() {
+        for (String param : List.of(
+            "tlsAllowInvalidCertificates=1",
+            "sslAllowInvalidCertificates=yes",
+            "TLSALLOWINVALIDCERTIFICATES=TRUE")) {
+            JsonObject connection = minimalConnection();
+            connection.addProperty("ssl", true);
+            connection.addProperty("url_params", "retryWrites=false&" + param);
+
+            MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+            assertTrue(settings.getSslSettings().isEnabled(), "Failed for " + param);
+            assertFalse(settings.getSslSettings().isInvalidHostNameAllowed(), "Failed for " + param);
+            assertNotNull(settings.getSslSettings().getContext(), "Failed for " + param);
+        }
+    }
+
+    @Test
+    void formModeWithTlsInsecureSkipsCertificateAndHostnameChecks() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsInsecure=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void formModeWithInvalidHostnamesOnlyDoesNotTrustInvalidCertificates() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidHostnames=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void uriModeHonoursTlsAllowInvalidCertificatesInConnectionString() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?ssl=true&tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertFalse(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void uriModeWithTlsInsecureSkipsCertificateAndHostnameChecks() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?ssl=true&tlsInsecure=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertTrue(settings.getSslSettings().isEnabled());
+        assertTrue(settings.getSslSettings().isInvalidHostNameAllowed());
+        assertNotNull(settings.getSslSettings().getContext());
+    }
+
+    @Test
+    void connectTimeoutSecsAppliedToServerSelectionTimeoutAndCapped() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("connect_timeout_secs", 10);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(10_000L, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(10_000, settings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+
+        JsonObject longTimeoutConn = minimalConnection();
+        longTimeoutConn.addProperty("connect_timeout_secs", 30);
+        MongoClientSettings cappedSettings = MongoAgent.configureBuilder(longTimeoutConn).build();
+
+        assertEquals(20_000L, cappedSettings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(30_000, cappedSettings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void explicitServerSelectionTimeoutMsInUriWinsOverConnectTimeoutSecs() {
+        JsonObject connection = new JsonObject();
+        connection.addProperty(
+            "connection_string",
+            "mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=5000");
+        connection.addProperty("connect_timeout_secs", 10);
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertEquals(5_000L, settings.getClusterSettings().getServerSelectionTimeout(TimeUnit.MILLISECONDS));
+        assertEquals(10_000, settings.getSocketSettings().getConnectTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Test
+    void formModeWithoutSslIgnoresInvalidCertificateParam() {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+
+        assertFalse(settings.getSslSettings().isEnabled());
+    }
+
+    @Test
+    void relaxedDisabledAlgorithmsAllowsLegacyMongoTlsOnly() {
+        String current = "SSLv3, TLSv1, TLSv1.1, RC4, DES, 3DES_EDE_CBC, anon, NULL, TLS_RSA_*, "
+            + "rsa_pkcs1_sha1 usage HandshakeSignature, ecdsa_sha1 usage HandshakeSignature";
+
+        assertEquals(
+            "SSLv3, RC4, DES, 3DES_EDE_CBC, anon, NULL, ecdsa_sha1 usage HandshakeSignature",
+            MongoAgent.relaxedDisabledAlgorithms(current));
+        assertEquals("", MongoAgent.relaxedDisabledAlgorithms(null));
+    }
+
+    @Test
+    void demotedLegacyAlgorithmsKeepOriginalCasing() {
+        String current = "SSLv3, TLSv1, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature, RC4";
+
+        assertEquals(
+            List.of("TLS_RSA_*", "rsa_pkcs1_sha1 usage HandshakeSignature"),
+            MongoAgent.demotedLegacyAlgorithms(current));
+        assertTrue(MongoAgent.demotedLegacyAlgorithms(null).isEmpty());
+    }
+
+    @Test
+    void mergedLegacyAlgorithmsMergeWithoutDuplicates() {
+        assertEquals(
+            "NULL, anon, RC4, DES, 3DES_EDE_CBC, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature",
+            MongoAgent.mergedLegacyAlgorithms(
+                "NULL, anon, RC4, DES, 3DES_EDE_CBC",
+                List.of("TLS_RSA_*", "rsa_pkcs1_sha1 usage HandshakeSignature")));
+        // Already-present entries (any casing) are not duplicated.
+        assertEquals(
+            "NULL, TLS_RSA_*",
+            MongoAgent.mergedLegacyAlgorithms("NULL, TLS_RSA_*", List.of("tls_rsa_*")));
+        assertEquals("TLS_RSA_*", MongoAgent.mergedLegacyAlgorithms(null, List.of("TLS_RSA_*")));
+    }
+
+    @Test
+    void relaxLegacyTlsPolicyUpdatesLiveSecurityProperties() {
+        String originalDisabled = Security.getProperty("jdk.tls.disabledAlgorithms");
+        String originalLegacy = Security.getProperty("jdk.tls.legacyAlgorithms");
+        assertNotNull(originalDisabled, "jdk.tls.disabledAlgorithms must be defined by the JRE");
+        Set<String> disabledBefore = upperCasedEntries(originalDisabled);
+        List<String> legacyEntries = List.of("TLSV1", "TLSV1.1", "TLS_RSA_*",
+            "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE");
+        try {
+            MongoAgent.relaxLegacyTlsPolicy();
+            // A second run must not change anything (idempotent).
+            MongoAgent.relaxLegacyTlsPolicy();
+
+            Set<String> disabledAfter = upperCasedEntries(Security.getProperty("jdk.tls.disabledAlgorithms"));
+            for (String removed : legacyEntries) {
+                assertFalse(disabledAfter.contains(removed), removed + " must leave the disabled list");
+            }
+            // Unrelated JRE defaults must stay disabled; JDK 21 also disables these.
+            for (String kept : List.of("SSLV3", "DTLSV1.0", "ECDH")) {
+                assertTrue(disabledAfter.contains(kept), kept + " must stay disabled");
+            }
+            // Every other entry of the real starting value (RC4, DES, 3DES_EDE_CBC, anon, NULL,
+            // ecdsa_sha1/dsa_sha1 usage HandshakeSignature, ...) survives untouched.
+            for (String entry : disabledBefore) {
+                if (!legacyEntries.contains(entry)) {
+                    assertTrue(disabledAfter.contains(entry), entry + " must stay disabled");
+                }
+            }
+
+            Set<String> legacyAfter = upperCasedEntries(Security.getProperty("jdk.tls.legacyAlgorithms"));
+            for (String entry : upperCasedEntries(originalLegacy)) {
+                assertTrue(legacyAfter.contains(entry), entry + " must stay legacy");
+            }
+            // The static-RSA entries move over when the running JRE disables them (Temurin 21
+            // does; older 21 updates do not list them, and then there is nothing to demote).
+            for (String demoted : List.of("TLS_RSA_*", "RSA_PKCS1_SHA1 USAGE HANDSHAKESIGNATURE")) {
+                if (disabledBefore.contains(demoted)) {
+                    assertTrue(legacyAfter.contains(demoted), demoted + " must become legacy");
+                } else {
+                    assertFalse(legacyAfter.contains(demoted));
+                }
+            }
+        } finally {
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms",
+                originalLegacy == null ? "" : originalLegacy);
+        }
+    }
+
+    @Test
+    void legacyTlsPolicyRelaxationRequiresExplicitOptIn() {
+        String originalDisabled = Security.getProperty("jdk.tls.disabledAlgorithms");
+        String originalLegacy = Security.getProperty("jdk.tls.legacyAlgorithms");
+        boolean rsaDemotable = upperCasedEntries(originalDisabled).contains("TLS_RSA_*");
+        try {
+            // Without the option the policy must stay at the JRE defaults.
+            JsonObject plain = minimalConnection();
+            plain.addProperty("ssl", true);
+            MongoAgent.configureBuilder(plain).build();
+            assertEquals(originalDisabled, Security.getProperty("jdk.tls.disabledAlgorithms"));
+            assertEquals(originalLegacy, Security.getProperty("jdk.tls.legacyAlgorithms"));
+
+            // The option without TLS must not relax anything either.
+            JsonObject noTls = minimalConnection();
+            noTls.addProperty("url_params", "tlsAllowLegacyProtocols=true");
+            MongoAgent.configureBuilder(noTls).build();
+            assertEquals(originalDisabled, Security.getProperty("jdk.tls.disabledAlgorithms"));
+            assertEquals(originalLegacy, Security.getProperty("jdk.tls.legacyAlgorithms"));
+
+            // With TLS and the option the policy is relaxed process-wide.
+            JsonObject legacy = minimalConnection();
+            legacy.addProperty("ssl", true);
+            legacy.addProperty("url_params", "tlsAllowLegacyProtocols=true");
+            MongoAgent.configureBuilder(legacy).build();
+            assertFalse(upperCasedEntries(Security.getProperty("jdk.tls.disabledAlgorithms")).contains("TLSV1"));
+            assertEquals(rsaDemotable,
+                upperCasedEntries(Security.getProperty("jdk.tls.legacyAlgorithms")).contains("TLS_RSA_*"));
+
+            // The same option works inside a connection string.
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms", originalLegacy);
+            JsonObject legacyUri = new JsonObject();
+            legacyUri.addProperty("connection_string",
+                "mongodb://127.0.0.1:27017/?ssl=true&tlsAllowLegacyProtocols=true");
+            MongoAgent.configureBuilder(legacyUri).build();
+            assertFalse(upperCasedEntries(Security.getProperty("jdk.tls.disabledAlgorithms")).contains("TLSV1.1"));
+            assertEquals(rsaDemotable,
+                upperCasedEntries(Security.getProperty("jdk.tls.legacyAlgorithms")).contains("TLS_RSA_*"));
+        } finally {
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms",
+                originalLegacy == null ? "" : originalLegacy);
+        }
+    }
+
+    @Test
+    void relaxLegacyTlsPolicyDemotesRsaEntriesOnTemurinShapedPolicy() {
+        // Temurin 21 disables more entries than older 21 updates; seed that exact shape so
+        // the demotion path runs against live properties even on a JRE without the entries.
+        String temurinDisabled = "SSLv3, TLSv1, TLSv1.1, DTLSv1.0, RC4, DES, MD5withRSA, "
+            + "DH keySize < 1024, EC keySize < 224, 3DES_EDE_CBC, anon, NULL, ECDH, "
+            + "TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature, "
+            + "ecdsa_sha1 usage HandshakeSignature, dsa_sha1 usage HandshakeSignature";
+        String originalDisabled = Security.getProperty("jdk.tls.disabledAlgorithms");
+        String originalLegacy = Security.getProperty("jdk.tls.legacyAlgorithms");
+        try {
+            Security.setProperty("jdk.tls.disabledAlgorithms", temurinDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms", "NULL, anon, RC4, DES, 3DES_EDE_CBC");
+
+            MongoAgent.relaxLegacyTlsPolicy();
+
+            assertEquals(
+                "SSLv3, DTLSv1.0, RC4, DES, MD5withRSA, DH keySize < 1024, EC keySize < 224, "
+                    + "3DES_EDE_CBC, anon, NULL, ECDH, "
+                    + "ecdsa_sha1 usage HandshakeSignature, dsa_sha1 usage HandshakeSignature",
+                Security.getProperty("jdk.tls.disabledAlgorithms"));
+            assertEquals(
+                "NULL, anon, RC4, DES, 3DES_EDE_CBC, TLS_RSA_*, rsa_pkcs1_sha1 usage HandshakeSignature",
+                Security.getProperty("jdk.tls.legacyAlgorithms"));
+        } finally {
+            Security.setProperty("jdk.tls.disabledAlgorithms", originalDisabled);
+            Security.setProperty("jdk.tls.legacyAlgorithms",
+                originalLegacy == null ? "" : originalLegacy);
+        }
+    }
+
+    private static Set<String> upperCasedEntries(String property) {
+        if (property == null || property.isBlank()) {
+            return Set.of();
+        }
+        Set<String> entries = new HashSet<>();
+        for (String part : property.split(",")) {
+            if (!part.isBlank()) {
+                entries.add(part.trim().toUpperCase(Locale.ROOT));
+            }
+        }
+        return entries;
+    }
+
+    @Test
+    void sslContextInstalledInSettingsTrustsSelfSignedServer() throws Exception {
+        JsonObject connection = minimalConnection();
+        connection.addProperty("ssl", true);
+        connection.addProperty("url_params", "tlsAllowInvalidCertificates=true");
+
+        MongoClientSettings settings = MongoAgent.configureBuilder(connection).build();
+        SSLContext clientContext = settings.getSslSettings().getContext();
+        assertNotNull(clientContext);
+
+        SSLContext serverContext = SSLContext.getInstance("TLS");
+        serverContext.init(
+            MongoAgent.loadKeyManagersFromPem(clientPemPath.toString(), clientKeyPath.toString()),
+            null, null);
+        AtomicReference<Exception> serverError = new AtomicReference<>();
+        try (SSLServerSocket server = (SSLServerSocket) serverContext
+            .getServerSocketFactory()
+            .createServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            Thread serverThread = new Thread(() -> {
+                try (SSLSocket socket = (SSLSocket) server.accept()) {
+                    socket.getOutputStream().write(42);
+                    socket.getOutputStream().flush();
+                } catch (Exception e) {
+                    serverError.set(e);
+                }
+            });
+            serverThread.setDaemon(true);
+            serverThread.start();
+
+            // The default JRE trust store would reject this self-signed certificate; the
+            // context installed into SslSettings must carry the trust-all manager.
+            try (SSLSocket client = (SSLSocket) clientContext
+                .getSocketFactory()
+                .createSocket("127.0.0.1", server.getLocalPort())) {
+                client.setSoTimeout(10_000);
+                assertEquals(42, client.getInputStream().read());
+            }
+            serverThread.join(10_000);
+        }
+        assertNull(serverError.get());
     }
 
     // ─── TLS: trust manager loading ───
@@ -1388,9 +2365,140 @@ class MongoAgentTest {
         return JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
     }
 
+    private static JsonObject cursorParams(String collection, int batchSize, String cursorId) {
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        if (collection != null) {
+            params.addProperty("collection", collection);
+        }
+        if (batchSize > 0) {
+            params.addProperty("batch_size", batchSize);
+        }
+        if (cursorId != null) {
+            params.addProperty("cursor_id", cursorId);
+            params.addProperty("limit", 1);
+        }
+        return params;
+    }
+
+    private static JsonObject findCursorRpc(MongoClient client, int id, String method, JsonObject params) {
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", method);
+        request.add("params", params);
+        return JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingFindMongoClient(List<String> calls, List<Document> documents) {
+        MongoCursor<Document> cursor = new MongoCursor<>() {
+            private int index;
+            private boolean closed;
+
+            @Override
+            public void close() {
+                closed = true;
+                calls.add("close");
+            }
+
+            @Override
+            public boolean hasNext() {
+                return !closed && index < documents.size();
+            }
+
+            @Override
+            public Document next() {
+                return documents.get(index++);
+            }
+
+            @Override
+            public Document tryNext() {
+                return hasNext() ? next() : null;
+            }
+
+            @Override
+            public com.mongodb.ServerAddress getServerAddress() {
+                return new com.mongodb.ServerAddress();
+            }
+
+            @Override
+            public com.mongodb.ServerCursor getServerCursor() {
+                return null;
+            }
+        };
+        return findMongoClientWithCursor(calls, cursor);
+    }
+
+    /** Same proxy chain as [recordingFindMongoClient], for cursors that fail mid-iteration. */
+    @SuppressWarnings("unchecked")
+    private static MongoClient findMongoClientWithCursor(List<String> calls, MongoCursor<Document> cursor) {
+        FindIterable<Document> iterable = (FindIterable<Document>) Proxy.newProxyInstance(
+            FindIterable.class.getClassLoader(),
+            new Class<?>[] {FindIterable.class},
+            (proxy, method, args) -> {
+                switch (method.getName()) {
+                    case "batchSize" -> {
+                        calls.add("batchSize:" + args[0]);
+                        return proxy;
+                    }
+                    case "projection", "sort", "collation", "filter", "skip", "limit" -> {
+                        calls.add(method.getName());
+                        return proxy;
+                    }
+                    case "iterator" -> {
+                        calls.add("iterator");
+                        return cursor;
+                    }
+                    default -> throw new UnsupportedOperationException(method.getName());
+                }
+            }
+        );
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("find".equals(method.getName())) {
+                    calls.add("find");
+                    return iterable;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    calls.add("getCollection:" + args[0]);
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    calls.add("getDatabase:" + args[0]);
+                    return database;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
     @SuppressWarnings("unchecked")
     private static MongoClient recordingInsertMongoClient(
         List<String> calls, List<List<Document>> batches
+    ) {
+        return recordingInsertMongoClient(calls, batches, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingInsertMongoClient(
+        List<String> calls, List<List<Document>> batches, List<Boolean> ordered
     ) {
         MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
             MongoCollection.class.getClassLoader(),
@@ -1400,6 +2508,13 @@ class MongoAgentTest {
                     List<Document> batch = ((List<Document>) args[0]).stream().map(Document::new).toList();
                     batches.add(batch);
                     calls.add("insertMany:" + batch.size());
+                    if (ordered != null) {
+                        boolean isOrdered = true;
+                        if (args.length > 1 && args[1] instanceof InsertManyOptions options) {
+                            isOrdered = options.isOrdered();
+                        }
+                        ordered.add(isOrdered);
+                    }
                     return null;
                 }
                 throw new UnsupportedOperationException(method.getName());
@@ -1786,6 +2901,176 @@ class MongoAgentTest {
                 }
                 throw new UnsupportedOperationException(method.getName());
             }
+        );
+    }
+
+    @Test
+    void listDatabasesFallsBackToTheDatabasesTheAccountIsAuthorizedFor() {
+        List<String> calls = new ArrayList<>();
+        Document connectionStatus = new Document("ok", 1.0)
+            .append("authInfo", new Document("authenticatedUserRoles", List.of(
+                new Document("role", "readWrite").append("db", "shopdb")))
+                .append("authenticatedUserPrivileges", List.of(
+                    new Document("resource", new Document("db", "shopdb").append("collection", ""))
+                        .append("actions", List.of("find", "insert")),
+                    new Document("resource",
+                        new Document("db", "shopdb").append("collection", "system.js"))
+                        .append("actions", List.of("find")),
+                    new Document("resource", new Document("db", "reports").append("collection", ""))
+                        .append("actions", List.of("find")))));
+
+        MongoDatabase admin = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    calls.add("connectionStatus");
+                    return connectionStatus;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(
+                        13,
+                        "Unauthorized",
+                        "not authorized on admin to execute command { listDatabases: 1, nameOnly: true }"
+                    );
+                }
+                if ("getDatabase".equals(method.getName())) {
+                    calls.add("getDatabase:" + args[0]);
+                    return admin;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertFalse(json.has("error"), json.toString());
+        JsonArray databases = json.getAsJsonArray("result");
+        assertEquals(2, databases.size());
+        assertEquals("reports", databases.get(0).getAsJsonObject().get("name").getAsString());
+        assertEquals("shopdb", databases.get(1).getAsJsonObject().get("name").getAsString());
+        assertEquals(List.of("getDatabase:admin", "connectionStatus"), calls);
+    }
+
+    @Test
+    void listDatabasesKeepsTheUnauthorizedErrorWhenNoAuthorizedDatabaseIsKnown() {
+        List<String> calls = new ArrayList<>();
+        MongoDatabase admin = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("runCommand".equals(method.getName())) {
+                    calls.add("connectionStatus");
+                    return new Document("ok", 1.0).append("authInfo", new Document());
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(
+                        13,
+                        "Unauthorized",
+                        "not authorized on admin to execute command { listDatabases: 1, nameOnly: true }"
+                    );
+                }
+                if ("getDatabase".equals(method.getName())) {
+                    return admin;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(json.getAsJsonObject("error").get("message").getAsString()
+            .contains("error 13 (Unauthorized)"), json.toString());
+        assertEquals(List.of("connectionStatus"), calls);
+    }
+
+    @Test
+    void listDatabasesDoesNotProbePrivilegesForUnrelatedFailures() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("listDatabaseNames".equals(method.getName())) {
+                    throw mongoCommandError(11600, "InterruptedAtShutdown", "operation was interrupted");
+                }
+                calls.add(method.getName());
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"list_databases\",\"params\":{}}", client);
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(json.getAsJsonObject("error").get("message").getAsString()
+            .contains("error 11600"), json.toString());
+        assertEquals(List.of(), calls);
+    }
+
+    @Test
+    void authorizedDatabaseNamesComeFromTheAccountsOwnPrivileges() {
+        Document status = new Document("authInfo", new Document("authenticatedUserPrivileges", List.of(
+            new Document("resource", new Document("db", "shopdb").append("collection", ""))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "shopdb").append("collection", "orders"))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "admin").append("collection", "system.users"))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("db", "").append("collection", ""))
+                .append("actions", List.of("find")),
+            new Document("resource", new Document("cluster", true))
+                .append("actions", List.of("listDatabases")),
+            new Document("resource", "not-a-resource"),
+            "not-a-privilege")));
+        assertEquals(List.of("admin", "shopdb"), MongoAgent.databaseNamesFromConnectionStatus(status));
+
+        assertEquals(List.of(), MongoAgent.databaseNamesFromConnectionStatus(new Document()));
+        assertEquals(List.of(), MongoAgent.databaseNamesFromConnectionStatus(null));
+    }
+
+    @Test
+    void listDatabasesAuthorizationFailureDetectionFollowsTheCauseChain() {
+        assertTrue(MongoAgent.isListDatabasesAuthorizationFailure(
+            new RuntimeException(
+                "wrapped",
+                mongoCommandError(13, "Unauthorized", "not authorized on admin")
+            )
+        ));
+        assertTrue(MongoAgent.isListDatabasesAuthorizationFailure(
+            mongoCommandError(0, "Unauthorized", "not authorized")
+        ));
+        assertFalse(MongoAgent.isListDatabasesAuthorizationFailure(
+            mongoCommandError(11600, "InterruptedAtShutdown", "operation was interrupted")
+        ));
+        assertFalse(MongoAgent.isListDatabasesAuthorizationFailure(
+            new IllegalStateException("Not connected")
+        ));
+    }
+
+    private static MongoCommandException mongoCommandError(int code, String codeName, String message) {
+        return new MongoCommandException(
+            BsonDocument.parse("{\"ok\": 0, \"errmsg\": \"" + message + "\", \"code\": " + code
+                + ", \"codeName\": \"" + codeName + "\"}"),
+            new ServerAddress("192.168.80.146", 27017)
         );
     }
 

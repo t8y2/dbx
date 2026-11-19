@@ -4,6 +4,7 @@ import {
   cloneColumnDraftAsNew,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
+  copySourceColumnDetails,
   createCopiedColumnDrafts,
   createColumnDrafts,
   createTriggerDrafts,
@@ -12,24 +13,330 @@ import {
   dataTypeLengthUnitValue,
   DATA_TYPE_OPTIONS,
   defaultNewColumnDataType,
+  draftColumnNameForSql,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
+  generateIndexName,
+  generateUniqueIndexName,
+  generateShortIndexName,
+  generateUniqueShortIndexName,
+  specialIndexColumnIssue,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
   isDamengIdentityCompatibleDataType,
   isMysqlCharacterDataType,
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
+  matchesCopySourceColumnSearch,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
+  parseMysqlGeneratedColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   splitDataType,
+  structureColumnCommentsForCopy,
+  structureColumnNamesForCopy,
   tableStructureIdentifierComparisonKey,
+  foldCreatedTableName,
 } from "@/lib/table/tableStructureEditorState";
 
 describe("tableStructureEditorState", () => {
+  describe("index naming", () => {
+    it("uses a lowercase type prefix and the initial field name", () => {
+      expect(generateShortIndexName("Prop_Code")).toBe("idx_prop_code");
+      expect(generateShortIndexName("email", { isUnique: true })).toBe("uk_email");
+      expect(generateShortIndexName("title", { indexType: "FULLTEXT" })).toBe("ft_title");
+      expect(generateShortIndexName("location", { indexType: "SPATIAL" })).toBe("sp_location");
+      expect(generateShortIndexName("id", { isPrimary: true })).toBe("PRIMARY");
+      expect(generateShortIndexName("")).toBe("");
+    });
+
+    it("keeps long names deterministic and distinguishes truncated column names", () => {
+      const name = generateShortIndexName("a".repeat(90));
+      expect(name).toHaveLength(63);
+      expect(name).toMatch(/^idx_.*_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("a".repeat(90))).toBe(name);
+      expect(generateShortIndexName("a".repeat(89) + "b")).not.toBe(name);
+      expect(generateShortIndexName("a".repeat(90), { maxLength: 64 })).toHaveLength(64);
+    });
+
+    it("resolves case-insensitive collisions while retaining type prefixes and limits", () => {
+      expect(generateUniqueShortIndexName("email", ["IDX_EMAIL", "idx_email_2"])).toBe("idx_email_3");
+      expect(generateUniqueShortIndexName("email", ["UK_EMAIL"], { isUnique: true })).toBe("uk_email_2");
+      const base = generateShortIndexName("a".repeat(90));
+      const next = generateUniqueShortIndexName("a".repeat(90), [base]);
+      expect(next).toHaveLength(63);
+      expect(next).toMatch(/^idx_.*_[0-9a-f]{8}_2$/);
+    });
+
+    it("preserves legacy callers and table-qualified names for shared namespaces", () => {
+      expect(generateIndexName("users", ["email"])).toBe("USERS_EMAIL_IDX");
+      expect(generateIndexName("orders", ["email"])).toBe("ORDERS_EMAIL_IDX");
+      expect(generateIndexName("users", ["email", "region"])).toBe("USERS_EMAIL_REGION_IDX");
+      expect(generateUniqueIndexName("users", ["email"], ["USERS_EMAIL_IDX"])).toBe("USERS_EMAIL_IDX_2");
+    });
+
+    it("preserves Chinese field names and provides deterministic names for symbols", () => {
+      const field = "\u5c5e\u6027";
+      expect(generateShortIndexName(field)).toBe(`idx_${field}`);
+      expect(generateUniqueShortIndexName(field, [`uk_${field}`], { isUnique: true })).toBe(`uk_${field}_2`);
+      const longName = generateShortIndexName(field.repeat(40), { maxLength: 64 });
+      expect(longName).toHaveLength(64);
+      expect(longName).toMatch(/_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+      expect(generateShortIndexName("---")).not.toBe(generateShortIndexName("+++"));
+      expect(generateShortIndexName("\u{10400}")).toMatch(/^idx_column_[0-9a-f]{8}$/);
+    });
+  });
+
+  describe("special index columns", () => {
+    const field = (dataType: string, isNullable = false) => ({ dataType, isNullable });
+
+    it("allows composite text searches but rejects JSON, numbers, and unique fulltext", () => {
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("varchar(255)"), field("longtext")])).toBeNull();
+      for (const type of ["json", "int", "blob"]) expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field(type)])).toBe("fulltextIndexColumns");
+      expect(specialIndexColumnIssue("mysql", "FULLTEXT", [field("text")], true)).toBe("specialIndexUnique");
+    });
+
+    it("requires one non-null geometry for MySQL spatial indexes", () => {
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point")])).toBeNull();
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("polygon", true)])).toBe("spatialIndexNullable");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("point"), field("geometry")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("varchar(64)")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("mysql", "SPATIAL", [field("geography")])).toBe("spatialIndexColumn");
+      expect(specialIndexColumnIssue("sqlserver", "SPATIAL", [field("geography", true)])).toBeNull();
+      expect(specialIndexColumnIssue("postgres", "GIST", [field("geometry", true)])).toBeNull();
+    });
+  });
+
+  describe("DuckDB type parameters", () => {
+    it.each([
+      "TINYINT",
+      "INT1",
+      "SMALLINT",
+      "INT2",
+      "SHORT",
+      "INT16",
+      "INTEGER",
+      "INT",
+      "INT4",
+      "SIGNED",
+      "INTEGRAL",
+      "INT32",
+      "BIGINT",
+      "INT8",
+      "LONG",
+      "OID",
+      "INT64",
+      "HUGEINT",
+      "INT128",
+      "UTINYINT",
+      "UINT8",
+      "USMALLINT",
+      "UINT16",
+      "UINTEGER",
+      "UINT32",
+      "UBIGINT",
+      "UINT64",
+      "UHUGEINT",
+      "UINT128",
+      "REAL",
+      "FLOAT4",
+      "DOUBLE",
+      "DOUBLE PRECISION",
+      "FLOAT8",
+      "BOOLEAN",
+      "BOOL",
+      "LOGICAL",
+      "BLOB",
+      "BYTEA",
+      "BINARY",
+      "VARBINARY",
+      "BIT",
+      "BITSTRING",
+      "VARINT",
+      "BIGNUM",
+      "DATE",
+      "TIME",
+      "TIME WITHOUT TIME ZONE",
+      "TIME WITH TIME ZONE",
+      "TIMETZ",
+      "TIMESTAMPTZ",
+      "TIMESTAMP WITH TIME ZONE",
+      "TIMESTAMP_S",
+      "TIMESTAMP_MS",
+      "TIMESTAMP_NS",
+      "UUID",
+      "GUID",
+      "JSON",
+      "INTERVAL",
+    ])("does not populate, expose, or save modifiers for %s", (baseType) => {
+      expect(getDefaultLengthForType("duckdb", baseType)).toBe("");
+      expect(isDataTypeLengthDisabled("duckdb", baseType)).toBe(true);
+      expect(dataTypeLengthInputValue("duckdb", `${baseType}(11)`)).toBe("");
+      expect(combineDataTypeForDatabase("duckdb", baseType, "11")).toBe(baseType);
+      expect(combineDataTypeForDatabase("duckdb", baseType.toLowerCase(), "10,2")).toBe(baseType.toLowerCase());
+    });
+
+    it("uses FLOAT mantissa precision instead of MySQL precision and scale", () => {
+      expect(getDefaultLengthForType("duckdb", "FLOAT")).toBe("");
+      expect(isDataTypeLengthDisabled("duckdb", "FLOAT")).toBe(false);
+      for (const precision of ["1", "24", "25", "53"]) {
+        expect(combineDataTypeForDatabase("duckdb", "FLOAT", precision)).toBe(`FLOAT(${precision})`);
+        expect(dataTypeLengthInputValue("duckdb", `FLOAT(${precision})`)).toBe(precision);
+      }
+      for (const invalid of ["0", "54", "-1", "1.5", "10,2", "abc", "999999999999999999999999"]) {
+        expect(combineDataTypeForDatabase("duckdb", "FLOAT", invalid)).toBe("FLOAT");
+        expect(dataTypeLengthInputValue("duckdb", `FLOAT(${invalid})`)).toBe("");
+      }
+    });
+
+    it.each([
+      ["DECIMAL", "10,2"],
+      ["NUMERIC", "38,0"],
+      ["DEC", "12,3"],
+      ["VARCHAR", "255"],
+      ["CHAR", "1"],
+      ["CHARACTER", "20"],
+      ["CHARACTER VARYING", "20"],
+      ["BPCHAR", "20"],
+      ["STRING", "20"],
+      ["TEXT", "20"],
+      ["NVARCHAR", "20"],
+      ["TIMESTAMP", "9"],
+      ["DATETIME", "3"],
+      ["TIMESTAMP_US", "3"],
+    ])("preserves supported %s parameters", (baseType, params) => {
+      expect(isDataTypeLengthDisabled("duckdb", baseType)).toBe(false);
+      expect(combineDataTypeForDatabase("duckdb", baseType, params)).toBe(`${baseType}(${params})`);
+      expect(dataTypeLengthInputValue("duckdb", `${baseType}(${params})`)).toBe(params);
+    });
+
+    it("normalizes stale scalar metadata without rewriting compound or user-defined types", () => {
+      const cases = [
+        ["INTEGER(11)", "INTEGER"],
+        ["FLOAT(10,2)", "FLOAT"],
+        ["FLOAT(53)", "FLOAT(53)"],
+        ["DECIMAL(12,3)", "DECIMAL(12,3)"],
+        ["VARCHAR(42)", "VARCHAR(42)"],
+        ["DECIMAL(10,2)[]", "DECIMAL(10,2)[]"],
+        ["INTEGER[3]", "INTEGER[3]"],
+        ["STRUCT(id INTEGER, price DECIMAL(10,2))", "STRUCT(id INTEGER, price DECIMAL(10,2))"],
+        ["MAP(VARCHAR, DECIMAL(10,2))", "MAP(VARCHAR, DECIMAL(10,2))"],
+        ["UNION(id INTEGER, name VARCHAR)", "UNION(id INTEGER, name VARCHAR)"],
+        ["ENUM('a', 'b')", "ENUM('a', 'b')"],
+        ["custom_type(10)", "custom_type(10)"],
+        ["main.INTEGER(11)", "main.INTEGER(11)"],
+        ['"INTEGER"(11)', '"INTEGER"(11)'],
+      ];
+      for (const [dataType, expected] of cases) {
+        const [draft] = createColumnDrafts([{ name: "value", data_type: dataType!, is_nullable: true, column_default: null, is_primary_key: false }], "duckdb");
+        expect(draft?.dataType).toBe(expected);
+        expect(draft?.original?.data_type).toBe(expected);
+        expect(combineDataTypeForDatabase("duckdb", dataType!, "")).toBe(expected);
+      }
+    });
+
+    it("retains temporal qualifiers instead of confusing them with length", () => {
+      expect(dataTypeBaseInputValue("duckdb", "TIMESTAMP(6) WITH TIME ZONE")).toBe("TIMESTAMP WITH TIME ZONE");
+      expect(dataTypeLengthInputValue("duckdb", "TIMESTAMP(6) WITH TIME ZONE")).toBe("");
+      expect(combineDataTypeForDatabase("duckdb", "TIMESTAMP(6) WITH TIME ZONE", "")).toBe("TIMESTAMP WITH TIME ZONE");
+      expect(combineDataTypeForDatabase("duckdb", "TIME(6) WITHOUT TIME ZONE", "")).toBe("TIME WITHOUT TIME ZONE");
+      expect(dataTypeBaseInputValue("duckdb", "TIMESTAMP(3) WITHOUT TIME ZONE")).toBe("TIMESTAMP WITHOUT TIME ZONE");
+      expect(dataTypeLengthInputValue("duckdb", "TIMESTAMP(3) WITHOUT TIME ZONE")).toBe("3");
+      expect(combineDataTypeForDatabase("duckdb", "TIMESTAMP WITHOUT TIME ZONE", "3")).toBe("TIMESTAMP(3) WITHOUT TIME ZONE");
+    });
+
+    it("hydrates supported metadata precision without restoring fixed-type lengths", () => {
+      const columns = [
+        { data_type: "INTEGER", numeric_precision: 32 },
+        { data_type: "BINARY", character_maximum_length: 255 },
+        { data_type: "DECIMAL", numeric_precision: 12, numeric_scale: 3 },
+        { data_type: "VARCHAR", character_maximum_length: 64 },
+      ].map((column, index) => ({ name: `value_${index}`, is_nullable: true, column_default: null, is_primary_key: false, ...column }));
+      expect(createColumnDrafts(columns, "duckdb").map((column) => column.dataType)).toEqual(["INTEGER", "BINARY", "DECIMAL(12,3)", "VARCHAR(64)"]);
+    });
+
+    it("keeps defaults and other dialects unchanged", () => {
+      expect(defaultNewColumnDataType("duckdb")).toBe("TEXT");
+      expect(getDefaultLengthForType("duckdb", "DECIMAL")).toBe("10,0");
+      expect(getDefaultLengthForType("duckdb", "VARCHAR")).toBe("255");
+      expect(getDefaultLengthForType("mysql", "INTEGER")).toBe("11");
+      expect(getDefaultLengthForType("mysql", "FLOAT")).toBe("10,2");
+      expect(combineDataTypeForDatabase("mysql", "INTEGER", "11")).toBe("INTEGER(11)");
+      expect(combineDataTypeForDatabase("mysql", "FLOAT", "10,2")).toBe("FLOAT(10,2)");
+      expect(combineDataTypeForDatabase("postgres", "INTEGER", "11")).toBe("INTEGER");
+      expect(getDefaultLengthForType("postgres", "INTEGER")).toBe("11");
+      expect(getDefaultLengthForType("sqlite", "INTEGER")).toBe("");
+      expect(combineDataTypeForDatabase("sqlite", "INTEGER", "11")).toBe("INTEGER(11)");
+      expect(isDataTypeLengthDisabled("duckdb", "custom_type")).toBe(false);
+      expect(combineDataTypeForDatabase("duckdb", "custom_type", "10")).toBe("custom_type(10)");
+      expect(combineDataTypeForDatabase("duckdb", "DECIMAL", "39,0")).toBe("DECIMAL(39,0)");
+      expect(combineDataTypeForDatabase("duckdb", "VARCHAR", "-1")).toBe("VARCHAR(-1)");
+    });
+  });
+
+  describe("Dameng temporal precision", () => {
+    it("restores timestamp and time precision reported in DATA_SCALE", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "updated_at", data_type: "TIMESTAMP", numeric_scale: 6, is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "created_at", data_type: "TIMESTAMP", numeric_scale: 0, is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "clock_time", data_type: "TIME", numeric_scale: 3, is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "dameng",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["TIMESTAMP(6)", "TIMESTAMP(0)", "TIME(3)"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+    });
+  });
+
+  describe("PostgreSQL temporal precision", () => {
+    it("keeps the time-zone qualifier returned by PostgreSQL metadata", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "with_tz", data_type: "timestamp(6) with time zone", is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "without_tz", data_type: "timestamp(6) without time zone", is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "postgres",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["timestamp(6) with time zone", "timestamp(6) without time zone"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+      expect(dataTypeBaseInputValue("postgres", drafts[0]!.dataType)).toBe("timestamp with time zone");
+      expect(dataTypeBaseInputValue("postgres", drafts[1]!.dataType)).toBe("timestamp without time zone");
+      expect(dataTypeLengthInputValue("postgres", drafts[0]!.dataType)).toBe("6");
+      expect(dataTypeLengthInputValue("postgres", drafts[1]!.dataType)).toBe("6");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[0]!.dataType), "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", dataTypeBaseInputValue("postgres", drafts[1]!.dataType), "3")).toBe("timestamp(3) without time zone");
+    });
+
+    it("rebuilds qualified timestamp precision without changing time-zone semantics", () => {
+      expect(combineDataTypeForDatabase("postgres", "timestamp with time zone", "3")).toBe("timestamp(3) with time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamp without time zone", "3")).toBe("timestamp(3) without time zone");
+      expect(combineDataTypeForDatabase("postgres", "timestamptz", "3")).toBe("timestamptz(3)");
+      expect(combineDataTypeForDatabase("postgres", "timestamp", "3")).toBe("timestamp(3)");
+    });
+
+    it("does not reinterpret temporal arrays, domains, or user-defined types as scalar timestamps", () => {
+      expect(dataTypeBaseInputValue("postgres", "timestamp(6) with time zone[]")).toBe("timestamp with time zone[]");
+      expect(dataTypeLengthInputValue("postgres", "timestamp(6) with time zone[]")).toBe("");
+      expect(dataTypeBaseInputValue("postgres", "timestamptz(6)[][]")).toBe("timestamptz[][]");
+      expect(dataTypeLengthInputValue("postgres", "timestamptz(6)[][]")).toBe("");
+
+      const metadataTypes = ["audit.timestamp_domain", 'audit."timestamp"', "custom_timestamp(6)"];
+      const drafts = createColumnDrafts(
+        metadataTypes.map((dataType, index) => ({ name: `custom_${index}`, data_type: dataType, is_nullable: true, column_default: null, is_primary_key: false })),
+        "postgres",
+      );
+      expect(drafts.map((column) => column.dataType)).toEqual(metadataTypes);
+    });
+  });
+
   it("keeps quoted mixed-case identifiers distinct when detecting copied-column duplicates", () => {
     const postgresNames = new Set([tableStructureIdentifierComparisonKey("Foo", "postgres")]);
     expect(postgresNames.has(tableStructureIdentifierComparisonKey("foo", "postgres"))).toBe(false);
@@ -44,16 +351,91 @@ describe("tableStructureEditorState", () => {
     expect(jdbcNames.has(tableStructureIdentifierComparisonKey("foo", "jdbc", { unquotedIdentifierCase: "lower", quotedIdentifierCase: "mixed" }))).toBe(false);
   });
 
-  it("keeps existing Oracle trigger drafts read-only until full source editing is available", () => {
-    const [existing] = createTriggerDrafts([{ name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;" }]);
-    if (!existing) throw new Error("expected an existing trigger draft");
+  describe("foldCreatedTableName", () => {
+    it("folds plain Oracle names to upper case and trims surrounding whitespace", () => {
+      expect(foldCreatedTableName("MyTable", "oracle")).toBe("MYTABLE");
+      expect(foldCreatedTableName("  MyTable  ", "oracle")).toBe("MYTABLE");
+      expect(foldCreatedTableName("order_items$", "oracle")).toBe("ORDER_ITEMS$");
+      expect(foldCreatedTableName("t#1", "oracle")).toBe("T#1");
+    });
 
-    expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
+    it("keeps Oracle names that the DDL generator must quote unchanged", () => {
+      // A leading digit, spaces or special characters force quoting, and a
+      // quoted identifier keeps its exact spelling on the server.
+      expect(foldCreatedTableName("1MyTable", "oracle")).toBe("1MyTable");
+      expect(foldCreatedTableName("my table", "oracle")).toBe("my table");
+      expect(foldCreatedTableName("МойТable", "oracle")).toBe("МойТable");
+      expect(foldCreatedTableName("", "oracle")).toBe("");
+    });
+
+    it("folds plain Informix-family names to lower case and keeps quoted ones unchanged", () => {
+      expect(foldCreatedTableName("MyTable", "informix")).toBe("mytable");
+      expect(foldCreatedTableName("  MyTable  ", "informix")).toBe("mytable");
+      expect(foldCreatedTableName("_t1$", "informix")).toBe("_t1$");
+      expect(foldCreatedTableName("1MyTable", "informix")).toBe("1MyTable");
+      expect(foldCreatedTableName("my table", "informix")).toBe("my table");
+    });
+
+    it("preserves names exactly on dialects that quote new identifiers", () => {
+      for (const databaseType of ["postgres", "mysql", "sqlserver", "dameng", "oceanbase-oracle", undefined] as const) {
+        expect(foldCreatedTableName("MyTable", databaseType)).toBe("MyTable");
+        expect(foldCreatedTableName("  MyTable  ", databaseType)).toBe("MyTable");
+        expect(foldCreatedTableName("1MyTable", databaseType)).toBe("1MyTable");
+      }
+    });
+  });
+
+  it("allows existing Oracle trigger drafts to be edited only when the source is a plain body", () => {
+    const [existing, unstructured, missingSource] = createTriggerDrafts([
+      { name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;", enabled: false },
+      { name: "ORDERS_WHEN", timing: "BEFORE EACH ROW", event: "INSERT", statement: "TRIGGER ORDERS_WHEN\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\nWHEN (NEW.ID > 0)\nBEGIN NULL; END;" },
+      { name: "ORDERS_EMPTY", timing: "BEFORE EACH ROW", event: "INSERT" },
+    ]);
+    if (!existing || !unstructured || !missingSource) throw new Error("expected existing trigger drafts");
+
+    expect(existing.enabled).toBe(false);
+    expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(true);
+    expect(canEditStructuredTriggerDraft("oracle", unstructured)).toBe(false);
+    expect(canEditStructuredTriggerDraft("oracle", missingSource)).toBe(false);
     expect(canEditStructuredTriggerDraft(undefined, existing)).toBe(false);
     expect(canEditStructuredTriggerDraft("mysql", existing)).toBe(true);
     expect(canEditStructuredTriggerDraft("sqlserver", existing)).toBe(true);
     expect(
       canEditStructuredTriggerDraft("oracle", {
+        id: "new:trigger",
+        name: "ORDERS_AUDIT",
+        timing: "AFTER EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        markedForDrop: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("allows existing Dameng trigger drafts to be edited only without a WHEN clause or complete source", () => {
+    const [existing, withCondition, completeSource] = createTriggerDrafts([
+      { name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT", statement: "BEGIN NULL; END;", enabled: true },
+      {
+        name: "ORDERS_WHEN",
+        timing: "BEFORE EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        condition: "NEW.ID > 0",
+      },
+      {
+        name: "ORDERS_FULL",
+        timing: "BEFORE EACH ROW",
+        event: "INSERT",
+        statement: 'CREATE OR REPLACE TRIGGER "APP"."ORDERS_FULL" BEFORE INSERT ON "APP"."ORDERS" FOR EACH ROW BEGIN NULL; END;',
+      },
+    ]);
+    if (!existing || !withCondition || !completeSource) throw new Error("expected existing trigger drafts");
+
+    expect(canEditStructuredTriggerDraft("dameng", existing)).toBe(true);
+    expect(canEditStructuredTriggerDraft("dameng", withCondition)).toBe(false);
+    expect(canEditStructuredTriggerDraft("dameng", completeSource)).toBe(false);
+    expect(
+      canEditStructuredTriggerDraft("dameng", {
         id: "new:trigger",
         name: "ORDERS_AUDIT",
         timing: "AFTER EACH ROW",
@@ -210,6 +592,33 @@ describe("tableStructureEditorState", () => {
     expect(parseExtraToColumnExtra("identity(1,1)", "postgres")).toEqual({});
   });
 
+  it("parses mysql generated-column metadata into the editable extra", () => {
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`price` * `quantity`) STORED", "mysql")).toEqual({
+      generated: { expression: "`price` * `quantity`", storage: "STORED" },
+    });
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (lower(`name`)) VIRTUAL", "mysql")).toEqual({
+      generated: { expression: "lower(`name`)", storage: "VIRTUAL" },
+    });
+    // MariaDB PERSISTENT normalizes to STORED, matching the backend introspection.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (`a` + 1) PERSISTENT", "mysql")).toEqual({
+      generated: { expression: "`a` + 1", storage: "STORED" },
+    });
+    // Storage omitted: MySQL defaults to VIRTUAL.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (json_extract(`doc`, '$.x'))", "mysql")).toEqual({
+      generated: { expression: "json_extract(`doc`, '$.x')", storage: "VIRTUAL" },
+    });
+    // Plain columns and identity columns stay untouched.
+    expect(parseMysqlGeneratedColumnExtra("auto_increment")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("GENERATED ALWAYS AS IDENTITY")).toBeUndefined();
+    expect(parseMysqlGeneratedColumnExtra("")).toBeUndefined();
+    // Identity extras for postgres must not leak into the mysql branch.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS IDENTITY", "postgres")).toEqual({
+      identity: { generation: "ALWAYS" },
+    });
+    // Other dialects never parse mysql generated columns.
+    expect(parseExtraToColumnExtra("GENERATED ALWAYS AS (1) STORED", "sqlite")).toEqual({});
+  });
+
   it("keeps mysql unsigned attributes in the editable base type", () => {
     expect(splitDataType("int(11) unsigned")).toEqual({ baseType: "int unsigned", params: "11" });
     expect(splitDataType("bigint(20) unsigned zerofill")).toEqual({
@@ -319,10 +728,11 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "varchar2", "255", "")).toBe("varchar2(255)");
   });
 
-  it("separates and reconstructs Oracle character length units", () => {
-    expect(dataTypeLengthInputValue("oracle", "VARCHAR2(255 CHAR)")).toBe("255");
-    expect(dataTypeLengthUnitValue("oracle", "VARCHAR2(255 CHAR)")).toBe("CHAR");
-    expect(combineDataTypeForDatabaseWithLengthUnit("oracle", "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+  it.each(["oracle", "oceanbase-oracle"] as const)("separates and reconstructs %s character length units", (databaseType) => {
+    expect(dataTypeLengthInputValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("255");
+    expect(dataTypeLengthUnitValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("CHAR");
+    expect(combineDataTypeForDatabaseWithLengthUnit(databaseType, "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+    expect(getDataTypeLengthUnitOptions(databaseType, "NVARCHAR2(10)")).toEqual([]);
   });
 
   it("does not reinterpret unsupported length parameters or dialects", () => {
@@ -374,10 +784,10 @@ describe("tableStructureEditorState", () => {
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 BYTE)");
   });
 
-  it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
-    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], "oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps a saved %s length unit when refreshed metadata omits it", (databaseType) => {
+    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], databaseType);
 
-    const [restored] = restoreCharacterLengthUnitsAfterSave("oracle", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+    const [restored] = restoreCharacterLengthUnitsAfterSave(databaseType, [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 
     expect(restored?.dataType).toBe("VARCHAR2(255 CHAR)");
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 CHAR)");
@@ -701,5 +1111,114 @@ describe("tableStructureEditorState", () => {
     expect(isMysqlCharacterDataType("varbinary(255)")).toBe(false);
     expect(isMysqlCharacterDataType("blob")).toBe(false);
     expect(isMysqlCharacterDataType("geometry")).toBe(false);
+  });
+});
+
+describe("copySourceColumnDetails", () => {
+  it("keeps the comment and default shown in the copy-fields dialog", () => {
+    expect(copySourceColumnDetails({ data_type: "varchar(20)", column_default: "'unknown'", comment: "名称" })).toEqual({ defaultValue: "'unknown'", comment: "名称" });
+  });
+
+  it("keeps falsy-looking defaults such as 0 and empty strings", () => {
+    expect(copySourceColumnDetails({ data_type: "int", column_default: "0", comment: null })).toEqual({ defaultValue: "0", comment: null });
+    expect(copySourceColumnDetails({ data_type: "varchar(20)", column_default: "''", comment: null })).toEqual({ defaultValue: "''", comment: null });
+  });
+
+  it("drops blank metadata instead of rendering an empty label", () => {
+    expect(copySourceColumnDetails({ data_type: "int", column_default: null, comment: null })).toEqual({ defaultValue: null, comment: null });
+    expect(copySourceColumnDetails({ data_type: "int", column_default: undefined, comment: undefined })).toEqual({ defaultValue: null, comment: null });
+    expect(copySourceColumnDetails({ data_type: "int", column_default: "  ", comment: "   " })).toEqual({ defaultValue: null, comment: null });
+  });
+
+  it("trims padded metadata for display", () => {
+    expect(copySourceColumnDetails({ data_type: "int", column_default: " 1 ", comment: " 备注 " })).toEqual({ defaultValue: "1", comment: "备注" });
+  });
+
+  it("normalizes defaults per database like the editor grid", () => {
+    expect(copySourceColumnDetails({ data_type: "character varying", column_default: "'unknown'::character varying", comment: null }, "postgres")).toEqual({ defaultValue: "'unknown'", comment: null });
+    expect(copySourceColumnDetails({ data_type: "int", column_default: "((0))", comment: null }, "sqlserver")).toEqual({ defaultValue: "0", comment: null });
+    expect(copySourceColumnDetails({ data_type: "varchar(50)", column_default: "", comment: null }, "mysql")).toEqual({ defaultValue: "''", comment: null });
+  });
+});
+
+describe("matchesCopySourceColumnSearch", () => {
+  const column = { name: "status", data_type: "tinyint", column_default: "1", comment: "状态：1启用 0停用" };
+
+  it("matches everything for a blank query", () => {
+    expect(matchesCopySourceColumnSearch(column, "")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "   ")).toBe(true);
+  });
+
+  it("matches name and type case-insensitively", () => {
+    expect(matchesCopySourceColumnSearch(column, "STAT")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "TINY")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "missing")).toBe(false);
+  });
+
+  it("matches comments and default values too", () => {
+    expect(matchesCopySourceColumnSearch(column, "启用")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "1")).toBe(true);
+    expect(matchesCopySourceColumnSearch({ ...column, column_default: null, comment: null }, "1")).toBe(false);
+  });
+});
+
+describe("structureColumnNamesForCopy", () => {
+  const column = (name: string, markedForDrop = false) => ({ name, markedForDrop });
+
+  it("keeps the visible field order", () => {
+    expect(structureColumnNamesForCopy([column("id"), column("name"), column("note")])).toEqual(["id", "name", "note"]);
+  });
+
+  it("drops fields marked for drop and blank names", () => {
+    expect(structureColumnNamesForCopy([column("id"), column("drop_me", true), column("  "), column(" name ")])).toEqual(["id", "name"]);
+  });
+
+  it("returns nothing for an empty table", () => {
+    expect(structureColumnNamesForCopy([])).toEqual([]);
+  });
+});
+
+describe("structureColumnCommentsForCopy", () => {
+  it("maps trimmed names to trimmed comments", () => {
+    const comments = structureColumnCommentsForCopy([
+      { name: "id", comment: " 主键 ", markedForDrop: false },
+      { name: "name", comment: "名称", markedForDrop: false },
+    ]);
+    expect([...comments]).toEqual([
+      ["id", "主键"],
+      ["name", "名称"],
+    ]);
+  });
+
+  it("skips dropped fields, blank comments and blank names", () => {
+    const comments = structureColumnCommentsForCopy([
+      { name: "gone", comment: "已删除", markedForDrop: true },
+      { name: "empty", comment: "   ", markedForDrop: false },
+      { name: "blank-name", comment: null, markedForDrop: false },
+      { name: "  ", comment: "没有字段名", markedForDrop: false },
+    ]);
+    expect(comments.size).toBe(0);
+  });
+});
+
+describe("draftColumnNameForSql", () => {
+  // MySQL rejects identifiers that end with a space (ERROR 1166), so a name the
+  // user pasted with a trailing space must not reach the DDL builder as typed.
+  it("drops the trailing whitespace of a name the user typed", () => {
+    expect(draftColumnNameForSql("device_app_face_status ", "app_auth_status")).toBe("device_app_face_status");
+    expect(draftColumnNameForSql("display_name\t", "name")).toBe("display_name");
+    expect(draftColumnNameForSql("new_column\n  ")).toBe("new_column");
+  });
+
+  // #9654: leading spaces are legal inside a backtick-quoted identifier, so the
+  // user's spelling is kept for a new column and for a metadata name alike.
+  it("keeps leading spaces of a name the user typed", () => {
+    expect(draftColumnNameForSql("  content1")).toBe("  content1");
+  });
+
+  it("keeps an untouched metadata name byte-exact so whitespace is never read as a rename", () => {
+    expect(draftColumnNameForSql("  content1", "  content1")).toBe("  content1");
+    expect(draftColumnNameForSql("content1 ", "content1 ")).toBe("content1 ");
+    expect(draftColumnNameForSql("plain", "plain")).toBe("plain");
   });
 });

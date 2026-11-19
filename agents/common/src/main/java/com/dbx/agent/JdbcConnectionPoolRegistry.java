@@ -13,9 +13,11 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.sql.SQLTransientConnectionException;
+import java.sql.SQLTimeoutException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -59,6 +61,10 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
     private final JdbcCheckoutExecutor checkoutExecutor;
     private final AtomicReference<SQLException> runtimeFailure = new AtomicReference<>();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final Object dedicatedMonitor = new Object();
+    private final Set<DedicatedOwner> dedicatedOwners = ConcurrentHashMap.newKeySet();
+    private final Set<DedicatedAttempt> dedicatedAttempts = ConcurrentHashMap.newKeySet();
+    private boolean physicalExecutorsClosed;
 
     JdbcConnectionPoolRegistry() {
         this(PoolSettings.fromEnvironment());
@@ -121,12 +127,64 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         return pools.size();
     }
 
+    /** Uses the existing physical budget and watchdogs, but never enters a reusable pool. */
+    Connection openDedicatedConnection(ConnectionFactory connectionFactory) throws SQLException {
+        if (closed.get()) throw new IllegalStateException("JDBC connection pool registry is closed");
+        SQLException failure = runtimeFailure.get();
+        if (failure != null) throw AgentRpcError.resource("connect", failure);
+        ConnectionFactoryDataSource source = new ConnectionFactoryDataSource(connectionFactory,
+            physicalConnectionBudget, physicalConnectionOpener, physicalConnectionCloser,
+            settings.connectionTimeoutMillis);
+        OperationDeadline deadline = new OperationDeadline(settings.connectionTimeoutMillis);
+        try (ConnectionFactoryDataSource.DeadlineRegistration ignored = source.registerCheckout(deadline)) {
+            Connection opened = source.getConnection();
+            // No Hikari setup follows on this path: the initialized physical connection is ready.
+            ((HikariSetupTrackedConnection) opened).completeHikariSetup();
+            return opened;
+        } catch (SQLException error) {
+            if (contains(error, PhysicalConnectionLimitException.class)) {
+                throw AgentRpcError.backpressure("connect", error);
+            }
+            if (requiresRuntimeReplacement(error)) throw AgentRpcError.resource("connect", error);
+            throw error;
+        }
+    }
+
     boolean isEnabled() {
         return settings.enabled;
     }
 
     int activePhysicalConnectionCount() {
         return physicalConnectionBudget.activeCount();
+    }
+
+    AbstractJdbcAgent.DedicatedConnectionOwner registerDedicatedOwner(
+        ConnectionFactory factory,
+        ConnectionInitializer initializer,
+        Runnable onRetire,
+        Runnable onCompletion
+    ) {
+        synchronized (dedicatedMonitor) {
+            if (closed.get()) throw new IllegalStateException("JDBC connection pool registry is closed");
+            DedicatedOwner owner = new DedicatedOwner(factory, initializer, onRetire, onCompletion);
+            dedicatedOwners.add(owner);
+            return owner;
+        }
+    }
+
+    /** Only dedicated resources keep the runtime alive; ordinary shutdown stays bounded. */
+    void awaitDedicatedDrain() {
+        boolean interrupted = false;
+        synchronized (dedicatedMonitor) {
+            while (!dedicatedOwners.isEmpty() || !dedicatedAttempts.isEmpty()) {
+                try {
+                    dedicatedMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
     }
 
     boolean hasActiveLeases(String identity) {
@@ -197,9 +255,13 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
 
     @Override
     public void close() {
-        if (!closed.compareAndSet(false, true)) {
-            return;
+        List<DedicatedOwner> retiring;
+        synchronized (dedicatedMonitor) {
+            if (!closed.compareAndSet(false, true)) return;
+            retiring = List.copyOf(dedicatedOwners);
+            for (DedicatedOwner owner : retiring) owner.retired = true;
         }
+        for (DedicatedOwner owner : retiring) owner.onRetire.run();
         for (PoolEntry entry : pools.values()) {
             entry.close();
         }
@@ -207,8 +269,18 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         checkoutExecutor.close();
         connectionReleaseExecutor.close();
         poolCloseExecutor.close();
-        physicalConnectionOpener.close();
-        physicalConnectionCloser.close();
+        finishDedicatedDrain();
+    }
+
+    private void finishDedicatedDrain() {
+        synchronized (dedicatedMonitor) {
+            if (closed.get() && dedicatedOwners.isEmpty() && dedicatedAttempts.isEmpty() && !physicalExecutorsClosed) {
+                physicalExecutorsClosed = true;
+                physicalConnectionOpener.close();
+                physicalConnectionCloser.close();
+            }
+            dedicatedMonitor.notifyAll();
+        }
     }
 
     private static String digest(String identity) {
@@ -259,13 +331,268 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         Connection open() throws Exception;
     }
 
+    @FunctionalInterface
+    interface ConnectionInitializer {
+        void initialize(Connection connection) throws Exception;
+    }
+
+    private final class DedicatedOwner implements AbstractJdbcAgent.DedicatedConnectionOwner {
+        private final ConnectionFactoryDataSource dataSource;
+        private final ConnectionInitializer initializer;
+        private final Runnable onRetire;
+        private final Runnable onCompletion;
+        private boolean retired;
+        private boolean finished;
+        private final Map<Connection, TrackedPhysicalConnection> deliveredConnections = new IdentityHashMap<>();
+
+        private DedicatedOwner(ConnectionFactory factory, ConnectionInitializer initializer, Runnable onRetire, Runnable onCompletion) {
+            this.dataSource = new ConnectionFactoryDataSource(factory, physicalConnectionBudget,
+                physicalConnectionOpener, physicalConnectionCloser, settings.connectionTimeoutMillis);
+            this.initializer = initializer;
+            this.onRetire = onRetire;
+            this.onCompletion = onCompletion;
+        }
+
+        @Override
+        public Connection open() throws Exception {
+            return open(new OperationDeadline(settings.connectionTimeoutMillis));
+        }
+
+        @Override
+        public Connection openUntil(long deadlineNanos) throws Exception {
+            OperationDeadline deadline = new OperationDeadline(settings.connectionTimeoutMillis, deadlineNanos);
+            if (deadline.remainingNanos() == 0) throw new SQLTimeoutException("Dedicated connection deadline expired before allocation");
+            return open(deadline);
+        }
+
+        private Connection open(OperationDeadline deadline) throws Exception {
+            DedicatedAttempt attempt;
+            synchronized (dedicatedMonitor) {
+                if (closed.get() || retired || finished) throw new PoolRetiredException();
+                SQLException failure = runtimeFailure.get();
+                if (failure != null) throw AgentRpcError.resource("connect", failure);
+                attempt = new DedicatedAttempt(this, deadline);
+                dedicatedAttempts.add(attempt);
+            }
+            return attempt.open();
+        }
+
+        @Override
+        public boolean closeConnectionUntil(Connection connection, long deadlineNanos) throws SQLException {
+            TrackedPhysicalConnection physical;
+            synchronized (dedicatedMonitor) { physical = deliveredConnections.get(connection); }
+            if (physical == null) throw new SQLException("The connection does not belong to this dedicated owner");
+            return physical.awaitClose(physical.beginClose(), deadlineNanos);
+        }
+
+        @Override
+        public boolean closeUnreturnedConnectionsUntil(long deadlineNanos) throws SQLException {
+            List<TrackedPhysicalConnection> unreturned;
+            synchronized (dedicatedMonitor) {
+                unreturned = dedicatedAttempts.stream()
+                    .filter(attempt -> attempt.owner == this && attempt.workerFinished && !attempt.delivered && attempt.physical != null)
+                    .map(attempt -> attempt.physical).toList();
+            }
+            Map<TrackedPhysicalConnection, CompletableFuture<Void>> flights = new LinkedHashMap<>();
+            SQLException failure = null;
+            for (TrackedPhysicalConnection physical : unreturned) {
+                try { flights.put(physical, physical.beginClose()); }
+                catch (SQLException error) {
+                    if (failure == null) failure = error;
+                    else failure.addSuppressed(error);
+                }
+            }
+            for (Map.Entry<TrackedPhysicalConnection, CompletableFuture<Void>> flight : flights.entrySet()) {
+                try { flight.getKey().awaitClose(flight.getValue(), deadlineNanos); }
+                catch (SQLException error) {
+                    if (failure == null) failure = error;
+                    else failure.addSuppressed(error);
+                }
+            }
+            if (failure != null) throw failure;
+            return resourcesReleased();
+        }
+
+        @Override
+        public boolean resourcesReleased() {
+            synchronized (dedicatedMonitor) {
+                return dedicatedAttempts.stream().noneMatch(attempt -> attempt.owner == this);
+            }
+        }
+
+        @Override
+        public void closeUnreturnedConnections() throws SQLException {
+            List<TrackedPhysicalConnection> unreturned;
+            synchronized (dedicatedMonitor) {
+                unreturned = dedicatedAttempts.stream()
+                    .filter(attempt -> attempt.owner == this && attempt.workerFinished && !attempt.delivered && attempt.physical != null)
+                    .map(attempt -> attempt.physical).toList();
+            }
+            SQLException failure = null;
+            for (TrackedPhysicalConnection connection : unreturned) {
+                try { connection.close(); }
+                catch (SQLException error) {
+                    if (failure == null) failure = error;
+                    else failure.addSuppressed(error);
+                }
+            }
+            if (failure != null) throw failure;
+        }
+
+        @Override
+        public void close() {
+            synchronized (dedicatedMonitor) {
+                if (finished) return;
+                if (!resourcesReleased()) throw new IllegalStateException("Dedicated JDBC resources are not yet released");
+                finished = true;
+                dedicatedOwners.remove(this);
+            }
+            finishDedicatedDrain();
+        }
+    }
+
+    /** One allocation, not a business operation: retains late results until physical close is confirmed. */
+    private final class DedicatedAttempt {
+        private final DedicatedOwner owner;
+        private final OperationDeadline deadline;
+        private final CompletableFuture<Connection> outcome = new CompletableFuture<>();
+        private boolean abandoned;
+        private boolean workerFinished;
+        private boolean permit;
+        private boolean delivered;
+        private boolean unreturnedUnknown;
+        private TrackedPhysicalConnection physical;
+
+        private DedicatedAttempt(DedicatedOwner owner, OperationDeadline deadline) { this.owner = owner; this.deadline = deadline; }
+
+        private boolean canDeliver() {
+            return !closed.get() && !owner.retired && !abandoned && deadline.remainingNanos() > 0L;
+        }
+
+        private Connection open() throws Exception {
+            try {
+                physicalConnectionBudget.acquire(deadline);
+            } catch (SQLException error) {
+                synchronized (dedicatedMonitor) { workerFinished = true; }
+                completeIfReleased();
+                if (error instanceof PhysicalConnectionLimitException) throw AgentRpcError.backpressure("connect", error);
+                throw error;
+            }
+            synchronized (dedicatedMonitor) {
+                permit = true;
+                if (!canDeliver()) {
+                    physicalConnectionBudget.release();
+                    permit = false;
+                    workerFinished = true;
+                }
+            }
+            if (workerFinished) {
+                completeIfReleased();
+                throw new PhysicalConnectionAttemptCanceledException();
+            }
+            try {
+                physicalConnectionOpener.executor.execute(this::completeOpen);
+            } catch (RejectedExecutionException error) {
+                synchronized (dedicatedMonitor) {
+                    physicalConnectionBudget.release();
+                    permit = false;
+                    workerFinished = true;
+                }
+                completeIfReleased();
+                throw AgentRpcError.resource("connect", new JdbcOperationCapacityException("physical_connect", error));
+            }
+            try {
+                return outcome.get(deadline.remainingNanos(), TimeUnit.NANOSECONDS);
+            } catch (TimeoutException | InterruptedException error) {
+                if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+                synchronized (dedicatedMonitor) {
+                    abandoned = true;
+                    outcome.completeExceptionally(new PhysicalConnectionStateUnknownException(error));
+                }
+                return completedOutcome();
+            } catch (ExecutionException error) {
+                PhysicalConnectionOpener.throwOpenFailure(error.getCause());
+                throw new IllegalStateException("unreachable");
+            }
+        }
+
+        private Connection completedOutcome() throws Exception {
+            try { return outcome.get(); }
+            catch (ExecutionException error) {
+                PhysicalConnectionOpener.throwOpenFailure(error.getCause());
+                throw new IllegalStateException("unreachable");
+            }
+        }
+
+        private void completeOpen() {
+            try {
+                synchronized (dedicatedMonitor) {
+                    if (!canDeliver()) throw new PhysicalConnectionAttemptCanceledException();
+                }
+                Connection raw = Objects.requireNonNull(owner.dataSource.connectionFactory.open(), "JDBC connection factory returned null");
+                ConnectionFactoryDataSource.HikariSetupAttempt setup = owner.dataSource.new HikariSetupAttempt(owner.dataSource.beginAttempt());
+                synchronized (dedicatedMonitor) {
+                    physical = new TrackedPhysicalConnection(raw, physicalConnectionBudget, physicalConnectionCloser,
+                        owner.dataSource, settings.connectionTimeoutMillis, setup, this::physicalClosed);
+                }
+                synchronized (dedicatedMonitor) {
+                    if (!canDeliver()) throw new PhysicalConnectionAttemptCanceledException();
+                }
+                owner.initializer.initialize(physical.connection);
+                setup.completeSuccessfully();
+                synchronized (dedicatedMonitor) {
+                    if (!canDeliver() || !outcome.complete(physical.connection)) {
+                        throw new PhysicalConnectionAttemptCanceledException();
+                    }
+                    delivered = true;
+                    owner.deliveredConnections.put(physical.connection, physical);
+                }
+            } catch (Throwable error) {
+                if (physical == null && contains(error, PhysicalConnectionStateUnknownException.class)) unreturnedUnknown = true;
+                if (physical != null) {
+                    if (error instanceof SQLException sqlError) physical.setupAttempt.recordFailure(sqlError);
+                    try { physical.close(); }
+                    catch (SQLException closeError) { error.addSuppressed(closeError); }
+                }
+                outcome.completeExceptionally(error);
+            } finally {
+                synchronized (dedicatedMonitor) {
+                    workerFinished = true;
+                    if (physical == null && permit && !unreturnedUnknown) {
+                        physicalConnectionBudget.release();
+                        permit = false;
+                    }
+                }
+                completeIfReleased();
+                owner.onCompletion.run();
+            }
+        }
+
+        private void physicalClosed() {
+            completeIfReleased();
+            owner.onCompletion.run();
+        }
+
+        private void completeIfReleased() {
+            synchronized (dedicatedMonitor) {
+                if (workerFinished && !unreturnedUnknown && (physical == null || physical.released.get())) dedicatedAttempts.remove(this);
+            }
+            finishDedicatedDrain();
+        }
+    }
+
     private static final class OperationDeadline {
         private final long deadlineNanos;
 
         private OperationDeadline(long timeoutMillis) {
+            this(timeoutMillis, Long.MAX_VALUE);
+        }
+
+        private OperationDeadline(long timeoutMillis, long requestedDeadlineNanos) {
             long timeoutNanos = TimeUnit.MILLISECONDS.toNanos(Math.max(1L, timeoutMillis));
             long now = System.nanoTime();
-            this.deadlineNanos = now > Long.MAX_VALUE - timeoutNanos ? Long.MAX_VALUE : now + timeoutNanos;
+            long configuredDeadline = now > Long.MAX_VALUE - timeoutNanos ? Long.MAX_VALUE : now + timeoutNanos;
+            this.deadlineNanos = Math.min(configuredDeadline, requestedDeadlineNanos);
         }
 
         private long remainingNanos() {
@@ -1510,20 +1837,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             long timeoutMillis,
             boolean preserveCompletedFailure
         ) throws SQLException {
-            CompletableFuture<T> outcome = new CompletableFuture<>();
-            try {
-                executor.execute(() -> {
-                    try {
-                        outcome.complete(call.run());
-                    } catch (Throwable error) {
-                        outcome.completeExceptionally(error);
-                    }
-                });
-            } catch (RejectedExecutionException error) {
-                SQLException failure = new JdbcOperationCapacityException(operation, error);
-                factoryDataSource.poison(failure);
-                throw failure;
-            }
+            CompletableFuture<T> outcome = submit(operation, call, factoryDataSource);
             OperationDeadline deadline = new OperationDeadline(timeoutMillis);
             try {
                 return outcome.get(deadline.remainingNanos(), TimeUnit.NANOSECONDS);
@@ -1550,9 +1864,31 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             }
         }
 
+        private <T> CompletableFuture<T> submit(
+            String operation,
+            PhysicalConnectionCall<T> call,
+            ConnectionFactoryDataSource factoryDataSource
+        ) throws SQLException {
+            CompletableFuture<T> outcome = new CompletableFuture<>();
+            try {
+                executor.execute(() -> {
+                    try {
+                        outcome.complete(call.run());
+                    } catch (Throwable error) {
+                        outcome.completeExceptionally(error);
+                    }
+                });
+            } catch (RejectedExecutionException error) {
+                SQLException failure = new JdbcOperationCapacityException(operation, error);
+                factoryDataSource.poison(failure);
+                throw failure;
+            }
+            return outcome;
+        }
+
         @Override
         public void close() {
-            executor.shutdownNow();
+            executor.shutdown();
         }
     }
 
@@ -1563,6 +1899,122 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
 
     private interface HikariSetupTrackedConnection {
         void completeHikariSetup();
+    }
+
+    /** Shared by Hikari and dedicated connections: one in-flight raw close and one permit return. */
+    private static final class TrackedPhysicalConnection {
+        private final Connection raw;
+        private final Connection connection;
+        private final PhysicalConnectionBudget budget;
+        private final PhysicalConnectionCloser closer;
+        private final ConnectionFactoryDataSource dataSource;
+        private final long closeTimeoutMillis;
+        private final ConnectionFactoryDataSource.HikariSetupAttempt setupAttempt;
+        private final Runnable onClosed;
+        private final AtomicBoolean released = new AtomicBoolean();
+        private CompletableFuture<Void> closeCompletion;
+
+        private TrackedPhysicalConnection(Connection raw, PhysicalConnectionBudget budget,
+            PhysicalConnectionCloser closer, ConnectionFactoryDataSource dataSource, long closeTimeoutMillis,
+            ConnectionFactoryDataSource.HikariSetupAttempt setupAttempt, Runnable onClosed) {
+            this.raw = raw;
+            this.budget = budget;
+            this.closer = closer;
+            this.dataSource = dataSource;
+            this.closeTimeoutMillis = closeTimeoutMillis;
+            this.setupAttempt = setupAttempt;
+            this.onClosed = onClosed;
+            this.connection = (Connection) Proxy.newProxyInstance(JdbcConnectionPoolRegistry.class.getClassLoader(),
+                new Class<?>[]{Connection.class, HikariSetupTrackedConnection.class}, (proxy, method, arguments) -> {
+                    String name = method.getName();
+                    if ("completeHikariSetup".equals(name) && method.getParameterCount() == 0) {
+                        setupAttempt.completeSuccessfully();
+                        return null;
+                    }
+                    if ("close".equals(name) && method.getParameterCount() == 0) {
+                        close();
+                        return null;
+                    }
+                    if ("abort".equals(name) && method.getParameterCount() == 1) {
+                        synchronized (this) {
+                            if (released.get()) return null;
+                            if (closeCompletion == null || closeCompletion.isDone()) {
+                                closer.abort(raw, (Executor) arguments[0], dataSource, closeTimeoutMillis);
+                            }
+                        }
+                        throw unknown(new SQLException("JDBC abort does not confirm physical release"));
+                    }
+                    if ("isClosed".equals(name) && method.getParameterCount() == 0) {
+                        return released.get() || closer.isClosed(raw, dataSource, closeTimeoutMillis);
+                    }
+                    if ("setNetworkTimeout".equals(name) && method.getParameterCount() == 2) {
+                        closer.setNetworkTimeout(raw, (Executor) arguments[0], (Integer) arguments[1], dataSource, closeTimeoutMillis);
+                        return null;
+                    }
+                    if ("isWrapperFor".equals(name) && ((Class<?>) arguments[0]).isInstance(proxy)) return true;
+                    if ("unwrap".equals(name) && ((Class<?>) arguments[0]).isInstance(proxy)) return proxy;
+                    try {
+                        return method.invoke(raw, arguments);
+                    } catch (InvocationTargetException error) {
+                        Throwable cause = error.getCause();
+                        if (cause instanceof SQLException sqlError) setupAttempt.recordFailure(sqlError);
+                        throw cause;
+                    }
+                });
+        }
+
+        private void close() throws SQLException {
+            CompletableFuture<Void> pending = beginClose();
+            try {
+                pending.get(closeTimeoutMillis, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw unknown(error);
+            } catch (TimeoutException | ExecutionException error) {
+                throw unknown(error instanceof ExecutionException ? error.getCause() : error);
+            }
+        }
+
+        private CompletableFuture<Void> beginClose() throws SQLException {
+            synchronized (this) {
+                if (released.get()) return CompletableFuture.completedFuture(null);
+                // A timed-out wait does not cancel the close. Only an explicitly
+                // retried, already failed close may issue another raw invocation.
+                if (closeCompletion == null || closeCompletion.isCompletedExceptionally()) {
+                    closeCompletion = closer.submit("physical_close", () -> {
+                        raw.close();
+                        if (released.compareAndSet(false, true)) {
+                            setupAttempt.completeAfterPhysicalClose();
+                            budget.release();
+                            if (onClosed != null) onClosed.run();
+                        }
+                        return null;
+                    }, dataSource);
+                }
+                return closeCompletion;
+            }
+        }
+
+        private boolean awaitClose(CompletableFuture<Void> pending, long deadlineNanos) throws SQLException {
+            if (released.get()) return true;
+            try {
+                pending.get(Math.max(0, deadlineNanos - System.nanoTime()), TimeUnit.NANOSECONDS);
+                return released.get();
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw unknown(error);
+            } catch (TimeoutException error) {
+                return released.get();
+            } catch (ExecutionException error) {
+                throw unknown(error.getCause());
+            }
+        }
+
+        private SQLException unknown(Throwable error) {
+            SQLException failure = new PhysicalConnectionStateUnknownException(error);
+            dataSource.poison(failure);
+            return failure;
+        }
     }
 
     private static final class PhysicalConnectionOpener implements AutoCloseable {
@@ -1660,7 +2112,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
 
         @Override
         public void close() {
-            executor.shutdownNow();
+            executor.shutdown();
         }
     }
 
@@ -1692,74 +2144,8 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             long closeTimeoutMillis,
             ConnectionFactoryDataSource.HikariSetupAttempt setupAttempt
         ) {
-            AtomicBoolean released = new AtomicBoolean();
-            return (Connection) Proxy.newProxyInstance(
-                JdbcConnectionPoolRegistry.class.getClassLoader(),
-                new Class<?>[] {Connection.class, HikariSetupTrackedConnection.class},
-                (proxy, method, arguments) -> {
-                    if ("completeHikariSetup".equals(method.getName()) && method.getParameterCount() == 0) {
-                        setupAttempt.completeSuccessfully();
-                        return null;
-                    }
-                    boolean close = "close".equals(method.getName()) && method.getParameterCount() == 0;
-                    boolean abort = "abort".equals(method.getName()) && method.getParameterCount() == 1;
-                    if (close || abort) {
-                        synchronized (released) {
-                            if (released.get()) {
-                                return null;
-                            }
-                            boolean terminated = close
-                                ? physicalConnectionCloser.close(
-                                    connection,
-                                    factoryDataSource,
-                                    closeTimeoutMillis
-                                )
-                                : physicalConnectionCloser.abort(
-                                    connection,
-                                    (Executor) arguments[0],
-                                    factoryDataSource,
-                                    closeTimeoutMillis
-                                );
-                            if (terminated) {
-                                setupAttempt.completeAfterPhysicalClose();
-                                if (released.compareAndSet(false, true)) {
-                                    release();
-                                }
-                                return null;
-                            }
-                            throw new PhysicalConnectionStateUnknownException(
-                                new SQLException("Physical JDBC connection termination did not complete")
-                            );
-                        }
-                    }
-                    if ("isClosed".equals(method.getName()) && method.getParameterCount() == 0) {
-                        return released.get() || physicalConnectionCloser.isClosed(
-                            connection,
-                            factoryDataSource,
-                            closeTimeoutMillis
-                        );
-                    }
-                    if ("setNetworkTimeout".equals(method.getName()) && method.getParameterCount() == 2) {
-                        physicalConnectionCloser.setNetworkTimeout(
-                            connection,
-                            (Executor) arguments[0],
-                            (Integer) arguments[1],
-                            factoryDataSource,
-                            closeTimeoutMillis
-                        );
-                        return null;
-                    }
-                    try {
-                        return method.invoke(connection, arguments);
-                    } catch (InvocationTargetException error) {
-                        Throwable cause = error.getCause();
-                        if (cause instanceof SQLException sqlError) {
-                            setupAttempt.recordFailure(sqlError);
-                        }
-                        throw cause;
-                    }
-                }
-            );
+            return new TrackedPhysicalConnection(connection, this, physicalConnectionCloser,
+                factoryDataSource, closeTimeoutMillis, setupAttempt, null).connection;
         }
 
         private void release() {

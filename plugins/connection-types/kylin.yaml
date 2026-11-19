@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 600
 dbType: kylin
+compareModes: [schema, data]
 rustVariant: Kylin
 label: Apache Kylin
 runtimeMode: agent

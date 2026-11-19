@@ -39,14 +39,14 @@ if (violations.length > 0) {
 console.log(`Static export verified: ${files.length} files contain no GitHub API endpoints.`);
 
 // `<html lang>` uses BCP 47, which is not always the route segment.
-const HTML_LANG = { en: "en", cn: "zh-CN", tr: "tr" };
+const HTML_LANG = { en: "en", cn: "zh-CN" };
 
 const requiredContent = [
   ...LANGUAGES.map((language) => ({
     file: `${language}.html`,
     includes: [`<html lang="${HTML_LANG[language] ?? language}"`, '"@type":"SoftwareApplication"'],
   })),
-  { file: "llms.txt", includes: ["90+ database", "20 MB", "Apache-2.0"] },
+  { file: "llms.txt", includes: ["100+ data systems", "25 MB", "Apache-2.0"] },
 ];
 
 for (const requirement of requiredContent) {
@@ -64,13 +64,7 @@ for (const requirement of requiredContent) {
 
 console.log("Static export metadata verified for language, software schema, and llms.txt accuracy.");
 
-const localizedHtmlFiles = files.filter(
-  (file) =>
-    extname(file) === ".html" &&
-    LANGUAGES.some(
-      (lang) => file === join(outputDirectory, `${lang}.html`) || file.startsWith(`${join(outputDirectory, lang)}${sep}`),
-    ),
-);
+const localizedHtmlFiles = files.filter((file) => extname(file) === ".html" && LANGUAGES.some((lang) => file === join(outputDirectory, `${lang}.html`) || file.startsWith(`${join(outputDirectory, lang)}${sep}`)));
 
 for (const file of localizedHtmlFiles) {
   const content = await readFile(file, "utf8");

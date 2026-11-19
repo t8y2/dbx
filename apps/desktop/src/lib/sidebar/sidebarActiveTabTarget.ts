@@ -1,4 +1,5 @@
 import { SIDEBAR_TREE_ROW_HEIGHT, type FlatTreeNode } from "@/composables/useFlatTree";
+import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import type { QueryTab, TreeNode } from "@/types/database";
 
 export type ActiveTabSidebarTarget =
@@ -7,11 +8,26 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "management";
+      connectionId: string;
+      nodeType: "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin" | "database-job-admin";
+    }
+  | {
       type: "table";
+      catalog?: string;
       connectionId: string;
       database: string;
       schema?: string;
       tableName: string;
+    }
+  | {
+      type: "redis-db";
+      connectionId: string;
+      database: string;
+    }
+  | {
+      type: "mqtt-topic";
+      connectionId: string;
     }
   | {
       type: "mongo-collection";
@@ -109,18 +125,57 @@ export function findSidebarConnectionNode(nodes: readonly TreeNode[], connection
 export function activeTabSidebarTarget(tab: QueryTab | undefined | null): ActiveTabSidebarTarget | null {
   if (!tab) return null;
 
+  const managementNodeTypes = {
+    users: "user-admin",
+    "xugu-users": "xugu-user-admin",
+    "dameng-users": "dameng-users",
+    "dameng-roles": "dameng-roles",
+    "dameng-jobs": "dameng-job-admin",
+    "database-jobs": "database-job-admin",
+  } as const;
+  if (Object.prototype.hasOwnProperty.call(managementNodeTypes, tab.mode)) {
+    if (!tab.connectionId) return null;
+    return { type: "management", connectionId: tab.connectionId, nodeType: managementNodeTypes[tab.mode as keyof typeof managementNodeTypes] };
+  }
+
   if (tab.mode === "databases") {
     return { type: "connection", connectionId: tab.connectionId };
   }
 
+  if (tab.mode === "objects" || tab.mode === "database-search" || (tab.mode === "structure" && !tab.structureTableName)) {
+    if (!tab.connectionId) return null;
+    if (!tab.database) return { type: "connection", connectionId: tab.connectionId };
+    return {
+      type: "query-context",
+      connectionId: tab.connectionId,
+      database: tab.database,
+      catalog: tab.objectBrowser?.catalog ?? tab.catalog,
+      schema: tab.objectBrowser?.schema ?? tab.schema,
+    };
+  }
+
+  if (tab.mode === "structure") {
+    return { type: "table", connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema: tab.schema, tableName: tab.structureTableName! };
+  }
+
+  if (tab.mode === "redis") {
+    return { type: "redis-db", connectionId: tab.connectionId, database: tab.database };
+  }
+
+  if (tab.mode === "mqtt") {
+    return { type: "mqtt-topic", connectionId: tab.connectionId };
+  }
+
   if (tab.mode === "data") {
-    const tableName = tab.tableMeta?.tableName || tab.title;
+    const tableMeta = tableMetaForDataTab(tab);
+    const tableName = tableMeta?.tableName || tab.title;
     if (!tableName) return null;
     return {
       type: "table",
       connectionId: tab.connectionId,
-      database: tab.database,
-      schema: tab.tableMeta?.schema ?? tab.schema,
+      database: tableMeta?.database ?? tab.database,
+      ...(tab.catalog ? { catalog: tab.catalog } : {}),
+      schema: tableMeta?.schema ?? tab.schema,
       tableName,
     };
   }
@@ -227,7 +282,8 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
   }
 
   if (tab.mode === "query") {
-    if (!tab.connectionId || !tab.database) return null;
+    if (!tab.connectionId) return null;
+    if (!tab.database) return { type: "connection", connectionId: tab.connectionId };
     return {
       type: "query-context",
       connectionId: tab.connectionId,
@@ -237,7 +293,9 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     };
   }
 
-  return null;
+  // Connection workspaces (dashboards, MQ without a tenant, and plugins)
+  // have no more specific object identity.
+  return tab.connectionId ? { type: "connection", connectionId: tab.connectionId } : null;
 }
 
 function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
@@ -254,6 +312,17 @@ function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
 export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): boolean {
   if (target.type === "connection") {
     return node.type === "connection" && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "management") {
+    return node.type === target.nodeType && node.connectionId === target.connectionId;
+  }
+
+  if (target.type === "redis-db") {
+    return node.type === "redis-db" && node.connectionId === target.connectionId && node.database === target.database;
+  }
+  if (target.type === "mqtt-topic") {
+    return node.type === "mqtt-topic" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "mongo-collection") {
@@ -284,7 +353,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     if (target.schema) {
       return node.type === "schema" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.schema;
     }
-    return node.type === "database" && node.connectionId === target.connectionId && node.label === target.database;
+    return (node.type === "database" || node.type === "mongo-db" || node.type === "redis-db" || node.type === "vector-database") && node.connectionId === target.connectionId && (node.database ?? node.label) === target.database;
   }
 
   if (target.type === "etcd-root") {
@@ -325,7 +394,14 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     return node.type === "saved-sql-file" && node.savedSqlId === target.savedSqlId;
   }
 
-  return (node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId === target.connectionId && node.database === target.database && schemaMatches(node, target.schema) && node.label === target.tableName;
+  return (
+    (node.type === "table" || node.type === "view" || node.type === "materialized_view") &&
+    (node.catalog || undefined) === (target.catalog || undefined) &&
+    node.connectionId === target.connectionId &&
+    node.database === target.database &&
+    schemaMatches(node, target.schema) &&
+    node.label === target.tableName
+  );
 }
 
 export function findSidebarNodeForActiveTab(tab: QueryTab | undefined | null, flatNodes: readonly FlatTreeNode[]): FlatTreeNode | null {
@@ -341,6 +417,40 @@ export function findSidebarNodeForTarget(target: ActiveTabSidebarTarget, flatNod
 export function shouldScrollActiveSidebarSelection(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): boolean {
   if (!options.autoSelectEnabled) return false;
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
+}
+
+/**
+ * Tracks whether the auto-select reveal for the current tab is still pending, so retries can
+ * finish it once async tree children arrive, while user-initiated collapses after it settled
+ * are left alone: re-running the reveal on every flatNodes change re-expanded whatever the
+ * user had just collapsed, making connection/database nodes impossible to fold (#13839, #13849).
+ */
+export class ActiveTabSidebarRevealTracker {
+  private initialized = false;
+  private pending = false;
+  private pendingScroll = false;
+  private pendingTabId: string | null | undefined;
+
+  /** Feed the watcher's previous/current values; returns whether the reveal should run now and with which scroll intent. */
+  onWatchTrigger(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): { run: boolean; scroll: boolean } {
+    const changed = !this.initialized || options.activeTabId !== options.previousActiveTabId || options.autoSelectEnabled !== options.previousAutoSelectEnabled;
+    this.initialized = true;
+    if (!options.autoSelectEnabled || !options.activeTabId) {
+      this.pending = false;
+      return { run: false, scroll: false };
+    }
+    if (changed) {
+      this.pending = true;
+      this.pendingTabId = options.activeTabId;
+      this.pendingScroll = shouldScrollActiveSidebarSelection(options);
+    }
+    return { run: this.pending, scroll: this.pending ? this.pendingScroll : false };
+  }
+
+  /** Settles the pending reveal once it landed (found); a miss stays pending so the next tree load retries. */
+  onSettled(found: boolean, tabId: string | null | undefined): void {
+    if (found && tabId === this.pendingTabId) this.pending = false;
+  }
 }
 
 // nearest is used for passive auto-selection; smart keeps context for the existing toolbar action.
@@ -396,4 +506,15 @@ function findPath(nodes: readonly TreeNode[], predicate: (node: TreeNode) => boo
     }
   }
   return null;
+}
+
+/** Expand loaded ancestors, including runtime Queries containers without metadata load markers. */
+export function expandSidebarLocatePath(path: readonly TreeNode[], canToggleLoaded: (node: TreeNode) => boolean): void {
+  for (let index = 0; index < path.length; index++) {
+    const node = path[index]!;
+    const next = path[index + 1];
+    const runtimeSqlAncestor = (node.type === "saved-sql-root" || node.type === "saved-sql-folder") && !!next && !!node.children?.some((child) => child.id === next.id);
+    // Keep unloaded table/collection leaves collapsed: their columns were not fetched.
+    if (!node.isExpanded && (runtimeSqlAncestor || canToggleLoaded(node))) node.isExpanded = true;
+  }
 }

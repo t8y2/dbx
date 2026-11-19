@@ -68,6 +68,11 @@ impl PacketHeader {
         }
     }
 
+    pub fn attention(id: u8) -> Self {
+        Self { ty: PacketType::AttentionSignal, status: PacketStatus::EndOfMessage,
+            ..Self::new(8, id) }
+    }
+
     pub fn rpc(id: u8) -> Self {
         Self {
             ty: PacketType::Rpc,

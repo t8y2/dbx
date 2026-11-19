@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
+import { buildHunks } from "@/components/diff/DiffHunkBuilder";
+import { findFirstSchemaDiffChangedLineNumber, findSchemaDiffDdlLineNumber } from "@/lib/schema/schemaDiffDdlLocate";
 import type { SchemaDiffObject } from "@/lib/schema/schemaDiff";
 
 const field: SchemaDiffObject = {
@@ -27,5 +28,26 @@ describe("schema diff DDL location", () => {
 
     expect(findSchemaDiffDdlLineNumber(source, createdField, "source")).toBe(2);
     expect(findSchemaDiffDdlLineNumber(target, createdField, "target")).toBeNull();
+  });
+
+  it("finds the first changed line when a modified table row is selected", () => {
+    const source = ["CREATE TABLE `agents` (", "  `id` bigint NOT NULL,", "  `context_window` int NOT NULL", ");"].join("\n");
+    const target = ["CREATE TABLE `agents` (", "  `id` bigint NOT NULL,", "  `context_window` int DEFAULT NULL", ");"].join("\n");
+    const hunks = buildHunks(source, target);
+
+    expect(findFirstSchemaDiffChangedLineNumber(hunks, "source")).toBe(3);
+    expect(findFirstSchemaDiffChangedLineNumber(hunks, "target")).toBe(3);
+  });
+
+  it("skips padding when a table change exists on only one side", () => {
+    const hunks = [
+      {
+        leftLines: [{ type: "equal", lineNumber: null, isPadding: true }],
+        rightLines: [{ type: "insert", lineNumber: 4, isPadding: false }],
+      },
+    ];
+
+    expect(findFirstSchemaDiffChangedLineNumber(hunks, "source")).toBeNull();
+    expect(findFirstSchemaDiffChangedLineNumber(hunks, "target")).toBe(4);
   });
 });

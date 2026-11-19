@@ -48,6 +48,7 @@ export function createTunnelProfile(type: TunnelProfileType): TunnelProfile {
       enabled: true,
       url: "",
       token: "",
+      protocol: "dbx_tcp",
       connect_timeout_secs: 10,
     };
   }
@@ -66,6 +67,7 @@ export function createTunnelProfile(type: TunnelProfileType): TunnelProfile {
     expose_lan: false,
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
+    ssh_agent_key_fingerprint: "",
     auth_method: "password",
   };
 }

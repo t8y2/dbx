@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
-import { ref, watch, computed } from "vue";
+import { ref, watch, computed, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import type { TopicRef, TopicInfo, SubscriptionInfo, ResetPosition, SkipCount, PeekedMessage, MqSystemKind } from "@/types/mq";
 import { mqListSubscriptions, mqEnrichSubscriptions, mqCreateSubscription, mqDeleteSubscription, mqResetCursor, mqSkipMessages, mqClearBacklog, mqPeekMessages, mqExpireMessages } from "@/lib/backend/api";
@@ -8,6 +8,7 @@ import RocketMqConsumerGroupDialogs, { type RocketMqConsumerGroupDialogKind } fr
 import MqTypeFilterBar from "./shared/MqTypeFilterBar.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { DEFAULT_ROCKETMQ_CONSUMER_GROUP_TYPE_FILTERS, matchesRocketMqConsumerGroupTypeFilters, resolveRocketMqConsumerGroupMessageModel, resolveRocketMqConsumerGroupType, ROCKETMQ_CONSUMER_GROUP_TYPES, type RocketMqConsumerGroupType } from "@/lib/mq/rocketmqConsumerGroupTypes";
+import { formatMqMessagePayload } from "@/lib/mq/thriftBinary";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
@@ -42,6 +43,10 @@ const error = ref<string>();
 let loadSeq = 0;
 const showCreateDialog = ref(false);
 const showResetDialog = ref(false);
+const resetError = ref<string>();
+const resetting = ref(false);
+let resetRequestVersion = 0;
+let subscriptionContextVersion = 0;
 const showSkipDialog = ref(false);
 const showPeekDialog = ref(false);
 const showExpireDialog = ref(false);
@@ -50,12 +55,14 @@ const peekedMessages = ref<PeekedMessage[]>([]);
 const peekLoading = ref(false);
 const peekIncomplete = ref(false);
 const peekCount = ref(5);
+const decodePeekPayload = ref(false);
 let peekRequestVersion = 0;
 const deleteTarget = ref<SubscriptionInfo>();
 const showDeleteDialog = ref(false);
 const deleting = ref(false);
 const clearBacklogTarget = ref<SubscriptionInfo>();
 const showClearBacklogDialog = ref(false);
+const clearBacklogError = ref<string>();
 const clearingBacklog = ref(false);
 
 const formData = ref({
@@ -256,10 +263,8 @@ function closeRocketMqDialog() {
 }
 
 function openResetDialog(sub: SubscriptionInfo) {
-  if (props.readOnly) {
-    error.value = t("mqSubscriptions.readOnly");
-    return;
-  }
+  if (props.readOnly) return;
+  closeResetDialog();
   selectedSub.value = sub;
   resetFormData.value = {
     position: "latest",
@@ -268,6 +273,14 @@ function openResetDialog(sub: SubscriptionInfo) {
     offset: 0,
   };
   showResetDialog.value = true;
+}
+
+function closeResetDialog() {
+  // A closed dialog must not receive results from an earlier reset request.
+  resetRequestVersion += 1;
+  showResetDialog.value = false;
+  resetError.value = undefined;
+  resetting.value = false;
 }
 
 function openSkipDialog(sub: SubscriptionInfo) {
@@ -361,32 +374,48 @@ async function confirmDelete() {
 }
 
 async function handleResetCursor() {
-  if (!(await guardWritable(t("mqSubscriptions.reset")))) return;
+  if (resetting.value || !showResetDialog.value) return;
+  resetError.value = undefined;
+  if (props.readOnly) {
+    resetError.value = t("mqSubscriptions.readOnly");
+    return;
+  }
   const topicRef = getPulsarTopicRef();
-  if (!selectedSub.value || !topicRef) return;
-  loading.value = true;
-  error.value = undefined;
+  const sub = selectedSub.value;
+  if (!sub || !topicRef) return;
+  const connectionId = props.connectionId;
+  const form = { ...resetFormData.value };
+  const requestVersion = ++resetRequestVersion;
+  const contextVersion = subscriptionContextVersion;
+  resetting.value = true;
   try {
     let pos: ResetPosition;
-    if (resetFormData.value.position === "timestamp") {
-      pos = { kind: "timestamp", timestampMs: resetFormData.value.timestampMs };
-    } else if (resetFormData.value.position === "partitionOffset") {
-      const { partition, offset } = resetFormData.value;
+    if (form.position === "timestamp") {
+      pos = { kind: "timestamp", timestampMs: form.timestampMs };
+    } else if (form.position === "partitionOffset") {
+      const { partition, offset } = form;
       if (!Number.isSafeInteger(partition) || partition < 0 || !Number.isSafeInteger(offset) || offset < 0) {
-        error.value = t("mqSubscriptions.nonNegativeIntegerRequired");
+        resetError.value = t("mqSubscriptions.nonNegativeIntegerRequired");
         return;
       }
       pos = { kind: "partitionOffset", partition, offset };
     } else {
-      pos = { kind: resetFormData.value.position };
+      pos = { kind: form.position };
     }
-    await mqResetCursor(props.connectionId, topicRef, selectedSub.value.name, pos);
-    showResetDialog.value = false;
+    if (!(await confirmMqWrite(t("mqSubscriptions.reset"))) || requestVersion !== resetRequestVersion) return;
+    if (props.readOnly) {
+      resetError.value = t("mqSubscriptions.readOnly");
+      return;
+    }
+    await mqResetCursor(connectionId, topicRef, sub.name, pos);
+    if (contextVersion !== subscriptionContextVersion) return;
+    // Closing the dialog does not cancel a reset already sent to the backend.
+    if (requestVersion === resetRequestVersion) closeResetDialog();
     await loadSubscriptions();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    if (requestVersion === resetRequestVersion) resetError.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (requestVersion === resetRequestVersion) resetting.value = false;
   }
 }
 
@@ -414,6 +443,7 @@ function handleClearBacklog(sub: SubscriptionInfo) {
     return;
   }
   clearBacklogTarget.value = sub;
+  clearBacklogError.value = undefined;
   showClearBacklogDialog.value = true;
 }
 
@@ -424,13 +454,13 @@ async function confirmClearBacklog() {
   const topicRef = getPulsarTopicRef();
   if (!topicRef) return;
   clearingBacklog.value = true;
-  error.value = undefined;
+  clearBacklogError.value = undefined;
   try {
     await mqClearBacklog(props.connectionId, topicRef, sub.name);
     showClearBacklogDialog.value = false;
     await loadSubscriptions();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    clearBacklogError.value = formatError(e);
   } finally {
     clearingBacklog.value = false;
   }
@@ -489,14 +519,20 @@ async function handleExpireMessages() {
 }
 
 watch(
-  () => [props.topic, props.tenant, props.namespace, props.mqSystemKind],
+  () => [props.connectionId, props.topic, props.tenant, props.namespace, props.mqSystemKind],
   () => {
+    subscriptionContextVersion += 1;
+    closeResetDialog();
     selectedSub.value = undefined;
     invalidatePeekRequest();
     loadSubscriptions();
   },
   { immediate: true },
 );
+onBeforeUnmount(() => {
+  subscriptionContextVersion += 1;
+  closeResetDialog();
+});
 </script>
 
 <template>
@@ -540,6 +576,7 @@ watch(
           <thead>
             <tr>
               <th>{{ t("mqSubscriptions.subscriptionName") }}</th>
+              <th v-if="mqSystemKind === 'rabbitmq'">{{ t("mqClients.address") }}</th>
               <th>{{ t("mqSubscriptions.type") }}</th>
               <th v-if="isRocketMqCluster">{{ t("mqSubscriptions.mode") }}</th>
               <th v-if="isClusterWideMode">{{ t("mqSubscriptions.subscribedTopics") }}</th>
@@ -552,6 +589,14 @@ watch(
           <tbody>
             <tr v-for="sub in filteredSubscriptions" :key="sub.name" :class="{ selected: selectedSub?.name === sub.name }" @click="selectSubscription(sub)">
               <td class="sub-name">{{ sub.name }}</td>
+              <td v-if="mqSystemKind === 'rabbitmq'">
+                {{
+                  sub.consumers
+                    .map((consumer) => consumer.address)
+                    .filter(Boolean)
+                    .join(", ") || "-"
+                }}
+              </td>
               <td>
                 <span v-if="isRocketMqCluster" :class="consumerGroupTypeBadgeClass(sub)">{{ consumerGroupTypeLabel(sub) }}</span>
                 <span v-else class="badge">{{ sub.subType }}</span>
@@ -575,6 +620,7 @@ watch(
                   <span v-if="sub.onlineMembers == null" class="text-muted">-</span>
                   <span v-else>{{ sub.onlineMembers }}</span>
                 </template>
+                <span v-else-if="mqSystemKind === 'kafka' && sub.onlineMembers == null" class="text-muted">-</span>
                 <template v-else>{{ t("mqSubscriptions.consumerCount", { count: sub.consumers.length }) }}</template>
               </td>
               <td class="actions">
@@ -639,50 +685,50 @@ watch(
     </div>
 
     <!-- Reset Cursor Dialog -->
-    <div v-if="!isRocketMqCluster && showResetDialog" class="dialog-overlay" @click="showResetDialog = false">
+    <div v-if="!isRocketMqCluster && showResetDialog" class="dialog-overlay" @click="closeResetDialog">
       <div class="dialog" @click.stop>
         <div class="dialog-header">
           <h3>{{ t("mqSubscriptions.resetDialogTitle", { name: selectedSub?.name }) }}</h3>
-          <button @click="showResetDialog = false" class="btn-close">×</button>
+          <button @click="closeResetDialog" class="btn-close">×</button>
         </div>
         <div class="dialog-body">
           <div class="form-group">
             <label>{{ t("mqSubscriptions.resetTo") }}</label>
             <div class="radio-group">
               <label class="radio-label">
-                <input type="radio" v-model="resetFormData.position" value="earliest" :disabled="readOnly" />
+                <input type="radio" v-model="resetFormData.position" value="earliest" :disabled="resetting || readOnly" />
                 {{ t("mqSubscriptions.earliest") }}
               </label>
               <label class="radio-label">
-                <input type="radio" v-model="resetFormData.position" value="latest" :disabled="readOnly" />
+                <input type="radio" v-model="resetFormData.position" value="latest" :disabled="resetting || readOnly" />
                 {{ t("mqSubscriptions.latest") }}
               </label>
               <label class="radio-label">
-                <input type="radio" v-model="resetFormData.position" value="timestamp" :disabled="readOnly" />
+                <input type="radio" v-model="resetFormData.position" value="timestamp" :disabled="resetting || readOnly" />
                 {{ t("mqSubscriptions.timestamp") }}
               </label>
               <label v-if="mqSystemKind === 'kafka'" class="radio-label">
-                <input type="radio" v-model="resetFormData.position" value="partitionOffset" :disabled="readOnly" />
+                <input type="radio" v-model="resetFormData.position" value="partitionOffset" :disabled="resetting || readOnly" />
                 {{ t("mqSubscriptions.partitionOffset") }}
               </label>
             </div>
           </div>
           <div v-if="resetFormData.position === 'timestamp'" class="form-group">
             <label>{{ t("mqSubscriptions.timestampMs") }}</label>
-            <input v-model.number="resetFormData.timestampMs" type="number" :disabled="readOnly" />
+            <input v-model.number="resetFormData.timestampMs" type="number" :disabled="resetting || readOnly" />
             <div class="form-hint">{{ t("mqSubscriptions.currentTime", { time: new Date(resetFormData.timestampMs).toLocaleString() }) }}</div>
           </div>
           <div v-if="mqSystemKind === 'kafka' && resetFormData.position === 'partitionOffset'" class="form-group">
             <label>{{ t("mqSubscriptions.partition") }}</label>
-            <input v-model.number="resetFormData.partition" data-testid="reset-partition" type="number" min="0" step="1" :disabled="readOnly" />
+            <input v-model.number="resetFormData.partition" data-testid="reset-partition" type="number" min="0" step="1" :disabled="resetting || readOnly" />
             <label>{{ t("mqSubscriptions.offset") }}</label>
-            <input v-model.number="resetFormData.offset" data-testid="reset-offset" type="number" min="0" step="1" :disabled="readOnly" />
+            <input v-model.number="resetFormData.offset" data-testid="reset-offset" type="number" min="0" step="1" :disabled="resetting || readOnly" />
           </div>
-          <div v-if="error" class="form-error">{{ error }}</div>
+          <div v-if="resetError" class="form-error">{{ resetError }}</div>
         </div>
         <div class="dialog-footer">
-          <button @click="showResetDialog = false" class="btn-secondary">{{ t("mqSubscriptions.cancel") }}</button>
-          <button @click="handleResetCursor" :disabled="loading || readOnly" class="btn-primary">{{ t("mqSubscriptions.reset") }}</button>
+          <button @click="closeResetDialog" class="btn-secondary">{{ t("mqSubscriptions.cancel") }}</button>
+          <button @click="handleResetCursor" :disabled="resetting || readOnly" class="btn-primary">{{ t("mqSubscriptions.reset") }}</button>
         </div>
       </div>
     </div>
@@ -734,6 +780,10 @@ watch(
               {{ t("mqSubscriptions.count") }}
               <input v-model.number="peekCount" type="number" min="1" max="100" />
             </label>
+            <label class="peek-checkbox-control">
+              <input v-model="decodePeekPayload" data-testid="peek-decode-payload" type="checkbox" />
+              <span>{{ t("mqMessages.decodePayload") }}</span>
+            </label>
             <button @click="handlePeekMessages" :disabled="peekLoading" class="btn-sm">
               {{ peekLoading ? t("mqSubscriptions.loading") : t("mqSubscriptions.refresh") }}
             </button>
@@ -754,7 +804,7 @@ watch(
               <div v-if="Object.keys(message.properties).length" class="peek-properties">
                 <span v-for="(value, key) in message.properties" :key="key">{{ key }}={{ value }}</span>
               </div>
-              <pre class="peek-payload">{{ message.payloadText ?? message.payloadBase64 }}</pre>
+              <pre class="peek-payload">{{ formatMqMessagePayload(message, { decode: decodePeekPayload, allowRawStructSniff: decodePeekPayload }) }}</pre>
             </div>
           </div>
         </div>
@@ -797,7 +847,11 @@ watch(
       :loading="clearingBacklog"
       :close-on-confirm="false"
       @confirm="confirmClearBacklog"
-    />
+    >
+      <template #options>
+        <div v-if="clearBacklogError" class="form-error" role="alert">{{ clearBacklogError }}</div>
+      </template>
+    </DangerConfirmDialog>
   </div>
 </template>
 
@@ -1158,13 +1212,21 @@ button:disabled {
   font-size: 13px;
 }
 
-.peek-toolbar input {
+.peek-toolbar input:not([type="checkbox"]) {
   width: 96px;
   padding: 6px 8px;
   border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-4);
   background: var(--color-background);
   color: var(--color-text);
+}
+
+.peek-toolbar label.peek-checkbox-control {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  gap: 6px;
+  cursor: pointer;
 }
 
 .peek-results {

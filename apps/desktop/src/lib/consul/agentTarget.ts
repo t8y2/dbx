@@ -34,23 +34,34 @@ export function consulAgentAddressesMatch(left: string, right: string): boolean 
   return a === b || (a === "localhost" && isLoopback(b)) || (b === "localhost" && isLoopback(a));
 }
 
-export function consulAgentWriteTargetSafe(connection: AgentTargetConnection | undefined, identityNode: string | undefined): boolean {
-  if (!connection || connectionIsEffectivelyReadOnly(connection) || connection.transport_layers?.some((layer) => layer.enabled !== false)) return false;
+export type ConsulAgentWriteBlockedReason = "connectionUnavailable" | "readOnly" | "transport" | "targetRequired" | "identityUnavailable" | "nodeMismatch" | "directAddressRequired" | "addressMismatch" | "invalidAddress";
+
+export function consulAgentWriteBlockedReason(connection: AgentTargetConnection | undefined, identityNode: string | undefined): ConsulAgentWriteBlockedReason | null {
+  if (!connection) return "connectionUnavailable";
+  if (connectionIsEffectivelyReadOnly(connection)) return "readOnly";
+  if (connection.transport_layers?.some((layer) => layer.enabled !== false)) return "transport";
   const external = connection.external_config;
-  if (!external || typeof external !== "object" || Array.isArray(external)) return false;
+  if (!external || typeof external !== "object" || Array.isArray(external)) return "targetRequired";
   const config = external as Record<string, unknown>;
   const rawTarget = config.agentTarget || config.agent_target;
-  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return false;
+  if (!rawTarget || typeof rawTarget !== "object" || Array.isArray(rawTarget)) return "targetRequired";
   const target = rawTarget as Record<string, unknown>;
   const node = String(target.node || "").trim();
   const address = String(target.address || "").trim();
-  if (!node || !address || node !== identityNode) return false;
+  if (!node || !address) return "targetRequired";
   const serverAddress = String(config.serverAddr || config.server_addr || "").trim();
   try {
     const host = normalizeAddress(new URL(serverAddress).hostname);
-    if (host !== "localhost" && !isIpv4(host) && !isIpv6(host)) return false;
-    return consulAgentAddressesMatch(host, address);
+    if (host !== "localhost" && !isIpv4(host) && !isIpv6(host)) return "directAddressRequired";
+    if (!consulAgentAddressesMatch(host, address)) return "addressMismatch";
   } catch {
-    return false;
+    return "invalidAddress";
   }
+  if (!identityNode) return "identityUnavailable";
+  if (node !== identityNode) return "nodeMismatch";
+  return null;
+}
+
+export function consulAgentWriteTargetSafe(connection: AgentTargetConnection | undefined, identityNode: string | undefined): boolean {
+  return consulAgentWriteBlockedReason(connection, identityNode) === null;
 }

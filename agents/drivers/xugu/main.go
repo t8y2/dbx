@@ -893,9 +893,7 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 			}
 		}
 	} else {
-		// SYSTEM control is optional for ordinary users (no SYSTEM account / no SYS_SESSIONS).
-		// Fall back to a business-database-only session so metadata and queries still
-		// work. Do not carry the optional APP_NAME into this degraded login path.
+		// Open the session with the original attributes if SYSTEM control is unavailable.
 		_, err = server.connectWithControl(businessParams, nil, false)
 		controlKey = ""
 	}
@@ -1384,6 +1382,9 @@ func (s *server) validateConnection() error {
 }
 
 func openDB(params connectParams) (*sql.DB, error) {
+	if configuredDatabaseName(params) == "" {
+		return nil, errors.New("XuguDB requires an existing database name; set Database or include DB in the connection string")
+	}
 	dsn := buildDSN(params)
 	db, err := sql.Open("xugu", dsn)
 	if err != nil {
@@ -1419,12 +1420,11 @@ func xuguIdentifiedSessionParams(params connectParams, agentSessionID string) co
 	return params
 }
 
-// Ordinary Xugu users often cannot use the SYSTEM control session, and some
-// server builds close the socket when an optional APP_NAME is sent for them.
-// Keep that path for explicit SYSDBA logins only; other users use a direct
-// business session with the parameters they supplied.
+// Xugu authenticates SYSDBA separately for each database. Probing SYSTEM with
+// a business database's credentials can lock the client IP before fallback.
 func xuguControlSessionEligible(params connectParams) bool {
-	return strings.EqualFold(strings.TrimSpace(params.Username), "SYSDBA")
+	return strings.EqualFold(strings.TrimSpace(params.Username), "SYSDBA") &&
+		strings.EqualFold(configuredDatabaseName(params), "SYSTEM")
 }
 
 func xuguControlParams(params connectParams) connectParams {
@@ -1920,13 +1920,47 @@ func isXuguMissingOnNullColumnError(err error) bool {
 }
 
 func xuguDSNValue(dsn string, key string) string {
-	for _, part := range strings.Split(dsn, ";") {
+	var result string
+	for _, part := range splitXuguDSNSegments(dsn) {
 		name, value, ok := strings.Cut(part, "=")
 		if ok && strings.EqualFold(strings.TrimSpace(name), key) {
-			return strings.TrimSpace(value)
+			value = strings.TrimSpace(value)
+			if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+				value = strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+			}
+			result = strings.TrimSpace(value)
 		}
 	}
-	return ""
+	return result
+}
+
+func splitXuguDSNSegments(dsn string) []string {
+	var segments []string
+	var current strings.Builder
+	inQuotes := false
+
+	for index := 0; index < len(dsn); index++ {
+		character := dsn[index]
+		if character == '\'' {
+			current.WriteByte(character)
+			if inQuotes && index+1 < len(dsn) && dsn[index+1] == '\'' {
+				current.WriteByte(dsn[index+1])
+				index++
+			} else {
+				inQuotes = !inQuotes
+			}
+			continue
+		}
+		if character == ';' && !inQuotes {
+			segments = append(segments, current.String())
+			current.Reset()
+			continue
+		}
+		current.WriteByte(character)
+	}
+
+	segments = append(segments, current.String())
+	return segments
 }
 
 func (s *server) listSchemas() ([]string, error) {
@@ -2769,7 +2803,28 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		item.NumericPrecision, item.NumericScale, item.CharacterMaximumLength = decodeXuguScale(item.DataType, scale)
 		result = append(result, item)
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = s.closeRows(rows)
+		return nil, err
+	}
+	if err := s.closeRows(rows); err != nil {
+		return nil, err
+	}
+
+	// Xugu exposes IDENTITY/AUTO_INCREMENT columns through the serial
+	// metadata catalogs rather than through DEF_VAL. Enrich the common column
+	// contract with the value already understood by the desktop data generator.
+	// This lookup is deliberately optional: an account may read ALL_COLUMNS
+	// while lacking access to ALL_SEQUENCES, and that must not make ordinary
+	// column metadata unavailable.
+	if identities, identityErr := s.tableIdentities(schema, table); identityErr == nil {
+		for index := range result {
+			if xuguIdentityMatchesColumn(result[index].Name, identities) {
+				result[index].Extra = stringPtr("auto_increment")
+			}
+		}
+	}
+	return emptyIfNil(result), nil
 }
 
 func (s *server) queryColumnRows(schema, table string) (*sql.Rows, bool, error) {
@@ -4546,6 +4601,22 @@ func (s *server) tableIdentities(schema, table string) (map[string]xuguIdentityI
 	return result, rows.Err()
 }
 
+// xuguIdentityMatchesColumn keeps identity enrichment safe for catalog views
+// that may normalize unquoted names differently from ALL_COLUMNS. Exact
+// matches win; a case-insensitive match is accepted only when unambiguous.
+func xuguIdentityMatchesColumn(columnName string, identities map[string]xuguIdentityInfo) bool {
+	if _, ok := identities[columnName]; ok {
+		return true
+	}
+	matches := 0
+	for identityColumn := range identities {
+		if strings.EqualFold(identityColumn, columnName) {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
 func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, error) {
 	return s.readTableConstraints(xuguTableConstraintsSQL, schema, table)
 }
@@ -4720,9 +4791,19 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 	// any FK whose parent is not yet visible) during CREATE, matching DBeaver's
 	// xugu-metadata exporter which always emits ALTER for F/PK/CHECK extras.
 	var foreignKeys []xuguConstraintInfo
+	var deferredPrimaryKeys []xuguConstraintInfo
+	deferLargeObjectPrimaryKeys := metadata.CopyNum > 0 && xuguTableHasLargeObjectColumn(columns)
 	for _, constraint := range constraints {
 		if strings.EqualFold(strings.TrimSpace(constraint.Type), "F") {
 			foreignKeys = append(foreignKeys, constraint)
+			continue
+		}
+		// On XuguDB, a CREATE TABLE combining a LOB column, an inline primary
+		// key, and explicit COPY NUMBER can remain blocked. Emit the same named
+		// key immediately after CREATE TABLE so the transfer does not lose its
+		// constraint semantics while avoiding that inline path.
+		if deferLargeObjectPrimaryKeys && strings.EqualFold(strings.TrimSpace(constraint.Type), "P") {
+			deferredPrimaryKeys = append(deferredPrimaryKeys, constraint)
 			continue
 		}
 		// Xugu exposes the implicit unique key that it creates for every
@@ -4758,6 +4839,12 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 		builder.WriteString("\nCOMMENT ")
 		builder.WriteString(quoteStringLiteral(strings.TrimSpace(metadata.Comment)))
 	}
+	for _, constraint := range deferredPrimaryKeys {
+		if item := renderXuguConstraintAlterDDL(schema, table, constraint); item != "" {
+			builder.WriteString(";\n\n")
+			builder.WriteString(item)
+		}
+	}
 	for _, constraint := range foreignKeys {
 		if item := renderXuguForeignKeyAlterDDL(schema, table, constraint); item != "" {
 			builder.WriteString(";\n\n")
@@ -4778,6 +4865,20 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 	// appendTableIndexDDL to terminate the CREATE/ALTER statement: tables with
 	// no independent indexes must remain directly executable as well.
 	return terminateDDLScript(builder.String())
+}
+
+func xuguTableHasLargeObjectColumn(columns []columnInfo) bool {
+	for _, column := range columns {
+		dataType := strings.ToUpper(strings.TrimSpace(column.DataType))
+		if separator := strings.IndexAny(dataType, " (["); separator >= 0 {
+			dataType = dataType[:separator]
+		}
+		switch dataType {
+		case "BLOB", "CLOB", "NCLOB", "JSON", "XML":
+			return true
+		}
+	}
+	return false
 }
 
 func shouldSkipXuguIdentityUniqueConstraint(constraint xuguConstraintInfo, identities map[string]xuguIdentityInfo) bool {
@@ -4814,6 +4915,14 @@ func renderXuguConstraintDDL(constraint xuguConstraintInfo) string {
 	default:
 		return ""
 	}
+}
+
+func renderXuguConstraintAlterDDL(schema, table string, constraint xuguConstraintInfo) string {
+	item := renderXuguConstraintDDL(constraint)
+	if item == "" {
+		return ""
+	}
+	return "ALTER TABLE " + quoteIdentifier(schema) + "." + quoteIdentifier(table) + " ADD " + item
 }
 
 // renderXuguForeignKeyAlterDDL emits FK constraints after CREATE TABLE. Self-

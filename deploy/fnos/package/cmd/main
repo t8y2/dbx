@@ -1,0 +1,18 @@
+#!/bin/bash
+
+container_name="dbx-fnos"
+
+case "$1" in
+  start|stop)
+    exit 0
+    ;;
+  status)
+    if [ "$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null)" = "running" ]; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    exit 1
+    ;;
+esac

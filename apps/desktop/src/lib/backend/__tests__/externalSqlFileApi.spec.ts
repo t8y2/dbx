@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: mocks.invoke,
 }));
 
-import { inspectExternalSqlFile, readExternalSqlFile, readExternalSqlFileSnapshot, writeExternalSqlFile } from "@/lib/backend/tauri";
+import { inspectExternalSqlFile, openPathWithDefaultApp, readExternalSqlFile, readExternalSqlFileSnapshot, writeExternalSqlFile } from "@/lib/backend/tauri";
 
 const version = {
   sizeBytes: 9,
@@ -26,7 +26,7 @@ describe("external SQL file API", () => {
     mocks.invoke.mockResolvedValue({ kind: "content", content: "select 1;", version });
 
     await expect(readExternalSqlFile("/tmp/demo.sql")).resolves.toBe("select 1;");
-    expect(mocks.invoke).toHaveBeenCalledWith("read_external_sql_file", { path: "/tmp/demo.sql" });
+    expect(mocks.invoke).toHaveBeenCalledWith("read_external_sql_file", { path: "/tmp/demo.sql", maxSizeBytes: undefined, encoding: null });
   });
 
   it("returns the disk version with an editor snapshot", async () => {
@@ -51,6 +51,7 @@ describe("external SQL file API", () => {
       content: "select 2;",
       expectedContentHash: "abc123",
       expectedMissing: false,
+      encoding: "utf8",
     });
   });
 
@@ -63,6 +64,7 @@ describe("external SQL file API", () => {
       content: "select 2;",
       expectedContentHash: null,
       expectedMissing: true,
+      encoding: "utf8",
     });
   });
 
@@ -73,5 +75,12 @@ describe("external SQL file API", () => {
 
     expect(error).toBeInstanceOf(ExternalSqlFileTooLargeError);
     expect(error).toMatchObject({ sizeBytes: 50 * 1024 ** 3, maxSizeBytes: 64 * 1024 ** 2 });
+  });
+
+  it("invokes open_path_with_default_app with the path", async () => {
+    mocks.invoke.mockResolvedValue(undefined);
+
+    await expect(openPathWithDefaultApp("/tmp/financial_report.xlsx")).resolves.toBeUndefined();
+    expect(mocks.invoke).toHaveBeenCalledWith("open_path_with_default_app", { path: "/tmp/financial_report.xlsx" });
   });
 });

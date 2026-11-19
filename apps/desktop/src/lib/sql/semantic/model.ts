@@ -1,9 +1,11 @@
 import { sqlSemanticDialectFor, type SqlSemanticDialectAdapter } from "@/lib/sql/semantic/dialect";
 import { findActiveSqlStatementSpan, isSuppressedSqlSemanticContext, tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
-import { resolveSqlStatementWindow } from "@/lib/sql/sqlSyntaxTreeWindow";
+import { resolveSqlStatementWindow } from "@/lib/sql/sqlStatementWindow";
 import type {
   SqlSemanticBuildOptions,
   SqlSemanticClauseSpans,
+  SqlSemanticCteOutputColumn,
+  SqlSemanticCteStar,
   SqlSemanticCursorIntent,
   SqlSemanticIdentifierPart,
   SqlSemanticModel,
@@ -28,12 +30,26 @@ const TABLE_FUNCTION_INTRODUCERS = new Set(["from", "join", "straight_join", "ap
 const TOP_LEVEL_STATEMENT_WORDS = new Set(["select", "insert", "delete", "merge", "create", "alter", "drop", "truncate", "call", "exec", "execute", "grant", "revoke"]);
 const SQLSERVER_DEFAULT_SCHEMA = "dbo";
 const SQLSERVER_UPDATE_STATISTICS_SCOPES = new Set(["all", "index", "table"]);
+// CTE navigation enrichment (body projection origins + body row sources) is best-effort; on very
+// large statements it is skipped entirely so click/hover parsing stays cheap.
+const CTE_ENRICHMENT_STATEMENT_TOKEN_LIMIT = 20_000;
+const CTE_ENRICHMENT_BODY_TOKEN_LIMIT = 5_000;
 
 interface ParseState {
   dialect: SqlSemanticDialectAdapter;
   tokens: SqlSemanticToken[];
   statement: SqlSemanticStatement;
   cteSources: SqlSemanticRowSource[];
+  expandGroupedSources?: boolean;
+  groupedSourceScopes?: SqlSemanticGroupedSourceScope[];
+  /** Enrich derived-table row sources parsed from this state (one level, CTE bodies only). */
+  enrichDerivedTables?: boolean;
+}
+
+export interface SqlSemanticGroupedSourceScope {
+  span: SqlSemanticSpan;
+  depth: number;
+  sources: SqlSemanticRowSource[];
 }
 
 interface QuerySourceRange {
@@ -251,6 +267,136 @@ function parseSelectProjections(tokens: readonly SqlSemanticToken[], dialect: Sq
     .filter((projection): projection is SqlSemanticProjection => projection != null && projection.name !== "*");
 }
 
+/**
+ * Analyzes one comma-separated CTE body SELECT projection for navigation metadata:
+ * a bare/qualified star or a named output with an optional plain-column origin.
+ */
+function cteBodyProjectionShape(state: ParseState, group: readonly SqlSemanticToken[]): { output?: SqlSemanticCteOutputColumn; star?: SqlSemanticCteStar } | null {
+  const useful = group.filter((item) => item.kind !== "comment");
+  if (useful.length === 0) return null;
+  const dialect = state.dialect;
+
+  // Bare `*`
+  if (useful.length === 1 && useful[0]?.text === "*") {
+    return { star: { starSpan: useful[0].span, qualifierParts: [] } };
+  }
+
+  // Qualified `q.*` (possibly a multi-part `a.b.*`) — the whole group must be the star chain.
+  const last = useful[useful.length - 1];
+  if (last?.text === "*" && useful[useful.length - 2]?.text === ".") {
+    const qualifierParts: string[] = [];
+    let cursor = useful.length - 3;
+    let valid = cursor >= 0;
+    while (valid && cursor >= 0) {
+      const identifier = useful[cursor];
+      if (!identifier || !tokenIsIdentifier(identifier)) {
+        valid = false;
+        break;
+      }
+      qualifierParts.unshift(identifierPart(identifier, dialect).name);
+      cursor -= 1;
+      if (cursor < 0) break;
+      if (useful[cursor]?.text !== ".") {
+        valid = false;
+        break;
+      }
+      cursor -= 1;
+    }
+    if (valid && qualifierParts.length > 0) {
+      return { star: { starSpan: last.span, qualifierParts } };
+    }
+  }
+
+  const projection = projectionNameFromTokens(useful, dialect);
+  if (!projection || projection.name === "*") return null;
+
+  // `expression AS alias` — navigate to the alias token; the expression itself is not traceable.
+  if (projection.aliasSpan) {
+    return { output: { name: projection.name, jumpSpan: projection.aliasSpan } };
+  }
+
+  // Plain `col` / `q.col` chain (identifiers separated only by dots) — traceable to a body source.
+  let isIdentifierChain = useful.length % 2 === 1;
+  for (let index = 0; isIdentifierChain && index < useful.length; index += 1) {
+    const token = useful[index];
+    if (!token) {
+      isIdentifierChain = false;
+      break;
+    }
+    if (index % 2 === 0) {
+      if (!tokenIsIdentifier(token)) isIdentifierChain = false;
+    } else if (token.text !== ".") {
+      isIdentifierChain = false;
+    }
+  }
+  if (isIdentifierChain) {
+    const identifiers = useful.filter((_, index) => index % 2 === 0);
+    const columnToken = identifiers[identifiers.length - 1];
+    if (columnToken) {
+      return {
+        output: {
+          name: identifierPart(columnToken, dialect).name,
+          jumpSpan: columnToken.span,
+          origin: {
+            qualifierParts: identifiers.slice(0, -1).map((token) => identifierPart(token, dialect).name),
+            column: identifierPart(columnToken, dialect).name,
+          },
+        },
+      };
+    }
+  }
+
+  // Any other expression without an alias — select the whole projection span, no origin.
+  return { output: { name: projection.name, jumpSpan: projection.span } };
+}
+
+/**
+ * CTE-body counterpart of parseSelectProjections that keeps stars and per-projection spans
+ * instead of flattening everything to bare column names.
+ */
+function parseCteBodyProjectionShapes(state: ParseState, bodyTokens: readonly SqlSemanticToken[]): { outputs: SqlSemanticCteOutputColumn[]; stars: SqlSemanticCteStar[] } {
+  const outputs: SqlSemanticCteOutputColumn[] = [];
+  const stars: SqlSemanticCteStar[] = [];
+  const baseDepth = bodyTokens.reduce((min, item) => Math.min(min, item.depth), Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(baseDepth)) return { outputs, stars };
+  const selectDepth = baseDepth;
+  const selectIndex = bodyTokens.findIndex((item) => item.depth === selectDepth && item.kind === "word" && item.normalized === "select");
+  if (selectIndex < 0) return { outputs, stars };
+  let fromIndex = bodyTokens.findIndex((item, index) => index > selectIndex && item.depth === selectDepth && item.kind === "word" && item.normalized === "from");
+  if (fromIndex < 0) fromIndex = bodyTokens.length;
+  const projectionTokens = bodyTokens.slice(selectIndex + 1, fromIndex);
+  for (const group of splitTopLevelByComma(projectionTokens)) {
+    const shape = cteBodyProjectionShape(state, group);
+    if (shape?.output) outputs.push(shape.output);
+    if (shape?.star) stars.push(shape.star);
+  }
+  return { outputs, stars };
+}
+
+/** Parses row sources visible inside one CTE body; preceding CTEs are in scope for chaining. */
+function parseCteBodySources(state: ParseState, bodyTokens: readonly SqlSemanticToken[], precedingCtes: readonly SqlSemanticRowSource[]): SqlSemanticRowSource[] {
+  if (bodyTokens.length === 0) return [];
+  let bodyDepth = Number.POSITIVE_INFINITY;
+  for (const token of bodyTokens) bodyDepth = Math.min(bodyDepth, token.depth);
+  if (!Number.isFinite(bodyDepth)) return [];
+  const first = bodyTokens.find((token) => token.depth === bodyDepth);
+  const last = bodyTokens[bodyTokens.length - 1];
+  if (!first || !last) return [];
+  const bodyState: ParseState = {
+    ...state,
+    tokens: bodyTokens as SqlSemanticToken[],
+    statement: {
+      kind: "select",
+      span: { start: first.span.start, end: last.span.end },
+      text: state.statement.text,
+    },
+    cteSources: precedingCtes as SqlSemanticRowSource[],
+    // Body parsing must not leak grouped-join scopes into the outer statement parse.
+    groupedSourceScopes: state.groupedSourceScopes ? [] : undefined,
+  };
+  return parseRowSourcesAtDepth(bodyState, bodyDepth);
+}
+
 function parseCteSources(state: ParseState): SqlSemanticRowSource[] {
   const tokens = state.tokens;
   const first = tokens.findIndex((item) => item.kind === "word" && item.normalized === "with");
@@ -258,6 +404,7 @@ function parseCteSources(state: ParseState): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [];
   let index = first + 1;
   if (tokens[index]?.normalized === "recursive") index += 1;
+  const enrich = tokens.length <= CTE_ENRICHMENT_STATEMENT_TOKEN_LIMIT;
 
   while (index < tokens.length) {
     while (tokens[index]?.text === ",") index += 1;
@@ -266,13 +413,13 @@ function parseCteSources(state: ParseState): SqlSemanticRowSource[] {
     const namePart = identifierPart(nameToken, state.dialect);
     index += 1;
 
-    const explicitColumns: string[] = [];
+    const explicitColumns: Array<{ name: string; span: SqlSemanticSpan }> = [];
     if (tokens[index]?.text === "(") {
       const close = findMatchingParenToken(tokens, index);
       if (close > index) {
         for (const part of splitTopLevelByComma(tokens.slice(index + 1, close))) {
           const identifier = part.find(tokenIsIdentifier);
-          if (identifier) explicitColumns.push(identifierPart(identifier, state.dialect).name);
+          if (identifier) explicitColumns.push({ name: identifierPart(identifier, state.dialect).name, span: identifier.span });
         }
         index = close + 1;
       }
@@ -284,7 +431,32 @@ function parseCteSources(state: ParseState): SqlSemanticRowSource[] {
     const bodyClose = findMatchingParenToken(tokens, bodyOpen);
     const safeBodyClose = bodyClose < 0 ? tokens.length - 1 : bodyClose;
     const bodyTokens = tokens.slice(bodyOpen + 1, safeBodyClose);
-    const bodyColumns = explicitColumns.length > 0 ? explicitColumns : parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name);
+
+    // columns: unchanged flat name list consumed by completion/intention logic.
+    const bodyColumns = explicitColumns.length > 0 ? explicitColumns.map((column) => column.name) : parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name);
+
+    let cteOutputs: SqlSemanticCteOutputColumn[] | undefined;
+    let cteStars: SqlSemanticCteStar[] | undefined;
+    let bodySources: SqlSemanticRowSource[] | undefined;
+    if (enrich && bodyTokens.length <= CTE_ENRICHMENT_BODY_TOKEN_LIMIT) {
+      const shapes = parseCteBodyProjectionShapes(state, bodyTokens);
+      cteStars = shapes.stars;
+      if (explicitColumns.length > 0) {
+        // Explicit `WITH c(a,b)` names win; body projection origins are inherited positionally
+        // so hover comments can still trace through the list, while navigation lands on list items.
+        cteOutputs = explicitColumns.map((column, columnIndex) => ({
+          name: column.name,
+          jumpSpan: column.span,
+          ...(shapes.outputs[columnIndex]?.origin ? { origin: shapes.outputs[columnIndex]!.origin } : {}),
+        }));
+      } else {
+        cteOutputs = shapes.outputs;
+      }
+      // Derived tables in the body (12-branch `FROM (SELECT ...) X` bodies and friends) receive one
+      // level of enrichment so CTE lineage can keep tracing down to the physical tables inside them.
+      bodySources = parseCteBodySources({ ...state, enrichDerivedTables: true }, bodyTokens, sources);
+    }
+
     sources.push({
       id: `cte:${namePart.name}:${sources.length}`,
       kind: "cte",
@@ -292,6 +464,11 @@ function parseCteSources(state: ParseState): SqlSemanticRowSource[] {
       qualifierParts: [],
       sourceSpan: { start: nameToken.span.start, end: tokens[safeBodyClose]?.span.end ?? nameToken.span.end },
       columns: bodyColumns,
+      nameSpan: nameToken.span,
+      bodySpan: { start: tokens[bodyOpen]?.span.start ?? nameToken.span.start, end: tokens[safeBodyClose]?.span.end ?? nameToken.span.end },
+      ...(cteOutputs ? { cteOutputs } : {}),
+      ...(cteStars ? { cteStars } : {}),
+      ...(bodySources ? { bodySources } : {}),
     });
     index = safeBodyClose + 1;
 
@@ -332,6 +509,19 @@ function mergeColumnAliases(columns: readonly string[], aliases: readonly string
   return columns.map((column, index) => aliases[index] ?? column);
 }
 
+/**
+ * Derived tables can rename the inline-view outputs (`FROM (SELECT id FROM t) x(a)`): the outer
+ * query sees `x.a` while the body still projects `id`. The rename list is positional, so it can
+ * only be applied when the body projects names one-for-one — no stars and equal lengths. Otherwise
+ * the outputs are returned untouched, because a positional rename against a star or a shorter list
+ * would point `x.a` at an unrelated column. `origin` / `jumpSpan` are intentionally kept: both
+ * still describe the body side, which is where tracing and Ctrl+click must continue.
+ */
+function applyDerivedTableColumnAliases(outputs: SqlSemanticCteOutputColumn[], stars: readonly SqlSemanticCteStar[], aliases: readonly string[] | undefined): SqlSemanticCteOutputColumn[] {
+  if (!aliases?.length || stars.length > 0 || aliases.length !== outputs.length) return outputs;
+  return outputs.map((output, index) => ({ ...output, name: aliases[index] ?? output.name }));
+}
+
 function consumeSqlServerTableHint(tokens: readonly SqlSemanticToken[], index: number, dialect: SqlSemanticDialectAdapter): number {
   if (dialect.id !== "sqlserver") return index;
   const openIndex = tokens[index]?.normalized === "with" && tokens[index + 1]?.text === "(" ? index + 1 : index;
@@ -350,6 +540,21 @@ function parseSubquerySource(state: ParseState, openIndex: number, introducer: s
     parseSelectProjections(bodyTokens, state.dialect).map((projection) => projection.name),
     alias.columns,
   );
+  // A derived table reached from a CTE body carries the same body metadata a CTE definition does,
+  // so `followBodySource` can resolve its projections/stars and trace one level into the inline
+  // view. Derived tables outside CTE bodies stay metadata-free (the common path stays cheap).
+  let body: Pick<SqlSemanticRowSource, "cteOutputs" | "cteStars" | "bodySources"> = {};
+  if (state.enrichDerivedTables && bodyTokens.length <= CTE_ENRICHMENT_BODY_TOKEN_LIMIT) {
+    const shapes = parseCteBodyProjectionShapes(state, bodyTokens);
+    body = {
+      // Outer column aliases rename the outputs so `x.a` resolves; tracing stays on the body side.
+      cteOutputs: applyDerivedTableColumnAliases(shapes.outputs, shapes.stars, alias.columns),
+      cteStars: shapes.stars,
+      // Enrichment stops here: derived tables nested inside this inline view are not parsed again,
+      // so depth can never re-parse arbitrarily nested views on every model build.
+      bodySources: parseCteBodySources({ ...state, enrichDerivedTables: false }, bodyTokens, state.cteSources),
+    };
+  }
   return {
     source: {
       id: `${introducer}:subquery:${sourceIndex}`,
@@ -360,6 +565,7 @@ function parseSubquerySource(state: ParseState, openIndex: number, introducer: s
       aliasSpan: alias.aliasSpan,
       sourceSpan: { start: state.tokens[openIndex]?.span.start ?? 0, end: state.tokens[alias.nextIndex - 1]?.span.end ?? alias.aliasSpan?.end ?? state.tokens[close]?.span.end ?? 0 },
       columns,
+      ...body,
     },
     nextIndex: alias.nextIndex,
   };
@@ -437,6 +643,65 @@ function parseRowSource(state: ParseState, target: number, introducer: string, s
   return parseTableFunctionSource(state, target, introducer, sourceIndex) ?? parseTableSource(state, target, introducer, sourceIndex);
 }
 
+function parseRowSourceList(state: ParseState, target: number, introducer: string, sourceIndex: number): { sources: SqlSemanticRowSource[]; nextIndex: number } | null {
+  const open = state.tokens[target];
+  if (state.expandGroupedSources && open?.text === "(" && open.depth < 128) {
+    const close = findMatchingParenToken(state.tokens, target);
+    const first = state.tokens[target + 1];
+    const isQuery = first?.kind === "word" && (first.normalized === "select" || first.normalized === "with");
+    if (close >= 0 && !isQuery) {
+      // An unaliased parenthesized join is transparent to the surrounding query scope.
+      // A SELECT body or an explicitly aliased group must retain its own boundary.
+      const from: SqlSemanticToken = { ...open, kind: "word", text: "from", normalized: "from", depth: open.depth + 1 };
+      const sources = parseRowSourcesAtDepth({ ...state, tokens: [from, ...state.tokens.slice(target + 1, close)] }, from.depth, sourceIndex);
+      if (!aliasAfter(state.tokens, close + 1, state.dialect).alias) return { sources, nextIndex: close + 1 };
+      state.groupedSourceScopes?.push({ span: { start: open.span.end, end: state.tokens[close].span.start }, depth: from.depth, sources });
+    }
+  }
+  const parsed = parseRowSource(state, target, introducer, sourceIndex);
+  return parsed ? { sources: [parsed.source], nextIndex: parsed.nextIndex } : null;
+}
+
+function parseDorisLateralView(state: ParseState, index: number, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
+  if (state.dialect.id !== "doris" || state.tokens[index]?.normalized !== "lateral" || state.tokens[index + 1]?.normalized !== "view") return null;
+  // Doris's `LATERAL VIEW [OUTER] fn(...) alias AS col` -- skip the optional OUTER marker so the
+  // OUTER form models the same function columns as the plain form.
+  let functionIndex = index + 2;
+  if (state.tokens[functionIndex]?.normalized === "outer") functionIndex += 1;
+  const functionName = readQualifiedName(state.tokens, functionIndex, state.dialect);
+  if (!functionName || state.tokens[functionName.nextIndex]?.text !== "(") return null;
+  const close = findMatchingParenToken(state.tokens, functionName.nextIndex);
+  if (close < 0) return null;
+  let aliasIndex = close + 1;
+  if (state.tokens[aliasIndex]?.normalized === "as") aliasIndex += 1;
+  const alias = state.tokens[aliasIndex];
+  if (!alias || alias.kind !== "word") return null;
+  let columnIndex = aliasIndex + 1;
+  if (state.tokens[columnIndex]?.normalized === "as") columnIndex += 1;
+  const columns: string[] = [];
+  while (state.tokens[columnIndex]?.kind === "word") {
+    columns.push(state.tokens[columnIndex].text);
+    columnIndex += 1;
+    if (state.tokens[columnIndex]?.text !== ",") break;
+    columnIndex += 1;
+  }
+  const endToken = state.tokens[Math.max(aliasIndex, columnIndex - 1)] ?? alias;
+  const name = alias.text;
+  return {
+    source: {
+      id: `table-function:${sourceIndex}:${name}`,
+      kind: "table_function",
+      name,
+      alias: name,
+      qualifierParts: [name],
+      qualifiedName: functionName.name,
+      sourceSpan: { start: state.tokens[index].span.start, end: endToken.span.end },
+      columns: columns.length ? columns : undefined,
+    },
+    nextIndex: columnIndex,
+  };
+}
+
 function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIndexOffset = 0): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [];
   let inSelectFromClause = false;
@@ -449,9 +714,9 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
       else if (inSelectFromClause && FROM_CLAUSE_BOUNDARIES.has(item.normalized)) inSelectFromClause = false;
     }
     if (inSelectFromClause && item.text === ",") {
-      const parsed = parseRowSource(state, index + 1, "from", sourceIndexOffset + sources.length);
+      const parsed = parseRowSourceList(state, index + 1, "from", sourceIndexOffset + sources.length);
       if (parsed) {
-        sources.push(parsed.source);
+        sources.push(...parsed.sources);
         index = parsed.nextIndex - 1;
       }
       continue;
@@ -465,17 +730,39 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
     while (JOIN_MODIFIERS.has(state.tokens[target]?.normalized ?? "")) target += 1;
     target = sqlServerMaintenanceTableTarget(state.tokens, target, normalized, state.dialect);
     for (;;) {
-      const parsed = parseRowSource(state, target, normalized, sourceIndexOffset + sources.length);
+      const parsed = parseRowSourceList(state, target, normalized, sourceIndexOffset + sources.length);
       if (!parsed) break;
-      sources.push(parsed.source);
+      sources.push(...parsed.sources);
       index = parsed.nextIndex - 1;
 
-      const separator = state.tokens[parsed.nextIndex];
+      // Track the position past any LATERAL VIEW clauses so the FROM-list separator check sees
+      // the real comma after them (parsed.nextIndex points at the first "lateral" token itself).
+      let afterSources = parsed.nextIndex;
+      let lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
+      while (lateral) {
+        sources.push(lateral.source);
+        index = lateral.nextIndex - 1;
+        afterSources = lateral.nextIndex;
+        lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
+      }
+
+      const separator = state.tokens[afterSources];
       if (normalized !== "from" || separator?.text !== "," || separator.depth !== sourceDepth) break;
-      target = parsed.nextIndex + 1;
+      target = afterSources + 1;
     }
   }
   return dedupeSources(sources);
+}
+
+/** Parse declarations in one query block without merging outer or sibling sources. */
+export function sqlSemanticQueryBlockSources(tokens: SqlSemanticToken[], options: SqlSemanticBuildOptions = {}, groupedSourceScopes?: SqlSemanticGroupedSourceScope[]): SqlSemanticRowSource[] {
+  if (!tokens.length) return [];
+  const statement: SqlSemanticStatement = {
+    kind: statementKind(tokens),
+    span: { start: tokens[0].span.start, end: tokens[tokens.length - 1].span.end },
+    text: "",
+  };
+  return parseRowSourcesAtDepth({ dialect: sqlSemanticDialectFor(options), tokens, statement, cteSources: [], expandGroupedSources: true, groupedSourceScopes }, tokens[0].depth);
 }
 
 function querySourceRanges(tokens: readonly SqlSemanticToken[], cursor: number): QuerySourceRange[] {
@@ -510,7 +797,13 @@ function querySourceRanges(tokens: readonly SqlSemanticToken[], cursor: number):
 }
 
 function parseRowSources(state: ParseState, cursor: number): SqlSemanticRowSource[] {
-  const ranges = querySourceRanges(state.tokens, cursor);
+  // Inside a CTE body only that body's query blocks and the CTEs declared before it
+  // are in scope. The CTE being defined is only a source where the body references
+  // it (recursive CTEs), and the outer query's sources are not visible (#14109).
+  const enclosingCteIndex = state.cteSources.findIndex((source) => !!source.bodySpan && cursor > source.bodySpan.start && cursor < source.bodySpan.end);
+  const enclosingBody = enclosingCteIndex >= 0 ? state.cteSources[enclosingCteIndex]?.bodySpan : undefined;
+  const ranges = querySourceRanges(state.tokens, cursor).filter((range) => !enclosingBody || (state.tokens[range.startIndex]?.span.start ?? -1) > enclosingBody.start);
+  const visibleCteSources = enclosingCteIndex >= 0 ? state.cteSources.slice(0, enclosingCteIndex) : state.cteSources;
   const sources: SqlSemanticRowSource[] = [];
   for (const range of ranges) {
     const scopedState = {
@@ -519,7 +812,7 @@ function parseRowSources(state: ParseState, cursor: number): SqlSemanticRowSourc
     };
     sources.push(...parseRowSourcesAtDepth(scopedState, range.depth, sources.length));
   }
-  return dedupeSources([...sources, ...state.cteSources]);
+  return dedupeSources([...sources, ...visibleCteSources]);
 }
 
 function dedupeSources(sources: SqlSemanticRowSource[]): SqlSemanticRowSource[] {
@@ -641,7 +934,15 @@ function nearestPreviousSyntaxWord(tokens: readonly SqlSemanticToken[]): string 
 function isTableListContinuation(tokens: readonly SqlSemanticToken[], position: number): boolean {
   const before = tokens.filter((item) => item.span.end <= position && item.kind !== "comment");
   let commaIndex = before.length - 1;
-  while (commaIndex >= 0 && (tokenIsIdentifier(before[commaIndex]) || before[commaIndex]?.text === ".")) commaIndex -= 1;
+  while (commaIndex >= 0 && (tokenIsIdentifier(before[commaIndex]) || before[commaIndex]?.text === ".")) {
+    // A clause keyword after the comma-separated sources (`FROM a, b WHERE`) closes the
+    // table slot: the cursor sits in the new clause even though a comma precedes it.
+    // Without this guard `WHERE`/`GROUP`… are skipped as identifiers and the implicit
+    // join keeps reporting a table context, so the WHERE clause never offers columns.
+    const token = before[commaIndex];
+    if (token?.kind === "word" && (CLAUSE_BOUNDARIES.has(token.normalized) || token.normalized === "select")) return false;
+    commaIndex -= 1;
+  }
   const comma = before[commaIndex];
   if (comma?.text !== ",") return false;
   const depth = comma.depth;
@@ -711,24 +1012,33 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
 
   if (kind === "insert" && hasWordBefore(tokens, cursor, "into") && !hasWordBefore(tokens, cursor, "values")) {
     const mutationTarget = sources.find((source) => source.kind === "mutation_target");
-    return {
-      kind: "insert_column",
-      prefix: trailing.prefix,
-      replacementRange: trailing.replacementRange,
-      qualifierParts: trailing.qualifierParts,
-      targetSourceId: mutationTarget?.id,
-      expectedObjectKinds: ["column"],
-      confidence: mutationTarget ? "medium" : "low",
-      fallbackReason: mutationTarget ? undefined : "unresolved_insert_target",
-    };
+    const targetEnd = mutationTarget?.qualifiedName?.span.end;
+    if (targetEnd != null && trailing.replacementRange.start < targetEnd) {
+      return { kind: "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "low", fallbackReason: "incomplete_insert_target" };
+    }
+    const openIndex = targetEnd == null ? -1 : tokens.findIndex((token) => token.span.start >= targetEnd);
+    const open = tokens[openIndex];
+    if (open?.text === "(" && open.span.end <= cursor) {
+      const closeIndex = findMatchingParenToken(tokens, openIndex);
+      if (closeIndex < 0 || tokens[closeIndex]!.span.start >= cursor) {
+        return {
+          kind: "insert_column",
+          prefix: trailing.prefix,
+          replacementRange: trailing.replacementRange,
+          qualifierParts: trailing.qualifierParts,
+          targetSourceId: mutationTarget?.id,
+          expectedObjectKinds: ["column"],
+          confidence: "medium",
+        };
+      }
+    }
   }
 
+  // Same rule as the unqualified table slot below: the introducer is the word before the
+  // identifier being completed, never the identifier itself (issue #10415).
   if (
     trailing.qualifierParts.length > 0 &&
-    (previous === "from" ||
-      previous === "join" ||
-      TABLE_INTRODUCERS.has(previous) ||
-      TABLE_INTRODUCERS.has(wordBeforeReplacement) ||
+    (TABLE_INTRODUCERS.has(wordBeforeReplacement) ||
       TABLE_INTRODUCERS.has(wordBeforeTrailing) ||
       (!!targetSource && !targetSource.alias && trailing.replacementRange.start >= targetSource.sourceSpan.start && trailing.replacementRange.start <= targetSource.sourceSpan.end + 1 && TABLE_INTRODUCERS.has(wordBeforePosition(tokens, targetSource.sourceSpan.start))))
   ) {
@@ -740,15 +1050,17 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
     return { kind: "alias_column", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, targetSourceId: targetSource.id, expectedObjectKinds: ["column"], confidence: "high" };
   }
 
-  if (TABLE_INTRODUCERS.has(previous) || TABLE_INTRODUCERS.has(wordBeforeReplacement) || TABLE_INTRODUCERS.has(wordBeforeTrailing) || previous === "from" || previous === "join" || wordBeforeReplacement === "from" || wordBeforeReplacement === "join" || tableListContinuation) {
-    return { kind: previous === "join" ? "table" : "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "high" };
+  if (TABLE_INTRODUCERS.has(wordBeforeReplacement) || TABLE_INTRODUCERS.has(wordBeforeTrailing) || tableListContinuation) {
+    return { kind: "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "high" };
   }
 
-  if (previous === "call" || previous === "exec" || previous === "execute") {
+  const routineIntroducer = wordBeforeTrailing || wordBeforeReplacement;
+  if (routineIntroducer === "call" || routineIntroducer === "exec" || routineIntroducer === "execute") {
     return { kind: "routine", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["routine", "procedure", "function"], confidence: "high" };
   }
 
-  if (previous === "set") {
+  const updateColumnIntroducer = wordBeforeTrailing || wordBeforeReplacement;
+  if (updateColumnIntroducer === "set") {
     return {
       kind: "update_column",
       prefix: trailing.prefix,

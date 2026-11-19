@@ -90,13 +90,13 @@ export function reconcileSchemaDiffTableMappings(selectedTables: readonly string
 export function buildSchemaDiffTableMatches(selectedTables: readonly string[], targetTables: readonly string[], mappings: readonly SchemaDiffTableMapping[], ignoreTableNameCase = false): SchemaDiffTableMatch[] {
   const reconciled = reconcileSchemaDiffTableMappings(selectedTables, targetTables, mappings, ignoreTableNameCase);
   const targetBySource = new Map(reconciled.map((mapping) => [mapping.sourceTable, mapping.targetTable]));
-  const explicitSources = new Set(firstMappingBySource(mappings).keys());
 
   return selectedTables.map((sourceTable) => {
     const targetTable = targetBySource.get(sourceTable);
     let kind: SchemaDiffTableMatchKind;
     if (!targetTable) kind = "unmatched";
-    else if (!explicitSources.has(sourceTable) && identifiersEqual(targetTable, sourceTable, ignoreTableNameCase)) kind = "automatic";
+    // Same-name (incl. ignore-case) stays automatic even after reconcile persists the pair in mappings.
+    else if (identifiersEqual(targetTable, sourceTable, ignoreTableNameCase)) kind = "automatic";
     else kind = "manual";
     return { sourceTable, targetTable, kind };
   });

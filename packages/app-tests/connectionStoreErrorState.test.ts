@@ -357,9 +357,9 @@ test("hanging database metadata load times out and clears loading state", async 
     });
 
     const loadPromise = store.loadDatabases("conn-1");
-    const timeoutRejection = assert.rejects(() => loadPromise, /Connection timed out while loading databases after 35s/);
+    const timeoutRejection = assert.rejects(() => loadPromise, /Connection timed out while loading databases after 65s/);
 
-    await vi.advanceTimersByTimeAsync(35000);
+    await vi.advanceTimersByTimeAsync(65000);
     await timeoutRejection;
 
     assert.equal(store.treeNodes[0].isLoading, false);
@@ -590,9 +590,9 @@ test.each([
     });
 
     const loadPromise = store[loader]("conn-1");
-    const timeoutRejection = assert.rejects(() => loadPromise, new RegExp(`Connection timed out while loading ${label} after 35s`));
+    const timeoutRejection = assert.rejects(() => loadPromise, new RegExp(`Connection timed out while loading ${label} after 65s`));
 
-    await vi.advanceTimersByTimeAsync(35000);
+    await vi.advanceTimersByTimeAsync(65000);
     await timeoutRejection;
 
     assert.equal(store.treeNodes[0].isLoading, false);

@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/composables/useToast";
 import { currentLocale } from "@/i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import type { EditorSettings } from "@/stores/settingsStore";
+import type { EditorSettingsImportPatch } from "@/lib/settings/editorSettingsDraft";
 import {
   buildSettingsTransferFilename,
   MAX_SETTINGS_TRANSFER_FILE_BYTES,
@@ -17,6 +17,7 @@ import {
   SETTINGS_TRANSFER_FORMAT_VERSION,
   type ParsedSettingsTransfer,
   type SettingsTransferCategoryId,
+  type SettingsTransferExtras,
   type SettingsTransferParseError,
 } from "@/lib/settings/settingsTransfer";
 
@@ -26,8 +27,9 @@ const props = defineProps<{
   hasUnappliedChanges: () => boolean;
   buildSavedExportPayload: () => string;
   buildAppliedExportPayload: () => Promise<string | null>;
-  applyImportedSettings: (imported: Partial<EditorSettings>) => void;
-  getDraftConflictCategories: (imported: Partial<EditorSettings>) => SettingsTransferCategoryId[];
+  applyImportedSettings: (imported: EditorSettingsImportPatch) => void;
+  applyImportedExtras: (extras: SettingsTransferExtras) => void;
+  getDraftConflictCategories: (imported: EditorSettingsImportPatch, extras?: SettingsTransferExtras) => SettingsTransferCategoryId[];
 }>();
 
 const { t } = useI18n();
@@ -195,14 +197,19 @@ async function handleFileInputChange(event: Event) {
 }
 
 function handleImportedText(text: string, fileName: string) {
-  const result = parseSettingsTransferFile(text);
+  // The desktop section carries switches that only exist in the Tauri app;
+  // on web it is skipped so the preview lists only what will be applied.
+  const result = parseSettingsTransferFile(text, { includeDesktopSettings: isTauriRuntime() });
   if (!result.ok) {
     toast(translateParseError(result.error), 5000);
     return;
   }
   pendingImport.value = result.value;
   pendingImportFileName.value = fileName;
-  pendingImportConflicts.value = props.getDraftConflictCategories(result.value.editorSettings);
+  pendingImportConflicts.value = props.getDraftConflictCategories(result.value.editorSettings, {
+    themeMode: result.value.themeMode,
+    desktopSettings: result.value.desktopSettings,
+  });
   showImportConfirmDialog.value = true;
 }
 
@@ -233,10 +240,13 @@ function confirmImport() {
   const imported = pendingImport.value;
   if (!imported) return;
   props.applyImportedSettings(imported.editorSettings);
+  props.applyImportedExtras({ themeMode: imported.themeMode, desktopSettings: imported.desktopSettings });
   showImportConfirmDialog.value = false;
   pendingImport.value = null;
   pendingImportConflicts.value = [];
-  // The draft is not persisted yet; applying is still the user's job.
+  // The editor and desktop drafts are not persisted yet; applying is still
+  // the user's job. The theme mode applies immediately, like the theme
+  // buttons in the dialog.
   toast(t("settings.settingsTransferImportLoaded"));
 }
 </script>
@@ -253,12 +263,12 @@ function confirmImport() {
       <div class="settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2">
         <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="busy" @click="onExportClick">
           <Loader2 v-if="exporting" class="mr-1 h-3.5 w-3.5 animate-spin" />
-          <Download v-else class="mr-1 h-3.5 w-3.5" />
+          <Upload v-else class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.settingsTransferExport") }}
         </Button>
         <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="busy" @click="onImportClick">
           <Loader2 v-if="importing" class="mr-1 h-3.5 w-3.5 animate-spin" />
-          <Upload v-else class="mr-1 h-3.5 w-3.5" />
+          <Download v-else class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.settingsTransferImport") }}
         </Button>
       </div>

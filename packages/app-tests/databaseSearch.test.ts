@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { ColumnInfo } from "../../apps/desktop/src/types/database.ts";
 import { findMatchedSearchColumns, isNumericSearchColumn, isTextSearchColumn } from "../../apps/desktop/src/lib/database/databaseSearch.ts";
 import { DATABASE_SEARCH_TABLE_BATCH_SIZE, databaseSearchBatchRange, databaseSearchNextBatchSize } from "../../apps/desktop/src/lib/database/databaseSearchBatch.ts";
+import { effectiveDatabaseSearchScope, mapStructureSearchRows } from "../../apps/desktop/src/lib/database/databaseStructureSearch.ts";
 
 function col(name: string, dataType: string, primary = false): ColumnInfo {
   return {
@@ -34,6 +35,17 @@ test("treats 200 tables as a resumable batch instead of a search cap", () => {
   assert.deepEqual(databaseSearchBatchRange(200, 450), { start: 200, end: 400 });
   assert.deepEqual(databaseSearchBatchRange(400, 450), { start: 400, end: 450 });
   assert.equal(databaseSearchNextBatchSize(400, 450), 50);
+});
+
+test("structure search scope falls back on unsupported engines", () => {
+  assert.equal(effectiveDatabaseSearchScope("structure", "redis"), "data");
+  assert.equal(effectiveDatabaseSearchScope("structure", "mysql"), "structure");
+});
+
+test("maps structure catalog rows", () => {
+  const hits = mapStructureSearchRows(["object_name", "column_name", "column_comment"], [["orders", "order_no", ""]], "order");
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0]?.tableName, "orders");
 });
 
 test("can scan every remaining table without exceeding the discovered table list", () => {

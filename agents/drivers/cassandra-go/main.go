@@ -35,18 +35,22 @@ type response struct {
 }
 
 type connectParams struct {
-	Host             string `json:"host"`
-	Port             int    `json:"port"`
-	Database         string `json:"database"`
-	Username         string `json:"username"`
-	Password         string `json:"password"`
-	URLParams        string `json:"url_params"`
-	ConnectionString string `json:"connection_string"`
-	SSL              bool   `json:"ssl"`
-	CACertPath       string `json:"ca_cert_path"`
-	ClientCertPath   string `json:"client_cert_path"`
-	ClientKeyPath    string `json:"client_key_path"`
-	SessionRole      string `json:"sessionRole"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Database           string `json:"database"`
+	Username           string `json:"username"`
+	Password           string `json:"password"`
+	URLParams          string `json:"url_params"`
+	ConnectionString   string `json:"connection_string"`
+	SSL                bool   `json:"ssl"`
+	CACertPath         string `json:"ca_cert_path"`
+	ClientCertPath     string `json:"client_cert_path"`
+	ClientKeyPath      string `json:"client_key_path"`
+	TruststorePath     string `json:"truststore_path"`
+	TruststorePassword string `json:"truststore_password"`
+	KeystorePath       string `json:"keystore_path"`
+	KeystorePassword   string `json:"keystore_password"`
+	SessionRole        string `json:"sessionRole"`
 }
 
 type queryOptions struct {
@@ -361,7 +365,12 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listTriggers(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err
 	case "get_object_source":
-		return nil, false, errors.New("object source is not supported by Cassandra")
+		result, err := s.getObjectSource(
+			firstNonEmpty(stringParam(params, "schema"), stringParam(params, "database"), s.defaultKeyspace()),
+			firstNonEmpty(stringParam(params, "name"), stringParam(params, "table")),
+			stringParam(params, "object_type"),
+		)
+		return result, false, err
 	case "get_table_ddl":
 		result, err := s.getTableDDL(stringParam(params, "schema"), stringParam(params, "table"))
 		return result, false, err

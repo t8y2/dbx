@@ -37,6 +37,13 @@ export function connectionEndpointLabel(connection?: ConnectionPresentationConfi
   return endpoint.host || connection.database || "";
 }
 
+export function connectionEndpointUserLabel(connection?: ConnectionPresentationConfig & Pick<ConnectionConfig, "username">): string {
+  const endpoint = connectionEndpointLabel(connection);
+  if (!endpoint) return "";
+  const username = connection?.username?.trim() ?? "";
+  return username ? `${endpoint}@${username}` : endpoint;
+}
+
 function normalizedPresentationEndpoint(connection: ConnectionPresentationConfig): { host: string; port: number } {
   if (connection.db_type !== "gaussdb") return { host: connection.host, port: connection.port };
   return serializeGaussdbHosts(parseGaussdbHosts(connection.host, connection.port));
@@ -142,6 +149,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "elasticsearch":
     case "easysearch":
     case "meilisearch":
+    case "solr":
     case "qdrant":
     case "milvus":
     case "weaviate":
@@ -151,6 +159,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "dynamodb":
     case "mq":
     case "consul":
+    case "salesforce":
       return connection.ssl ? "https" : "http";
     case "cloudflare-d1":
       return "https";
@@ -207,14 +216,23 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "access":
       return "jdbc:ucanaccess:///absolute/path/to/database.accdb";
 
+    case "h2":
+      return driverProfile === "file" ? "jdbc:h2:file:/path/to/database" : "jdbc:h2:tcp://host:9092/database";
+
     case "mongodb":
       return "mongodb://user:password@host:port/database";
+
+    case "nebula":
+      return "nebula://root:password@graphd:9669/space";
 
     case "dynamodb":
       return "https://dynamodb.us-east-1.amazonaws.com";
 
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";
+
+    case "databend":
+      return "databend://user:password@host:443/default?warehouse=default";
 
     case "sqlserver":
       return "mssql://user:password@host:port/database";
@@ -232,6 +250,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
 
     case "meilisearch":
       return "http://host:port/base/path";
+
+    case "solr":
+      return "http://user:password@host:8983";
 
     case "dameng":
       return "dm://user:password@host:port";
@@ -260,6 +281,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "iris":
       return driverProfile === "cache" ? "cache://user:password@host:port/namespace" : "iris://user:password@host:port/namespace";
 
+    case "transwarp":
+      return "jdbc:inceptor2://host:10000/default";
+
     case "influxdb":
       return "influxdb://user:password@host:port/database";
 
@@ -268,6 +292,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
 
     case "victoriametrics":
       return "http://user:password@host:port/prometheus";
+
+    case "salesforce":
+      return "https://acme.my.salesforce.com";
 
     case "jdbc":
       return "jdbc:mysql://host:3306/database";

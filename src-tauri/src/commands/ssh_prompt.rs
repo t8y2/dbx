@@ -263,8 +263,7 @@ mod tests {
             port: 22,
             key_type: Some("ssh-ed25519".to_string()),
             fingerprint: Some("SHA256:test".to_string()),
-            prompt: None,
-            echo: false,
+            ..Default::default()
         }
     }
 

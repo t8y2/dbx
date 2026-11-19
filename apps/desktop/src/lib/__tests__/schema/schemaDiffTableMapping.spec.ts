@@ -46,6 +46,22 @@ describe("schema diff table mappings", () => {
     expect(buildSchemaDiffTableMatches(["a"], ["a", "a_new"], [{ sourceTable: "a", targetTable: "a_new" }])).toEqual([{ sourceTable: "a", targetTable: "a_new", kind: "manual" }]);
   });
 
+  it("treats reconciled same-name mappings as automatic", () => {
+    expect(
+      buildSchemaDiffTableMatches(
+        ["a", "b"],
+        ["a", "b"],
+        [
+          { sourceTable: "a", targetTable: "a" },
+          { sourceTable: "b", targetTable: "b" },
+        ],
+      ),
+    ).toEqual([
+      { sourceTable: "a", targetTable: "a", kind: "automatic" },
+      { sourceTable: "b", targetTable: "b", kind: "automatic" },
+    ]);
+  });
+
   it("removes mappings for deselected sources and automatically matches new sources", () => {
     const mappings = [
       { sourceTable: "a", targetTable: "a" },
@@ -92,6 +108,8 @@ describe("schema diff table mappings", () => {
     expect(normalizeSchemaDiffCompareOptions({}).tableMappings).toEqual([]);
     expect(normalizeSchemaDiffCompareOptions({}).ignoreTableNameCase).toBe(false);
     expect(normalizeSchemaDiffCompareOptions({}).ignoreColumnNameCase).toBe(false);
+    expect(normalizeSchemaDiffCompareOptions({ tables: false, views: true }, "mysql").views).toBe(false);
+    expect(normalizeSchemaDiffCompareOptions({ tables: true, views: true }, "mysql").views).toBe(true);
   });
 
   it("swaps each mapping direction", () => {

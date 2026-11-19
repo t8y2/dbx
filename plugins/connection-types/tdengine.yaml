@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 650
 dbType: tdengine
+compareModes: [schema, data]
 rustVariant: Tdengine
 label: TDengine
 runtimeMode: agent

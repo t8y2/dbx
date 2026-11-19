@@ -1,23 +1,56 @@
 <script setup lang="ts">
-import { ArrowLeft, Minus, Square, Copy, X, Grip } from "@lucide/vue";
+import { computed, onMounted, onUnmounted } from "vue";
+import { ArrowLeft, Minus, Square, Copy, X, Grip, Pin, PinOff, Bot } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useWindowControls } from "@/composables/useWindowControls";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT } from "@/lib/app/windowAlwaysOnTop";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 defineProps<{
   title: string;
   dirty?: boolean;
+  showAiPanel?: boolean;
 }>();
 
 const emit = defineEmits<{
   return: [];
   close: [];
+  "toggle-ai": [];
   "drag-start": [position: { x: number; y: number }];
   dragging: [position: { x: number; y: number }];
   "drag-end": [position: { x: number; y: number }];
 }>();
 
 const { t } = useI18n();
-const { isMac, isMaximized, minimize, toggleMaximize } = useWindowControls();
+const { isMac, isMaximized, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop } = useWindowControls();
+const settingsStore = useSettingsStore();
+// Mirrors the main toolbar: the pin control is opt-in, and it keeps showing
+// whenever this window is pinned so the user can always unpin it again.
+const showAlwaysOnTopButton = computed(() => settingsStore.editorSettings.toolbarItems.alwaysOnTop || isAlwaysOnTop.value);
+
+let unlistenToolbarVisibility: (() => void) | null = null;
+let unmounted = false;
+
+onMounted(async () => {
+  if (!isTauriRuntime()) return;
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    if (unmounted) return;
+    const unlisten = await listen<boolean>(ALWAYS_ON_TOP_TOOLBAR_VISIBILITY_CHANGED_EVENT, ({ payload }) => {
+      if (!unmounted && typeof payload === "boolean") settingsStore.syncAlwaysOnTopToolbarVisibility(payload);
+    });
+    if (unmounted) unlisten();
+    else unlistenToolbarVisibility = unlisten;
+  } catch (error) {
+    console.error("[DBX][window:always-on-top-toolbar-visibility-listen]", error);
+  }
+});
+
+onUnmounted(() => {
+  unmounted = true;
+  unlistenToolbarVisibility?.();
+});
 
 let dragging = false;
 
@@ -69,9 +102,35 @@ async function handleDragEnd(event: PointerEvent) {
       </button>
       <span class="min-w-0 flex-1 truncate font-medium" data-tauri-drag-region> <span v-if="dirty" class="mr-0.5">*</span>{{ title }} </span>
     </div>
+    <button
+      type="button"
+      class="mr-1 inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+      :class="{ 'bg-accent text-foreground': showAiPanel }"
+      title="AI"
+      aria-label="AI"
+      :aria-pressed="!!showAiPanel"
+      @pointerdown.stop
+      @click="emit('toggle-ai')"
+    >
+      <Bot class="h-3.5 w-3.5" />
+    </button>
     <button type="button" class="mr-1 inline-flex h-7 items-center gap-1 rounded px-2 text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('tabs.returnToMainWindow')" @pointerdown.stop @click="emit('return')">
       <ArrowLeft class="h-3.5 w-3.5" />
       <span>{{ t("tabs.returnToMainWindow") }}</span>
+    </button>
+    <button
+      v-if="showAlwaysOnTopButton"
+      type="button"
+      class="mr-1 inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+      :class="{ 'bg-accent text-foreground': isAlwaysOnTop }"
+      :title="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
+      :aria-pressed="isAlwaysOnTop"
+      :aria-label="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
+      @pointerdown.stop
+      @click="toggleAlwaysOnTop"
+    >
+      <Pin v-if="isAlwaysOnTop" class="h-3.5 w-3.5 fill-current" />
+      <PinOff v-else class="h-3.5 w-3.5" />
     </button>
     <template v-if="!isMac">
       <button type="button" class="inline-flex h-10 w-10 items-center justify-center hover:bg-foreground/10" :title="t('tabs.minimizeWindow')" @click="minimize"><Minus class="h-4 w-4" /></button>

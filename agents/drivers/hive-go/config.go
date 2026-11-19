@@ -22,6 +22,9 @@ import (
 const (
 	defaultHivePort            = 10000
 	defaultHiveDatabase        = "default"
+	defaultHiveIdentifierQuote = "`"
+	trinoIdentifierQuote       = "\""
+	kyuubiEngineTypeSetting    = "kyuubi.engine.type"
 	defaultHiveHTTPPath        = "cliservice"
 	defaultHiveService         = "hive"
 	defaultImpalaService       = "impala"
@@ -433,6 +436,7 @@ func parseHiveAssignments(raw string, lowercaseKeys bool) map[string]string {
 		if decoded, err := url.QueryUnescape(key); err == nil {
 			key = decoded
 		}
+		key = strings.TrimLeft(strings.TrimSpace(key), "?#")
 		if lowercaseKeys {
 			key = strings.ToLower(key)
 		}
@@ -688,22 +692,27 @@ func applyHiveParameters(config *connectionConfig, values, hiveConfs map[string]
 func applyOpenSessionVariables(config *connectionConfig, values, hiveConfs, hiveVars map[string]string) {
 	config.HiveConfiguration["set:hiveconf:"+resultSetUniqueColumnNames] = "false"
 	for key, value := range values {
-		lowerKey := strings.ToLower(key)
+		cleanKey := strings.TrimPrefix(key, "#")
+		lowerKey := strings.ToLower(cleanKey)
 		switch {
 		case strings.HasPrefix(lowerKey, "hiveconf:"):
-			config.HiveConfiguration["set:hiveconf:"+canonicalHiveConfKey(key[len("hiveconf:"):])] = value
+			config.HiveConfiguration["set:hiveconf:"+canonicalHiveConfKey(cleanKey[len("hiveconf:"):])] = value
 		case strings.HasPrefix(lowerKey, "hivevar:"):
-			config.HiveConfiguration["set:hivevar:"+key[len("hivevar:"):]] = value
+			config.HiveConfiguration["set:hivevar:"+cleanKey[len("hivevar:"):]] = value
+		case strings.HasPrefix(lowerKey, "kyuubi."):
+			config.HiveConfiguration["set:hivevar:"+cleanKey] = value
 		}
 	}
 	for key, value := range hiveConfs {
-		if strings.EqualFold(key, "hive.server2.transport.mode") || strings.EqualFold(key, "hive.server2.thrift.http.path") {
+		cleanKey := strings.TrimPrefix(key, "#")
+		if strings.EqualFold(cleanKey, "hive.server2.transport.mode") || strings.EqualFold(cleanKey, "hive.server2.thrift.http.path") {
 			continue
 		}
-		config.HiveConfiguration["set:hiveconf:"+canonicalHiveConfKey(key)] = value
+		config.HiveConfiguration["set:hiveconf:"+canonicalHiveConfKey(cleanKey)] = value
 	}
 	for key, value := range hiveVars {
-		config.HiveConfiguration["set:hivevar:"+key] = value
+		cleanKey := strings.TrimPrefix(key, "#")
+		config.HiveConfiguration["set:hivevar:"+cleanKey] = value
 	}
 	if proxyUser := firstNonEmpty(parameter(values, "proxyuser"), parameter(values, "hive.server2.proxy.user")); proxyUser != "" {
 		config.HiveConfiguration["hive.server2.proxy.user"] = proxyUser
@@ -729,6 +738,34 @@ func canonicalHiveConfKey(key string) string {
 func hiveAssignmentValue(values map[string]string, key string) string {
 	for candidate, value := range values {
 		if strings.EqualFold(strings.TrimSpace(candidate), key) {
+			return value
+		}
+	}
+	return ""
+}
+
+func (config connectionConfig) identifierQuote() string {
+	if !strings.EqualFold(config.DatabaseType, "kyuubi") {
+		return defaultHiveIdentifierQuote
+	}
+	engineType := openSessionConfigurationValue(config.HiveConfiguration, kyuubiEngineTypeSetting)
+	if strings.EqualFold(strings.TrimSpace(engineType), "TRINO") {
+		return trinoIdentifierQuote
+	}
+	return defaultHiveIdentifierQuote
+}
+
+func openSessionConfigurationValue(values map[string]string, key string) string {
+	// Hive JDBC-style URL fragments are sent as hive variables, while values
+	// after '?' are sent as hive confs. Kyuubi strips either prefix before it
+	// resolves session-scoped settings such as kyuubi.engine.type.
+	normalizedKey := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(key), "#"))
+	for candidate, value := range values {
+		candidateKey := strings.ToLower(strings.TrimSpace(candidate))
+		candidateKey = strings.TrimPrefix(candidateKey, "set:hivevar:")
+		candidateKey = strings.TrimPrefix(candidateKey, "set:hiveconf:")
+		candidateKey = strings.TrimPrefix(candidateKey, "#")
+		if candidateKey == normalizedKey {
 			return value
 		}
 	}

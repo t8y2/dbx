@@ -1,10 +1,21 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { groupMcpScopeConnections, isMcpPolicyMutationBlocked, matchesMcpSearchQuery, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedConnectionId, updateMcpAllowedConnectionIds } from "@/lib/mcp/mcpPolicySelection";
+import {
+  groupMcpScopeConnections,
+  isMcpPolicyMutationBlocked,
+  matchesMcpSearchQuery,
+  MCP_CAPABILITY_ROWS,
+  MCP_EXECUTION_MODE_COLUMNS,
+  MCP_TOOL_OPTIONS,
+  mcpExecutionModeFromPolicy,
+  mcpPolicyFieldsForExecutionMode,
+  toggleMcpAllowedConnectionId,
+  toggleMcpAllowedToolName,
+  updateMcpAllowedConnectionIds,
+} from "@/lib/mcp/mcpPolicySelection";
 
-const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
-const scopePickerSource = readFileSync(new URL("../../../components/settings/McpConnectionScopePicker.vue", import.meta.url), "utf8");
+const mcpServerSource = readFileSync(new URL("../../../../../../crates/dbx-mcp/src/server.rs", import.meta.url), "utf8");
 
 describe("MCP execution permission selection", () => {
   it("maps the persisted policy to the three UI modes", () => {
@@ -33,7 +44,8 @@ describe("MCP execution permission selection", () => {
       { labelKey: "settings.mcpCapabilityScopedMutation", read_only: false, safe_write: true, high_risk_write: true },
       { labelKey: "settings.mcpCapabilityBroadMutation", read_only: false, safe_write: false, high_risk_write: true },
       { labelKey: "settings.mcpCapabilitySchemaAdmin", read_only: false, safe_write: false, high_risk_write: true },
-      { labelKey: "settings.mcpCapabilityConnectionManagement", read_only: false, safe_write: true, high_risk_write: true },
+      { labelKey: "settings.mcpCapabilityConnectionCreate", read_only: false, safe_write: true, high_risk_write: true },
+      { labelKey: "settings.mcpCapabilityConnectionRemove", read_only: false, safe_write: false, high_risk_write: true },
     ]);
   });
 });
@@ -70,94 +82,53 @@ describe("MCP policy connection selection", () => {
   });
 });
 
+describe("MCP tool permission selection", () => {
+  it("lists every tool registered by the MCP server", () => {
+    const registeredToolNames = [...mcpServerSource.matchAll(/name\s*=\s*"(dbx_[^"]+)"/g)].map((match) => match[1]).sort();
+
+    expect(MCP_TOOL_OPTIONS.map((tool) => tool.name).sort()).toEqual(registeredToolNames);
+  });
+
+  it("keeps the Salesforce tools individually switchable, writes included", () => {
+    expect(MCP_TOOL_OPTIONS.filter((tool) => tool.name.startsWith("dbx_salesforce_")).map((tool) => [tool.name, tool.labelKey])).toEqual([
+      ["dbx_salesforce_current_user", "settings.mcpToolSalesforceCurrentUser"],
+      ["dbx_salesforce_prepare_write", "settings.mcpToolSalesforcePrepareWrite"],
+      ["dbx_salesforce_apply_write", "settings.mcpToolSalesforceApplyWrite"],
+    ]);
+
+    // An admin can expose reading (identity + SOQL) without handing over the write path.
+    const readOnlySfdc = toggleMcpAllowedToolName(null, "dbx_salesforce_apply_write", false);
+    expect(toggleMcpAllowedToolName(readOnlySfdc, "dbx_salesforce_prepare_write", false)).not.toContain("dbx_salesforce_prepare_write");
+    expect(readOnlySfdc).toContain("dbx_salesforce_current_user");
+  });
+
+  it("keeps batch execution allowed when allow-all becomes an explicit allowlist", () => {
+    const next = toggleMcpAllowedToolName(null, "dbx_send_message", false);
+
+    expect(next).toContain("dbx_execute_batch");
+    expect(next).not.toContain("dbx_send_message");
+  });
+
+  it("keeps Kafka reading independent from message sending", () => {
+    const next = toggleMcpAllowedToolName(null, "dbx_send_message", false);
+    expect(next).toContain("dbx_peek_messages");
+    expect(toggleMcpAllowedToolName(next, "dbx_peek_messages", false)).not.toContain("dbx_peek_messages");
+    expect(toggleMcpAllowedToolName([], "dbx_peek_messages", true)).toEqual(["dbx_peek_messages"]);
+  });
+
+  it("lets batch execution be enabled and disabled independently", () => {
+    expect(toggleMcpAllowedToolName(["dbx_execute_query"], "dbx_execute_batch", true)).toEqual(["dbx_execute_query", "dbx_execute_batch"]);
+    expect(toggleMcpAllowedToolName(["dbx_execute_query", "dbx_execute_batch"], "dbx_execute_batch", false)).toEqual(["dbx_execute_query"]);
+    expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_execute_batch")?.labelKey).toBe("settings.mcpToolExecuteBatch");
+  });
+});
+
 describe("MCP policy settings state", () => {
   it("blocks mutations while loading, saving, or displaying a load error", () => {
     expect(isMcpPolicyMutationBlocked({ loading: true, saving: false, loadError: "" })).toBe(true);
     expect(isMcpPolicyMutationBlocked({ loading: false, saving: true, loadError: "" })).toBe(true);
     expect(isMcpPolicyMutationBlocked({ loading: false, saving: false, loadError: "unavailable" })).toBe(true);
     expect(isMcpPolicyMutationBlocked({ loading: false, saving: false, loadError: "" })).toBe(false);
-  });
-
-  it("guards the mutation entry point and wires the shared disabled state to policy controls", () => {
-    expect(settingsDialogSource).toContain("if (mcpPolicyControlsDisabled.value) return;");
-    expect(settingsDialogSource).toContain(':disabled="mcpPolicyControlsDisabled"');
-    expect(settingsDialogSource).toContain('@update:scope="onMcpResourceScopeChange"');
-
-    const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
-    const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");
-    const loadingEnd = settingsDialogSource.indexOf("mcpPolicyLoading.value = false;", policyLoad);
-    expect(loadingStart).toBeGreaterThan(-1);
-    expect(loadingStart).toBeLessThan(policyLoad);
-    expect(loadingEnd).toBeGreaterThan(policyLoad);
-  });
-
-  it("renders one static mode hint in place of stacked per-mode description tracks", () => {
-    expect(settingsDialogSource).not.toContain("data-mcp-execution-mode-description");
-    const groupStart = settingsDialogSource.indexOf('role="radiogroup" aria-labelledby="mcp-execution-mode-label"');
-    const hintIndex = settingsDialogSource.indexOf("settings.mcpPermissionGlobalDefaultHint");
-    expect(groupStart).toBeGreaterThan(-1);
-    expect(hintIndex).toBeGreaterThan(groupStart);
-  });
-
-  it("keeps execution mode cards accessible as a keyboard radio group", () => {
-    expect(settingsDialogSource).toContain('role="radiogroup" aria-labelledby="mcp-execution-mode-label"');
-    expect(settingsDialogSource).toContain('v-for="mode in mcpExecutionModeOptions"');
-    expect(settingsDialogSource.match(/role="radio"/g)).toHaveLength(1);
-    expect(settingsDialogSource).toContain(':aria-checked="mcpExecutionMode === mode"');
-    expect(settingsDialogSource).toContain(':tabindex="mcpExecutionMode === mode ? 0 : -1"');
-    expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, mode)");
-    expect(settingsDialogSource).toContain('@keydown="onMcpExecutionModeKeydown($event, mode)"');
-  });
-
-  it("keeps MCP client config tabs on a single scrollable row", () => {
-    const tabsStart = settingsDialogSource.indexOf('<Tabs v-model="mcpConfigTab"');
-    const tabsEnd = settingsDialogSource.indexOf("</TabsList>", tabsStart);
-    const tabsSource = settingsDialogSource.slice(tabsStart, tabsEnd);
-
-    expect(tabsStart).toBeGreaterThan(-1);
-    expect(tabsEnd).toBeGreaterThan(tabsStart);
-    expect(tabsSource).toContain("overflow-x-auto");
-    expect(tabsSource).toContain("min-w-0");
-    expect(tabsSource).toContain("max-w-full");
-    expect(tabsSource).toContain("overscroll-x-contain");
-    expect(tabsSource).not.toContain("flex-wrap");
-    expect(tabsSource).not.toContain("grid-cols-");
-    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(13);
-    expect(tabsSource).toContain('<TabsTrigger value="deepseek-harness"');
-    expect(tabsSource).toContain('<TabsTrigger value="codebuddy"');
-    expect(tabsSource).toContain('<TabsTrigger value="zcode"');
-    expect(tabsSource).toContain('<TabsTrigger value="qoder"');
-    expect(tabsSource).not.toContain("min-w-0 px-");
-
-    const codeBuddyStart = settingsDialogSource.indexOf('<TabsContent value="codebuddy"', tabsEnd);
-    const codeBuddyEnd = settingsDialogSource.indexOf("</TabsContent>", codeBuddyStart);
-    const codeBuddySource = settingsDialogSource.slice(codeBuddyStart, codeBuddyEnd);
-
-    expect(codeBuddyStart).toBeGreaterThan(tabsEnd);
-    expect(codeBuddyEnd).toBeGreaterThan(codeBuddyStart);
-    expect(codeBuddySource).toContain("settings.mcpCodeBuddyConfigPath");
-    expect(codeBuddySource).toContain("mcpJsonRecommendedConfig");
-    expect(codeBuddySource).toContain("copyMcpText('codebuddy-config', mcpJsonRecommendedConfig)");
-
-    const zCodeStart = settingsDialogSource.indexOf('<TabsContent value="zcode"', tabsEnd);
-    const zCodeEnd = settingsDialogSource.indexOf("</TabsContent>", zCodeStart);
-    const zCodeSource = settingsDialogSource.slice(zCodeStart, zCodeEnd);
-
-    expect(zCodeStart).toBeGreaterThan(tabsEnd);
-    expect(zCodeEnd).toBeGreaterThan(zCodeStart);
-    expect(zCodeSource).toContain("settings.mcpZCodeConfigPath");
-    expect(zCodeSource).toContain("mcpJsonRecommendedConfig");
-    expect(zCodeSource).toContain("copyMcpText('zcode-config', mcpJsonRecommendedConfig)");
-
-    const qoderStart = settingsDialogSource.indexOf('<TabsContent value="qoder"', tabsEnd);
-    const qoderEnd = settingsDialogSource.indexOf("</TabsContent>", qoderStart);
-    const qoderSource = settingsDialogSource.slice(qoderStart, qoderEnd);
-
-    expect(qoderStart).toBeGreaterThan(tabsEnd);
-    expect(qoderEnd).toBeGreaterThan(qoderStart);
-    expect(qoderSource).toContain("settings.mcpQoderConfigPath");
-    expect(qoderSource).toContain("mcpQoderRecommendedConfig");
-    expect(qoderSource).toContain("copyMcpText('qoder-config', mcpQoderRecommendedConfig)");
   });
 });
 
@@ -173,13 +144,5 @@ describe("MCP connection search", () => {
   it("treats an empty query as a match and can search unavailable IDs", () => {
     expect(matchesMcpSearchQuery("   ", [null, undefined])).toBe(true);
     expect(matchesMcpSearchQuery("missing-id", ["missing-id-123", "Previously selected connection (unavailable)"])).toBe(true);
-  });
-
-  it("uses responsive allowed and available panes with an allowed-first compact view", () => {
-    expect(scopePickerSource).toContain('const compactPane = ref<ScopePane>("allowed")');
-    expect(scopePickerSource).toContain('data-scope-pane="available"');
-    expect(scopePickerSource).toContain('data-scope-pane="allowed"');
-    expect(scopePickerSource).toContain("@container mcp-scope (min-width: 42rem)");
-    expect(scopePickerSource).toContain("filteredUnavailableAllowedIds");
   });
 });

@@ -45,6 +45,38 @@ func TestLiveNeo4jAgent(t *testing.T) {
 	}
 }
 
+// TestLiveNeo4jAgentSingleInstanceRoutingFallback covers single-instance
+// servers that cannot serve `neo4j://` routing. The connection intentionally
+// keeps the default routing scheme so the direct-connection fallback runs.
+func TestLiveNeo4jAgentSingleInstanceRoutingFallback(t *testing.T) {
+	if os.Getenv("DBX_NEO4J_LIVE") != "1" {
+		t.Skip("set DBX_NEO4J_LIVE=1 to run against a real Neo4j server")
+	}
+	params := connectParams{
+		Host:     envOr("DBX_NEO4J_HOST", "127.0.0.1"),
+		Port:     envIntOr("DBX_NEO4J_PORT", defaultNeo4jPort),
+		Database: envOr("DBX_NEO4J_DATABASE", defaultDatabase),
+		Username: envOr("DBX_NEO4J_USER", "neo4j"),
+		Password: os.Getenv("DBX_NEO4J_PASSWORD"),
+	}
+	runtime, err := newConnectionRuntime(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.close()
+	if runtime.legacySingleDatabase && runtime.params.URLParams != "scheme=bolt" {
+		t.Fatalf("legacy server must fall back to a direct connection, got %q", runtime.params.URLParams)
+	}
+	server := newServer(runtime, params)
+	result, err := server.executeQuery(queryOptions{SQL: "RETURN 1 AS value", MaxRows: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 || result.Rows[0][0] != "1" {
+		t.Fatalf("unexpected query result: %#v", result)
+	}
+}
+
 func rawParams(values map[string]any) map[string]json.RawMessage {
 	result := make(map[string]json.RawMessage, len(values))
 	for key, value := range values {

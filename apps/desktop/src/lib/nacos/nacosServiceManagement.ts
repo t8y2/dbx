@@ -1,4 +1,22 @@
-import type { NacosInstanceInfo, NacosInstancePatch, NacosInstanceRef, NacosServiceDetail, NacosServiceUpsert } from "@/types/nacos";
+import type { NacosInstanceInfo, NacosInstancePatch, NacosInstanceRef, NacosServiceDetail, NacosServiceInfo, NacosServiceUpsert } from "@/types/nacos";
+
+export type NacosServiceInstanceHealth = "allHealthy" | "partiallyHealthy" | "noHealthyInstances" | "noInstances";
+
+export interface NacosServiceInstanceHealthSummary {
+  status: NacosServiceInstanceHealth;
+  healthy: number;
+  total: number;
+}
+
+export function nacosServiceInstanceHealthSummary(service: Pick<NacosServiceInfo, "ipCount" | "healthyInstanceCount">): NacosServiceInstanceHealthSummary | null {
+  const total = service.ipCount;
+  const healthy = service.healthyInstanceCount;
+  if (total == null || healthy == null || !Number.isInteger(total) || !Number.isInteger(healthy) || total < 0 || healthy < 0 || healthy > total) return null;
+  if (total === 0) return { status: "noInstances", healthy, total };
+  if (healthy === total) return { status: "allHealthy", healthy, total };
+  if (healthy === 0) return { status: "noHealthyInstances", healthy, total };
+  return { status: "partiallyHealthy", healthy, total };
+}
 
 function canonicalJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalJson);

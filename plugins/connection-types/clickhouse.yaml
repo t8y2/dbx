@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 90
 dbType: clickhouse
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: ClickHouse
 label: ClickHouse
 dialect: ClickHouse

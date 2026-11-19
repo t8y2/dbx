@@ -44,3 +44,10 @@ export function limitDataGridCellDisplay(value: string, maxLength = DATA_GRID_CE
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength)}...`;
 }
+
+/** Visual-only cell text; never use whitespace markers for editing or serialization. */
+export function gridCellDisplayValue(value: string, flatteningMultiLine: boolean, showWhitespace: boolean): string {
+  const text = firstLineCellDisplayValue(value, flatteningMultiLine);
+  // Map one space to one marker so monospace fonts preserve the original cell width.
+  return showWhitespace ? text.replace(/[ \t]/g, (character) => (character === " " ? "·" : "→")) : text;
+}

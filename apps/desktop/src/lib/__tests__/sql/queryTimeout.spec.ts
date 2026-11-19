@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CONCURRENT_INDEX_QUERY_TIMEOUT_SECS, frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 
 describe("queryTimeout", () => {
-  it("gives CREATE INDEX CONCURRENTLY a dedicated long budget instead of the 30s default", () => {
+  it("gives CREATE INDEX CONCURRENTLY a dedicated long budget instead of the 60s default", () => {
     expect(CONCURRENT_INDEX_QUERY_TIMEOUT_SECS).toBe(1800);
     expect(CONCURRENT_INDEX_QUERY_TIMEOUT_SECS).toBeGreaterThan(30);
     expect(frontendQueryTimeoutDelayMs(CONCURRENT_INDEX_QUERY_TIMEOUT_SECS)).toBe(1_800_000);
@@ -25,15 +25,23 @@ describe("queryTimeout", () => {
     expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready' RETURNING id", "postgres", 30)).toBe(0);
   });
 
+  it("uses conservative package splitting for an unresolved openGauss mode", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+END pkg_utils;`;
+    expect(frontendQueryTimeoutSecsForSql(`${packageSpec}\n/\nSELECT 1;`, "opengauss", 30)).toBe(60);
+  });
+
   it("keeps the frontend guard for non-row PostgreSQL statements", () => {
-    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(60);
-    expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(60);
-    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET note = 'ready' /* RETURNING */", "postgres", 30)).toBe(60);
+    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET note = 'ready' /* RETURNING */", "postgres", 30)).toBe(30);
   });
 
   it("keeps the existing frontend guard for other database types", () => {
-    expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(60);
-    expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("SELECT SLEEP(30)", "mysql", 10)).toBe(10);
+    expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(60);
   });
 
   it("does not schedule frontend timeouts beyond the browser timer limit", () => {
@@ -49,6 +57,6 @@ describe("queryTimeout", () => {
   });
 
   it("falls back safely when an inherited global timeout is invalid", () => {
-    expect(queryTimeoutSecsForConnection({ query_timeout_inherit: true }, Number.NaN)).toBe(30);
+    expect(queryTimeoutSecsForConnection({ query_timeout_inherit: true }, Number.NaN)).toBe(60);
   });
 });

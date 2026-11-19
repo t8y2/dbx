@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -89,7 +90,37 @@ class CacheAgentTest {
     }
 
     @Test
+    void readsOutOfRangeIntegerThroughBigDecimal() {
+        BigDecimal valueOutsideIntegerRange = new BigDecimal("2147483648");
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getBigDecimal".equals(method.getName())) {
+                calls.add("getBigDecimal");
+                return valueOutsideIntegerRange;
+            }
+            if (method.getName().startsWith("get")) {
+                calls.add(method.getName());
+                throw new SQLException("Numeric value out of range");
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new CacheAgent().resultValue(resultSet, 1, Types.INTEGER);
+
+        assertEquals(valueOutsideIntegerRange, value);
+        assertEquals(Collections.singletonList("getBigDecimal"), calls);
+    }
+
+    @Test
     void preservesStringPathForStandardValues() {
+        assertStringPath(Types.VARCHAR);
+        assertStringPath(Types.LONGVARCHAR);
+    }
+
+    private static void assertStringPath(int sqlType) {
         List<String> calls = new ArrayList<>();
         ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
             if ("getString".equals(method.getName())) {
@@ -102,7 +133,7 @@ class CacheAgentTest {
             return defaultValue(method.getReturnType());
         });
 
-        Object value = new CacheAgent().resultValue(resultSet, 1, Types.VARCHAR);
+        Object value = new CacheAgent().resultValue(resultSet, 1, sqlType);
 
         assertEquals("ordinary", value);
         assertEquals(Collections.singletonList("getString"), calls);
@@ -126,6 +157,47 @@ class CacheAgentTest {
 
         assertNull(value);
         assertEquals(Collections.singletonList("getObject"), calls);
+    }
+
+    @Test
+    void readsBitColumnsAsStoredNumbers() {
+        for (int sqlType : new int[] {Types.BIT, Types.BOOLEAN}) {
+            List<String> calls = new ArrayList<>();
+            ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+                if ("getInt".equals(method.getName())) {
+                    calls.add("getInt");
+                    return 1;
+                }
+                if (method.getName().startsWith("get")) {
+                    calls.add(method.getName());
+                    throw new AssertionError("Caché %Boolean must not be read as a Java boolean");
+                }
+                if ("wasNull".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            });
+
+            Object value = new CacheAgent().resultValue(resultSet, 1, sqlType);
+
+            assertEquals(1, value);
+            assertEquals(Collections.singletonList("getInt"), calls);
+        }
+    }
+
+    @Test
+    void preservesNullForBitColumns() {
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getInt".equals(method.getName())) {
+                return 0;
+            }
+            if ("wasNull".equals(method.getName())) {
+                return true;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        assertNull(new CacheAgent().resultValue(resultSet, 1, Types.BIT));
     }
 
     @Test

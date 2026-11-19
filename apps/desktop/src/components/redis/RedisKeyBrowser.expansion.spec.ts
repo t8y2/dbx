@@ -17,9 +17,12 @@ const mocks = vi.hoisted(() => ({
   redisStreamAdd: vi.fn(),
   redisSetTtl: vi.fn(),
   redisSetExpireAt: vi.fn(),
+  redisSetKeysTtl: vi.fn(),
+  redisSetKeysExpireAt: vi.fn(),
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisDeleteKeysByPattern: vi.fn(),
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   toast: vi.fn(),
@@ -45,9 +48,12 @@ vi.mock("@/lib/backend/api", () => ({
   redisStreamAdd: mocks.redisStreamAdd,
   redisSetTtl: mocks.redisSetTtl,
   redisSetExpireAt: mocks.redisSetExpireAt,
+  redisSetKeysTtl: mocks.redisSetKeysTtl,
+  redisSetKeysExpireAt: mocks.redisSetKeysExpireAt,
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisDeleteKeysByPattern: mocks.redisDeleteKeysByPattern,
   redisExecuteCommand: mocks.redisExecuteCommand,
   saveHistory: mocks.saveHistory,
 }));
@@ -349,7 +355,7 @@ function clickRefresh(host: HTMLElement) {
 }
 
 function clickLoadMore(host: HTMLElement) {
-  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.loadMoreKeys") && !button.disabled);
+  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.fetchMoreKeys") && !button.disabled);
   expect(loadMore, "load more button").toBeDefined();
   loadMore!.click();
 }

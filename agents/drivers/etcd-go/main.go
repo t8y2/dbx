@@ -21,6 +21,7 @@ const (
 	legacyAgentSessionID = "__legacy__"
 	maxAgentSessions     = 256
 	rpcTimeoutSeconds    = 30
+	statusProbeSeconds   = 10
 	readAccessCacheTTL   = 15 * time.Second
 )
 

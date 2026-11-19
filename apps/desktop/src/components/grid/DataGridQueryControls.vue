@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
-import { Filter, Trash2, X } from "@lucide/vue";
+import { ArrowUpDown, Filter, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import DataGridConditionEditor from "@/components/grid/DataGridConditionEditor.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
 import type { DataGridConditionColumnOption } from "@/composables/useDataGridConditionEditor";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
+import type { DataGridStructuredSortRule } from "@/composables/useDataGridSortBuilder";
 import type { DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
-import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
+import type { DatabaseType } from "@/types/database";
+import { clampSearchSplitWidth, MIN_SEARCH_SPLIT_PANE_WIDTH } from "@/lib/dataGrid/dataGridSearchSplit";
+import { filterModeHasCompleteValue, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 
 type LocalFilterSummary = {
   columnIndex: number;
@@ -20,39 +26,67 @@ type LocalFilterSummary = {
   hiddenValueCount: number;
 };
 
-const props = defineProps<{
-  whereInput: string;
-  orderByInput: string;
-  columns: readonly string[];
-  conditionColumns: readonly DataGridConditionColumnOption[];
-  identifierQuote?: string;
-  historyScope: DataGridConditionHistoryScope;
-  canUseWhereSearch: boolean;
-  compact: boolean;
-  leadingBorder: boolean;
-  filterBuilderOpen: boolean;
-  filterEditorView: DataGridFilterEditorView;
-  filterButtonActive: boolean;
-  filterButtonCount: number;
-  hasLocalColumnFilters: boolean;
-  localFilterCount: number;
-  localFilterSummaries: LocalFilterSummary[];
-  rules: DataGridStructuredFilterRule[];
-  filteredColumns: string[];
-  modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
-  columnSearch: string;
-  applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
-  applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
-  clearOrderBy: () => void | Promise<void>;
-}>();
+type StructuredFilterSummary = {
+  id: string;
+  columnName: string;
+  modeLabel: string;
+  valueText: string;
+};
+
+const props = withDefaults(
+  defineProps<{
+    whereInput: string;
+    orderByInput: string;
+    columns: readonly string[];
+    quickBuilderColumns?: readonly string[];
+    commentByColumn?: ReadonlyMap<string, string>;
+    conditionColumns: readonly DataGridConditionColumnOption[];
+    identifierQuote?: string;
+    databaseType?: DatabaseType;
+    historyScope: DataGridConditionHistoryScope;
+    canUseWhereSearch: boolean;
+    compact: boolean;
+    leadingBorder: boolean;
+    filterBuilderOpen: boolean;
+    filterEditorView: DataGridFilterEditorView;
+    filterButtonActive: boolean;
+    filterButtonCount: number;
+    hasLocalColumnFilters: boolean;
+    localFilterCount: number;
+    localFilterSummaries: LocalFilterSummary[];
+    rules: DataGridStructuredFilterRule[];
+    filteredColumns: string[];
+    modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
+    columnSearch: string;
+    applyOnlyBusy?: boolean;
+    valueSuggestions?: DataGridDistinctValueSuggestionState;
+    applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
+    applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
+    clearOrderBy: () => void | Promise<void>;
+    sortBuilderOpen?: boolean;
+    sortButtonActive?: boolean;
+    sortButtonCount?: number;
+    sortRules?: readonly DataGridStructuredSortRule[];
+    sortBuilderBusy?: boolean;
+    sortApplyOnlyBusy?: boolean;
+    showOrderBy?: boolean;
+    wherePaneRatio?: number;
+  }>(),
+  {
+    showOrderBy: true,
+    wherePaneRatio: 0.5,
+  },
+);
 
 const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "update:filterBuilderOpen": [value: boolean];
+  "update:sortBuilderOpen": [value: boolean];
   "update:columnSearch": [value: string];
   ensureRule: [];
   addRule: [];
+  applyOnly: [id: string];
   applyFilters: [];
   resetFilters: [];
   clearFilters: [];
@@ -60,10 +94,57 @@ const emit = defineEmits<{
   moveRule: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
   clearLocalFilter: [columnIndex?: number];
+  openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
+  closeValueSuggestions: [];
+  updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
+  selectValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleAllValueSuggestions: [];
+  applyValueSuggestions: [];
+  customModeOrder: [];
+  addSortRule: [];
+  removeSortRule: [id: string];
+  moveSortRule: [id: string, targetIndex: number];
+  updateSortRule: [id: string, patch: Partial<DataGridStructuredSortRule>];
+  applyOnlySortRule: [id: string];
+  resetSortRules: [];
+  clearSortRules: [];
+  applySortRules: [];
 }>();
+
+const quickFilteredColumns = computed(() => {
+  if (!props.quickBuilderColumns) return props.filteredColumns;
+  const matching = new Set(props.filteredColumns);
+  return props.quickBuilderColumns.filter((column) => matching.has(column));
+});
 
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement>();
+const whereEditorRef = ref<InstanceType<typeof DataGridConditionEditor>>();
+
+// Structured rules at a glance (#14969): the collapsed count badge cannot tell
+// the user which fields are filtered; this block shows field + condition and
+// lets each field be dropped on its own, mirroring the local-filter summary.
+const structuredFilterSummaries = computed<StructuredFilterSummary[]>(() => {
+  const modeLabelByValue = new Map(props.modeOptions.map((option) => [option.value, t(option.labelKey)] as const));
+  return props.rules
+    .filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue))
+    .map((rule) => ({
+      id: rule.id,
+      columnName: rule.columnName,
+      modeLabel: modeLabelByValue.get(rule.mode) ?? rule.mode,
+      valueText: filterModeUsesRange(rule.mode) ? `${rule.rawValue} ~ ${rule.rawEndValue}` : rule.rawValue,
+    }));
+});
+
+function focusWhere(): boolean {
+  if (!props.canUseWhereSearch || !whereEditorRef.value) return false;
+  whereEditorRef.value.focus();
+  return true;
+}
+
+defineExpose({ focusWhere });
 const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
 const pendingFirstEmptyRuleColumnSearch = ref(false);
 let openingFirstEmptyRuleColumnSearch = false;
@@ -72,7 +153,18 @@ const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-const wherePaneStyle = computed(() => (whereWidth.value == null ? {} : { flex: `0 0 ${whereWidth.value}px` }));
+const effectiveShowOrderBy = computed(() => props.showOrderBy);
+const effectiveWhereRatio = computed(() => (typeof props.wherePaneRatio === "number" && Number.isFinite(props.wherePaneRatio) && props.wherePaneRatio >= 0.2 && props.wherePaneRatio <= 0.85 ? props.wherePaneRatio : 0.5));
+
+const wherePaneStyle = computed(() => {
+  if (!effectiveShowOrderBy.value) {
+    return { flex: "1 1 100%", width: "100%" };
+  }
+  const defaultRatio = effectiveWhereRatio.value;
+  return {
+    flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value == null ? `${defaultRatio * 100}%` : `${whereWidth.value}px`}, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
+  };
+});
 
 function containerWidth(): number {
   return containerRef.value?.getBoundingClientRect().width ?? 0;
@@ -84,7 +176,7 @@ function onResizeStart(event: MouseEvent) {
   event.preventDefault();
   resizing.value = true;
   resizeStartX = event.clientX;
-  resizeStartWidth = clampSearchSplitWidth({ containerWidth: width, desiredWidth: whereWidth.value ?? undefined });
+  resizeStartWidth = clampSearchSplitWidth({ containerWidth: width, desiredWidth: whereWidth.value ?? undefined, defaultRatio: effectiveWhereRatio.value });
   whereWidth.value = resizeStartWidth;
   document.body.classList.add("select-none", "cursor-col-resize");
   window.addEventListener("mousemove", onResizeMove);
@@ -106,8 +198,7 @@ function onResizeEnd() {
 }
 
 function resetWidth() {
-  const width = containerWidth();
-  whereWidth.value = width > 0 ? clampSearchSplitWidth({ containerWidth: width }) : null;
+  whereWidth.value = null;
 }
 
 function updateRule(id: string, patch: Partial<DataGridStructuredFilterRule>) {
@@ -136,6 +227,7 @@ async function openPendingFirstEmptyRuleColumnSearch() {
 async function handleFilterButtonClick() {
   if (props.filterEditorView !== "quick") {
     const nextOpen = !props.filterBuilderOpen;
+    if (nextOpen && props.sortBuilderOpen) emit("update:sortBuilderOpen", false);
     emit("update:filterBuilderOpen", nextOpen);
     if (nextOpen) emit("ensureRule");
     return;
@@ -149,6 +241,21 @@ async function handleFilterButtonClick() {
   await openPendingFirstEmptyRuleColumnSearch();
 }
 
+function updateQuickFilterBuilderOpen(open: boolean) {
+  emit("update:filterBuilderOpen", open);
+  if (!open) emit("closeValueSuggestions");
+}
+
+function updateSortBuilderOpen(open: boolean) {
+  emit("update:sortBuilderOpen", open);
+}
+
+function handleSortButtonClick() {
+  const nextOpen = !props.sortBuilderOpen;
+  if (nextOpen && props.filterBuilderOpen) emit("update:filterBuilderOpen", false);
+  emit("update:sortBuilderOpen", nextOpen);
+}
+
 watch([() => props.filterBuilderOpen, () => props.rules.map((rule) => `${rule.id}:${rule.columnName}:${rule.disabled ? "1" : "0"}`).join("\u0000"), filterBuilderRef], () => void openPendingFirstEmptyRuleColumnSearch(), { flush: "post" });
 
 onUnmounted(onResizeEnd);
@@ -156,9 +263,9 @@ onUnmounted(onResizeEnd);
 
 <template>
   <div ref="containerRef" class="flex flex-1 min-w-0">
-    <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': leadingBorder }" :style="wherePaneStyle">
+    <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="[{ 'border-l': leadingBorder }, !effectiveShowOrderBy ? 'border-r' : '']" :style="wherePaneStyle">
       <template v-if="filterEditorView === 'quick'">
-        <Popover :open="filterBuilderOpen" @update:open="emit('update:filterBuilderOpen', $event)">
+        <Popover :open="filterBuilderOpen" @update:open="updateQuickFilterBuilderOpen">
           <PopoverTrigger as-child>
             <button
               type="button"
@@ -176,6 +283,19 @@ onUnmounted(onResizeEnd);
             <div class="flex items-center justify-between gap-2">
               <div class="text-xs font-medium text-foreground">{{ t("grid.filter") }}</div>
               <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="emit('clearFilters')"><Trash2 class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearFilter") }}</Button>
+            </div>
+
+            <div v-if="structuredFilterSummaries.length" class="space-y-1.5 rounded-md border border-sky-500/30 bg-sky-500/5 px-2 py-1.5">
+              <div class="flex items-center gap-2 text-xs font-medium text-sky-600 dark:text-sky-400">
+                <Filter class="h-3.5 w-3.5 shrink-0" /><span class="truncate">{{ t("grid.structuredFiltersActive", { count: structuredFilterSummaries.length }) }}</span>
+              </div>
+              <div class="space-y-0.5">
+                <div v-for="summary in structuredFilterSummaries" :key="summary.id" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-1.5 rounded border border-sky-500/10 bg-background/70 px-2 py-0.5 text-xs">
+                  <span class="truncate font-medium text-foreground" :title="summary.columnName">{{ summary.columnName }}</span>
+                  <span class="min-w-0 truncate font-mono text-muted-foreground" :title="`${summary.modeLabel} ${summary.valueText}`">{{ summary.modeLabel }} {{ summary.valueText }}</span>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" :aria-label="t('grid.clearFilter')" @click="emit('removeRule', summary.id)"><X class="h-3.5 w-3.5" /></Button>
+                </div>
+              </div>
             </div>
 
             <div v-if="hasLocalColumnFilters" class="space-y-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-1.5">
@@ -202,13 +322,17 @@ onUnmounted(onResizeEnd);
             <DataGridFilterBuilder
               ref="filterBuilderRef"
               :rules="rules"
-              :columns="[...columns]"
-              :filtered-columns="filteredColumns"
+              :show-apply-only="true"
+              :apply-only-busy="applyOnlyBusy"
+              :columns="[...(quickBuilderColumns ?? columns)]"
+              :filtered-columns="quickFilteredColumns"
               :mode-options="modeOptions"
               :column-search="columnSearch"
               :disabled="!canUseWhereSearch"
               :show-header="false"
+              :value-suggestions="valueSuggestions"
               @add="emit('addRule')"
+              @apply-only="emit('applyOnly', $event)"
               @apply="emit('applyFilters')"
               @reset="emit('resetFilters')"
               @clear="emit('clearFilters')"
@@ -216,6 +340,15 @@ onUnmounted(onResizeEnd);
               @move="(id, targetIndex) => emit('moveRule', id, targetIndex)"
               @update-rule="updateRule"
               @update:column-search="emit('update:columnSearch', $event)"
+              @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
+              @close-value-suggestions="emit('closeValueSuggestions')"
+              @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+              @update-value-suggestion-source="emit('updateValueSuggestionSource', $event)"
+              @select-value-suggestion="emit('selectValueSuggestion', $event)"
+              @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
+              @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
+              @apply-value-suggestions="emit('applyValueSuggestions')"
+              @custom-mode-order="emit('customModeOrder')"
             />
           </PopoverContent>
         </Popover>
@@ -234,10 +367,12 @@ onUnmounted(onResizeEnd);
         <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
       </button>
       <DataGridConditionEditor
+        ref="whereEditorRef"
         :model-value="whereInput"
         kind="where"
         :columns="conditionColumns"
         :identifier-quote="identifierQuote"
+        :database-type="databaseType"
         :history-scope="historyScope"
         placeholder="WHERE"
         :history-empty-text="t('grid.conditionHistoryEmpty')"
@@ -250,6 +385,7 @@ onUnmounted(onResizeEnd);
       />
     </div>
     <button
+      v-if="effectiveShowOrderBy"
       type="button"
       class="group relative flex w-2 shrink-0 cursor-col-resize items-center justify-center border-l border-r border-border/80 bg-muted/15 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       aria-label="Resize WHERE and ORDER BY"
@@ -258,17 +394,65 @@ onUnmounted(onResizeEnd);
     >
       <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
     </button>
-    <div class="flex flex-1 items-center px-2 py-0.5 border-r min-w-0">
+    <div v-if="effectiveShowOrderBy" class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0">
+      <template v-if="filterEditorView === 'quick'">
+        <Popover :open="sortBuilderOpen" @update:open="updateSortBuilderOpen">
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+              :class="sortButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+              :disabled="!canUseWhereSearch"
+              :aria-label="t('grid.sortBuilderTitle')"
+            >
+              <ArrowUpDown class="h-3 w-3" />
+              <span v-if="sortButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ sortButtonCount }}</span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent data-sort-rules-scroll align="start" :collision-padding="8" class="max-h-[var(--reka-popover-content-available-height)] w-fit max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain p-2.5">
+            <DataGridSortBuilder
+              :rules="sortRules ?? []"
+              :columns="quickBuilderColumns ?? columns"
+              :comment-by-column="commentByColumn"
+              :busy="sortBuilderBusy"
+              :apply-only-busy="sortApplyOnlyBusy"
+              @add="emit('addSortRule')"
+              @remove="emit('removeSortRule', $event)"
+              @move="(id, targetIndex) => emit('moveSortRule', id, targetIndex)"
+              @update-rule="(id, patch) => emit('updateSortRule', id, patch)"
+              @apply-only="emit('applyOnlySortRule', $event)"
+              @reset="emit('resetSortRules')"
+              @clear="emit('clearSortRules')"
+              @apply="emit('applySortRules')"
+            />
+          </PopoverContent>
+        </Popover>
+      </template>
+      <button
+        v-else
+        type="button"
+        class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+        :class="sortButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+        :disabled="!canUseWhereSearch"
+        :aria-label="t('grid.sortBuilderTitle')"
+        :aria-expanded="sortBuilderOpen"
+        @click="handleSortButtonClick"
+      >
+        <ArrowUpDown class="h-3 w-3" />
+        <span v-if="sortButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ sortButtonCount }}</span>
+      </button>
       <DataGridConditionEditor
         :model-value="orderByInput"
         kind="orderBy"
         :columns="conditionColumns"
         :identifier-quote="identifierQuote"
+        :database-type="databaseType"
         :history-scope="historyScope"
         placeholder="ORDER BY"
         :history-empty-text="t('grid.conditionHistoryEmpty')"
         :history-no-matches-text="t('grid.conditionHistoryNoMatches')"
         :compact="compact"
+        :disabled="sortBuilderBusy"
         :apply="applyOrderBy"
         :clear="clearOrderBy"
         @update:model-value="emit('update:orderByInput', $event)"

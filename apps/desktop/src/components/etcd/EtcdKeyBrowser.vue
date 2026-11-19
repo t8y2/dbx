@@ -12,7 +12,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isKeyInKvExportScope, kvExportFilenameStem, kvValueByteIdentity, type KvExportScopeKind, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { detectKvValueFormat } from "@/lib/kv/kvValueFormat";
@@ -95,6 +97,23 @@ const TRANSFER_PREVIEW_PAGE_SIZE = 100;
 const TARGET_LOOKUP_CONCURRENCY = 8;
 
 const props = defineProps<{ connectionId: string }>();
+interface EtcdTabUiState {
+  mode?: WorkbenchMode;
+  activeOperation?: "maintenance" | "watch" | "lease";
+  searchQuery?: string;
+  searchPrefix?: string;
+  searchScope?: SearchScope;
+  transferOpen?: boolean;
+  transferMode?: "import" | "sync";
+  targetConnectionId?: string;
+  transferKeyFilter?: string;
+  syncPrefix?: string;
+  syncScope?: EtcdSyncScope;
+  transferConflictPolicy?: EtcdConflictPolicy;
+  transferCurrentPage?: number;
+  syncConfigurationExpanded?: boolean;
+}
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<EtcdTabUiState>({}, "EtcdKeyBrowser");
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
@@ -106,11 +125,11 @@ const ttlCapabilityRefreshIntervalMs = 5000;
 let ttlCapabilityRequest = 0;
 let ttlCapabilityInFlightConnection: string | null = null;
 let ttlCapabilityRefreshTimer: ReturnType<typeof setInterval> | null = null;
-const mode = ref<WorkbenchMode>("keys");
+const mode = ref<WorkbenchMode>(restoredUiState.mode ?? "keys");
 const operationsStatus = ref<api.KvStatusResponse | null>(null);
 const operationsLoading = ref(false);
 const watchPreset = ref<EtcdWatchPreset | null>(null);
-const activeOperation = ref<"maintenance" | "watch" | "lease">("maintenance");
+const activeOperation = ref<"maintenance" | "watch" | "lease">(restoredUiState.activeOperation ?? "maintenance");
 const isOperationsMode = computed(() => mode.value === "maintenance" || mode.value === "watch" || mode.value === "lease");
 const keyBytesByDisplay = new Map<string, Map<string, api.KvValue>>();
 const keySuggestionVersion = ref(0);
@@ -123,9 +142,9 @@ const selectedTreeKeys = ref<EtcdMultiSelection[]>([]);
 const batchDeleteOpen = ref(false);
 const batchDeleting = ref(false);
 
-const searchQuery = ref("");
-const searchPrefix = ref("");
-const searchScope = ref<SearchScope>("all");
+const searchQuery = ref(restoredUiState.searchQuery ?? "");
+const searchPrefix = ref(restoredUiState.searchPrefix ?? "");
+const searchScope = ref<SearchScope>(restoredUiState.searchScope ?? "all");
 const searchResults = ref<SearchResult[]>([]);
 const searchRunning = ref(false);
 const searchScanned = ref(0);
@@ -137,22 +156,39 @@ const searchError = ref("");
 let searchCancelled = false;
 let transferPreviewGeneration = 0;
 
-const transferOpen = ref(false);
-const transferMode = ref<"import" | "sync">("import");
+const transferOpen = ref(restoredUiState.transferOpen ?? false);
+const transferMode = ref<"import" | "sync">(restoredUiState.transferMode ?? "import");
 const transferBundle = ref<EtcdBundle | null>(null);
-const targetConnectionId = ref("");
+const targetConnectionId = ref(restoredUiState.targetConnectionId ?? "");
 const transferRows = ref<TransferRow[]>([]);
 const transferLoading = ref(false);
 const transferApplying = ref(false);
 const transferError = ref("");
-const transferKeyFilter = ref("");
-const syncPrefix = ref("");
-const syncScope = ref<EtcdSyncScope>("prefix");
-const transferConflictPolicy = ref<EtcdConflictPolicy>("ABORT");
-const transferCurrentPage = ref(1);
+const transferKeyFilter = ref(restoredUiState.transferKeyFilter ?? "");
+const syncPrefix = ref(restoredUiState.syncPrefix ?? "");
+const syncScope = ref<EtcdSyncScope>(restoredUiState.syncScope ?? "prefix");
+const transferConflictPolicy = ref<EtcdConflictPolicy>(restoredUiState.transferConflictPolicy ?? "ABORT");
+const transferCurrentPage = ref(restoredUiState.transferCurrentPage ?? 1);
 const transferLoadingDetail = ref("");
 const transferPreviewLoaded = ref(false);
-const syncConfigurationExpanded = ref(true);
+const syncConfigurationExpanded = ref(restoredUiState.syncConfigurationExpanded ?? true);
+
+trackUiState(() => ({
+  mode: mode.value,
+  activeOperation: activeOperation.value,
+  searchQuery: searchQuery.value,
+  searchPrefix: searchPrefix.value,
+  searchScope: searchScope.value,
+  transferOpen: transferOpen.value,
+  transferMode: transferMode.value,
+  targetConnectionId: targetConnectionId.value,
+  transferKeyFilter: transferKeyFilter.value,
+  syncPrefix: syncPrefix.value,
+  syncScope: syncScope.value,
+  transferConflictPolicy: transferConflictPolicy.value,
+  transferCurrentPage: transferCurrentPage.value,
+  syncConfigurationExpanded: syncConfigurationExpanded.value,
+}));
 
 const etcdAccess = computed(() => connectionStore.getEtcdAccessCapabilities(props.connectionId));
 const canManageEtcd = computed(() => etcdAccess.value.admin);
@@ -561,7 +597,7 @@ async function exportTreeSelection(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -588,7 +624,7 @@ async function deleteSelectedTreeKeys() {
     toast(t("etcd.batchDeleteSuccess", { count: deleted }), 3000);
   } catch (error) {
     failed = true;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     toast(t("etcd.batchDeletePartial", { count: deleted, error: message }), 5000);
   } finally {
     if (failed) browserRef.value?.clearMultiSelection();
@@ -676,7 +712,7 @@ async function exportAll(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: scan.entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -709,7 +745,7 @@ async function exportEtcdNodeScope(connectionId: string, request: KvExportScopeR
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -741,7 +777,7 @@ async function onImportFile(event: Event) {
     transferOpen.value = true;
     await previewTransfer();
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -790,7 +826,7 @@ async function loadSyncPreview() {
     transferBundle.value = bundleFromSummaries(scan.entries, prefix, scan.revision);
     await previewTransfer();
   } catch (error) {
-    transferError.value = error instanceof Error ? error.message : String(error);
+    transferError.value = formatError(error);
   } finally {
     transferLoading.value = false;
     transferLoadingDetail.value = "";
@@ -835,7 +871,7 @@ async function previewTransfer() {
     if (transferMode.value === "sync") syncConfigurationExpanded.value = false;
   } catch (error) {
     if (generation !== transferPreviewGeneration) return;
-    transferError.value = error instanceof Error ? error.message : String(error);
+    transferError.value = formatError(error);
     transferPreviewLoaded.value = false;
   } finally {
     if (generation === transferPreviewGeneration) {
@@ -880,7 +916,7 @@ async function applyTransfer() {
     transferOpen.value = false;
     if (targetId === props.connectionId) browserRef.value?.refresh();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     // Rebuild the preview so an ambiguous network failure or a successful
     // prefix of the batch is reflected before the user retries.
     let previewError = "";
@@ -997,7 +1033,7 @@ async function runSearch() {
       return { id: `${identity}:${summary.modRevision || ""}`, displayKey: shown, keyIdentity: identity, summary: { ...summary, key: shown, keyBytes: bytes, keyIdentity: identity }, matchesKey, matchesValue, selected: true };
     });
   } catch (error) {
-    searchError.value = error instanceof Error ? error.message : String(error);
+    searchError.value = formatError(error);
   } finally {
     searchRunning.value = false;
   }
@@ -1028,7 +1064,7 @@ async function openOperations(nextMode: Extract<WorkbenchMode, "maintenance" | "
   try {
     operationsStatus.value = await api.etcdStatus(props.connectionId);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 5000);
+    toast(formatError(error), 5000);
   } finally {
     operationsLoading.value = false;
   }
@@ -1048,7 +1084,7 @@ async function refreshLeaseOptions() {
   try {
     leaseOptions.value = (await api.etcdLeaseList(props.connectionId)).leases;
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -1064,7 +1100,7 @@ async function exportSearchResults(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: selected.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 

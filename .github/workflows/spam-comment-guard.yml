@@ -12,7 +12,12 @@ jobs:
   delete-malicious-link:
     runs-on: ubuntu-latest
     # 跳过机器人与仓库 owner，避免误删维护者的正当评论
-    if: ${{ github.event.comment.user.type != 'Bot' && github.event.comment.user.login != github.repository_owner }}
+    if: >-
+      ${{ github.event.comment.user.type != 'Bot' && github.event.comment.user.login != github.repository_owner &&
+          (contains(github.event.comment.body, '.zip') ||
+           contains(github.event.comment.body, '.7z') ||
+           contains(github.event.comment.body, '.exe') ||
+           contains(github.event.comment.body, '.scr')) }}
     env:
       # owner PAT：GITHUB_TOKEN 非 admin 删不掉别人的评论，必须用 owner 令牌
       GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_TOKEN }}

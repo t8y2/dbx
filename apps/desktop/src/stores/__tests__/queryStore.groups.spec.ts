@@ -72,6 +72,57 @@ describe("queryStore editor groups", () => {
     expect(store.groups).toHaveLength(2);
   });
 
+  it("registers an incoming window tab in the focused split group", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    store.createTab("pg-1", "app", "Query 2", "query");
+    store.splitTabRight(firstId);
+    const targetGroupId = store.focusedGroupId;
+    const saved = { id: "incoming-tab", title: "Incoming", connectionId: "pg-1", database: "app", sql: "SELECT 42;" };
+
+    expect(store.importTransferredTab(saved)).toBe(saved.id);
+    expect(store.groups.find((group) => group.id === targetGroupId)?.tabIds).toContain(saved.id);
+    expect(store.groups.find((group) => group.id === targetGroupId)?.activeTabId).toBe(saved.id);
+    expect(store.activeTabId).toBe(saved.id);
+    expect(store.importTransferredTab(saved)).toBeNull();
+    expect(store.groups.flatMap((group) => group.tabIds).filter((id) => id === saved.id)).toHaveLength(1);
+  });
+
+  it("prunes the source split and selects a live tab after moving its last tab to another window", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    store.splitTabRight(firstId);
+
+    expect(store.detachTabForTransfer(firstId)?.id).toBe(firstId);
+    expect(store.groups).toHaveLength(1);
+    expect(store.groups[0].tabIds).toEqual([secondId]);
+    expect(store.groups[0].activeTabId).toBe(secondId);
+    expect(store.activeTabId).toBe(secondId);
+    expect(store.tabs.some((tab) => tab.id === firstId)).toBe(false);
+  });
+
+  it("imports a whole window group in order, preserves selection, and accepts retries", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Existing 1");
+    store.createTab("pg-1", "app", "Existing 2");
+    store.splitTabRight(firstId);
+    const targetGroupId = store.focusedGroupId;
+    const entries = ["incoming-1", "incoming-2", "incoming-3"].map((id) => ({
+      tab: { id, title: id, connectionId: "pg-1", database: "app", sql: "SELECT 42;" },
+    }));
+
+    expect(store.importTransferredTabs(entries, "incoming-2")).toBe(true);
+    expect(store.groups.find((group) => group.id === targetGroupId)?.tabIds).toEqual([firstId, ...entries.map((entry) => entry.tab.id)]);
+    expect(store.activeTabId).toBe("incoming-2");
+    expect(store.importTransferredTabs(entries, "incoming-2")).toBe(true);
+    expect(store.tabs.filter((tab) => tab.id.startsWith("incoming"))).toHaveLength(3);
+    expect(store.importTransferredTabs([])).toBe(false);
+  });
+
   it("unsplits a secondary group tab back to the main group", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -109,6 +160,61 @@ describe("queryStore editor groups", () => {
     expect(store.activeTabId).toBe(firstId);
 
     expect(store.activateTab("missing")).toBe(false);
+  });
+
+  it("keeps UI state isolated when switching tabs", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+
+    store.updateTabUiState(firstId, { activeOutputView: "chart", resultPaneOpen: false });
+    store.updateTabUiState(secondId, { activeOutputView: "summary", resultPaneOpen: true });
+
+    store.activateTab(firstId);
+    expect(store.tabs.find((tab) => tab.id === firstId)?.uiState).toEqual({ activeOutputView: "chart", resultPaneOpen: false });
+    store.activateTab(secondId);
+    expect(store.tabs.find((tab) => tab.id === secondId)?.uiState).toEqual({ activeOutputView: "summary", resultPaneOpen: true });
+  });
+
+  it("rejects stale or wrong-mode special-page UI updates", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Keys", "etcd");
+    const owner = store.tabs.find((tab) => tab.id === tabId)!;
+
+    store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "search" } }, owner);
+    store.updateTabPageUiState(tabId, "query", { QueryEditor: { draft: "stale" } }, owner);
+    store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "watch" } }, { ...owner });
+
+    expect(owner.uiState?.page).toEqual({ etcd: { EtcdKeyBrowser: { mode: "search" } } });
+  });
+
+  it("persists tab UI state with the open-tabs snapshot", async () => {
+    const api = await import("@/lib/backend/api");
+    const storeApi = vi.mocked(api.saveOpenTabsState);
+    storeApi.mockClear();
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query 1", "query");
+
+    store.updateTabUiState(tabId, { activeOutputView: "messages", resultPaneOpen: false });
+    store.updateTabPageUiState(tabId, "query", { QueryEditor: { inspectorOpen: true } });
+    await store.flushPendingPersist();
+
+    expect(storeApi).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tabs: [
+          expect.objectContaining({
+            uiState: {
+              activeOutputView: "messages",
+              resultPaneOpen: false,
+              page: { query: { QueryEditor: { inspectorOpen: true } } },
+            },
+          }),
+        ],
+      }),
+    );
   });
 
   it("close all in group only closes the same pinned partition as the trigger tab", async () => {

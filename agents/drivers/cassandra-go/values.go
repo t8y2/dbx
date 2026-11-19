@@ -13,6 +13,9 @@ import (
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 )
 
+// cqlTuple marks a decoded tuple so it renders as a CQL tuple literal.
+type cqlTuple []any
+
 func normalizeCQLValue(value any) any {
 	if value == nil {
 		return nil
@@ -20,25 +23,44 @@ func normalizeCQLValue(value any) any {
 	return cqlString(value)
 }
 
+// cqlString renders a column value for the grid. Scalars keep their plain
+// text form; collections are rendered as CQL literals, the same text cqlsh
+// prints, so a copied cell can be pasted back into a CQL statement.
 func cqlString(value any) string {
+	return renderCQLValue(value, false)
+}
+
+// cqlLiteral renders a value nested inside a collection: text-like values
+// are single-quoted so the literal stays unambiguous and valid CQL.
+func cqlLiteral(value any) string {
+	return renderCQLValue(value, true)
+}
+
+func renderCQLValue(value any, nested bool) string {
 	if value == nil {
 		return "null"
 	}
+	quote := func(text string) string {
+		if nested {
+			return quoteCQLString(text)
+		}
+		return text
+	}
 	switch typed := value.(type) {
 	case string:
-		return typed
+		return quote(typed)
 	case []byte:
 		return "0x" + hex.EncodeToString(typed)
 	case time.Time:
-		return typed.Format(time.RFC3339Nano)
+		return quote(typed.Format(time.RFC3339Nano))
 	case time.Duration:
-		return typed.String()
+		return quote(typed.String())
 	case gocql.Duration:
 		return fmt.Sprintf("%dmo%dd%dns", typed.Months, typed.Days, typed.Nanoseconds)
 	case gocql.UUID:
 		return typed.String()
 	case net.IP:
-		return typed.String()
+		return quote(typed.String())
 	case *big.Int:
 		if typed == nil {
 			return ""
@@ -46,6 +68,12 @@ func cqlString(value any) string {
 		return typed.String()
 	case big.Int:
 		return typed.String()
+	case cqlTuple:
+		values := make([]string, len(typed))
+		for index, element := range typed {
+			values[index] = cqlLiteral(element)
+		}
+		return "(" + strings.Join(values, ", ") + ")"
 	case fmt.Stringer:
 		return typed.String()
 	}
@@ -58,22 +86,31 @@ func cqlString(value any) string {
 	}
 	switch valueOf.Kind() {
 	case reflect.Map:
-		entries := make([]string, 0, valueOf.Len())
+		type entry struct{ key, value string }
+		entries := make([]entry, 0, valueOf.Len())
 		iterator := valueOf.MapRange()
 		for iterator.Next() {
-			entries = append(entries, cqlString(iterator.Key().Interface())+"="+cqlString(iterator.Value().Interface()))
+			entries = append(entries, entry{cqlLiteral(iterator.Key().Interface()), cqlLiteral(iterator.Value().Interface())})
 		}
-		sort.Strings(entries)
-		return "{" + strings.Join(entries, ", ") + "}"
+		sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+		parts := make([]string, len(entries))
+		for index, item := range entries {
+			parts[index] = item.key + ": " + item.value
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
 	case reflect.Slice, reflect.Array:
 		values := make([]string, valueOf.Len())
 		for index := range values {
-			values[index] = cqlString(valueOf.Index(index).Interface())
+			values[index] = cqlLiteral(valueOf.Index(index).Interface())
 		}
 		return "[" + strings.Join(values, ", ") + "]"
 	default:
 		return fmt.Sprint(value)
 	}
+}
+
+func quoteCQLString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func cqlTypeName(typeInfo gocql.TypeInfo) string {

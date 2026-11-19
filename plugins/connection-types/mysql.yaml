@@ -1,6 +1,9 @@
 schemaVersion: 1
 order: 10
 dbType: mysql
+compareModes: [schema, data]
+transferSupportLevel: verified
+transferObjectFamily: mysql
 rustVariant: Mysql
 label: MySQL
 dialect: MySQL

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
+import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems, createSaveAllTabsMenuItem } from "@/lib/tabs/tabMenu";
 
 const t = (key: string) => key;
 
 describe("shared tab menu helpers", () => {
-  it("builds rename and duplicate items only when renaming is allowed", () => {
+  it("builds rename and duplicate items for query tabs", () => {
     const items = createRenameDuplicateTabItems({
       tab: { id: "t1" } as never,
       t,
@@ -27,6 +27,24 @@ describe("shared tab menu helpers", () => {
     });
     expect(queryOnly).toHaveLength(1);
     expect(queryOnly[0]?.visible).toBe(false);
+  });
+
+  it("allows duplicating data tabs without allowing rename", () => {
+    let duplicated = false;
+    const items = createRenameDuplicateTabItems({
+      tab: { id: "data", mode: "data" } as never,
+      t,
+      canRename: false,
+      onRename: () => undefined,
+      onDuplicate: () => {
+        duplicated = true;
+      },
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.label).toBe("contextMenu.duplicateTab");
+    expect(items[0]?.visible).toBe(true);
+    items[0]?.action?.();
+    expect(duplicated).toBe(true);
   });
 
   it("builds locate and pin menu items with the expected actions", () => {
@@ -131,5 +149,28 @@ describe("shared tab menu helpers", () => {
       onClose: () => undefined,
     });
     expect(closeAllDefault.variant).toBeUndefined();
+
+    let savedAll = false;
+    const saveAll = createSaveAllTabsMenuItem({
+      label: "Save All Tabs",
+      disabled: false,
+      shortcut: "Shift+Mod+S",
+      onSaveAll: () => {
+        savedAll = true;
+      },
+    });
+    expect(saveAll.label).toBe("Save All Tabs");
+    expect(saveAll.disabled).toBe(false);
+    expect(saveAll.shortcut).toBe("Shift+Mod+S");
+    saveAll.action?.();
+    expect(savedAll).toBe(true);
+
+    const saveAllDisabled = createSaveAllTabsMenuItem({
+      label: "Save All Tabs",
+      disabled: true,
+      onSaveAll: () => undefined,
+    });
+    expect(saveAllDisabled.disabled).toBe(true);
+    expect("shortcut" in saveAllDisabled).toBe(false);
   });
 });

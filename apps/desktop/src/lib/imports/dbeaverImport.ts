@@ -2,6 +2,7 @@ import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/data
 import { uuid } from "@/lib/common/utils";
 import { JDBCX_JDBC_DRIVER_CLASS } from "@/lib/database/jdbcxBuiltinDriver";
 import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -264,7 +265,7 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     color: getString(config.color || config["connection-color"]),
     transport_layers: [],
     connect_timeout_secs: 10,
-    query_timeout_secs: 30,
+    query_timeout_secs: DEFAULT_QUERY_TIMEOUT_SECS,
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsedUrl.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? url || undefined : undefined,

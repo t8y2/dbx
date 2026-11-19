@@ -1,0 +1,5964 @@
+{
+  "source": "https://github.com/apache/doris-website",
+  "revision": "b28541fb0fc91425ab97c8324af5abd0f72d1ef0",
+  "license": "Apache-2.0",
+  "functions": [
+    {
+      "name": "ABS",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ABS(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/abs/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ACOS",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ACOS(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/acos/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "AES_DECRYPT",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "AES_DECRYPT( <str>, <key_str>[, <init_vector>][, <encryption_mode>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/aes-decrypt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "AES_ENCRYPT",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "AES_ENCRYPT( <str>, <key_str>[, <init_vector>][, <encryption_mode>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/aes-encrypt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ANY_VALUE",
+      "category": "aggregate-functions",
+      "signatures": [
+        "ANY_VALUE(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/any-value/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "APPEND_TRAILING_CHAR_IF_ABSENT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "APPEND_TRAILING_CHAR_IF_ABSENT(<str>, <trailing_char>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/append-trailing-char-if-absent/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "APPROX_COUNT_DISTINCT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "APPROX_COUNT_DISTINCT(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/approx-count-distinct/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_AGG",
+      "category": "aggregate-functions",
+      "signatures": [
+        "ARRAY_AGG(<col>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/array-agg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_APPLY",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_APPLY(<arr>, <op>, <val>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-apply/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_AVG",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_AVG(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-avg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_COMPACT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_COMPACT(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-compact/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_CONCAT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_CONCAT(<arr1> [,<arr2> , ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-concat/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_CONTAINS",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "array_contains(ARRAY<T> arr, T value)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-contains/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_COUNT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_COUNT(<arr>)",
+        "ARRAY_COUNT(<lambda>, <arr>[, ... ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_CUM_SUM",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_CUM_SUM(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-cum-sum/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_DIFFERENCE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_DIFFERENCE(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-difference/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_DISTINCT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_DISTINCT(<arr> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-distinct/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_ENUMERATE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_ENUMERATE(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-enumerate/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_ENUMERATE_UNIQ",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_ENUMERATE_UNIQ(<arr1> [,<arr2> , ... ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-enumerate-uniq/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_EXCEPT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_EXCEPT(<arr1> , <arr2> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-except/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_EXISTS",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_EXISTS([ <lambda>, ] <arr1> [, <arr2> , ...] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-exists/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_FILTER",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_FILTER(<lambda>, <arr>)",
+        "ARRAY_FILTER(<arr>, <filter_column>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-filter/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_FIRST",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_FIRST(<lambda>, <arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-first/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_FIRST_INDEX",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_FIRST_INDEX(<lambda>, <arr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-first-index/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_INTERSECT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_INTERSECT(<arr1> , <arr2> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-intersect/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_JOIN",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_JOIN(<arr> , <sep> [, <null_replace>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-join/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_LAST",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_LAST(<lambda>, <arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-last/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_LAST_INDEX",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_LAST_INDEX(<lambda>, <arr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-last-index/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_MAP",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_MAP(lambda, <arr> [ , <arr> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-map/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_MATCH_ALL",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "array_match_all(lambda, <arr> [, <arr> ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-match-all/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_MATCH_ANY",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "array_match_any(lambda, <arr> [, <arr> ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-match-any/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_MAX",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_MAX(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-max/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_MIN",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_MIN(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-min/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_POPBACK",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_POPBACK(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-popback/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_POPFRONT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_POPFRONT(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-popfront/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_POSITION",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_POSITION(<arr>, <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-position/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_PRODUCT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_PRODUCT(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-product/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_PUSHBACK",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_PUSHBACK(<arr>, <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-pushback/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_PUSHFRONT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_PUSHFRONT(<arr>, <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-pushfront/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_RANGE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_RANGE(<end>)",
+        "ARRAY_RANGE(<start>, <end>)",
+        "ARRAY_RANGE(<start>, <end>, <step>)",
+        "ARRAY_RANGE(<start_datetime>, <end_datetime>)",
+        "ARRAY_RANGE(<start_datetime>, <end_datetime>, INTERVAL <interval_step> <unit>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-range/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_REMOVE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_REMOVE(<arr>, <val>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-remove/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_REPEAT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_REPEAT(<element>, <n>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-repeat/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_REVERSE_SORT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_REVERSE_SORT(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-reverse-sort/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_REVERSE_SPLIT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_REVERSE_SPLIT(<arr>, <cond>)",
+        "ARRAY_REVERSE_SPLIT(<lambda>, <arr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-reverse-split/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SHUFFLE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SHUFFLE(<array>, <seed>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-shuffle/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SIZE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SIZE(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-size/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SLICE",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SLICE(<arr>, <off>, <len>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-slice/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SORT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SORT(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-sort/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SORTBY",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SORTBY(<src>, <key>)",
+        "ARRAY_SORTBY(<lambda>, <arr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-sortby/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SPLIT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SPLIT(<arr>, <cond>)",
+        "ARRAY_SPLIT(<lambda>, arr [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-split/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_SUM",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_SUM(<src>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-sum/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_UNION",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_UNION(<array>, <array> [, ... ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-union/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_WITH_CONSTANT",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_WITH_CONSTANT(<n>, <element>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-with-constant/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAY_ZIP",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAY_ZIP(<array>[, <array> ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/array-zip/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ARRAYS_OVERLAP",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "ARRAYS_OVERLAP(<left>, <right>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/arrays-overlap/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ASCII",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "ASCII ( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/ascii/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ASIN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ASIN(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/asin/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ATAN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ATAN(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/atan/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ATAN2",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ATAN2(<y>, <x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/atan2/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "AUTO_PARTITION_NAME",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "AUTO_PARTITION_NAME('RANGE', 'VARCHAR unit', DATETIME datetime)",
+        "AUTO_PARTITION_NAME('LIST', VARCHAR,...)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/auto-partition-name/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "AVG",
+      "category": "aggregate-functions",
+      "signatures": [
+        "AVG([DISTINCT] <expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/avg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "AVG_WEIGHTED",
+      "category": "aggregate-functions",
+      "signatures": [
+        "AVG_WEIGHTED(<x>, <weight>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/avg-weighted/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BACKENDS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "BACKENDS()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/backends/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BIN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "BIN(<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/bin/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BIT_COUNT",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BIT_COUNT( <x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bitcount/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BIT_LENGTH",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BIT_LENGTH( <str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bit-length/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BIT_SHIFT_LEFT",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BIT_SHIFT_LEFT( <x>, <bits>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bitshiftleft/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BIT_SHIFT_RIGHT",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BIT_SHIFT_RIGHT( <x>, <bits>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bitshiftright/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITAND",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BITAND( <lhs>, <rhs>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bitand/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_AGG",
+      "category": "aggregate-functions",
+      "signatures": [
+        "BITMAP_AGG(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/bitmap-agg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_AND",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_AND(<bitmap>, <bitmap>,[, <bitmap>...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-and/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_AND_COUNT",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_AND_COUNT(<bitmap>, <bitmap>,[, <bitmap>...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-and-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_CONTAINS",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_CONTAINS(<bitmap>, <bigint>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-contains/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_COUNT",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_COUNT(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_EMPTY",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_EMPTY()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-empty/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_FROM_ARRAY",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_FROM_ARRAY(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-from-array/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_FROM_BASE64",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_FROM_BASE64(<base64_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-from-base64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_FROM_STRING",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_FROM_STRING(<str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-from-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_HAS_ALL",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_HAS_ALL(<bitmap1>, <bitmap2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-has-all/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_HAS_ANY",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_HAS_ANY(<bitmap1>, <bitmap2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-has-any/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_HASH",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_HASH(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-hash/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_HASH64",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_HASH64(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-hash64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_INTERSECT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "BITMAP_INTERSECT(BITMAP <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/bitmap-intersect/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_MAX",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_MAX(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-max/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_MIN",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_MIN(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-min/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_NOT",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_NOT(<bitmap1>, <bitmap2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-not/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_OR",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_OR(<bitmap1>, <bitmap2>, ..., <bitmapN>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-or/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_OR_COUNT",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_OR_COUNT(<bitmap1>, <bitmap2>, ..., <bitmapN>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-or-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_REMOVE",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_REMOVE(<bitmap>, <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-remove/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_SUBSET_IN_RANGE",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_SUBSET_IN_RANGE(<bitmap>, <range_start_include>, <range_end_exclude>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-subset-in-range/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_SUBSET_LIMIT",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_SUBSET_LIMIT(<bitmap>, <position>, <cardinality_limit>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-subset-limit/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_TO_ARRAY",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_TO_ARRAY(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-to-array/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_TO_BASE64",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_TO_BASE64(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-to-base64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_TO_STRING",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_TO_STRING(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-to-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_UNION",
+      "category": "aggregate-functions",
+      "signatures": [
+        "BITMAP_UNION(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/bitmap-union/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_UNION_COUNT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "BITMAP_UNION_COUNT(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/bitmap-union-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_XOR",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_XOR(<bitmap1>, <bitmap2>, ..., <bitmapN>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-xor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITMAP_XOR_COUNT",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "BITMAP_XOR_COUNT(<bitmap1>, <bitmap2>, ..., <bitmapN>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/bitmap-xor-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITNOT",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BITNOT( <x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bitnot/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "BITOR",
+      "category": "scalar-functions/bitwise-functions",
+      "signatures": [
+        "BITOR( <lhs>, <rhs>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitwise-functions/bitor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CATALOGS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "CATALOGS()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/catalogs/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CBRT",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "CBRT(<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/cbrt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CEIL",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "CEIL(<a>[, <d>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CHAR_LENGTH",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "CHAR_LENGTH ( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/char-length/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COALESCE",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "COALESCE(<expr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/coalesce/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COLLECT_LIST",
+      "category": "aggregate-functions",
+      "signatures": [
+        "COLLECT_LIST(<expr> [,<max_size>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/collect-list/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COLLECT_SET",
+      "category": "aggregate-functions",
+      "signatures": [
+        "COLLECT_SET(<expr> [,<max_size>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/collect-set/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CONCAT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "CONCAT ( <expr> [ , <expr> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/concat/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CONCAT_WS",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "CONCAT_WS ( <sep> , <str> [ , <str> ] )",
+        "CONCAT_WS ( <sep> , <array> [ , <array> ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/concat-ws/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CONNECTION_ID",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "CONNECTION_ID()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/connection-id/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CONV",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "CONV(<input>, <from_base>, <to_base>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/conv/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CONVERT_TO",
+      "category": "scalar-functions/other-functions",
+      "signatures": [
+        "CONVERT_TO(<column>, <character>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/other-functions/convert-to/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CONVERT_TZ",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "CONVERT_TZ(<dt>, <from_tz>, <to_tz>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/convert-tz/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CORR",
+      "category": "aggregate-functions",
+      "signatures": [
+        "CORR(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/corr/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CORR_WELFORD",
+      "category": "aggregate-functions",
+      "signatures": [
+        "CORR_WELFORD(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/corr-welford/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "COS",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "COS(<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/cos/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COSH",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "COSH(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/cosh/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COSINE_DISTANCE",
+      "category": "scalar-functions/distance-functions",
+      "signatures": [
+        "COSINE_DISTANCE(<array1>, <array2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/distance-functions/cosine-distance/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COUNT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "COUNT(DISTINCT <expr> [,<expr>,...])",
+        "COUNT(*)",
+        "COUNT(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COUNT_BY_ENUM",
+      "category": "aggregate-functions",
+      "signatures": [
+        "COUNT_BY_ENUM(<expr1>, <expr2>, ... , <exprN>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/count-by-enum/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COUNT_SUBSTRINGS",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "COUNT_SUBSTRINGS(<str>, <pattern>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/count_substrings/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COUNTEQUAL",
+      "category": "scalar-functions/array-functions",
+      "signatures": [
+        "COUNTEQUAL(<arr>, <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/array-functions/countequal/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "COVAR_SAMP",
+      "category": "aggregate-functions",
+      "signatures": [
+        "COVAR_SAMP(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/covar-samp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CRC32",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "CRC32( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/crc32/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CUME_DIST",
+      "category": "window-functions",
+      "signatures": [
+        "CUME_DIST()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/cume-dist/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CURRENT_CATALOG",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "CURRENT_CATALOG()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/current-catalog/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CURRENT_USER",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "CURRENT_USER()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/current-user/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "CUT_IPV6",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "CUT_IPV6(<ipv6>, <cut_ipv6_bytes>, <cut_ipv4_bytes>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/cut-ipv6/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "CUT_TO_FIRST_SIGNIFICANT_SUBDOMAIN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "CUT_TO_FIRST_SIGNIFICANT_SUBDOMAIN(<url>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/cut-to-first-significant-subdomain/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DATABASE",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "DATABASE()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/database/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DATE_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DATE_CEIL(<datetime>, INTERVAL <period> <type>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/date-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DATE_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DATE_FLOOR(<datetime>, INTERVAL <period> <type>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/date-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DATE_FORMAT",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DATE_FORMAT(<date>, <format>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/date-format/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DATE_TRUNC",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DATE_TRUNC(<datetime>, <time_unit>)",
+        "DATE_TRUNC(<time_unit>, <datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/date-trunc/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DATEDIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DATEDIFF(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/datediff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAY",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DAY(<dt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/day/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAY_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DAY_CEIL(<datetime>)",
+        "DAY_CEIL(<datetime>, <origin>)",
+        "DAY_CEIL(<datetime>, <period>)",
+        "DAY_CEIL(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/day-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAY_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DAY_FLOOR(<datetime>)",
+        "DAY_FLOOR(<datetime>, <origin>)",
+        "DAY_FLOOR(<datetime>, <period>)",
+        "DAY_FLOOR(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/day-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAYNAME",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DAYNAME(<dt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/dayname/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAYOFWEEK",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DAYOFWEEK(<dt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/dayofweek/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAYOFYEAR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "DAYOFYEAR(<dt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/dayofyear/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAYS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/date-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DAYS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/date-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DEGREES",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "DEGREES(<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/degrees/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DENSE_RANK",
+      "category": "window-functions",
+      "signatures": [
+        "DENSE_RANK()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/dense-rank/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DIGITAL_MASKING",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "DIGITAL_MASKING( <digital_number> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/digital-masking/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DOMAIN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "DOMAIN ( <url> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/domain/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "DOMAIN_WITHOUT_WWW",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "DOMAIN_WITHOUT_WWW ( <url> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/domain-without-www/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "E",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "E()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/e/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ELT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "ELT ( <pos> , <str> [ , <str> ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/elt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ENDS_WITH",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "ENDS_WITH ( <str> , <suffix> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/ends-with/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ESQUERY",
+      "category": "scalar-functions/other-functions",
+      "signatures": [
+        "ESQUERY(<field>, <query_dsl>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/other-functions/esquery/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXP",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "EXP(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/exp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE(<array>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_BITMAP",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_BITMAP(<bitmap>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-bitmap/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_JSON_ARRAY_DOUBLE",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_JSON_ARRAY_DOUBLE(<json>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-json-array-double/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_JSON_ARRAY_INT",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_JSON_ARRAY_INT(<json>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-json-array-int/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_JSON_ARRAY_JSON",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_JSON_ARRAY_JSON(<json>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-json-array-json/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_JSON_ARRAY_STRING",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_JSON_ARRAY_STRING(<json>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-json-array-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_JSON_OBJECT",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_JSON_OBJECT(<json>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-json-object/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_MAP",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_MAP(map<k,v>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-map/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_NUMBERS",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_NUMBERS(<n>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-numbers/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXPLODE_SPLIT",
+      "category": "table-functions",
+      "signatures": [
+        "EXPLODE_SPLIT(<str>, <delimiter>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/explode-split/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXTRACT",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "EXTRACT(<unit> FROM <datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/extract/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "EXTRACT_URL_PARAMETER",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "EXTRACT_URL_PARAMETER ( <url> , <name> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/extract-url-parameter/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FIELD",
+      "category": "scalar-functions/other-functions",
+      "signatures": [
+        "FIELD(<expr>, <param> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/other-functions/field/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FIND_IN_SET",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "FIND_IN_SET ( <str> , <strlist> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/find-in-set/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FIRST_SIGNIFICANT_SUBDOMAIN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "FIRST_SIGNIFICANT_SUBDOMAIN ( <url> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/first-significant-subdomain/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FIRST_VALUE",
+      "category": "window-functions",
+      "signatures": [
+        "FIRST_VALUE(expr[, ignore_null])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/first-value/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FLOOR",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "FLOOR(<a>[, <d>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FMOD",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/fmod/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FORMAT_ROUND",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "FORMAT_ROUND(<number>, <D>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/format-round/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "FROM_BASE64",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "FROM_BASE64 ( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/from-base64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FROM_DAYS",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "FROM_DAYS(<dt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/from-days/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FROM_MICROSECOND",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "FROM_MICROSECOND(<unix_timestamp>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/from-microsecond/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FROM_MILLISECOND",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "FROM_MILLISECOND(<millisecond>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/from-millisecond/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FROM_SECOND",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "FROM_SECOND(<unix_timestamp>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/from-second/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FROM_UNIXTIME",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "FROM_UNIXTIME(<unix_timestamp>[, <string_format>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/from-unixtime/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FRONTENDS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "FRONTENDS()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/frontends/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "FRONTENDS_DISKS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "FRONTENDS_DISKS()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/frontends_disks/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GET_JSON_BIGINT",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "GET_JSON_BIGINT( <json_str>, <json_path>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/get-json-bigint/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GET_JSON_DOUBLE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "GET_JSON_DOUBLE( <json_str>, <json_path>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/get-json-double/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GET_JSON_INT",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "GET_JSON_INT( <json_str>, <json_path>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/get-json-int/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GET_JSON_STRING",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "GET_JSON_STRING( <json_str>, <json_path>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/get-json-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GREATEST",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "GREATEST(<expr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/greatest/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUP_ARRAY_INTERSECT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUP_ARRAY_INTERSECT(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/group-array-intersect/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUP_BIT_AND",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUP_BIT_AND(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/group-bit-and/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUP_BIT_OR",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUP_BIT_OR(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/group-bit-or/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUP_BIT_XOR",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUP_BIT_XOR(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/group-bit-xor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUP_BITMAP_XOR",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUP_BITMAP_XOR(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/group-bitmap-xor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUP_CONCAT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUP_CONCAT([DISTINCT] <str>[, <sep>] [ORDER BY { <col_name> | <expr>} [ASC | DESC]])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/group-concat/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUPING",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUPING( <column_expression> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/grouping/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "GROUPING_ID",
+      "category": "aggregate-functions",
+      "signatures": [
+        "GROUPING_ID(<column_expression> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/grouping-id/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HEX",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "HEX ( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/hex/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HISTOGRAM",
+      "category": "aggregate-functions",
+      "signatures": [
+        "HISTOGRAM(<expr>[, <num_buckets>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/histogram/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_CARDINALITY",
+      "category": "scalar-functions/hll-functions",
+      "signatures": [
+        "HLL_CARDINALITY(<hll>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/hll-functions/hll-cardinality/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_EMPTY",
+      "category": "scalar-functions/hll-functions",
+      "signatures": [
+        "HLL_EMPTY()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/hll-functions/hll-empty/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_FROM_BASE64",
+      "category": "scalar-functions/hll-functions",
+      "signatures": [
+        "HLL_FROM_BASE64(<input>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/hll-functions/hll-from-base64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_HASH",
+      "category": "scalar-functions/hll-functions",
+      "signatures": [
+        "HLL_HASH(<value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/hll-functions/hll-hash/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_RAW_AGG",
+      "category": "aggregate-functions",
+      "signatures": [
+        "HLL_RAW_AGG(<hll>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/hll-raw-agg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_TO_BASE64",
+      "category": "scalar-functions/hll-functions",
+      "signatures": [
+        "HLL_TO_BASE64(<hll_input>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/hll-functions/hll-to-base64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HLL_UNION_AGG",
+      "category": "aggregate-functions",
+      "signatures": [
+        "hll_union_agg(<hll>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/hll-union-agg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HOUR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "HOUR(<dt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/hour/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HOUR_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "HOUR_CEIL(<datetime>)",
+        "HOUR_CEIL(<datetime>, <origin>)",
+        "HOUR_CEIL(<datetime>, <period>)",
+        "HOUR_CEIL(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/hour-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HOUR_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "HOUR_FLOOR(<datetime>)",
+        "HOUR_FLOOR(<datetime>, <origin>)",
+        "HOUR_FLOOR(<datetime>, <period>)",
+        "HOUR_FLOOR(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/hour-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HOURS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "HOURS_ADD(<date>, <hours>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/hours-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HOURS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "HOURS_DIFF(<end_date>, <start_date>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/hours-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HOURS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "HOURS_SUB(<date>, <hours>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/hours-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "HUDI_META",
+      "category": "table-valued-functions",
+      "signatures": [
+        "HUDI_META( \"table\" = \"<table>\", \"query_type\" = \"<query_type>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/hudi-meta/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "ICEBERG_META",
+      "category": "table-valued-functions",
+      "signatures": [
+        "ICEBERG_META( \"table\" = \"<table>\", \"query_type\" = \"<query_type>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/iceberg-meta/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IF",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "IF(<condition>, <value_true>, <value_false_or_null>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/if/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IFNULL",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "IFNULL(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/ifnull/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "INITCAP",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "INITCAP ( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/initcap/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "INNER_PRODUCT",
+      "category": "scalar-functions/distance-functions",
+      "signatures": [
+        "INNER_PRODUCT(<array1>, <array2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/distance-functions/inner-product/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "INSTR",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "INSTR ( <str> , <substr> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/instr/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "INT_TO_UUID",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "INT_TO_UUID ( <int128> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/int-to-uuid/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "INTERSECT_COUNT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "INTERSECT_COUNT(<bitmap_column>, <column_to_filter>, <filter_values>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/intersect-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV4_CIDR_TO_RANGE",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV4_CIDR_TO_RANGE(<ip_v4>, <cidr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv4-cidr-to-range/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV4_NUM_TO_STRING",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV4_NUM_TO_STRING(<ipv4_num>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv4-num-to-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV4_STRING_TO_NUM",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV4_STRING_TO_NUM(<ipv4_string>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv4-string-to-num/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV4_STRING_TO_NUM_OR_DEFAULT",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV4_STRING_TO_NUM_OR_DEFAULT(<ipv4_string>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv4-string-to-num-or-default/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV4_STRING_TO_NUM_OR_NULL",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV4_STRING_TO_NUM_OR_NULL(<ipv4_string>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv4-string-to-num-or-null/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV4_TO_IPV6",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV4_TO_IPV6(<ipv4>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv4-to-ipv6/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV6_CIDR_TO_RANGE",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV6_CIDR_TO_RANGE(ip_v6, cidr)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv6-cidr-to-range/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV6_NUM_TO_STRING",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV6_NUM_TO_STRING(<ipv6_num>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv6-num-to-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV6_STRING_TO_NUM",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV6_STRING_TO_NUM(<ipv6_string>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv6-string-to-num/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV6_STRING_TO_NUM_OR_DEFAULT",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV6_STRING_TO_NUM_OR_DEFAULT(<ipv6_string>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv6-string-to-num-or-default/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IPV6_STRING_TO_NUM_OR_NULL",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IPV6_STRING_TO_NUM_OR_NULL(<ipv6_string>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/ipv6-string-to-num-or-null/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IS_IP_ADDRESS_IN_RANGE",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IS_IP_ADDRESS_IN_RANGE(ip_str, cidr_prefix)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/is-ip-address-in-range/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IS_IPV4_COMPAT",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IS_IPV4_COMPAT(INET6_ATON(<ipv4_addr>))"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/is-ipv4-compat/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IS_IPV4_MAPPED",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IS_IPV4_MAPPED(INET6_ATON(<ipv4_addr>))"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/is-ipv4-mapped/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IS_IPV4_STRING",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IS_IPV4_STRING(<ipv4_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/is-ipv4-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "IS_IPV6_STRING",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "IS_IPV6_STRING(<ipv6_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/is-ipv6-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JOBS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "JOBS( \"type\"=\"<type>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/jobs/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_ARRAY",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_ARRAY (<a>, ...)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-array/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_CONTAINS",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_CONTAINS(<json_str>, <candidate> [, <json_path>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-contains/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_EXISTS_PATH",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_EXISTS_PATH (<json_str>, <path>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-exists-path/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_EXTRACT",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_EXTRACT (<json_str>, <path>[, path] ...)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-extract/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_INSERT",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_INSERT (<json_str>, <path>, <val>[, <path>, <val>, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-insert/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_KEYS",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_KEYS(<str> [, <path>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-keys/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_LENGTH",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_LENGTH(<json_str> [ , <json_path> ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-length/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_OBJECT",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_OBJECT (<key>, <value>[,<key>, <value>, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-object/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE (<json_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_ERROR_TO_INVALID",
+      "category": "scalar-functions/json-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/2.1/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-error-to-invalid/",
+      "documentedIn": [
+        "2.1"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_ERROR_TO_NULL",
+      "category": "scalar-functions/json-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/2.1/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-error-to-null/",
+      "documentedIn": [
+        "2.1"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_ERROR_TO_VALUE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/2.1/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-error-to-value/",
+      "documentedIn": [
+        "2.1"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NOTNULL",
+      "category": "scalar-functions/json-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/2.1/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-notnull/",
+      "documentedIn": [
+        "2.1"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NOTNULL_ERROR_TO_INVALID",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE_NOTNULL_ERROR_TO_INVALID( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-notnull-error-to-invalid/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NOTNULL_ERROR_TO_VALUE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE_NOTNULL_ERROR_TO_VALUE(< str >, <default_value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-notnull-error-to-value/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NULLABLE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE_NULLABLE( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-nullable/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NULLABLE_ERROR_TO_INVALID",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE_NULLABLE_ERROR_TO_INVALID( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-nullable-error-to-invalid/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NULLABLE_ERROR_TO_NULL",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE_NULLABLE_ERROR_TO_NULL( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-nullable-error-to-null/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_PARSE_NULLABLE_ERROR_TO_VALUE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_PARSE_NULLABLE_ERROR_TO_VALUE( <str> , <default_value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-parse-nullable-error-to-value/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_QUOTE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_QUOTE (<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-quote/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_REPLACE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_REPLACE (<json_str>, <path>, <val>[, <jsonPath>, <val>, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-replace/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_SEARCH",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_SEARCH(<str>, <one_or_all>, <search_value> [, <start_path> [, <escape_char>]])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-search/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_SET",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_SET (<json_str>, <path>, <val> [, <path>, <val>, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-set/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_TYPE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_TYPE( <json>, <json_path> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-type/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_UNQUOTE",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_UNQUOTE (<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-unquote/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "JSON_VALID",
+      "category": "scalar-functions/json-functions",
+      "signatures": [
+        "JSON_VALID( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/json-functions/json-valid/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "L1_DISTANCE",
+      "category": "scalar-functions/distance-functions",
+      "signatures": [
+        "L1_DISTANCE(<array1>, <array2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/distance-functions/l1-distance/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "L2_DISTANCE",
+      "category": "scalar-functions/distance-functions",
+      "signatures": [
+        "L2_DISTANCE(<array1>, <array2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/distance-functions/l2-distance/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LAG",
+      "category": "window-functions",
+      "signatures": [
+        "LAG ( <expr>, <offset>, <default> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/lag/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LAST_DAY",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "LAST_DAY(<date>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/last-day/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LAST_QUERY_ID",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "LAST_QUERY_ID()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/last-query-id/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LAST_VALUE",
+      "category": "window-functions",
+      "signatures": [
+        "LAST_VALUE(<expr>[, <ignore_null>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/last-value/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LEAD",
+      "category": "window-functions",
+      "signatures": [
+        "LEAD ( <expr> [ , <offset> [ , <default> ] ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/lead/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LEAST",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "LEAST(<expr> [, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/least/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LENGTH",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "LENGTH ( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/length/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "LN(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/ln/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LOCAL",
+      "category": "table-valued-functions",
+      "signatures": [
+        "LOCAL( \"file_path\" = \"<file_path>\", \"backend_id\" = \"<backend_id>\", \"format\" = \"<format>\" [, \"<optional_property_key>\" = \"<optional_property_value>\" [, ...] ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/2.1/sql-manual/sql-functions/table-valued-functions/local/",
+      "documentedIn": [
+        "2.1"
+      ]
+    },
+    {
+      "name": "LOCATE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "LOCATE ( <substr> , <str> [, <pos> ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/locate/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LOG",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "LOG([<b>, ]<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/log/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LOG10",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "LOG10(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/log10/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LOG2",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "LOG2(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/log2/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LPAD",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "LPAD ( <str> , <len> , <pad>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/lpad/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LTRIM",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "LTRIM( <str> [, <trim_chars> ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/ltrim/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "LTRIM_IN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "LTRIM_IN(<str> [, <rhs>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/ltrim-in/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAKEDATE",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MAKEDATE(<year>, <day_of_year>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/makedate/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAP_AGG",
+      "category": "aggregate-functions",
+      "signatures": [
+        "MAP_AGG(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/map-agg/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAP_CONTAINS_KEY",
+      "category": "scalar-functions/map-functions",
+      "signatures": [
+        "MAP_CONTAINS_KEY(<map>, <key>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/map-functions/map-contains-key/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAP_CONTAINS_VALUE",
+      "category": "scalar-functions/map-functions",
+      "signatures": [
+        "MAP_CONTAINS_VALUE(<map>, <value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/map-functions/map-contains-value/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAP_KEYS",
+      "category": "scalar-functions/map-functions",
+      "signatures": [
+        "MAP_KEYS(<map>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/map-functions/map-keys/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAP_SIZE",
+      "category": "scalar-functions/map-functions",
+      "signatures": [
+        "MAP_SIZE(<map>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/map-functions/map-size/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAP_VALUES",
+      "category": "scalar-functions/map-functions",
+      "signatures": [
+        "MAP_VALUES(<map>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/map-functions/map-values/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MASK",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "MASK(<str> [, <upper> [, <lower> [, <number> ]]])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/mask/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MASK_FIRST_N",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "MASK_FIRST_N( <str> [, <n> ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/mask-first-n/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MASK_LAST_N",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "MASK_LAST_N( <str> [, <n> ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/mask-last-n/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAX",
+      "category": "aggregate-functions",
+      "signatures": [
+        "MAX(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/max/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MAX_BY",
+      "category": "aggregate-functions",
+      "signatures": [
+        "MAX_BY(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/max-by/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MD5",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "MD5( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/md5/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MD5SUM",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "MD5SUM( <str> [ , <str> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/md5sum/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MICROSECOND",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MICROSECOND(<date>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/microsecond/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MICROSECOND_TIMESTAMP",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MICROSECOND_TIMESTAMP(<datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/microsecond-timestamp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MICROSECONDS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MICROSECONDS_ADD(<basetime>, <delta>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/microseconds-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MICROSECONDS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MICROSECONDS_DIFF(<enddate>, <startdate>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/microseconds-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MICROSECONDS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MICROSECONDS_SUB(<basetime>, <delta>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/microseconds-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MILLISECOND_TIMESTAMP",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MILLISECOND_TIMESTAMP(<datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/millisecond-timestamp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MILLISECONDS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MILLISECONDS_ADD(<basetime>, <delta>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/milliseconds-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MILLISECONDS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MILLISECONDS_DIFF(<enddate>, <startdate>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/milliseconds-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MILLISECONDS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MILLISECONDS_SUB(<basetime>, <delta>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/milliseconds-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MIN",
+      "category": "aggregate-functions",
+      "signatures": [
+        "MIN(expr)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/min/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MIN_BY",
+      "category": "aggregate-functions",
+      "signatures": [
+        "MIN_BY(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/min-by/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MINUTE",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MINUTE(<datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/minute/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MINUTE_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MINUTE_CEIL(<datetime>)",
+        "MINUTE_CEIL(<datetime>, <origin>)",
+        "MINUTE_CEIL(<datetime>, <period>)",
+        "MINUTE_CEIL(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/minute-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MINUTE_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MINUTE_FLOOR(<datetime>)",
+        "MINUTE_FLOOR(<datetime>, <origin>)",
+        "MINUTE_FLOOR(<datetime>, <period>)",
+        "MINUTE_FLOOR(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/minute-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MINUTES_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MINUTES_ADD(<datetime>, <minutes>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/minutes-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MINUTES_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MINUTES_DIFF(<enddate>, <startdate>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/minutes-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MINUTES_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MINUTES_SUB(<date>, <minutes>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/minutes-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MOD",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "MOD(<col_a> , <col_b>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/mod/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONEY_FORMAT",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "MONEY_FORMAT(<number>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/money-format/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTH",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTH(<date>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/month/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTH_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTH_CEIL(<datetime>)",
+        "MONTH_CEIL(<datetime>, <origin>)",
+        "MONTH_CEIL(<datetime>, <period>)",
+        "MONTH_CEIL(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/month-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTH_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTH_FLOOR(<datetime>)",
+        "MONTH_FLOOR(<datetime>, <origin>)",
+        "MONTH_FLOOR(<datetime>, <period>)",
+        "MONTH_FLOOR(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/month-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTHNAME",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTHNAME(<date>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/monthname/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTHS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTHS_ADD(<datetime/date>, <nums>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/months-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTHS_BETWEEN",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTHS_BETWEEN(<enddate>, <startdate> [, <round_type>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/months-between/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTHS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTHS_DIFF(<enddate>, <startdate>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/months-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MONTHS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "MONTHS_SUB(<datetime/date>, <nums>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/months-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MULTI_MATCH_ANY",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "multi_match_any(VARCHAR haystack, ARRAY<VARCHAR> patterns)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/multi-match-any/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MULTI_SEARCH_ALL_POSITIONS",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "multi_search_all_positions(VARCHAR haystack, ARRAY<VARCHAR> needles)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/multi-search-all-positions/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MURMUR_HASH3_32",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "MURMUR_HASH3_32( <str> [ , <str> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/murmur-hash3-32/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MURMUR_HASH3_64",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "MURMUR_HASH3_64( <str> [ , <str> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/murmur-hash3-64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "MV_INFOS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "MV_INFOS(\"database\"=\"<database>\")"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/mv_infos/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NAMED_STRUCT",
+      "category": "scalar-functions/struct-functions",
+      "signatures": [
+        "NAMED_STRUCT( <field_name> , <filed_value> [ , <field_name> , <filed_value> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/struct-functions/named-struct/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NEGATIVE",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "NEGATIVE(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/negative/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NEXT_DAY",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "NEXT_DAY(<datetime/date>, <day_of_week>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/next-day/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "NGRAM_SEARCH",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "ngram_search(VARCHAR text,VARCHAR pattern,INT gram_num)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/ngram-search/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NORMAL_CDF",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "NORMAL_CDF(<mean>, <sd>, <x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/normal-cdf/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NOT_NULL_OR_EMPTY",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "NOT_NULL_OR_EMPTY (<str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/not-null-or-empty/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NOW",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "NOW([<precision>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/now/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NTILE",
+      "category": "window-functions",
+      "signatures": [
+        "NTILE( <constant_value> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/ntile/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NULL_OR_EMPTY",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "NULL_OR_EMPTY (<str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/null-or-empty/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NULLIF",
+      "category": "scalar-functions/conditional-functions",
+      "signatures": [
+        "NULLIF(<expr1>, <expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/conditional-functions/nullif/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "NUMBERS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "NUMBERS( \"number\" = \"<number>\" [, \"const_value\" = \"<const_value>\" ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/numbers/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "OVERLAY",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "OVERLAY(<str>, <pos>, <len>, <newstr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/overlay/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "PARSE_URL",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "PARSE_URL( <url>, <name> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/parse-url/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PARTITION_VALUES",
+      "category": "table-valued-functions",
+      "signatures": [
+        "PARTITION_VALUES( \"catalog\"=\"<catalog>\", \"database\"=\"<database>\", \"table\"=\"<table>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/partition-values/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PARTITIONS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "PARTITIONS( \"catalog\"=\"<catalog>\", \"database\"=\"<database>\", \"table\"=\"<table>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/partitions/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PERCENT_RANK",
+      "category": "window-functions",
+      "signatures": [
+        "PERCENT_RANK()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/percent-rank/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PERCENTILE",
+      "category": "aggregate-functions",
+      "signatures": [
+        "PERCENTILE(<col>, <p>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/percentile/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PERCENTILE_APPROX",
+      "category": "aggregate-functions",
+      "signatures": [
+        "PERCENTILE_APPROX(<col>, <p> [, <compression>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/percentile-approx/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PERCENTILE_APPROX_WEIGHTED",
+      "category": "aggregate-functions",
+      "signatures": [
+        "PERCENTILE_APPROX_WEIGHTED(<col>, <weight>, <p> [, <compression>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/percentile_approx_weighted/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "PERCENTILE_ARRAY",
+      "category": "aggregate-functions",
+      "signatures": [
+        "PERCENTILE_ARRAY(<col>, <array_p>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/percentile-array/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PI",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "PI()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/pi/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PMOD",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "PMOD(<x> , <y>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/pmod/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "POSEXPLODE",
+      "category": "table-functions",
+      "signatures": [
+        "POSEXPLODE(<arr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-functions/posexplode/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "POSITIVE",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "POSITIVE(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/positive/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "POW",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "POW(<a>, <b>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/pow/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "PRINTF",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "PRINTF(<format>, [<args>, ...])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/printf/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "PROTOCOL",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "PROTOCOL( <url> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/protocol/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUANTILE_PERCENT",
+      "category": "scalar-functions/quantile-functions",
+      "signatures": [
+        "QUANTILE_PERCENT(<quantile_state>, <percent>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/quantile-functions/quantile-percent/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUANTILE_STATE_EMPTY",
+      "category": "scalar-functions/quantile-functions",
+      "signatures": [
+        "QUANTILE_STATE_EMPTY()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/quantile-functions/quantile-state-empty/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUANTILE_UNION",
+      "category": "aggregate-functions",
+      "signatures": [
+        "QUANTILE_UNION(<query_state>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/quantile-union/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUARTER",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "QUARTER(<datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/quarter/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUARTER_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "QUARTER_CEIL(<datetime>)",
+        "QUARTER_CEIL(<datetime>, <origin>)",
+        "QUARTER_CEIL(<datetime>, <period>)",
+        "QUARTER_CEIL(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/quarter-ceil/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUARTER_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "QUARTER_FLOOR(<datetime>)",
+        "QUARTER_FLOOR(<datetime>, <origin>)",
+        "QUARTER_FLOOR(<datetime>, <period>)",
+        "QUARTER_FLOOR(<datetime>, <period>, <origin>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/quarter-floor/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUARTERS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "QUARTERS_ADD(<date/datetime>, <quarters>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/quarters-add/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUARTERS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "QUARTERS_DIFF(<enddate>, <startdate>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/quarters-diff/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUARTERS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "QUARTERS_SUB(<date/datetime>, <quarters>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/quarters-sub/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUERY",
+      "category": "table-valued-functions",
+      "signatures": [
+        "QUERY( \"catalog\" = \"<catalog>\", \"query\" = \"<query_sql>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/query/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "QUOTE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "quote(VARCHAR str)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/quote/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RADIANS",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "RADIANS(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/radians/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RANDOM",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "RANDOM()",
+        "RANDOM(<seed>)",
+        "RANDOM(<a> , <b>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/random/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RANDOM_BYTES",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "RANDOM_BYTES( <len> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/random_bytes/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RANK",
+      "category": "window-functions",
+      "signatures": [
+        "RANK()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/rank/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REGEXP",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REGEXP(<str>, <pattern>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/regexp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REGEXP_EXTRACT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REGEXP_EXTRACT(<str>, <pattern>, <pos>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/regexp-extract/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REGEXP_EXTRACT_ALL",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REGEXP_EXTRACT_ALL(<str>, <pattern>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/regexp-extract-all/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REGEXP_EXTRACT_OR_NULL",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REGEXP_EXTRACT_OR_NULL(<str>, <pattern>, <pos>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/regexp-extract-or-null/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REGEXP_REPLACE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REGEXP_REPLACE(<str>, <pattern>, <repl>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/regexp-replace/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REGEXP_REPLACE_ONE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REGEXP_REPLACE_ONE(<str>, <pattern>, <repl>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/regexp-replace-one/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REPEAT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REPEAT( <str>, <count> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/repeat/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REPLACE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REPLACE ( <str>, <old>, <new> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/replace/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REPLACE_EMPTY",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REPLACE_EMPTY ( <str>, <old>, <new> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/replace-empty/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RETENTION",
+      "category": "aggregate-functions",
+      "signatures": [
+        "RETENTION(<event_1> [, <event_2>, ... , <event_n>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/retention/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "REVERSE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "REVERSE( <seq> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/reverse/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ROUND",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ROUND(<x> [ , <d> ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/round/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ROUND_BANKERS",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "ROUND_BANKERS(<x> [ , <d>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/round-bankers/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ROW_NUMBER",
+      "category": "window-functions",
+      "signatures": [
+        "ROW_NUMBER()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/window-functions/row-number/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RPAD",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "RPAD ( <str> , <len> , <pad>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/rpad/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RTRIM",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "RTRIM( <str> [, <trim_chars> ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/rtrim/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "RTRIM_IN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "RTRIM_IN(<str>[, <rhs>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/rtrim-in/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SEC_TO_TIME",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SEC_TO_TIME(<seconds>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/sec-to-time/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SECOND",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SECOND(<datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/second/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SECOND_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SECOND_CEIL(<datetime>[, <period>][, <origin_datetime>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/second-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SECOND_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SECOND_FLOOR(<datetime>[, <period>][, <origin_datetime>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/second-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SECONDS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SECONDS_ADD(<datetime>, <seconds>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/seconds-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SECONDS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SECONDS_DIFF(<end_datetime>, <start_datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/seconds-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SECONDS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "SECONDS_SUB(<datetime>, <seconds>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/seconds-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SEQUENCE_COUNT",
+      "category": "aggregate-functions",
+      "signatures": [
+        "SEQUENCE_COUNT(<pattern>, <timestamp>, <cond_1> [, <cond_2>, ..., <cond_n>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/sequence-count/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SEQUENCE_MATCH",
+      "category": "aggregate-functions",
+      "signatures": [
+        "SEQUENCE_MATCH(<pattern>, <timestamp>, <cond_1> [, <cond_2>, ..., <cond_n>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/sequence-match/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SESSION_USER",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "SESSION_USER()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/session-user/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SHA1",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "SHA1( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/sha/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SHA2",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "SHA2( <str>, <digest_length>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/sha2/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SIGN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "SIGN(x)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/sign/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SIN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "SIN(<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/sin/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SM3",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "SM3( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/sm3/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SM3SUM",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "SM3SUM( <str> [ , <str> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/sm3sum/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SM4_DECRYPT",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "SM4_DECRYPT( <str>, <key_str>[, <init_vector>][, <encryption_mode>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/sm4-decrypt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SM4_ENCRYPT",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "SM4_ENCRYPT( <str>, <key_str>[, <init_vector>][, <encryption_mode>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/sm4-encrypt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SPACE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "SPACE ( <len> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/space/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SPLIT_BY_STRING",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "SPLIT_BY_STRING ( <str>, <separator> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/split-by-string/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SPLIT_PART",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "SPLIT_PART ( <str>, <separator>, <part_index> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/split-part/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SQRT",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "SQRT(<a>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/sqrt/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_ANGLE",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_ANGLE( <point1>, <point2>, <point3>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-angle/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_ANGLE_SPHERE",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_ANGLE_SPHERE( <x_lng>, <x_lat>, <y_lng>, <y_lat>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-angle-sphere/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_AREA_SQUARE_KM",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_AREA_SQUARE_KM( <geo>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-area-square-km/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_AREA_SQUARE_METERS",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_AREA_SQUARE_METERS( <geo>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-area-square-meters/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_ASBINARY",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_ASBINARY( <geo>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-asbinary/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_ASTEXT",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_ASTEXT( <geo>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-astext/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_AZIMUTH",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_AZIMUTH( <point1>, <point2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-azimuth/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_CIRCLE",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_CIRCLE( <center_lng>, <center_lat>, <radius>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-circle/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_CONTAINS",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_CONTAINS( <shape1>, <shape2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-contains/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_DISJOINT",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_DISJOINT( <shape1>, <shape2> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-disjoint/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_DISTANCE_SPHERE",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_DISTANCE_SPHERE( <x_lng>, <x_lat>, <y_lng>, <y_lat>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-distance-sphere/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_GEOMETRYFROMTEXT",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_GEOMETRYFROMTEXT( <wkt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-geometryfromtext/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_GEOMETRYFROMWKB",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_GEOMETRYFROMWKB( <wkb>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-geometryfromwkb/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_INTERSECTS",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_INTERSECTS( <shape1>, <shape2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-intersects/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_LINEFROMTEXT",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_LINEFROMTEXT( <wkt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-linefromtext/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_POINT",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_POINT( <x>, <y>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-point/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_POLYGON",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_POLYGON( <wkt>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-polygon/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_TOUCHES",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_TOUCHES( <shape1>, <shape2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-touches/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_X",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_X( <point>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-x/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "ST_Y",
+      "category": "scalar-functions/spatial-functions",
+      "signatures": [
+        "ST_Y( <point>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/spatial-functions/st-y/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STARTS_WITH",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "STARTS_WITH(<str>, <prefix>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/starts-with/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STDDEV_SAMP",
+      "category": "aggregate-functions",
+      "signatures": [
+        "STDDEV_SAMP(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/stddev-samp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STR_TO_DATE",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "STR_TO_DATE(<datetime_str>, <format>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/str-to-date/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STR_TO_MAP",
+      "category": "scalar-functions/map-functions",
+      "signatures": [
+        "STR_TO_MAP(<str> [, <pair_delimiter> [, <key_value_delimiter>]])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/map-functions/str-to-map/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "STRCMP",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "STRCMP(<str0>, <str1>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/strcmp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STRLEFT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "STRLEFT(<str>, <len>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/strleft/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STRRIGHT",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "STRRIGHT(<str>, <len>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/strright/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "STRUCT_ELEMENT",
+      "category": "scalar-functions/struct-functions",
+      "signatures": [
+        "STRUCT_ELEMENT( <struct>, '<filed_location>/<filed_name>')"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/struct-functions/struct-element/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SUB_BITMAP",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "SUB_BITMAP(<bitmap>, <position>, <cardinality_limit>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/sub-bitmap/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SUB_REPLACE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "sub_replace(<str>, <new_str>, [ ,<start> [ , <len> ] ])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/sub-replace/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SUBSTRING",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "SUBSTRING(<str>, <pos> [, <len>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/substring/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SUBSTRING_INDEX",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "SUBSTRING_INDEX(<content>, <delimiter>, <field>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/substring-index/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SUM",
+      "category": "aggregate-functions",
+      "signatures": [
+        "SUM(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/sum/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "SUM0",
+      "category": "aggregate-functions",
+      "signatures": [
+        "SUM0(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/sum0/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TAN",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "TAN(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/tan/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TANH",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "TANH(<x>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/tanh/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TASKS",
+      "category": "table-valued-functions",
+      "signatures": [
+        "TASKS( \"type\"=\"<type>\" )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/table-valued-functions/tasks/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TIME_TO_SEC",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TIME_TO_SEC(<time>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/time-to-sec/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TIMEDIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TIMEDIFF(<end_datetime>, <start_datetime>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/timediff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TIMESTAMP",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TIMESTAMP(string)",
+        "TIMESTAMP(date, time)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/timestamp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TIMESTAMPADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TIMESTAMPADD(<unit>, <interval>, <datetime_expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/timestampadd/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TIMESTAMPDIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TIMESTAMPDIFF(<unit>, <datetime_expr1>, <datetime_expr2>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/timestampdiff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_BASE64",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "TO_BASE64(<str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/to-base64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_BITMAP",
+      "category": "scalar-functions/bitmap-functions",
+      "signatures": [
+        "TO_BITMAP(<expr>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/bitmap-functions/to-bitmap/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_DATE",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TO_DATE(<datetime_value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/to-date/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_DAYS",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "TO_DAYS(<datetime_or_date_value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/to-days/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_IPV4",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "TO_IPV4(<ipv4_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/to-ipv4/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_IPV4_OR_DEFAULT",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "TO_IPV4_OR_DEFAULT(<ipv4_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/to-ipv4-or-default/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_IPV4_OR_NULL",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "TO_IPV4_OR_NULL(<ipv4_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/to-ipv4-or-null/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_IPV6",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "TO_IPV6(<ipv6_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/to-ipv6/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_IPV6_OR_DEFAULT",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "TO_IPV6_OR_DEFAULT(<ipv6_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/to-ipv6-or-default/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_IPV6_OR_NULL",
+      "category": "scalar-functions/ip-functions",
+      "signatures": [
+        "TO_IPV6_OR_NULL(<ipv6_str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/ip-functions/to-ipv6-or-null/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_MONDAY",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "to_monday(DATETIME date)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/to-monday/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TO_QUANTILE_STATE",
+      "category": "scalar-functions/quantile-functions",
+      "signatures": [
+        "TO_QUANTILE_STATE(<raw_data>, <compression>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/quantile-functions/to-quantile-state/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TOKENIZE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "TOKENIZE(VARCHAR str, VARCHAR properties)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/tokenize/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TOP_LEVEL_DOMAIN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "TOP_LEVEL_DOMAIN(<url>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/top-level-domain/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TOPN",
+      "category": "aggregate-functions",
+      "signatures": [
+        "TOPN(<expr>, <top_num> [, <space_expand_rate>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/topn/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TOPN_ARRAY",
+      "category": "aggregate-functions",
+      "signatures": [
+        "TOPN_ARRAY(<expr>, <top_num> [, <space_expand_rate>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/topn-array/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TOPN_WEIGHTED",
+      "category": "aggregate-functions",
+      "signatures": [
+        "TOPN_WEIGHTED(<expr>, <weight>, <top_num> [, <space_expand_rate>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/topn-weighted/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TRANSLATE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "TRANSLATE(<source>, <from>, <to>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/translate/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TRIM",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "TRIM( <str> [ , <rhs>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/trim/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TRIM_IN",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "TRIM_IN( <str> [ , <rhs>])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/trim-in/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "TRUNCATE",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "TRUNCATE(<x>, <d>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/truncate/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "UNHEX",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "UNHEX(<str>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/unhex/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "UNIX_TIMESTAMP",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "UNIX_TIMESTAMP([DATETIME date[, STRING fmt]])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/unix-timestamp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "URL_DECODE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "URL_DECODE( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/url-decode/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "URL_ENCODE",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "URL_ENCODE( <str> )"
+      ],
+      "docs": "https://doris.apache.org/docs/2.1/sql-manual/sql-functions/scalar-functions/string-functions/url-encode/",
+      "documentedIn": [
+        "2.1"
+      ]
+    },
+    {
+      "name": "USER",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "USER()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/user/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "UTC_TIMESTAMP",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "UTC_TIMESTAMP()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/utc-timestamp/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "UUID",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "UUID()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/uuid/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "UUID_NUMERIC",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "UUID_NUMERIC()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/uuid_numeric/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "VERSION",
+      "category": "scalar-functions/system-functions",
+      "signatures": [
+        "VERSION()"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/system-functions/version-function/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WEEK",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "WEEK(DATE date[, INT mode])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/week/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WEEKDAY",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "WEEKDAY (DATETIME date)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/weekday/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WEEKOFYEAR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "WEEKOFYEAR (DATETIME DATE)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/weekofyear/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WEEKS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "WEEKS_ADD(<datetime_or_date_value>, <weeks_value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/weeks-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WEEKS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "WEEKS_DIFF(<end_date>, <start_date>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/weeks-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WEEKS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "WEEKS_SUB(<date_value>, <week_period>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/weeks-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WIDTH_BUCKET",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [
+        "WIDTH_BUCKET(<expr>, <min_value>, <max_value>, <num_buckets>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/width-bucket/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "WINDOW_FUNNEL",
+      "category": "aggregate-functions",
+      "signatures": [
+        "WINDOW_FUNNEL(<window>, <mode>, <timestamp>, <event_1>[, event_2, ... , event_n])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/aggregate-functions/window-funnel/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "XOR",
+      "category": "scalar-functions/numeric-functions",
+      "signatures": [],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/numeric-functions/xor/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "XPATH_STRING",
+      "category": "scalar-functions/string-functions",
+      "signatures": [
+        "XPATH_STRING(<xml_string>, <xpath_expression>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/string-functions/xpath-string/",
+      "documentedIn": [
+        "3.x"
+      ]
+    },
+    {
+      "name": "XXHASH_32",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "XXHASH_32( <str> [ , <str> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/xxhash-32/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "XXHASH_64",
+      "category": "scalar-functions/encrypt-digest-functions",
+      "signatures": [
+        "XXHASH_64( <str> [ , <str> ... ] )"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/encrypt-digest-functions/xxhash-64/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEAR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEAR(DATETIME date)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/year/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEAR_CEIL",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEAR_CEIL(DATETIME datetime)",
+        "YEAR_CEIL(DATETIME datetime, DATETIME origin)",
+        "YEAR_CEIL(DATETIME datetime, INT period)",
+        "YEAR_CEIL(DATETIME datetime, INT period, DATETIME origin)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/year-ceil/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEAR_FLOOR",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEAR_FLOOR(<date_value>, [<period> | <origin_date_value>])",
+        "YEAR_FLOOR(<date_value>, <period>, <origin_date_value>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/year-floor/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEARS_ADD",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEARS_ADD(<date>, <years>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/years-add/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEARS_DIFF",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEARS_DIFF(<enddate>, <startdate>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/years-diff/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEARS_SUB",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEARS_SUB(<date>, <years>)"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/years-sub/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    },
+    {
+      "name": "YEARWEEK",
+      "category": "scalar-functions/date-time-functions",
+      "signatures": [
+        "YEARWEEK(DATE date[, INT mode])"
+      ],
+      "docs": "https://doris.apache.org/docs/3.x/sql-manual/sql-functions/scalar-functions/date-time-functions/yearweek/",
+      "documentedIn": [
+        "2.1",
+        "3.x"
+      ]
+    }
+  ]
+}

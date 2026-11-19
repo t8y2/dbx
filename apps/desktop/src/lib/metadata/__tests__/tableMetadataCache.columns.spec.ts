@@ -25,7 +25,7 @@ vi.mock("@/lib/backend/api", () => ({
   listIndexes: mocks.listIndexes,
 }));
 
-import { clearTableMetadataCache, getCachedTableMetadata, invalidateTableMetadataCache, loadTableColumns, loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS } from "@/lib/metadata/tableMetadataCache";
+import { clearTableMetadataCache, getCachedTableMetadata, invalidateTableMetadataCache, loadTableColumns, loadTableMetadata, loadTableMetadataForExport, TABLE_METADATA_CACHE_TTL_MS } from "@/lib/metadata/tableMetadataCache";
 
 // The coordinator starts its loader on a microtask (Promise.resolve().then), so
 // flush before asserting remote call counts.
@@ -53,6 +53,118 @@ describe("tableMetadataCache columns facet request counts", () => {
     vi.clearAllMocks();
     mocks.getColumns.mockImplementation(async (_c: string, _d: string, _s: string, table: string) => [column(table)]);
     mocks.listIndexes.mockResolvedValue([]);
+  });
+
+  it("loads export metadata facets serially through the original request boundary", async () => {
+    let finishColumns!: (columns: ColumnInfo[]) => void;
+    mocks.getColumns.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishColumns = resolve;
+        }),
+    );
+    const read = vi.fn(async <T>(request: () => Promise<T>) => request());
+    const pending = loadTableMetadataForExport(usersRequest, read);
+    await flush();
+    expect(mocks.getColumns).toHaveBeenCalledOnce();
+    expect(mocks.listIndexes).not.toHaveBeenCalled();
+    finishColumns([column("id")]);
+    const result = await pending;
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(result.primaryKeys).toEqual(["id"]);
+    expect(result.rowIdentityResolved).toBe(true);
+  });
+
+  it("propagates export index discovery rejection instead of swallowing it", async () => {
+    mocks.listIndexes.mockRejectedValueOnce(new Error("indexes unavailable"));
+    await expect(loadTableMetadataForExport(usersRequest, (request) => request())).rejects.toThrow("indexes unavailable");
+    expect(mocks.getColumns).toHaveBeenCalledOnce();
+    expect(mocks.listIndexes).toHaveBeenCalledOnce();
+  });
+
+  it("resolves a synonym before loading its export indexes", async () => {
+    mocks.getColumns.mockResolvedValueOnce([{ ...column("ItemId"), is_primary_key: false, resolved_schema: "MixedOwner", resolved_table: "ActualItems", resolved_object_type: "TABLE" }]);
+    mocks.listIndexes.mockResolvedValueOnce([{ name: "ITEMS_PK", columns: ["ItemId"], is_primary: true, is_unique: true }]);
+    const request = { connectionId: "ob-1", database: "service", schema: "AppOwner", tableName: "ItemsAlias", tableType: "SYNONYM", databaseType: "oceanbase-oracle" };
+    const metadata = await loadTableMetadataForExport(request, (read) => read());
+    expect(mocks.listIndexes).toHaveBeenCalledExactlyOnceWith("ob-1", "service", "MixedOwner", "ActualItems", undefined);
+    expect(metadata.primaryKeys).toEqual(["ItemId"]);
+    expect(metadata.columns[0]!.resolved_table).toBe("ActualItems");
+  });
+
+  it("does not treat failed index discovery as a complete cacheable row identity", async () => {
+    mocks.getColumns.mockResolvedValue([{ ...column("id"), is_primary_key: false }]);
+    mocks.listIndexes.mockRejectedValueOnce(new Error("indexes unavailable"));
+    const failed = await loadTableMetadata(usersRequest);
+    expect(failed.metadata.rowIdentityResolved).toBe(false);
+    expect(failed.metadata.primaryKeys).toEqual([]);
+    expect(getCachedTableMetadata(usersRequest)).toBeUndefined();
+
+    const retried = await loadTableMetadata(usersRequest);
+    expect(retried.metadata.rowIdentityResolved).toBe(true);
+    expect(mocks.listIndexes).toHaveBeenCalledTimes(2);
+    expect(mocks.getColumns).toHaveBeenCalledOnce();
+  });
+
+  it("separates exact dictionary identities from legacy snapshots and sends the mode to both facets", async () => {
+    const request = { ...usersRequest, schema: " Mixed ", tableName: " T(a) ", databaseType: "oceanbase-oracle", tableType: "TABLE" };
+    await loadTableMetadata(request);
+    const exact = { ...request, exactIdentity: true };
+    const result = await loadTableMetadata(exact);
+    expect(result.cacheStatus).toBe("miss");
+    expect(mocks.getColumns).toHaveBeenNthCalledWith(2, "c1", "db", " Mixed ", " T(a) ", undefined, undefined, undefined, true);
+    expect(mocks.listIndexes).toHaveBeenNthCalledWith(2, "c1", "db", " Mixed ", " T(a) ", undefined, true);
+    expect((await loadTableMetadata(request)).cacheStatus).toBe("hit");
+    expect((await loadTableMetadata(exact)).cacheStatus).toBe("hit");
+  });
+
+  it("uses a synonym's exact resolved target for indexes while retaining its source name", async () => {
+    mocks.getColumns.mockResolvedValue([{ ...column("ItemId"), is_primary_key: false, resolved_schema: "MixedOwner", resolved_table: "ActualItems", resolved_object_type: "TABLE" }]);
+    mocks.listIndexes.mockResolvedValue([{ name: "ITEMS_PK", columns: ["ItemId"], is_primary: true, is_unique: true }]);
+    const request = { connectionId: "ob-1", database: "service", schema: "AppOwner", tableName: "ItemsAlias", tableType: "SYNONYM", databaseType: "oceanbase-oracle" };
+
+    const result = await loadTableMetadata(request);
+
+    expect(mocks.listIndexes).toHaveBeenCalledExactlyOnceWith("ob-1", "service", "MixedOwner", "ActualItems", undefined);
+    expect(result.metadata).toMatchObject({ schema: "AppOwner", tableName: "ItemsAlias", tableType: "TABLE", primaryKeys: ["ItemId"] });
+    expect((await loadTableColumns(request)).tableType).toBe("TABLE");
+  });
+
+  it("keeps unqualified synonym column metadata separate for different current schemas", async () => {
+    const request = { connectionId: "ob-1", database: "service", tableName: "ITEMS", databaseType: "oceanbase-oracle", currentSchema: "FirstOwner" };
+    mocks.getColumns.mockImplementation(async (_c, _d, _s, _t, _catalog, _session, currentSchema) => [{ ...column(currentSchema === "SecondOwner" ? "SecondId" : "FirstId"), resolved_schema: currentSchema, resolved_table: "Items", resolved_object_type: "TABLE" }]);
+
+    const first = await loadTableColumns(request);
+    const second = await loadTableColumns({ ...request, currentSchema: "SecondOwner" });
+    const cached = await loadTableColumns(request);
+
+    expect(first.columns[0]?.name).toBe("FirstId");
+    expect(second.columns[0]?.name).toBe("SecondId");
+    expect(cached.columns[0]?.name).toBe("FirstId");
+    expect(mocks.getColumns).toHaveBeenNthCalledWith(1, "ob-1", "service", "", "ITEMS", undefined, undefined, "FirstOwner");
+    expect(mocks.getColumns).toHaveBeenNthCalledWith(2, "ob-1", "service", "", "ITEMS", undefined, undefined, "SecondOwner");
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+
+    invalidateTableMetadataCache({ connectionId: "ob-1", database: "service", schema: "FirstOwner", tableName: "ITEMS" });
+    await loadTableColumns(request);
+    await loadTableColumns({ ...request, currentSchema: "SecondOwner" });
+    expect(mocks.getColumns).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses the current schema for parallel index discovery on a known direct table", async () => {
+    let releaseColumns: (value: ColumnInfo[]) => void = () => {};
+    mocks.getColumns.mockReturnValueOnce(
+      new Promise<ColumnInfo[]>((resolve) => {
+        releaseColumns = resolve;
+      }),
+    );
+    const load = loadTableMetadata({ connectionId: "ob-1", database: "service", schema: "", currentSchema: "SelectedOwner", tableName: "Items", tableType: "TABLE", databaseType: "oceanbase-oracle" });
+
+    await flush();
+
+    expect(mocks.listIndexes).toHaveBeenCalledExactlyOnceWith("ob-1", "service", "SelectedOwner", "Items", undefined);
+    releaseColumns([column("ID")]);
+    expect((await load).metadata.primaryKeys).toEqual(["ID"]);
   });
 
   it("R1 — cold single-source columns load: 1 getColumns, 0 listIndexes", async () => {

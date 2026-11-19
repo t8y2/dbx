@@ -8,9 +8,7 @@ const env = {
 const hasCargoWatch = await commandSucceeds("cargo", ["watch", "--version"]);
 
 if (!hasCargoWatch) {
-  console.warn(
-    "cargo-watch is not installed; running dbx-web without hot reload. Install with: cargo install cargo-watch",
-  );
+  console.warn("cargo-watch is not installed; running dbx-web without hot reload. Install with: cargo install cargo-watch");
 }
 
 const args = hasCargoWatch ? ["watch", "-x", "run -p dbx-web"] : ["run", "-p", "dbx-web"];

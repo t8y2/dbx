@@ -358,12 +358,19 @@ export interface NacosConfigSelector {
 
 export type NacosConflictPolicy = "ABORT" | "SKIP" | "OVERWRITE";
 
+export interface NacosBatchPreviewDiff {
+  beforeContent: string;
+  afterContent: string;
+  format?: string;
+}
+
 export interface NacosBatchPreviewItem {
   namespace: string;
   group: string;
   dataId: string;
   status: string;
   message?: string;
+  diff?: NacosBatchPreviewDiff;
 }
 
 export interface NacosBatchPreview {
@@ -458,6 +465,8 @@ export interface NacosConfigUpsert extends NacosConfigKey {
   appName?: string;
   desc?: string;
   tags?: string;
+  /** Publish only while the server still holds this MD5. */
+  casMd5?: string;
 }
 
 export interface NacosConfigHistoryQuery extends NacosConfigKey {

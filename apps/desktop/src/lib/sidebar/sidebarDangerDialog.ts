@@ -12,6 +12,7 @@ export interface SidebarDangerDialogOption {
 export interface SidebarDangerDialogProgress {
   completed: number;
   total: number;
+  phase?: "preparing" | "executing";
 }
 
 export interface SidebarDangerDialogTextInput {
@@ -22,12 +23,22 @@ export interface SidebarDangerDialogTextInput {
   onInput?: (value: string) => void | Promise<void>;
 }
 
+/** A single-choice option (e.g. Navicat's "Foreign Key Checks: Default / Enable / Disable"). */
+export interface SidebarDangerDialogSelect {
+  value: string;
+  label: string;
+  hint?: string;
+  choices: Array<{ value: string; label: string }>;
+  onChange?: (value: string) => void | Promise<void>;
+}
+
 export interface SidebarDangerDialogRequest {
   target: SidebarActionTarget;
   title: string;
   message: string;
   confirmLabel: string;
   sql?: string;
+  copySql?: string | (() => string);
   details?: string;
   detailsText?: string;
   loading?: boolean;
@@ -38,6 +49,21 @@ export interface SidebarDangerDialogRequest {
   option?: SidebarDangerDialogOption;
   options?: SidebarDangerDialogOption[];
   textInput?: SidebarDangerDialogTextInput;
+  select?: SidebarDangerDialogSelect;
   cancelRunning?: () => void | Promise<void>;
   confirm: () => void | boolean | Promise<void | boolean>;
+}
+
+// One application-level host keeps requests alive when their originating tab closes.
+let dialogHost: ((request: SidebarDangerDialogRequest) => void) | undefined;
+
+export function registerSidebarDangerDialogHost(host: (request: SidebarDangerDialogRequest) => void): () => void {
+  dialogHost = host;
+  return () => {
+    if (dialogHost === host) dialogHost = undefined;
+  };
+}
+
+export function openSidebarDangerDialog(request: SidebarDangerDialogRequest): void {
+  dialogHost?.(request);
 }

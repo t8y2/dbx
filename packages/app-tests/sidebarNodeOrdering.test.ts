@@ -103,7 +103,7 @@ test("keeps connection utility nodes in fixed positions", () => {
   );
 });
 
-test("dameng user/role admin nodes sort after regular children", () => {
+test("dameng utility nodes sort after regular children", () => {
   const parent: Pick<TreeNode, "type"> = { type: "connection" };
   const children: TreeNode[] = [
     { id: "conn:__dameng_roles", label: "tree.damengRoles", type: "dameng-roles" },
@@ -118,9 +118,9 @@ test("dameng user/role admin nodes sort after regular children", () => {
     sorted.map((child) => [child.type, child.label]),
     [
       ["database", "b"],
-      ["dameng-job-admin", "tree.damengJobAdmin"],
       ["dameng-roles", "tree.damengRoles"],
       ["dameng-users", "tree.damengUsers"],
+      ["dameng-job-admin", "tree.damengJobAdmin"],
     ],
   );
 });

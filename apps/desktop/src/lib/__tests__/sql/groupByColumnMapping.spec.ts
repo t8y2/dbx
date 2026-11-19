@@ -58,6 +58,30 @@ describe("grouped query display column mapping", () => {
       expect(analysis.hasHavingClause).toBe(true);
     });
 
+    it("evaluates issue 11672 query editability", () => {
+      const sqls = [
+        `SELECT 
+  R.P_ID, 
+  R.SUBJECT, 
+  COUNT(0) AS CNT_NUM
+  FROM COMMON.RECORD R
+ WHERE R.CREATE_TIME >= SYSDATE - INTERVAL '1' DAY
+   AND R.SUBJECT = '邮件提醒'
+   AND R.P_ID = '123214512'
+ GROUP BY R.P_ID, R.SUBJECT`,
+        `SELECT\r\nR.P_ID,\r\nR.SUBJECT,\r\nCOUNT(0) AS CNT_NUM\r\nFROM COMMON.RECORD R\r\nWHERE R.CREATE_TIME >= SYSDATE - INTERVAL '1' DAY\r\nAND R.SUBJECT = '邮件提醒'\r\nAND R.P_ID = '123214512'\r\nGROUP BY R.P_ID, R.SUBJECT`,
+        `SELECT R.P_ID, R.SUBJECT, COUNT(0) AS CNT_NUM FROM COMMON.RECORD R WHERE R.CREATE_TIME >= SYSDATE - INTERVAL '1' DAY AND R.SUBJECT = '邮件提醒' AND R.P_ID = '123214512' GROUP BY R.P_ID, R.SUBJECT`,
+        `SELECT R.P_ID, R.SUBJECT, COUNT(0) AS CNT_NUM FROM COMMON.RECORD R GROUP BY R.P_ID, R.SUBJECT`,
+      ];
+      for (const sql of sqls) {
+        const editability = analyzeEditableQueryEditability(sql);
+        expect(editability.editable).toBe(false);
+        if (!editability.editable) {
+          expect(editability.reason).toBe("aggregation");
+        }
+      }
+    });
+
     it("records window functions so mutation safety can reject them", () => {
       const analysis = analyzeSelectStructureForDisplay("SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS row_number, COUNT(*) FROM users GROUP BY id");
       expect(analysis).not.toBeNull();

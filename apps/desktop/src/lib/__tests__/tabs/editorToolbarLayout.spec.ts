@@ -56,6 +56,18 @@ describe("editor toolbar measured condensation", () => {
     ).toBe(2);
   });
 
+  it("does not restore a measured tier before the pane has grown past the hysteresis gap", () => {
+    expect(
+      resolveNextEditorToolbarTier({
+        tier: 2,
+        availableWidth: 460,
+        contentWidth: 460,
+        condensedAtWidth: 420,
+        expandedTierRequiredWidths: { 1: 400 },
+      }),
+    ).toBe(2);
+  });
+
   it("never oscillates: slack alone without pane growth keeps the condensed tier", () => {
     // The row fits with plenty of slack, but the pane barely grew since the
     // toolbar condensed at this width — stepping down would overflow again.

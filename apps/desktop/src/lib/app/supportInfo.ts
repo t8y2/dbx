@@ -1,4 +1,5 @@
 import type { AppSupportInfo } from "@/lib/backend/tauri";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
 
 export interface AppSupportInfoLabels {
   appVersion: string;
@@ -7,6 +8,10 @@ export interface AppSupportInfoLabels {
   runtimeWeb: string;
   operatingSystem: string;
   architecture: string;
+  userAgent: string;
+  databaseTypes: string;
+  localDriverVersions: string;
+  aiProviders: string;
   unknown: string;
 }
 
@@ -28,11 +33,38 @@ export function formatSupportInfoRuntime(runtime: AppSupportInfo["runtime"], lab
   return labels.unknown;
 }
 
+/**
+ * Map a Windows NT kernel version (`major.minor.build[.ubr]`) to its marketing name.
+ *
+ * Windows 11 still reports kernel `10.0.x`; the build number is what distinguishes it
+ * (build >= 22000 is Windows 11). Returns null for non-`10.0` versions (e.g. legacy 6.x)
+ * so callers keep the raw string instead of guessing.
+ */
+export function windowsMarketingName(version: string | null | undefined): string | null {
+  const trimmed = version?.trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split(".");
+  if (parts.length < 3) return null;
+  const major = Number(parts[0]);
+  const build = Number(parts[2]);
+  if (!Number.isInteger(major) || !Number.isInteger(build)) return null;
+  if (major !== 10) return null;
+  return build >= 22000 ? "Windows 11" : "Windows 10";
+}
+
 export function formatSupportInfoOperatingSystem(info: AppSupportInfo, unknownLabel: string): string {
   const name = info.osName?.trim();
   const version = info.osVersion?.trim();
   if (!name && !version) return unknownLabel;
+  if (name?.toLowerCase() === "windows") {
+    const marketing = windowsMarketingName(version);
+    if (marketing) return version ? `${marketing} (${version})` : marketing;
+  }
   return [name, version].filter(Boolean).join(" ");
+}
+
+export function collectBrowserSupportInfo(): string {
+  return typeof navigator === "undefined" ? "" : navigator.userAgent?.trim() || "";
 }
 
 export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupportInfoLabels): AppSupportInfoRow[] {
@@ -40,7 +72,7 @@ export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupport
     {
       key: "appVersion",
       label: labels.appVersion,
-      value: normalizeSupportInfoVersion(info.appVersion, labels.unknown),
+      value: normalizeSupportInfoVersion(displayAppVersion(info.appVersion), labels.unknown),
     },
     {
       key: "runtime",
@@ -61,7 +93,19 @@ export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupport
 }
 
 export function formatAppSupportInfoForClipboard(info: AppSupportInfo, labels: AppSupportInfoLabels): string {
-  return buildAppSupportInfoRows(info, labels)
-    .map((row) => `${row.label}: ${row.value}`)
-    .join("\n");
+  // Bug reports need the exact build, so a promoted beta keeps its build number
+  // next to the stable version shown elsewhere.
+  const rows = buildAppSupportInfoRows(info, labels).map((row) => {
+    const buildVersion = info.appVersion?.trim();
+    const showsBuild = row.key === "appVersion" && buildVersion && row.value !== normalizeSupportInfoVersion(buildVersion, labels.unknown);
+    return `${row.label}: ${showsBuild ? `${row.value} (${buildVersion})` : row.value}`;
+  });
+  const extraRows: Array<[string, string | null | undefined]> = [];
+  if (info.userAgent?.trim()) extraRows.push([labels.userAgent, info.userAgent]);
+  if (info.databaseTypes?.length) extraRows.push([labels.databaseTypes, info.databaseTypes.join(", ")]);
+  if (info.localDriverVersions?.length) {
+    extraRows.push([labels.localDriverVersions, info.localDriverVersions.map((driver) => `${driver.dbType} ${driver.version}`).join(", ")]);
+  }
+  if (info.aiProviders?.length) extraRows.push([labels.aiProviders, info.aiProviders.join(", ")]);
+  return rows.concat(extraRows.map(([label, value]) => `${label}: ${value?.trim() || labels.unknown}`)).join("\n");
 }

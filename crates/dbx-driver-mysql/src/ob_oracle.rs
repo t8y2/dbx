@@ -1,0 +1,658 @@
+use std::collections::BTreeMap;
+
+use mysql_async::prelude::*;
+
+use crate::types::{
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectSourceKind, TableInfo, TriggerInfo,
+};
+
+const CURRENT_SCHEMA_EXPRESSION: &str = "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')";
+
+fn row_get<T, I>(row: &mysql_async::Row, index: I) -> Option<T>
+where
+    T: mysql_async::prelude::FromValue,
+    I: mysql_async::prelude::ColumnIndex,
+{
+    row.get_opt::<T, I>(index).and_then(|result| result.ok())
+}
+
+fn quote_value(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+fn metadata_owner_sql(schema: &str) -> String {
+    if schema.trim().is_empty() {
+        // Unqualified Oracle objects resolve in the session's current schema. Keep metadata lookup on the same session
+        // semantics without an extra round trip that could observe a different pooled connection.
+        CURRENT_SCHEMA_EXPRESSION.to_string()
+    } else {
+        quote_value(schema)
+    }
+}
+
+fn get_str(row: &mysql_async::Row, idx: usize) -> String {
+    row_get::<String, _>(row, idx)
+        .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(|b| String::from_utf8_lossy(&b).to_string()))
+        .unwrap_or_default()
+}
+
+fn get_opt_str(row: &mysql_async::Row, idx: usize) -> Option<String> {
+    row_get::<String, _>(row, idx)
+        .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(|b| String::from_utf8_lossy(&b).to_string()))
+}
+
+fn get_opt_i32(row: &mysql_async::Row, idx: usize) -> Option<i32> {
+    row_get::<i32, _>(row, idx).or_else(|| row_get::<i64, _>(row, idx).and_then(|v| i32::try_from(v).ok()))
+}
+
+fn list_user_schemas_sql() -> &'static str {
+    "SELECT USERNAME FROM ALL_USERS \
+     WHERE USERNAME NOT IN ('SYS','LBACSYS','__public') \
+        OR USERNAME = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') \
+     ORDER BY USERNAME"
+}
+
+pub async fn list_databases(pool: &mysql_async::Pool) -> Result<Vec<DatabaseInfo>, String> {
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(list_user_schemas_sql()).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    Ok(rows.iter().map(|row| DatabaseInfo { name: get_str(row, 0), ..Default::default() }).collect())
+}
+
+pub async fn list_schemas(pool: &mysql_async::Pool) -> Result<Vec<String>, String> {
+    list_databases(pool).await.map(|databases| databases.into_iter().map(|database| database.name).collect())
+}
+
+fn list_tables_sql(schema: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME, 'TABLE' AS TABLE_TYPE FROM ALL_TABLES WHERE OWNER = {s} \
+         UNION ALL \
+         SELECT VIEW_NAME, 'VIEW' AS TABLE_TYPE FROM ALL_VIEWS WHERE OWNER = {s} \
+         ORDER BY 1",
+        s = metadata_owner_sql(schema),
+    )
+}
+
+pub async fn list_tables(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<TableInfo>, String> {
+    let sql = list_tables_sql(schema);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| TableInfo {
+            name: get_str(row, 0),
+            table_type: get_str(row, 1),
+            valid: None,
+            comment: None,
+            parent_schema: None,
+            parent_name: None,
+        })
+        .collect())
+}
+
+fn list_objects_sql(schema: &str) -> String {
+    format!(
+        "SELECT TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, OWNER AS OBJECT_SCHEMA, NULL AS PARENT_SCHEMA, NULL AS PARENT_NAME, 0 AS SORT_ORDER \
+         FROM ALL_TABLES WHERE OWNER = {s} \
+         UNION ALL \
+         SELECT VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, OWNER AS OBJECT_SCHEMA, NULL AS PARENT_SCHEMA, NULL AS PARENT_NAME, 1 AS SORT_ORDER \
+         FROM ALL_VIEWS WHERE OWNER = {s} \
+         UNION ALL \
+         SELECT OBJECT_NAME, OBJECT_TYPE, OWNER AS OBJECT_SCHEMA, NULL AS PARENT_SCHEMA, NULL AS PARENT_NAME, \
+                CASE WHEN OBJECT_TYPE = 'PROCEDURE' THEN 2 ELSE 3 END AS SORT_ORDER \
+         FROM ALL_PROCEDURES \
+         WHERE OWNER = {s} AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') AND PROCEDURE_NAME IS NULL \
+         UNION ALL \
+         SELECT SEQUENCE_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, SEQUENCE_OWNER AS OBJECT_SCHEMA, NULL AS PARENT_SCHEMA, NULL AS PARENT_NAME, 4 AS SORT_ORDER \
+         FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = {s} \
+         UNION ALL \
+         SELECT OBJECT_NAME, CASE OBJECT_TYPE WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY' ELSE OBJECT_TYPE END AS OBJECT_TYPE, \
+                OWNER AS OBJECT_SCHEMA, NULL AS PARENT_SCHEMA, NULL AS PARENT_NAME, CASE WHEN OBJECT_TYPE = 'PACKAGE' THEN 5 ELSE 6 END AS SORT_ORDER \
+         FROM ALL_OBJECTS \
+         WHERE OWNER = {s} AND OBJECT_TYPE IN ('PACKAGE', 'PACKAGE BODY') \
+         UNION ALL \
+         SELECT INDEX_NAME AS OBJECT_NAME, 'INDEX' AS OBJECT_TYPE, OWNER AS OBJECT_SCHEMA, TABLE_OWNER AS PARENT_SCHEMA, TABLE_NAME AS PARENT_NAME, 7 AS SORT_ORDER \
+         FROM ALL_INDEXES WHERE OWNER = {s} AND (GENERATED = 'N' OR GENERATED IS NULL) \
+         ORDER BY SORT_ORDER, OBJECT_NAME",
+        s = metadata_owner_sql(schema),
+    )
+}
+
+pub async fn list_objects(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
+    let sql = list_objects_sql(schema);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    Ok(rows.iter().map(|row| object_info_from_row(row, schema)).collect())
+}
+
+fn object_info_from_row(row: &mysql_async::Row, schema: &str) -> ObjectInfo {
+    ObjectInfo {
+        name: get_str(row, 0),
+        object_type: get_str(row, 1),
+        schema: get_opt_str(row, 2)
+            .filter(|schema| !schema.is_empty())
+            .or_else(|| (!schema.trim().is_empty()).then(|| schema.to_string())),
+        valid: None,
+        signature: None,
+        custom_type_kind: None,
+        has_members: None,
+        comment: None,
+        created_at: None,
+        updated_at: None,
+        parent_schema: get_opt_str(row, 3),
+        parent_name: get_opt_str(row, 4),
+        trigger: None,
+        xugu_type_members_expandable: None,
+    }
+}
+
+fn get_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
+         c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
+         CASE WHEN cc.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK \
+         FROM ALL_TAB_COLUMNS c \
+         LEFT JOIN ( \
+           SELECT cols.OWNER, cols.TABLE_NAME, cols.COLUMN_NAME \
+           FROM ALL_CONS_COLUMNS cols \
+           JOIN ALL_CONSTRAINTS con ON con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME AND con.OWNER = cols.OWNER \
+           WHERE con.CONSTRAINT_TYPE = 'P' \
+         ) cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME \
+         WHERE c.OWNER = {s} AND c.TABLE_NAME = {t} \
+         ORDER BY c.COLUMN_ID",
+        s = metadata_owner_sql(schema),
+        t = quote_value(table),
+    )
+}
+
+pub async fn get_columns(pool: &mysql_async::Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
+    let sql = get_columns_sql(schema, table);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let data_type = get_str(row, 1);
+            let precision = get_opt_i32(row, 5);
+            let scale = get_opt_i32(row, 6);
+            let length = get_opt_i32(row, 4);
+            let display_type = format_oracle_type(&data_type, precision, scale, length);
+            ColumnInfo {
+                name: get_str(row, 0),
+                data_type: display_type,
+                is_nullable: get_str(row, 2) == "Y",
+                column_default: get_opt_str(row, 3).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+                is_primary_key: row_get::<i32, _>(row, 8).unwrap_or(0) == 1,
+                extra: None,
+                comment: None,
+                numeric_precision: precision,
+                numeric_scale: scale,
+                character_maximum_length: length,
+                enum_values: None,
+                ..Default::default()
+            }
+        })
+        .collect())
+}
+
+fn format_oracle_type(data_type: &str, precision: Option<i32>, scale: Option<i32>, length: Option<i32>) -> String {
+    match data_type.to_uppercase().as_str() {
+        "NUMBER" => match (precision, scale) {
+            (Some(p), Some(s)) if s > 0 => format!("NUMBER({p},{s})"),
+            (Some(p), _) => format!("NUMBER({p})"),
+            _ => "NUMBER".to_string(),
+        },
+        "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" | "RAW" => match length {
+            Some(l) => format!("{data_type}({l})"),
+            None => data_type.to_string(),
+        },
+        _ => data_type.to_string(),
+    }
+}
+
+fn list_indexes_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT ai.INDEX_NAME, aic.COLUMN_NAME, ai.UNIQUENESS, \
+         CASE WHEN ac.CONSTRAINT_NAME IS NULL THEN 0 ELSE 1 END AS IS_PRIMARY, ai.INDEX_TYPE, ai.PARTITIONED, \
+         ai.VISIBILITY, aic.DESCEND, aie.COLUMN_EXPRESSION, aic.COLUMN_POSITION, ai.OWNER \
+         FROM ALL_INDEXES ai \
+         JOIN ALL_IND_COLUMNS aic ON ai.INDEX_NAME = aic.INDEX_NAME AND ai.OWNER = aic.INDEX_OWNER \
+           AND ai.TABLE_OWNER = aic.TABLE_OWNER AND ai.TABLE_NAME = aic.TABLE_NAME \
+         LEFT JOIN ALL_IND_EXPRESSIONS aie ON aie.INDEX_OWNER = aic.INDEX_OWNER AND aie.INDEX_NAME = aic.INDEX_NAME \
+           AND aie.TABLE_OWNER = aic.TABLE_OWNER AND aie.TABLE_NAME = aic.TABLE_NAME AND aie.COLUMN_POSITION = aic.COLUMN_POSITION \
+         LEFT JOIN ALL_CONSTRAINTS ac ON ac.INDEX_NAME = ai.INDEX_NAME AND ac.OWNER = ai.TABLE_OWNER \
+           AND ac.TABLE_NAME = ai.TABLE_NAME AND ac.INDEX_OWNER = ai.OWNER AND ac.CONSTRAINT_TYPE = 'P' \
+         WHERE ai.TABLE_OWNER = {s} AND ai.TABLE_NAME = {t} \
+         ORDER BY ai.OWNER, ai.INDEX_NAME, aic.COLUMN_POSITION",
+        s = metadata_owner_sql(schema),
+        t = quote_value(table),
+    )
+}
+
+pub async fn list_indexes(pool: &mysql_async::Pool, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
+    let sql = list_indexes_sql(schema, table);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    let mut indexes = BTreeMap::<(String, String), IndexInfo>::new();
+    for row in &rows {
+        let name = get_str(row, 0);
+        let owner = get_str(row, 10);
+        let visibility = get_str(row, 6);
+        let partitioned = get_str(row, 5);
+        let direction = get_str(row, 7);
+        let expression = get_opt_str(row, 8).filter(|value| !value.trim().is_empty());
+        let column = get_str(row, 1);
+        let position = row_get::<u64, _>(row, 9).unwrap_or(0) as usize;
+        let index = indexes.entry((owner.clone(), name.clone())).or_insert_with(|| IndexInfo {
+            owner: Some(owner),
+            key_directions: Vec::new(),
+            visibility: Some(visibility.clone()),
+            key_metadata_complete: true,
+            name,
+            columns: Vec::new(),
+            is_unique: get_str(row, 2) == "UNIQUE",
+            is_primary: row_get::<i32, _>(row, 3).unwrap_or(0) == 1,
+            filter: None,
+            index_type: get_opt_str(row, 4),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: false,
+        });
+        if position != index.columns.len() + 1
+            || !matches!(direction.as_str(), "ASC" | "DESC")
+            || !matches!(visibility.as_str(), "VISIBLE" | "INVISIBLE")
+            || index.visibility.as_deref() != Some(visibility.as_str())
+            || partitioned != "NO"
+            || !matches!(get_str(row, 4).as_str(), "NORMAL" | "FUNCTION-BASED NORMAL")
+            || (expression.is_none() && column.starts_with("SYS_NC") && column.ends_with('$'))
+        {
+            index.key_metadata_complete = false;
+        }
+        index.columns.push(expression.clone().unwrap_or(column));
+        index.key_is_expression.push(expression.is_some());
+        index.key_directions.push(direction);
+    }
+    Ok(indexes.into_values().collect())
+}
+
+pub async fn list_foreign_keys(
+    pool: &mysql_async::Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ForeignKeyInfo>, String> {
+    let sql = list_foreign_keys_sql(schema, table);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| ForeignKeyInfo {
+            name: get_str(row, 0),
+            column: get_str(row, 1),
+            ref_schema: Some(get_str(row, 2)),
+            ref_table: get_str(row, 3),
+            ref_column: get_str(row, 4),
+            on_update: None,
+            on_delete: None,
+        })
+        .collect())
+}
+
+fn list_foreign_keys_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT ac.CONSTRAINT_NAME, acc.COLUMN_NAME, \
+         ac2.OWNER AS R_OWNER, ac2.TABLE_NAME AS R_TABLE, acc2.COLUMN_NAME AS R_COLUMN \
+         FROM ALL_CONSTRAINTS ac \
+         JOIN ALL_CONS_COLUMNS acc ON ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME AND ac.OWNER = acc.OWNER \
+         JOIN ALL_CONSTRAINTS ac2 ON ac.R_CONSTRAINT_NAME = ac2.CONSTRAINT_NAME AND ac.R_OWNER = ac2.OWNER \
+         JOIN ALL_CONS_COLUMNS acc2 ON ac2.CONSTRAINT_NAME = acc2.CONSTRAINT_NAME AND ac2.OWNER = acc2.OWNER \
+           AND acc.POSITION = acc2.POSITION \
+         WHERE ac.CONSTRAINT_TYPE = 'R' AND ac.OWNER = {s} AND ac.TABLE_NAME = {t} \
+         ORDER BY ac.CONSTRAINT_NAME, acc.POSITION",
+        s = metadata_owner_sql(schema),
+        t = quote_value(table),
+    )
+}
+
+fn list_triggers_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE \
+         FROM ALL_TRIGGERS \
+         WHERE TABLE_OWNER = {s} AND TABLE_NAME = {t} \
+         ORDER BY TRIGGER_NAME",
+        s = metadata_owner_sql(schema),
+        t = quote_value(table),
+    )
+}
+
+pub async fn list_triggers(pool: &mysql_async::Pool, schema: &str, table: &str) -> Result<Vec<TriggerInfo>, String> {
+    let sql = list_triggers_sql(schema, table);
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let trigger_type = get_str(row, 2);
+            let timing = if trigger_type.contains("BEFORE") {
+                "BEFORE"
+            } else if trigger_type.contains("AFTER") {
+                "AFTER"
+            } else {
+                "INSTEAD OF"
+            };
+            TriggerInfo {
+                name: get_str(row, 0),
+                event: get_str(row, 1),
+                timing: timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
+                oracle_metadata: None,
+                statement: None,
+            }
+        })
+        .collect())
+}
+
+pub fn all_source_type(kind: &ObjectSourceKind) -> Option<&'static str> {
+    match kind {
+        ObjectSourceKind::Procedure => Some("PROCEDURE"),
+        ObjectSourceKind::Function => Some("FUNCTION"),
+        ObjectSourceKind::Package => Some("PACKAGE"),
+        ObjectSourceKind::PackageBody => Some("PACKAGE BODY"),
+        ObjectSourceKind::Trigger => Some("TRIGGER"),
+        ObjectSourceKind::Type => Some("TYPE"),
+        ObjectSourceKind::TypeBody => Some("TYPE BODY"),
+        _ => None,
+    }
+}
+
+pub fn metadata_ddl_type(kind: &ObjectSourceKind) -> Option<&'static str> {
+    match kind {
+        ObjectSourceKind::View => Some("VIEW"),
+        ObjectSourceKind::MaterializedView => Some("MATERIALIZED_VIEW"),
+        ObjectSourceKind::Procedure => Some("PROCEDURE"),
+        ObjectSourceKind::Function => Some("FUNCTION"),
+        ObjectSourceKind::Trigger => Some("TRIGGER"),
+        ObjectSourceKind::Sequence => Some("SEQUENCE"),
+        ObjectSourceKind::Synonym => Some("SYNONYM"),
+        ObjectSourceKind::Package => Some("PACKAGE"),
+        ObjectSourceKind::PackageBody => Some("PACKAGE_BODY"),
+        ObjectSourceKind::Type => Some("TYPE"),
+        ObjectSourceKind::TypeBody => Some("TYPE_BODY"),
+        _ => None,
+    }
+}
+
+pub fn all_source_sql(schema: &str, name: &str, source_type: &str) -> String {
+    format!(
+        "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = {s} AND NAME = {n} AND TYPE = {t} ORDER BY LINE",
+        s = metadata_owner_sql(schema),
+        n = quote_value(name),
+        t = quote_value(source_type),
+    )
+}
+
+pub fn all_views_sql(schema: &str, name: &str) -> String {
+    format!(
+        "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = {s} AND VIEW_NAME = {n}",
+        s = metadata_owner_sql(schema),
+        n = quote_value(name),
+    )
+}
+
+pub fn dbms_metadata_ddl_sql(schema: &str, name: &str, ddl_type: &str) -> String {
+    if schema.trim().is_empty() {
+        format!(
+            "SELECT DBMS_METADATA.GET_DDL({ddl}, {name}) FROM DUAL",
+            ddl = quote_value(ddl_type),
+            name = quote_value(name),
+        )
+    } else {
+        format!(
+            "SELECT DBMS_METADATA.GET_DDL({ddl}, {name}, {schema}) FROM DUAL",
+            ddl = quote_value(ddl_type),
+            name = quote_value(name),
+            schema = quote_value(schema),
+        )
+    }
+}
+
+pub fn editable_oracle_source(source: &str) -> String {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("CREATE"))
+        && (trimmed.len() == 6 || trimmed.as_bytes()[6].is_ascii_whitespace())
+    {
+        trimmed.to_string()
+    } else {
+        format!("CREATE OR REPLACE {trimmed}")
+    }
+}
+
+pub async fn get_object_source(
+    pool: &mysql_async::Pool,
+    schema: &str,
+    name: &str,
+    kind: &ObjectSourceKind,
+) -> Result<String, String> {
+    let mut conn = pool.get_conn().await.map_err(|e| e.to_string())?;
+
+    // For routine and package types (PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY),
+    // query ALL_SOURCE first because DBMS_METADATA.GET_DDL can block or fail on OceanBase Oracle mode (#10212, #13628).
+    if let Some(source_type) = all_source_type(kind) {
+        let sql = all_source_sql(schema, name, source_type);
+        if let Ok(result) = conn.query_iter(&sql).await {
+            if let Ok(rows) = result.collect_and_drop::<mysql_async::Row>().await {
+                let mut full_source = String::new();
+                for row in rows {
+                    let line = get_str(&row, 0);
+                    full_source.push_str(&line);
+                }
+                if !full_source.trim().is_empty() {
+                    return Ok(editable_oracle_source(&full_source));
+                }
+            }
+        }
+    }
+
+    // For VIEW, DBMS_METADATA produces the complete CREATE OR REPLACE VIEW declaration.
+    // Fall back to ALL_VIEWS if DBMS_METADATA is unavailable or empty.
+    if matches!(kind, ObjectSourceKind::View) {
+        let metadata_sql = dbms_metadata_ddl_sql(schema, name, "VIEW");
+        if let Ok(result) = conn.query_iter(&metadata_sql).await {
+            if let Ok(rows) = result.collect_and_drop::<mysql_async::Row>().await {
+                if let Some(row) = rows.first() {
+                    let source = get_str(row, 0);
+                    if !source.trim().is_empty() {
+                        return Ok(editable_oracle_source(&source));
+                    }
+                }
+            }
+        }
+
+        let views_sql = all_views_sql(schema, name);
+        let result = conn.query_iter(&views_sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        if let Some(row) = rows.first() {
+            let source = get_str(row, 0);
+            if !source.trim().is_empty() {
+                return Ok(source);
+            }
+        }
+        return Err("Object source not found".to_string());
+    }
+
+    // For other types or when ALL_SOURCE yielded nothing, fall back to DBMS_METADATA.GET_DDL.
+    if let Some(ddl_type) = metadata_ddl_type(kind) {
+        let sql = dbms_metadata_ddl_sql(schema, name, ddl_type);
+        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        if let Some(row) = rows.first() {
+            let source = get_str(row, 0);
+            if !source.trim().is_empty() {
+                return Ok(editable_oracle_source(&source));
+            }
+        }
+    }
+
+    Err("Object source not found".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_index_row_keeps_separate_raw_parent_identity() {
+        use mysql_async::{consts::ColumnType, Column, Value};
+        let values = vec![
+            Value::from(" Ix (a) "),
+            Value::from("INDEX"),
+            Value::from(" Index Owner "),
+            Value::from(" Parent Owner "),
+            Value::from(" T(a) "),
+            Value::Int(7),
+        ];
+        let columns = (0..values.len())
+            .map(|index| Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(format!("c{index}").as_bytes()))
+            .collect::<Vec<_>>();
+        let row = mysql_common::row::new_row(values, columns.into());
+        let object = object_info_from_row(&row, "CURRENT");
+        assert_eq!(object.schema.as_deref(), Some(" Index Owner "));
+        assert_eq!(object.name, " Ix (a) ");
+        assert_eq!(object.parent_schema.as_deref(), Some(" Parent Owner "));
+        assert_eq!(object.parent_name.as_deref(), Some(" T(a) "));
+        assert!(list_objects_sql(" Owner ").contains("ALL_INDEXES"));
+    }
+
+    #[test]
+    fn ob_oracle_list_objects_sql_includes_routines() {
+        let sql = list_objects_sql("DLJPM");
+
+        assert!(sql.contains("ALL_TABLES"));
+        assert!(sql.contains("ALL_VIEWS"));
+        assert!(sql.contains("ALL_PROCEDURES"));
+        assert!(sql.contains("'PROCEDURE'"));
+        assert!(sql.contains("'FUNCTION'"));
+        assert!(sql.contains("ALL_SEQUENCES"));
+        assert!(sql.contains("'SEQUENCE'"));
+        assert!(sql.contains("ALL_OBJECTS"));
+        assert!(sql.contains("'PACKAGE'"));
+        assert!(sql.contains("'PACKAGE BODY'"));
+        assert!(sql.contains("OWNER AS OBJECT_SCHEMA"));
+    }
+
+    #[test]
+    fn ob_oracle_user_schema_sql_filters_system_schemas_but_keeps_current_schema() {
+        let sql = list_user_schemas_sql();
+
+        assert!(sql.contains("USERNAME NOT IN ('SYS','LBACSYS','__public')"));
+        assert!(sql.contains("OR USERNAME = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"));
+        assert!(!sql.contains("ORAAUDITOR"));
+    }
+
+    #[test]
+    fn ob_oracle_empty_schema_uses_current_schema_for_all_metadata_sql() {
+        let statements = [
+            list_tables_sql(""),
+            list_objects_sql(""),
+            get_columns_sql("", "PERF_PROV_CONFIG"),
+            list_indexes_sql("", "PERF_PROV_CONFIG"),
+            list_foreign_keys_sql("", "PERF_PROV_CONFIG"),
+            list_triggers_sql("", "PERF_PROV_CONFIG"),
+            all_source_sql("", "PKG", "PACKAGE BODY"),
+            all_views_sql("", "V"),
+        ];
+
+        for sql in statements {
+            assert!(sql.contains(CURRENT_SCHEMA_EXPRESSION), "missing current schema fallback in: {sql}");
+            assert!(!sql.contains("OWNER = ''"), "empty owner remained in: {sql}");
+            assert!(!sql.contains("TABLE_OWNER = ''"), "empty table owner remained in: {sql}");
+        }
+    }
+
+    #[test]
+    fn ob_oracle_explicit_schema_does_not_query_current_schema() {
+        let statements = [
+            list_tables_sql("SYS"),
+            list_objects_sql("SYS"),
+            get_columns_sql("SYS", "PERF_PROV_CONFIG"),
+            list_indexes_sql("SYS", "PERF_PROV_CONFIG"),
+            list_foreign_keys_sql("SYS", "PERF_PROV_CONFIG"),
+            list_triggers_sql("SYS", "PERF_PROV_CONFIG"),
+            all_source_sql("SYS", "PKG", "PACKAGE BODY"),
+            all_views_sql("SYS", "V"),
+        ];
+
+        for sql in statements {
+            assert!(sql.contains("'SYS'"), "missing explicit schema in: {sql}");
+            assert!(!sql.contains(CURRENT_SCHEMA_EXPRESSION), "unexpected current schema lookup in: {sql}");
+        }
+    }
+
+    #[test]
+    fn ob_oracle_all_source_sql_for_package_body() {
+        let sql = all_source_sql("HR", "PAYROLL_PKG", "PACKAGE BODY");
+        assert_eq!(
+            sql,
+            "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = 'HR' AND NAME = 'PAYROLL_PKG' AND TYPE = 'PACKAGE BODY' ORDER BY LINE"
+        );
+    }
+
+    #[test]
+    fn ob_oracle_dbms_metadata_ddl_sql() {
+        assert_eq!(
+            dbms_metadata_ddl_sql("HR", "PAYROLL_PKG", "PACKAGE_BODY"),
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', 'PAYROLL_PKG', 'HR') FROM DUAL"
+        );
+        assert_eq!(
+            dbms_metadata_ddl_sql("", "PAYROLL_PKG", "PACKAGE_BODY"),
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', 'PAYROLL_PKG') FROM DUAL"
+        );
+    }
+
+    #[test]
+    fn ob_oracle_editable_oracle_source_wraps_raw_source() {
+        assert_eq!(
+            editable_oracle_source("PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"),
+            "CREATE OR REPLACE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"
+        );
+        assert_eq!(
+            editable_oracle_source("CREATE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"),
+            "CREATE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"
+        );
+        assert_eq!(
+            editable_oracle_source("CREATE OR REPLACE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"),
+            "CREATE OR REPLACE PACKAGE BODY pkg IS\nBEGIN\n  NULL;\nEND;"
+        );
+        assert_eq!(
+            editable_oracle_source("   create or replace package pkg is end;  "),
+            "create or replace package pkg is end;"
+        );
+        let commented = "--注释\nPACKAGE BODY pkg IS BEGIN NULL; END;";
+        assert_eq!(editable_oracle_source(commented), format!("CREATE OR REPLACE {commented}"));
+        assert_eq!(editable_oracle_source(""), "");
+    }
+}

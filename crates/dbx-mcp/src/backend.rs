@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
-    connection::AppState,
+    connection::{connection_configs_pool_equivalent, AppState, ConnectionLifecycleSnapshot, SalesforceCurrentUser},
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
+    history::HistoryEntry,
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
     mcp_result_protection::{ResultSource, ResultSourceMetadata, ResultSourceMetadataRequest},
     models::connection::{ConnectionConfig, DatabaseType},
@@ -21,7 +22,10 @@ use tokio::sync::Mutex;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use crate::mongo::MongoCommand;
+use crate::{
+    mongo::MongoCommand,
+    transaction::{MysqlTransactionIo, TransactionOwner, TransactionOwnerConfig, TransactionOwnerRegistry},
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionSummary {
@@ -32,6 +36,7 @@ pub struct ConnectionSummary {
     pub port: u16,
     pub database: String,
     pub group_path: Vec<String>,
+    pub note: String,
 }
 
 impl From<&ConnectionConfig> for ConnectionSummary {
@@ -48,20 +53,42 @@ impl From<&ConnectionConfig> for ConnectionSummary {
             port: config.port,
             database: config.database.clone().unwrap_or_default(),
             group_path: Vec::new(),
+            note: config.note.clone(),
         }
     }
 }
 
 fn legacy_mcp_allow_writes() -> Option<bool> {
-    match std::env::var("DBX_MCP_ALLOW_WRITES").ok()?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
+    parse_legacy_mcp_allow_writes(&std::env::var("DBX_MCP_ALLOW_WRITES").ok()?)
+}
+
+fn parse_legacy_mcp_allow_writes(value: &str) -> Option<bool> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => true,
+        "0" | "false" | "no" | "yes" | "" => false,
+        // Fail closed for values that are not understood by the CLI flag
+        // parser; an invalid setting must never silently enable writes.
+        _ => false,
+    })
 }
 
 fn effective_mcp_policy(state: McpGlobalPolicyState) -> McpGlobalPolicy {
     effective_mcp_policy_with_legacy_allow_writes(state, legacy_mcp_allow_writes())
+}
+
+fn effective_mcp_access_policy(
+    mut access: dbx_core::mcp_access::McpAccessPolicy,
+) -> dbx_core::mcp_access::McpAccessPolicy {
+    // Both local storage and Web responses must honor the CLI run's read-only
+    // restriction. Cap every override while leaving visibility/scopes intact.
+    if legacy_mcp_allow_writes() == Some(false) {
+        let read = dbx_core::mcp_access::McpAccessLevel::Read;
+        access.default_access = access.default_access.min(read);
+        for rule in access.rules.values_mut() {
+            rule.access = rule.access.map(|level| level.min(read));
+        }
+    }
+    access
 }
 
 fn effective_mcp_policy_with_legacy_allow_writes(
@@ -84,6 +111,9 @@ fn effective_mcp_policy_with_legacy_allow_writes(
         for rule in &mut policy.connection_policies {
             rule.read_only = true;
             rule.allow_dangerous_sql = false;
+            // An unconfirmed CLI run must not reach Salesforce DML either: the
+            // connection opt-in is a write permission like any other here.
+            rule.allow_salesforce_dml = false;
             rule.execution_mode_configured = true;
             rule.execution_mode_policy_version = Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION);
             for database_policy in &mut rule.database_policies {
@@ -119,10 +149,32 @@ pub struct BatchStatementResult {
     /// false.
     #[serde(skip_serializing_if = "is_false")]
     pub merged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_state: Option<crate::transaction::TransactionState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_outcome: Option<crate::transaction::TransactionOutcome>,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub(crate) fn native_mysql_transaction_connection(connection: &ConnectionConfig) -> bool {
+    connection.db_type == DatabaseType::Mysql
+        && connection.driver_profile.as_deref().is_none_or(|profile| {
+            let profile = profile.trim();
+            profile.is_empty() || profile.eq_ignore_ascii_case("mysql")
+        })
+}
+
+fn transaction_operation_timeout(
+    connection: &ConnectionConfig,
+    configured: std::time::Duration,
+) -> std::time::Duration {
+    match connection.effective_query_timeout_secs() {
+        0 => configured,
+        seconds => std::time::Duration::from_secs(seconds),
+    }
 }
 
 impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
@@ -141,6 +193,8 @@ impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
             statement_index: result.statement_index,
             error_message,
             merged: false,
+            transaction_state: None,
+            transaction_outcome: None,
         }
     }
 }
@@ -169,7 +223,15 @@ fn batch_statement_result_from_json(value: &Value) -> Result<BatchStatementResul
                 .or_else(|| value.pointer("/rows/0/0").and_then(Value::as_str).map(str::to_owned))
         })
         .flatten();
-    Ok(BatchStatementResult { result, execution_error, statement_index, error_message, merged: false })
+    Ok(BatchStatementResult {
+        result,
+        execution_error,
+        statement_index,
+        error_message,
+        merged: false,
+        transaction_state: None,
+        transaction_outcome: None,
+    })
 }
 
 /// Wire-level options for a documentation snapshot. Mirrors
@@ -185,11 +247,93 @@ pub struct DocsSnapshotOptions {
     pub project_name: Option<String>,
 }
 
+/// Stand-in backend for a store that could not be opened, most often because the
+/// data encryption key is not reachable from this process.
+///
+/// Exiting at startup closes stdout before the transport is running, so an MCP
+/// client sees only EOF and the remedy stays on stderr where the host does not
+/// show it. Keeping the server answerable turns that into an ordinary protocol
+/// error: every request fails closed, carrying the reason the operator needs.
+pub struct UnavailableBackend {
+    reason: String,
+}
+
+impl UnavailableBackend {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self { reason: reason.into() }
+    }
+}
+
+#[async_trait]
+impl DbxBackend for UnavailableBackend {
+    async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn execute_agent_tool(
+        &self,
+        _connection: &ConnectionConfig,
+        _database: &str,
+        tool_name: &str,
+        _arguments: Value,
+        _permissions: AgentSqlPermissions,
+    ) -> ToolResult {
+        ToolResult {
+            tool_call_id: String::new(),
+            tool_name: tool_name.to_string(),
+            content: self.reason.clone(),
+            is_error: true,
+            explain_data: None,
+        }
+    }
+
+    async fn add_connection_for_mcp(&self, _config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn duplicate_connection_for_mcp(
+        &self,
+        _source_id: &str,
+        _copy_id: &str,
+        _copy_name: &str,
+    ) -> Result<ConnectionConfig, String> {
+        Err(self.reason.clone())
+    }
+
+    async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
+        Err(self.reason.clone())
+    }
+}
+
 #[async_trait]
 pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
+    /// The v2 access policy, for decisions v1 cannot express (plugin
+    /// sub-scopes). Defaults to the v1 mapping, which carries no plugin
+    /// sub-scope rules and so admits every value at the connection level.
+    async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+        Ok(dbx_core::mcp_access::McpAccessPolicy::from_v1(&self.load_mcp_global_policy().await?))
+    }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+
+    /// Whether the user has saved any MCP policy. Fresh installs have none,
+    /// in which case writable plugin connections fall back to their own
+    /// protection level (at least write) instead of the global default. Once
+    /// a policy is saved, its explicit settings are authoritative everywhere.
+    /// Unreadable storage counts as configured: unreadable hides, never widens.
+    async fn mcp_policy_configured(&self) -> bool {
+        false
+    }
+
+    async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
+        let _ = entry;
+        Err("Query history is not supported by this backend.".to_string())
+    }
     /// Return database names visible to the DBX connection itself. The MCP
     /// server applies its own database-scope policy before exposing these
     /// names to a client.
@@ -225,6 +369,17 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, request);
         Err("Message queue sending is not supported by this backend.".to_string())
     }
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        let _ = (connection, topic, count, options);
+        Err("Message queue reading is not supported by this backend.".to_string())
+    }
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -250,6 +405,15 @@ pub trait DbxBackend: Send + Sync {
             return Err("Raw query options are not supported by this backend.".to_string());
         }
         self.execute_query(connection, database, sql, options.max_rows, options.timeout_secs).await
+    }
+    async fn open_transaction_owner(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        let _ = (connection, database, client_session_id);
+        Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection.".to_string())
     }
     /// Execute a multi-statement SQL script, returning one result per statement.
     ///
@@ -364,6 +528,14 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, command);
         Err("MongoDB shell commands are not supported by this backend.".to_string())
     }
+    /// Connected-user identity for a Salesforce connection: who a write would be
+    /// attributed to, plus the profile's "Modify All Data" flag. Salesforce has
+    /// no session-scoped identity, so this reads the pool's cached user info and
+    /// creates the pool when the MCP process is still cold.
+    async fn salesforce_current_user(&self, connection: &ConnectionConfig) -> Result<SalesforceCurrentUser, String> {
+        let _ = connection;
+        Err("Salesforce identity is not supported by this backend.".to_string())
+    }
     /// Release the connection pool pinned by an MCP session (`client_session_id`).
     async fn close_client_session(
         &self,
@@ -378,6 +550,40 @@ pub trait DbxBackend: Send + Sync {
         let _ = (path, body);
         Err("DBX is not running. Please start DBX first.".to_string())
     }
+    async fn approve_high_risk_sql(&self, connection_id: &str, database: &str, sql: &str) -> Result<String, String> {
+        let _ = (connection_id, database, sql);
+        Err("SQL_BLOCKED: Desktop approval is unavailable for this MCP backend.".to_string())
+    }
+    async fn consume_high_risk_sql_approval(
+        &self,
+        token: &str,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+    ) -> Result<(), String> {
+        let _ = (token, connection_id, database, sql);
+        Err("SQL_BLOCKED: Desktop approval is unavailable for this MCP backend.".to_string())
+    }
+    /// Runs one product-provider operation (Nacos, Consul, …) on a resolved
+    /// connection. Policy, scope and access level are checked by the server
+    /// before this is reached.
+    async fn product_call(
+        &self,
+        connection: &ConnectionConfig,
+        call: &crate::products::ProductCall,
+    ) -> Result<Value, String> {
+        let _ = (connection, call);
+        Err("This MCP backend does not support product tools.".to_string())
+    }
+    /// Asks the desktop user to confirm one high-risk non-SQL tool call
+    /// (a plugin tool declared `full`, a dangerous Redis command). Returns
+    /// once the person answered: `Ok(())` to proceed, `Err` with a
+    /// `TOOL_BLOCKED:` message otherwise. Backends without a desktop UI
+    /// refuse, so a call needing confirmation never runs unconfirmed.
+    async fn approve_high_risk_tool(&self, request: &crate::approval::ToolApprovalRequest) -> Result<(), String> {
+        let _ = request;
+        Err("TOOL_BLOCKED: Desktop confirmation is unavailable for this MCP backend.".to_string())
+    }
     async fn collect_docs_snapshot(
         &self,
         connection: &ConnectionConfig,
@@ -387,11 +593,51 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, options);
         Err("Documentation snapshots are not supported by this backend.".to_string())
     }
+    /// Local documentation notes for a connection. The default keeps backends
+    /// without notes support working: AI schema tools then use database
+    /// comments only.
+    async fn load_docs_annotations(
+        &self,
+        connection: &ConnectionConfig,
+    ) -> Result<Option<dbx_core::docs::annotations::AnnotationFile>, String> {
+        let _ = connection;
+        Ok(None)
+    }
+    /// Tool-capable plugins for the external `dbx` MCP surface, with their
+    /// discovered `mcp/tools` listings. Author opt-in: installed +
+    /// compatible + backend entrypoint + a manifest `external_tools: true`
+    /// declaration. An error means "no plugin tools on this backend" (e.g.
+    /// the web backend); the server degrades to the static tools.
+    async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+        let _ = self;
+        Err("Plugin tools are not supported by this backend.".to_string())
+    }
+    /// Lists a plugin-declared sub-scope for one saved connection.
+    async fn list_plugin_mcp_scopes(&self, plugin_id: &str, connection_id: &str) -> Result<Vec<String>, String> {
+        let _ = (plugin_id, connection_id);
+        Err("Plugin scope listing is not supported by this backend.".to_string())
+    }
+    /// Calls one plugin MCP tool. `connection_id` (already policy-checked by
+    /// the server) selects the saved connection whose host-generated
+    /// lifecycle payload is sent to the plugin; `None` targets
+    /// connection-less tools.
+    async fn call_plugin_mcp_tool(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        connection_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        let _ = (self, plugin_id, tool, connection_id, arguments);
+        Err("Plugin tools are not supported by this backend.".to_string())
+    }
 }
 
 pub struct LocalBackend {
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
+    transaction_owners: Arc<TransactionOwnerRegistry>,
+    transaction_owner_config: TransactionOwnerConfig,
 }
 
 #[derive(Debug, Default)]
@@ -407,6 +653,12 @@ pub struct WebBackend {
     headers: HeaderMap,
     auth: Mutex<WebAuthState>,
     connected: Mutex<HashMap<String, ConnectionConfig>>,
+}
+
+impl Drop for LocalBackend {
+    fn drop(&mut self) {
+        self.transaction_owners.invalidate_all();
+    }
 }
 
 // Manual impl: the derived one would print `password` (and the session cookie
@@ -597,35 +849,313 @@ impl WebBackend {
     }
 }
 
+/// Whether a sidecar error means "this plugin simply does not expose an MCP surface".
+///
+/// `mcp/tools` is an optional host↔plugin bridge method introduced after many plugins were
+/// published. A plugin that predates it answers with JSON-RPC `-32601` ("unknown method" /
+/// "method not found"), which is the correct response, not a failure. MCP tool discovery must
+/// skip such plugins instead of aborting the whole pass.
+fn plugin_lacks_mcp_surface(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("unknown method") || lower.contains("method not found") || lower.contains("-32601")
+}
+
+/// Probe budget for one plugin's `mcp/tools` during external discovery —
+/// aligned with the AI surface's discovery timeout so one hung sidecar
+/// cannot stall `tools/list` beyond a few seconds.
+const PLUGIN_TOOLS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 impl LocalBackend {
+    async fn notify_connections_changed(&self) {
+        // Persistence has already succeeded. A closed or unresponsive desktop
+        // must not turn the mutation into an error (or block headless MCP).
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.bridge_request("/reload-connections", json!({})),
+        )
+        .await;
+    }
+
+    fn spawn_connection_lifecycle_watcher(
+        &self,
+        lifecycle: ConnectionLifecycleSnapshot,
+        owner: &Arc<TransactionOwner>,
+    ) -> tokio::task::JoinHandle<()> {
+        let cancellation = lifecycle.cancellation().clone();
+        let owner_closed = owner.closed_token();
+        let watched_owner = Arc::downgrade(owner);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    if let Some(owner) = watched_owner.upgrade() {
+                        owner.invalidate();
+                    }
+                }
+                _ = owner_closed.cancelled() => {}
+            }
+        })
+    }
+
+    async fn finalize_transaction_owner(
+        &self,
+        connection_id: &str,
+        lifecycle: ConnectionLifecycleSnapshot,
+        owner: Arc<TransactionOwner>,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        self.spawn_connection_lifecycle_watcher(lifecycle.clone(), &owner);
+        self.transaction_owners.register(connection_id, &owner);
+        if !self.state.connection_lifecycle_is_current(connection_id, &lifecycle) {
+            owner.invalidate();
+            let _ = owner.close().await;
+            return Err("The connection was removed while its fixed transaction session was opening.".to_string());
+        }
+        Ok(owner)
+    }
+
     /// Reuse an already initialized DBX application state, for hosts that
     /// embed MCP alongside their own HTTP server.
     pub fn from_app_state(state: Arc<AppState>, data_dir: PathBuf) -> Self {
-        Self { state, data_dir }
+        Self {
+            state,
+            data_dir,
+            transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
+            transaction_owner_config: TransactionOwnerConfig::from_env(),
+        }
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
-        let storage = Storage::open(path).await?;
+        // The standalone MCP binary and CLI are versioned independently from
+        // the DBX app, so their crate version must not stand in for the app
+        // version during plugin `engines.dbx` checks: a plugin requiring
+        // DBX >= 0.5.68 would be rejected against e.g. 0.4.90 (#9595). An
+        // empty version makes the compatibility check skip that requirement.
+        Self::open_with_app_version(path, "").await
+    }
+
+    /// Same as [`open`], but lets tests and embedded callers pin the app version
+    /// used for plugin compatibility checks instead of the compile-time version.
+    pub async fn open_with_app_version(path: &Path, app_version: &str) -> Result<Self, String> {
+        // A local CLI/MCP process may share an already provisioned desktop
+        // Keychain/credential-store key. Preflight only reads that provider;
+        // it never provisions a key or migrates legacy credentials.
+        let data_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut storage = Storage::open_unmigrated(path).await?.with_secret_key_creation(false);
+        if dbx_core::persistence::secret_codec::managed_key_path(data_dir).is_file() {
+            storage =
+                storage.with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        }
+        let migration = storage.inspect_data_migration().await?;
+        if !migration.is_ready() {
+            // The migration wizard may have already completed on Desktop with
+            // the key provisioned in the OS keychain, which a keyring-less
+            // CLI/MCP build cannot read. Pointing those users back at the
+            // wizard loops forever, so separate the two failure shapes.
+            let migration_data_remaining = migration.database_plaintext_count > 0
+                || migration.sync_credential_count > 0
+                || migration.legacy_json_files.iter().any(|file| file.exists);
+            if !migration_data_remaining && !migration.key_provider_available {
+                return Err(format!(
+                    "SECRET_KEY_UNAVAILABLE: this process cannot read the DBX data encryption key ({}). \
+                     If the data security upgrade was completed in DBX Desktop, its key may live in the OS \
+                     keychain: use an MCP/CLI build with OS keychain support, or expose the key to headless \
+                     tools via the DBX_SECRET_KEY_FILE / DBX_SECRET_KEY environment variables. Otherwise open \
+                     DBX Desktop or Web to complete the data security upgrade first.",
+                    migration.error_code.as_deref().unwrap_or("KEY_PROVIDER_UNAVAILABLE")
+                ));
+            }
+            return Err("DATA_MIGRATION_REQUIRED: open DBX Desktop or Web to complete the data security upgrade".into());
+        }
         storage.load_mcp_global_policy().await?;
         let configs = storage.load_connections().await?;
         let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
-        let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let data_dir = data_dir.to_path_buf();
         let plugin_dir = local_plugin_dir(&desktop_settings, &data_dir);
         let agent_dir = local_agent_dir(&desktop_settings, &data_dir);
         let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
             storage,
             plugin_dir,
             agent_dir,
-            env!("CARGO_PKG_VERSION"),
+            app_version,
         ));
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
-        Ok(Self { state, data_dir })
+        Ok(Self {
+            state,
+            data_dir,
+            transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
+            transaction_owner_config: TransactionOwnerConfig::from_env(),
+        })
+    }
+
+    #[cfg(feature = "transaction-test-hooks")]
+    pub fn with_transaction_test_config(mut self, config: TransactionOwnerConfig) -> Self {
+        self.transaction_owner_config = config;
+        self
     }
 
     pub fn state(&self) -> &Arc<AppState> {
         &self.state
+    }
+
+    /// List the MCP tools exposed by every installed plugin.
+    ///
+    /// Plugin MCP surfaces are discovered through the same `mcp/tools`
+    /// protocol used by the desktop bridge. Keep the response grouped by
+    /// plugin so callers can select the correct sidecar for a tool call.
+    pub async fn list_plugin_tools(&self) -> Result<Vec<Value>, String> {
+        let plugins = self.state.plugins.list_installed()?;
+        let mut providers = Vec::new();
+        for plugin in plugins {
+            if !plugin.compatibility.compatible || plugin.manifest.backend_entrypoint().is_none() {
+                continue;
+            }
+            let tools: Value = match self
+                .state
+                .plugin_host
+                .probe(&plugin.manifest.id, "mcp/tools", json!({}), Some(std::time::Duration::from_secs(30)))
+                .await
+            {
+                Ok(tools) => tools,
+                // A plugin that predates the optional `mcp/tools` bridge answers -32601; skip it
+                // instead of failing discovery for every other installed plugin.
+                Err(err) if plugin_lacks_mcp_surface(&err) => {
+                    log::debug!("[mcp] plugin {} exposes no MCP tool surface: {}", plugin.manifest.id, err);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            let tool_list = tools
+                .get("tools")
+                .cloned()
+                .or_else(|| tools.is_array().then_some(tools.clone()))
+                .unwrap_or_else(|| json!([]));
+            providers.push(json!({
+                "pluginId": plugin.manifest.id,
+                "tools": tool_list,
+            }));
+        }
+        Ok(providers)
+    }
+
+    /// Call one plugin MCP tool through the host-managed sidecar session.
+    /// When a saved connection is supplied, only its host-generated lifecycle
+    /// payload is sent to the plugin; credentials remain host-managed. The
+    /// saved config must still belong to the target plugin, so a connection
+    /// re-bound to another plugin can never leak its lifecycle here.
+    pub async fn call_plugin_tool(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        connection_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        let mut params = json!({ "tool": tool, "arguments": arguments });
+        if let Some(connection_id) = connection_id {
+            let config = self
+                .state
+                .configs
+                .read()
+                .await
+                .get(connection_id)
+                .cloned()
+                .ok_or_else(|| format!("Connection not found: {connection_id}"))?;
+            if config.plugin_id.as_deref() != Some(plugin_id) {
+                return Err(format!("Connection \"{connection_id}\" is not bound to plugin \"{plugin_id}\""));
+            }
+            let lifecycle = self.state.plugin_host.connection_params_standalone(&config)?;
+            params["lifecycle"] = lifecycle;
+        }
+        self.state
+            .plugin_host
+            .invoke(plugin_id, "mcp/call", params, None, Some(std::time::Duration::from_secs(300)))
+            .await
+    }
+
+    /// Opt-in, parallel `mcp/tools` discovery for the external surface:
+    /// installed + compatible + backend plugins whose manifest declares
+    /// `external_tools: true`, narrowed by the user's per-plugin grant
+    /// (`dbx_core::plugin_mcp`). A plugin that fails to list skips itself
+    /// (with a warning) instead of failing the whole `tools/list`; an
+    /// unreadable grant store hides every plugin rather than widening.
+    pub async fn detect_plugin_tool_providers(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+        let plugins = self.state.plugins.list_installed()?;
+        let grants = self.state.storage.load_plugin_mcp_grants().await.map_err(|error| {
+            log::warn!("[mcp] cannot read plugin MCP grants: {error}");
+            format!("Plugin MCP grants are unavailable: {error}")
+        })?;
+        let candidates: Vec<dbx_core::plugins::PluginManifest> = plugins
+            .into_iter()
+            .filter(|plugin| {
+                plugin.compatibility.compatible
+                    && plugin.manifest.backend_entrypoint().is_some()
+                    && dbx_core::plugin_mcp::author_allows_external(&plugin.manifest)
+                    && grants.get(&plugin.manifest.id).is_none_or(|grant| grant.external)
+            })
+            .map(|plugin| plugin.manifest)
+            .collect();
+        // Discovery uses short-lived sessions: merely listing tools must not keep every
+        // installed plugin loaded in every independent MCP host.
+        let probes = candidates.into_iter().map(|manifest| {
+            let state = Arc::clone(&self.state);
+            async move {
+                let listing = state
+                    .plugin_host
+                    .probe::<Value>(&manifest.id, "mcp/tools", json!({}), Some(PLUGIN_TOOLS_PROBE_TIMEOUT))
+                    .await;
+                (manifest, listing)
+            }
+        });
+        let mut providers = Vec::new();
+        for (manifest, listing) in futures::future::join_all(probes).await {
+            let plugin_id = manifest.id.clone();
+            let plugin_name = manifest.name.clone();
+            match listing {
+                Ok(value) => {
+                    let tools = dbx_core::plugin_mcp::exposed_tools(
+                        &manifest,
+                        grants.get(&plugin_id),
+                        dbx_core::ai::plugin_tools::parse_tool_list(&value),
+                    );
+                    if tools.is_empty() {
+                        log::debug!("[mcp] plugin {plugin_id} exposes no MCP tools");
+                    } else {
+                        let scope = manifest
+                            .mcp_contribution()
+                            .and_then(|mcp| mcp.scope.as_ref())
+                            .map(|scope| (scope.kind.clone(), scope.argument.clone()));
+                        let scope_list_method = manifest
+                            .mcp_contribution()
+                            .and_then(|mcp| mcp.scope.as_ref())
+                            .and_then(|scope| scope.list_method.clone());
+                        let toolsets = tools
+                            .iter()
+                            .map(|tool| {
+                                (
+                                    tool.name.clone(),
+                                    dbx_core::plugin_mcp::tool_toolset(manifest.mcp_contribution(), &tool.name),
+                                )
+                            })
+                            .collect();
+                        providers.push(crate::plugin_tools::PluginToolProvider {
+                            plugin_id,
+                            plugin_name,
+                            tools,
+                            scope,
+                            scope_list_method,
+                            toolsets,
+                        });
+                    }
+                }
+                Err(err) if plugin_lacks_mcp_surface(&err) => {
+                    log::debug!("[mcp] plugin {plugin_id} exposes no MCP tool surface: {err}");
+                }
+                Err(err) => {
+                    log::warn!("[mcp] plugin {plugin_id} tool discovery failed: {err}");
+                }
+            }
+        }
+        Ok(providers)
     }
 
     /// Sync the latest connection list from storage into the `AppState.configs` in-memory cache:
@@ -633,19 +1163,35 @@ impl LocalBackend {
     /// needs this — WebBackend talks HTTP and holds no local AppState, and the desktop mcp_bridge
     /// shares the DBX process so it is unaffected by this cache desync.
     async fn sync_runtime_configs(&self, configs: &[ConnectionConfig]) {
-        let mut runtime = self.state.configs.write().await;
-        for config in configs {
-            match runtime.get(&config.id) {
-                Some(existing) if existing == config => {}
-                _ => {
-                    runtime.insert(config.id.clone(), config.clone());
+        let pool_ids_to_drop = {
+            let mut runtime = self.state.configs.write().await;
+            let mut pool_ids_to_drop = Vec::new();
+            for config in configs {
+                match runtime.get(&config.id) {
+                    Some(existing) if existing == config => {}
+                    Some(existing) => {
+                        if !connection_configs_pool_equivalent(existing, config) {
+                            pool_ids_to_drop.push(config.id.clone());
+                        }
+                        runtime.insert(config.id.clone(), config.clone());
+                    }
+                    None => {
+                        runtime.insert(config.id.clone(), config.clone());
+                    }
                 }
             }
-        }
-        let stale_ids: Vec<String> =
-            runtime.keys().filter(|id| !configs.iter().any(|config| &config.id == *id)).cloned().collect();
-        for id in stale_ids {
-            runtime.remove(&id);
+            let stale_ids: Vec<String> =
+                runtime.keys().filter(|id| !configs.iter().any(|config| &config.id == *id)).cloned().collect();
+            for id in &stale_ids {
+                runtime.remove(id);
+            }
+            pool_ids_to_drop.extend(stale_ids);
+            pool_ids_to_drop
+        };
+
+        for id in pool_ids_to_drop {
+            self.transaction_owners.invalidate_connection(&id);
+            self.state.remove_connection_pools_detached(&id).await;
         }
     }
 }
@@ -697,8 +1243,154 @@ fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
 
 #[async_trait]
 impl DbxBackend for LocalBackend {
+    async fn load_docs_annotations(
+        &self,
+        connection: &ConnectionConfig,
+    ) -> Result<Option<dbx_core::docs::annotations::AnnotationFile>, String> {
+        // Resolve against the same data directory the desktop app uses: an
+        // explicit docs_notes_path wins, otherwise the connection's notes file
+        // lives under <data_dir>/docs-notes.
+        let path = dbx_core::docs::annotations::resolve_notes_path(
+            &connection.id,
+            connection.docs_notes_path.as_deref(),
+            &self.data_dir,
+        );
+        dbx_core::docs::annotations::load_annotations(&path)
+    }
+
+    async fn approve_high_risk_sql(&self, connection_id: &str, database: &str, sql: &str) -> Result<String, String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "SQL_BLOCKED: DBX desktop is not running.".to_string())?;
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(100))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!("http://127.0.0.1:{}/approve-high-risk-sql", port.trim()))
+            .json(&json!({ "connection_id": connection_id, "database": database, "sql": sql }))
+            .send()
+            .await
+            .map_err(|error| format!("SQL_BLOCKED: Desktop approval unavailable: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response.text().await.unwrap_or_else(|_| "SQL_BLOCKED: Approval failed".to_string()));
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?
+            .get("token")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| "SQL_BLOCKED: Invalid desktop approval response".to_string())
+    }
+    async fn product_call(
+        &self,
+        connection: &ConnectionConfig,
+        call: &crate::products::ProductCall,
+    ) -> Result<Value, String> {
+        crate::products::dispatch_local(&self.state, &connection.id, call).await
+    }
+
+    async fn approve_high_risk_tool(&self, request: &crate::approval::ToolApprovalRequest) -> Result<(), String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "TOOL_BLOCKED: DBX desktop is not running, so the call cannot be confirmed.".to_string())?;
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(100))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!("http://127.0.0.1:{}/approve-high-risk-tool", port.trim()))
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| format!("TOOL_BLOCKED: Desktop confirmation unavailable: {error}"))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(response.text().await.unwrap_or_else(|_| "TOOL_BLOCKED: Confirmation failed".to_string()))
+        }
+    }
+
+    async fn consume_high_risk_sql_approval(
+        &self,
+        token: &str,
+        connection_id: &str,
+        database: &str,
+        sql: &str,
+    ) -> Result<(), String> {
+        let port = tokio::fs::read_to_string(self.data_dir.join("mcp-bridge-port"))
+            .await
+            .map_err(|_| "SQL_BLOCKED: DBX desktop is not running.".to_string())?;
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!("http://127.0.0.1:{}/consume-high-risk-sql-approval", port.trim()))
+            .json(&json!({ "token": token, "connection_id": connection_id, "database": database, "sql": sql }))
+            .send()
+            .await
+            .map_err(|error| format!("SQL_BLOCKED: Desktop approval unavailable: {error}"))?;
+        if !response.status().is_success() {
+            return Err(response.text().await.unwrap_or_else(|_| "SQL_BLOCKED: Approval expired".to_string()));
+        }
+        Ok(())
+    }
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-        self.state.storage.load_mcp_global_policy().await.map(effective_mcp_policy)
+        self.state.storage.load_enforced_mcp_policy().await.map(effective_mcp_policy)
+    }
+
+    async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+        self.state.storage.load_mcp_access_policy().await.map(effective_mcp_access_policy)
+    }
+
+    async fn mcp_policy_configured(&self) -> bool {
+        self.state.storage.load_enforced_mcp_policy().await.map(|state| state.configured).unwrap_or(true)
+    }
+
+    async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
+        self.detect_plugin_tool_providers().await
+    }
+
+    async fn list_plugin_mcp_scopes(&self, plugin_id: &str, connection_id: &str) -> Result<Vec<String>, String> {
+        let manifest = self
+            .state
+            .plugins
+            .list_installed()?
+            .into_iter()
+            .find(|plugin| plugin.manifest.id == plugin_id)
+            .ok_or_else(|| format!("Plugin `{plugin_id}` is not installed."))?
+            .manifest;
+        let method = manifest
+            .mcp_contribution()
+            .and_then(|mcp| mcp.scope.as_ref())
+            .and_then(|scope| scope.list_method.as_deref())
+            .ok_or_else(|| "This plugin does not declare a scope list method.".to_string())?;
+        let value = self
+            .state
+            .plugin_host
+            .invoke::<Value>(
+                plugin_id,
+                method,
+                json!({ "connectionId": connection_id }),
+                None,
+                Some(PLUGIN_TOOLS_PROBE_TIMEOUT),
+            )
+            .await?;
+        value
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Plugin scope list must return { values: string[] }.".to_string())
+            .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect())
+    }
+
+    async fn call_plugin_mcp_tool(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        connection_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        self.call_plugin_tool(plugin_id, tool, connection_id, arguments).await
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -713,7 +1405,22 @@ impl DbxBackend for LocalBackend {
         Ok(configs)
     }
 
+    async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
+        self.state.storage.save_history_entry(entry).await
+    }
+
     async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        if connection.db_type == DatabaseType::MongoDb {
+            if self.state.pool_handle(&connection.id).await.is_none() {
+                self.state.get_or_create_pool(&connection.id, None).await?;
+            }
+            if matches!(self.state.pool_handle(&connection.id).await, Some(dbx_core::connection::PoolKind::MongoDb(_)))
+            {
+                return dbx_core::mongo_ops::mongo_list_databases_core(&self.state, &connection.id).await;
+            }
+            // Keep the existing metadata retry path for MongoDB agent pools.
+        }
+
         // `list_databases_core` supports many database engines and therefore
         // produces a very large future. Boxing it here keeps the async-trait
         // implementation below Rust's type-layout recursion limit in desktop
@@ -773,6 +1480,77 @@ impl DbxBackend for LocalBackend {
         request: dbx_core::mq::SendMessageRequest,
     ) -> Result<dbx_core::mq::SendMessageResponse, String> {
         dbx_core::mq::service::mq_send_message_core(&self.state, &connection.id, request).await
+    }
+
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        dbx_core::mq::service::mq_peek_messages_core(
+            &self.state,
+            &connection.id,
+            topic,
+            "__dbx_kafka_viewer__".into(),
+            count,
+            Some(options),
+        )
+        .await
+    }
+
+    async fn open_transaction_owner(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        if !native_mysql_transaction_connection(connection) {
+            return Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection."
+                .to_string());
+        }
+        let lifecycle = self.state.connection_lifecycle_snapshot(&connection.id);
+        let resource_permit =
+            self.state.shared_resource_budget("dbx-mcp-transaction-owners", 32)?.try_acquire_owned().map_err(|_| {
+                "Too many open transaction-enabled MCP sessions (max 32). Close an existing transaction session first."
+                    .to_string()
+            })?;
+        let pool_database = (!database.trim().is_empty()).then_some(database);
+        let pool_key =
+            self.state.get_or_create_pool_for_session(&connection.id, pool_database, Some(client_session_id)).await?;
+        let pool = match self.state.pool_handle(&pool_key).await {
+            Some(dbx_core::connection::PoolKind::Mysql(pool, dbx_core::connection::MysqlMode::Normal)) => pool,
+            _ => {
+                let _ = self.state.close_client_session_pool(&connection.id, pool_database, client_session_id).await;
+                return Err(
+                    "TRANSACTION_UNSUPPORTED: fixed-session transactions require the native MySQL driver.".to_string()
+                );
+            }
+        };
+        let conn = match dbx_core::db::mysql::get_conn_with_health_check(&pool).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let _ = self.state.close_client_session_pool(&connection.id, pool_database, client_session_id).await;
+                return Err(format!("Failed to acquire the fixed MySQL session connection: {error}"));
+            }
+        };
+        let mut owner_config = self.transaction_owner_config;
+        owner_config.operation_timeout = transaction_operation_timeout(connection, owner_config.operation_timeout);
+        let owner = TransactionOwner::spawn_with_resource_permit(
+            MysqlTransactionIo::new(
+                conn,
+                self.state.clone(),
+                connection.id.clone(),
+                database.to_string(),
+                client_session_id.to_string(),
+                pool.data_charset(),
+            ),
+            owner_config,
+            resource_permit,
+        );
+        self.finalize_transaction_owner(&connection.id, lifecycle, owner).await
     }
 
     async fn execute_query(
@@ -848,12 +1626,21 @@ impl DbxBackend for LocalBackend {
     ) -> dbx_core::sql::SqlExecutionPlan {
         let is_sqlserver_agent =
             dbx_core::query::connection_pool_is_sqlserver_agent(self.state.as_ref(), &connection.id, database).await;
-        dbx_core::query::query_execution_plan(sql, Some(connection.db_type), is_sqlserver_agent)
+        // Split with the connection's statement-splitting dialect, not its
+        // routing `db_type`: a JDBC SQL Server connection keeps control-flow
+        // batches whole (#13514), a JDBC Oracle connection keeps PL/SQL units
+        // whole, matching the core's own execution plan.
+        dbx_core::query::query_execution_plan(
+            sql,
+            Some(dbx_core::query::statement_split_database_type(connection)),
+            is_sqlserver_agent,
+        )
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.add_connection_for_mcp(config).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -865,6 +1652,7 @@ impl DbxBackend for LocalBackend {
     ) -> Result<ConnectionConfig, String> {
         let config = self.state.storage.duplicate_connection_for_mcp(source_id, copy_id, copy_name).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        self.notify_connections_changed().await;
         Ok(config)
     }
 
@@ -872,6 +1660,9 @@ impl DbxBackend for LocalBackend {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
+            self.transaction_owners.invalidate_connection(connection_id);
+            self.state.remove_connection_pools_detached(connection_id).await;
+            self.notify_connections_changed().await;
         }
         Ok(removed)
     }
@@ -1008,6 +1799,19 @@ impl DbxBackend for LocalBackend {
         dbx_core::mongo_ops::execute_mongo_command_core(&self.state, &connection.id, database, command, 100).await
     }
 
+    async fn salesforce_current_user(&self, connection: &ConnectionConfig) -> Result<SalesforceCurrentUser, String> {
+        if connection.db_type != DatabaseType::Salesforce {
+            return Err("Not a Salesforce connection".to_string());
+        }
+        // The identity is the pool's cached connected-user record, so a cold MCP
+        // process has to establish the connection first — the same thing the
+        // metadata paths above do before reading pool state.
+        if self.state.pool_handle(&connection.id).await.is_none() {
+            self.state.get_or_create_pool(&connection.id, None).await?;
+        }
+        self.state.salesforce_current_user(&connection.id).await
+    }
+
     async fn close_client_session(
         &self,
         connection_id: &str,
@@ -1064,6 +1868,22 @@ impl DbxBackend for WebBackend {
         .map_err(|_| dbx_core::mcp_result_protection::SOURCE_UNRESOLVED.to_string())
     }
 
+    async fn load_docs_annotations(
+        &self,
+        connection: &ConnectionConfig,
+    ) -> Result<Option<dbx_core::docs::annotations::AnnotationFile>, String> {
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::POST,
+            "/api/docs/annotations/load",
+            Some(json!({ "connectionId": connection.id })),
+        )
+        .await?
+        .json::<Option<dbx_core::docs::annotations::AnnotationFile>>()
+        .await
+        .map_err(|error| format!("Invalid docs annotations response: {error}"))
+    }
+
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
         self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None)
             .await?
@@ -1073,12 +1893,37 @@ impl DbxBackend for WebBackend {
             .map_err(|error| format!("Invalid MCP policy response: {error}"))
     }
 
+    async fn mcp_policy_configured(&self) -> bool {
+        // Same source as `load_mcp_global_policy` and as LocalBackend: the
+        // enforced global policy state's `configured` flag. Transport or
+        // parse failures count as configured — unreadable hides, never widens.
+        match self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None).await {
+            Ok(response) => response.json::<McpGlobalPolicyState>().await.map(|state| state.configured).unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+
+    async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+        let body = self
+            .request(reqwest::Method::GET, "/api/app-settings/mcp-access-policy", None)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| format!("Invalid MCP access policy response: {error}"))?;
+        parse_mcp_access_policy(&body).map(effective_mcp_access_policy)
+    }
+
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         self.request(reqwest::Method::GET, "/api/connection/list", None)
             .await?
             .json()
             .await
             .map_err(|error| format!("Invalid connection list response: {error}"))
+    }
+
+    async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
+        self.request(reqwest::Method::POST, "/api/history/save", Some(json!({ "entry": entry }))).await?;
+        Ok(())
     }
 
     async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
@@ -1188,8 +2033,17 @@ impl DbxBackend for WebBackend {
                 }
             }
 
-            let max_rows = arguments.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
-            let mut body = json!({ "connectionId": connection.id, "database": database, "sql": sql });
+            // Clamp here too: the Web backend does not go through the in-process
+            // `execute_tool` clamp, so an unclamped value would bypass the
+            // published max_rows ceiling. `maxRows` also bounds how many rows the
+            // route fetches, not just how many are rendered.
+            let max_rows = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(100)
+                .clamp(1, agent_tools::MAX_EXECUTE_QUERY_ROWS as u64) as usize;
+            let mut body =
+                json!({ "connectionId": connection.id, "database": database, "sql": sql, "maxRows": max_rows });
             // Stateful MCP sessions pin every query to the same backend pool.
             if let Some(client_session_id) = arguments.get("client_session_id").and_then(Value::as_str) {
                 body["clientSessionId"] = json!(client_session_id);
@@ -1243,6 +2097,21 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid message send response: {error}"))
+    }
+
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/mq/subscriptions/peek-messages",
+            Some(json!({ "connectionId": connection.id, "topic": topic, "sub": "__dbx_kafka_viewer__", "count": count, "options": options })),
+        ).await?.json().await.map_err(|error| format!("Invalid message peek response: {error}"))
     }
 
     async fn execute_query(
@@ -1436,6 +2305,7 @@ impl DbxBackend for WebBackend {
                     Some(TableInfo {
                         name,
                         table_type: "COLLECTION".to_string(),
+                        valid: None,
                         comment: None,
                         parent_schema: None,
                         parent_name: None,
@@ -1617,6 +2487,19 @@ impl DbxBackend for WebBackend {
         .map_err(|error| format!("Invalid Redis command response: {error}"))
     }
 
+    async fn salesforce_current_user(&self, connection: &ConnectionConfig) -> Result<SalesforceCurrentUser, String> {
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::GET,
+            &format!("/api/salesforce/current-user?connection_id={}", url_encode(&connection.id)),
+            None,
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid Salesforce identity response: {error}"))
+    }
+
     async fn execute_mongo_command(
         &self,
         connection: &ConnectionConfig,
@@ -1626,6 +2509,9 @@ impl DbxBackend for WebBackend {
         self.ensure_connected(connection).await?;
         let connection_id = &connection.id;
         match command {
+            MongoCommand::InDatabase { database, command } => {
+                Box::pin(self.execute_mongo_command(connection, database, command)).await
+            }
             MongoCommand::Version => {
                 let version: String = self
                     .request(
@@ -1849,6 +2735,45 @@ impl DbxBackend for WebBackend {
                     .map_err(|error| format!("Invalid MongoDB insert response: {error}"))?;
                 Ok(affected_query_result(affected_rows_from_value(&value)))
             }
+            MongoCommand::BulkWrite { collection, operations, options } => {
+                let result: dbx_core::db::mongo_driver::MongoBulkWriteResult = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/bulk-write",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "operationsJson": operations,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB bulkWrite response: {error}"))?;
+                Ok(dbx_core::mongo_ops::mongo_bulk_write_query_result(&result))
+            }
+            MongoCommand::Replace { collection, filter, replacement, options } => {
+                let value: Value = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/replace-document",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "filterJson": filter,
+                            "replacementJson": replacement,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB replace response: {error}"))?;
+                Ok(affected_query_result(affected_rows_from_value(&value)))
+            }
             MongoCommand::Update { collection, filter, update, options, many } => {
                 let value: Value = self
                     .request(
@@ -1968,6 +2893,20 @@ impl DbxBackend for WebBackend {
                     })
                     .collect::<Vec<_>>();
                 Ok(mongo_drop_indexes_query_result(dropped_names, failures, affected_rows_from_value(&value)))
+            }
+            MongoCommand::RenameCollection { collection, new_name } => {
+                self.request(
+                    reqwest::Method::POST,
+                    "/api/mongo/rename-collection",
+                    Some(json!({
+                        "connectionId": connection_id,
+                        "database": database,
+                        "collection": collection,
+                        "newName": new_name,
+                    })),
+                )
+                .await?;
+                Ok(scalar_query_result("renamed", Value::String(format!("{collection} -> {new_name}"))))
             }
             MongoCommand::DropCollection { collection } => {
                 self.request(
@@ -2148,6 +3087,10 @@ fn url_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+fn parse_mcp_access_policy(body: &[u8]) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    serde_json::from_slice(body).map_err(|error| format!("Invalid MCP access policy response: {error}"))
+}
+
 pub(crate) fn format_query_result(result: &dbx_core::db::QueryResult, max_rows: usize) -> String {
     let mut output = if result.columns.is_empty() {
         format!("Query executed. {} row(s) affected.", result.affected_rows)
@@ -2175,12 +3118,16 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
     dbx_core::db::QueryResult {
         columns,
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows,
         execution_time_ms: 0,
+        server_execute_time_us: None,
+        query_timings_ms: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -2297,6 +3244,8 @@ fn infer_document_columns(documents: &[Value]) -> Vec<ColumnInfo> {
             name,
             data_type,
             resolved_schema: None,
+            resolved_table: None,
+            resolved_object_type: None,
             is_nullable: true,
             column_default: None,
             is_primary_key: false,
@@ -2309,6 +3258,7 @@ fn infer_document_columns(documents: &[Value]) -> Vec<ColumnInfo> {
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         })
         .collect()
 }
@@ -2356,27 +3306,307 @@ pub fn new_connection_config(
     ssl: bool,
     driver_profile: Option<String>,
 ) -> Result<ConnectionConfig, String> {
+    new_connection_config_with_external_config(
+        id,
+        name,
+        db_type,
+        host,
+        port,
+        username,
+        password,
+        database,
+        ssl,
+        driver_profile,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Nacos connections need a dialect-specific `external_config` to be reachable:
+/// Nacos 2.x only serves its API under the `/nacos` context, and the desktop
+/// dialog defaults new connections to `implementation=nacos`, `versionMode=v2`,
+/// `contextPath=/nacos`. MCP-created connections must get the same defaults, and
+/// a user-provided `external_config` wins field-by-field while host, port,
+/// credentials and the namespace (from `database`) fill the rest (#14527).
+pub fn new_connection_config_with_external_config(
+    id: String,
+    name: String,
+    db_type: DatabaseType,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    database: Option<String>,
+    ssl: bool,
+    driver_profile: Option<String>,
+    external_config: Option<serde_json::Value>,
+) -> Result<ConnectionConfig, String> {
     let minimal =
         NewConnectionConfig { id, name, db_type, host, port, username, password, database, ssl, driver_profile };
-    serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    let mut config: ConnectionConfig =
+        serde_json::from_value(serde_json::to_value(minimal).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if config.db_type != DatabaseType::Nacos {
+        if external_config.is_some() {
+            return Err("external_config is only supported for Nacos connections.".to_string());
+        }
+        return Ok(config);
+    }
+    let mut merged = match external_config {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(_) => return Err("external_config must be a JSON object.".to_string()),
+        None => serde_json::Map::new(),
+    };
+    let scheme = if config.ssl { "https" } else { "http" };
+    merged
+        .entry("serverAddr".to_string())
+        .or_insert_with(|| serde_json::json!(format!("{scheme}://{}:{}", config.host.trim(), config.port)));
+    if config.database.as_deref().is_some_and(|namespace| !namespace.trim().is_empty()) {
+        merged.entry("namespace".to_string()).or_insert_with(|| serde_json::json!(config.database));
+    }
+    if !config.username.trim().is_empty() {
+        merged
+            .entry("auth".to_string())
+            .or_insert_with(|| serde_json::json!({ "kind": "usernamePassword", "username": config.username, "password": config.password }));
+    }
+    merged.entry("implementation".to_string()).or_insert_with(|| serde_json::json!("nacos"));
+    merged.entry("versionMode".to_string()).or_insert_with(|| serde_json::json!("v2"));
+    merged.entry("contextPath".to_string()).or_insert_with(|| serde_json::json!("/nacos"));
+    let parsed: dbx_core::admin::nacos::config::NacosAdminConfig =
+        serde_json::from_value(serde_json::Value::Object(merged))
+            .map_err(|error| format!("Failed to parse Nacos external_config: {error}"))?;
+    config.external_config = Some(serde_json::to_value(&parsed).map_err(|error| error.to_string())?);
+    // Validate and store the normalized form so endpoint/context errors surface
+    // at add time instead of when the connection is first opened.
+    let validated = dbx_core::admin::nacos::config::NacosAdminConfig::from_connection(&config)?;
+    config.external_config = Some(serde_json::to_value(&validated).map_err(|error| error.to_string())?);
+    Ok(config)
+}
+
+#[cfg(test)]
+mod unavailable_backend_tests {
+    use super::*;
+
+    const REASON: &str = "SECRET_KEY_UNAVAILABLE: this process cannot read the DBX data encryption key";
+
+    fn sample_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    // The server used to exit before the transport started, so the client saw
+    // EOF and this text never left stderr. Serving it means every entry point
+    // has to carry it rather than failing blank.
+    #[tokio::test]
+    async fn every_required_entry_point_reports_the_reason() {
+        let backend = UnavailableBackend::new(REASON);
+
+        assert_eq!(backend.load_mcp_global_policy().await.unwrap_err(), REASON);
+        assert_eq!(backend.load_connections().await.unwrap_err(), REASON);
+        assert_eq!(backend.remove_connection_for_mcp("any").await.unwrap_err(), REASON);
+        assert_eq!(backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap_err(), REASON);
+        assert_eq!(backend.add_connection_for_mcp(sample_connection()).await.unwrap_err(), REASON);
+    }
+
+    // A tool call answers in band: is_error set, reason in the content, and the
+    // tool name preserved so the client can tell which call failed.
+    #[tokio::test]
+    async fn an_agent_tool_call_fails_closed_with_the_reason() {
+        let backend = UnavailableBackend::new(REASON);
+
+        let result = backend
+            .execute_agent_tool(
+                &sample_connection(),
+                "db",
+                "execute_query",
+                Value::Null,
+                AgentSqlPermissions { allow_writes: false, allow_dangerous: false, confirmed_write_sql: None },
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, REASON);
+        assert_eq!(result.tool_name, "execute_query");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dbx_core::models::connection::TransportLayerConfig;
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         time::Duration,
     };
+
+    async fn connection_mutation_backend(data_dir: &Path) -> LocalBackend {
+        let storage = Storage::open(&data_dir.join("dbx.db"))
+            .await
+            .unwrap()
+            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        storage.save_mcp_global_policy(&McpGlobalPolicy { read_only: false, ..Default::default() }).await.unwrap();
+        LocalBackend::from_app_state(Arc::new(AppState::new(storage)), data_dir.to_path_buf())
+    }
+
+    fn mutation_test_connection() -> ConnectionConfig {
+        new_connection_config(
+            "source".into(),
+            "Source".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "test-password".into(),
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connection_summary_preserves_notes() {
+        let mut config = mutation_test_connection();
+        for note in ["", "Application database | staging\nRead-only queries"] {
+            config.note = note.to_string();
+            assert_eq!(ConnectionSummary::from(&config).note, note);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_notify_desktop_only_after_success() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let storage = backend.state.storage.clone();
+        let app = axum::Router::new().route(
+            "/reload-connections",
+            axum::routing::post(move || {
+                let sent = sent.clone();
+                let storage = storage.clone();
+                async move {
+                    // The desktop must observe the committed state, not the old list.
+                    let ids: Vec<_> = storage.load_connections().await.unwrap().into_iter().map(|c| c.id).collect();
+                    sent.send(ids).unwrap();
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        tokio::fs::write(data_dir.path().join("mcp-bridge-port"), listener.local_addr().unwrap().port().to_string())
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        backend.add_connection_for_mcp(mutation_test_connection()).await.unwrap();
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        let mut ids = received.try_recv().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["copy", "source"]);
+        assert!(backend.remove_connection_for_mcp("copy").await.unwrap());
+        assert_eq!(received.try_recv().unwrap(), vec!["source"]);
+
+        assert!(!backend.remove_connection_for_mcp("missing").await.unwrap());
+        assert!(backend.duplicate_connection_for_mcp("missing", "other", "Other").await.is_err());
+        backend
+            .state
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy { read_only: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(backend.add_connection_for_mcp(mutation_test_connection()).await.is_err());
+        assert!(backend.remove_connection_for_mcp("source").await.is_err());
+        assert!(received.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_without_desktop() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let backend = connection_mutation_backend(data_dir.path()).await;
+        let mut source = mutation_test_connection();
+        source.transport_layers = serde_json::from_value(json!([
+            { "type": "ssh", "id": "ssh-1", "host": "bastion", "port": 22, "user": "deploy", "local_port": 4059 }
+        ]))
+        .unwrap();
+        backend.add_connection_for_mcp(source).await.unwrap();
+        backend.duplicate_connection_for_mcp("source", "copy", "Copy").await.unwrap();
+        let ssh_local_ports = |connections: &[ConnectionConfig], id: &str| -> Vec<Option<u16>> {
+            let connection = connections.iter().find(|connection| connection.id == id).unwrap();
+            connection
+                .transport_layers
+                .iter()
+                .filter_map(|layer| match layer {
+                    TransportLayerConfig::Ssh(ssh) => Some(ssh.local_port),
+                    _ => None,
+                })
+                .collect()
+        };
+        let connections = backend.load_connections().await.unwrap();
+        assert_eq!(ssh_local_ports(&connections, "source"), vec![Some(4059)]);
+        assert_eq!(ssh_local_ports(&connections, "copy"), vec![None]);
+        assert!(backend.remove_connection_for_mcp("source").await.unwrap());
+        let connections = backend.load_connections().await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, "copy");
+        assert_eq!(connections[0].password, "test-password");
+    }
+
+    #[tokio::test]
+    async fn local_connection_mutations_succeed_when_desktop_fails_or_stalls() {
+        for stall in [false, true] {
+            let data_dir = tempfile::tempdir().unwrap();
+            let backend = connection_mutation_backend(data_dir.path()).await;
+            let app = axum::Router::new().route(
+                "/reload-connections",
+                axum::routing::post(move || async move {
+                    if stall {
+                        std::future::pending::<()>().await;
+                    }
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tokio::fs::write(
+                data_dir.path().join("mcp-bridge-port"),
+                listener.local_addr().unwrap().port().to_string(),
+            )
+            .await
+            .unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            tokio::time::timeout(Duration::from_secs(5), backend.add_connection_for_mcp(mutation_test_connection()))
+                .await
+                .expect("desktop notification must be bounded")
+                .unwrap();
+            assert_eq!(backend.load_connections().await.unwrap().len(), 1);
+            server.abort();
+        }
+    }
 
     fn policy_state(configured: bool, read_only: bool) -> McpGlobalPolicyState {
         McpGlobalPolicyState {
             configured,
             read_only,
             allow_dangerous_sql: false,
+            prompt_high_risk_sql: false,
+            call_confirmation: None,
             allowed_connection_ids: None,
             allowed_group_ids: Vec::new(),
             allowed_tool_names: None,
@@ -2384,7 +3614,21 @@ mod tests {
             group_policies: Vec::new(),
             query_timeout_secs: None,
             result_protection: Default::default(),
+            plugin_tools_mode: dbx_core::mcp_access::McpPluginToolsMode::Auto,
         }
+    }
+
+    #[test]
+    fn plugin_lacks_mcp_surface_skips_unknown_method_but_keeps_real_errors() {
+        // The exact error a plugin that never implemented the optional mcp/tools bridge returns
+        // (e.g. com.yiqiui.leetcode-cn's JSON-RPC -32601 fallback). Discovery must skip these.
+        assert!(plugin_lacks_mcp_surface("unknown method: mcp/tools"));
+        assert!(plugin_lacks_mcp_surface("JSON-RPC error -32601: Method not found"));
+        assert!(plugin_lacks_mcp_surface("rpc error: code=-32601"));
+        // Genuine failures must still abort discovery, not be silently skipped.
+        assert!(!plugin_lacks_mcp_surface("connection refused"));
+        assert!(!plugin_lacks_mcp_surface("sidecar panicked"));
+        assert!(!plugin_lacks_mcp_surface(""));
     }
 
     #[test]
@@ -2404,10 +3648,116 @@ mod tests {
     }
 
     #[test]
+    fn legacy_allow_writes_parser_fails_closed_for_unknown_values() {
+        assert_eq!(parse_legacy_mcp_allow_writes("1"), Some(true));
+        assert_eq!(parse_legacy_mcp_allow_writes("yes"), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes("0"), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes("no"), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes(""), Some(false));
+        assert_eq!(parse_legacy_mcp_allow_writes("unexpected"), Some(false));
+    }
+
+    #[test]
+    fn legacy_read_only_also_revokes_the_salesforce_dml_opt_in() {
+        // DBX_MCP_ALLOW_WRITES=0 marks an unconfirmed CLI run. The Salesforce DML
+        // opt-in is a write permission like any other, so it must be withdrawn
+        // with the rest — an opted-in connection must not become writable just
+        // because the org speaks REST instead of SQL.
+        let mut state = policy_state(true, false);
+        state.connection_policies = vec![dbx_core::storage::McpConnectionPolicy {
+            connection_id: "sfdc".to_string(),
+            read_only: false,
+            allow_dangerous_sql: true,
+            execution_mode_configured: false,
+            execution_mode_policy_version: None,
+            database_scope: dbx_core::storage::McpDatabaseScope::All,
+            allowed_databases: Vec::new(),
+            database_policies: Vec::new(),
+            allow_salesforce_dml: true,
+        }];
+
+        let forced = effective_mcp_policy_with_legacy_allow_writes(state.clone(), Some(false));
+        assert!(forced.read_only);
+        assert!(!forced.connection_policies[0].allow_salesforce_dml);
+        assert!(!forced.connection_policies[0].allow_dangerous_sql);
+
+        // Without the env override the stored opt-in survives untouched.
+        let untouched = effective_mcp_policy_with_legacy_allow_writes(state, None);
+        assert!(untouched.connection_policies[0].allow_salesforce_dml);
+    }
+
+    #[test]
     fn parses_database_type_using_dbx_protocol_names() {
         assert_eq!(parse_database_type("Postgres").unwrap(), DatabaseType::Postgres);
         assert_eq!(parse_database_type("mongodb").unwrap(), DatabaseType::MongoDb);
+        assert_eq!(parse_database_type("Solr").unwrap(), DatabaseType::Solr);
+        assert_eq!(parse_database_type("solr").unwrap(), DatabaseType::Solr);
         assert!(parse_database_type("unknown").is_err());
+    }
+
+    #[test]
+    fn new_connection_config_accepts_solr() {
+        // Solr connections are created through the generic descriptor path; the
+        // REST core lives in the query text, not a database field.
+        let connection = new_connection_config(
+            "solr".to_string(),
+            "solr".to_string(),
+            DatabaseType::Solr,
+            "localhost".to_string(),
+            8983,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(connection.db_type, DatabaseType::Solr);
+        assert_eq!(connection.port, 8983);
+    }
+
+    #[test]
+    fn native_mysql_transaction_gate_accepts_the_builtin_mysql_profile_only() {
+        let mut connection: ConnectionConfig = serde_json::from_value(json!({
+            "id": "mysql",
+            "name": "mysql",
+            "db_type": "mysql",
+            "host": "",
+            "port": 3306,
+            "username": "",
+            "password": "",
+            "database": "test",
+            "ssl": false
+        }))
+        .unwrap();
+        assert!(native_mysql_transaction_connection(&connection));
+        connection.driver_profile = Some("mysql".to_string());
+        assert!(native_mysql_transaction_connection(&connection));
+        connection.driver_profile = Some("MySQL".to_string());
+        assert!(native_mysql_transaction_connection(&connection));
+        for profile in ["dolt", "tidb", "oceanbase", "custom-profile"] {
+            connection.driver_profile = Some(profile.to_string());
+            assert!(!native_mysql_transaction_connection(&connection), "unexpectedly accepted {profile}");
+        }
+    }
+
+    #[test]
+    fn unlimited_connection_timeout_preserves_bounded_transaction_default() {
+        let mut connection: ConnectionConfig = serde_json::from_value(json!({
+            "id": "mysql",
+            "name": "mysql",
+            "db_type": "mysql",
+            "host": "",
+            "port": 3306,
+            "username": "",
+            "password": "",
+            "database": "test",
+            "ssl": false
+        }))
+        .unwrap();
+        connection.query_timeout_secs = 0;
+
+        assert_eq!(transaction_operation_timeout(&connection, Duration::from_secs(300)), Duration::from_secs(300));
     }
 
     #[test]
@@ -2489,6 +3839,243 @@ mod tests {
         server.join().unwrap();
         assert_eq!(request_receiver.recv().unwrap(), "GET /api/layout/sidebar HTTP/1.1");
         assert_eq!(paths.get("web-db"), Some(&vec!["Project".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn web_backend_policy_configured_follows_the_enforced_state() {
+        // `mcp_policy_configured` must mirror the same source the local
+        // backend uses: the enforced global policy state's `configured` flag.
+        // A configured (or unreadable) web source keeps the saved policy
+        // authoritative — unreadable hides, never widens.
+        for (body, expected) in [
+            (r#"{"configured":true,"readOnly":false,"allowDangerousSql":false}"#, true),
+            (r#"{"configured":false,"readOnly":true,"allowDangerousSql":false}"#, false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (request_sender, request_receiver) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..count]);
+                    if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                request_sender.send(String::from_utf8(request).unwrap().lines().next().unwrap().to_string()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            });
+
+            let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+            backend.auth.lock().await.checked = true;
+            let configured = backend.mcp_policy_configured().await;
+
+            server.join().unwrap();
+            assert_eq!(request_receiver.recv().unwrap(), "GET /api/app-settings/mcp-policy HTTP/1.1");
+            assert_eq!(configured, expected, "body: {body}");
+        }
+
+        // Unreachable desktop (transport error) counts as configured.
+        let backend = WebBackend::new("http://127.0.0.1:1".to_string(), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        assert!(backend.mcp_policy_configured().await);
+    }
+
+    #[tokio::test]
+    async fn web_backend_loads_v2_access_policy_with_plugin_scope_rules() {
+        // The desktop test suite normally exercises the HTTP path below. Some
+        // restricted CI sandboxes disallow local listeners altogether; the
+        // parser test that follows still covers the v2 wire shape there.
+        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else { return };
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            request_sender.send(String::from_utf8(request).unwrap().lines().next().unwrap().to_string()).unwrap();
+            let body = r#"{"version":2,"defaultAccess":"read","confirm":"off","visibility":"all","rules":[{"target":{"kind":"scope","connectionId":"plugin-connection","scope":"namespace","value":"dev"},"subScope":"selected"}],"pluginToolsMode":"lazy"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        backend.auth.lock().await.checked = true;
+        let policy = backend.load_mcp_access_policy().await.unwrap();
+
+        server.join().unwrap();
+        assert_eq!(request_receiver.recv().unwrap(), "GET /api/app-settings/mcp-access-policy HTTP/1.1");
+        assert_eq!(policy.version, 2);
+        assert_eq!(policy.plugin_tools_mode, dbx_core::mcp_access::McpPluginToolsMode::Lazy);
+        assert!(policy.rules.contains_key(&dbx_core::mcp_access::McpRuleTarget::Scope {
+            connection_id: "plugin-connection".to_string(),
+            scope: "namespace".to_string(),
+            value: "dev".to_string(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn web_backend_enforces_run_scoped_read_only() {
+        use axum::{extract::Request, response::IntoResponse, Json, Router};
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy};
+        use rmcp::{model::CallToolRequestParams, ServiceExt};
+        const CHILD: &str = "DBX_MCP_WEB_READ_ONLY_TEST_CHILD";
+        // Never mutate the test runner's process-wide environment: exercise the
+        // real env reader in isolated children, as the CLI launches MCP.
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["0", "false", "1", "unset"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", "backend::tests::web_backend_enforces_run_scoped_read_only", "--nocapture"])
+                    .env(CHILD, mode)
+                    .env_remove("DBX_MCP_CONFIRMED_WRITE_SQL");
+                if mode == "unset" {
+                    command.env_remove("DBX_MCP_ALLOW_WRITES");
+                } else {
+                    command.env("DBX_MCP_ALLOW_WRITES", mode);
+                }
+                assert!(command.status().unwrap().success(), "isolated Web mode {mode} failed");
+            }
+            return;
+        }
+        let restricted = matches!(std::env::var(CHILD).unwrap().as_str(), "0" | "false");
+        let access: McpAccessPolicy = serde_json::from_value(json!({
+            "version": 2, "defaultAccess": "full", "confirm": "off", "visibility": "all",
+            "pluginToolsMode": "lazy", "rules": [
+                {"target": {"kind": "group", "id": "team"}, "access": "write"},
+                {"target": {"kind": "connection", "id": "redis"}, "access": "full", "subScope": "selected"},
+                {"target": {"kind": "scope", "connectionId": "redis", "scope": "database", "value": "0"}, "access": "full", "visible": true},
+                {"target": {"kind": "scope", "connectionId": "redis", "scope": "database", "value": "2"}, "access": "read", "visible": true},
+                {"target": {"kind": "scope", "connectionId": "redis", "scope": "database", "value": "3"}, "access": "none", "visible": false},
+                {"target": {"kind": "connection", "id": "plugin"}, "subScope": "selected", "subScopeKind": "namespace", "toolsetCeilings": {"admin": "read"}},
+                {"target": {"kind": "scope", "connectionId": "plugin", "scope": "namespace", "value": "dev"}, "access": "write", "visible": true}
+            ]
+        })).unwrap();
+        let mut v1 = serde_json::to_value(access.to_v1()).unwrap();
+        v1["configured"] = json!(true);
+        let v2 = serde_json::to_value(&access).unwrap();
+        let executions = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorded = executions.clone();
+        let router = Router::new().fallback(move |request: Request| {
+            let (v1, v2, recorded) = (v1.clone(), v2.clone(), recorded.clone());
+            async move {
+                let response = match request.uri().path() {
+                    "/api/auth/check" => json!({"authenticated": true, "required": false, "setup_required": false}),
+                    "/api/app-settings/mcp-policy" => v1,
+                    "/api/app-settings/mcp-access-policy" => v2,
+                    "/api/connection/list" => json!([{
+                        "id": "redis", "name": "redis", "db_type": "redis", "host": "localhost",
+                        "port": 6379, "username": "", "password": "", "database": "0", "ssl": false
+                    }]),
+                    "/api/layout/sidebar" => json!({"groups": [], "order": []}),
+                    "/api/connection/connect" => json!({}),
+                    "/api/redis/execute-command" => {
+                        let body = axum::body::to_bytes(request.into_body(), 8192).await.unwrap();
+                        let arguments: Value = serde_json::from_slice(&body).unwrap();
+                        recorded.lock().unwrap().push(arguments.clone());
+                        json!({"command": arguments["command"], "safety": "allowed", "value": "OK"})
+                    }
+                    _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+                };
+                Json(response).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let http_server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let backend = Arc::new(WebBackend::new(format!("http://{address}"), String::new()).unwrap());
+        let loaded = backend.load_mcp_access_policy().await.unwrap();
+        let full = if restricted { McpAccessLevel::Read } else { McpAccessLevel::Full };
+        let write = if restricted { McpAccessLevel::Read } else { McpAccessLevel::Write };
+        assert_eq!(loaded.default_access, full);
+        assert_eq!(loaded.resolve(&["team".into()], "unconfigured", None).level, write);
+        assert_eq!(loaded.resolve(&[], "redis", None).level, full);
+        assert_eq!(loaded.resolve(&[], "redis", Some(("database", "0"))).level, full);
+        assert_eq!(loaded.resolve(&[], "redis", Some(("database", "2"))).level, McpAccessLevel::Read);
+        assert!(!loaded.resolve(&[], "redis", Some(("database", "3"))).visible);
+        assert!(!loaded.resolve(&[], "redis", Some(("database", "1"))).visible);
+        assert_eq!(loaded.resolve(&[], "plugin", Some(("namespace", "dev"))).level, write);
+        assert!(!loaded.resolve(&[], "plugin", Some(("namespace", "prod"))).visible);
+        assert_eq!(loaded.toolset_ceiling("plugin", "admin"), Some(McpAccessLevel::Read));
+        assert_eq!(loaded.plugin_tools_mode, access.plugin_tools_mode);
+        if !restricted {
+            assert_eq!(loaded, access);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let local = connection_mutation_backend(directory.path()).await;
+        local.state.storage.save_mcp_access_policy(&access).await.unwrap();
+        assert_eq!(local.load_mcp_access_policy().await.unwrap(), loaded);
+
+        let server = crate::DbxMcpServer::with_runtime_options(backend, crate::McpScope::default(), true);
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await.unwrap() });
+        let client = ().serve(client_transport).await.unwrap();
+        for (db, command, error) in [
+            (0, "SET probe value", restricted.then_some("MCP_READ_ONLY")),
+            (0, "GET probe", None),
+            (2, "SET probe value", Some("MCP_READ_ONLY")),
+            (1, "GET probe", Some("DATABASE_OUT_OF_SCOPE")),
+        ] {
+            let before = executions.lock().unwrap().len();
+            let result = client
+                .peer()
+                .call_tool(CallToolRequestParams::new("dbx_execute_redis_command").with_arguments(
+                    json!({"connection_id": "redis", "db": db, "command": command}).as_object().unwrap().clone(),
+                ))
+                .await
+                .unwrap();
+            if let Some(error) = error {
+                assert_eq!(result.is_error, Some(true), "{result:?}");
+                assert!(result.content[0].as_text().unwrap().text.contains(error), "{result:?}");
+                assert_eq!(executions.lock().unwrap().len(), before, "denied call must not reach the execution API");
+            } else {
+                assert!(!result.is_error.unwrap_or(false), "{result:?}");
+                assert_eq!(executions.lock().unwrap().len(), before + 1);
+                assert_eq!(executions.lock().unwrap().last().unwrap()["command"], command);
+            }
+        }
+        client.cancel().await.unwrap();
+        server_task.await.unwrap().cancel().await.unwrap();
+        http_server.abort();
+    }
+
+    #[test]
+    fn parses_v2_access_policy_without_dropping_sub_scope_rules() {
+        let policy = parse_mcp_access_policy(
+            br#"{"version":2,"defaultAccess":"read","rules":[{"target":{"kind":"scope","connectionId":"c1","scope":"namespace","value":"dev"},"visible":true}],"pluginToolsMode":"auto"}"#,
+        )
+        .unwrap();
+        assert_eq!(policy.version, 2);
+        assert_eq!(policy.default_access, dbx_core::mcp_access::McpAccessLevel::Read);
+        assert_eq!(policy.rules.len(), 1);
+        assert!(policy.rules.contains_key(&dbx_core::mcp_access::McpRuleTarget::Scope {
+            connection_id: "c1".to_string(),
+            scope: "namespace".to_string(),
+            value: "dev".to_string(),
+        }));
     }
 
     #[test]
@@ -2619,14 +4206,16 @@ mod tests {
         assert_eq!(request_line, "POST /api/query/execute HTTP/1.1");
         let request: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(request["timeoutSecs"], 60);
+        assert_eq!(request["maxRows"], 10);
 
-        // Policy argument 300 overrides the connection.
+        // Policy argument 300 overrides the connection; maxRows is clamped to the
+        // published ceiling instead of being forwarded as-is.
         let result = backend
             .execute_agent_tool(
                 &connection,
                 "postgres",
                 "execute_query",
-                json!({ "sql": "SELECT 1", "limit": 10, "timeout_secs": 300 }),
+                json!({ "sql": "SELECT 1", "limit": 100000, "timeout_secs": 300 }),
                 AgentSqlPermissions { allow_writes: false, allow_dangerous: false, confirmed_write_sql: None },
             )
             .await;
@@ -2636,6 +4225,85 @@ mod tests {
         let (_request_line, second_body) = request_receiver.recv().unwrap();
         let second_request: Value = serde_json::from_str(&second_body).unwrap();
         assert_eq!(second_request["timeoutSecs"], 300);
+        assert_eq!(second_request["maxRows"], agent_tools::MAX_EXECUTE_QUERY_ROWS);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn web_peek_messages_forwards_kafka_options_and_preserves_partial_results() {
+        use dbx_core::mq::{PeekMessagesOptions, PeekStartPosition, TopicRef};
+        use std::io::BufRead;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "POST /api/mq/subscriptions/peek-messages HTTP/1.1");
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["connectionId"], "kafka-peek");
+            assert_eq!(body["topic"]["topic"], "events");
+            assert_eq!(body["sub"], "__dbx_kafka_viewer__");
+            assert_eq!(body["count"], 7);
+            assert_eq!(body["options"], json!({"startPosition":"offset", "partition":2, "offset":17}));
+            let response = r#"{"messages":[{"position":1,"messageId":"2:17","payloadBase64":"/w==","headers":{"type":"binary"}}],"incomplete":true}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        });
+        let backend =
+            WebBackend::new_with_config(format!("http://{address}"), String::new(), None, None, None, false, None)
+                .unwrap();
+        backend.auth.lock().await.checked = true;
+        let connection = new_connection_config(
+            "kafka-peek".into(),
+            "Kafka".into(),
+            DatabaseType::MessageQueue,
+            "localhost".into(),
+            9092,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let result = backend
+            .peek_messages(
+                &connection,
+                TopicRef { topic: "events".into(), ..Default::default() },
+                7,
+                PeekMessagesOptions {
+                    start_position: Some(PeekStartPosition::Offset),
+                    partition: Some(2),
+                    offset: Some(17),
+                    timestamp: None,
+                    end_timestamp: None,
+                    sort_order: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.incomplete);
+        assert_eq!(result.messages[0].payload_base64, "/w==");
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("2:17"));
+        assert_eq!(result.messages[0].headers.get("type").map(String::as_str), Some("binary"));
+        server.join().unwrap();
     }
 
     #[tokio::test]
@@ -3451,19 +5119,12 @@ mod tests {
         let server_csr = dir.path().join("server.csr");
         let server_pem = dir.path().join("server.pem");
         let run = |args: &[&str]| {
-            let status = std::process::Command::new("openssl")
-                .args(args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
             let output = std::process::Command::new("openssl").args(args).output().unwrap();
             assert!(
                 output.status.success(),
                 "openssl failed: {args:?} stderr={}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let _ = status;
         };
         // Self-signed CA.
         run(&[
@@ -3499,7 +5160,12 @@ mod tests {
         // Server cert signed by the CA, with SAN for 127.0.0.1. The x509 -req
         // subcommand takes extensions via -extfile, not -addext.
         let ext_path = dir.path().join("server.ext");
-        std::fs::write(&ext_path, "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n").unwrap();
+        // Native TLS on macOS requires an explicit TLS server purpose.
+        std::fs::write(
+            &ext_path,
+            "subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n",
+        )
+        .unwrap();
         run(&[
             "x509",
             "-req",
@@ -3612,6 +5278,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_backend_rejects_legacy_data_without_migrating_it() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let legacy_path = data_dir.path().join("secrets.json");
+        let legacy_contents = br#"{"legacy-connection":{"password":"legacy-test-password"}}"#;
+        std::fs::write(&legacy_path, legacy_contents).unwrap();
+
+        let error = match LocalBackend::open(&database_path).await {
+            Ok(_) => panic!("legacy data must not be opened by CLI/MCP"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("DATA_MIGRATION_REQUIRED"));
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_contents);
+        assert!(!data_dir.path().join("secrets.json.bak").exists());
+        assert!(std::fs::read_dir(data_dir.path())
+            .unwrap()
+            .all(|entry| { !entry.unwrap().file_name().to_string_lossy().starts_with("dbx-secret-migration-") }));
+        let storage = Storage::open_unmigrated(&database_path).await.unwrap();
+        assert!(storage.inspect_data_migration().await.unwrap().needs_migration);
+        assert!(storage.load_connections().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_backend_uses_portable_data_directory_key() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let storage = Storage::open_unmigrated(&database_path)
+            .await
+            .unwrap()
+            .with_secret_key_policy(dbx_core::persistence::secret_codec::SecretKeyPolicy::ManagedDataDir);
+        storage.set_secret("portable", "password", "portable-secret").await.unwrap();
+        drop(storage);
+
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+
+        assert_eq!(
+            backend.state.storage.get_secret("portable", "password").await.unwrap().as_deref(),
+            Some("portable-secret")
+        );
+    }
+
+    #[tokio::test]
     async fn local_backend_uses_desktop_plugin_directory() {
         let data_dir = tempfile::tempdir().unwrap();
         let database_path = data_dir.path().join("dbx.db");
@@ -3658,6 +5366,172 @@ mod tests {
         let backend = LocalBackend::open(&database_path).await.unwrap();
 
         assert_eq!(backend.state().agent_manager.base_dir(), &agent_dir);
+    }
+
+    struct LifecycleTestIo {
+        disconnects: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::transaction::TransactionIo for LifecycleTestIo {
+        async fn execute(
+            &mut self,
+            _sql: &str,
+            _max_rows: Option<usize>,
+        ) -> Result<crate::transaction::TransactionIoSuccess, crate::transaction::TransactionIoError> {
+            panic!("lifecycle test owner must stay idle")
+        }
+
+        async fn ping_in_transaction(&mut self) -> Result<bool, crate::transaction::TransactionIoError> {
+            panic!("lifecycle test owner must not probe")
+        }
+
+        async fn disconnect(&mut self) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_transaction_owner_rejects_stale_connection_lifecycle_before_registration() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        state.invalidate_connection_lifecycle("conn");
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: disconnects.clone() },
+            TransactionOwnerConfig::default(),
+        );
+
+        let error = backend.finalize_transaction_owner("conn", lifecycle, owner.clone()).await.unwrap_err();
+
+        assert!(error.contains("removed"), "{error}");
+        owner.wait_closed().await;
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_app_state_removal_cancels_a_registered_local_transaction_owner() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: disconnects.clone() },
+            TransactionOwnerConfig::default(),
+        );
+        backend.finalize_transaction_owner("conn", lifecycle, owner.clone()).await.unwrap();
+
+        state.remove_connection_pools_detached("conn").await;
+        owner.wait_closed().await;
+
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn connection_lifecycle_watcher_exits_after_normal_owner_disposal() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: Arc::new(AtomicUsize::new(0)) },
+            TransactionOwnerConfig::default(),
+        );
+        let watcher = backend.spawn_connection_lifecycle_watcher(lifecycle, &owner);
+
+        owner.close().await.unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), watcher)
+            .await
+            .expect("lifecycle watcher must not outlive a normally disposed owner")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_backend_standalone_open_skips_plugin_dbx_engine_gate() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let plugin_dir = data_dir.path().join("plugins").join("io.dbx.gated");
+        std::fs::create_dir_all(plugin_dir.join("ui")).unwrap();
+        std::fs::write(plugin_dir.join("ui").join("index.html"), "<!doctype html>").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{
+                "manifest_version": 1,
+                "id": "io.dbx.gated",
+                "name": "Gated",
+                "version": "1.0.0",
+                "publisher": "example",
+                "engines": { "dbx": ">=999.0.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+                "permissions": ["host.events"]
+            }"#,
+        )
+        .unwrap();
+        let storage = Storage::open(&database_path).await.unwrap();
+        drop(storage);
+
+        // The standalone host has no app version to compare against (#9595).
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+        let installed = backend.state().plugins.list_installed().unwrap();
+        let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
+        assert!(plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
+
+        // A host that knows the app version keeps enforcing the requirement.
+        let backend = LocalBackend::open_with_app_version(&database_path, "0.6.16").await.unwrap();
+        let installed = backend.state().plugins.list_installed().unwrap();
+        let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
+        assert!(!plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
+    }
+
+    #[tokio::test]
+    async fn standalone_open_leaves_fixed_ssh_local_ports_to_the_desktop_app() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let fixed_port = held.local_addr().unwrap().port();
+        let closed_port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "tunnelled",
+            "name": "tunnelled",
+            "db_type": "mysql",
+            "host": "db.internal",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "transport_layers": [{
+                "type": "ssh",
+                "id": "ssh-1",
+                "host": "127.0.0.1",
+                "port": closed_port,
+                "user": "user",
+                "auth_method": "none",
+                "connect_timeout_secs": 2,
+                "local_port": fixed_port
+            }]
+        }))
+        .unwrap();
+        let bind_error = format!("Failed to bind requested local port {fixed_port}");
+
+        let standalone_dir = tempfile::tempdir().unwrap();
+        let standalone_path = standalone_dir.path().join("dbx.db");
+        drop(Storage::open(&standalone_path).await.unwrap());
+        let standalone = LocalBackend::open(&standalone_path).await.unwrap();
+        let error = standalone.state().connection_host_port(&config.id, &config).await.unwrap_err();
+        assert!(!error.contains(&bind_error), "{error}");
+
+        let embedded_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&embedded_dir.path().join("dbx.db")).await.unwrap();
+        let app_state = Arc::new(AppState::new(storage));
+        app_state.set_honor_fixed_ssh_local_ports(true);
+        let embedded = LocalBackend::from_app_state(app_state, embedded_dir.path().to_path_buf());
+        let error = embedded.state().connection_host_port(&config.id, &config).await.unwrap_err();
+        assert!(error.contains(&bind_error), "{error}");
     }
 
     #[test]
@@ -3742,5 +5616,132 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
+    }
+}
+
+#[cfg(test)]
+mod nacos_external_config_tests {
+    use super::*;
+    use dbx_core::admin::nacos::config::{NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosVersionMode};
+
+    fn nacos_connection(external_config: Option<Value>) -> ConnectionConfig {
+        new_connection_config_with_external_config(
+            "nacos-1".into(),
+            "Nacos".into(),
+            DatabaseType::Nacos,
+            "127.0.0.1".into(),
+            8848,
+            "nacos".into(),
+            "secret".into(),
+            Some("public".into()),
+            false,
+            None,
+            external_config,
+        )
+        .unwrap()
+    }
+
+    fn parsed_external(config: &ConnectionConfig) -> NacosAdminConfig {
+        serde_json::from_value(config.external_config.clone().expect("external_config must be set")).unwrap()
+    }
+
+    #[test]
+    fn nacos_connections_get_the_desktop_default_context() {
+        let config = nacos_connection(None);
+        let parsed = parsed_external(&config);
+
+        assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
+        assert_eq!(parsed.context_path, "/nacos");
+        assert_eq!(parsed.implementation, Some(NacosImplementation::Nacos));
+        assert_eq!(parsed.version_mode, Some(NacosVersionMode::V2));
+        assert_eq!(parsed.namespace, "public");
+        assert_eq!(
+            parsed.auth,
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "secret".to_string() }
+        );
+    }
+
+    #[test]
+    fn nacos_user_external_config_wins_over_the_defaults() {
+        let config = nacos_connection(Some(json!({
+            "implementation": "rnacos",
+            "versionMode": "v3",
+            "contextPath": "/my-nacos",
+        })));
+        let parsed = parsed_external(&config);
+
+        assert_eq!(parsed.implementation, Some(NacosImplementation::RNacos));
+        assert_eq!(parsed.version_mode, Some(NacosVersionMode::V3));
+        assert_eq!(parsed.context_path, "/my-nacos");
+        // serverAddr still comes from the connection fields.
+        assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
+        // Credentials still flow from the connection fields when the user's
+        // external_config does not carry an auth block.
+        assert_eq!(
+            parsed.auth,
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "secret".to_string() }
+        );
+    }
+
+    #[test]
+    fn nacos_ssl_connections_use_https_server_addr() {
+        let config = new_connection_config_with_external_config(
+            "nacos-2".into(),
+            "Nacos TLS".into(),
+            DatabaseType::Nacos,
+            "nacos.example".into(),
+            8848,
+            String::new(),
+            String::new(),
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        let parsed = parsed_external(&config);
+
+        assert_eq!(parsed.server_addr, "https://nacos.example:8848");
+        assert_eq!(parsed.auth, NacosAuthConfig::None);
+    }
+
+    #[test]
+    fn external_config_is_rejected_for_other_database_types() {
+        let error = new_connection_config_with_external_config(
+            "pg-1".into(),
+            "Postgres".into(),
+            DatabaseType::Postgres,
+            "127.0.0.1".into(),
+            5432,
+            "postgres".into(),
+            "pw".into(),
+            None,
+            false,
+            None,
+            Some(json!({ "contextPath": "/nacos" })),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("external_config"), "{error}");
+    }
+
+    #[test]
+    fn malformed_external_config_fails_at_add_time() {
+        let error = new_connection_config_with_external_config(
+            "nacos-3".into(),
+            "Nacos".into(),
+            DatabaseType::Nacos,
+            "127.0.0.1".into(),
+            8848,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+            Some(json!("not-an-object")),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("external_config"), "{error}");
     }
 }

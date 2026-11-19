@@ -17,7 +17,29 @@ public final class QueryResult {
     private List<List<Object>> rows;
     private long affected_rows;
     private long execution_time_ms;
+    private Long server_execute_time_us;
+    private java.util.Map<String, Double> query_timings_ms;
     private boolean truncated;
+    // Optional protocol field: existing drivers omit it, manual SQL Server batches retain PRINT/warnings.
+    private List<Map<String, Object>> messages;
+
+    public List<Map<String, Object>> getMessages() {
+        return messages == null ? Collections.emptyList() : messages;
+    }
+
+    public void setMessages(List<Map<String, Object>> messages) {
+        this.messages = messages;
+    }
+
+    public void addInformationalMessage(String message, String code) {
+        if (messages == null) messages = new ArrayList<>();
+        if (messages.size() >= 512) return;
+        Map<String, Object> entry = new java.util.LinkedHashMap<>();
+        entry.put("severity", "INFO");
+        entry.put("message", message);
+        if (code != null) entry.put("code", code);
+        messages.add(entry);
+    }
 
     public QueryResult() {
         this(Collections.emptyList(), Collections.emptyList(), 0L, 0L, false);
@@ -84,6 +106,14 @@ public final class QueryResult {
         return execution_time_ms;
     }
 
+    public java.util.Map<String, Double> getQuery_timings_ms() { return query_timings_ms; }
+
+    public void setQuery_timings_ms(java.util.Map<String, Double> value) { query_timings_ms = value; }
+
+    public Long getServer_execute_time_us() {
+        return server_execute_time_us;
+    }
+
     public boolean getTruncated() {
         return truncated;
     }
@@ -117,6 +147,10 @@ public final class QueryResult {
 
     public void setExecution_time_ms(long execution_time_ms) {
         this.execution_time_ms = execution_time_ms;
+    }
+
+    public void setServer_execute_time_us(Long server_execute_time_us) {
+        this.server_execute_time_us = server_execute_time_us;
     }
 
     public void setTruncated(boolean truncated) {
@@ -190,6 +224,7 @@ public final class QueryResult {
         QueryResult that = (QueryResult) other;
         return affected_rows == that.affected_rows
             && execution_time_ms == that.execution_time_ms
+            && Objects.equals(server_execute_time_us, that.server_execute_time_us)
             && truncated == that.truncated
             && Objects.equals(columns, that.columns)
             && Objects.equals(column_types, that.column_types)
@@ -200,7 +235,7 @@ public final class QueryResult {
 
     @Override
     public int hashCode() {
-        return Objects.hash(columns, column_types, spatial_columns, spatial_values, rows, affected_rows, execution_time_ms, truncated);
+        return Objects.hash(columns, column_types, spatial_columns, spatial_values, rows, affected_rows, execution_time_ms, server_execute_time_us, truncated);
     }
 
     @Override
@@ -212,6 +247,7 @@ public final class QueryResult {
             + ", rows=" + rows
             + ", affected_rows=" + affected_rows
             + ", execution_time_ms=" + execution_time_ms
+            + ", server_execute_time_us=" + server_execute_time_us
             + ", truncated=" + truncated
             + ")";
     }

@@ -399,6 +399,7 @@ fn ambiguous_case_sensitive_column_metadata_is_rejected() {
     let tables = vec![crate::types::TableInfo {
         name: "users".to_string(),
         table_type: "TABLE".to_string(),
+        valid: None,
         comment: None,
         parent_schema: None,
         parent_name: None,

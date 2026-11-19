@@ -585,6 +585,7 @@ const emit = defineEmits<{
   "peek-structure": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection, createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding>];
+  "open-postgres-sequence": [node: TreeNode];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
   "open-connection-settings": [connectionId: string];
@@ -8831,6 +8832,18 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "sequence" || (node.type === "synonym" && supportsOracleObjectExport(databaseTypeForNode(node), "SYNONYM"))) {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (node.type === "sequence" && connectionStore.getConfig(node.connectionId || "")?.db_type === "postgres") {
+      const sequenceTarget = createSidebarActionTarget(node);
+      const exactIdentity = sequenceTarget.postgresSequenceExactIdentity === true && !!sequenceTarget.objectName && !!sequenceTarget.schema;
+      items.push({
+        label: t("postgresSequence.title"),
+        action: () => {
+          if (exactIdentity) emit("open-postgres-sequence", sequenceTarget);
+        },
+        icon: Pencil,
+        disabled: !exactIdentity,
+      });
+    }
     if (currentDatabaseType() === "oceanbase-oracle") {
       items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
     }

@@ -2281,6 +2281,8 @@ export interface TreeNode {
   tableName?: string;
   columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
+  /** Native PostgreSQL sequence identifiers were read without display normalization. Absent on legacy cached nodes. */
+  postgresSequenceExactIdentity?: true;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";
   signature?: string;

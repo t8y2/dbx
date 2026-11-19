@@ -114,7 +114,7 @@ import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import type { OracleTriggerSqlBinding } from "@/lib/database/oracleTriggerSql";
-import { SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarPostgresSequenceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
 import { orderSidebarConnectionUtilitiesForDisplay } from "@/lib/sidebar/sidebarNodeOrdering";
@@ -188,6 +188,8 @@ const sidebarElasticsearchIndexMetadataTarget = ref<{ node: TreeNode; kind: Elas
 const sidebarElasticsearchIndexMetadataOpen = ref(false);
 const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean; initialSection?: ObjectDetailsSection; createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding> } | null>(null);
 const sidebarObjectSourceOpen = ref(false);
+const sidebarPostgresSequenceTarget = ref<TreeNode | null>(null);
+const sidebarPostgresSequenceOpen = ref(false);
 const sidebarProcedureTarget = ref<TreeNode | null>(null);
 const sidebarProcedureOpen = ref(false);
 const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
@@ -1833,7 +1835,17 @@ async function focusSidebarTreeNode(nodeId: string) {
 }
 
 function sidebarDialogOpen(): boolean {
-  return sidebarDdlOpen.value || sidebarElasticsearchIndexMetadataOpen.value || sidebarObjectSourceOpen.value || sidebarProcedureOpen.value || sidebarVisibleDatabasesOpen.value || sidebarVisibleSchemasOpen.value || sidebarVisibleNacosNamespacesOpen.value || sidebarTableNameFilterOpen.value;
+  return (
+    sidebarDdlOpen.value ||
+    sidebarElasticsearchIndexMetadataOpen.value ||
+    sidebarObjectSourceOpen.value ||
+    sidebarPostgresSequenceOpen.value ||
+    sidebarProcedureOpen.value ||
+    sidebarVisibleDatabasesOpen.value ||
+    sidebarVisibleSchemasOpen.value ||
+    sidebarVisibleNacosNamespacesOpen.value ||
+    sidebarTableNameFilterOpen.value
+  );
 }
 
 function restoreSidebarTreeFocusAfterDialog(nodeId: string | null | undefined) {
@@ -2385,6 +2397,7 @@ function beginSidebarAction(): number {
   sidebarDdlOpen.value = false;
   sidebarElasticsearchIndexMetadataOpen.value = false;
   sidebarObjectSourceOpen.value = false;
+  sidebarPostgresSequenceOpen.value = false;
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
@@ -2393,6 +2406,7 @@ function beginSidebarAction(): number {
   sidebarDdlTarget.value = null;
   sidebarElasticsearchIndexMetadataTarget.value = null;
   sidebarObjectSourceTarget.value = null;
+  sidebarPostgresSequenceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
@@ -2472,6 +2486,14 @@ function openSidebarObjectSource(node: TreeNode, initialEditing: boolean, initia
   // 界面上没有任何反馈；现在连接与取源都在弹窗自身的加载态之内完成。
   sidebarObjectSourceTarget.value = { node: target, initialEditing, initialSection, createTrigger };
   sidebarObjectSourceOpen.value = true;
+}
+
+function openSidebarPostgresSequence(node: TreeNode) {
+  if (node.type !== "sequence" || node.postgresSequenceExactIdentity !== true || !node.objectName || !node.connectionId || !node.database || !node.schema || store.getConfig(node.connectionId)?.db_type !== "postgres") return;
+  const target = createSidebarActionTarget(node);
+  beginSidebarAction();
+  sidebarPostgresSequenceTarget.value = target;
+  sidebarPostgresSequenceOpen.value = true;
 }
 
 function openSidebarSettings(initialTab: string) {
@@ -2596,7 +2618,7 @@ async function executeSidebarProcedureSql(sql: string) {
 }
 
 async function refreshSidebarActionTarget() {
-  const target = sidebarObjectSourceTarget.value?.createTrigger?.target || sidebarObjectSourceTarget.value?.node || sidebarDdlTarget.value || sidebarInstallExtensionTarget.value;
+  const target = sidebarObjectSourceTarget.value?.createTrigger?.target || sidebarObjectSourceTarget.value?.node || sidebarPostgresSequenceTarget.value || sidebarDdlTarget.value || sidebarInstallExtensionTarget.value;
   if (!target) return;
   const currentTarget = findSidebarActionTarget(store.treeNodes, target);
   if (!currentTarget) return;
@@ -2619,6 +2641,14 @@ watch(sidebarObjectSourceOpen, (open) => {
   if (!open) {
     const nodeId = sidebarObjectSourceTarget.value?.createTrigger?.target.id || sidebarObjectSourceTarget.value?.node.id;
     sidebarObjectSourceTarget.value = null;
+    restoreSidebarTreeFocusAfterDialog(nodeId);
+  }
+});
+
+watch(sidebarPostgresSequenceOpen, (open) => {
+  if (!open) {
+    const nodeId = sidebarPostgresSequenceTarget.value?.id;
+    sidebarPostgresSequenceTarget.value = null;
     restoreSidebarTreeFocusAfterDialog(nodeId);
   }
 });
@@ -3121,6 +3151,7 @@ onUnmounted(() => {
   sidebarDdlTarget.value = null;
   sidebarElasticsearchIndexMetadataTarget.value = null;
   sidebarObjectSourceTarget.value = null;
+  sidebarPostgresSequenceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
@@ -3169,6 +3200,7 @@ defineExpose({
       @peek-structure="openSidebarStructurePeek"
       @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
+      @open-postgres-sequence="openSidebarPostgresSequence"
       @open-procedure="openSidebarProcedure"
       @open-settings="openSidebarSettings"
       @open-connection-settings="(connectionId) => emit('open-connection-settings', connectionId)"
@@ -3453,6 +3485,16 @@ defineExpose({
       :execution-schema="sidebarObjectSourceTarget.node.schema || sidebarObjectSourceTarget.node.database"
       :trigger-identity-mode="exactOracleTriggerNodeMetadata(sidebarObjectSourceTarget.node) ? 'exact' : undefined"
       @open-object="(context: ObjectDependencyTarget, target: SqlObjectNavigationTarget) => emit('open-dependency-object', context, target)"
+      @saved="refreshSidebarActionTarget"
+    />
+
+    <SidebarPostgresSequenceDialog
+      v-if="sidebarPostgresSequenceTarget?.connectionId && sidebarPostgresSequenceTarget.database && sidebarPostgresSequenceTarget.schema"
+      v-model:open="sidebarPostgresSequenceOpen"
+      :connection-id="sidebarPostgresSequenceTarget.connectionId"
+      :database="sidebarPostgresSequenceTarget.database"
+      :schema="sidebarPostgresSequenceTarget.schema"
+      :name="sidebarPostgresSequenceTarget.objectName!"
       @saved="refreshSidebarActionTarget"
     />
 

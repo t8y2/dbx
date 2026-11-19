@@ -600,6 +600,13 @@ fn last_ssh_layer_local_port(transport_layers: &[TransportLayerConfig]) -> Optio
     transport_layers.last().and_then(ssh_layer_local_port)
 }
 
+fn mongo_uses_srv(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::MongoDb
+        && config.connection_string.as_deref().is_some_and(|uri| {
+            uri.trim().get(.."mongodb+srv://".len()).is_some_and(|scheme| scheme.eq_ignore_ascii_case("mongodb+srv://"))
+        })
+}
+
 /// Connection kinds whose primary path never listens on the static SSH tunnel,
 /// as `(kind, route)` for the error message. `plugin_proxy_route` carries the
 /// provider label of a plugin that declared `proxy_route`.
@@ -609,6 +616,7 @@ fn static_tunnel_bypass(config: &ConnectionConfig, plugin_proxy_route: Option<&s
         DatabaseType::ClickHouse => ("ClickHouse", "a SOCKS5 route"),
         DatabaseType::Consul => ("Consul", "a SOCKS5 route"),
         DatabaseType::Turso => ("Turso", "a SOCKS5 route"),
+        DatabaseType::MongoDb if mongo_uses_srv(config) => ("MongoDB SRV", "a SOCKS5 route"),
         DatabaseType::Redis if config.uses_redis_cluster() => ("Redis Cluster", "per-node tunnels"),
         DatabaseType::Redis if config.uses_redis_sentinel() => ("Redis Sentinel", "per-node tunnels"),
         DatabaseType::MessageQueue if connection_secrets::is_rocketmq_connection(config) => {
@@ -2212,6 +2220,33 @@ impl AppState {
         self.mongo_oidc_browser_opener.read().expect("MongoDB OIDC browser opener lock poisoned").clone()
     }
 
+    pub async fn connect_native_mongodb(
+        &self,
+        url: &str,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+        proxy: Option<&PluginRuntimeProxy>,
+    ) -> Result<mongodb::Client, String> {
+        let proxy = proxy.map(|proxy| {
+            mongodb::options::Socks5Proxy::builder()
+                .host(proxy.host.clone())
+                .port(proxy.port)
+                .authentication(
+                    (!proxy.username.is_empty() || !proxy.password.is_empty())
+                        .then(|| (proxy.username.clone(), proxy.password.clone())),
+                )
+                .build()
+        });
+        db::mongo_driver::connect_with_oidc_and_proxy(
+            url,
+            connect_timeout,
+            idle_timeout,
+            self.mongo_oidc_browser_opener(),
+            proxy,
+        )
+        .await
+    }
+
     pub fn set_salesforce_browser_opener(&self, opener: SfBrowserOpener) {
         *self.salesforce_browser_opener.write().expect("Salesforce browser opener lock poisoned") = Some(opener);
     }
@@ -3764,12 +3799,7 @@ impl AppState {
                     client.connect(connect_params).await.map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     PoolKind::agent(client)
                 } else {
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        self.mongo_oidc_browser_opener(),
-                    )
+                    let native_err = match self.connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
                     .await
                     {
                         Ok(client) => match db::mongo_driver::test_connection_for_url(
@@ -3803,7 +3833,7 @@ impl AppState {
                         },
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""))? });
                         let legacy_agent_key =
@@ -4679,6 +4709,24 @@ impl AppState {
             }
         }
         let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
+        if mongo_uses_srv(config) {
+            if mongo_uses_legacy_driver(config) && !db::mongo_driver::mongo_uri_uses_oidc(&config.connection_url()) {
+                return Err("MongoDB SRV with transport layers requires the native MongoDB driver. Select MongoDB instead of MongoDB (Legacy).".to_string());
+            }
+            if !matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_)))
+                && !matches!(transport_layers.last(), Some(TransportLayerConfig::Proxy(proxy)) if proxy.proxy_type == crate::models::connection::ProxyType::Socks5)
+            {
+                return Err("MongoDB SRV requires SSH or SOCKS5 as its final transport layer.".to_string());
+            }
+            // Keep the SRV hostname and options. The driver discovers the seed
+            // list and sends every server connection through the SOCKS5 route.
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::SocksProxy { host: config.host.clone(), port: config.port },
+            });
+        }
         if matches!(
             config.db_type,
             DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso | DatabaseType::Consul
@@ -11390,6 +11438,42 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn mongodb_srv_transport_preserves_seed_and_uses_dynamic_ssh_route() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = config_of_type(DatabaseType::MongoDb);
+        let uri = "mongodb+srv://cluster.example.test/app?replicaSet=rs0";
+        config.connection_string = Some(uri.into());
+
+        let direct = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(direct.route, super::ConnectionTransportRoute::Direct { .. }));
+
+        let mut ssh = ssh_layer("ssh-1", "");
+        ssh.host = "bastion.example.test".into();
+        ssh.user = "tester".into();
+        let mut proxy = proxy_layer("proxy-1", "");
+        proxy.host = "proxy.example.test".into();
+        config.transport_layers = vec![TransportLayerConfig::Proxy(proxy), TransportLayerConfig::Ssh(ssh)];
+        let tunneled = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        let super::ConnectionTransportRoute::SocksProxy { host, port } = tunneled.route else {
+            panic!("expected dynamic SOCKS5 route for SRV");
+        };
+        assert_eq!(connection_url_for_endpoint(&config, &host, port), uri);
+
+        config.driver_profile = Some("mongodb-legacy".into());
+        assert!(state
+            .prepare_connection_transport(&config.id, &config)
+            .await
+            .err()
+            .unwrap()
+            .contains("native MongoDB driver"));
+
+        config.driver_profile = None;
+        config.connection_string = Some("mongodb://mongo.example.test:27017/app".into());
+        let ordinary = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(ordinary.route, super::ConnectionTransportRoute::Static { .. }));
     }
 
     #[tokio::test]

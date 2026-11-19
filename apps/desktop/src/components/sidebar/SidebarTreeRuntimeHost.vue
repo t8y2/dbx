@@ -188,6 +188,7 @@ import {
   isDocumentBrowserTreeNode,
   isRepeatableNavigationTreeNode,
   objectSourceTargetForTreeNode,
+  packageMemberFocusForTreeNode,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
@@ -3324,6 +3325,10 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
   const sourceTarget = objectSourceTargetForTreeNode(sourceNode);
   if (!sourceTarget) return;
   const schema = sourceTarget.schema || database;
+  // 包成员打开的是整个包体，标题就该是那个包：成员名放进标题的话，复用同一个
+  // tab 打开第二个成员时标题还停在第一个成员上，反而指错了内容。
+  const focusMember = packageMemberFocusForTreeNode(sourceNode);
+  const title = `Source - ${focusMember ? sourceTarget.name : node.label}`;
   // issue #9035：两个分支都不再 await 连接与取源。先把容器挂出来（源码 tab /
   // 源码弹窗），ensureConnected 与 getObjectSource 都发生在已挂载的 UI 之内，
   // 加载中有状态、失败就地重试，而不是点击后一段时间毫无反应。
@@ -3331,12 +3336,13 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
     queryStore.openObjectSourceTabPending({
       connectionId,
       database,
-      title: `Source - ${node.label}`,
+      title,
       schema,
       catalog: node.catalog,
       initialEditing,
       initialSection,
-      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceNode.signature },
+      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceTarget.signature },
+      ...(focusMember ? { focusMember } : {}),
     });
     return;
   }

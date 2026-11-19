@@ -164,7 +164,7 @@ function getConnectionLabel(connectionId: string) {
   return conn?.name || t("sqlLibrary.deletedConnection");
 }
 
-function connectionIconColor(connectionId: string) {
+function connectionColor(connectionId: string) {
   return connectionStore.getConfig(connectionId)?.color || undefined;
 }
 
@@ -1827,7 +1827,7 @@ defineExpose({
               >
                 <div v-if="showDropBefore(row.folder.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                 <div v-if="showDropAfter(row.folder.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" :style="{ color: connectionIconColor(row.folder.connectionId) }" />
+                <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
                 <template v-if="isRenamingFolder(row.folder.id)">
                   <input
                     :ref="setRenameInputRef"
@@ -1847,6 +1847,7 @@ defineExpose({
                   {{ row.folder.name }}
                   <span class="ml-1 text-muted-foreground">({{ folderFileCount(row.folder.id) }})</span>
                 </span>
+                <span v-if="connectionColor(row.folder.connectionId)" data-sql-library-connection-color class="size-1.5 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor(row.folder.connectionId) }" aria-hidden="true" />
                 <LightTooltip v-if="!isRenamingFolder(row.folder.id)" :text="t('savedSql.newSubfolder')" side="left" :delay="0" :close-delay="0" nowrap>
                   <button
                     type="button"
@@ -1880,7 +1881,7 @@ defineExpose({
                 >
                   <div v-if="showDropBefore(row.file.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(row.file.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" :style="{ color: connectionIconColor(row.file.connectionId) }" />
+                  <FileText class="h-3.5 w-3.5 text-blue-400 shrink-0" />
                   <span v-if="isFileDirty(row.file)" aria-hidden="true" class="dirty-sql-library-marker">*</span>
                   <template v-if="isRenamingFile(row.file.id)">
                     <input
@@ -1898,6 +1899,7 @@ defineExpose({
                     />
                   </template>
                   <span v-else class="dbx-sql-library-drag-label min-w-0 flex-1 truncate" :title="fileTitleLabel(row.file)" :style="fileTitleStyle(row.file)">{{ row.file.name }}</span>
+                  <span v-if="connectionColor(row.file.connectionId)" data-sql-library-connection-color class="size-1.5 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor(row.file.connectionId) }" aria-hidden="true" />
                   <span class="min-w-0 max-w-[45%] shrink truncate text-[13px]" :class="fileMetaClass(row.file.id)" :title="getConnectionLabel(row.file.connectionId)">[{{ getConnectionLabel(row.file.connectionId) }}]</span>
                 </div>
                 <SqlLibrarySearchSnippet v-if="contentSearchActive" :file="row.file" :query="searchQuery" :depth="row.depth" @select-match="(match) => handleMatchClick(row.file, match)" />

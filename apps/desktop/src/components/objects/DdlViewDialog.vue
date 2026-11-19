@@ -13,6 +13,7 @@ import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/ed
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { editorThemeAppearanceFor, resolveEditorThemeColors } from "@/lib/editor/editorThemeSettings";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
@@ -55,7 +56,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { isDark, themePalette } = useTheme();
+const { isDark, themePalette, activeCustomUiColors } = useTheme();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 
@@ -393,12 +394,10 @@ async function initDdlEditor(content: string) {
   if (!ddlEditorContainer.value) return;
   destroyDdlEditor();
   const [{ EditorView, keymap }, { EditorState, Prec }, langSql, { basicSetup }, { search: cmSearch }] = await Promise.all([import("@codemirror/view"), import("@codemirror/state"), import("@codemirror/lang-sql"), import("codemirror"), import("@codemirror/search")]);
-  const editorTheme = settingsStore.editorSettings.theme;
-  const appAppearance = isDark.value ? "dark" : "light";
-  const fontSize = settingsStore.editorSettings.fontSize;
-  const fontFamily = settingsStore.editorSettings.fontFamily;
-  const themeExt = await loadEditorTheme(editorTheme, appAppearance, undefined, themePalette.value);
-  const fontExt = editorFontTheme(EditorView, fontSize, fontFamily, { fixedHeight: true, scrollable: true });
+  const editorSettings = settingsStore.editorSettings;
+  const appAppearance = editorThemeAppearanceFor(isDark.value ? "dark" : "light", themePalette.value, themePalette.value === "custom" ? activeCustomUiColors.value : undefined);
+  const themeExt = await loadEditorTheme(editorSettings.theme, appAppearance, resolveEditorThemeColors(editorSettings), themePalette.value);
+  const fontExt = editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true });
   const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect, props.databaseType);
   const state = EditorState.create({
     doc: content,

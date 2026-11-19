@@ -264,6 +264,47 @@ mod tests {
         }
     }
 
+    /// The same package read two ways must compare equal: DBMS_METADATA.GET_DDL emits the
+    /// default EDITIONABLE clause and a qualified name, ALL_SOURCE stores neither. Before the
+    /// fingerprint ignored that default, a save committed its own DDL and then declared the
+    /// readback different from what it had just written.
+    #[test]
+    fn fingerprint_matches_across_edition_clause_and_owner_qualification() {
+        let fingerprint = |source: &str| {
+            comparable_oracle_routine_definition(OracleRoutineDefinitionInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::PackageBody,
+                source_owner: "SCOTT".into(),
+                target_owner: "SCOTT".into(),
+                name: "PKG1".into(),
+                source: source.into(),
+                replace: true,
+            })
+            .unwrap()
+        };
+
+        // What GET_DDL hands the editor.
+        let from_metadata = "CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"SCOTT\".\"PKG1\" as
+  PROCEDURE P IS
+  BEGIN
+    NULL;
+  END;
+END PKG1;";
+        // What ALL_SOURCE stores and the readback reads.
+        let from_dictionary = "PACKAGE BODY \"PKG1\" as
+  PROCEDURE P IS
+  BEGIN
+    NULL;
+  END;
+END PKG1;";
+
+        assert_eq!(fingerprint(from_metadata), fingerprint(from_dictionary));
+        // Only the default clause is ignored; NONEDITIONABLE still changes the definition.
+        assert_ne!(fingerprint(&from_metadata.replace("EDITIONABLE", "NONEDITIONABLE")), fingerprint(from_dictionary));
+        // A real body change must still register.
+        assert_ne!(fingerprint(from_metadata), fingerprint(&from_dictionary.replace("NULL;", "COMMIT;")));
+    }
+
     #[test]
     fn adapts_only_declaration_and_keeps_literals_comments_and_raw_input() {
         let source = r#"-- Source.Owner.Mixed.Func remains here

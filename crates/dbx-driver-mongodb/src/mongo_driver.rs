@@ -1,7 +1,7 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
     options::{
-        ClientOptions, Collation, GridFsBucketOptions, IndexOptions, ReadPreference, SelectionCriteria,
+        ClientOptions, Collation, GridFsBucketOptions, IndexOptions, ReadPreference, SelectionCriteria, Socks5Proxy,
         UpdateModifications,
     },
     Client, Cursor, Database, IndexModel,
@@ -78,12 +78,25 @@ pub async fn connect_with_oidc(
     idle_timeout: Duration,
     oidc_browser_opener: Option<MongoOidcBrowserOpener>,
 ) -> Result<Client, String> {
+    connect_with_oidc_and_proxy(url, timeout, idle_timeout, oidc_browser_opener, None).await
+}
+
+pub async fn connect_with_oidc_and_proxy(
+    url: &str,
+    timeout: Duration,
+    idle_timeout: Duration,
+    oidc_browser_opener: Option<MongoOidcBrowserOpener>,
+    proxy: Option<Socks5Proxy>,
+) -> Result<Client, String> {
     let url = normalize_mongo_uri_direct_connection(url);
     let is_multi_host = is_multi_host_mongo_uri(&url);
     let parse_timeout = if is_multi_host { std::cmp::max(timeout * 2, Duration::from_secs(10)) } else { timeout };
 
     with_connection_timeout("MongoDB", parse_timeout, async {
         let mut options = ClientOptions::parse(&url).await.map_err(|e| format!("MongoDB connection failed: {e}"))?;
+        if let Some(proxy) = proxy {
+            options.socks5_proxy = Some(proxy);
+        }
         if let Some(credential) = options.credential.as_mut().filter(|credential| {
             credential
                 .mechanism
@@ -3966,6 +3979,44 @@ mod tests {
 
         assert_eq!(normalized, "mongodb+srv://read:pass@cluster.example.net/admin?tls=true&replicaSet=rs0");
         assert!(is_multi_host_mongo_uri(&normalized));
+    }
+
+    #[tokio::test]
+    async fn native_mongodb_sends_server_hostname_to_socks_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy = Socks5Proxy::builder().host("127.0.0.1").port(listener.local_addr().unwrap().port()).build();
+        let timeout = Duration::from_secs(5);
+        let client = connect_with_oidc_and_proxy(
+            "mongodb://member.example.test:27018/app",
+            timeout,
+            Duration::ZERO,
+            None,
+            Some(proxy),
+        )
+        .await
+        .unwrap();
+        let ping = tokio::spawn(async move { client.database("app").run_command(doc! { "ping": 1 }).await });
+
+        tokio::time::timeout(timeout, async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).await.unwrap();
+
+            let mut request = [0; 5];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(request[..4], [5, 1, 0, 3]);
+            let mut host = vec![0; usize::from(request[4])];
+            stream.read_exact(&mut host).await.unwrap();
+            assert_eq!(host, b"member.example.test");
+            assert_eq!(stream.read_u16().await.unwrap(), 27018);
+        })
+        .await
+        .expect("MongoDB should dial the server using the configured SOCKS5 proxy");
+        ping.abort();
     }
 
     #[test]

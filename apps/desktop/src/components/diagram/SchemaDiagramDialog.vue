@@ -20,9 +20,9 @@ import "@vue-flow/minimap/dist/style.css";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useGraphStore } from "@/lib/diagram/graph-store";
 import * as api from "@/lib/backend/api";
-import { loadFocusedDiagram, diagramIdentityKey, diagramIndexes, type FocusedDiagramLoadRequest } from "@/lib/diagram/diagramMetadataLoader";
+import { loadFocusedDiagram, diagramIdentityKey, diagramIndexes, normalizedDiagramRoots, type DiagramTableIdentity, type FocusedDiagramLoadRequest } from "@/lib/diagram/diagramMetadataLoader";
 import { focusedDiagramCacheKey, getFocusedDiagramCache, loadFocusedDiagramCached } from "@/lib/diagram/diagramMetadataCache";
-import { saveFocusedDiagramState } from "@/lib/diagram/draft-storage";
+import { focusedTableSelectionKey, loadFocusedTableSelection, saveFocusedDiagramState, saveFocusedTableSelection } from "@/lib/diagram/draft-storage";
 import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/database/databaseCapabilities";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildDiagramJoinSql, buildDiagramRelationships, diagramTableId, filterDiagramTables, mergeRelationshipsWithInferred, normalizeCustomDiagramRelationship, type CustomDiagramRelationship, type DiagramPosition, type DiagramTable, isDraftTable, needsDiagramSync } from "@/lib/diagram/erDiagram";
@@ -172,6 +172,7 @@ function captureHistorySnapshot(): HistorySnapshot {
     positions: deepCloneJson(positions.value),
     layers: layerStore.toJSON(),
     tables: deepCloneJson(tables.value),
+    focusedTableSelection: [...focusedTableSelection],
     customRelationships: deepCloneJson(customRelationships.value),
     edgeWaypoints: deepCloneJson(edgeWaypoints.value),
     edgeHandleHints: deepCloneJson(edgeHandleHints.value),
@@ -196,6 +197,12 @@ function syncGraphStoreFromPositions() {
 }
 
 function applyHistorySnapshot(snapshot: HistorySnapshot) {
+  const nextSelection = [...(snapshot.focusedTableSelection ?? [])];
+  const previousKeys = new Set(focusedTableSelection.map(diagramIdentityKey));
+  const nextKeys = new Set(nextSelection.map(diagramIdentityKey));
+  const membershipOnly = new Set([...previousKeys, ...nextKeys].filter((key) => previousKeys.has(key) !== nextKeys.has(key)));
+  focusedTableSelection = nextSelection;
+  if (membershipOnly.size && loadedFocusedSelectionKey) saveFocusedTableSelection(loadedFocusedSelectionKey, focusedTableSelection);
   positions.value = deepCloneJson(snapshot.positions);
   layerStore.loadLayers(deepCloneJson(snapshot.layers));
   tables.value = deepCloneJson(snapshot.tables ?? []);
@@ -216,7 +223,7 @@ function applyHistorySnapshot(snapshot: HistorySnapshot) {
   }
   saveCustomRelationships();
   saveMatchData();
-  persistDraftAndLayers();
+  persistDraftAndLayers(membershipOnly);
   refreshMatchResult();
   fitAllFreeLayers();
   syncVueFlowNodes();
@@ -358,6 +365,8 @@ const showAllTables = ref(false);
 type DiagramLoadMode = "focused" | "full";
 const loadedDiagramScope = ref<DiagramLoadMode>("full");
 let persistedTableSnapshot: DiagramTable[] = [];
+let loadedFocusedSelectionKey = "";
+let focusedTableSelection: DiagramTableIdentity[] = [];
 let diagramLoadGeneration = 0;
 let initializationGeneration = 0;
 let namespaceGeneration = 0;
@@ -783,11 +792,11 @@ const structureCapabilities = computed(() => getTableStructureCapabilities(selec
 const canCreateDraftTable = computed(() => structureCapabilities.value.createTable);
 const canSyncStructure = computed(() => supportsTableStructureEditing(selectedConnection.value?.db_type));
 
-function persistDraftAndLayers() {
+function persistDraftAndLayers(membershipOnly?: Set<string>) {
   if (!connectionId.value || !database.value) return;
   const schemaKey = effectiveSchemaKey.value;
   if (loadedDiagramScope.value === "focused") {
-    saveFocusedDiagramState(tables.value, persistedTableSnapshot, positions.value, layerStore.toJSON(), connectionId.value, database.value, schemaKey, selectedSchemas.value[0]);
+    saveFocusedDiagramState(tables.value, persistedTableSnapshot, positions.value, layerStore.toJSON(), connectionId.value, database.value, schemaKey, selectedSchemas.value[0], membershipOnly);
     persistedTableSnapshot = deepCloneJson(tables.value);
     return;
   }
@@ -1049,6 +1058,8 @@ function syncVueFlowNodes() {
               if (expandedFields.value.has(key)) expandedFields.value.delete(key);
               else expandedFields.value.add(key);
               clearWaypointsForTables([node.id]);
+              const layer = layerStore.getLayerByTable(node.id);
+              if (layer && canLayoutLayer(layer)) sizeLayerToFit(layer, positions.value, tableHeightsMap());
               syncVueFlowNodes();
             }
           : undefined,
@@ -1560,40 +1571,50 @@ async function openPicker() {
   }
 }
 
+async function loadSelectedTableMetadata(chosen: TableCandidate[], { connectionId: id, database: db, catalog }: Pick<FocusedDiagramLoadRequest, "connectionId" | "database" | "catalog">, active: () => boolean) {
+  const loaded: DiagramTable[] = [];
+  const failed = new Set<string>();
+  for (let offset = 0; active() && offset < chosen.length; offset += METADATA_BATCH_SIZE) {
+    const selection = chosen.slice(offset, offset + METADATA_BATCH_SIZE);
+    const batch = await Promise.allSettled(
+      selection.map(async (table) => {
+        const [columns, foreignKeys, indexes, comment] = await Promise.all([
+          api.getColumns(id, db, table.schema, table.name, catalog),
+          api.listForeignKeys(id, db, table.schema, table.name, catalog).catch(() => []),
+          api.listIndexes(id, db, table.schema, table.name, catalog).catch(() => []),
+          table.comment === undefined ? api.getTableComment(id, db, table.schema, table.name, catalog).catch(() => null) : table.comment,
+        ]);
+        return { ...table, columns, foreignKeys, indexes: diagramIndexes(indexes), comment };
+      }),
+    );
+    if (!active()) break;
+    for (const [index, result] of batch.entries()) {
+      if (result.status === "fulfilled") {
+        loaded.push(result.value);
+      } else {
+        const table = selection[index];
+        failed.add(diagramIdentityKey(table));
+        console.warn(`[diagram] failed to load table metadata: ${table.schema}.${table.name}`, result.reason);
+      }
+    }
+  }
+  return { loaded, failed };
+}
+
 async function appendSelectedTables() {
-  if (pickerBusy.value || !candidates.value) return;
+  if (pickerBusy.value || loadingDiagram.value || !candidates.value || !loadedFocusedSelectionKey) return;
   const keys = new Set(picked.value);
   const chosen = candidates.value.filter((table) => keys.has(diagramIdentityKey(table)));
   if (!chosen.length) return;
   const generation = pickerGeneration;
   const id = connectionId.value;
   const db = database.value;
-  const catalog = props.prefillCatalog;
+  const active = () => generation === pickerGeneration;
   pickerBusy.value = true;
   pickerError.value = "";
   try {
-    const loaded: DiagramTable[] = [];
-    const failed = new Set<string>();
-    for (let offset = 0; offset < chosen.length; offset += METADATA_BATCH_SIZE) {
-      if (generation !== pickerGeneration) return;
-      const selection = chosen.slice(offset, offset + METADATA_BATCH_SIZE);
-      const batch = await Promise.allSettled(
-        selection.map(async (table) => {
-          const [columns, foreignKeys, indexes] = await Promise.all([api.getColumns(id, db, table.schema, table.name, catalog), api.listForeignKeys(id, db, table.schema, table.name, catalog).catch(() => []), api.listIndexes(id, db, table.schema, table.name, catalog).catch(() => [])]);
-          return { ...table, columns, foreignKeys, indexes: diagramIndexes(indexes) };
-        }),
-      );
-      if (generation !== pickerGeneration) return;
-      for (const [index, result] of batch.entries()) {
-        if (result.status === "fulfilled") {
-          loaded.push(result.value);
-        } else {
-          const table = selection[index];
-          failed.add(diagramIdentityKey(table));
-          console.warn(`[diagram] failed to load table metadata: ${table.schema}.${table.name}`, result.reason);
-        }
-      }
-    }
+    const { loaded, failed } = await loadSelectedTableMetadata(chosen, { connectionId: id, database: db, catalog: props.prefillCatalog }, active);
+    if (!active()) return;
     if (failed.size) {
       pickerError.value = t("diagram.partialError", { count: failed.size });
       if (!loaded.length) return;
@@ -1610,9 +1631,14 @@ async function appendSelectedTables() {
       nextPositions[getTableKey(table)] = { x: right, y };
       y += tableHeight(table) + GAP_Y;
     }
+    recordHistory();
     positions.value = nextPositions;
-    persistedTableSnapshot.push(...deepCloneJson(additions));
     tables.value = [...tables.value, ...additions];
+    const selected = chosen.filter((table) => !failed.has(diagramIdentityKey(table)));
+    focusedTableSelection = normalizedDiagramRoots([...focusedTableSelection, ...selected.map(({ schema, name }) => ({ schema, name }))]);
+    saveFocusedTableSelection(loadedFocusedSelectionKey, focusedTableSelection);
+    persistDraftAndLayers(new Set(selected.map(diagramIdentityKey)));
+    refreshMatchResult();
     syncVueFlowNodes();
     if (failed.size) {
       const added = new Set(loaded.map(diagramIdentityKey));
@@ -1649,9 +1675,11 @@ async function loadDiagram(options: { mode?: DiagramLoadMode; force?: boolean } 
     },
   };
   const key = focusedDiagramCacheKey(request);
+  const selectionKey = mode === "focused" ? focusedTableSelectionKey(request, selectedSchemas.value) : "";
+  const selection = selectionKey ? loadFocusedTableSelection(selectionKey) : [];
   const cached = mode === "focused" && !options.force ? getFocusedDiagramCache(key) : undefined;
   // Check memory before connecting or showing the remote loading state.
-  loadingDiagram.value = !cached;
+  loadingDiagram.value = !cached || selection.length > 0;
   loadedTableCount.value = cached?.length ?? 0;
   totalTableCount.value = cached?.length ?? 0;
   failedTableCount.value = 0;
@@ -1682,7 +1710,22 @@ async function loadDiagram(options: { mode?: DiagramLoadMode; force?: boolean } 
       }
     }
     if (!active()) return;
-    loadedTableCount.value = totalTableCount.value = liveTables.length;
+    const liveKeys = new Set(liveTables.map(diagramIdentityKey));
+    const missing = selection.filter((table) => !liveKeys.has(diagramIdentityKey(table)));
+    let selectionFailures = 0;
+    if (missing.length) {
+      if (cached) await store.ensureConnected(request.connectionId);
+      if (!active()) return;
+      const { loaded, failed } = await loadSelectedTableMetadata(missing, request, active);
+      if (!active()) return;
+      liveTables = [...liveTables, ...loaded];
+      selectionFailures = failed.size;
+    }
+    loadedFocusedSelectionKey = selectionKey;
+    focusedTableSelection = selection;
+    loadedTableCount.value = liveTables.length;
+    totalTableCount.value = liveTables.length + selectionFailures;
+    failedTableCount.value += selectionFailures;
     await applyLoadedDiagramTables(liveTables, mode, active);
     if (active() && failedTableCount.value > 0) toast(t("diagram.partialError", { count: failedTableCount.value }), 5000);
   } catch (error: any) {
@@ -1886,6 +1929,8 @@ async function initialize() {
   loadingDatabases.value = false;
   loadingSchemas.value = false;
   persistedTableSnapshot = [];
+  loadedFocusedSelectionKey = "";
+  focusedTableSelection = [];
   connectionId.value = "";
   database.value = "";
   schema.value = "";

@@ -167,6 +167,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarDensity",
+  "sidebarConnectionIconStyle",
   "sidebarHiddenTablePrefixes",
   "sidebarCopyTableNameSeparator",
   "sidebarCopyTableNameIncludeSchema",

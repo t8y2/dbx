@@ -341,9 +341,9 @@ function draftWithColumns(count: number) {
 }
 
 async function mountEditor(
-  databaseType: "mysql" | "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix" | "clickhouse",
+  databaseType: "mysql" | "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix" | "clickhouse" | "saphana",
   isPrimaryKey = false,
-  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
+  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; tableType?: "table" | "view"; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
 ) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
@@ -359,6 +359,7 @@ async function mountEditor(
     database: options.database ?? "test",
     schema: "SYSDBA",
     tableName: options.tableName ?? "users",
+    tableType: options.tableType,
     draft: options.draftOverride ?? draft(isPrimaryKey, options.identity, options.columnName, options.foreignKeyRefTable),
     "onUpdate:draft": options.onDraftUpdate,
   });
@@ -449,6 +450,27 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor primary key editing", () => {
+  it.each(["table", "view"] as const)("passes the HANA %s kind when generating comment SQL", async (tableType) => {
+    const root = await mountEditor("saphana", false, { database: "", tableName: "V_6200_YGMBBK", tableType });
+    const input = root.querySelector<HTMLInputElement>("[data-table-comment-input]")!;
+    expect(input.disabled).toBe(false);
+    input.value = "员工目标";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          databaseType: "saphana",
+          schema: "SYSDBA",
+          tableName: "V_6200_YGMBBK",
+          tableType,
+          tableComment: "员工目标",
+          originalTableComment: "",
+        }),
+      ),
+    );
+  });
+
   it("allows enabling identity on an existing Dameng integer column", async () => {
     const root = await mountEditor("dameng");
     const identity = columnPropertyCheckbox(root, "structureEditor.identity");

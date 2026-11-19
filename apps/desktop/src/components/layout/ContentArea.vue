@@ -396,6 +396,7 @@ const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
 const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean>; focusSearch: () => boolean }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
+const resultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
 const standaloneResultToolbarViewportWidth = ref(0);
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
@@ -995,6 +996,16 @@ const hasTabularResult = computed(() => {
 const redisConsoleResults = computed(() => (props.activeTab.results?.length ? props.activeTab.results : props.activeTab.result ? [props.activeTab.result] : []));
 const canShowRedisConsoleOutput = computed(() => activeEffectiveDatabaseType.value === "redis" && (props.activeTab.isExecuting || redisConsoleResults.value.some((result) => result.execution_error === true || typeof result.redis_console_output === "string")));
 const redisResultViewMode = computed<RedisResultViewMode>(() => (activeEffectiveDatabaseType.value === "redis" ? (props.activeTab.uiState?.redisResultViewMode ?? "grid") : "grid"));
+const { tier: resultToolbarTier } = useToolbarOverflow(resultToolbarRef, [
+  () => props.activeTab.id,
+  () => !!props.activeTab.result,
+  () => props.activeOutputView,
+  () => redisResultViewMode.value,
+  () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  () => !!dataGridRef.value?.tableInfoToolbarCapability?.visible,
+  () => hideToolbarLabels.value,
+  () => dataGridRef.value?.defaultCopyPreferenceLabel,
+]);
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const activeGraphAdapter = computed(() => graphAdapterForDatabase(activeEffectiveDatabaseType.value));
 const canShowGraphOutput = computed(() => !!activeGraphAdapter.value && !!props.activeTab.result?.graph_data?.nodes.length);
@@ -2497,7 +2508,7 @@ defineExpose({
               Gating it on hasQueryOutput alone left users with an always-open, empty
               shared pane and no way to collapse it (#8233).
             -->
-            <div v-if="hasQueryOutput || resultOnly" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
+            <div v-if="hasQueryOutput || resultOnly" ref="resultToolbarRef" class="flex h-10 min-w-0 shrink-0 items-center gap-1 overflow-hidden border-b bg-muted/20 px-2">
               <Button
                 v-if="activeTab.mode === 'query' && activeTab.result"
                 variant="ghost"
@@ -2516,7 +2527,7 @@ defineExpose({
               </Button>
               <template v-if="resultRuns.length > 0 || visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
-                <div v-if="showResultRunTabs" data-result-run-tabs-region class="relative min-w-0 flex-1 self-stretch">
+                <div v-if="showResultRunTabs" data-result-run-tabs-region class="relative min-w-40 flex-1 self-stretch">
                   <div v-if="hasResultTabOverflow" class="result-tab-scrollbar" :class="{ 'result-tab-scrollbar--dragging': isResultTabsScrollbarDragging }" @pointerdown="startResultTabsScrollbarDrag">
                     <div class="result-tab-scrollbar__thumb" :style="resultTabsScrollbarThumbStyle" />
                   </div>
@@ -2561,7 +2572,7 @@ defineExpose({
                     </div>
                   </div>
                 </div>
-                <div v-else-if="showResultRunSelector" class="min-w-0" :class="{ 'flex-1': visibleResultItems.length <= 1 }">
+                <div v-else-if="showResultRunSelector" class="min-w-40" :class="{ 'flex-1': visibleResultItems.length <= 1 }">
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
@@ -2605,6 +2616,7 @@ defineExpose({
                   :connection-color="activeResultColor"
                   :display-mode="resultRunDisplayMode"
                   :has-sibling-run-tabs="resultRuns.length > 0"
+                  class="min-w-40"
                   @select="selectResultItem"
                   @copy-sql="copySelectedResultSql"
                   @copy-query-sql="copySelectedResultQueries"
@@ -2612,8 +2624,18 @@ defineExpose({
                 />
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
+                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                  <DataGridCopyFormatControl
+                    toolbar
+                    :compact="resultToolbarTier >= 1 || hideToolbarLabels"
+                    :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
+                    :current-value="dataGridRef?.defaultCopyPreference ?? ''"
+                    :items="dataGridRef?.copyPreferenceMenuItems ?? []"
+                    @select="dataGridRef?.setDefaultCopyPreference($event)"
+                  />
+                </template>
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
-                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
+                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="resultToolbarTier >= 2 || hideToolbarLabels" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
                       data-toolbar-action="navigation"
@@ -2626,7 +2648,7 @@ defineExpose({
                       @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
                     >
                       <Columns3 class="h-3.5 w-3.5" />
-                      <span v-if="!hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
+                      <span v-if="resultToolbarTier < 3 && !hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
                     </Button>
                   </LightTooltip>
                   <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
@@ -2641,7 +2663,7 @@ defineExpose({
                       @click="dataGridRef.tableInfoToolbarCapability.onTrigger()"
                     >
                       <TableProperties class="h-3.5 w-3.5" />
-                      <span v-if="!hideToolbarLabels">DDL</span>
+                      <span v-if="resultToolbarTier < 3 && !hideToolbarLabels">DDL</span>
                     </Button>
                   </LightTooltip>
                 </template>

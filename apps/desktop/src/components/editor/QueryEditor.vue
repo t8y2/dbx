@@ -97,6 +97,7 @@ import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 
 import { sqlObjectNavigationSourceKind, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 
+import { resolveEditorThemeColors } from "@/lib/editor/editorThemeSettings";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, sqlCompletionTheme } from "@/lib/editor/editorThemes";
 import { shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 
@@ -2282,7 +2283,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
     });
     bookmarkShortcuts = bookmarks;
     const initialSettings = settingsStore.editorSettings;
-    const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors(), themePalette.value);
+    const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), resolveEditorThemeColors(initialSettings), themePalette.value);
     if (initialSettings.vimModeEnabled) {
       await ensureCodeMirrorVim();
     }
@@ -2665,7 +2666,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         void nextTick(async () => {
           if (!view.value || !initializedRuntime.codeMirrorTheme) return;
           const settings = settingsStore.editorSettings;
-          const themeColors = settings.theme === "custom" ? getCurrentCustomThemeColors() : settings.customThemeColors;
+          const themeColors = resolveEditorThemeColors(settings);
           const themeExt = await loadEditorTheme(settings.theme, editorThemeAppearance(), themeColors, themePalette.value);
           view.value.dispatch({
             effects: [initializedRuntime.codeMirrorTheme.reconfigure(themeExt)],
@@ -2953,14 +2954,6 @@ watch(
   },
 );
 
-// Derive current custom theme colors from settingsStore
-function getCurrentCustomThemeColors() {
-  const settings = settingsStore.editorSettings;
-  if (settings.theme !== "custom") return settings.customThemeColors;
-  const activeTheme = settings.customThemes?.find((t: { id: string }) => t.id === settings.activeCustomThemeId) || settings.customThemes?.[0];
-  return activeTheme?.colors ?? settings.customThemeColors;
-}
-
 // Reactively apply editor settings changes. Also called after restoring a
 // cached per-tab state, whose compartments predate any settings changed while
 // another tab was active.
@@ -2986,7 +2979,7 @@ async function applyEditorAppearance() {
   }
   syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
   syncEditorDiagnosticCssVars();
-  const themeColors = getCurrentCustomThemeColors();
+  const themeColors = resolveEditorThemeColors(ss);
   const [themeExt, , vimCommands] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false), ss.vimModeEnabled ? loadVimConfig() : Promise.resolve([])]);
   if (
     !view.value ||

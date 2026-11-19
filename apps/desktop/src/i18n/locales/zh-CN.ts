@@ -2707,6 +2707,14 @@ export default withEnglishFallback({
       drag: "拖动面板",
       empty: "暂无字段",
     },
+    bookmarks: {
+      workspaceTitle: "书签",
+      workspaceSearch: "搜索文件名、SQL 内容或行号",
+      workspaceEmpty: "所有已打开 SQL 标签页的书签会显示在这里。点击编辑器行号左侧的书签栏即可添加。",
+      line: "第 {line} 行",
+      emptyLine: "（空白行）",
+      noMatches: "没有匹配的书签",
+    },
     gotoLine: {
       placeholder: "行号",
       total: "共 {total} 行",

@@ -2455,6 +2455,14 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "Impossibile leggere gli appunti: {message}",
       convertNamingStyle: "Cambia stile di denominazione",
     },
+    bookmarks: {
+      workspaceTitle: "Segnalibri",
+      workspaceSearch: "Cerca file, testo SQL o numeri di riga",
+      workspaceEmpty: "Qui vengono mostrati i segnalibri di tutte le schede SQL aperte. Fai clic nel margine dei segnalibri accanto al numero di riga per aggiungerne uno.",
+      line: "Riga {line}",
+      emptyLine: "(riga vuota)",
+      noMatches: "Nessun segnalibro corrispondente",
+    },
     gotoLine: {
       placeholder: "Numero di riga",
       total: "{total} righe",

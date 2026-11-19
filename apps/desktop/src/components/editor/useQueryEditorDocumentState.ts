@@ -3,7 +3,8 @@ import { Transaction } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
-import { resetQueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
+import { restoreQueryEditorBookmarks, queryEditorBookmarkLines } from "@/lib/editor/codemirrorBookmarks";
+import { bookmarkDocumentChange } from "@/lib/editor/workspaceBookmarks";
 import type { ShallowRef, Ref } from "vue";
 import type { QueryEditorProps } from "./queryEditorTypes";
 
@@ -23,6 +24,7 @@ interface QueryEditorDocumentStateOptions {
   runtime: QueryEditorDocumentStateRuntime;
   emit: {
     (event: "selectionStateChange", selection: { anchor: number; head: number }): void;
+    (event: "bookmarksChange", lines: number[], tabId?: string): void;
     (event: "viewportChange", viewport: { scrollTop: number; scrollLeft: number }, tabId?: string): void;
     (event: "editorStateFlushed"): void;
     (event: "editorRevealConsumed"): void;
@@ -62,6 +64,29 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   } = options;
 
   let viewportOwnerTabId = props.tabId;
+  let changingDocument = false;
+
+  function recordBookmarks(currentView: EditorViewType) {
+    if (changingDocument || isEditorComposing(currentView)) return;
+    emit("bookmarksChange", queryEditorBookmarkLines(currentView), viewportOwnerTabId);
+  }
+
+  function restoreBookmarks(lines = props.bookmarkLines ?? []) {
+    if (!view.value) return;
+    const previous = changingDocument;
+    changingDocument = true;
+    try {
+      restoreQueryEditorBookmarks(view.value, lines);
+    } finally {
+      changingDocument = previous;
+    }
+  }
+
+  watch(
+    () => props.bookmarkLines,
+    () => restoreBookmarks(),
+    { deep: true, flush: "post" },
+  );
   const viewportEmitTask = createDeferredEditorTask(() => {
     if (latestViewport) emitEditorViewport(latestViewport);
   }, 150);
@@ -128,7 +153,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     const cached = tabId === undefined ? undefined : tabStateCache.get(tabId);
     if (!cached) {
       swapEditorDocument(doc);
-      resetQueryEditorBookmarks(currentView);
+      restoreBookmarks();
       // First activation in this editor instance (or a cache-evicted tab, e.g.
       // beyond MAX_CACHED_TAB_STATES): restore the tab's saved cursor and scroll
       // position exactly like the cached-state branch, otherwise the swapped-in
@@ -155,13 +180,20 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     applyEditorShortcutKeymaps();
     applyEditorIndentExtension();
     applyEditorCompletionExtension();
-    if (doc !== currentView.state.doc.toString()) {
+    const previousDoc = currentView.state.doc.toString();
+    const documentChanged = doc !== previousDoc;
+    const hydrating = !previousDoc.length && !!props.bookmarkLines?.length;
+    if (documentChanged) {
       // Content changed while the tab was inactive (external file change, AI
       // edit, another split group): apply it as a regular undoable edit.
       currentView.dispatch({
-        changes: { from: 0, to: currentView.state.doc.length, insert: doc },
+        changes: bookmarkDocumentChange(previousDoc, doc),
       });
     }
+    // Store-mapped positions take precedence over a cached editor's net diff:
+    // several inactive updates may have already deleted/replaced an anchor.
+    // Legacy/unhydrated saved lines can still refer to the old document.
+    if ((!documentChanged || hydrating || props.bookmarkDocument === doc) && props.bookmarkLines !== undefined) restoreBookmarks();
     scheduleDocumentSearchUpdate();
     invalidateSemanticDiagnosticsForDocumentChange();
     if (props.initialSelection !== undefined) {
@@ -175,20 +207,34 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     syncContextMenuState(currentView);
     emit("previewChangesAvailable", !!previewContextSql.value);
     scheduleSemanticDiagnostics();
+    return documentChanged;
   }
 
   watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) => {
     if (!view.value) return;
     if (tabId !== prevTabId) {
-      activateTabDocument(prevTabId, tabId, val);
+      let bookmarksMapped = false;
+      changingDocument = true;
+      try {
+        bookmarksMapped = activateTabDocument(prevTabId, tabId, val) === true;
+      } finally {
+        changingDocument = false;
+      }
+      if (bookmarksMapped) recordBookmarks(view.value);
       if (props.autoFocus) restoreEditorFocus();
       return;
     }
     if (val !== currentEditorDocText(view.value)) {
       if (isEditorComposing(view.value)) return;
-      view.value.dispatch({
-        changes: { from: 0, to: view.value.state.doc.length, insert: val },
-      });
+      const hydrating = !view.value.state.doc.length && !!props.bookmarkLines?.length;
+      changingDocument = true;
+      try {
+        view.value.dispatch({ changes: bookmarkDocumentChange(currentEditorDocText(view.value), val) });
+        if (hydrating || props.bookmarkDocument === val) restoreBookmarks();
+      } finally {
+        changingDocument = false;
+      }
+      recordBookmarks(view.value);
       scheduleSemanticDiagnostics();
     }
   });
@@ -289,6 +335,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   function performEditorReveal() {
     const request = props.revealRequest;
     if (!request || !view.value) return;
+    cancelEditorViewportRestore();
     revealEditorSelection(request.line, request.column);
     emit("editorRevealConsumed");
   }
@@ -336,7 +383,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     cancelEditorViewportRestore();
     const generation = viewportRestoreGeneration;
     const restoreScroll = () => {
-      if (!view.value) return;
+      if (!view.value || generation !== viewportRestoreGeneration) return;
       view.value.scrollDOM.scrollTo({
         top: viewport.scrollTop,
         left: viewport.scrollLeft,
@@ -351,6 +398,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
       restoreScroll();
       let attempts = 0;
       const restoreNextFrame = () => {
+        if (generation !== viewportRestoreGeneration) return;
         restoreScroll();
         attempts += 1;
         if (attempts >= 32) {
@@ -392,5 +440,5 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
   }
 
-  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, cancelEditorViewportRestore, recordSelection, flushBeforeDeactivation, attach, dispose };
+  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, cancelEditorViewportRestore, recordSelection, recordBookmarks, restoreBookmarks, flushBeforeDeactivation, attach, dispose };
 }

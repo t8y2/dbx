@@ -259,7 +259,7 @@ const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAss
 const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
-const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
+const SqlFilesBookmarksDock = defineAsyncComponent(() => import("@/components/layout/SqlFilesBookmarksDock.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
 const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
@@ -557,6 +557,21 @@ watch(
 const sqlFileLocateRequest = ref<{ id: number; path: string } | null>(null);
 let sqlFileLocateRequestId = 0;
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
+const sqlFilesDockTab = ref<"files" | "bookmarks">(safeLocalStorageGet("dbx-sql-files-dock-tab") === "bookmarks" ? "bookmarks" : "files");
+watch(sqlFilesDockTab, (tab) => safeLocalStorageSet("dbx-sql-files-dock-tab", tab));
+function openBookmarksPanel() {
+  sqlFilesDockTab.value = "bookmarks";
+  isZenMode.value = false;
+  openRightSidebarPanel("sqlFile");
+}
+function toggleSqlFilesPanel() {
+  if (showSqlFilePanel.value && sqlFilesDockTab.value === "bookmarks") {
+    sqlFilesDockTab.value = "files";
+    return;
+  }
+  sqlFilesDockTab.value = "files";
+  toggleRightSidebarPanel("sqlFile");
+}
 watch(
   showSqlFilePanel,
   (open) => {
@@ -3900,6 +3915,7 @@ function locateSqlFile(tab: QueryTab) {
   isZenMode.value = false;
   openRightSidebarPanel("sqlFile");
   sqlFileLocateRequest.value = { id: ++sqlFileLocateRequestId, path };
+  sqlFilesDockTab.value = "files";
 }
 
 function finishSqlFileLocate(requestId: number) {
@@ -5714,7 +5730,8 @@ onUnmounted(() => {
           @toggle-ai="toggleRightSidebarPanel('ai')"
           @toggle-history="toggleRightSidebarPanel('history')"
           @toggle-sql-library="toggleRightSidebarPanel('sqlLibrary')"
-          @toggle-sql-file-panel="toggleRightSidebarPanel('sqlFile')"
+          @toggle-sql-file-panel="toggleSqlFilesPanel"
+          @open-bookmarks="openBookmarksPanel"
           @open-github="openGitHub"
           @open-settings="openSettings(showMcpSettingsUpdateBadge ? 'mcp' : 'appearance')"
           @open-driver-store="openDriverStorePage"
@@ -5927,7 +5944,7 @@ onUnmounted(() => {
                     @execute-in-new-result-tab="(tabId: string, override?: SqlExecutionOverride) => tryExecuteInNewResultTab(override, { tabId })"
                     @cancel="(tabId: string) => cancelActiveExecution(tabId)"
                     @explain="(tabId: string) => tryExplain(undefined, { tabId })"
-                    @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v)"
+                    @editor-update="(tabId: string, v: string) => queryStore.updateSql(tabId, v, 'editor')"
                     @editor-selection-change="
                       (tabId: string, v: string) => {
                         if (tabId === queryStore.activeTabId) selectedSql = v;
@@ -6129,7 +6146,7 @@ onUnmounted(() => {
             :style="{ width: sqlFilePanelWidth + 'px' }"
           >
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <SqlFilePanel :locate-request="sqlFileLocateRequest" @locate-handled="finishSqlFileLocate" @close="closeRightSidebarPanel('sqlFile')" />
+              <SqlFilesBookmarksDock v-model="sqlFilesDockTab" :locate-request="sqlFileLocateRequest" @locate-handled="finishSqlFileLocate" @close="closeRightSidebarPanel('sqlFile')" />
             </div>
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlFilePanelResize" />
           </div>

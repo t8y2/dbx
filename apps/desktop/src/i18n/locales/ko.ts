@@ -2402,6 +2402,14 @@ export default withEnglishFallback({
       drag: "드래그하여 이동",
       empty: "열 없음",
     },
+    bookmarks: {
+      workspaceTitle: "북마크",
+      workspaceSearch: "파일, SQL 텍스트 또는 줄 번호 검색",
+      workspaceEmpty: "열려 있는 모든 SQL 탭의 북마크가 여기에 표시됩니다. 줄 번호 옆의 북마크 여백을 클릭하여 추가하세요.",
+      line: "{line}행",
+      emptyLine: "(빈 줄)",
+      noMatches: "일치하는 북마크가 없습니다",
+    },
     gotoLine: {
       placeholder: "줄 번호",
       total: "총 {total}행",

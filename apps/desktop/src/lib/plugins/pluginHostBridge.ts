@@ -316,7 +316,7 @@ export interface PluginHostBridgeApi {
   /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
   receiveOsDrops?: boolean;
   /** Whether this host can subscribe to host observation events; presence gates the `observations` capability. */
-  subscribeHostObservations?(): Promise<() => void> | (() => void);
+  subscribeHostObservations?(onEvent: (event: PluginHostObservationEvent) => void): Promise<() => void> | (() => void);
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
   storageGet?(pluginId: string, key: string): Promise<unknown>;
   storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;

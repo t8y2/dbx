@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from "vitest";
-import { PluginHostBridge } from "./pluginHostBridge";
+import { PluginHostBridge, type PluginHostBridgeApi } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 import type { PluginHostObservationEvent } from "@/types/pluginObservation";
 
@@ -21,11 +21,11 @@ function messagesTarget(messages: unknown[]): Window {
   return { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
 }
 
-function minimalApi(extra: Record<string, unknown> = {}) {
+function minimalApi(extra: Partial<PluginHostBridgeApi> = {}): PluginHostBridgeApi {
   return {
-    invoke: () => Promise.resolve(),
+    invoke: <T = unknown>() => Promise.resolve(undefined as T),
     notify: () => Promise.resolve(),
-    sendBinary: () => {},
+    sendBinary: () => Promise.resolve(),
     readAsset: () => Promise.resolve({ contentType: "text/plain", dataBase64: "", etag: "" }),
     ...extra,
   };
@@ -68,11 +68,11 @@ describe("PluginHostBridge.forwardObservation", () => {
     const subscribingMessages: unknown[] = [];
     const subscribing = new PluginHostBridge(plugin(["host.observe:ai"]), workbench, {}, () => messagesTarget(subscribingMessages), minimalApi({ subscribeHostObservations: () => () => {} }));
     subscribing.sendInit();
-    expect(subscribingMessages.at(-1)).toMatchObject({ type: "init", capabilities: { observations: true } });
+    expect(subscribingMessages[subscribingMessages.length - 1]).toMatchObject({ type: "init", capabilities: { observations: true } });
 
     const plainMessages: unknown[] = [];
     const plain = new PluginHostBridge(plugin([]), workbench, {}, () => messagesTarget(plainMessages), minimalApi());
     plain.sendInit();
-    expect(plainMessages.at(-1)).toMatchObject({ type: "init", capabilities: { observations: false } });
+    expect(plainMessages[plainMessages.length - 1]).toMatchObject({ type: "init", capabilities: { observations: false } });
   });
 });

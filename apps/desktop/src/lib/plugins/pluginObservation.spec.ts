@@ -24,7 +24,7 @@ describe("pluginObservation", () => {
   });
 
   it("gates delivery on the declared permission only", () => {
-    const declared = new Set([PLUGIN_OBSERVATION_PERMISSIONS.queries]);
+    const declared = new Set<string>([PLUGIN_OBSERVATION_PERMISSIONS.queries]);
     const hasPermission = (permission: string) => declared.has(permission);
     expect(canObserveHostEvent(event("query.finished"), hasPermission)).toBe(true);
     expect(canObserveHostEvent(event("ai.tool_call_started"), hasPermission)).toBe(false);

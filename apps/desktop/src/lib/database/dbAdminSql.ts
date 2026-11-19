@@ -1,4 +1,4 @@
-import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
@@ -9,7 +9,7 @@ import { buildOceanbaseTableClone, type OceanbaseTableClone } from "./oceanbaseT
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
-  objectType: DatabaseObjectType;
+  objectType: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "EVENT" | "TRIGGER" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
   schema?: string | null;
   name: string;
   signature?: string | null;

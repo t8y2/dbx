@@ -113,7 +113,6 @@ import type {
   TreeNode,
   TriggerInfo,
 } from "@/types/database";
-import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -221,7 +220,7 @@ import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { COLUMN_NAME_COPY_SEPARATOR_VALUES } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
-import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { orderObjectBrowserDropRows, runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
 import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -686,6 +685,7 @@ const batchDropExecuting = ref(false);
 const batchDropProgress = ref({ completed: 0, total: 0 });
 const batchDropPreviewSql = ref("");
 const batchDropPreviewError = ref("");
+const batchDropPreviewPending = ref(false);
 const batchTriggerDropRequested = ref(false);
 const batchTriggerDropPreview = shallowRef<BrowserTriggerDropPreview>();
 const showBatchTruncateConfirm = ref(false);
@@ -1321,7 +1321,7 @@ const hasSelectedSchemaIndexes = computed(() => selectedTableRows.value.some((ro
 const hasSelectedTablesOnly = computed(() => selectedTableRows.value.length > 0 && selectedTableRows.value.every((row) => row.type === "TABLE"));
 const batchDropConfirmTitle = computed(() => (hasSelectedTablesOnly.value ? t("objects.confirmBatchDropTitle") : t("contextMenu.confirmBatchDropTitle")));
 const batchDropConfirmMessage = computed(() => (hasSelectedTablesOnly.value ? t("objects.confirmBatchDropMessage", { count: selectedTableCount.value }) : t("contextMenu.confirmBatchDropMessage", { count: selectedTableCount.value })));
-const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
+const canBatchDropCascade = computed(() => supportsDropTableCascade(effectiveDatabaseType.value) && selectedTableRows.value.some((row) => row.type === "TABLE"));
 const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
 
 // Column resizes change the scrollable content width, so the header's clamped
@@ -3648,21 +3648,14 @@ function openBatchDatabaseExport() {
   };
 }
 
-async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
-  const rows = [...selectedTableRows.value];
-  if (rows.length <= 1) return rows;
-
-  const fkResults = await Promise.all(rows.map((row) => (row.type === "TABLE" ? api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name, props.catalog).catch(() => [] as ForeignKeyInfo[]) : Promise.resolve([] as ForeignKeyInfo[]))));
-
-  const tablesWithFk: TableWithFk[] = rows.map((row, i) => ({
-    name: row.name,
-    schema: row.schema || selectedSchema.value,
-    foreignKeys: fkResults[i] ?? [],
-  }));
-
-  const sorted = sortTablesByFkDependency(tablesWithFk);
-  const nameToRow = new Map(rows.map((r) => [r.name, r]));
-  return sorted.map((t) => nameToRow.get(t.name)!).filter(Boolean);
+async function fetchBatchDropPlan() {
+  const connectionId = props.connection.id;
+  const database = props.database;
+  const catalog = props.catalog;
+  const schema = selectedSchema.value;
+  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
+  const rows = await orderObjectBrowserDropRows([...selectedTableRows.value], schema, (row) => api.listForeignKeys(connectionId, database, row.schema || schema || "", row.name, catalog).catch(() => [] as ForeignKeyInfo[]));
+  return Promise.all(rows.map(async (target) => ({ target, sql: await buildDropSqlForRow(target, { cascade: useCascade }) })));
 }
 
 interface BrowserTriggerDropPreview {
@@ -3672,7 +3665,7 @@ interface BrowserTriggerDropPreview {
   pinnedContext: ReturnType<typeof objectBrowserPinnedTreeNodeContext>;
   isCurrent: () => boolean;
 }
-let batchTriggerDropPreviewRequestId = 0;
+let batchDropPreviewRequestId = 0;
 
 function usesExactTriggerDrop(row: ObjectBrowserRow): boolean {
   return row.type === "TRIGGER" && (!!exactOracleTriggerMetadata(row.trigger) || !!oracleTriggerObjectReadOptions(props.connection, undefined, props.catalog));
@@ -3692,14 +3685,10 @@ async function prepareBrowserTriggerDrops(selected: readonly ObjectBrowserRow[],
     browserTriggerContext() === context &&
     (batch ? showBatchDropConfirm.value && [...selectedTableIds.value].sort().join("\n") === selection && (canBatchDropCascade.value && batchDropCascade.value) === cascade : showDropConfirm.value && dropTarget.value?.id === selected[0]?.id) &&
     expected.every((item) => rows.value.some((row) => row.id === item.id && (item.objectId === undefined || exactOracleTriggerMetadata(row.trigger)?.objectId === item.objectId)));
-  // Verify triggers before dropping a selected parent. The existing FK sorter
-  // still orders tables, with exact tuple keys instead of collapsing bare names.
-  const tables = selected.filter((row) => row.type === "TABLE");
-  const key = (schema: string | undefined | null, name: string) => JSON.stringify([schema ?? fixed.executionSchema, name]);
-  const tableIds = new Map(tables.map((row) => [key(row.schema, row.name), row.id]));
-  const foreignKeys = await Promise.all(tables.map((row) => api.listForeignKeys(fixed.connectionId, fixed.database, row.schema || fixed.executionSchema, row.name, fixed.catalog).catch(() => [] as ForeignKeyInfo[])));
-  const sortedTables = sortTablesByFkDependency(tables.map((row, index) => ({ name: row.id, foreignKeys: foreignKeys[index].map((fk) => ({ ...fk, ref_table: tableIds.get(key(fk.ref_schema ?? row.schema, fk.ref_table)) ?? "" })) })));
-  const ordered = [...selected.filter((row) => usesExactTriggerDrop(row)), ...sortedTables.map((table) => tables.find((row) => row.id === table.name)!), ...selected.filter((row) => row.type !== "TABLE" && !usesExactTriggerDrop(row))];
+  // Verify triggers before dropping a selected parent.
+  const triggers = selected.filter(usesExactTriggerDrop);
+  const otherRows = [...selected.filter((row) => row.type === "TABLE"), ...selected.filter((row) => row.type !== "TABLE" && !usesExactTriggerDrop(row))];
+  const ordered = [...triggers, ...(await orderObjectBrowserDropRows(otherRows, fixed.executionSchema, (row) => api.listForeignKeys(fixed.connectionId, fixed.database, row.schema || fixed.executionSchema, row.name, fixed.catalog).catch(() => [] as ForeignKeyInfo[])))];
   const entries = [];
   let engine: OracleTriggerDropBatchPlan["engine"] | undefined;
   for (const row of ordered) {
@@ -3798,29 +3787,26 @@ async function executeBrowserTriggerDrops(preview: BrowserTriggerDropPreview, ba
 }
 
 async function refreshBatchDropPreviewSql() {
-  if (batchTriggerDropRequested.value) {
-    const requestId = ++batchTriggerDropPreviewRequestId;
-    batchTriggerDropPreview.value = undefined;
-    batchDropPreviewSql.value = "";
-    batchDropPreviewError.value = "";
-    try {
+  const requestId = ++batchDropPreviewRequestId;
+  batchTriggerDropPreview.value = undefined;
+  batchDropPreviewSql.value = "";
+  batchDropPreviewError.value = "";
+  batchDropPreviewPending.value = true;
+  try {
+    if (batchTriggerDropRequested.value) {
       const prepared = await prepareBrowserTriggerDrops([...selectedTableRows.value], true);
-      if (requestId !== batchTriggerDropPreviewRequestId || !prepared.isCurrent()) return;
+      if (requestId !== batchDropPreviewRequestId || !prepared.isCurrent()) return;
       batchTriggerDropPreview.value = prepared;
       batchDropPreviewSql.value = prepared.plan.entries.map((entry) => entry.sql).join("\n\n");
-    } catch (error) {
-      if (requestId === batchTriggerDropPreviewRequestId) batchDropPreviewError.value = error instanceof Error ? error.message : String(error);
+    } else {
+      const plan = await fetchBatchDropPlan();
+      if (requestId === batchDropPreviewRequestId) batchDropPreviewSql.value = plan.map((entry) => entry.sql).join("\n");
     }
-    return;
+  } catch (error) {
+    if (requestId === batchDropPreviewRequestId) batchDropPreviewError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (requestId === batchDropPreviewRequestId) batchDropPreviewPending.value = false;
   }
-  const statements: string[] = [];
-  const sortedRows = await fetchSortedTableRowsForDrop();
-  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-  for (const row of sortedRows) {
-    const sql = await buildDropSqlForRow(row, { cascade: useCascade }).catch(() => "");
-    if (sql) statements.push(sql);
-  }
-  batchDropPreviewSql.value = statements.join("\n");
 }
 
 function requestBatchDropTables() {
@@ -3854,7 +3840,7 @@ function requestBatchDropTables() {
 }
 
 async function confirmBatchDropTables() {
-  if (batchDropExecuting.value) return;
+  if (batchDropExecuting.value || batchDropPreviewPending.value || batchDropPreviewError.value) return;
   if (selectedTableRows.value.some((row) => row.type === "INDEX")) return;
   if (batchTriggerDropRequested.value) {
     if (batchTriggerDropPreview.value) await executeBrowserTriggerDrops(batchTriggerDropPreview.value, true);
@@ -3866,16 +3852,10 @@ async function confirmBatchDropTables() {
   let targets: ObjectBrowserRow[] = [];
   const start = Date.now();
   try {
-    targets = await fetchSortedTableRowsForDrop();
-    if (targets.length === 0) return;
+    const plan = await fetchBatchDropPlan();
+    if (plan.length === 0) return;
+    targets = plan.map(({ target }) => target);
     batchDropProgress.value = { completed: 0, total: targets.length };
-    const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    const plan = await Promise.all(
-      targets.map(async (target) => ({
-        target,
-        sql: await buildDropSqlForRow(target, { cascade: useCascade }),
-      })),
-    );
     const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
     batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
     const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
@@ -6828,7 +6808,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
     <div v-if="selectedTableCount > 0 && supportsBatchTableActions" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
-        {{ t("objects.selectedTables", { count: selectedTableCount }) }}
+        {{ t(hasSelectedTablesOnly ? "objects.selectedTables" : "objects.selectedObjects", { count: selectedTableCount }) }}
       </div>
       <Button v-if="supportsBatchTableActions && !hasSelectedSchemaIndexes" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
@@ -7642,12 +7622,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :sql="batchDropDisplaySql"
     :confirm-label="t('objects.dropSelected')"
     :loading="batchDropExecuting && !batchTriggerDropRequested"
-    :confirm-disabled="batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy)"
+    :confirm-disabled="batchDropPreviewPending || !!batchDropPreviewError || (batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy))"
     :close-on-confirm="false"
     @confirm="confirmBatchDropTables"
   >
     <template #options>
       <p v-if="batchDropPreviewError" role="alert" class="mb-3 text-sm text-destructive">{{ batchDropPreviewError }}</p>
+      <p v-if="selectedTableRows.some((row) => row.type === 'PACKAGE')" class="mb-3 text-sm text-muted-foreground">{{ t("objects.dropPackageBodyHint") }}</p>
       <p v-if="batchTriggerDropPreview" class="mb-3 text-sm text-muted-foreground">{{ t("oracleTrigger.executionSchema") }}: {{ batchTriggerDropPreview.plan.target.executionSchema }}</p>
       <div v-if="batchDropExecuting" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
         <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">

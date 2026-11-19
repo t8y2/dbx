@@ -7179,6 +7179,8 @@ export default {
     selectedTables: "{count} tables selected",
     exportSelected: "Export selected",
     dropSelected: "Drop selected",
+    selectedObjects: "{count} objects selected",
+    dropPackageBodyHint: "Dropping a package specification also drops its body, if present.",
     truncateSelected: "Truncate selected",
     clearSelection: "Clear selection",
     confirmBatchDropTitle: "Drop Selected Tables",

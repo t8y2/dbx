@@ -5524,6 +5524,8 @@ export default withEnglishFallback({
     selectedTables: "已選擇 {count} 張資料表",
     exportSelected: "匯出所選",
     dropSelected: "刪除所選",
+    selectedObjects: "已選擇 {count} 個物件",
+    dropPackageBodyHint: "刪除套件規格時，也會刪除已有的套件主體。",
     truncateSelected: "截斷所選",
     clearSelection: "清空選擇",
     confirmBatchDropTitle: "刪除所選資料表",

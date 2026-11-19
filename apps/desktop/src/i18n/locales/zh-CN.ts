@@ -7549,6 +7549,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "SQL Server 自增仅支持 tinyint、smallint、int、bigint、decimal/numeric(小数位为 0)",
   },
   diagram: {
+    addTables: "添加表",
+    showMoreFields: "展开其余 {count} 个字段",
+    collapseFields: "收起字段",
     title: "关系图",
     open: "查看关系图",
     selectConnection: "选择连接",

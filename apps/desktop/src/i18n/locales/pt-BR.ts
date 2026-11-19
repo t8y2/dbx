@@ -6417,6 +6417,9 @@ export default withEnglishFallback({
     title: "Editar estrutura da tabela",
   },
   diagram: {
+    addTables: "Adicionar tabelas",
+    showMoreFields: "Mostrar mais {count} campos",
+    collapseFields: "Recolher campos",
     title: "Diagrama de relacionamentos",
     open: "Ver diagrama",
     selectConnection: "Selecionar conexão",

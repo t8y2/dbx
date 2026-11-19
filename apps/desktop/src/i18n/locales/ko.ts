@@ -6689,6 +6689,9 @@ export default withEnglishFallback({
     title: "테이블 구조 편집",
   },
   diagram: {
+    addTables: "테이블 추가",
+    showMoreFields: "필드 {count}개 더 보기",
+    collapseFields: "필드 접기",
     title: "관계 다이어그램",
     open: "다이어그램 보기",
     selectConnection: "연결 선택",

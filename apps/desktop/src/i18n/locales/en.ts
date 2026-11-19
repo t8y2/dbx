@@ -7579,6 +7579,9 @@ export default {
     sqlServerIdentityTypeHint: "SQL Server identity only supports tinyint, smallint, int, bigint, and decimal/numeric with scale 0",
   },
   diagram: {
+    addTables: "Add tables",
+    showMoreFields: "Show {count} more fields",
+    collapseFields: "Collapse fields",
     title: "Relationship Diagram",
     open: "View Diagram",
     selectConnection: "Select connection",

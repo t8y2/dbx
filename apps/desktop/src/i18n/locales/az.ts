@@ -5200,6 +5200,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "SQL Server identifikatoru yalnız tinyint, smallint, int, bigint və kəsr hissəsində 0 rəqəm olan decimal/numeric növlərini dəstəkləyir",
   },
   diagram: {
+    addTables: "Cədvəllər əlavə et",
+    showMoreFields: "Daha {count} sahə göstər",
+    collapseFields: "Sahələri yığ",
     title: "Əlaqələr diaqramı",
     open: "Diaqrama bax",
     selectConnection: "Əlaqə seç",

@@ -7438,6 +7438,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "Identity ของ SQL Server รองรับเฉพาะ tinyint, smallint, int, bigint และ decimal/numeric ที่มี Scale 0",
   },
   diagram: {
+    addTables: "เพิ่มตาราง",
+    showMoreFields: "แสดงอีก {count} ฟิลด์",
+    collapseFields: "ย่อฟิลด์",
     title: "Relationship Diagram",
     open: "ดู Diagram",
     selectConnection: "เลือกการเชื่อมต่อ",

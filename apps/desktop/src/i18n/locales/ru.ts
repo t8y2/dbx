@@ -7179,6 +7179,9 @@ export default withEnglishFallback({
     title: "Редактировать структуру таблицы",
   },
   diagram: {
+    addTables: "Добавить таблицы",
+    showMoreFields: "Показать ещё {count} полей",
+    collapseFields: "Свернуть поля",
     title: "Диаграмма связей",
     open: "Открыть диаграмму",
     selectConnection: "Выберите подключение",

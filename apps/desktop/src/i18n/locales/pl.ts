@@ -5880,6 +5880,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "Kolumny Identity w SQL Server obsługują tylko tinyint, smallint, int, bigint oraz decimal/numeric ze skalą 0",
   },
   diagram: {
+    addTables: "Dodaj tabele",
+    showMoreFields: "Pokaż jeszcze {count} pól",
+    collapseFields: "Zwiń pola",
     title: "Aktualizacja zabezpieczeń danych",
     open: "Wyświetl diagram",
     selectConnection: "Wybierz połączenie",

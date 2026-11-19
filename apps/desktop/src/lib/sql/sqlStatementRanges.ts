@@ -21,6 +21,21 @@ export interface MysqlDelimiterCommand {
   delimiter: string;
 }
 
+export function mysqlDelimiterAt(commands: readonly MysqlDelimiterCommand[] | undefined, position: number): string {
+  if (commands) {
+    for (let index = commands.length - 1; index >= 0; index -= 1) {
+      const command = commands[index];
+      if (command.to <= position) return command.delimiter;
+    }
+  }
+  return ";";
+}
+
+export function mysqlDelimiterPrefixAt(commands: readonly MysqlDelimiterCommand[] | undefined, position: number): string {
+  const delimiter = mysqlDelimiterAt(commands, position);
+  return delimiter === ";" ? "" : `DELIMITER ${delimiter}\n`;
+}
+
 const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
 
 function isHttpJsonRestDatabaseType(databaseType?: DatabaseType): boolean {

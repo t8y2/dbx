@@ -1046,7 +1046,8 @@ function executeScriptFromContextPosition() {
   const position = contextMenuPosition.value ?? currentView.state.selection.main.head;
   const cache = executableStatementRangeCacheForDoc(executableStatementRangeCache, doc, statementDatabaseType(), sqlStatementParameterOptions());
   executableStatementRangeCache = cache;
-  const start = cache.ranges.findIndex((range) => range.to >= position);
+  const currentStatement = executableStatementRangeAtCursor(cache, position);
+  const start = currentStatement ? cache.ranges.indexOf(currentStatement) : cache.ranges.findIndex((range) => range.to >= position);
   if (start < 0) {
     toast(t("editor.noExecutableStatementAtCursor"), 3000);
     return;

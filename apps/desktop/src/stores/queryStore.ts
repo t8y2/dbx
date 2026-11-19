@@ -132,7 +132,7 @@ import { appendIndexedResultCells, remapIndexedResultCells, appendLargeValueCell
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
-import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, stripMysqlClientDisplayCommand } from "@/lib/sql/sqlStatementRanges";
+import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, stripMysqlClientDisplayCommand, type MysqlDelimiterCommand } from "@/lib/sql/sqlStatementRanges";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, switchesDatabaseWithUseStatement, useDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
 import { classifySqlRisk } from "@/lib/sql/sqlRisk";
@@ -646,13 +646,15 @@ function clearLiveBatchSqlExecution(tab: QueryTab, executionId: string) {
 }
 
 function createBatchSqlExecution(executionId: string, editorSql: string, submittedSql: string, databaseType: DatabaseType | undefined, sourceOffset: number | undefined, executionTarget: MultiDbExecutionTarget, parameterOptions?: SqlParameterOptions): BatchSqlExecution | undefined {
-  const statements = databaseType === "mongodb" ? splitMongoCommandRanges(submittedSql).map(({ from, to, text }) => ({ from, to, sql: text })) : splitSqlStatementRanges(submittedSql, databaseType, parameterOptions);
+  const mysqlDelimiterCommands: MysqlDelimiterCommand[] = [];
+  const statements = databaseType === "mongodb" ? splitMongoCommandRanges(submittedSql).map(({ from, to, text }) => ({ from, to, sql: text })) : splitSqlStatementRanges(submittedSql, databaseType, parameterOptions, mysqlDelimiterCommands);
   if (statements.length === 0) return undefined;
   if (statements.length > 1 && databaseType && NON_STREAMING_BATCH_DATABASE_TYPES.has(databaseType)) return undefined;
   const offset = sourceOffset ?? 0;
   return {
     executionId,
     submittedSql,
+    ...(mysqlDelimiterCommands.length > 0 ? { mysqlDelimiterCommands } : {}),
     editorFingerprint: sqlTextFingerprint(editorSql),
     sourceOffset: offset,
     completed: 0,

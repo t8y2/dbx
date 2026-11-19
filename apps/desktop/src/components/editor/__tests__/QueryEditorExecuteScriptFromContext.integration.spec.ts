@@ -96,4 +96,31 @@ describe("QueryEditor execute script from a MySQL context position", () => {
     expect(request.selectedSql).toBe(`DELIMITER //\n${sql.slice(sql.indexOf(procedure))}`);
     expectMappedStatements(request, sql, [procedure.slice(0, -3), "SELECT 2"]);
   });
+
+  it.each([
+    ["the whitespace before a semicolon", " ;", 0, ["SELECT 1", "SELECT 2"]],
+    ["the semicolon", ";", 0, ["SELECT 1", "SELECT 2"]],
+    ["a trailing comment", "-- first tail", 5, ["SELECT 1", "SELECT 2"]],
+    ["the last trailing comment", "# last tail", 5, ["SELECT 2"]],
+    ["the blank line between statements", "\n\n", 1, ["SELECT 2"]],
+  ])("starts at the expected statement when right-clicking %s", async (_name, token, offset, expected) => {
+    const sql = "SELECT 1   ; -- first tail\n\nSELECT 2   ; # last tail";
+    const request = await executeFromContext(sql, sql.indexOf(token) + offset);
+    expect(request.selectedSql).toBe(sql.slice(sql.indexOf(expected[0])));
+    expectMappedStatements(request, sql, expected);
+  });
+
+  it("starts at the next statement when right-clicking its text on the same line", async () => {
+    const sql = "SELECT 1; SELECT 2;";
+    const request = await executeFromContext(sql, sql.indexOf("SELECT 2"));
+    expect(request.selectedSql).toBe("SELECT 2;");
+    expectMappedStatements(request, sql, ["SELECT 2"]);
+  });
+
+  it("keeps the routine when right-clicking its custom delimiter and trailing comment on the next line", async () => {
+    const sql = ["SELECT 'before';", "DELIMITER //", procedure.slice(0, -3), "  // -- routine tail", "DELIMITER ;", ordinary].join("\n");
+    const request = await executeFromContext(sql, sql.indexOf("routine tail"));
+    expect(request.selectedSql).toBe(`DELIMITER //\n${sql.slice(sql.indexOf("CREATE PROCEDURE"))}`);
+    expectMappedStatements(request, sql, [procedure.slice(0, -3), "SELECT 2"]);
+  });
 });

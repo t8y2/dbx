@@ -1,7 +1,7 @@
 import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { executableStatementRanges, findSqlBlockCommentEnd, startsHashLineComment, statementParsingDatabaseType, type MysqlDelimiterCommand, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, findSqlBlockCommentEnd, mysqlDelimiterAt, mysqlDelimiterPrefixAt, startsHashLineComment, statementParsingDatabaseType, type MysqlDelimiterCommand, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
@@ -103,18 +103,9 @@ export function executableScriptFromStatement(cache: ExecutableStatementRangeCac
   if (!first) return null;
 
   const line = cache.doc.lineAt(position);
-  let from = first.from;
-  let activeDelimiter = ";";
-  for (const command of cache.mysqlDelimiterCommands) {
-    if (command.to > first.from) break;
-    if (command.from >= line.from && command.to <= line.to) {
-      from = line.from;
-      break;
-    }
-    activeDelimiter = command.delimiter;
-  }
-
-  const prefix = from === first.from && activeDelimiter !== ";" ? `DELIMITER ${activeDelimiter}\n` : "";
+  const clickedDirective = cache.mysqlDelimiterCommands.some((command) => command.from >= line.from && command.to <= line.to && command.to <= first.from);
+  let from = clickedDirective ? line.from : first.from;
+  const prefix = clickedDirective ? "" : mysqlDelimiterPrefixAt(cache.mysqlDelimiterCommands, first.from);
   const sql = prefix + cache.doc.sliceString(from);
   // Place the synthetic directive before the suffix so each executable
   // statement still maps to its original editor offset.
@@ -184,7 +175,8 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
 
     const next = cache.ranges[index + 1];
     if (pos > range.to && (!next || pos < next.from)) {
-      if (cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos)) return range;
+      const delimiter = mysqlDelimiterAt(cache.mysqlDelimiterCommands, range.from);
+      if (cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos, delimiter)) return range;
       if (isCursorOnRangeEndLine(cache.doc, pos, range.to)) return range;
     }
   }

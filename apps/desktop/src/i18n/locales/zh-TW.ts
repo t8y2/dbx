@@ -12422,6 +12422,7 @@ export default withEnglishFallback({
     searchConfigurations: "搜尋設定項目名稱",
     configuration: "Broker 設定",
     noConfigurations: "沒有符合的設定項目",
+    configurationUnsupported: "此 Kafka Broker 不支援查詢設定。",
     configName: "名稱",
     configValue: "值",
     configSource: "來源",

@@ -11592,6 +11592,7 @@ export default withEnglishFallback({
     searchConfigurations: "Szukaj nazw ustawień",
     configuration: "Konfiguracja brokera",
     noConfigurations: "Brak pasujących ustawień",
+    configurationUnsupported: "Ten broker Kafka nie obsługuje odczytu konfiguracji.",
     configName: "Nazwa",
     configValue: "Wartość",
     configSource: "Źródło",

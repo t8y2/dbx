@@ -946,7 +946,15 @@ public final class KafkaAgent {
             .all().get(timeout, TimeUnit.MILLISECONDS).get(resource));
     }
 
-    static Object topicConfigResult(TopicConfigLoader configLoader) throws Exception {
+    static Map<String, Object> topicConfigResult(ConfigLoader configLoader) throws Exception {
+        return describeConfigResult(configLoader, "Topic");
+    }
+
+    static Map<String, Object> brokerConfigResult(ConfigLoader configLoader) throws Exception {
+        return describeConfigResult(configLoader, "Broker");
+    }
+
+    private static Map<String, Object> describeConfigResult(ConfigLoader configLoader, String resourceLabel) throws Exception {
         Config config;
         try {
             config = configLoader.load();
@@ -959,7 +967,7 @@ public final class KafkaAgent {
             unsupported.put("configSupported", false);
             unsupported.put(
                 "unsupportedReason",
-                "Topic configuration is unavailable because this Kafka broker does not support DescribeConfigs."
+                resourceLabel + " configuration is unavailable because this Kafka broker does not support DescribeConfigs."
             );
             return unsupported;
         }
@@ -972,9 +980,9 @@ public final class KafkaAgent {
         if (id < 0) throw new IllegalArgumentException("Broker ID must be non-negative");
         var resource = new ConfigResource(ConfigResource.Type.BROKER, Integer.toString(id));
         int timeout = requestTimeout(params);
-        Config config = requireAdmin().describeConfigs(Collections.singletonList(resource))
-            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource);
-        return configEntries(config);
+        AdminClient admin = requireAdmin();
+        return brokerConfigResult(() -> admin.describeConfigs(Collections.singletonList(resource))
+            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource));
     }
 
     static Map<String, Object> configEntries(Config config) {
@@ -992,7 +1000,7 @@ public final class KafkaAgent {
     }
 
     @FunctionalInterface
-    interface TopicConfigLoader {
+    interface ConfigLoader {
         Config load() throws Exception;
     }
 

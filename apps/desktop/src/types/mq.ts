@@ -332,6 +332,8 @@ export interface BacklogStats {
 
 export interface KafkaBrokerConfig {
   configs: Record<string, { value: string | null; source: string; isSensitive: boolean; isReadOnly: boolean; isDefault: boolean }>;
+  configSupported?: boolean;
+  unsupportedReason?: string;
 }
 
 export interface ClusterInfo {

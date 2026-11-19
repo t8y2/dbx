@@ -12,13 +12,14 @@ import type { KafkaBrokerConfig } from "@/types/mq";
 const props = defineProps<{ connectionId: string; brokerId: number | null }>();
 const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
-const configs = ref<KafkaBrokerConfig["configs"]>();
+const result = ref<KafkaBrokerConfig>();
+const unsupported = computed(() => result.value?.configSupported === false);
 const filter = ref("");
 const error = ref("");
 const refresh = ref(0);
 const visible = computed(() => {
   const query = filter.value.trim().toLowerCase();
-  return Object.entries(configs.value ?? {})
+  return Object.entries(result.value?.configs ?? {})
     .filter(([key]) => key.toLowerCase().includes(query))
     .sort(([a], [b]) => a.localeCompare(b));
 });
@@ -37,12 +38,12 @@ watch(
     onCleanup(() => {
       active = false;
     });
-    configs.value = undefined;
+    result.value = undefined;
     error.value = "";
     if (brokerId === null) return;
     try {
       const response = await mqGetBrokerConfig(connectionId, brokerId);
-      if (active) configs.value = response.configs;
+      if (active) result.value = response;
     } catch (cause) {
       if (active) error.value = formatError(cause);
     }
@@ -66,11 +67,15 @@ watch(
         <DialogDescription>{{ t("mqBroker.nodeId") }}: {{ brokerId }}</DialogDescription>
       </DialogHeader>
       <div class="flex items-center gap-2">
-        <Input v-model="filter" :placeholder="t('mqBroker.searchConfigurations')" :aria-label="t('mqBroker.searchConfigurations')" />
-        <Button variant="outline" size="icon" :title="t('common.refresh')" :aria-label="t('common.refresh')" :disabled="!configs && !error" @click="refresh++"><RefreshCw class="h-4 w-4" /></Button>
+        <Input v-model="filter" :placeholder="t('mqBroker.searchConfigurations')" :aria-label="t('mqBroker.searchConfigurations')" :disabled="unsupported" />
+        <Button variant="outline" size="icon" :title="t('common.refresh')" :aria-label="t('common.refresh')" :disabled="!result && !error" @click="refresh++"><RefreshCw class="h-4 w-4" /></Button>
       </div>
       <p v-if="error" role="alert" class="break-words text-sm text-destructive">{{ error }}</p>
-      <p v-else-if="!configs" role="status" class="text-sm text-muted-foreground">{{ t("common.loading") }}</p>
+      <p v-else-if="!result" role="status" class="text-sm text-muted-foreground">{{ t("common.loading") }}</p>
+      <div v-else-if="unsupported" role="status" class="space-y-1 break-words text-sm text-muted-foreground">
+        <p>{{ t("mqBroker.configurationUnsupported") }}</p>
+        <p v-if="result.unsupportedReason" class="text-xs">{{ result.unsupportedReason }}</p>
+      </div>
       <p v-else-if="!visible.length" class="text-sm text-muted-foreground">{{ t("mqBroker.noConfigurations") }}</p>
       <div v-else class="min-h-0 overflow-auto">
         <table class="w-full table-fixed text-left text-xs">

@@ -10698,6 +10698,7 @@ export default withEnglishFallback({
     searchConfigurations: "Konfiqurasiya adını axtar",
     configuration: "Broker konfiqurasiyası",
     noConfigurations: "Uyğun konfiqurasiya qeydi yoxdur",
+    configurationUnsupported: "Bu Kafka brokeri konfiqurasiyaya baxmağı dəstəkləmir.",
     configName: "Ad",
     configValue: "Dəyər",
     configSource: "Mənbə",

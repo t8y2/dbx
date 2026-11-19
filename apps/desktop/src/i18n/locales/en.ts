@@ -13526,6 +13526,7 @@ export default {
     searchConfigurations: "Search configuration names",
     configuration: "Broker configuration",
     noConfigurations: "No matching configuration entries",
+    configurationUnsupported: "This Kafka broker does not support configuration lookup.",
     configName: "Name",
     configValue: "Value",
     configSource: "Source",

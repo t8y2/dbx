@@ -10604,6 +10604,7 @@ export default withEnglishFallback({
     searchConfigurations: "Yapılandırma adlarını ara",
     configuration: "Broker yapılandırması",
     noConfigurations: "Eşleşen yapılandırma kaydı yok",
+    configurationUnsupported: "Bu Kafka aracısı yapılandırma sorgulamayı desteklemiyor.",
     configName: "Ad",
     configValue: "Değer",
     configSource: "Kaynak",

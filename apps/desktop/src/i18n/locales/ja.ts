@@ -12473,6 +12473,7 @@ export default withEnglishFallback({
     searchConfigurations: "設定名を検索",
     configuration: "ブローカー設定",
     noConfigurations: "一致する設定項目がありません",
+    configurationUnsupported: "この Kafka ブローカーは設定の取得に対応していません。",
     configName: "名前",
     configValue: "値",
     configSource: "ソース",

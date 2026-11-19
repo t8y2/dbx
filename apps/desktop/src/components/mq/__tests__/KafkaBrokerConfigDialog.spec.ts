@@ -61,3 +61,26 @@ it("keeps the selected broker's result when an earlier request finishes later", 
   await Promise.resolve();
   expect(document.body.textContent).not.toContain("old broker");
 });
+
+it("shows an unsupported status for legacy brokers and clears it when switching brokers", async () => {
+  fetchConfig.mockResolvedValueOnce({ configs: {}, configSupported: false, unsupportedReason: "DescribeConfigs is not supported" });
+  fetchConfig.mockResolvedValueOnce({ configs: { "num.partitions": entry("4") } });
+  const props = mount();
+  props.brokerId = 1;
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"] [role="status"]')?.textContent).toContain(en.mqBroker.configurationUnsupported));
+  expect(document.body.textContent).toContain("DescribeConfigs is not supported");
+  expect(document.querySelector('[role="dialog"] [role="alert"]')).toBeNull();
+  expect(document.body.textContent).not.toContain(en.mqBroker.noConfigurations);
+
+  props.brokerId = 2;
+  await vi.waitFor(() => expect(document.body.textContent).toContain("num.partitions"));
+  expect(document.body.textContent).not.toContain(en.mqBroker.configurationUnsupported);
+});
+
+it.each(["permission denied", "network disconnected", "request timed out"])("shows an ordinary error for %s", async (message) => {
+  fetchConfig.mockRejectedValueOnce(new Error(message));
+  const props = mount();
+  props.brokerId = 0;
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"] [role="alert"]')?.textContent).toContain(message));
+  expect(document.body.textContent).not.toContain(en.mqBroker.configurationUnsupported);
+});

@@ -13672,6 +13672,7 @@ export default withEnglishFallback({
     searchConfigurations: "Поиск по именам параметров",
     configuration: "Конфигурация брокера",
     noConfigurations: "Нет подходящих параметров",
+    configurationUnsupported: "Этот брокер Kafka не поддерживает просмотр конфигурации.",
     configName: "Имя",
     configValue: "Значение",
     configSource: "Источник",

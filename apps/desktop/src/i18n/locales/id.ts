@@ -11539,6 +11539,7 @@ export default withEnglishFallback({
     searchConfigurations: "Cari nama konfigurasi",
     configuration: "Konfigurasi broker",
     noConfigurations: "Tidak ada entri konfigurasi yang cocok",
+    configurationUnsupported: "Broker Kafka ini tidak mendukung penayangan konfigurasi.",
     configName: "Nama",
     configValue: "Nilai",
     configSource: "Sumber",

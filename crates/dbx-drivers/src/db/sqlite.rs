@@ -586,6 +586,18 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
 }
 
 fn is_network_path(path: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        // Canonical Windows drive paths start with \\?\ but are not UNC paths.
+        if matches!(
+            Path::new(path).components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        ) {
+            return false;
+        }
+    }
     path.starts_with("\\\\") || path.starts_with("//") || path.contains("wsl.localhost") || path.contains("wsl$")
 }
 
@@ -961,6 +973,27 @@ mod tests {
         let path = r"\\wsl.localhost\Ubuntu\home\app\data.db";
 
         assert_eq!(sqlite_network_path_uri(path), r"file:\\wsl.localhost\Ubuntu\home\app\data.db?nolock=1");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opens_database_in_canonical_windows_data_dir() {
+        use std::path::{Component, Prefix};
+
+        let dir = tempfile::tempdir().unwrap();
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        assert!(matches!(
+            canonical_dir.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        ));
+        let path = canonical_dir.join("dbx.db");
+        let handle = open_sqlite_handle(path.to_str().unwrap(), true, None, Vec::new()).unwrap();
+        handle
+            .with_connection(|conn| conn.execute_batch("CREATE TABLE example (id INTEGER)").map_err(|e| e.to_string()))
+            .unwrap();
+        drop(handle);
+
+        assert!(path_has_sqlite_header(&dir.path().join("dbx.db")).unwrap());
     }
 
     #[test]

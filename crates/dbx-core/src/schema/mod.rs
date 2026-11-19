@@ -12901,7 +12901,12 @@ pub fn oracle_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourc
         db::ObjectSourceKind::Sequence => "SEQUENCE",
         db::ObjectSourceKind::Synonym => "SYNONYM",
         db::ObjectSourceKind::Job => "",
-        db::ObjectSourceKind::Package => "PACKAGE",
+        // `PACKAGE` makes DBMS_METADATA emit the specification *and* the body as two
+        // CREATE statements. The editor would then hold two objects, which every later
+        // step treats as one: saving failed with "must contain exactly one complete
+        // object definition", and the readback comparison could never match.
+        // `PACKAGE_SPEC` is the specification alone, matching `source_integrity_sql`.
+        db::ObjectSourceKind::Package => "PACKAGE_SPEC",
         db::ObjectSourceKind::PackageBody => "PACKAGE_BODY",
         db::ObjectSourceKind::Type => "TYPE",
         db::ObjectSourceKind::TypeBody => "TYPE_BODY",
@@ -15474,9 +15479,16 @@ mod object_source_tests {
             oracle_object_source_sql("HR", "PAYROLL", &ObjectSourceKind::PackageBody),
             "SELECT DBMS_METADATA.GET_DDL('PACKAGE_BODY', 'PAYROLL', 'HR') FROM DUAL"
         );
+        // A package specification must be fetched as PACKAGE_SPEC: plain `PACKAGE`
+        // returns the specification and the body together, which the editor and the
+        // save path both treat as a single object.
         assert_eq!(
             oracle_object_source_sql("", "PAYROLL", &ObjectSourceKind::Package),
-            "SELECT DBMS_METADATA.GET_DDL('PACKAGE', 'PAYROLL') FROM DUAL"
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_SPEC', 'PAYROLL') FROM DUAL"
+        );
+        assert_eq!(
+            oracle_object_source_sql("HR", "PAYROLL", &ObjectSourceKind::Package),
+            "SELECT DBMS_METADATA.GET_DDL('PACKAGE_SPEC', 'PAYROLL', 'HR') FROM DUAL"
         );
         assert_eq!(
             oracle_object_source_sql("HR", "ORDER_SEQ", &ObjectSourceKind::Sequence),

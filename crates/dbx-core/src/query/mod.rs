@@ -4283,7 +4283,14 @@ fn batch_terminal_status(
     cancelled: bool,
 ) -> (&'static str, usize, Option<String>) {
     match outcome {
-        Err(error) => ("error", 0, Some(error.to_string())),
+        Err(error) => {
+            // A cancel can surface as an error (for example
+            // `wait_for_result_opt` while switching the MySQL catalog context)
+            // and the cancellation token may be the only evidence, so check
+            // both before reporting a failure.
+            let cancelled = cancelled || matches!(error, QueryExecutionError::Canceled { .. });
+            (if cancelled { "cancelled" } else { "error" }, 0, Some(error.to_string()))
+        }
         Ok(results) => {
             let failed = results.iter().filter(|result| result.execution_error).count();
             let error = results
@@ -15529,6 +15536,20 @@ mod batch_observation_tests {
         assert_eq!(status, "error");
         assert_eq!(failed, 1);
         assert!(error.is_some());
+    }
+
+    /// A cancel delivered as an error (for example during the MySQL catalog
+    /// switch) must report `cancelled`; a plain error stays an error.
+    #[test]
+    fn batch_status_reports_cancelled_for_error_outcomes() {
+        let canceled: Result<Vec<ExecuteMultiResult>, QueryExecutionError> = Err(canceled_query_execution_error());
+        assert_eq!(batch_terminal_status(&canceled, false).0, "cancelled");
+
+        let failed: Result<Vec<ExecuteMultiResult>, QueryExecutionError> = Err("boom".to_string().into());
+        assert_eq!(batch_terminal_status(&failed, false).0, "error");
+
+        // A string-converted cancel is only visible through the token.
+        assert_eq!(batch_terminal_status(&failed, true).0, "cancelled");
     }
 
     #[test]

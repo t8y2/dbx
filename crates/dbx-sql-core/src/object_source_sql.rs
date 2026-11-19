@@ -715,6 +715,13 @@ pub fn fingerprint_oracle_routine_object_source(input: EditableObjectSourceSqlIn
                 Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
             )
         })
+        // DBMS_METADATA.GET_DDL spells out the default `EDITIONABLE` clause, ALL_SOURCE never
+        // stores it. Comparing token text would then call an unchanged package a mismatch
+        // purely because it was read through a different catalog, which is what made a
+        // save report a definition mismatch right after committing its own DDL. Only the
+        // default is ignored: NONEDITIONABLE is a real property of the object and must keep
+        // distinguishing definitions.
+        .filter(|token| !token_unquoted_word_is(&token.token, "EDITIONABLE"))
         .collect::<Vec<_>>();
     let last_statement_token = tokens.iter().rposition(|token| {
         !matches!(

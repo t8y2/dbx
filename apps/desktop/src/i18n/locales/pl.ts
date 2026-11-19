@@ -11596,6 +11596,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Czas wygaśnięcia musi być większy niż 0 dni",
   },
   mqBroker: {
+    searchConfigurations: "Szukaj nazw ustawień",
+    configuration: "Konfiguracja brokera",
+    noConfigurations: "Brak pasujących ustawień",
+    configurationUnsupported: "Ten broker Kafka nie obsługuje odczytu konfiguracji.",
+    configName: "Nazwa",
+    configValue: "Wartość",
+    configSource: "Źródło",
     title: "Aktualizacja zabezpieczeń danych",
     autoRefresh: "Automatyczne odświeżanie",
     refreshInterval5s: "5s",

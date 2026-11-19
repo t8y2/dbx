@@ -13684,6 +13684,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Срок действия должен быть больше 0 дней",
   },
   mqBroker: {
+    searchConfigurations: "Поиск по именам параметров",
+    configuration: "Конфигурация брокера",
+    noConfigurations: "Нет подходящих параметров",
+    configurationUnsupported: "Этот брокер Kafka не поддерживает просмотр конфигурации.",
+    configName: "Имя",
+    configValue: "Значение",
+    configSource: "Источник",
     title: "Кластер брокеров",
     autoRefresh: "Автообновление",
     refreshInterval5s: "5 с",

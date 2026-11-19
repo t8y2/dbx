@@ -12434,6 +12434,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "有效期必須大於 0 天",
   },
   mqBroker: {
+    searchConfigurations: "搜尋設定項目名稱",
+    configuration: "Broker 設定",
+    noConfigurations: "沒有符合的設定項目",
+    configurationUnsupported: "此 Kafka Broker 不支援查詢設定。",
+    configName: "名稱",
+    configValue: "值",
+    configSource: "來源",
     title: "Broker 叢集",
     autoRefresh: "自動重新整理",
     refreshInterval5s: "5 秒",

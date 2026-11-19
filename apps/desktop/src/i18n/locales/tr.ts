@@ -10608,6 +10608,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Sona erme 0 günden büyük olmalıdır",
   },
   mqBroker: {
+    searchConfigurations: "Yapılandırma adlarını ara",
+    configuration: "Broker yapılandırması",
+    noConfigurations: "Eşleşen yapılandırma kaydı yok",
+    configurationUnsupported: "Bu Kafka aracısı yapılandırma sorgulamayı desteklemiyor.",
+    configName: "Ad",
+    configValue: "Değer",
+    configSource: "Kaynak",
     title: "Broker kümesi",
     autoRefresh: "Otomatik yenile",
     refreshInterval5s: "5 sn",

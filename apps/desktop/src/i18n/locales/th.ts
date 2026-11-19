@@ -14046,6 +14046,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "วันหมดอายุต้องมากกว่า 0 วัน",
   },
   mqBroker: {
+    searchConfigurations: "ค้นหาชื่อการกำหนดค่า",
+    configuration: "การกำหนดค่าโบรกเกอร์",
+    noConfigurations: "ไม่พบรายการกำหนดค่าที่ตรงกัน",
+    configurationUnsupported: "โบรกเกอร์ Kafka นี้ไม่รองรับการเรียกดูการกำหนดค่า",
+    configName: "ชื่อ",
+    configValue: "ค่า",
+    configSource: "ที่มา",
     title: "Broker Cluster",
     autoRefresh: "รีเฟรชอัตโนมัติ",
     refreshInterval5s: "5 วินาที",

@@ -13538,6 +13538,13 @@ export default {
     expiryMustBePositive: "Expiry must be greater than 0 days",
   },
   mqBroker: {
+    searchConfigurations: "Search configuration names",
+    configuration: "Broker configuration",
+    noConfigurations: "No matching configuration entries",
+    configurationUnsupported: "This Kafka broker does not support configuration lookup.",
+    configName: "Name",
+    configValue: "Value",
+    configSource: "Source",
     title: "Broker cluster",
     autoRefresh: "Auto refresh",
     refreshInterval5s: "5s",

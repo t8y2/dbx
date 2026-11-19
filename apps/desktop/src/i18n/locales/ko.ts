@@ -12174,6 +12174,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "만료는 0일보다 커야 합니다",
   },
   mqBroker: {
+    searchConfigurations: "구성 이름 검색",
+    configuration: "브로커 구성",
+    noConfigurations: "일치하는 구성 항목이 없습니다",
+    configurationUnsupported: "이 Kafka 브로커는 구성 조회를 지원하지 않습니다.",
+    configName: "이름",
+    configValue: "값",
+    configSource: "출처",
     title: "브로커 클러스터",
     autoRefresh: "자동 새로고침",
     refreshInterval5s: "5초",

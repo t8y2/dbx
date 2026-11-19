@@ -12950,6 +12950,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "La expiración debe ser mayor que 0 días",
   },
   mqBroker: {
+    searchConfigurations: "Buscar nombres de configuración",
+    configuration: "Configuración del broker",
+    noConfigurations: "No hay entradas de configuración coincidentes",
+    configurationUnsupported: "Este broker de Kafka no permite consultar la configuración.",
+    configName: "Nombre",
+    configValue: "Valor",
+    configSource: "Origen",
     title: "Cluster de Broker",
     autoRefresh: "Actualización automática",
     refreshInterval5s: "5s",

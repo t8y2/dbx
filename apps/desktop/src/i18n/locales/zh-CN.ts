@@ -13498,6 +13498,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "有效期必须大于 0 天",
   },
   mqBroker: {
+    searchConfigurations: "搜索配置项名称",
+    configuration: "Broker 配置",
+    noConfigurations: "没有匹配的配置项",
+    configurationUnsupported: "此 Kafka Broker 不支持查询配置。",
+    configName: "名称",
+    configValue: "值",
+    configSource: "来源",
     title: "Broker 集群",
     autoRefresh: "自动刷新",
     refreshInterval5s: "5秒",

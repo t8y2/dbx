@@ -5,7 +5,7 @@ import { Check, Loader2, ShieldAlert, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import type { AiAgentStepApproval } from "@/lib/ai/aiAgentStepPresentation";
 
-/** Inline approval for a plugin tool call that may change state. */
+/** Approval for a plugin tool call that may change state. */
 const props = defineProps<{ approval: AiAgentStepApproval }>();
 const emit = defineEmits<{ resolve: [approved: boolean] }>();
 
@@ -25,6 +25,11 @@ watch(
   { immediate: true },
 );
 
+// A command is a preview, never a replacement for the exact tool arguments.
+const commandText = computed(() => {
+  const command = props.approval.args?.command;
+  return typeof command === "string" && command.trim() ? command : null;
+});
 const argumentsText = computed(() => JSON.stringify(props.approval.args ?? {}, null, 2));
 // A pending card restored from history after its deadline (or an app restart)
 // has nobody waiting for the answer anymore.
@@ -39,7 +44,14 @@ const expiresAt = computed(() => new Date(props.approval.expiresAtMs).toLocaleTi
       <ShieldAlert class="mt-px h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
       <span class="min-w-0 wrap-anywhere">{{ t("ai.toolApproval.prompt", { plugin: approval.pluginName, tool: approval.pluginTool, connection: approval.connectionName }) }}</span>
     </div>
-    <pre class="max-h-40 overflow-auto rounded bg-background/60 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap wrap-anywhere">{{ argumentsText }}</pre>
+    <template v-if="commandText !== null">
+      <pre data-ai-tool-approval-command class="max-h-40 overflow-auto rounded bg-background/60 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap wrap-anywhere">{{ commandText }}</pre>
+      <details>
+        <summary class="cursor-pointer text-muted-foreground">{{ t("ai.toolApproval.allArguments") }}</summary>
+        <pre class="max-h-40 overflow-auto rounded bg-background/60 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap wrap-anywhere">{{ argumentsText }}</pre>
+      </details>
+    </template>
+    <pre v-else class="max-h-40 overflow-auto rounded bg-background/60 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap wrap-anywhere">{{ argumentsText }}</pre>
     <div v-if="waiting" class="flex flex-wrap items-center gap-1.5">
       <Button size="sm" class="h-6 gap-1 px-2 text-[10px]" :disabled="approval.status === 'submitting'" @click="emit('resolve', true)">
         <Loader2 v-if="approval.status === 'submitting'" class="h-3 w-3 animate-spin" />

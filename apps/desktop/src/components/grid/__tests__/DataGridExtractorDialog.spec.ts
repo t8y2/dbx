@@ -119,9 +119,13 @@ afterEach(() => {
 
 describe("extractor draft preview", () => {
   it("shows CSV-specific settings only for CSV and DSV extractors", async () => {
+    // TSV shares the CSV option set since #13305.
     const { host } = mountDialog(undefined, true, "tsv");
-    expect(host.textContent).not.toContain("grid.copyExtractorEscapeFormulas");
-    expect(host.textContent).not.toContain("grid.copyExtractorHeaderPosition");
+    expect(host.textContent).toContain("grid.copyExtractorEscapeFormulas");
+    expect(host.textContent).toContain("grid.copyExtractorHeaderPosition");
+    const pipe = mountDialog(undefined, true, "pipe-separated");
+    expect(pipe.host.textContent).not.toContain("grid.copyExtractorEscapeFormulas");
+    expect(pipe.host.textContent).not.toContain("grid.copyExtractorHeaderPosition");
     const csv = mountDialog(undefined, true, "csv");
     expect(csv.host.textContent).toContain("grid.copyExtractorEscapeFormulas");
     expect(csv.host.textContent).toContain("grid.copyExtractorHeaderPosition");

@@ -31,6 +31,8 @@ export interface MqttConnectionConfig {
 
 export interface MqttSavedTopic {
   topic: string;
+  /** Display-only name; never sent to the broker as a topic. */
+  alias?: string;
   qos: MqttQoS;
   noLocal?: boolean;
   /** Whether the topic is restored and subscribed when the connection opens. */

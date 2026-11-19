@@ -586,7 +586,12 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
 }
 
 fn is_network_path(path: &str) -> bool {
-    path.starts_with("\\\\") || path.starts_with("//") || path.contains("wsl.localhost") || path.contains("wsl$")
+    let normalized = path.replace('/', "\\");
+    let is_verbatim_unc = normalized.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\\\?\\UNC\\"));
+    is_verbatim_unc
+        || (normalized.starts_with("\\\\") && !normalized.starts_with("\\\\?\\"))
+        || normalized.contains("wsl.localhost")
+        || normalized.contains("wsl$")
 }
 
 fn sqlite_network_path_uri(path: &str) -> String {
@@ -981,6 +986,27 @@ mod tests {
             sqlite_network_path_uri(path),
             r"file:\\wsl.localhost\Ubuntu\home\app\data.db?nolock=1&cache=shared"
         );
+    }
+
+    #[test]
+    fn windows_verbatim_paths_are_only_network_when_they_are_unc() {
+        assert!(!is_network_path(r"\\?\C:\Users\app\AppData\Roaming\com.dbx.app\dbx.db"));
+        assert!(!is_network_path(r"//?/C:/Users/app/AppData/Roaming/com.dbx.app/dbx.db"));
+        assert!(is_network_path(r"\\?\UNC\server\share\dbx.db"));
+        assert!(is_network_path(r"//?/UNC/server/share/dbx.db"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn verbatim_windows_paths_open_as_local_sqlite_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = std::fs::canonicalize(directory.path()).unwrap().join("dbx.db");
+        let database_path = database_path.to_string_lossy();
+
+        assert!(database_path.starts_with(r"\\?\"));
+        let database = connect_path_create_if_missing(&database_path).await.unwrap();
+        drop(database);
+        assert!(directory.path().join("dbx.db").is_file());
     }
 
     #[test]
@@ -2516,6 +2542,7 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                 })
                 .collect();
             indexes.push(IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -2575,6 +2602,7 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                     .collect::<Vec<_>>();
 
                 indexes.push(IndexInfo {
+                    owner: None,
                     key_directions: Vec::new(),
                     visibility: None,
                     key_metadata_complete: false,
@@ -2685,6 +2713,7 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                     valid: None,
                     comment: None,
                     created_at: None,
+                    oracle_metadata: None,
                     statement: if sql_text.is_empty() { None } else { Some(sql_text) },
                 }
             })
@@ -2730,6 +2759,7 @@ pub async fn list_triggers(pool: &SqliteHandle, schema: &str, table: &str) -> Re
                         valid: None,
                         comment: None,
                         created_at: None,
+                        oracle_metadata: None,
                         statement: sql_text,
                     })
                 })
@@ -2952,8 +2982,10 @@ fn execute_query_blocking(
             Ok(QueryResult {
                 columns,
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: result_rows,
                 affected_rows: 0,
@@ -2971,8 +3003,10 @@ fn execute_query_blocking(
             Ok(QueryResult {
                 columns: vec![],
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: vec![],
                 affected_rows: conn.changes(),

@@ -67,6 +67,7 @@ export function createTunnelProfile(type: TunnelProfileType): TunnelProfile {
     expose_lan: false,
     use_ssh_agent: false,
     ssh_agent_sock_path: "",
+    ssh_agent_key_fingerprint: "",
     auth_method: "password",
   };
 }

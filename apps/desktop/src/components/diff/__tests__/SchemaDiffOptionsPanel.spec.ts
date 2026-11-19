@@ -58,6 +58,14 @@ describe("SchemaDiffOptionsPanel", () => {
     expect(normalized.ignoreColumnNameCase).toBe(false);
   });
 
+  it("exposes the refresh-metadata option for every target and defaults it on, including legacy configs", () => {
+    for (const dbType of ["postgres", "mysql", "goldendb", "oracle"]) {
+      expect(getSchemaDiffOptionsForDbType(dbType).map((item) => item.id)).toContain("refreshMetadata");
+      expect(normalizeSchemaDiffCompareOptions({}, dbType).refreshMetadata).toBe(true);
+    }
+    expect(normalizeSchemaDiffCompareOptions({ refreshMetadata: false }, "mysql").refreshMetadata).toBe(false);
+  });
+
   it("exposes charset comparison only for supported MySQL targets and defaults it on", () => {
     expect(getSchemaDiffOptionsForDbType("mysql").map((item) => item.id)).toContain("compareCharset");
     expect(getSchemaDiffOptionsForDbType("goldendb").map((item) => item.id)).toContain("compareCharset");

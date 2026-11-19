@@ -1,6 +1,6 @@
 # Background Database Backups
 
-DBX schedules MySQL and PostgreSQL SQL backups in a shared Rust worker. The
+DBX schedules MySQL, PostgreSQL, and openGauss SQL backups in a shared Rust worker. The
 desktop window and browser display persisted state; neither needs to keep a
 JavaScript timer alive. Backup options, table filters, gzip compression,
 per-database snapshots, cancellation, and successful-run retention also apply

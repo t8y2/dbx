@@ -42,6 +42,23 @@ List, Set, Hash, Sorted Set, and Stream member details provide the same Decompre
 
 Large collection types load in pages and display total and loaded counts where available.
 
+## Plugin Decoding
+
+For application-specific binary values, install a native plugin declaring the
+`redis-value-codec-v1` capability. In String or collection-member details, choose
+**Plugin** in the Decode row, then select a decoder. Its JSON tree or text
+appears in the existing value viewer.
+
+Only the explicitly selected decoder receives the current bytes; it gets no
+database credentials or connection configuration. Input and serialized output
+are each limited to 2 MiB, calls time out after 10 seconds, and truncated
+previews cannot be decoded. Errors stay visible; choose a built-in decoder to
+return to the raw view.
+
+Decoded previews are read-only and are not serialized back into Redis. See the
+[Redis codec protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md#redis-value-codec-capability)
+for plugin development.
+
 ## Create and Edit Keys
 
 Choose a data type and initial content when creating a key. Set a positive TTL or choose a persistent key.

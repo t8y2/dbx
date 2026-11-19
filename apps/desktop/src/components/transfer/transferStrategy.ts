@@ -1,4 +1,4 @@
-import type { TransferContent, TransferMode, TransferOwnershipPolicy, TransferOwnershipPreview, TransferRequest } from "@/lib/backend/api";
+import type { TransferContent, TransferMode, TransferOwnershipPolicy, TransferOwnershipPreview, TransferRequest, OraclePackageTransferRequest } from "@/lib/backend/api";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
@@ -29,12 +29,20 @@ export function rebuildUnavailableReason(content: TransferContent, targetType: D
 
 /** Snapshot the complete selection before any asynchronous preview or confirmation. */
 function freezeTransferRequest(request: TransferRequest): TransferRequest {
+  const oraclePackages: OraclePackageTransferRequest | undefined = request.oraclePackages && JSON.parse(JSON.stringify(request.oraclePackages));
+  const freezePackage = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    for (const child of Object.values(value)) freezePackage(child);
+    Object.freeze(value);
+  };
+  freezePackage(oraclePackages);
   const snapshot = {
     ...request,
     ...transferStrategyOptions(resolveTransferStrategy(request)),
     tables: [...request.tables],
     objects: request.objects.map((selection) => ({ ...selection, names: [...selection.names] })),
     dropTargetConfirmed: false,
+    ...(oraclePackages ? { oraclePackages } : {}),
   };
   Object.freeze(snapshot.tables);
   for (const selection of snapshot.objects) {
@@ -70,11 +78,16 @@ export function hasTransferSqlPreview(preview: TransferOwnershipPreview): boolea
   return Boolean(preview.rebuild || preview.structure);
 }
 
+export interface TransferPackageConfirmation {
+  objects: TransferRequest["objects"];
+  oraclePackages: OraclePackageTransferRequest;
+}
+
 interface TransferSubmissionOptions {
   ensureWritable?: (request: TransferRequest) => Promise<boolean>;
   preview: (request: TransferRequest) => Promise<TransferOwnershipPreview>;
   confirmOwnership: (preview: TransferOwnershipPreview) => Promise<TransferOwnershipPolicy | null>;
-  confirm: (request: TransferRequest, preview: TransferOwnershipPreview) => Promise<boolean>;
+  confirm: (request: TransferRequest, preview: TransferOwnershipPreview) => Promise<boolean | TransferPackageConfirmation>;
   execute: (request: TransferRequest) => void;
 }
 
@@ -106,7 +119,23 @@ export function createTransferSubmission(options: TransferSubmissionOptions) {
         // A structure-only transfer changes the target schema; never fall back to the plain
         // start confirmation when the backend did not say what it is going to run.
         if (request.content === "structureOnly" && !preview.structure) throw new Error(TRANSFER_STRUCTURE_PREVIEW_UNAVAILABLE);
-        if (!(await options.confirm(request, preview)) || !isCurrent()) return false;
+        const decision = await options.confirm(request, preview);
+        if (!decision || !isCurrent()) return false;
+        if (typeof decision !== "boolean") {
+          const isPackage = (selection: TransferRequest["objects"][number]) => selection.objectType === "PACKAGE" || selection.objectType === "PACKAGE_BODY";
+          const original = request.objects.filter(isPackage);
+          const names = new Set(original.flatMap((selection) => selection.names));
+          const other = (objects: TransferRequest["objects"]) => objects.filter((selection) => !isPackage(selection)).map((selection) => [selection.objectType, selection.names]);
+          if (
+            original.length === 0 ||
+            JSON.stringify(other(request.objects)) !== JSON.stringify(other(decision.objects)) ||
+            decision.objects.filter(isPackage).some((selection) => selection.names.some((name) => !names.has(name))) ||
+            original.some((selection) => selection.names.some((name) => !decision.objects.some((next) => next.objectType === selection.objectType && next.names.includes(name))))
+          ) {
+            throw new Error("TRANSFER_PACKAGE_REVIEW_SCOPE_CHANGED");
+          }
+          request = freezeTransferRequest({ ...request, objects: decision.objects, oraclePackages: decision.oraclePackages });
+        }
         options.execute(Object.freeze({ ...request, dropTargetConfirmed: request.dropTargetBeforeCreate }));
         return true;
       } catch (error) {

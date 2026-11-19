@@ -36,6 +36,13 @@ pub async fn start_database_export(
     Json(body): Json<StartExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    dbx_core::query::mysql_data_charset_policy::reject_operation(
+        &state.app,
+        &req.connection_id,
+        dbx_core::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await
+    .map_err(AppError::from)?;
     let export_id = req.export_id.clone();
 
     // Web mode: write to a server-side temp file instead of the client-supplied
@@ -48,6 +55,8 @@ pub async fn start_database_export(
         "zip"
     } else if req.output_compression == DatabaseExportOutputCompression::Gzip {
         "sql.gz"
+    } else if req.output_compression == DatabaseExportOutputCompression::Nb3 {
+        "nb3"
     } else {
         "sql"
     };
@@ -180,6 +189,8 @@ pub async fn database_export_download(
         "application/zip"
     } else if export_file.format == "sql.gz" {
         "application/gzip"
+    } else if export_file.format == "nb3" {
+        "application/x-tar"
     } else {
         "application/sql; charset=utf-8"
     };

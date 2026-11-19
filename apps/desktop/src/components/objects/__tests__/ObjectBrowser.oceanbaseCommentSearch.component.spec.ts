@@ -20,6 +20,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
     ensureConnected: vi.fn().mockResolvedValue(undefined),
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
 }));

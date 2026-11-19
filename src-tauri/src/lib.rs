@@ -10,6 +10,9 @@ mod macos_escape_guard;
 mod migration_gate;
 mod models;
 mod plugin_ui_protocol;
+mod promoted_build;
+#[cfg(any(target_os = "windows", test))]
+mod startup_messages;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
@@ -17,9 +20,20 @@ mod startup_recovery;
 mod startup_recovery;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_legacy_css;
+#[cfg(target_os = "windows")]
+mod webview2_preflight;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
+mod window_geometry;
 mod window_state_guard;
+#[cfg(target_os = "windows")]
+mod windows_appcompat;
+#[cfg(not(target_os = "windows"))]
+#[path = "windows_appcompat_noop.rs"]
+mod windows_appcompat;
+#[cfg(any(target_os = "windows", test))]
+mod windows_appcompat_state;
+mod workspace_session;
 
 use commands::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
@@ -39,7 +53,7 @@ use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, EventTarget, Manager};
 #[cfg(target_os = "macos")]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
@@ -60,6 +74,65 @@ const APP_CLOSE_ACTIVE_TAB_EVENT: &str = "dbx-close-active-tab";
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
     frontend_ready: AtomicBool,
+}
+
+struct WindowOwnership {
+    logical_primary: String,
+    last_active: std::collections::HashMap<String, u64>,
+    activity_sequence: u64,
+}
+
+/// Tracks the business-level primary workspace independently from Tauri's fixed
+/// `main` label. The label remains a bootstrap detail; ownership may move to a
+/// detached tab window when the current logical primary closes.
+pub struct WindowOwnershipState {
+    inner: std::sync::Mutex<WindowOwnership>,
+}
+
+impl WindowOwnershipState {
+    fn new() -> Self {
+        let mut last_active = std::collections::HashMap::new();
+        last_active.insert("main".to_string(), 1);
+        Self {
+            inner: std::sync::Mutex::new(WindowOwnership {
+                logical_primary: "main".to_string(),
+                last_active,
+                activity_sequence: 1,
+            }),
+        }
+    }
+
+    fn logical_primary(&self) -> String {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).logical_primary.clone()
+    }
+
+    fn record_activity(&self, label: &str) {
+        let mut ownership = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ownership.activity_sequence = ownership.activity_sequence.saturating_add(1);
+        let activity_sequence = ownership.activity_sequence;
+        ownership.last_active.insert(label.to_string(), activity_sequence);
+    }
+
+    /// Removes a closed workspace and transfers logical ownership only when the
+    /// closed workspace owned it. The most recently active remaining window wins.
+    fn complete_close(&self, label: &str, remaining_labels: &[String]) -> Option<String> {
+        let mut ownership = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ownership.last_active.remove(label);
+        for remaining_label in remaining_labels {
+            ownership.last_active.entry(remaining_label.clone()).or_insert(0);
+        }
+        if ownership.logical_primary != label {
+            return None;
+        }
+        let next_primary = remaining_labels
+            .iter()
+            .max_by_key(|candidate| ownership.last_active.get(*candidate).copied().unwrap_or(0))
+            .cloned();
+        if let Some(next_primary) = &next_primary {
+            ownership.logical_primary = next_primary.clone();
+        }
+        next_primary
+    }
 }
 
 impl CloseBehaviorState {
@@ -273,6 +346,23 @@ fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, conf
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
 }
 
+/// Route a Linux compositor close request (Wayland `xdg_toplevel.close`, X11
+/// `WM_DELETE_WINDOW`) through the tray-aware close flow instead of the default
+/// window destroy, which would bypass the "minimize to tray on close" setting.
+/// Requires the main window, a ready frontend listener, and a registered tray.
+/// The tray is only created when the tray setting is on with AppIndicator
+/// available and is never destroyed or hidden at runtime, so its presence is a
+/// sound proxy for the window being restorable; any missed premise keeps the
+/// native close.
+fn should_route_linux_close_through_tray(
+    target_os: &str,
+    window_label: &str,
+    frontend_ready: bool,
+    tray_registered: bool,
+) -> bool {
+    target_os == "linux" && window_label == "main" && frontend_ready && tray_registered
+}
+
 fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
     target == "quit" && !frontend_ready
 }
@@ -288,9 +378,16 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app_handle.package_info();
     let app_name = pkg_info.name.clone();
+    let build_version = pkg_info.version.to_string();
+    // A promoted stable build keeps its beta version inside the binary; the
+    // renderer reports the promotion so the panel can show the stable version
+    // like Settings → About and the copied support info do.
+    let promoted = app_handle.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+    let (version, short_version) = promoted_build::about_version_pair(&build_version, promoted.as_deref());
     let about_metadata = AboutMetadata {
         name: Some(app_name.clone()),
-        version: Some(pkg_info.version.to_string()),
+        version: Some(version),
+        short_version,
         copyright: Some(commands::support_info::format_support_info_for_native_about()),
         icon: Some(ABOUT_APP_ICON),
         ..Default::default()
@@ -400,8 +497,15 @@ fn linux_nvidia_driver_from_state(
     proprietary_control_exists: bool,
     proprietary_proc_exists: bool,
     render_driver: Option<&str>,
+    prime_render_offload: bool,
 ) -> LinuxNvidiaDriver {
-    if proprietary_control_exists || proprietary_proc_exists {
+    // On hybrid laptops the proprietary module is loaded for the dGPU while the
+    // integrated GPU (i915/xe/amdgpu) drives the display and WebKit's renderer.
+    // Applying the NVIDIA workarounds there needlessly disables DMABuf and drops
+    // WebKitGTK to the slow shared-memory path (laggy scrolling everywhere).
+    let renders_on_nvidia =
+        prime_render_offload || render_driver.is_none_or(|driver| driver.eq_ignore_ascii_case("nvidia"));
+    if (proprietary_control_exists || proprietary_proc_exists) && renders_on_nvidia {
         LinuxNvidiaDriver::Proprietary
     } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
         LinuxNvidiaDriver::Nouveau
@@ -601,6 +705,7 @@ fn apply_linux_webkit_rendering_workarounds() {
         std::path::Path::new("/dev/nvidiactl").exists(),
         std::path::Path::new("/proc/driver/nvidia/version").exists(),
         selected_device.and_then(|device| device.driver.as_deref()),
+        std::env::var_os("__NV_PRIME_RENDER_OFFLOAD").is_some_and(|value| value == "1"),
     );
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
@@ -631,7 +736,42 @@ fn apply_linux_webkit_rendering_workarounds() {
     }
 }
 
-/// Brings the main window to the foreground, reporting whether it ended up visible.
+pub(crate) fn is_workspace_window_label(label: &str) -> bool {
+    label == "main" || (label.starts_with("dbx-tab-") && !label.starts_with("dbx-tab-drag-preview"))
+}
+
+pub(crate) fn other_workspace_window_labels<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    current_label: &str,
+) -> Vec<String> {
+    app.webview_windows()
+        .into_keys()
+        .filter(|label| label != current_label && is_workspace_window_label(label))
+        .collect()
+}
+
+fn logical_primary_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    if let Some(state) = app.try_state::<WindowOwnershipState>() {
+        let label = state.logical_primary();
+        if app.get_webview_window(&label).is_some() {
+            return Some(label);
+        }
+    }
+    if app.get_webview_window("main").is_some() {
+        return Some("main".to_string());
+    }
+    app.webview_windows().into_keys().find(|label| is_workspace_window_label(label))
+}
+
+pub(crate) fn emit_workspace_close_request<R: tauri::Runtime>(window: &tauri::Window<R>, target: &str) {
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
+        APP_CLOSE_REQUESTED_EVENT,
+        serde_json::json!({ "target": target, "windowLabel": window.label() }),
+    );
+}
+
+/// Brings the active logical primary window to the foreground, reporting whether it ended up visible.
 ///
 /// The individual calls used to be discarded with `let _ =`, which made a failed
 /// reveal completely silent. That matters on macOS: an instance that has lost its
@@ -640,31 +780,43 @@ fn apply_linux_webkit_rendering_workarounds() {
 /// so the app looks like it simply does not start. Logging here is what makes that
 /// state diagnosable at all.
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("[WINDOW] show_main_window: no \"main\" webview window to reveal");
+    let Some(label) = logical_primary_window_label(app) else {
+        eprintln!("[WINDOW] show_main_window: no workspace window to reveal");
+        return false;
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        eprintln!("[WINDOW] show_main_window: logical primary window \"{label}\" is missing");
+        startup_recovery::record(format!("show_main_window: workspace window \"{label}\" is missing"));
         return false;
     };
     if let Err(err) = window.show() {
         eprintln!("[WINDOW] show_main_window: show() failed: {err}");
+        startup_recovery::record(format!("show_main_window: show() failed: {err}"));
     }
     if let Err(err) = window.unminimize() {
         eprintln!("[WINDOW] show_main_window: unminimize() failed: {err}");
+        startup_recovery::record(format!("show_main_window: unminimize() failed: {err}"));
     }
     if let Err(err) = window.set_focus() {
         eprintln!("[WINDOW] show_main_window: set_focus() failed: {err}");
+        startup_recovery::record(format!("show_main_window: set_focus() failed: {err}"));
     }
     match window.is_visible() {
         Ok(visible) => visible,
         Err(err) => {
             eprintln!("[WINDOW] show_main_window: is_visible() failed: {err}");
+            startup_recovery::record(format!("show_main_window: is_visible() failed: {err}"));
             false
         }
     }
 }
 
 fn main_window_probe_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    let Some(window) = app.get_webview_window("main") else {
-        return "main_window=missing".to_string();
+    let Some(label) = logical_primary_window_label(app) else {
+        return "workspace_window=missing".to_string();
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        return format!("workspace_window={label}:missing");
     };
     format!(
         "main_window visible={:?} minimized={:?} maximized={:?} fullscreen={:?} position={:?} size={:?}",
@@ -687,9 +839,10 @@ fn prepare_main_window_for_display<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
 }
 
 fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval(
-            r#"
+    if let Some(label) = logical_primary_window_label(app) {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.eval(
+                r#"
             (() => {
               const active = document.activeElement;
               if (active instanceof HTMLElement) active.blur();
@@ -701,7 +854,8 @@ fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
               }
             })();
             "#,
-        );
+            );
+        }
     }
 }
 
@@ -743,7 +897,8 @@ pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHand
 }
 
 pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
-    let frontend_ready = app.try_state::<CloseBehaviorState>().is_some_and(|state| state.is_frontend_ready());
+    let frontend_ready =
+        app.try_state::<workspace_session::WorkspaceSessionState>().is_some_and(|state| state.any_ready());
     if should_fallback_to_native_quit(target, frontend_ready) {
         // A missing WebView2 runtime can prevent the frontend listener from ever
         // loading. Only the explicit tray Quit fallback bypasses the prompt.
@@ -754,7 +909,26 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
-    let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
+    window_state_guard::remember_main_window_geometry(app);
+    let Some(window_label) = logical_primary_window_label(app) else {
+        return;
+    };
+    if target == "quit" {
+        let sessions = app.state::<workspace_session::WorkspaceSessionState>();
+        let preferred = if sessions.is_ready(&window_label) {
+            window_label
+        } else {
+            app.webview_windows().into_keys().find(|label| sessions.is_ready(label)).unwrap_or(window_label)
+        };
+        let (id, label) = sessions.begin(&preferred);
+        workspace_session::send_quit_request(app, &id, &label);
+        return;
+    }
+    let _ = app.emit_to(
+        EventTarget::webview_window(window_label.as_str()),
+        APP_CLOSE_REQUESTED_EVENT,
+        serde_json::json!({ "target": target, "windowLabel": window_label }),
+    );
 }
 
 fn register_deep_link_state<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
@@ -1085,14 +1259,16 @@ pub(crate) fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: Deskt
     }
 
     #[cfg(not(target_os = "macos"))]
-    if let Some(window) = app.get_webview_window("main") {
-        match icon_theme {
-            DesktopIconTheme::Default => {
-                if let Some(icon) = app.default_window_icon().cloned() {
-                    window.set_icon(icon)?;
+    if let Some(label) = logical_primary_window_label(app) {
+        if let Some(window) = app.get_webview_window(&label) {
+            match icon_theme {
+                DesktopIconTheme::Default => {
+                    if let Some(icon) = app.default_window_icon().cloned() {
+                        window.set_icon(icon)?;
+                    }
                 }
+                DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
             }
-            DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -1162,6 +1338,9 @@ fn run_shutdown_on_dedicated_thread(shutdown: impl FnOnce() + Send + 'static) ->
 }
 
 pub(crate) fn cleanup_before_updater_forced_exit(app_handle: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    window_state_guard::save_current_main_window_geometry(app_handle);
+
     let shutdown_app = app_handle.clone();
     if let Err(error) = run_shutdown_on_dedicated_thread(move || {
         tauri::async_runtime::block_on(shutdown_runtime_resources(&shutdown_app));
@@ -1182,9 +1361,9 @@ mod tests {
         linux_webkit_rendering_workarounds, native_window_decorations_override, run_shutdown_on_dedicated_thread,
         should_confirm_app_exit_request, should_enable_linux_floating_frame, should_enable_single_instance,
         should_fallback_to_native_quit, should_hide_window_before_exit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        should_route_linux_close_through_tray, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver, WindowOwnershipState,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1336,6 +1515,28 @@ mod tests {
     }
 
     #[test]
+    fn transfers_logical_primary_to_most_recent_remaining_workspace() {
+        let state = WindowOwnershipState::new();
+        state.record_activity("dbx-tab-a");
+        state.record_activity("dbx-tab-b");
+
+        assert_eq!(
+            state.complete_close("main", &["dbx-tab-a".to_string(), "dbx-tab-b".to_string()]),
+            Some("dbx-tab-b".to_string())
+        );
+        assert_eq!(state.logical_primary(), "dbx-tab-b");
+    }
+
+    #[test]
+    fn closing_a_non_primary_workspace_keeps_existing_owner() {
+        let state = WindowOwnershipState::new();
+        state.record_activity("dbx-tab-a");
+
+        assert_eq!(state.complete_close("dbx-tab-a", &["main".to_string()]), None);
+        assert_eq!(state.logical_primary(), "main");
+    }
+
+    #[test]
     fn tray_menu_labels_follow_locale() {
         assert_eq!(tray_menu_labels_for_locale("zh-CN"), ("显示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("zh_CN"), ("显示 DBX", "退出 DBX"));
@@ -1402,6 +1603,17 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn routes_linux_close_through_tray_only_with_main_window_frontend_and_tray() {
+        assert!(should_route_linux_close_through_tray("linux", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "main", true, false));
+        assert!(!should_route_linux_close_through_tray("linux", "main", false, true));
+        assert!(!should_route_linux_close_through_tray("linux", "detached-tab-1", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "plugin-floating-audio", true, true));
+        assert!(!should_route_linux_close_through_tray("macos", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("windows", "main", true, true));
     }
 
     #[test]
@@ -1511,13 +1723,19 @@ mod tests {
 
     #[test]
     fn classifies_linux_nvidia_driver_from_selected_renderer() {
-        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None, false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("nvidia"), false), LinuxNvidiaDriver::Proprietary);
+        // Hybrid laptops: the iGPU renders, so the proprietary dGPU module must not disable DMABuf.
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("xe"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), true), LinuxNvidiaDriver::Proprietary);
     }
 
     fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
@@ -1605,7 +1823,10 @@ mod tests {
 
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1618,7 +1839,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
 
@@ -1628,7 +1849,10 @@ mod tests {
         ];
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1641,7 +1865,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
     }
@@ -1777,6 +2001,17 @@ fn route_external_commands(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebView2 warm-up child mode: when a compatibility profile asks for a
+    // preflight, the parent re-launches this executable with
+    // DBX_WEBVIEW2_PREFLIGHT_CHILD=1. The child only creates and releases a
+    // WebView2 environment (forcing AV products to scan/trust msedgewebview2.exe)
+    // and exits before any Tauri/window setup. Doing this in a separate process
+    // isolates a hanging environment creation from the real startup attempt.
+    #[cfg(target_os = "windows")]
+    if webview2_preflight::run_child_if_requested() {
+        return;
+    }
+
     // Metadata/completion command chains nest very large async futures and can
     // exhaust tokio's default 2 MiB worker stack, which aborts the process with
     // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
@@ -1789,10 +2024,83 @@ pub fn run() {
     startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
     append_startup_probe("runtime prerequisites configured");
+    // Record the WebView2 / security-software environment before any window is
+    // created. This is the first thing to look at when a startup recovery chain
+    // fails: it distinguishes a missing/hooked WebView2 runtime from an AV
+    // product that blocks the child browser process.
+    #[cfg(target_os = "windows")]
+    let webview2_runtime_health = webview2_preflight::runtime_health();
+    #[cfg(target_os = "windows")]
+    append_startup_probe(format!("webview2 runtime_health={}", webview2_runtime_health.as_str()));
+
+    #[cfg(target_os = "windows")]
+    {
+        // Collect WebView2/AV diagnostics on a worker thread with a hard deadline:
+        // on machines where a security product hooks the WebView2 loader (the very
+        // machines this diagnostics targets) the version query must never be able
+        // to delay the real startup path. A timed-out worker is abandoned and dies
+        // with the process.
+        let (diagnostics_tx, diagnostics_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let diagnostics = webview2_preflight::collect_diagnostics();
+            let _ = diagnostics_tx.send(webview2_preflight::format_diagnostics(&diagnostics));
+        });
+        match diagnostics_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(lines) => {
+                for line in lines {
+                    append_startup_probe(line);
+                }
+            }
+            Err(_) => append_startup_probe("webview2 diagnostics timed out after 3s; continuing startup"),
+        }
+    }
+    // A missing/damaged WebView2 runtime is the #1 cause of "the window never
+    // appears" on enterprise Windows machines, and it used to be misdiagnosed as a
+    // security product blocking WebView2 (the compatibility ladder then retried for
+    // minutes). Detect it before Tauri tries to create the window and show one
+    // clear, actionable message instead.
+    #[cfg(target_os = "windows")]
+    {
+        // Diagnostic escape hatch: a user who wants the AV compatibility ladder to
+        // run even though the WebView2 runtime is missing/damaged can force it.
+        // This makes no difference on a healthy runtime but lets support reproduce
+        // "try everything" behaviour on a broken machine.
+        let force_compat_on_broken_runtime =
+            std::env::var_os("DBX_TRY_COMPAT_ON_BROKEN_WEBVIEW2").is_some_and(|value| value == "1");
+        match webview2_runtime_health {
+            webview2_preflight::WebView2RuntimeHealth::Missing if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_missing_webview2_runtime();
+                return;
+            }
+            webview2_preflight::WebView2RuntimeHealth::RegisteredButDamaged if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_damaged_webview2_runtime(
+                    webview2_preflight::collect_diagnostics().runtime_version.as_deref(),
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Profile-specific pre-Tauri work (scan delay, WebView2 warm-up preflight).
+    // This must run before `Builder::default().build()` because wry reads the
+    // WebView2 environment variables during window creation.
+    startup_recovery::run_profile_pre_tauri_hooks();
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
 
     let startup_begin = Instant::now();
+
+    let context = tauri::generate_context!();
+    let default_data_dir = dirs::data_dir().expect("Failed to resolve app data dir").join(&context.config().identifier);
+    let mut data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
+    data_dir_resolution.prepare().expect("Failed to prepare app data dir");
+    let instance_secret = data_dir_resolution.single_instance_secret();
+    let window_state_filename = if data_dir_resolution.uses_custom_data_dir() {
+        data_dir_resolution.data_dir.join(tauri_plugin_window_state::DEFAULT_FILENAME).to_string_lossy().into_owned()
+    } else {
+        tauri_plugin_window_state::DEFAULT_FILENAME.to_owned()
+    };
 
     let builder = register_deep_link_state(tauri::Builder::default())
         .plugin(tauri_plugin_deep_link::init())
@@ -1804,7 +2112,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol(plugin_ui_protocol::PLUGIN_UI_SCHEME, plugin_ui_protocol::handle);
 
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
-        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        builder.plugin(tauri_plugin_single_instance::Builder::new().secret(instance_secret).callback(|app, args, cwd| {
             let app_open_requested = args.iter().any(|arg| commands::deep_link::is_app_open_deep_link(arg));
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
@@ -1838,7 +2146,7 @@ pub fn run() {
                     main_window_probe_state(app)
                 );
             }
-        }))
+        }).build())
     } else {
         builder
     };
@@ -1847,10 +2155,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_filename(window_state_filename)
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                // The main window's geometry is restored by `window_state_guard`
+                // in logical units; the plugin's physical restore is the bug in
+                // issue #13168.
                 .skip_initial_state("main")
                 .build(),
         );
@@ -1862,7 +2173,9 @@ pub fn run() {
         if event.id() == APP_MENU_QUIT_ID {
             request_app_close(app, "quit");
         } else if event.id() == APP_MENU_COPY_SUPPORT_INFO_ID {
-            if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
+            let promoted = app.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+            let text = commands::support_info::format_support_info_for_clipboard(promoted.as_deref());
+            if let Err(err) = app.clipboard().write_text(text) {
                 log::warn!("Failed to copy support info from app menu: {err}");
             }
         } else if event.id() == APP_MENU_CLOSE_TAB_ID {
@@ -1871,15 +2184,24 @@ pub fn run() {
     });
 
     builder
+        .manage(data_dir_resolution)
         .manage(CloseBehaviorState::new())
+        .manage(WindowOwnershipState::new())
+        .manage(workspace_session::WorkspaceSessionState::default())
+        .manage(commands::tab_drag_preview::TabDragPreviewState::default())
         .manage(commands::plugin_file::PluginFileState::new())
         .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
+        // Managed on the builder, not in setup: `build_app_menu` runs before
+        // setup and reads it to render the About panel.
+        .manage(promoted_build::PromotedBuildState::new())
         .on_page_load(|webview, payload| {
-            if payload.event() == PageLoadEvent::Started {
+            if payload.event() == PageLoadEvent::Started && is_workspace_window_label(webview.label()) {
+                let sessions = webview.app_handle().state::<workspace_session::WorkspaceSessionState>();
+                sessions.set_ready(webview.label(), false);
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
-                    state.set_frontend_ready(false);
+                    state.set_frontend_ready(sessions.any_ready());
                 }
             }
         })
@@ -1890,6 +2212,7 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             {
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -1898,13 +2221,14 @@ pub fn run() {
                         "early main window show requested; {}",
                         main_window_probe_state(app.handle())
                     ));
+                    startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                        app.handle(),
+                    ));
                 }
             }
 
             append_startup_probe("resolving app data dir");
-            let default_data_dir =
-                app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
-            let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
+            let data_dir_resolution = app.state::<data_dir::DataDirResolution>();
             let data_dir = data_dir_resolution.data_dir.clone();
             let portable_mode = data_dir_resolution.is_portable_mode();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
@@ -1925,7 +2249,10 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let mut s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path)
+                    .await
+                    .expect("Failed to open storage")
+                    .with_desktop_credential_recovery();
                 if portable_mode {
                     s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
                     match s.prepare_portable_secret_key().await {
@@ -1950,12 +2277,20 @@ pub fn run() {
             let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
             app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
+            // The app menu — and with it the About panel metadata — is built
+            // before storage exists, so hand the stored marker over now.
+            #[cfg(target_os = "macos")]
+            {
+                let stored_promotion = tauri::async_runtime::block_on(storage.load_promoted_build()).unwrap_or(None);
+                promoted_build::apply_stored_promotion(app.handle(), stored_promotion);
+            }
             #[cfg(target_os = "linux")]
             {
                 // Transparency must be chosen before creating the native window. Read the saved
                 // preference first so a disabled frame is never briefly shown during startup.
                 create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -2035,6 +2370,7 @@ pub fn run() {
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            state.set_honor_fixed_ssh_local_ports(true);
             let oidc_app_handle = app.handle().clone();
             state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
                 oidc_app_handle
@@ -2128,6 +2464,9 @@ pub fn run() {
                     "final main window show requested; {}",
                     main_window_probe_state(app.handle())
                 ));
+                startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                    app.handle(),
+                ));
             }
             #[cfg(any(windows, target_os = "linux"))]
             let _ = app.deep_link().register_all();
@@ -2156,6 +2495,11 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::Destroyed = event {
+                window
+                    .app_handle()
+                    .state::<workspace_session::WorkspaceSessionState>()
+                    .set_ready(window.label(), false);
+                let _ = window.app_handle().emit("dbx:workspace-windows-changed", window.label());
                 // A webview that no longer exists must not leave drop grants
                 // behind for a future renderer to claim.
                 if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
@@ -2163,6 +2507,14 @@ pub fn run() {
                 }
                 if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
                     let _ = window.emit("dbx:detached-tab-lost", serde_json::json!({ "tabId": tab_id }));
+                }
+                return;
+            }
+            if let tauri::WindowEvent::Focused(true) = event {
+                if is_workspace_window_label(window.label()) {
+                    if let Some(state) = window.app_handle().try_state::<WindowOwnershipState>() {
+                        state.record_activity(window.label());
+                    }
                 }
                 return;
             }
@@ -2186,17 +2538,32 @@ pub fn run() {
                     let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
                     return;
                 }
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                if !is_workspace_window_label(window.label()) {
                     return;
                 }
                 let app = window.app_handle();
-                if app.try_state::<CloseBehaviorState>().is_none() {
+                let close_behavior = app.try_state::<CloseBehaviorState>();
+                // Only intercept Linux close requests when the tray can restore
+                // the main window and the frontend can handle the close event.
+                let linux_tray_close = should_route_linux_close_through_tray(
+                    std::env::consts::OS,
+                    window.label(),
+                    close_behavior.as_ref().is_some_and(|state| state.is_frontend_ready()),
+                    app.tray_by_id(DESKTOP_TRAY_ID).is_some(),
+                );
+                let has_other_workspaces = !other_workspace_window_labels(app, window.label()).is_empty();
+                if !should_hide_window_on_close(std::env::consts::OS) && !linux_tray_close && !has_other_workspaces {
+                    return;
+                }
+                if close_behavior.is_none() {
                     api.prevent_close();
                     hide_main_window_for_close(app, window);
                     return;
                 }
                 api.prevent_close();
-                request_app_close(app, "settings");
+                let target =
+                    if other_workspace_window_labels(app, window.label()).is_empty() { "settings" } else { "window" };
+                emit_workspace_close_request(window, target);
             }
         })
         .invoke_handler(migration_gate::guard_handler(route_external_commands(tauri::generate_handler![
@@ -2250,7 +2617,10 @@ pub fn run() {
             commands::app_settings::load_app_appearance_settings,
             commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
+            commands::app_settings::set_promoted_build,
             commands::app_settings::complete_app_close,
+            commands::app_settings::cancel_app_quit,
+            commands::app_settings::complete_window_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,
@@ -2263,6 +2633,14 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::app_settings::load_mcp_tool_catalog,
+            commands::app_settings::load_mcp_access_policy,
+            commands::app_settings::reset_invalid_mcp_access_policy,
+            commands::app_settings::set_mcp_plugin_scope_rule,
+            commands::app_settings::list_plugin_mcp_views,
+            commands::app_settings::load_plugin_mcp_view,
+            commands::app_settings::list_mcp_plugin_scopes,
+            commands::app_settings::save_plugin_mcp_grant,
             commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
@@ -2295,6 +2673,8 @@ pub fn run() {
             commands::cloud_sync::migration_start,
             commands::cloud_sync::migration_retry,
             commands::cloud_sync::migration_cleanup_backups,
+            commands::cloud_sync::migration_prepare_credential_reset,
+            commands::cloud_sync::migration_reset_credentials,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,
@@ -2323,6 +2703,7 @@ pub fn run() {
             commands::local_backup::local_backup_import,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
+            commands::connection::connection_parameters,
             commands::connection::test_ssh_tunnel,
             commands::salesforce_oauth::salesforce_oauth_browser_authorize,
             commands::salesforce_oauth::salesforce_oauth_device_start,
@@ -2424,6 +2805,17 @@ pub fn run() {
             commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
+            commands::pl_debug::pl_debug_bootstrap,
+            commands::pl_debug::pl_debug_inspect,
+            commands::pl_debug::pl_debug_compile,
+            commands::pl_debug::pl_debug_compile_status,
+            commands::pl_debug::pl_debug_list,
+            commands::pl_debug::pl_debug_start,
+            commands::pl_debug::pl_debug_status,
+            commands::pl_debug::pl_debug_heartbeat,
+            commands::pl_debug::pl_debug_operation,
+            commands::pl_debug::pl_debug_operate,
+            commands::pl_debug::pl_debug_read,
             commands::query::execute_conditional_update,
             commands::query::execute_multi,
             commands::query::cancel_query,
@@ -2484,9 +2876,11 @@ pub fn run() {
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
             commands::query::validate_oracle_executable_object_source,
+            commands::query::prepare_oracle_trigger_sql,
             commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
+            commands::query::build_oracle_object_export_sql,
             commands::query::build_routine_rename_object_source_statements,
             commands::query::rewrite_oracle_routine_references,
             commands::query::rewrite_oracle_table_references,
@@ -2536,6 +2930,7 @@ pub fn run() {
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
+            commands::list_sql_files::search_sql_file_contents,
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
@@ -2543,6 +2938,7 @@ pub fn run() {
             commands::list_sql_files::rename_sql_folder_in_folder,
             commands::list_sql_files::delete_sql_folder_in_folder,
             commands::global_search::global_search,
+            commands::global_search::cancel_global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
@@ -2552,6 +2948,8 @@ pub fn run() {
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
+            commands::tab_drag_preview::start_tab_drag_preview,
+            commands::tab_drag_preview::stop_tab_drag_preview,
             commands::mongodb_import_export::preview_mongodb_import_file,
             commands::mongodb_import_export::import_mongodb_file,
             commands::mongodb_import_export::cancel_mongodb_import,
@@ -2566,6 +2964,7 @@ pub fn run() {
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
+            commands::redis_cmd::redis_key_metadata_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
             commands::redis_cmd::redis_get_raw_value,
@@ -2685,6 +3084,7 @@ pub fn run() {
             commands::saved_sql::sync_saved_sql_directory,
             commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
+            commands::fs_open::open_path_with_default_app,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
             background_backup::database_backup_command,
@@ -2971,8 +3371,11 @@ pub fn run() {
             commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
             commands::mcp::uninstall_npm_mcp_server,
+            commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
+            commands::update::fetch_changelog_index,
+            commands::update::fetch_changelog_release,
             commands::update::get_system_proxy_url,
             commands::update::get_downloaded_update,
             commands::update::discard_downloaded_update,
@@ -3038,8 +3441,9 @@ pub fn run() {
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
+            commands::tunnel_profiles::list_ssh_agent_identities,
         ])))
-        .build(tauri::generate_context!())
+        .build(context)
         .inspect(|app| {
             append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
             startup_recovery::start_watchdog(app.handle());
@@ -3067,6 +3471,7 @@ pub fn run() {
                     // shutdown below gives WindowServer time to remove it.
                     if should_hide_window_before_exit(std::env::consts::OS) {
                         if let Some(window) = app_handle.get_webview_window("main") {
+                            window_state_guard::remember_main_window_geometry(app_handle);
                             let _ = window.hide();
                         }
                     }
@@ -3112,10 +3517,7 @@ pub fn run() {
                         state.push(paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-sql-files", paths);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
 
                 let db_paths: Vec<String> = urls
@@ -3129,10 +3531,7 @@ pub fn run() {
                         state.push(db_paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-db-files", db_paths);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
             }
 

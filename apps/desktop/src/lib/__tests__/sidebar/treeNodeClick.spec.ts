@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  copyNameForTreeNode,
   isDirectNavigationTreeNode,
   isRepeatableNavigationTreeNode,
   objectSourceKindForTreeNode,
@@ -13,6 +14,9 @@ import {
 } from "@/lib/sidebar/treeNodeClick";
 
 describe("treeNodeClick", () => {
+  it("copies the raw Schema index name rather than its decorated tree label", () => {
+    expect(copyNameForTreeNode({ id: "index", type: "index", objectScope: "schema", objectName: ' Ix (a)" ', label: ' Ix (a)"  (TABLE)', connectionId: "ob", database: "service" })).toBe(' Ix (a)" ');
+  });
   it("opens DynamoDB tables in the document browser on single or double activation", () => {
     expect(treeNodeRowAction("dynamodb-table", false, "single", "dynamodb")).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("dynamodb-table", false, "double", false, "dynamodb")).toBe("toggle");
@@ -23,8 +27,13 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("synonym", false)).toBe("open-source");
   });
 
-  it("only Xugu type nodes open source on single click", () => {
+  it("opens Oracle-family and Xugu type sources on single click", () => {
     expect(treeNodeRowAction("type", false, "single", "xugu")).toBe("open-source");
+    for (const dbType of ["oracle", "oceanbase-oracle", "dameng"] as const) {
+      expect(treeNodeRowAction("type", false, "single", dbType), dbType).toBe("open-source");
+      expect(treeNodeRowAction("type-body", false, "single", dbType), dbType).toBe("open-source");
+      expect(treeNodeRowAction("type", true, "single", dbType), dbType).toBe("toggle");
+    }
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
       expect(treeNodeRowAction("type", true, "single", dbType), String(dbType)).toBe("toggle");
       expect(treeNodeRowAction("type", false, "single", dbType), String(dbType)).toBe("none");
@@ -33,8 +42,12 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("type", false, "single", undefined)).toBe("none");
   });
 
-  it("only Xugu type nodes open source on double click", () => {
+  it("opens Oracle-family and Xugu type sources on double click", () => {
     expect(treeNodeRowDoubleClickAction("type", false, "double", false, "xugu")).toBe("open-source");
+    for (const dbType of ["oracle", "oceanbase-oracle", "dameng"] as const) {
+      expect(treeNodeRowDoubleClickAction("type", false, "double", false, dbType), dbType).toBe("open-source");
+      expect(treeNodeRowDoubleClickAction("type-body", false, "double", false, dbType), dbType).toBe("open-source");
+    }
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
       expect(treeNodeRowDoubleClickAction("type", false, "double", true, dbType), String(dbType)).toBe("toggle");
       expect(treeNodeRowDoubleClickAction("type", false, "double", false, dbType), String(dbType)).toBe("none");
@@ -104,11 +117,26 @@ describe("treeNodeClick", () => {
   });
 
   it("browses objects on single-click activation only when enabled", () => {
-    expect(treeNodeRowAction("database", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("database", true, "single", "postgres", true, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("database", false, "single", "postgres", true, true)).toBe("open-object-browser");
-    expect(treeNodeRowAction("schema", true, "single", "postgres", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("schema", true, "single", "postgres", true, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("database", true, "single", "postgres", false, true)).toBe("toggle");
     expect(treeNodeRowAction("schema", true, "single", "postgres", false, true)).toBe("toggle");
+  });
+
+  it.each(["database", "schema", "mongo-db"] as const)("expands %s by default and preserves expansion when opted out", (type) => {
+    expect(treeNodeRowAction(type, true, "single", "mysql", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction(type, true, "single", "mysql", true, true, false)).toBe("open-object-browser");
+    expect(treeNodeRowDoubleClickAction(type, true, "double", true, "mysql", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction(type, true, "double", true, "mysql", false, true, false)).toBe("open-object-browser");
+    for (const autoExpand of [false, true]) {
+      expect(treeNodeRowAction(type, true, "single", "mysql", false, true, autoExpand)).toBe("toggle");
+      expect(treeNodeRowDoubleClickAction(type, true, "double", true, "mysql", false, false, autoExpand)).toBe("toggle");
+      expect(treeNodeRowAction(type, true, "single", "mysql", true, false, autoExpand)).toBe("toggle");
+      expect(treeNodeRowDoubleClickAction(type, false, "double", true, "mysql", false, true, autoExpand)).toBe("toggle");
+      expect(treeNodeRowAction(type, false, "single", "mysql", true, true, autoExpand)).toBe("open-object-browser");
+      expect(treeNodeRowDoubleClickAction(type, true, "double", false, "mysql", false, true, autoExpand)).toBe("open-object-browser");
+    }
   });
 
   it("keeps the first click selection-only in double-click activation", () => {
@@ -124,7 +152,7 @@ describe("treeNodeClick", () => {
   });
 
   it("browses objects on double-click activation only when enabled", () => {
-    expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowDoubleClickAction("schema", true, "double", false, "postgres", false, true)).toBe("open-object-browser");
     expect(treeNodeRowDoubleClickAction("database", true, "double", true, "postgres", false, false)).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("schema", true, "double", false, "postgres", false, false)).toBe("none");
@@ -148,10 +176,10 @@ describe("treeNodeClick", () => {
   });
 
   it("opens the MongoDB object browser from mongo-db nodes like SQL databases", () => {
-    expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", true, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", true, true, true)).toBe("open-object-browser-and-expand");
     expect(treeNodeRowAction("mongo-db", true, "single", "mongodb", false, true)).toBe("toggle");
     expect(treeNodeRowDoubleClickAction("mongo-db", true, "single", true, "mongodb", false, true)).toBe("none");
-    expect(treeNodeRowDoubleClickAction("mongo-db", true, "double", true, "mongodb", false, true)).toBe("open-object-browser-and-expand");
+    expect(treeNodeRowDoubleClickAction("mongo-db", true, "double", true, "mongodb", false, true, true)).toBe("open-object-browser-and-expand");
   });
 
   it("expands package containers while preserving source behavior for leaf packages", () => {

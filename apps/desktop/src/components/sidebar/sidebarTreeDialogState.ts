@@ -24,7 +24,7 @@ export const deleteConnectionsWithGroup = ref(false);
 export const showTableVGroupDialog = ref(false);
 export const tableVGroupName = ref("");
 /** Scope snapshot + creation payload for the table vgroup naming dialog. */
-export const tableVGroupDialogScope = shallowRef<TreeNode | null>(null);
+export const tableVGroupDialogScope = shallowRef<(TreeNode & TableVGroupScope) | null>(null);
 export const tableVGroupDialogParentGroupId = ref<string | null>(null);
 export const tableVGroupDialogTableNames = ref<string[]>([]);
 export const showTableVGroupDeleteConfirm = ref(false);

@@ -69,6 +69,48 @@ pub struct ManagedDriverEntry {
     pub store_order: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseSupportLevel {
+    Connect,
+    Browse,
+    Understand,
+    Operate,
+}
+
+/// Product capabilities a connection type advertises. Flags the descriptor
+/// omits fall back to its support level's defaults (see [`DatabaseManifestEntry::capability`]),
+/// matching the frontend's `databaseDriverManifest.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DatabaseCapability {
+    QueryExecution,
+    MetadataBrowse,
+    ObjectBrowser,
+    ObjectSource,
+    SchemaSearch,
+    TableDataEdit,
+    SqlFileExecution,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseCapabilityFlags {
+    #[serde(default)]
+    pub query_execution: Option<bool>,
+    #[serde(default)]
+    pub metadata_browse: Option<bool>,
+    #[serde(default)]
+    pub object_browser: Option<bool>,
+    #[serde(default)]
+    pub object_source: Option<bool>,
+    #[serde(default)]
+    pub schema_search: Option<bool>,
+    #[serde(default)]
+    pub table_data_edit: Option<bool>,
+    #[serde(default)]
+    pub sql_file_execution: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseManifestEntry {
@@ -106,6 +148,37 @@ pub struct DatabaseManifestEntry {
     pub local_file: bool,
     #[serde(default)]
     pub specialized_surface: bool,
+    pub support_level: DatabaseSupportLevel,
+    #[serde(default)]
+    pub capabilities: DatabaseCapabilityFlags,
+}
+
+impl DatabaseManifestEntry {
+    pub fn capability(&self, capability: DatabaseCapability) -> bool {
+        let flags = &self.capabilities;
+        let explicit = match capability {
+            DatabaseCapability::QueryExecution => flags.query_execution,
+            DatabaseCapability::MetadataBrowse => flags.metadata_browse,
+            DatabaseCapability::ObjectBrowser => flags.object_browser,
+            DatabaseCapability::ObjectSource => flags.object_source,
+            DatabaseCapability::SchemaSearch => flags.schema_search,
+            DatabaseCapability::TableDataEdit => flags.table_data_edit,
+            DatabaseCapability::SqlFileExecution => flags.sql_file_execution,
+        };
+        explicit.unwrap_or_else(|| support_level_default(self.support_level, capability))
+    }
+}
+
+fn support_level_default(level: DatabaseSupportLevel, capability: DatabaseCapability) -> bool {
+    use DatabaseCapability::*;
+    match capability {
+        QueryExecution => level == DatabaseSupportLevel::Connect,
+        SqlFileExecution => true,
+        MetadataBrowse | ObjectBrowser => level != DatabaseSupportLevel::Connect,
+        SchemaSearch => matches!(level, DatabaseSupportLevel::Understand | DatabaseSupportLevel::Operate),
+        TableDataEdit => level == DatabaseSupportLevel::Operate,
+        ObjectSource => false,
+    }
 }
 
 static DATABASE_MANIFEST: OnceLock<DatabaseManifestFile> = OnceLock::new();
@@ -148,6 +221,10 @@ pub fn supports_compare_mode(db_type: &DatabaseType, mode: DatabaseCompareMode) 
     entry(db_type).is_some_and(|candidate| candidate.compare_modes.contains(&mode))
 }
 
+pub fn supports_capability(db_type: &DatabaseType, capability: DatabaseCapability) -> bool {
+    entry(db_type).is_some_and(|candidate| candidate.capability(capability))
+}
+
 pub fn is_agent_runtime(db_type: &DatabaseType) -> bool {
     entry(db_type).is_some_and(|candidate| candidate.runtime_mode == DatabaseRuntimeMode::Agent)
 }
@@ -175,6 +252,16 @@ mod tests {
                 serde_json::from_str::<DatabaseType>(&serialized).expect("database type must deserialize");
             assert_eq!(deserialized, *db_type);
         }
+    }
+
+    #[test]
+    fn capabilities_fall_back_to_support_level_defaults() {
+        assert!(supports_capability(&DatabaseType::Mysql, DatabaseCapability::ObjectSource));
+        assert!(!supports_capability(&DatabaseType::Sqlite, DatabaseCapability::ObjectSource));
+        assert!(supports_capability(&DatabaseType::Sqlite, DatabaseCapability::QueryExecution));
+        assert!(!supports_capability(&DatabaseType::Nacos, DatabaseCapability::QueryExecution));
+        assert!(!support_level_default(DatabaseSupportLevel::Operate, DatabaseCapability::QueryExecution));
+        assert!(support_level_default(DatabaseSupportLevel::Browse, DatabaseCapability::MetadataBrowse));
     }
 
     #[test]

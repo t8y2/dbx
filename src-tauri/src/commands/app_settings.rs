@@ -7,18 +7,20 @@ use std::{
 use dbx_core::storage::{
     AppAppearanceSettings, AppAppearanceSettingsPatch, DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState,
 };
-use tauri::{AppHandle, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
     apply_debug_log_level, apply_desktop_settings, clear_startup_probe_after_frontend_ready,
-    hide_main_window_for_close, refresh_native_menus, request_app_close, AppLocaleState, CloseBehaviorState,
+    emit_workspace_close_request, hide_main_window_for_close, other_workspace_window_labels,
+    promoted_build::PromotedBuildState, refresh_native_menus, AppLocaleState, CloseBehaviorState, WindowOwnershipState,
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
 const DETACHED_TABS_STATE_KEY: &str = "detached_tabs";
 static DETACHED_TABS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static APPROVED_DETACHED_CLOSES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static EDITOR_SETTINGS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn detached_tabs_lock() -> &'static tokio::sync::Mutex<()> {
     DETACHED_TABS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -77,6 +79,7 @@ pub async fn save_desktop_settings(
     if let Err(err) = apply_desktop_settings(&app, &settings) {
         eprintln!("Failed to apply desktop settings: {err}");
     }
+    let _ = app.emit("dbx:desktop-settings-changed", &settings);
     Ok(())
 }
 
@@ -118,6 +121,42 @@ pub async fn set_app_locale(
     refresh
 }
 
+/// Display-only: records the beta build the renderer recognised as promoted,
+/// mirroring how `set_app_locale` feeds the native menus. Persisted next to the
+/// other app state because the renderer's localStorage is not reliable across
+/// macOS restarts and the About panel is built before the webview runs. Must
+/// stay callable while the data migration gate is closed, so the panel is right
+/// for migration users too.
+#[tauri::command]
+pub async fn set_promoted_build(
+    app: AppHandle,
+    promoted_build: State<'_, PromotedBuildState>,
+    build_version: String,
+) -> Result<(), String> {
+    let normalize = dbx_platform::version::normalize_version;
+    let build_version = normalize(&build_version);
+    // A report about some other build says nothing about this one: the renderer
+    // can still hold a marker from before an upgrade. Ignore it rather than
+    // overwrite the value seeded from storage.
+    if build_version.is_empty() || build_version != normalize(env!("CARGO_PKG_VERSION")) {
+        return Ok(());
+    }
+    if !promoted_build.replace(Some(build_version.clone())) {
+        return Ok(());
+    }
+    // `AppState` only exists once setup reaches storage; the renderer may call
+    // this while startup is still running (that is why the migration gate lets
+    // the command through), and the marker is re-reported on the next launch.
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        if let Err(error) = state.storage.save_promoted_build(&build_version).await {
+            log::warn!("[ABOUT] failed to persist the promoted build: {error}");
+        }
+    }
+    // Runs once per process at most: the check above returns early unless the
+    // marker actually changed.
+    refresh_native_menus(&app).map_err(|err| format!("failed to refresh native menus: {err}"))
+}
+
 #[tauri::command]
 pub async fn save_max_agent_turns(state: State<'_, Arc<AppState>>, max_agent_turns: u32) -> Result<(), String> {
     state.storage.save_max_agent_turns(max_agent_turns).await
@@ -154,9 +193,24 @@ pub async fn save_max_retries(state: State<'_, Arc<AppState>>, max_retries: u32)
 }
 
 #[tauri::command]
-pub async fn complete_app_close(app: AppHandle, window: Window, action: String) -> Result<(), String> {
+pub async fn complete_app_close(
+    app: AppHandle,
+    window: Window,
+    action: String,
+    quit_request_id: Option<String>,
+) -> Result<(), String> {
     match action.as_str() {
         "quit" => {
+            let labels = crate::workspace_session::quit_window_labels(&app);
+            let next = app.state::<crate::workspace_session::WorkspaceSessionState>().approve(
+                window.label(),
+                quit_request_id.as_deref(),
+                &labels,
+            )?;
+            if let Some((id, label)) = next {
+                crate::workspace_session::send_quit_request(&app, &id, &label);
+                return Ok(());
+            }
             if let Some(state) = app.try_state::<CloseBehaviorState>() {
                 state.allow_next_exit();
             }
@@ -165,6 +219,10 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
                 // Take the whole app off-screen first so WKWebView teardown during
                 // process exit cannot flash the window red on macOS 12. `AppHandle::hide`
                 // is macOS-only, so this block is compiled per-platform.
+                // Hiding can blank the frame, and the window-state plugin saves
+                // at exit; keep the geometry `request_app_close` captured while
+                // the window was still visible (issue #13168).
+                crate::window_state_guard::remember_main_window_geometry(&app);
                 let _ = window.hide();
                 let _ = app.hide();
                 tokio::time::sleep(std::time::Duration::from_millis(crate::EXIT_HIDE_GRACE_MS)).await;
@@ -180,18 +238,70 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
 }
 
 #[tauri::command]
-pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
+pub fn cancel_app_quit(app: AppHandle, quit_request_id: Option<String>) -> Result<(), String> {
+    if app.state::<crate::workspace_session::WorkspaceSessionState>().cancel(quit_request_id.as_deref()) {
+        let _ = app.emit("dbx-app-quit-cancelled", ());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mark_frontend_ready(app: AppHandle, window: Window) -> Result<(), String> {
+    app.state::<crate::workspace_session::WorkspaceSessionState>().set_ready(window.label(), true);
     let state =
         app.try_state::<CloseBehaviorState>().ok_or_else(|| "close behavior state is unavailable".to_string())?;
     state.set_frontend_ready(true);
     let main_window_visible = app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false));
     clear_startup_probe_after_frontend_ready(main_window_visible);
+    if let Some(id) = app.state::<crate::workspace_session::WorkspaceSessionState>().pending_for(window.label()) {
+        crate::workspace_session::send_quit_request(&app, &id, window.label());
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn request_app_close_from_window_controls(app: AppHandle) -> Result<(), String> {
-    request_app_close(&app, "settings");
+pub async fn request_app_close_from_window_controls(app: AppHandle, window: Window) -> Result<(), String> {
+    let target = if other_workspace_window_labels(&app, window.label()).is_empty() { "settings" } else { "window" };
+    emit_workspace_close_request(&window, target);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn complete_window_close(app: AppHandle, window: Window) -> Result<(), String> {
+    let remaining_labels = other_workspace_window_labels(&app, window.label());
+    if remaining_labels.is_empty() {
+        return Err("last workspace window must use the app close flow".to_string());
+    }
+    if let Some(state) = app.try_state::<WindowOwnershipState>() {
+        if let Some(next_primary) = state.complete_close(window.label(), &remaining_labels) {
+            log::info!("[WINDOW] logical primary transferred: {} -> {}", window.label(), next_primary);
+        }
+    }
+    // `close` emits CloseRequested again. The close has already been confirmed
+    // by this window's frontend, so destroy it without re-entering that flow.
+    window.destroy().map_err(|err| format!("failed to close workspace window: {err}"))?;
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        let _guard = detached_tabs_lock().lock().await;
+        let mut tabs = load_detached_tabs_map(state.inner()).await?;
+        tabs.remove(&format!(
+            "workspace-window:{}{}",
+            if cfg!(debug_assertions) { "development:" } else { "" },
+            window.label()
+        ));
+        state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await?;
+        if window.label() == "main" {
+            state
+                .storage
+                .save_open_tabs_state_with_key(
+                    open_tabs_state_key(cfg!(debug_assertions)),
+                    &serde_json::json!({ "tabs": [], "activeTabId": null }),
+                )
+                .await?;
+        }
+    }
+    if window.label() != "main" {
+        log::info!("[WINDOW] child workspace window destroyed: {}", window.label());
+    }
     Ok(())
 }
 
@@ -211,6 +321,123 @@ pub async fn load_mcp_global_policy(state: State<'_, Arc<AppState>>) -> Result<M
 }
 
 #[tauri::command]
+pub fn load_mcp_tool_catalog() -> dbx_core::mcp_catalog::McpToolCatalog {
+    dbx_mcp::DbxMcpServer::tool_catalog()
+}
+
+/// Plugin cards of the MCP capability tab (probes plugin sidecars).
+#[tauri::command]
+pub async fn list_plugin_mcp_views(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<dbx_core::plugin_mcp::PluginMcpView>, String> {
+    dbx_core::plugin_mcp::list_plugin_views(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn load_plugin_mcp_view(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+) -> Result<dbx_core::plugin_mcp::PluginMcpView, String> {
+    dbx_core::plugin_mcp::plugin_view_for(state.inner(), &plugin_id).await
+}
+
+#[tauri::command]
+pub async fn list_mcp_plugin_scopes(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    connection_id: String,
+) -> Result<serde_json::Value, String> {
+    let manifest = state
+        .plugins
+        .list_installed()?
+        .into_iter()
+        .find(|plugin| plugin.manifest.id == plugin_id)
+        .ok_or_else(|| format!("Plugin `{plugin_id}` is not installed."))?
+        .manifest;
+    let method = manifest
+        .mcp_contribution()
+        .and_then(|mcp| mcp.scope.as_ref())
+        .and_then(|scope| scope.list_method.as_deref())
+        .ok_or_else(|| "This plugin does not declare a scope list method.".to_string())?;
+    let policy = state.storage.load_enforced_mcp_policy().await?.policy();
+    let group_paths = match state.storage.load_sidebar_layout().await? {
+        Some(layout) => dbx_core::mcp_policy::connection_group_paths(&layout)
+            .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))?,
+        None => std::collections::HashMap::new(),
+    };
+    let connection = state
+        .storage
+        .load_connections()
+        .await?
+        .into_iter()
+        .find(|connection| connection.id == connection_id)
+        .ok_or_else(|| "CONNECTION_NOT_FOUND: connection is not available.".to_string())?;
+    if connection.plugin_id.as_deref() != Some(plugin_id.as_str()) {
+        return Err("CONNECTION_OUT_OF_SCOPE: connection is not owned by this plugin.".to_string());
+    }
+    if !dbx_core::mcp_policy::policy_allows_connection(&policy, group_paths.get(&connection.id), &connection.id) {
+        return Err("CONNECTION_OUT_OF_SCOPE: connection is not allowed by DBX MCP settings.".to_string());
+    }
+    let value = state
+        .plugin_host
+        .invoke::<serde_json::Value>(
+            &plugin_id,
+            method,
+            serde_json::json!({ "connectionId": connection.id }),
+            None,
+            Some(std::time::Duration::from_secs(8)),
+        )
+        .await?;
+    let values: Vec<String> = serde_json::from_value(
+        value
+            .get("values")
+            .cloned()
+            .ok_or_else(|| "Plugin scope list must return { values: string[] }.".to_string())?,
+    )
+    .map_err(|_| "Plugin scope list must return { values: string[] }.".to_string())?;
+    Ok(serde_json::json!({ "values": values }))
+}
+
+#[tauri::command]
+pub async fn save_plugin_mcp_grant(
+    state: State<'_, Arc<AppState>>,
+    plugin_id: String,
+    grant: dbx_core::storage::PluginMcpGrant,
+    approve_current: bool,
+) -> Result<dbx_core::plugin_mcp::PluginMcpView, String> {
+    dbx_core::plugin_mcp::save_plugin_grant(state.inner(), &plugin_id, grant, approve_current).await
+}
+
+#[tauri::command]
+pub async fn load_mcp_access_policy(
+    state: State<'_, Arc<AppState>>,
+) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    state.storage.load_mcp_access_policy().await
+}
+
+#[tauri::command]
+pub async fn set_mcp_plugin_scope_rule(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    kind: String,
+    value: Option<String>,
+    rule: Option<dbx_core::mcp_access::McpAccessRule>,
+    sub_scope: Option<dbx_core::mcp_access::McpSubScopeMode>,
+) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
+    let access =
+        dbx_core::plugin_mcp::set_scope_rule(&state, &connection_id, &kind, value.as_deref(), rule, sub_scope).await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(access)
+}
+
+#[tauri::command]
+pub async fn reset_invalid_mcp_access_policy(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.storage.reset_invalid_mcp_access_policy().await?;
+    super::mcp_bridge::clear_mcp_sql_approvals();
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: McpGlobalPolicy) -> Result<(), String> {
     state.storage.save_mcp_global_policy(&policy).await?;
     super::mcp_bridge::clear_mcp_sql_approvals();
@@ -223,8 +450,28 @@ pub async fn load_editor_settings(state: State<'_, Arc<AppState>>) -> Result<Opt
 }
 
 #[tauri::command]
-pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: serde_json::Value) -> Result<(), String> {
-    state.storage.save_editor_settings(&settings).await
+pub async fn save_editor_settings(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    settings: serde_json::Value,
+    patch: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let _guard = EDITOR_SETTINGS_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+    let settings = if let Some(serde_json::Value::Object(patch)) = patch {
+        let mut current = state
+            .storage
+            .load_editor_settings()
+            .await?
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_else(|| settings.as_object().cloned().unwrap_or_default());
+        current.extend(patch);
+        serde_json::Value::Object(current)
+    } else {
+        settings
+    };
+    state.storage.save_editor_settings(&settings).await?;
+    let _ = app.emit("dbx:editor-settings-changed", &settings);
+    Ok(settings)
 }
 
 const GLOBAL_SEARCH_SETTINGS_FILE: &str = "global-search-settings.json";
@@ -263,11 +510,20 @@ pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serd
 
 #[tauri::command]
 pub async fn save_detached_tab_handoff(
+    app: AppHandle,
+    window: Window,
     state: State<'_, Arc<AppState>>,
     tab_id: String,
     handoff: serde_json::Value,
 ) -> Result<(), String> {
     let _guard = detached_tabs_lock().lock().await;
+    if tab_id.starts_with("workspace-window:") {
+        let expected =
+            format!("workspace-window:{}{}", if cfg!(debug_assertions) { "development:" } else { "" }, window.label());
+        if tab_id != expected || app.get_webview_window(window.label()).is_none() {
+            return Err("Workspace snapshot does not belong to a live caller window".to_string());
+        }
+    }
     let mut tabs = load_detached_tabs_map(state.inner()).await?;
     tabs.insert(tab_id, handoff);
     state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await

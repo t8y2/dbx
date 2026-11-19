@@ -49,17 +49,38 @@ pub(super) async fn build_structure_preview(
     source_pool_key: &str,
     target_pool_key: &str,
 ) -> Result<TransferStructurePreview, String> {
-    let schema_object_preview = mysql_schema_object_preview_sql(
-        state,
-        request,
-        source_db_type,
-        target_db_type,
-        source_pool_key,
-        target_pool_key,
-    )
-    .await?;
+    let xugu_plan = if *source_db_type == DatabaseType::Xugu
+        && *target_db_type == DatabaseType::Xugu
+        && should_transfer_schema_objects(source_db_type, target_db_type, request)
+    {
+        Some(xugu_objects::prepare(state, request, source_pool_key).await?)
+    } else {
+        None
+    };
+    let schema_object_preview = if let Some(plan) = &xugu_plan {
+        Some(plan.preview_after_tables())
+    } else {
+        mysql_schema_object_preview_sql(
+            state,
+            request,
+            source_db_type,
+            target_db_type,
+            source_pool_key,
+            target_pool_key,
+        )
+        .await?
+    };
     if !request.create_table {
-        let mut sections = vec![CREATE_TABLE_DISABLED_NOTE.to_string()];
+        let mut sections = vec![if request.has_package_selection()
+            && matches!(source_db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+        {
+            "-- Table creation is disabled; selected package definitions are reviewed separately.".into()
+        } else {
+            CREATE_TABLE_DISABLED_NOTE.to_string()
+        }];
+        if let Some(plan) = &xugu_plan {
+            sections.push(plan.preview_before_tables());
+        }
         if let Some(sql) = &schema_object_preview {
             sections.push(sql.clone());
         }
@@ -77,7 +98,7 @@ pub(super) async fn build_structure_preview(
     // `create_transfer_target_table` (PostgreSQL-dialect target from another family) and
     // `transfer_postgres_schema_dependencies` (PostgreSQL→PostgreSQL). Plan the same statement
     // for either, deciding it with a read-only existence check instead of executing anything.
-    let create_schema_sql = if is_postgres_transfer_dialect(target_db_type)
+    let create_schema_sql = if is_postgres_family_target(target_db_type)
         && !request.target_schema.trim().is_empty()
         && !postgres_schema_exists(state, target_pool_key, &request.target_schema).await?
     {
@@ -90,6 +111,9 @@ pub(super) async fn build_structure_preview(
     let (tables, known_foreign_keys) = sorted_source_tables_with_foreign_keys(state, request).await;
 
     let mut sections: Vec<String> = Vec::new();
+    if let Some(plan) = &xugu_plan {
+        sections.push(plan.preview_before_tables());
+    }
     let mut operations = Vec::new();
     let mut deferred_fk_operations = Vec::new();
     if let Some(create_schema_sql) = &create_schema_sql {
@@ -128,6 +152,7 @@ pub(super) async fn build_structure_preview(
                  DDL for it"
             );
             planned_tables.push(TransferStructurePreviewTable {
+                oracle_plan: None,
                 source_table: table.clone(),
                 target_table,
                 preexisting: true,
@@ -158,6 +183,7 @@ pub(super) async fn build_structure_preview(
 
         let section = format!("-- {} -> {}\n{}", table, target_table, statement_block(&planned.statements));
         planned_tables.push(TransferStructurePreviewTable {
+            oracle_plan: planned.oracle_plan,
             source_table: table.clone(),
             target_table,
             preexisting: false,
@@ -189,14 +215,16 @@ pub(super) async fn build_structure_preview(
         sql: sections.join("\n\n"),
         tables: planned_tables,
         operations,
-        schema_objects_expanded: request.mode == TransferMode::Overwrite
-            && transfer_object_family(source_db_type) == Some(TransferObjectFamily::Mysql)
-            && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Mysql)
-            && request.object_selection_mode().selections().iter().any(|selection| {
-                selection.object_type != TransferObjectKind::Table
-                    && transfer_object_kinds_for_family(&TransferObjectFamily::Mysql).contains(&selection.object_type)
-                    && !selection.names.is_empty()
-            }),
+        schema_objects_expanded: xugu_plan.is_some()
+            || request.mode == TransferMode::Overwrite
+                && transfer_object_family(source_db_type) == Some(TransferObjectFamily::Mysql)
+                && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Mysql)
+                && request.object_selection_mode().selections().iter().any(|selection| {
+                    selection.object_type != TransferObjectKind::Table
+                        && transfer_object_kinds_for_family(&TransferObjectFamily::Mysql)
+                            .contains(&selection.object_type)
+                        && !selection.names.is_empty()
+                }),
     })
 }
 
@@ -270,6 +298,7 @@ async fn mysql_schema_object_preview_sql(
 }
 
 struct PlannedTableStructure {
+    oracle_plan: Option<ddl_plan::PreparedTableDdl>,
     statements: Vec<String>,
     operations: Vec<TransferStructureOperation>,
     deferred_fk_alters: Vec<String>,
@@ -397,6 +426,7 @@ async fn plan_table_structure(
         known_foreign_keys,
     )
     .await?;
+    let oracle_plan = request.has_package_selection().then(|| prepared.clone());
     let ddl = if pg_compat_transfer && !owned_sequences.owned_sequences.is_empty() {
         rewrite_postgres_serial_columns_for_transfer(
             &prepared.ddl,
@@ -496,6 +526,7 @@ async fn plan_table_structure(
     }
 
     Ok(PlannedTableStructure {
+        oracle_plan,
         statements,
         operations,
         deferred_fk_alters: prepared.deferred_fk_alters,
@@ -618,10 +649,17 @@ fn unexpanded_schema_object_notes(
         TransferObjectSelectionMode::LegacyUnspecified => return vec![UNEXPANDED_OBJECTS_NOTE.to_string()],
         TransferObjectSelectionMode::Explicit(selections) => selections,
     };
-    let mut notes = vec![UNEXPANDED_OBJECTS_NOTE.to_string()];
+    let mut notes = Vec::new();
     for selection in selections {
-        if selection.object_type == TransferObjectKind::Table || selection.names.is_empty() {
+        if matches!(
+            selection.object_type,
+            TransferObjectKind::Table | TransferObjectKind::Package | TransferObjectKind::PackageBody
+        ) || selection.names.is_empty()
+        {
             continue;
+        }
+        if notes.is_empty() {
+            notes.push(UNEXPANDED_OBJECTS_NOTE.to_string());
         }
         notes.push(format!("-- {}: {}", preview_object_kind_label(&selection.object_type), selection.names.join(", ")));
     }
@@ -635,9 +673,12 @@ fn preview_object_kind_label(kind: &TransferObjectKind) -> &'static str {
         TransferObjectKind::MaterializedView => "Materialized views",
         TransferObjectKind::Procedure => "Procedures",
         TransferObjectKind::Function => "Functions",
+        TransferObjectKind::Package => "Packages",
+        TransferObjectKind::PackageBody => "Package bodies",
         TransferObjectKind::Trigger => "Triggers",
         TransferObjectKind::Sequence => "Sequences",
         TransferObjectKind::Event => "Events",
+        TransferObjectKind::Synonym => "Synonyms",
     }
 }
 
@@ -656,8 +697,37 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn internal_table_provenance_is_not_part_of_the_legacy_structure_payload() {
+        let table = TransferStructurePreviewTable {
+            source_table: "source".into(),
+            target_table: "target".into(),
+            preexisting: false,
+            sql: "CREATE TABLE target (N NUMBER)".into(),
+            oracle_plan: Some(ddl_plan::PreparedTableDdl {
+                ddl: "CREATE TABLE target (N NUMBER)".into(),
+                reused_source_ddl: true,
+                deferred_fk_alters: Vec::new(),
+                deferred_fk_names: Vec::new(),
+                source_evidence: Some(json!({"sourceDdl":"full original input"})),
+            }),
+        };
+        assert_eq!(
+            table.oracle_plan.as_ref().unwrap().source_evidence.as_ref().unwrap()["sourceDdl"],
+            "full original input"
+        );
+        assert_eq!(
+            serde_json::to_value(&table).unwrap(),
+            json!({
+                "sourceTable":"source", "targetTable":"target", "preexisting":false,
+                "sql":"CREATE TABLE target (N NUMBER)",
+            })
+        );
+    }
+
+    #[test]
     fn structured_ddl_metadata_produces_operation_dtos() {
         let index = db::IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,

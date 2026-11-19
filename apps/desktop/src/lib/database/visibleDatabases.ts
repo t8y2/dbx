@@ -179,6 +179,32 @@ export function visibleDatabasePatternsAreEnabled(patterns: string[] | undefined
   return Array.isArray(patterns) && patterns.some((pattern) => pattern.trim() !== "");
 }
 
+const visibleNameSearchRegExpCache = new Map<string, RegExp>();
+
+/**
+ * 选择器搜索框的匹配规则：输入含 `%` 时按通配符整串匹配（`%` 匹配任意文本，
+ * 其余字符按字面匹配，大小写不敏感）；不含 `%` 时保持原有的大小写不敏感子串匹配。
+ * 搜索里的 `_` 按字面处理——schema/库名普遍带下划线，把 `_` 当单字符通配符会让
+ * 常见输入（如 `app_`）反而搜不到 `app_orders`。
+ */
+export function visibleNameMatchesSearch(name: string, query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return true;
+  if (!trimmed.includes("%")) return name.toLowerCase().includes(trimmed.toLowerCase());
+  let regExp = visibleNameSearchRegExpCache.get(trimmed);
+  if (!regExp) {
+    let source = "";
+    for (const ch of trimmed) {
+      if (ch === "%") source += "[\\s\\S]*";
+      else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    }
+    regExp = new RegExp(`^${source}$`, "i");
+    if (visibleNameSearchRegExpCache.size > 256) visibleNameSearchRegExpCache.clear();
+    visibleNameSearchRegExpCache.set(trimmed, regExp);
+  }
+  return regExp.test(name);
+}
+
 /** 解析用户输入的模式列表：逗号/分号/换行分隔，去空白、去重。 */
 export function parseVisibleDatabasePatternsInput(value: string): string[] {
   const seen = new Set<string>();
@@ -197,8 +223,9 @@ export function databaseNameMatchesVisiblePatterns(name: string, patterns: strin
   return patterns!.some((pattern) => visibleDatabasePatternRegExp(pattern).test(name));
 }
 
-export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
-  return selectedNames.length > 0;
+/** 没有勾选时，只要还有通配符就能保存：侧栏只显示命中通配符的库（#14221）。 */
+export function canSaveVisibleDatabaseSelection(selectedNames: string[], patterns: readonly string[] = []): boolean {
+  return selectedNames.length > 0 || visibleDatabasePatternsAreEnabled([...patterns]);
 }
 
 export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined, visibleDatabasePatterns?: string[]): string[] {

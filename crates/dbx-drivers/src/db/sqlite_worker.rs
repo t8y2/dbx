@@ -69,7 +69,7 @@ fn removes_remote_worker_on_disconnect(placement: SqliteWorkerPlacement) -> bool
 }
 
 fn session_worker_path(connection_id: &str, digest: &str) -> String {
-    format!("{DEFAULT_PERSIST_DIR}/session-{connection_id}-{digest}")
+    format!("{DEFAULT_PERSIST_DIR}/session-{connection_id}-{digest}-{}", uuid::Uuid::new_v4().simple())
 }
 
 pub fn sqlite_worker_remote_path(config: &ConnectionConfig) -> String {
@@ -95,6 +95,58 @@ pub struct SqliteWorkerClient {
     ssh_session: Option<Arc<Handle<SshClient>>>,
     /// Session placement only: delete this uploaded file after the worker exits.
     remove_remote_path: Option<String>,
+}
+
+struct SqliteWorkerStartup {
+    session: Option<Arc<Handle<SshClient>>>,
+    remove_paths: Vec<String>,
+}
+
+impl SqliteWorkerStartup {
+    fn cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let session = self.session.take()?;
+        let paths = std::mem::take(&mut self.remove_paths);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::warn!("SQLite worker SSH cleanup is unconfirmed: async runtime unavailable");
+            return None;
+        };
+        Some(runtime.spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            // Unlink the upload part before its destination to prevent a late promotion after cleanup.
+            for path in paths.into_iter().rev() {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    ssh_exec_with_stdin(session.as_ref(), remove_session_worker_command(&path), tokio::io::empty()),
+                )
+                .await;
+                if !matches!(result, Ok(Ok(()))) {
+                    log::warn!("SQLite worker private file cleanup is unconfirmed: {path}");
+                }
+            }
+            let result = tokio::time::timeout_at(
+                deadline,
+                session.disconnect(russh::Disconnect::ByApplication, "SQLite worker closed", "en"),
+            )
+            .await;
+            if !matches!(result, Ok(Ok(()))) {
+                log::warn!("SQLite worker SSH disconnect request is unconfirmed");
+            }
+            match Arc::try_unwrap(session) {
+                Ok(session) => {
+                    if !matches!(tokio::time::timeout_at(deadline, session).await, Ok(Ok(()))) {
+                        log::warn!("SQLite worker local SSH task exit is unconfirmed");
+                    }
+                }
+                Err(_) => log::warn!("SQLite worker local SSH task exit is unconfirmed: handle still shared"),
+            }
+        }))
+    }
+}
+
+impl Drop for SqliteWorkerStartup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
 }
 
 enum WorkerIo {
@@ -123,8 +175,10 @@ impl SqliteWorkerSession<'_> {
             WorkerBody::Ok { columns, column_types, rows, affected_rows, truncated, .. } => Ok(QueryResult {
                 columns: columns.unwrap_or_default(),
                 column_types: column_types.unwrap_or_default(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: rows.unwrap_or_default(),
                 affected_rows: affected_rows.unwrap_or(0),
@@ -280,17 +334,13 @@ impl Drop for SqliteWorkerClient {
                 WorkerIo::Closed => {}
             }
         }
-        let Some(path) = self.remove_remote_path.take() else {
-            return;
-        };
         let Some(session) = self.ssh_session.take() else {
             return;
         };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                remove_uploaded_session_worker(session.as_ref(), &path).await;
-            });
-        }
+        drop(SqliteWorkerStartup {
+            session: Some(session),
+            remove_paths: self.remove_remote_path.take().into_iter().collect(),
+        });
     }
 }
 
@@ -338,6 +388,30 @@ pub async fn connect_sqlite_worker(
     config: &ConnectionConfig,
     transport_layers: &[TransportLayerConfig],
 ) -> Result<Arc<SqliteWorkerClient>, String> {
+    let route = prepare_sqlite_worker_route(config, transport_layers)?;
+    let chain_id = format!("{}:{}", sqlite_worker_chain_id(connection_id), uuid::Uuid::new_v4().simple());
+    let result = connect_sqlite_worker_with_route(
+        tunnels,
+        proxy_tunnels,
+        http_tunnels,
+        agent_manager,
+        data_dir,
+        connection_id,
+        config,
+        &route,
+        &chain_id,
+    )
+    .await;
+    if result.is_err() {
+        stop_sqlite_transport_layers(&chain_id, tunnels, proxy_tunnels, http_tunnels).await;
+    }
+    result
+}
+
+pub fn prepare_sqlite_worker_route(
+    config: &ConnectionConfig,
+    transport_layers: &[TransportLayerConfig],
+) -> Result<ResolvedSqliteWorkerRoute, String> {
     if !sqlite_ssh_runtime_enabled() {
         return Err("Remote SQLite over SSH is only available in the DBX Desktop app".to_string());
     }
@@ -352,7 +426,6 @@ pub async fn connect_sqlite_worker(
     }
 
     let route = sqlite_worker_route(transport_layers)?;
-    let chain_id = (!route.prefix_layers.is_empty()).then(|| sqlite_worker_chain_id(connection_id));
     let db_path = config.host.trim();
     if db_path.is_empty() {
         return Err("Remote SQLite path is empty".to_string());
@@ -362,63 +435,98 @@ pub async fn connect_sqlite_worker(
     }
     validate_remote_path(db_path)?;
 
+    let prefix = transport_layer_tunnel::ResolvedTransportLayers::resolve(&route.prefix_layers)?;
+    let mut final_ssh = route.final_ssh;
+    final_ssh.id.clear();
+    final_ssh.name.clear();
+    final_ssh.profile_id.clear();
+    final_ssh.enabled = true;
+    final_ssh.expose_lan = false;
+    final_ssh.allow_exec_channel_proxy = false;
+    final_ssh.connect_timeout_secs = ssh_tunnel::effective_hop_timeout(&final_ssh);
+    Ok(ResolvedSqliteWorkerRoute { prefix, final_ssh })
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedSqliteWorkerRoute {
+    prefix: transport_layer_tunnel::ResolvedTransportLayers,
+    final_ssh: SshTunnelConfig,
+}
+
+impl ResolvedSqliteWorkerRoute {
+    pub fn prefix(&self) -> &transport_layer_tunnel::ResolvedTransportLayers {
+        &self.prefix
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_sqlite_worker_with_route(
+    tunnels: &TunnelManager,
+    proxy_tunnels: &ProxyTunnelManager,
+    http_tunnels: &HttpTunnelManager,
+    agent_manager: &AgentManager,
+    data_dir: &Path,
+    connection_id: &str,
+    config: &ConnectionConfig,
+    route: &ResolvedSqliteWorkerRoute,
+    chain_id: &str,
+) -> Result<Arc<SqliteWorkerClient>, String> {
+    let db_path = config.host.trim();
+
     let placement = sqlite_worker_placement(config);
     let remove_remote_on_close = removes_remote_worker_on_disconnect(placement);
     let configured_path = sqlite_worker_remote_path(config);
-    let session = open_final_hop_session(
-        tunnels,
-        proxy_tunnels,
-        http_tunnels,
-        connection_id,
-        &route.prefix_layers,
-        &route.final_ssh,
-    )
-    .await?;
-    let remote_home = ssh_capture(&session, "printf %s \"$HOME\"").await?;
-    let expand_home = |path: &str| {
-        if let Some(rest) = path.strip_prefix("~/") {
-            format!("{}/{}", remote_home.trim_end_matches('/'), rest)
-        } else if path == "~" {
-            remote_home.clone()
-        } else {
-            path.to_string()
-        }
-    };
-
-    let platform = remote_linux_platform(&session).await?;
-    // Only the remote host's architecture matters: an offline import of that one
-    // platform is a complete installation and must not trigger a download, while
-    // a missing binary for this host still gets fetched when it can be (#8987).
-    if std::env::var_os(WORKER_PATH_ENV).is_none() && !agent_manager.sqlite_worker_platform_installed(&platform) {
-        crate::agent_service::ensure_sqlite_worker_driver_ready(agent_manager).await?;
-    }
-    let local_worker = resolve_local_worker(agent_manager, &platform).await?;
-    let digest = local_worker.digest.clone();
-    let identity = hop_identity(&route.final_ssh);
-
-    let remote_path = match placement {
-        SqliteWorkerPlacement::Preplaced => {
-            if configured_path.trim().is_empty() {
-                return Err("Pre-placed SQLite worker path is required".to_string());
-            }
-            validate_remote_path(&configured_path)?;
-            expand_home(&configured_path)
-        }
-        SqliteWorkerPlacement::Persist => {
-            let path = if configured_path.trim().is_empty() {
-                format!("{DEFAULT_PERSIST_DIR}/{digest}")
-            } else {
-                validate_remote_path(&configured_path)?;
-                configured_path
-            };
-            expand_home(&path)
-        }
-        SqliteWorkerPlacement::Session => expand_home(&session_worker_path(connection_id, &digest)),
-    };
-
-    let expanded_db = expand_home(db_path);
-    let session = Arc::new(session);
+    let session = Arc::new(
+        open_final_hop_session(tunnels, proxy_tunnels, http_tunnels, chain_id, &route.prefix, &route.final_ssh).await?,
+    );
+    let mut startup = SqliteWorkerStartup { session: Some(session.clone()), remove_paths: Vec::new() };
     let start_worker = async {
+        let remote_home = ssh_capture(&session, "printf %s \"$HOME\"").await?;
+        let expand_home = |path: &str| {
+            if let Some(rest) = path.strip_prefix("~/") {
+                format!("{}/{}", remote_home.trim_end_matches('/'), rest)
+            } else if path == "~" {
+                remote_home.clone()
+            } else {
+                path.to_string()
+            }
+        };
+
+        let platform = remote_linux_platform(&session).await?;
+        // Only the remote host's architecture matters: an offline import of that one
+        // platform is a complete installation and must not trigger a download, while
+        // a missing binary for this host still gets fetched when it can be (#8987).
+        if std::env::var_os(WORKER_PATH_ENV).is_none() && !agent_manager.sqlite_worker_platform_installed(&platform) {
+            crate::agent_service::ensure_sqlite_worker_driver_ready(agent_manager).await?;
+        }
+        let local_worker = resolve_local_worker(agent_manager, &platform).await?;
+        let digest = local_worker.digest.clone();
+        let identity = hop_identity(&route.final_ssh);
+
+        let remote_path = match placement {
+            SqliteWorkerPlacement::Preplaced => {
+                if configured_path.trim().is_empty() {
+                    return Err("Pre-placed SQLite worker path is required".to_string());
+                }
+                validate_remote_path(&configured_path)?;
+                expand_home(&configured_path)
+            }
+            SqliteWorkerPlacement::Persist => {
+                let path = if configured_path.trim().is_empty() {
+                    format!("{DEFAULT_PERSIST_DIR}/{digest}")
+                } else {
+                    validate_remote_path(&configured_path)?;
+                    configured_path
+                };
+                expand_home(&path)
+            }
+            SqliteWorkerPlacement::Session => expand_home(&session_worker_path(connection_id, &digest)),
+        };
+
+        let expanded_db = expand_home(db_path);
+        if remove_remote_on_close {
+            startup.remove_paths.push(remote_path.clone());
+        }
         ensure_remote_sqlite_file_exists(session.as_ref(), &expanded_db).await?;
         if placement != SqliteWorkerPlacement::Preplaced {
             ensure_worker_consent(data_dir, &identity, &remote_path, &digest).await?;
@@ -427,7 +535,10 @@ pub async fn connect_sqlite_worker(
         if placement != SqliteWorkerPlacement::Preplaced
             && verify_remote_digest(session.as_ref(), &remote_path, &digest).await.is_err()
         {
-            upload_worker(session.as_ref(), &remote_path, &local_worker.bytes).await?;
+            let part_path = worker_part_path(&remote_path);
+            startup.remove_paths.push(part_path.clone());
+            upload_worker(session.as_ref(), &remote_path, &part_path, &local_worker.bytes).await?;
+            startup.remove_paths.retain(|path| path != &part_path);
         }
         verify_remote_digest(session.as_ref(), &remote_path, &digest).await?;
         let channel = session.channel_open_session().await.map_err(|e| format!("SSH session channel failed: {e}"))?;
@@ -439,20 +550,24 @@ pub async fn connect_sqlite_worker(
         let client = SqliteWorkerClient {
             io: AsyncMutex::new(WorkerIo::Ssh { stream: BufReader::new(stream) }),
             next_id: AtomicU64::new(1),
-            ssh_session: Some(Arc::clone(&session)),
-            remove_remote_path: remove_remote_on_close.then(|| remote_path.clone()),
+            ssh_session: None,
+            remove_remote_path: None,
         };
         client.open_database(&expanded_db).await?;
-        Ok(client)
+        Ok((client, remove_remote_on_close.then_some(remote_path)))
     };
-    match start_worker.await {
-        Ok(client) => Ok(Arc::new(client)),
+    let result = start_worker.await;
+    drop(session);
+    match result {
+        Ok((mut client, remove_remote_path)) => {
+            client.ssh_session = startup.session.take();
+            client.remove_remote_path = remove_remote_path;
+            startup.remove_paths.clear();
+            Ok(Arc::new(client))
+        }
         Err(error) => {
-            if remove_remote_on_close {
-                remove_uploaded_session_worker(session.as_ref(), &remote_path).await;
-            }
-            if let Some(chain_id) = chain_id.as_deref() {
-                stop_sqlite_transport_layers(chain_id, tunnels, proxy_tunnels, http_tunnels).await;
+            if let Some(cleanup) = startup.cleanup() {
+                let _ = cleanup.await;
             }
             Err(error)
         }
@@ -549,11 +664,11 @@ async fn open_final_hop_session(
     tunnels: &TunnelManager,
     proxy_tunnels: &ProxyTunnelManager,
     http_tunnels: &HttpTunnelManager,
-    connection_id: &str,
-    prefix_layers: &[TransportLayerConfig],
+    chain_id: &str,
+    prefix_layers: &transport_layer_tunnel::ResolvedTransportLayers,
     final_ssh: &SshTunnelConfig,
 ) -> Result<Handle<SshClient>, String> {
-    if prefix_layers.is_empty() {
+    if prefix_layers.layers().is_empty() {
         return ssh_tunnel::connect_and_authenticate(
             &final_ssh.host,
             final_ssh.port,
@@ -565,6 +680,7 @@ async fn open_final_hop_session(
             &final_ssh.key_passphrase,
             final_ssh.use_ssh_agent,
             &final_ssh.ssh_agent_sock_path,
+            &final_ssh.ssh_agent_key_fingerprint,
             &final_ssh.auth_method,
             ssh_tunnel::effective_hop_timeout(final_ssh),
             tunnels.known_hosts_path(),
@@ -572,25 +688,9 @@ async fn open_final_hop_session(
         )
         .await;
     }
-    let chain_id = sqlite_worker_chain_id(connection_id);
-    let local_port = match transport_layer_tunnel::start_transport_layers(
-        &chain_id,
-        prefix_layers,
-        &final_ssh.host,
-        final_ssh.port,
-        tunnels,
-        proxy_tunnels,
-        http_tunnels,
-    )
-    .await
-    {
-        Ok(local_port) => local_port,
-        Err(error) => {
-            stop_sqlite_transport_layers(&chain_id, tunnels, proxy_tunnels, http_tunnels).await;
-            return Err(error);
-        }
-    };
-    match ssh_tunnel::connect_and_authenticate(
+    let local_port =
+        prefix_layers.start(chain_id, &final_ssh.host, final_ssh.port, tunnels, proxy_tunnels, http_tunnels).await?;
+    ssh_tunnel::connect_and_authenticate(
         "127.0.0.1",
         local_port,
         &final_ssh.host,
@@ -601,19 +701,13 @@ async fn open_final_hop_session(
         &final_ssh.key_passphrase,
         final_ssh.use_ssh_agent,
         &final_ssh.ssh_agent_sock_path,
+        &final_ssh.ssh_agent_key_fingerprint,
         &final_ssh.auth_method,
         ssh_tunnel::effective_hop_timeout(final_ssh),
         tunnels.known_hosts_path(),
         &final_ssh.proxy_command,
     )
     .await
-    {
-        Ok(session) => Ok(session),
-        Err(error) => {
-            stop_sqlite_transport_layers(&chain_id, tunnels, proxy_tunnels, http_tunnels).await;
-            Err(error)
-        }
-    }
 }
 
 async fn stop_sqlite_transport_layers(
@@ -733,25 +827,30 @@ fn empty_cache_dirs_to_remove(worker_path: &str) -> Vec<String> {
 }
 
 fn remove_session_worker_command(path: &str) -> String {
-    let mut command = format!("rm -f {}", shell_quote(path));
+    let mut command = format!("rm -f {}; status=$?", shell_quote(path));
     for dir in empty_cache_dirs_to_remove(path) {
         command.push_str("; rmdir ");
         command.push_str(&shell_quote(&dir));
         command.push_str(" 2>/dev/null");
     }
+    command.push_str("; exit \"$status\"");
     command
 }
 
 async fn remove_uploaded_session_worker(session: &Handle<SshClient>, path: &str) {
-    if let Err(err) = ssh_capture(session, &remove_session_worker_command(path)).await {
+    if let Err(err) = ssh_exec_with_stdin(session, remove_session_worker_command(path), tokio::io::empty()).await {
         log::warn!("Failed to remove session SQLite worker at {path}: {err}");
     }
 }
 
-fn worker_upload_command(dest: &str, byte_len: usize) -> String {
+fn worker_part_path(dest: &str) -> String {
+    format!("{dest}.part-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn worker_upload_command(dest: &str, part: &str, byte_len: usize) -> String {
     let quoted = shell_quote(dest);
     // Unique part file: two connects must not `cat` into the same path.
-    let part = shell_quote(&format!("{dest}.part-{}", uuid::Uuid::new_v4().simple()));
+    let part = shell_quote(part);
     format!(
         "mkdir -p \"$(dirname {quoted})\" && cat > {part} && test \"$(wc -c < {part})\" -eq {byte_len} && chmod 700 {part} && mv {part} {quoted}"
     )
@@ -767,8 +866,8 @@ async fn remote_worker_install_lock(identity: &str, remote_path: &str) -> tokio:
     slot.lock_owned().await
 }
 
-async fn upload_worker(session: &Handle<SshClient>, dest: &str, bytes: &[u8]) -> Result<(), String> {
-    let command = worker_upload_command(dest, bytes.len());
+async fn upload_worker(session: &Handle<SshClient>, dest: &str, part: &str, bytes: &[u8]) -> Result<(), String> {
+    let command = worker_upload_command(dest, part, bytes.len());
     ssh_exec_with_stdin(session, command, bytes).await
 }
 
@@ -899,6 +998,262 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::server::{self, Server};
+
+    #[derive(Clone)]
+    struct WorkerSshEvents {
+        commands: Arc<std::sync::Mutex<Vec<String>>>,
+        home_entered: Arc<tokio::sync::Notify>,
+        closed: Arc<AtomicBool>,
+        block_home: bool,
+        block_auth: bool,
+        auth_entered: Arc<tokio::sync::Notify>,
+        release_auth: Arc<tokio::sync::Notify>,
+    }
+
+    struct WorkerSshServer(WorkerSshEvents);
+    struct WorkerSshHandler(WorkerSshEvents);
+
+    impl Server for WorkerSshServer {
+        type Handler = WorkerSshHandler;
+
+        fn new_client(&mut self, _peer: Option<std::net::SocketAddr>) -> Self::Handler {
+            WorkerSshHandler(self.0.clone())
+        }
+    }
+
+    impl Drop for WorkerSshHandler {
+        fn drop(&mut self) {
+            self.0.closed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl server::Handler for WorkerSshHandler {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
+            self.0.auth_entered.notify_one();
+            if self.0.block_auth {
+                self.0.release_auth.notified().await;
+            }
+            Ok(server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: russh::Channel<server::Msg>,
+            _session: &mut server::Session,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            data: &[u8],
+            session: &mut server::Session,
+        ) -> Result<(), Self::Error> {
+            let command = String::from_utf8(data.to_vec()).unwrap();
+            self.0.commands.lock().unwrap().push(command.clone());
+            session.channel_success(channel)?;
+            if command == "printf %s \"$HOME\"" {
+                self.0.home_entered.notify_one();
+                if self.0.block_home {
+                    return Ok(());
+                }
+                session.data(channel, b"/fixture/home".to_vec())?;
+            } else if command == "uname -m" {
+                session.data(channel, b"unsupported-fixture-platform".to_vec())?;
+            }
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    async fn worker_ssh_fixture(
+        block_home: bool,
+        block_auth: bool,
+    ) -> (u16, russh::keys::ssh_key::PublicKey, WorkerSshEvents, tokio::task::JoinHandle<()>) {
+        let pem = openssl::rsa::Rsa::generate(2048).unwrap().private_key_to_pem().unwrap();
+        let key = russh::keys::decode_secret_key(std::str::from_utf8(&pem).unwrap(), None).unwrap();
+        let public_key = key.public_key().clone();
+        let config = Arc::new(server::Config { keys: vec![key], ..Default::default() });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let events = WorkerSshEvents {
+            commands: Arc::new(std::sync::Mutex::new(Vec::new())),
+            home_entered: Arc::new(tokio::sync::Notify::new()),
+            closed: Arc::new(AtomicBool::new(false)),
+            block_home,
+            block_auth,
+            auth_entered: Arc::new(tokio::sync::Notify::new()),
+            release_auth: Arc::new(tokio::sync::Notify::new()),
+        };
+        let mut server = WorkerSshServer(events.clone());
+        let task = tokio::spawn(async move {
+            let _ = server.run_on_socket(config, &listener).await;
+        });
+        (port, public_key, events, task)
+    }
+
+    async fn wait_for_worker_ssh_exit(events: &WorkerSshEvents) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events.closed.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("original SSH server session must observe disconnect");
+    }
+
+    #[tokio::test]
+    async fn transport_worker_frozen_start_and_early_error_close_original_session() {
+        enable_sqlite_ssh_runtime("fixture");
+        let (port, key, events, server) = worker_ssh_fixture(false, false).await;
+        let directory = tempfile::tempdir().unwrap();
+        let tunnels = TunnelManager::new(directory.path().to_path_buf());
+        crate::db::ssh_host_key::HostKeyVerifier::new(tunnels.known_hosts_path().to_path_buf())
+            .learn("127.0.0.1", port, &key)
+            .unwrap();
+        let mut config = empty_config();
+        let mut layer = ssh_layer("127.0.0.1", "fixture-user");
+        let TransportLayerConfig::Ssh(ssh) = &mut layer else { unreachable!() };
+        ssh.port = port;
+        ssh.auth_method = "none".into();
+        config.transport_layers = vec![layer];
+        let route = prepare_sqlite_worker_route(&config, &config.transport_layers).unwrap();
+        config.transport_layers = vec![ssh_layer("unresolvable.invalid", "changed-user")];
+        let result = connect_sqlite_worker_with_route(
+            &tunnels,
+            &ProxyTunnelManager::new(),
+            &HttpTunnelManager::new(),
+            &AgentManager::new_with_base_dir(directory.path().join("agents")),
+            directory.path(),
+            "original",
+            &config,
+            &route,
+            "original:sqlite-worker",
+        )
+        .await;
+        assert!(result.err().unwrap().contains("unsupported-fixture-platform"));
+        wait_for_worker_ssh_exit(&events).await;
+        assert_eq!(events.commands.lock().unwrap().as_slice(), ["printf %s \"$HOME\"", "uname -m"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_worker_cancelled_home_read_closes_original_session() {
+        enable_sqlite_ssh_runtime("fixture");
+        let (port, key, events, server) = worker_ssh_fixture(true, false).await;
+        let directory = tempfile::tempdir().unwrap();
+        let tunnels = TunnelManager::new(directory.path().to_path_buf());
+        crate::db::ssh_host_key::HostKeyVerifier::new(tunnels.known_hosts_path().to_path_buf())
+            .learn("127.0.0.1", port, &key)
+            .unwrap();
+        let config = empty_config();
+        let mut layer = ssh_layer("127.0.0.1", "fixture-user");
+        let TransportLayerConfig::Ssh(ssh) = &mut layer else { unreachable!() };
+        ssh.port = port;
+        ssh.auth_method = "none".into();
+        let route = prepare_sqlite_worker_route(&config, &[layer]).unwrap();
+        let starting = tokio::spawn(async move {
+            connect_sqlite_worker_with_route(
+                &tunnels,
+                &ProxyTunnelManager::new(),
+                &HttpTunnelManager::new(),
+                &AgentManager::new_with_base_dir(directory.path().join("agents")),
+                directory.path(),
+                "cancelled",
+                &config,
+                &route,
+                "cancelled:sqlite-worker",
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), events.home_entered.notified()).await.unwrap();
+        starting.abort();
+        assert!(starting.await.is_err_and(|error| error.is_cancelled()));
+        wait_for_worker_ssh_exit(&events).await;
+        assert_eq!(events.commands.lock().unwrap().as_slice(), ["printf %s \"$HOME\""]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_worker_cleanup_keeps_original_private_paths_and_observes_session_exit() {
+        let (port, key, events, server) = worker_ssh_fixture(false, false).await;
+        let directory = tempfile::tempdir().unwrap();
+        let known_hosts = directory.path().join("known_hosts");
+        crate::db::ssh_host_key::HostKeyVerifier::new(known_hosts.clone()).learn("127.0.0.1", port, &key).unwrap();
+        let session = ssh_tunnel::connect_and_authenticate(
+            "127.0.0.1",
+            port,
+            "127.0.0.1",
+            port,
+            "fixture-user",
+            "",
+            "",
+            "",
+            false,
+            "",
+            "",
+            "none",
+            5,
+            &known_hosts,
+            "",
+        )
+        .await
+        .unwrap();
+        let mut startup = SqliteWorkerStartup {
+            session: Some(Arc::new(session)),
+            remove_paths: vec!["/fixture/session-original".into(), "/fixture/cache.part-original".into()],
+        };
+        let cleanup = startup.cleanup().unwrap();
+        drop(startup);
+        cleanup.await.unwrap();
+        wait_for_worker_ssh_exit(&events).await;
+        let commands = events.commands.lock().unwrap();
+        assert_eq!(commands.len(), 2, "original owner must not run cleanup twice");
+        assert_eq!(commands[0], "rm -f '/fixture/cache.part-original'; status=$?; exit \"$status\"");
+        assert_eq!(commands[1], "rm -f '/fixture/session-original'; status=$?; exit \"$status\"");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_worker_authentication_cancellation_closes_acquired_handle() {
+        let (port, key, events, server) = worker_ssh_fixture(false, true).await;
+        let directory = tempfile::tempdir().unwrap();
+        let known_hosts = directory.path().join("known_hosts");
+        crate::db::ssh_host_key::HostKeyVerifier::new(known_hosts.clone()).learn("127.0.0.1", port, &key).unwrap();
+        let starting = tokio::spawn(async move {
+            ssh_tunnel::connect_and_authenticate(
+                "127.0.0.1",
+                port,
+                "127.0.0.1",
+                port,
+                "fixture-user",
+                "",
+                "",
+                "",
+                false,
+                "",
+                "",
+                "none",
+                5,
+                &known_hosts,
+                "",
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), events.auth_entered.notified()).await.unwrap();
+        starting.abort();
+        assert!(starting.await.is_err_and(|error| error.is_cancelled()));
+        events.release_auth.notify_one();
+        wait_for_worker_ssh_exit(&events).await;
+        assert!(events.commands.lock().unwrap().is_empty());
+        server.abort();
+    }
 
     #[test]
     fn default_placement_is_session() {
@@ -916,7 +1271,9 @@ mod tests {
         assert!(removes_remote_worker_on_disconnect(SqliteWorkerPlacement::Session));
         assert!(!removes_remote_worker_on_disconnect(SqliteWorkerPlacement::Persist));
         assert!(!removes_remote_worker_on_disconnect(SqliteWorkerPlacement::Preplaced));
-        assert_eq!(session_worker_path("conn-1", "abc123"), "~/.cache/dbx/sqlite-worker/session-conn-1-abc123");
+        assert!(
+            session_worker_path("conn-1", "abc123").starts_with("~/.cache/dbx/sqlite-worker/session-conn-1-abc123-")
+        );
         assert_eq!(
             empty_cache_dirs_to_remove("/home/u/.cache/dbx/sqlite-worker/session-conn-1-abc123"),
             vec!["/home/u/.cache/dbx/sqlite-worker".to_string(), "/home/u/.cache/dbx".to_string()]
@@ -924,6 +1281,33 @@ mod tests {
         assert!(empty_cache_dirs_to_remove("/opt/dbx/dbx-sqlite-worker").is_empty());
         assert!(remove_session_worker_command("/home/u/.cache/dbx/sqlite-worker/session-conn-1-abc123")
             .contains("rmdir '/home/u/.cache/dbx/sqlite-worker' 2>/dev/null; rmdir '/home/u/.cache/dbx' 2>/dev/null"));
+    }
+
+    #[test]
+    fn transport_worker_session_paths_are_private_to_each_candidate() {
+        let first = session_worker_path("shared-connection", "same-binary");
+        let second = session_worker_path("shared-connection", "same-binary");
+        assert_ne!(first, second, "two candidates can delete or replace each other's Session worker file");
+    }
+
+    #[test]
+    fn transport_worker_frozen_route_compares_only_consumed_final_ssh_fields() {
+        enable_sqlite_ssh_runtime("fixture");
+        let mut config = empty_config();
+        config.host = "/fixture/data.db".into();
+        let mut layer = ssh_layer("203.0.113.10", "fixture-user");
+        let original = prepare_sqlite_worker_route(&config, &[layer.clone()]).unwrap();
+        let TransportLayerConfig::Ssh(ssh) = &mut layer else { unreachable!() };
+        ssh.id = "renamed".into();
+        ssh.name = "Display change".into();
+        ssh.expose_lan = true;
+        ssh.allow_exec_channel_proxy = true;
+        let same = prepare_sqlite_worker_route(&config, &[layer.clone()]).unwrap();
+        assert!(original == same);
+        let TransportLayerConfig::Ssh(ssh) = &mut layer else { unreachable!() };
+        ssh.password = "changed-password".into();
+        let changed = prepare_sqlite_worker_route(&config, &[layer]).unwrap();
+        assert!(original != changed);
     }
 
     #[test]
@@ -942,14 +1326,16 @@ mod tests {
 
     #[test]
     fn worker_upload_uses_a_private_part_file_and_checks_size() {
-        let command = worker_upload_command("/home/u/.cache/dbx/sqlite-worker/abc", 12);
+        let part = worker_part_path("/home/u/.cache/dbx/sqlite-worker/abc");
+        let command = worker_upload_command("/home/u/.cache/dbx/sqlite-worker/abc", &part, 12);
         assert!(command.contains("mkdir -p"));
         assert!(command.contains(".part-"));
         assert!(!command.contains(".part &&"));
         assert!(command.contains("test \"$(wc -c < "));
         assert!(command.contains("-eq 12"));
         assert!(command.contains("&& mv "));
-        assert_ne!(worker_upload_command("/tmp/worker", 1), worker_upload_command("/tmp/worker", 1));
+        assert!(command.contains(&shell_quote(&part)));
+        assert_ne!(worker_part_path("/tmp/worker"), worker_part_path("/tmp/worker"));
     }
 
     #[test]

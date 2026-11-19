@@ -1,0 +1,64 @@
+---
+title: PL/SQL Debugging
+description: Start Oracle and OceanBase Oracle debugging, inspect stops and results, and recover the original session.
+---
+
+Select a procedure, function, or package member in the object tree and choose **Debug PL/SQL**. For an anonymous PL/SQL block, select the block in the query editor and open debugging from the context menu's execution group. Desktop and Web use the same debugging workspace.
+
+<Callout type="warn">Debugging executes the program. Parameter defaults, package initialization, constructors, and the target may write data, commit, or execute DDL. Closing the debugger can roll back only uncommitted work it still controls; it cannot undo the program's own commits, DDL, or autonomous transactions. The program may continue after the controller connection is lost.</Callout>
+
+## Confirm the target and parameters
+
+The connection needs access to the system `DBMS_DEBUG` interface, the target, and the required metadata. Resolve permission errors explicitly. DBX does not grant privileges, change network configuration, or install persistent debugging helper packages, tables, types, or routines. Use an Oracle or OceanBase Oracle Agent that matches your DBX version; the old helper protocol is not a substitute for native debugging.
+
+1. Check the connection, schema, object, and routine signature. Choose the intended overload when several are available.
+2. Enter `IN` and `IN OUT` parameters. Distinguish a value, `NULL`, and use of a database default. Read `OUT` values after execution. Use the type editor's structure for complex values, not arbitrary SQL expressions.
+3. Use **Read parameter types** when complex metadata is needed. After the object or source changes, refresh the preview and check the parameters again.
+4. Review and acknowledge the execution risk, then start debugging.
+
+Resolve stale signatures, ambiguous objects, incomplete parameters, and write protection before refreshing the preview. Debug operations retain the connection's read-only and [production-safety controls](/en/docs/production-safety).
+
+## Compile debug information explicitly when needed
+
+DBX does not silently recompile objects during connection, inspection, or startup. Compile a named program from its original launch dialog when needed. Anonymous blocks have no stored-object compile step.
+
+<Callout type="warn">`COMPILE DEBUG` is DDL. It can implicitly commit, invalidate dependent objects, and affect other callers. For a package member, the scope is the entire package body, including other members and initialization code, not just the selected member.</Callout>
+
+1. Preview the debug compilation.
+2. Check the exact object, generated SQL, and impact.
+3. Acknowledge the compile confirmation, then compile the debug information.
+4. Inspect the original compile result and the current dictionary readback. Check the parameters again and start debugging separately. Compilation never starts the program automatically.
+
+Executed DDL does not guarantee a valid object. If it remains `INVALID`, inspect diagnostics and open **Edit source**; a package member opens its package body. Correct the source and execute the corresponding `CREATE OR REPLACE` statement in the original query editor. After execution succeeds, return to reread and confirm the preview. Saving a SQL draft alone does not change the database object. A diagnostic-read failure means verification is incomplete, not that DDL should be repeated.
+
+Current dictionary observations are separate from the original compile receipt. A fresh `VALID` status does not prove that an earlier compilation with a lost response succeeded. Unreadable settings remain unconfirmed and do not force compilation. The corresponding Agent handles version-specific SQL; failure does not trigger an automatic retry with different SQL.
+
+## Inspect and control a stop
+
+The workspace shows source above variables, call stack, breakpoints, debug-session SQL, trace, logs, DBMS output, and OUT parameters/return values. Drag the splitter to adjust the space.
+
+- **Continue** runs to the next applicable stop.
+- **Step into / over / out** advances according to the current stack and native database events.
+- **Run to end ignoring breakpoints** continues without ordinary breakpoint stops.
+- **Abort** requests termination; use the returned execution outcome as confirmation.
+- **Close debug session** ends debugging and releases resources. Restart is available only after release is confirmed.
+
+Manage line breakpoints beside the source and edit conditions, ignore counts, and messages in the breakpoint tab. Conditions use the debugger's limited expression language, not arbitrary SQL. Read or evaluation failures remain visible rather than being treated as false. Exception stops depend on the engine and version; the workspace reports the actual capability or limitation.
+
+Select a call-stack frame to read variables and watches in its native context. Unverified source, object identity, or frame mapping remains unverified; display text is not promoted to a confirmed object identity. Native entry, return, and repeated-line events mean step line numbers need not increase monotonically.
+
+Before assigning a variable or executing debug-session SQL, check the current stop and the engine's reported context. Available operations use the original debuggee, never an ordinary query connection as a substitute. Unavailable frame or session operations return an explicit error. Continue, stepping, assignment, SQL, and restart can write and remain subject to write protection.
+
+## Separate results, completeness, and release
+
+DBMS output and OUT parameters/return values have separate views. Normal completion, exceptions, and aborts may produce different partial results. Use the reported completeness state when reads fail, output is truncated, or a budget is reached; a displayed prefix is not necessarily the entire result.
+
+`NULL`, empty strings, read failures, out-of-scope values, and historical values have distinct states. Stepping, switching frames, or restarting invalidates the previous stop's current values. Already captured results can remain available after execution ends.
+
+## Recover the original session after a disconnect
+
+After a short Web disconnect or refresh, use the original user and client to recover the original session. If a start, write, or close response is unconfirmed, query that operation's status instead of clicking again to rerun the program.
+
+Execution completion, transaction outcome, and resource release are separate facts. Failed or unconfirmed release retains the session identity and recovery path; clearing the UI is not confirmation. A new operation cannot bypass an unknown execution. The server attempts bounded cleanup after the client lease expires, but a disconnect alone does not prove termination or rollback.
+
+After a server restart, the new instance may be unable to verify the old session's latest state. Keep the original recovery identity and verify the original database execution before considering another run.

@@ -78,6 +78,51 @@ struct RunningTask {
 pub struct CancellationWaitResult {
     pub requested: bool,
     pub terminal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_terminal: Option<bool>,
+}
+
+pub async fn observe_type_execution(
+    storage: &crate::storage::Storage,
+    running: &RunningQueries,
+    binding: &crate::storage::TypeExecutionBinding,
+    timeout: Duration,
+) -> Result<CancellationWaitResult, String> {
+    let mut terminal = storage.type_execution_terminal(binding).await?;
+    if terminal == Some(false) {
+        // The in-memory ID can be reused by ordinary callers; only the bound
+        // durable receipt can prove this TYPE statement reached a terminal state.
+        running.wait_for_completion(&binding.execution_id, timeout).await;
+        terminal = storage.type_execution_terminal(binding).await?;
+    }
+    Ok(CancellationWaitResult {
+        requested: false,
+        terminal: terminal == Some(true),
+        database_terminal: Some(terminal == Some(true)),
+    })
+}
+
+pub async fn finish_conditional_update<T>(
+    registered: RegisteredQuery,
+    storage: &crate::storage::Storage,
+    binding: Option<&crate::storage::TypeExecutionBinding>,
+    result: Result<T, crate::query::QueryExecutionError>,
+) -> Result<T, crate::backend_error::BackendError> {
+    let terminal = registered.finish_with_database_result(&result);
+    if let Some(binding) = binding {
+        if terminal {
+            storage.finish_type_execution(binding).await.map_err(|error| {
+                crate::backend_error::BackendError::from_legacy_backend(&format!(
+                    "TYPE terminal receipt was not saved: {error}. Keep the recovery plan; do not replay."
+                ))
+            })?;
+        } else {
+            // Legacy SQL envelopes can look like acknowledged SQL rejections to
+            // the frontend. An unproven TYPE result must remain unknown there too.
+            return result.map_err(|error| crate::backend_error::BackendError::from_legacy_backend(&error.to_string()));
+        }
+    }
+    result.map_err(crate::query::QueryExecutionError::into_backend_error)
 }
 
 #[derive(Clone, Default)]
@@ -90,7 +135,7 @@ pub struct RunningQueries {
     // before its interrupt handle was ready — inserted a closure keyed to
     // an execution id nothing would ever look at again, leaking it forever.
     inner: Arc<Mutex<HashMap<String, RunningTask>>>,
-    completed: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    completed: Arc<Mutex<HashMap<String, (std::time::Instant, bool)>>>,
     next_registration_id: Arc<AtomicU64>,
 }
 
@@ -119,13 +164,33 @@ impl RunningQueries {
         metadata: RunningTaskMetadata,
         remember_completion: bool,
     ) -> RegisteredQuery {
-        let token = CancellationToken::new();
+        self.register_task_with_token(execution_id, metadata, remember_completion, CancellationToken::new())
+    }
+
+    /// Bind a controlled write to its original connection lifecycle. Cancelling
+    /// this child must never cancel other users of the connection's parent token.
+    pub fn register_task_for_terminal_confirmation_with_parent(
+        &self,
+        execution_id: String,
+        metadata: RunningTaskMetadata,
+        parent: &CancellationToken,
+    ) -> RegisteredQuery {
+        self.register_task_with_token(execution_id, metadata, true, parent.child_token())
+    }
+
+    fn register_task_with_token(
+        &self,
+        execution_id: String,
+        metadata: RunningTaskMetadata,
+        remember_completion: bool,
+        token: CancellationToken,
+    ) -> RegisteredQuery {
         let registration_id = self.next_registration_id.fetch_add(1, Ordering::Relaxed) + 1;
         let (completion, _) = watch::channel(false);
         let previous = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let mut completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
-            completed.retain(|_, completed_at| completed_at.elapsed() < DETACHED_REGISTRATION_GRACE_PERIOD);
+            completed.retain(|_, (completed_at, _)| completed_at.elapsed() < DETACHED_REGISTRATION_GRACE_PERIOD);
             completed.remove(&execution_id);
             inner.insert(
                 execution_id.clone(),
@@ -148,17 +213,47 @@ impl RunningQueries {
             }
         }
 
-        RegisteredQuery { execution_id, registration_id, token, running_queries: self.clone(), detached: false }
+        RegisteredQuery {
+            execution_id,
+            registration_id,
+            token,
+            running_queries: self.clone(),
+            detached: false,
+            database_terminal: false,
+        }
     }
 
-    fn completed_execution_is_terminal(&self, execution_id: &str) -> bool {
+    fn completed_execution_result(&self, execution_id: &str) -> CancellationWaitResult {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.contains_key(execution_id) {
-            return false;
+            return CancellationWaitResult { requested: false, terminal: false, database_terminal: Some(false) };
         }
         let mut completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
-        completed.retain(|_, completed_at| completed_at.elapsed() < DETACHED_REGISTRATION_GRACE_PERIOD);
-        completed.contains_key(execution_id)
+        completed.retain(|_, (completed_at, _)| completed_at.elapsed() < DETACHED_REGISTRATION_GRACE_PERIOD);
+        CancellationWaitResult {
+            requested: false,
+            terminal: completed.contains_key(execution_id),
+            database_terminal: Some(completed.get(execution_id).is_some_and(|(_, proven)| *proven)),
+        }
+    }
+
+    /// Wait without cancelling. Missing or expired registrations prove nothing.
+    pub async fn wait_for_completion(&self, execution_id: &str, timeout: Duration) -> CancellationWaitResult {
+        let completion = {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.get(execution_id).map(|task| task.completion.subscribe())
+        };
+        if let Some(mut completion) = completion {
+            let _ = tokio::time::timeout(timeout, async {
+                while !*completion.borrow() {
+                    if completion.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+        self.completed_execution_result(execution_id)
     }
 
     /// Hands over the driver-specific interrupt handle (e.g. a MySQL
@@ -214,16 +309,10 @@ impl RunningQueries {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.get(execution_id).map(|task| task.completion.subscribe())
         }) else {
-            return CancellationWaitResult {
-                requested: false,
-                terminal: self.completed_execution_is_terminal(execution_id),
-            };
+            return self.completed_execution_result(execution_id);
         };
         if !self.cancel(execution_id) {
-            return CancellationWaitResult {
-                requested: false,
-                terminal: self.completed_execution_is_terminal(execution_id),
-            };
+            return self.completed_execution_result(execution_id);
         }
 
         let terminal = tokio::time::timeout(timeout, async {
@@ -238,7 +327,11 @@ impl RunningQueries {
         })
         .await
         .is_ok();
-        CancellationWaitResult { requested: true, terminal }
+        CancellationWaitResult {
+            requested: true,
+            terminal,
+            database_terminal: self.completed_execution_result(execution_id).database_terminal,
+        }
     }
 
     pub fn cancel_connection(&self, connection_id: &str) -> usize {
@@ -317,7 +410,7 @@ impl RunningQueries {
         (tasks, interrupts)
     }
 
-    fn remove(&self, execution_id: &str, registration_id: u64) {
+    fn remove(&self, execution_id: &str, registration_id: u64, database_terminal: bool) {
         let removed = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let should_remove = inner.get(execution_id).is_some_and(|task| task.registration_id == registration_id);
@@ -328,7 +421,7 @@ impl RunningQueries {
                 self.completed
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(execution_id.to_string(), std::time::Instant::now());
+                    .insert(execution_id.to_string(), (std::time::Instant::now(), database_terminal));
             }
             inner.remove(execution_id)
         };
@@ -365,11 +458,28 @@ pub struct RegisteredQuery {
     token: CancellationToken,
     running_queries: RunningQueries,
     detached: bool,
+    database_terminal: bool,
 }
 
 impl RegisteredQuery {
     pub fn token(&self) -> CancellationToken {
         self.token.clone()
+    }
+
+    /// Task cleanup alone does not prove a database request has stopped.
+    pub fn finish_with_database_result<T>(mut self, result: &Result<T, crate::query::QueryExecutionError>) -> bool {
+        use crate::db::agent_driver::{AgentCallError, AgentErrorCategory, AgentErrorStage, AgentOperationOutcome};
+        use crate::query::QueryExecutionError;
+        self.database_terminal = match result {
+            Ok(_) => true,
+            Err(QueryExecutionError::Agent(AgentCallError::Structured { context, .. })) => {
+                context.operation_outcome == AgentOperationOutcome::NotStarted
+                    || (context.category == AgentErrorCategory::Sql && context.stage == AgentErrorStage::Execute)
+            }
+            Err(QueryExecutionError::Canceled { operation_outcome: AgentOperationOutcome::NotStarted, .. }) => true,
+            _ => false,
+        };
+        self.database_terminal
     }
 
     /// Consumes the guard without immediately removing its `RunningQueries`
@@ -390,7 +500,7 @@ impl RegisteredQuery {
         let registration_id = self.registration_id;
         tokio::spawn(async move {
             tokio::time::sleep(DETACHED_REGISTRATION_GRACE_PERIOD).await;
-            running_queries.remove(&execution_id, registration_id);
+            running_queries.remove(&execution_id, registration_id, false);
         });
     }
 
@@ -419,7 +529,7 @@ impl RegisteredQuery {
 impl Drop for RegisteredQuery {
     fn drop(&mut self) {
         if !self.detached {
-            self.running_queries.remove(&self.execution_id, self.registration_id);
+            self.running_queries.remove(&self.execution_id, self.registration_id, self.database_terminal);
         }
     }
 }
@@ -428,6 +538,86 @@ impl Drop for RegisteredQuery {
 mod tests {
     use super::{RunningQueries, RunningTaskKind, RunningTaskMetadata, DETACHED_REGISTRATION_GRACE_PERIOD};
     use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_only_does_not_cancel_and_requires_a_real_database_result() {
+        let running = RunningQueries::default();
+        let registered = running.register_task_for_terminal_confirmation("type-step".to_string(), Default::default());
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = interrupted.clone();
+        running.register_interrupt("type-step", move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let pending = running.wait_for_completion("type-step", Duration::from_millis(1)).await;
+        assert!(!pending.requested && !pending.terminal);
+        assert_eq!(pending.database_terminal, Some(false));
+        assert!(!registered.token().is_cancelled());
+        assert!(!interrupted.load(std::sync::atomic::Ordering::SeqCst));
+        registered.finish_with_database_result(&Ok::<_, crate::query::QueryExecutionError>(()));
+        let completed = running.wait_for_completion("type-step", Duration::from_secs(1)).await;
+        assert!(!completed.requested && completed.terminal);
+        assert_eq!(completed.database_terminal, Some(true));
+    }
+
+    #[tokio::test]
+    async fn missing_expired_and_unproven_completion_do_not_claim_database_terminal() {
+        let running = RunningQueries::default();
+        let missing = running.wait_for_completion("missing", Duration::ZERO).await;
+        assert!(!missing.terminal);
+        assert_eq!(missing.database_terminal, Some(false));
+        let registered = running.register_task_for_terminal_confirmation("unknown".to_string(), Default::default());
+        drop(registered);
+        let unknown = running.wait_for_completion("unknown", Duration::ZERO).await;
+        assert!(unknown.terminal);
+        assert_eq!(unknown.database_terminal, Some(false));
+        running
+            .completed
+            .lock()
+            .unwrap()
+            .insert("expired".to_string(), (Instant::now() - DETACHED_REGISTRATION_GRACE_PERIOD, true));
+        let expired = running.wait_for_completion("expired", Duration::ZERO).await;
+        assert!(!expired.terminal);
+        assert_eq!(expired.database_terminal, Some(false));
+    }
+
+    #[tokio::test]
+    async fn transport_timeout_and_legacy_errors_do_not_prove_database_completion() {
+        use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOutcome};
+        use crate::query::QueryExecutionError;
+        for error in [
+            QueryExecutionError::Agent(AgentCallError::Transport { message: "Lost RPC response".to_string() }),
+            QueryExecutionError::Timeout("Timed out".to_string()),
+            QueryExecutionError::Legacy("Unclassified error".to_string()),
+            QueryExecutionError::Canceled {
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+            },
+        ] {
+            let running = RunningQueries::default();
+            let registered = running.register_task_for_terminal_confirmation("step".to_string(), Default::default());
+            registered.finish_with_database_result::<()>(&Err(error));
+            let completed = running.wait_for_completion("step", Duration::ZERO).await;
+            assert!(completed.terminal);
+            assert_eq!(completed.database_terminal, Some(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_database_rejection_is_terminal_but_not_an_execution_success() {
+        use crate::db::agent_driver::{AgentCallError, AgentErrorContext};
+        let context: AgentErrorContext = serde_json::from_value(serde_json::json!({
+            "contractVersion": 1, "category": "sql", "retryable": false,
+            "sessionDisposition": "keep", "stage": "execute", "operationOutcome": "unknown"
+        }))
+        .unwrap();
+        let running = RunningQueries::default();
+        let registered = running.register_task_for_terminal_confirmation("rejected".to_string(), Default::default());
+        registered.finish_with_database_result::<()>(&Err(crate::query::QueryExecutionError::Agent(
+            AgentCallError::Structured { rpc_code: -32001, message: "Rejected by database".to_string(), context },
+        )));
+        assert_eq!(running.wait_for_completion("rejected", Duration::ZERO).await.database_terminal, Some(true));
+    }
 
     #[test]
     fn cancel_marks_registered_query_as_cancelled() {
@@ -461,6 +651,21 @@ mod tests {
         drop(registered);
 
         assert!(!running.has("exec-1"));
+    }
+
+    #[test]
+    fn connection_lifecycle_cancels_only_its_registered_children() {
+        let running = RunningQueries::default();
+        let parent = CancellationToken::new();
+        let first =
+            running.register_task_for_terminal_confirmation_with_parent("first".into(), Default::default(), &parent);
+        running.cancel("first");
+        assert!(first.token().is_cancelled());
+        assert!(!parent.is_cancelled());
+        let second =
+            running.register_task_for_terminal_confirmation_with_parent("second".into(), Default::default(), &parent);
+        parent.cancel();
+        assert!(second.token().is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]
@@ -589,7 +794,7 @@ mod tests {
             .completed
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert("exec-1".to_string(), Instant::now() - DETACHED_REGISTRATION_GRACE_PERIOD);
+            .insert("exec-1".to_string(), (Instant::now() - DETACHED_REGISTRATION_GRACE_PERIOD, false));
 
         let result = running.cancel_and_wait("exec-1", Duration::from_secs(1)).await;
 

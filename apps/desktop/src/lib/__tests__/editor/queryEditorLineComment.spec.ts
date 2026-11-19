@@ -1,8 +1,11 @@
+// @vitest-environment happy-dom
+
 import { toggleLineComment } from "@codemirror/commands";
 import { sql } from "@codemirror/lang-sql";
 import { EditorState, Prec, type Transaction } from "@codemirror/state";
+import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
-import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
+import { createQueryEditorLineCommentShortcutBindings, queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 
 function runToggleLineComment(doc: string, commentToken: string) {
   let state = EditorState.create({
@@ -83,5 +86,75 @@ describe("QueryEditor line comment", () => {
     const result = runToggleLineComment("SELECT 1", "--");
 
     expect(result.state.doc.toString()).toBe("-- SELECT 1");
+  });
+});
+
+describe("createQueryEditorLineCommentShortcutBindings", () => {
+  function createView(shortcut: string, run: (view: EditorView) => boolean, platform = "Win32") {
+    return new EditorView({
+      parent: document.createElement("div"),
+      state: EditorState.create({
+        extensions: [keymap.of(createQueryEditorLineCommentShortcutBindings(shortcut, run, platform))],
+      }),
+    });
+  }
+
+  it.each([
+    ["standard slash", { key: "/", code: "Slash", ctrlKey: true }],
+    ["Chinese IME punctuation (、)", { key: "、", code: "Slash", ctrlKey: true }],
+    ["IME Process key", { key: "Process", code: "Slash", ctrlKey: true }],
+    ["IME Process key while isComposing", { key: "Process", code: "Slash", ctrlKey: true, isComposing: true }],
+    ["numpad divide key (Divide)", { key: "Divide", code: "NumpadDivide", ctrlKey: true }],
+    ["numpad divide key (/)", { key: "/", code: "NumpadDivide", ctrlKey: true }],
+  ])("dispatches line comment for %s on Windows", (_name, eventInit) => {
+    const run = vi.fn(() => true);
+    const view = createView("Mod+/", run, "Win32");
+    const event = new KeyboardEvent("keydown", {
+      ...eventInit,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    expect(runScopeHandlers(view, event, "editor")).toBe(true);
+    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledWith(view);
+    view.destroy();
+  });
+
+  it("leaves line comment unhandled when a different key is pressed", () => {
+    const run = vi.fn(() => true);
+    const view = createView("Mod+/", run, "Win32");
+    const event = new KeyboardEvent("keydown", {
+      key: "z",
+      code: "KeyZ",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    expect(runScopeHandlers(view, event, "editor")).toBe(false);
+    expect(run).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it("handles custom configured shortcut", () => {
+    const run = vi.fn(() => true);
+    const view = createView("Shift+Mod+C", run, "Win32");
+    const event = new KeyboardEvent("keydown", {
+      key: "C",
+      code: "KeyC",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    expect(runScopeHandlers(view, event, "editor")).toBe(true);
+    expect(run).toHaveBeenCalledOnce();
+    view.destroy();
+  });
+
+  it("keeps disabled when shortcut is empty", () => {
+    expect(createQueryEditorLineCommentShortcutBindings("", vi.fn())).toEqual([]);
   });
 });

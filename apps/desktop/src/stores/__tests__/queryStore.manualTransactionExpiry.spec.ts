@@ -1,4 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
+import { statementExecutionMarkers } from "@/lib/tabs/tabPresentation";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -87,6 +88,35 @@ function successfulReadOnlySelect() {
 }
 
 describe("queryStore manual transaction expiry recovery", () => {
+  it.each(["oracle", "mysql", "postgres", "dameng", "sqlserver"] as const)(
+    "keeps execution markers for a selected %s manual transaction batch without statement indexes",
+    async (databaseType) => {
+      mocks.getConnectionConfig.mockReturnValue({ id: "manual-selection", db_type: databaseType, database: "app" });
+      mocks.beginManualTransaction.mockResolvedValue("manual-selection-session");
+      mocks.executeInManualTransaction.mockResolvedValue([
+        { columns: ["VALUE"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 },
+        { columns: ["VALUE"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 },
+      ]);
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const store = useQueryStore();
+      const tabId = store.createTab("manual-selection", "app", "Manual selection");
+      const tab = store.tabs.find((item) => item.id === tabId)!;
+      tab.sql = "SELECT 0;\n\nSELECT 1;\nSELECT 2;\n\nSELECT 3;";
+      store.setAutoCommit(tabId, false);
+      const sourceOffset = tab.sql.indexOf("SELECT 1");
+      const selectedSql = tab.sql.slice(sourceOffset, tab.sql.indexOf("\n\nSELECT 3"));
+
+      await store.executeCurrentSql(selectedSql, { tabId, sourceOffset });
+
+      expect(mocks.executeInManualTransaction).toHaveBeenCalled();
+      expect(statementExecutionMarkers(tab.sql, tab.results, databaseType, tab.resultBaseSql, tab.resultEditorFingerprint, tab.batchSqlExecution)).toEqual([
+        { from: sourceOffset, status: "success", successCount: 1, errorCount: 0 },
+        { from: tab.sql.indexOf("SELECT 2"), status: "success", successCount: 1, errorCount: 0 },
+      ]);
+    },
+    30_000,
+  );
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();

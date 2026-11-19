@@ -18,6 +18,23 @@ import { buildTreeNodesFromLayout } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfig, SidebarLayout, TreeNode } from "@/types/database";
 
 describe("sidebar pinned tree nodes", () => {
+  it("matches pinned keys by scoped identity, legacy id and redis index, and follows in-place set edits", () => {
+    const table = (name: string, database = "main"): TreeNode => ({ id: `c1:${database}:${name}`, label: name, type: "table", connectionId: "c1", database, objectName: name });
+    const redisDb = (label: string): TreeNode => ({ id: "r1:db1", label, type: "redis-db", connectionId: "r1", database: "1" });
+    const orders = table("orders");
+    const pinned = new Set<string>([treeNodePinKey(orders), treeNodePinKey(redisDb("db1"))]);
+
+    expect(isPinnedKeyPresent(orders, pinned)).toBe(true);
+    expect(isPinnedKeyPresent(table("users"), pinned)).toBe(false);
+    expect(isPinnedKeyPresent(table("orders", "other"), pinned)).toBe(false);
+    expect(isPinnedKeyPresent(redisDb("db1 (12 keys)"), pinned)).toBe(true);
+    expect(isPinnedKeyPresent({ ...orders, id: "c1:main:orders:renamed" }, pinned)).toBe(true);
+
+    pinned.add(table("users").id);
+    expect(isPinnedKeyPresent(table("users"), pinned)).toBe(true);
+    expect(isPinnedKeyPresent(orders, new Set())).toBe(false);
+  });
+
   it("reorders the pinned node within its parent", () => {
     const tree: TreeNode[] = [
       {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { markRowIdLocatorSupported, markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
+import { isPostgresTupleLocatorRejection, markRowIdLocatorSupported, markRowIdLocatorUnsupported, resetRowIdLocatorStateForTests, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import type { QueryResult } from "@/types/database";
 
 const locatorSql = `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM "public"."events" LIMIT 200;`;
@@ -15,15 +15,18 @@ describe("tableRowIdSupport", () => {
   });
 
   it("retries once for a failed load whose SQL carried the locator", () => {
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", resultOf(true))).toBe(true);
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, resultOf(true))).toBe(true);
   });
 
-  it("does not retry successful loads, plain SQL, or already-disabled connections", () => {
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", resultOf(false))).toBe(false);
-    expect(shouldRetryWithoutRowIdLocator(plainSql, "conn-1", resultOf(true))).toBe(false);
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", undefined)).toBe(false);
+  it("does not retry successful loads, plain SQL, or missing results", () => {
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, resultOf(false))).toBe(false);
+    expect(shouldRetryWithoutRowIdLocator(plainSql, resultOf(true))).toBe(false);
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, undefined)).toBe(false);
+  });
+
+  it("still retries an already-issued locator query after another request disables the connection", () => {
     markRowIdLocatorUnsupported("conn-1");
-    expect(shouldRetryWithoutRowIdLocator(locatorSql, "conn-1", resultOf(true))).toBe(false);
+    expect(shouldRetryWithoutRowIdLocator(locatorSql, resultOf(true))).toBe(true);
   });
 
   it("keeps the flag only after a successful fallback and restores it on a failed one", () => {
@@ -40,5 +43,26 @@ describe("tableRowIdSupport", () => {
     markRowIdLocatorUnsupported("conn-1");
     expect(rowIdLocatorUnsupported("conn-1")).toBe(true);
     expect(rowIdLocatorUnsupported("conn-2")).toBe(false);
+  });
+});
+
+describe("isPostgresTupleLocatorRejection", () => {
+  it("matches explicit system-column rejections from PostgreSQL-compatible engines", () => {
+    // Exact wording reported by Crunchy bridge for external tables (#15071).
+    expect(isPostgresTupleLocatorRejection('System column "xmin" is not supported for crunchy_lake_analytics table "dim_zip3"')).toBe(true);
+    expect(isPostgresTupleLocatorRejection("System column tableoid is not supported for foreign table ft_events")).toBe(true);
+    expect(isPostgresTupleLocatorRejection("ERROR: System column 'ctid' is not supported for iceberg DIM_ZIP3")).toBe(true);
+  });
+
+  it("matches Hologres-style query-translation failures for locator variables", () => {
+    expect(isPostgresTupleLocatorRejection("ERROR: Variable tableoid can't be found in query translation")).toBe(true);
+    expect(isPostgresTupleLocatorRejection("ERROR: Variable ctid can't be found in query translation")).toBe(true);
+  });
+
+  it("does not match permission failures, transport errors, or ordinary column errors", () => {
+    expect(isPostgresTupleLocatorRejection("permission denied for table events")).toBe(false);
+    expect(isPostgresTupleLocatorRejection("error trying to connect: tcp connect error: Connection refused")).toBe(false);
+    expect(isPostgresTupleLocatorRejection('column "xmin" does not exist')).toBe(false);
+    expect(isPostgresTupleLocatorRejection("")).toBe(false);
   });
 });

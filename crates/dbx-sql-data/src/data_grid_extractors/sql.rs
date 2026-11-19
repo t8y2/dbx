@@ -6,16 +6,16 @@ use super::{
 use crate::data_grid_sql::{
     build_column_predicate, build_data_grid_copy_insert_statement_with_formatters,
     build_data_grid_copy_insert_statements_with_formatters, build_data_grid_copy_update_statements, column_info_for,
-    data_grid_delete_sql, data_grid_generated_table_name, data_grid_statement, format_grid_copy_insert_sql_literal,
-    format_grid_sql_literal_with_identifier_quote, is_auto_generated_column, is_grid_insert_omitted_column,
-    is_non_identity_generated_column, is_primary_key_column, supports_relational_copy_predicates, DataGridColumnInfo,
-    DataGridCopyInsertMode, DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions,
-    DataGridPrimaryKeyMode, DataGridTableMeta,
+    data_grid_delete_sql, data_grid_generated_table_name, data_grid_statement,
+    format_grid_copy_insert_sql_literal_with_spatial, format_grid_sql_literal_with_spatial, is_auto_generated_column,
+    is_grid_insert_omitted_column, is_non_identity_generated_column, is_primary_key_column,
+    supports_relational_copy_predicates, DataGridColumnInfo, DataGridCopyInsertMode,
+    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridPrimaryKeyMode, DataGridTableMeta,
 };
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::uses_single_row_insert_statements;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
-use dbx_types::types::is_opaque_aggregate_state_type;
+use dbx_types::types::{is_opaque_aggregate_state_type, SpatialColumn};
 use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::io::Write;
@@ -30,7 +30,15 @@ pub(super) fn write_sql_in_list(
     write_bytes(output, b"(")?;
     let mut seen_rows = HashMap::<Vec<u8>, ()>::new();
     let mut has_output = false;
-    for row in &context.request.rows {
+    let spatial_columns: HashMap<usize, Option<u32>> = context
+        .request
+        .spatial_columns
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|col| (col.column_index, col.srid))
+        .collect();
+    for (row_index, row) in context.request.rows.iter().enumerate() {
         let mut tuple = Vec::new();
         if context.selected_columns.len() > 1 {
             tuple.push(b'(');
@@ -41,12 +49,22 @@ pub(super) fn write_sql_in_list(
             }
             let value = &row[*source_index];
             let info = context.selected_column_info[column_index];
+            let spatial_srid = context
+                .request
+                .spatial_values
+                .as_ref()
+                .and_then(|values| values.get(row_index))
+                .and_then(|r| r.get(*source_index))
+                .copied()
+                .flatten()
+                .or_else(|| spatial_columns.get(source_index).copied().flatten());
             tuple.extend_from_slice(
-                format_grid_sql_literal_with_identifier_quote(
+                format_grid_sql_literal_with_spatial(
                     value,
                     context.request.database_type,
                     info,
                     context.request.identifier_quote.as_deref(),
+                    spatial_srid,
                 )
                 .as_bytes(),
             );
@@ -86,6 +104,8 @@ pub(super) fn write_sql_inserts(
             include_computed_columns: !context.request.options.sql.skip_computed_columns,
             include_database_name: context.request.options.sql.include_database_name,
             insert_mode: context.request.options.sql.insert_mode,
+            spatial_columns: data.spatial_columns,
+            spatial_values: data.spatial_values,
         },
         |reference| {
             if context.request.options.sql.quote_identifiers {
@@ -98,13 +118,13 @@ pub(super) fn write_sql_inserts(
                 )
             }
         },
-        |value, database_type, info, identifier_quote| {
+        |value, database_type, info, identifier_quote, spatial_srid| {
             if context.request.options.sql.temporal_format == DataGridTemporalFormat::String {
                 if let Some(literal) = portable_temporal_literal(value, database_type, info) {
                     return literal;
                 }
             }
-            format_grid_copy_insert_sql_literal(value, database_type, info, identifier_quote)
+            format_grid_copy_insert_sql_literal_with_spatial(value, database_type, info, identifier_quote, spatial_srid)
         },
     )
     .ok_or_else(|| {
@@ -199,6 +219,8 @@ pub(super) fn write_sql_updates(
         source_columns: Some(data.source_columns),
         rows: data.rows,
         include_database_name: context.request.options.sql.include_database_name,
+        spatial_columns: data.spatial_columns,
+        spatial_values: data.spatial_values,
     });
     if statements.len() != context.request.rows.len() {
         return Err(DataGridExtractError::new(
@@ -208,6 +230,99 @@ pub(super) fn write_sql_updates(
     }
     write_bytes(output, statements.join("\n").as_bytes())?;
     Ok(sql_metadata(data.omitted_columns))
+}
+
+pub(super) fn write_sql_deletes(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<WriteMetadata, DataGridExtractError> {
+    ensure_sql_builder_budget(context)?;
+    reject_selected_opaque_aggregate_states(context)?;
+    let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
+        DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingTableMetadata,
+            "SQL Deletes requires table metadata.",
+        )
+    })?;
+    if table_meta.primary_keys.is_empty() {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingPrimaryKey,
+            "SQL Deletes requires at least one primary key column.",
+        ));
+    }
+    if !supports_relational_copy_predicates(context.request.database_type) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::UnsupportedDatabase,
+            "SQL Deletes is not supported for this database type.",
+        ));
+    }
+
+    let mut primary_key_indices = Vec::with_capacity(table_meta.primary_keys.len());
+    for primary_key in &table_meta.primary_keys {
+        let col = context
+            .request
+            .columns
+            .iter()
+            .find(|column| {
+                normalized_name_eq(column.source_name.as_deref().unwrap_or(&column.display_name), primary_key)
+            })
+            .ok_or_else(|| {
+                DataGridExtractError::new(
+                    DataGridExtractErrorCode::MissingPrimaryKey,
+                    format!("Primary key column '{primary_key}' is not present in the result set."),
+                )
+            })?;
+        primary_key_indices.push((primary_key.as_str(), col.source_index));
+    }
+
+    let column_info = table_meta.columns.as_deref().unwrap_or(&[]);
+    let primary_key_info: Vec<Option<&DataGridColumnInfo>> =
+        primary_key_indices.iter().map(|(pk_name, _)| column_info_for(column_info, pk_name)).collect();
+    let table = data_grid_generated_table_name(
+        context.request.database_type,
+        table_meta.catalog.as_deref(),
+        table_meta.schema.as_deref(),
+        table_meta.database.as_deref(),
+        &table_meta.table_name,
+        context.request.identifier_quote.as_deref(),
+        context.request.options.sql.include_database_name,
+    );
+    let table = if context.request.options.sql.quote_identifiers {
+        table
+    } else {
+        identifiers::unquote_optional_identifiers(
+            table,
+            context.request.database_type,
+            context.request.identifier_quote.as_deref(),
+        )
+    };
+
+    let mut delete_statements = Vec::with_capacity(context.request.rows.len());
+    for (row_index, row) in context.request.rows.iter().enumerate() {
+        let mut predicates = Vec::with_capacity(primary_key_indices.len());
+        for (pk_index, (pk_name, src_idx)) in primary_key_indices.iter().enumerate() {
+            let val = row.get(*src_idx).unwrap_or(&Value::Null);
+            if val.is_null() {
+                return Err(DataGridExtractError::new(
+                    DataGridExtractErrorCode::NullPrimaryKey,
+                    format!("Row {row_index} has a NULL value for primary key '{pk_name}'."),
+                ));
+            }
+            let info = primary_key_info[pk_index];
+            let quote = if context.request.options.sql.quote_identifiers {
+                context.request.identifier_quote.as_deref()
+            } else {
+                None
+            };
+            predicates.push(build_column_predicate(context.request.database_type, pk_name, val, info, false, quote));
+        }
+        delete_statements.push(data_grid_statement(
+            context.request.database_type,
+            data_grid_delete_sql(context.request.database_type, &table, &predicates.join(" AND ")),
+        ));
+    }
+    write_bytes(output, delete_statements.join("\n").as_bytes())?;
+    Ok(sql_metadata(Vec::new()))
 }
 
 pub(super) fn write_sql_deletes_inserts(
@@ -279,6 +394,8 @@ pub(super) fn write_sql_deletes_inserts(
             include_computed_columns: !context.request.options.sql.skip_computed_columns,
             include_database_name: context.request.options.sql.include_database_name,
             insert_mode: context.request.options.sql.insert_mode,
+            spatial_columns: data.spatial_columns,
+            spatial_values: data.spatial_values,
         },
         |reference| {
             if context.request.options.sql.quote_identifiers {
@@ -291,13 +408,13 @@ pub(super) fn write_sql_deletes_inserts(
                 )
             }
         },
-        |value, database_type, info, identifier_quote| {
+        |value, database_type, info, identifier_quote, spatial_srid| {
             if context.request.options.sql.temporal_format == DataGridTemporalFormat::String {
                 if let Some(literal) = portable_temporal_literal(value, database_type, info) {
                     return literal;
                 }
             }
-            format_grid_copy_insert_sql_literal(value, database_type, info, identifier_quote)
+            format_grid_copy_insert_sql_literal_with_spatial(value, database_type, info, identifier_quote, spatial_srid)
         },
     )
     .ok_or_else(|| {
@@ -409,7 +526,8 @@ fn ensure_sql_builder_budget(context: &ExtractContext<'_>) -> Result<(), DataGri
     // WHERE-clause output (and SELECT built from a cell selection, which reuses
     // the same predicate builder) repeats every selected column's identifier
     // once per row via OR'd row groups, just like SqlUpdates/row-by-row insert.
-    let repeats_identifiers_per_row = context.request.extractor == super::DataGridExtractorId::SqlUpdates
+    let repeats_identifiers_per_row = context.request.extractor == super::DataGridExtractorId::SqlDeletes
+        || context.request.extractor == super::DataGridExtractorId::SqlUpdates
         || context.request.extractor == super::DataGridExtractorId::SqlDeletesInserts
         || context.request.options.sql.insert_mode == crate::data_grid_sql::DataGridCopyInsertMode::RowByRow
         || context.request.extractor == super::DataGridExtractorId::WhereClause
@@ -483,6 +601,8 @@ struct SqlSelectedData {
     column_types: Vec<Option<String>>,
     rows: Vec<Vec<Value>>,
     omitted_columns: Vec<String>,
+    spatial_columns: Option<Vec<SpatialColumn>>,
+    spatial_values: Option<Vec<Vec<Option<u32>>>>,
 }
 
 fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<SqlSelectedData, DataGridExtractError> {
@@ -559,7 +679,33 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
         .iter()
         .map(|row| included.iter().map(|column| row[column.source_index].clone()).collect())
         .collect();
-    Ok(SqlSelectedData { columns, source_columns, column_types, rows, omitted_columns: omitted })
+    let spatial_columns = context.request.spatial_columns.as_ref().map(|cols| {
+        let source_to_new_index: HashMap<usize, usize> =
+            included.iter().enumerate().map(|(new_idx, col)| (col.source_index, new_idx)).collect();
+        cols.iter()
+            .filter_map(|col| {
+                source_to_new_index
+                    .get(&col.column_index)
+                    .map(|&new_idx| SpatialColumn { column_index: new_idx, srid: col.srid })
+            })
+            .collect::<Vec<_>>()
+    });
+    let spatial_values = context.request.spatial_values.as_ref().map(|rows| {
+        rows.iter()
+            .map(|row| {
+                included.iter().map(|column| row.get(column.source_index).copied().flatten()).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(SqlSelectedData {
+        columns,
+        source_columns,
+        column_types,
+        rows,
+        omitted_columns: omitted,
+        spatial_columns,
+        spatial_values,
+    })
 }
 
 pub(super) fn write_where_clause(

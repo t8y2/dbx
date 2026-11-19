@@ -62,6 +62,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":
+    case "group-database-indexes":
     case "index":
       return { icon: Key, colorClass: "text-amber-500" };
     case "group-fkeys":
@@ -113,6 +114,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "procedure":
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "function":
+    case "postgres-aggregate-functions":
       return { icon: Braces, colorClass: "text-amber-500" };
     case "sequence":
       return { icon: ListTree, colorClass: "text-emerald-500" };
@@ -121,6 +123,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
     case "job":
+    case "dameng-job-admin":
+    case "database-job-admin":
       return { icon: Clock, colorClass: "text-orange-400" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
@@ -145,6 +149,8 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "group-jobs":
       return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
+      return { icon: Package, colorClass: "text-cyan-500" };
+    case "group-package-bodies":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-tablespaces":
       return { icon: Database, colorClass: "text-orange-500" };

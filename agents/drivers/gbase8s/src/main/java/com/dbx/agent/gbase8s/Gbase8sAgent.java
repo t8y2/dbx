@@ -522,8 +522,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             Connection conn = requireConnection();
             String owner = trim(schema);
             Set<Integer> primaryKeyColumns = getPrimaryKeyColumnNumbers(conn, owner, table);
-            boolean mysqlCompatMode = isMysqlCompatMode(databaseListParams);
-            Map<String, String> columnDefaults = loadColumnDefaults(conn, owner, table, mysqlCompatMode);
+            Map<String, String> columnDefaults = loadColumnDefaults(conn, owner, table);
             try {
                 return loadColumns(conn, owner, table, true, primaryKeyColumns, columnDefaults);
             } catch (Exception ignored) {
@@ -606,38 +605,201 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private static Map<String, String> loadColumnDefaults(
         Connection conn,
         String owner,
+        String table
+    ) {
+        // sysdefaults is the canonical catalog for column defaults (referenced
+        // through syscolumns.coldefault) and covers literal, USER/CURRENT/TODAY
+        // and NULL defaults; sysdefaultsexpr only exposes compiled expression
+        // defaults, which is why tables whose defaults are plain literals came
+        // back empty before (issue #13220). Query both and keep the first value
+        // per column; either source failing leaves the other usable.
+        //
+        // sysdefaults layout (GBase 8s SQL Reference / IBM SYSDEFAULTS): the
+        // key is tabid+colno+class, there is no seqno column, `class` marks the
+        // column category (T = table column), and `type` holds the DEFAULT
+        // clause marker (C=Current, L=Literal, N=NULL, S=Dbservername, T=Today,
+        // U=User) with the literal itself in `default`.
+        //
+        // Literal defaults of non-character columns are stored ENCODED: the
+        // `default` column holds a 6-bit binary prefix, a blank, then the ASCII
+        // text (IBM Informix 12.10 SYSDEFAULTS). Decode them server-side with
+        // the builtin gbasedbt.get_default_value(c.coltype, c.extended_id,
+        // c.collength, d.default::lvarchar(256)) — the same call DBeaver's
+        // GBase 8s meta model and GBase's DDL-reconstruction recipe use. The
+        // builtin returns character literals unquoted, so quotes are re-added
+        // per column type below. Servers whose build lacks the builtin (older
+        // GBase 8s / Informix, where the routine is informix.get_default_value
+        // or absent) fall back to the plain undecoded query instead of losing
+        // every default.
+        //
+        // The `default` catalog column is always backtick-quoted: the GBase JDBC
+        // driver's statement parser rejects a bare `default` column reference
+        // with a syntax error (even though dbaccess parses it), in every
+        // SQLMODE, while the backtick form is accepted in both the server's
+        // standard mode and SQLMODE=mysql (verified against GBase 8s 8.8 with
+        // driver 3.6.5.21).
+        Map<String, String> defaults = new LinkedHashMap<>();
+        if (loadColumnDefaultsFromSource(
+            defaults,
+            conn,
+            owner,
+            table,
+            """
+                SELECT c.colname, c.coltype,
+                    CASE d.type
+                        WHEN 'L' THEN gbasedbt.get_default_value(c.coltype, c.extended_id, c.collength, d.`default`::lvarchar(256))
+                        ELSE d.`default`
+                    END AS column_default,
+                    d.type AS default_class
+                FROM systables t
+                JOIN syscolumns c ON t.tabid = c.tabid
+                JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno
+                WHERE t.tabname = ? AND d.class = 'T'
+                """.stripIndent().trim(),
+            true,
+            true
+        ) == DefaultsQueryOutcome.DECODE_ROUTINE_MISSING) {
+            loadColumnDefaultsFromSource(
+                defaults,
+                conn,
+                owner,
+                table,
+                """
+                    SELECT c.colname, c.coltype, d.`default` AS column_default, d.type AS default_class
+                    FROM systables t
+                    JOIN syscolumns c ON t.tabid = c.tabid
+                    JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno
+                    WHERE t.tabname = ? AND d.class = 'T'
+                    """.stripIndent().trim(),
+                true,
+                false
+            );
+        }
+        loadColumnDefaultsFromSource(
+            defaults,
+            conn,
+            owner,
+            table,
+            """
+                SELECT c.colname, e.`default` AS column_default
+                FROM systables t
+                JOIN syscolumns c ON t.tabid = c.tabid
+                JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
+                WHERE t.tabname = ? AND e.type = 'T'
+                """.stripIndent().trim(),
+            false,
+            false
+        );
+        return defaults;
+    }
+
+    private enum DefaultsQueryOutcome {
+        COMPLETED,
+        DECODE_ROUTINE_MISSING,
+        FAILED
+    }
+
+    private static DefaultsQueryOutcome loadColumnDefaultsFromSource(
+        Map<String, String> defaults,
+        Connection conn,
+        String owner,
         String table,
-        boolean mysqlCompatMode
+        String sqlText,
+        boolean hasDefaultClass,
+        boolean decodeLiterals
     ) {
         List<Object> args = new ArrayList<>();
         args.add(table);
-        StringBuilder sql = new StringBuilder("""
-            SELECT c.colname, %s AS column_default
-            FROM systables t
-            JOIN syscolumns c ON t.tabid = c.tabid
-            JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
-            WHERE t.tabname = ? AND e.type = 'T'
-            """.formatted(mysqlCompatMode ? "e.`default`" : "e.default").stripIndent().trim());
+        StringBuilder sql = new StringBuilder(sqlText);
         if (!owner.isEmpty()) {
             sql.append(" AND t.owner = ?");
             args.add(owner);
         }
 
-        Map<String, String> defaults = new LinkedHashMap<>();
         try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
             bind(stmt, args);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
-                    String value = sanitizeColumnDefault(rs.getString("column_default"));
+                    String value = rs.getString("column_default");
+                    String defaultClass = hasDefaultClass ? rs.getString("default_class") : null;
+                    // sysdefaults (decoded or raw) returns character literals
+                    // unquoted, so both sysdefaults queries re-add the quotes by
+                    // column type; sysdefaultsexpr rows are expression text and
+                    // are passed through as-is.
+                    if (hasDefaultClass
+                        && "L".equals(defaultClass)
+                        && value != null
+                        && isCharFamilyColType(rs.getInt("coltype"))) {
+                        value = quoteCharacterDefault(value);
+                    }
+                    value = sanitizeColumnDefault(value);
+                    if (value == null && hasDefaultClass) {
+                        // sysdefaults stores keyword defaults with a NULL value
+                        // and the class marker instead; surface the DEFAULT
+                        // clause keyword the class stands for.
+                        value = defaultClassKeyword(defaultClass);
+                    }
                     if (value != null) {
-                        defaults.put(trim(rs.getString("colname")), value);
+                        defaults.putIfAbsent(trim(rs.getString("colname")), value);
                     }
                 }
             }
-        } catch (SQLException ignored) {
-            return Collections.emptyMap();
+        } catch (SQLException e) {
+            // Either catalog failing (older servers may lack the view or the
+            // decoding builtin) leaves whatever the other source contributed in
+            // place, but never silently: the failure is visible on stderr.
+            if (decodeLiterals && missingDecodeRoutine(e)) {
+                System.err.println(
+                    "[gbase8s] gbasedbt.get_default_value unavailable, retrying sysdefaults undecoded: " + e.getMessage());
+                return DefaultsQueryOutcome.DECODE_ROUTINE_MISSING;
+            }
+            System.err.println("[gbase8s] column defaults query failed, skipping this defaults source: " + e.getMessage());
+            return DefaultsQueryOutcome.FAILED;
         }
-        return defaults;
+        return DefaultsQueryOutcome.COMPLETED;
+    }
+
+    /** Whether a sysdefaults failure is the server lacking the literal-decoding builtin it names. */
+    private static boolean missingDecodeRoutine(SQLException e) {
+        String message = e.getMessage();
+        return message != null && message.toLowerCase(Locale.ROOT).contains("get_default_value");
+    }
+
+    /**
+     * get_default_value returns character literals unquoted, but a DEFAULT clause needs them
+     * quoted (GBase's DDL-reconstruction recipe re-adds the quotes by column type), so wrap
+     * the decoded literal and double embedded quotes. The value is not trimmed: surrounding
+     * blanks can be part of the literal.
+     */
+    static String quoteCharacterDefault(String decoded) {
+        String literal = decoded == null ? "" : decoded;
+        int nullIndex = literal.indexOf('\0');
+        if (nullIndex >= 0) {
+            literal = literal.substring(0, nullIndex);
+        }
+        return "'" + literal.replace("'", "''") + "'";
+    }
+
+    /** Whether the syscolumns coltype is a character type whose decoded literal must be re-quoted. */
+    static boolean isCharFamilyColType(int coltype) {
+        int baseType = baseColType(coltype);
+        return baseType == 0 /* CHAR */ || baseType == 13 /* VARCHAR */ || baseType == 15 /* NCHAR */
+            || baseType == 16 /* NVARCHAR */ || baseType == 40 /* LVARCHAR */;
+    }
+
+    /** The Informix DEFAULT clause keyword a sysdefaults.type marker stands for. */
+    static String defaultClassKeyword(String defaultClass) {
+        if (defaultClass == null) {
+            return null;
+        }
+        return switch (defaultClass) {
+            case "U" -> "USER";
+            case "C" -> "CURRENT";
+            case "T" -> "TODAY";
+            case "S" -> "DBSERVERNAME";
+            case "N" -> "NULL";
+            default -> null;
+        };
     }
 
     public static String sanitizeColumnDefault(String value) {
@@ -650,17 +812,6 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         }
         value = value.trim();
         return value.isEmpty() ? null : value;
-    }
-
-    private static boolean isMysqlCompatMode(ConnectParams params) {
-        if (params == null) {
-            return false;
-        }
-        if (params.isMysql_compat_mode()) {
-            return true;
-        }
-        String sqlMode = connectionParameterValue(buildUrl(params), "SQLMODE");
-        return sqlMode.equalsIgnoreCase("mysql");
     }
 
     @Override

@@ -208,6 +208,17 @@ export function pluginConnectionProviderIcon(entry: PluginContributionEntry<Plug
 }
 
 /**
+ * 提供者声明的默认端口：取 `binding: "port"` 字段的声明默认值。
+ *
+ * 深链 `type=<插件类型>` 只用它做预填提示，链接上的 `port` 参数始终优先。
+ */
+export function pluginConnectionProviderDefaultPort(contribution: PluginConnectionProviderContribution): number | undefined {
+  const field = contribution.fields.find((candidate) => candidate.binding === "port");
+  const value = field?.default;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535 ? value : undefined;
+}
+
+/**
  * Well-known provider field key whose declared default seeds the typed
  * `ConnectionConfig.connect_timeout_secs`. A plugin knows its own transport
  * (SSH handshakes on slow links need far more than the generic 10s), so a

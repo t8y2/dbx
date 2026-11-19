@@ -333,13 +333,16 @@ pub fn resolved_models_command(config: &AiConfig) -> Result<OpenCodeCommandSpec,
     resolved_models_command_for_version(config, version)
 }
 
+// OpenCode 1 prints one `modelID` line followed by a JSON metadata block per model and accepts
+// `--verbose`/`--pure`; OpenCode 2 rejects both flags and prints one plain `providerID/model` line per model.
 pub fn resolved_models_command_for_version(
     config: &AiConfig,
     version: OpenCodeVersion,
 ) -> Result<OpenCodeCommandSpec, String> {
     let mut command = resolve_opencode_command(config)?;
-    command.args.extend(["models".to_string(), "--verbose".to_string()]);
+    command.args.push("models".to_string());
     if version == OpenCodeVersion::V1 {
+        command.args.push("--verbose".to_string());
         command.args.push("--pure".to_string());
     }
     Ok(command)
@@ -424,6 +427,20 @@ pub async fn list_opencode_models(config: &AiConfig) -> Result<Vec<AiModelInfo>,
     })
 }
 
+fn push_pending_opencode_model(
+    pending_id: &mut Option<String>,
+    models: &mut Vec<AiModelInfo>,
+    seen: &mut BTreeSet<String>,
+) {
+    if let Some(id) = pending_id.take() {
+        if let Some(info) = opencode_model_info(Some(id), &Value::Null) {
+            if seen.insert(info.id.clone()) {
+                models.push(info);
+            }
+        }
+    }
+}
+
 fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
     let mut models = Vec::new();
     let mut seen = BTreeSet::new();
@@ -437,6 +454,8 @@ fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
                 json_buffer.push_str(line);
                 json_buffer.push('\n');
             } else if !trimmed.is_empty() {
+                // OpenCode 2 emits consecutive plain `providerID/model` lines with no metadata block.
+                push_pending_opencode_model(&mut pending_id, &mut models, &mut seen);
                 pending_id = Some(trimmed.to_string());
             }
         } else {
@@ -463,6 +482,7 @@ fn parse_opencode_models(stdout: &str) -> Option<Vec<AiModelInfo>> {
             }
         }
     }
+    push_pending_opencode_model(&mut pending_id, &mut models, &mut seen);
 
     if models.is_empty() {
         return None;
@@ -758,7 +778,71 @@ mod tests {
         let command = resolved_models_command(&config).unwrap();
 
         assert_eq!(command.program, "opencode");
-        assert_eq!(command.args, ["models", "--verbose"]);
+        assert_eq!(command.args, ["models"]);
+    }
+
+    struct StubOpenCodeCli {
+        config: AiConfig,
+        _directory: std::path::PathBuf,
+    }
+
+    impl StubOpenCodeCli {
+        fn new(version: &str) -> Self {
+            let directory = std::env::temp_dir().join(format!("dbx-opencode-stub-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let script_path = if cfg!(windows) { directory.join("opencode.cmd") } else { directory.join("opencode") };
+            #[cfg(windows)]
+            let script = format!(
+                "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo {version}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"models\" (\r\n  if \"%~2\"==\"--verbose\" (\r\n    echo ERROR\r\n    echo   Unrecognized flag: --verbose in command opencode models\r\n    exit /b 1\r\n  )\r\n  echo anthropic/claude-sonnet-4-5\r\n  echo openai/gpt-5.2\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
+            );
+            #[cfg(not(windows))]
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo {version}\n  exit 0\nfi\nif [ \"$1\" = \"models\" ]; then\n  if [ \"$2\" = \"--verbose\" ]; then\n    echo ERROR\n    echo \"  Unrecognized flag: --verbose in command opencode models\"\n    exit 1\n  fi\n  echo anthropic/claude-sonnet-4-5\n  echo openai/gpt-5.2\n  exit 0\nfi\nexit 1\n"
+            );
+            std::fs::write(&script_path, script).unwrap();
+            #[cfg(not(windows))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let mut config = config("default");
+            config.opencode_cli_path = Some(script_path.to_string_lossy().to_string());
+            Self { config, _directory: directory }
+        }
+    }
+
+    impl Drop for StubOpenCodeCli {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self._directory);
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_model_discovery_and_connection_test_skip_unsupported_verbose_flag() {
+        let mut stub = StubOpenCodeCli::new("2.1.4");
+        stub.config.opencode_cli_version = Some("v2".to_string());
+
+        let models = list_opencode_models(&stub.config).await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "anthropic/claude-sonnet-4-5", "openai/gpt-5.2"]
+        );
+        assert!(models[1].effort_capability.is_none());
+        assert!(models[1].display_name.is_none());
+
+        let result = test_opencode_connection(&stub.config).await.unwrap();
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn auto_detected_v2_falls_back_from_verbose_to_plain_models() {
+        let stub = StubOpenCodeCli::new("2.1.4");
+
+        let models = list_opencode_models(&stub.config).await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "anthropic/claude-sonnet-4-5", "openai/gpt-5.2"]
+        );
     }
 
     #[test]
@@ -831,6 +915,20 @@ mod tests {
         reserved.opencode_cli_env.clear();
         reserved.opencode_cli_env.insert("DBX_MCP_ALLOW_WRITES".to_string(), "1".to_string());
         assert!(opencode_cli_env(&reserved).unwrap_err().starts_with("[openCodeEnvReserved]"));
+    }
+
+    #[test]
+    fn parses_plain_text_model_lines_from_v2() {
+        let stdout = "anthropic/claude-sonnet-4-5\nopenai/gpt-5.2\n";
+
+        let models = parse_opencode_models(stdout).unwrap();
+
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["default", "anthropic/claude-sonnet-4-5", "openai/gpt-5.2"]
+        );
+        assert!(models[1].display_name.is_none());
+        assert!(models[1].effort_capability.is_none());
     }
 
     #[test]

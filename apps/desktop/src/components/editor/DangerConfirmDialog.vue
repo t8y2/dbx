@@ -131,7 +131,7 @@ async function copyFullCode() {
 
 <template>
   <Dialog v-model:open="dialogOpen">
-    <DialogContent class="sm:max-w-[480px]" @open-auto-focus="onDangerDialogOpenAutoFocus" @close-auto-focus="onDangerDialogCloseAutoFocus">
+    <DialogContent :class="$slots.preview ? 'flex h-[85vh] min-h-0 flex-col sm:max-w-[1120px]' : 'sm:max-w-[480px]'" @open-auto-focus="onDangerDialogOpenAutoFocus" @close-auto-focus="onDangerDialogCloseAutoFocus">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2 text-destructive">
           <AlertTriangle class="h-5 w-5" />
@@ -139,29 +139,31 @@ async function copyFullCode() {
         </DialogTitle>
       </DialogHeader>
 
-      <div class="py-4 min-w-0">
+      <div class="py-4 min-w-0" :class="{ 'flex min-h-0 flex-1 flex-col': $slots.preview }">
         <p class="text-sm text-muted-foreground mb-3">{{ message || t("dangerDialog.message") }}</p>
         <p v-if="detailsText" class="text-xs text-muted-foreground mb-3 whitespace-pre-line max-h-40 overflow-auto">{{ detailsText }}</p>
         <slot name="options" />
-        <component :is="detailsLabel ? 'details' : 'div'" v-if="code" data-testid="danger-code-container" class="min-w-0">
-          <summary v-if="detailsLabel" class="mb-2 cursor-pointer text-sm text-muted-foreground">{{ detailsLabel }}</summary>
-          <div data-testid="danger-code-actions" class="mb-1 flex items-center justify-end gap-0.5">
-            <Button variant="ghost" size="icon-xs" class="h-6 w-6 text-muted-foreground" :title="t('dangerDialog.copyFullText')" @click="copyFullCode">
-              <Check v-if="copied" class="h-3.5 w-3.5 text-emerald-600" />
-              <Copy v-else class="h-3.5 w-3.5" />
-            </Button>
-            <Button variant="ghost" size="icon-xs" class="h-6 w-6" :class="wrap ? 'text-foreground bg-accent' : 'text-muted-foreground'" :title="t('dangerDialog.wrapLines')" @click="wrap = !wrap">
-              <TextWrap class="h-3.5 w-3.5" />
-            </Button>
-          </div>
-          <div data-native-clipboard data-testid="danger-code-preview" class="max-h-40 min-w-0 overflow-auto rounded bg-muted px-3 py-3 text-xs font-mono">
-            <pre class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedHead" />
-            <div v-if="preview.truncated" data-testid="danger-preview-truncated" class="my-2 rounded border border-border/70 bg-background/70 px-2 py-1.5 text-center text-[11px] leading-4 text-muted-foreground whitespace-normal">
-              {{ t("dangerDialog.previewTruncated", { lines: preview.omittedLines.toLocaleString(), characters: preview.omittedCharacters.toLocaleString() }) }}
+        <slot name="preview">
+          <component :is="detailsLabel ? 'details' : 'div'" v-if="code" data-testid="danger-code-container" class="min-w-0">
+            <summary v-if="detailsLabel" class="mb-2 cursor-pointer text-sm text-muted-foreground">{{ detailsLabel }}</summary>
+            <div data-testid="danger-code-actions" class="mb-1 flex items-center justify-end gap-0.5">
+              <Button variant="ghost" size="icon-xs" class="h-6 w-6 text-muted-foreground" :title="t('dangerDialog.copyFullText')" @click="copyFullCode">
+                <Check v-if="copied" class="h-3.5 w-3.5 text-emerald-600" />
+                <Copy v-else class="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="ghost" size="icon-xs" class="h-6 w-6" :class="wrap ? 'text-foreground bg-accent' : 'text-muted-foreground'" :title="t('dangerDialog.wrapLines')" @click="wrap = !wrap">
+                <TextWrap class="h-3.5 w-3.5" />
+              </Button>
             </div>
-            <pre v-if="preview.tail" class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedTail" />
-          </div>
-        </component>
+            <div data-native-clipboard data-testid="danger-code-preview" class="max-h-40 min-w-0 overflow-auto rounded bg-muted px-3 py-3 text-xs font-mono">
+              <pre class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedHead" />
+              <div v-if="preview.truncated" data-testid="danger-preview-truncated" class="my-2 rounded border border-border/70 bg-background/70 px-2 py-1.5 text-center text-[11px] leading-4 text-muted-foreground whitespace-normal">
+                {{ t("dangerDialog.previewTruncated", { lines: preview.omittedLines.toLocaleString(), characters: preview.omittedCharacters.toLocaleString() }) }}
+              </div>
+              <pre v-if="preview.tail" class="font-inherit" :class="wrap ? 'w-full whitespace-pre-wrap break-all' : 'w-max min-w-full whitespace-pre'" v-html="highlightedTail" />
+            </div>
+          </component>
+        </slot>
         <div v-if="showSuppressToggle" class="mt-3 flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
           <Label for="danger-confirm-suppress" class="text-sm leading-5">{{ suppressToggleLabel || t("dangerDialog.suppressFuturePrompts") }}</Label>
           <Switch id="danger-confirm-suppress" v-model="suppressFuturePrompts" />

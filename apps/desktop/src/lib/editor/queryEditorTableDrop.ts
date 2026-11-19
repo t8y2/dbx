@@ -1,10 +1,10 @@
 import type { DatabaseType } from "@/types/database";
 import { COLUMN_NAME_COPY_SEPARATOR_VALUES, loadColumnNameCopySeparator, type ColumnNameCopySeparator, isColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { qualifiedTableName, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
-import { requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
+import { requiresClickhouseIdentifierQuote, requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 
 /** 智能引号使用反引号的方言族。 */
-const SMART_QUOTE_BACKTICK_TYPES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "transwarp", "kyuubi", "impala", "spark", "databricks", "databend", "tdengine", "access", "doris", "starrocks", "goldendb"]);
+const SMART_QUOTE_BACKTICK_TYPES = new Set<DatabaseType>(["mysql", "hive", "argo", "transwarp", "kyuubi", "impala", "spark", "databricks", "databend", "tdengine", "access", "doris", "starrocks", "goldendb"]);
 /** 智能引号使用双引号的方言族（SQL Server 方括号除外）。 */
 const SMART_QUOTE_DOUBLE_TYPES = new Set<DatabaseType>(["postgres", "gaussdb", "opengauss"]);
 /** SQL Server 族智能引号使用方括号。 */
@@ -18,6 +18,9 @@ const SMART_QUOTE_BRACKET_TYPES = new Set<DatabaseType>(["sqlserver"]);
  * 用「严格标识符正则 + PG/MySQL 保留字并集」做通用保守判定。
  */
 function quoteColumnReferenceName(databaseType: DatabaseType | undefined, name: string): string {
+  if (databaseType === "clickhouse") {
+    return requiresClickhouseIdentifierQuote(name) ? `\`${name.replace(/`/g, "``")}\`` : name;
+  }
   if (databaseType && SMART_QUOTE_BACKTICK_TYPES.has(databaseType)) {
     return requiresMysqlIdentifierQuote(name) ? `\`${name.replace(/`/g, "``")}\`` : name;
   }

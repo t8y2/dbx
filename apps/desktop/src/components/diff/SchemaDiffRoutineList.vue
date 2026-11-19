@@ -38,6 +38,7 @@ const rows = computed(() =>
 
 function displayName(object: SchemaDiffObject, side: "source" | "target"): string {
   const name = side === "source" ? (object.sourceName ?? object.name) : (object.targetName ?? object.name);
+  if (object.routineType === "PACKAGE" || object.routineType === "PACKAGE_BODY") return `${object.routineType.replaceAll("_", " ")} ${name}`;
   return schemaDiffRoutineKey(name, object.arguments ?? "");
 }
 
@@ -46,6 +47,7 @@ function hasStats(stats: SchemaDiffRoutineTextDiffStats): boolean {
 }
 
 function onCheckboxChange(object: SchemaDiffObject, event: Event) {
+  if (object.operationType === "none") return;
   emit("toggle-selection", object, (event.target as HTMLInputElement).checked);
 }
 
@@ -79,7 +81,17 @@ function onRowActivate(object: SchemaDiffObject) {
         @keydown.enter.prevent="onRowActivate(row.object)"
         @keydown.space.prevent="onRowActivate(row.object)"
       >
-        <input v-if="showSelection" type="checkbox" class="accent-primary justify-self-center" :checked="row.selection.checked" :indeterminate="row.selection.indeterminate" @click.stop @change="onCheckboxChange(row.object, $event)" />
+        <input
+          v-if="showSelection"
+          type="checkbox"
+          class="accent-primary justify-self-center"
+          :checked="row.selection.checked"
+          :indeterminate="row.selection.indeterminate"
+          :disabled="row.object.operationType === 'none'"
+          :aria-label="displayName(row.object, 'source') || displayName(row.object, 'target')"
+          @click.stop
+          @change="onCheckboxChange(row.object, $event)"
+        />
         <div class="min-w-0 truncate font-mono" :title="row.sourceLabel || undefined">
           <span v-if="row.sourceLabel" :class="row.object.operationType === 'create' ? 'text-green-600 dark:text-green-400' : ''">{{ row.sourceLabel }}</span>
           <span v-else class="text-muted-foreground">—</span>
@@ -89,7 +101,10 @@ function onRowActivate(object: SchemaDiffObject) {
           <span v-else class="text-muted-foreground">—</span>
         </div>
         <div class="min-w-0 truncate tabular-nums" :title="hasStats(row.stats) ? t('diff.routineDiffStats', { added: row.stats.added, removed: row.stats.removed, modified: row.stats.modified }) : undefined">
-          <template v-if="hasStats(row.stats)">
+          <span v-if="row.object.routineComparisonState === 'equal'" class="text-muted-foreground">{{ t("diff.routineEqual") }}</span>
+          <span v-else-if="row.object.routineComparisonState === 'unreadable'" class="text-amber-700 dark:text-amber-300">{{ t("diff.routineUnreadable") }}</span>
+          <span v-else-if="row.object.routineComparisonState === 'conflict'" class="text-destructive">{{ t("diff.routineConflict") }}</span>
+          <template v-else-if="hasStats(row.stats)">
             <span class="text-green-600 dark:text-green-400">+{{ row.stats.added }}</span>
             <span class="text-muted-foreground"> </span>
             <span class="text-red-500 dark:text-red-400">−{{ row.stats.removed }}</span>

@@ -11,6 +11,9 @@ import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.JsonRpcServer;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -1274,6 +1277,50 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(sql.get(0).contains("ALL_SOURCE"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("DBMS_METADATA.GET_DDL"), sql.get(1));
         Assertions.assertEquals(List.of("APP", "P1", "PROCEDURE", "PROCEDURE", "P1", "APP"), params);
+    }
+
+    @Test
+    void strictPackageSourceReportsActualFallbackOriginWithoutChangingOrdinaryResponses() throws Exception {
+        Method request = JsonRpcServer.class.getDeclaredMethod("handleRequest", String.class);
+        request.setAccessible(true);
+        for (boolean fallback : new boolean[]{false, true}) {
+            for (boolean strict : new boolean[]{false, true}) {
+                OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+                ResultSet rows = resultSet(new String[]{fallback ? "DDL" : "TEXT"}, new Object[][]{
+                    {fallback ? "CREATE OR REPLACE PACKAGE BODY APP.P AS END;" : "PACKAGE BODY P AS END;"}
+                });
+                TestSupport.setPrivateConnection(agent, fallback
+                    ? objectSourceFallbackConnection(new ArrayList<>(), new ArrayList<>(), rows)
+                    : objectSourceConnection(new ArrayList<>(), new ArrayList<>(), rows));
+                String response = (String) request.invoke(new JsonRpcServer(agent),
+                    "{\"id\":1,\"method\":\"get_object_source\",\"params\":{\"schema\":\"APP\",\"name\":\"P\",\"object_type\":\"PACKAGE_BODY\",\"include_source_origin\":" + strict + "}}");
+                JsonObject envelope = JsonParser.parseString(response).getAsJsonObject();
+                Assertions.assertFalse(envelope.has("error"), response);
+                JsonObject result = envelope.getAsJsonObject("result");
+                if (strict) {
+                    Assertions.assertTrue(result.has("source_origin"), response);
+                    Assertions.assertEquals(fallback ? "oracle-metadata" : "oceanbase-dictionary", result.get("source_origin").getAsString());
+                } else {
+                    Assertions.assertFalse(result.has("source_origin"), response);
+                }
+            }
+        }
+    }
+
+    @Test
+    void strictSpecificationMetadataFallbackRequestsOnlyTheSpecification() throws Exception {
+        Method request = JsonRpcServer.class.getDeclaredMethod("handleRequest", String.class);
+        request.setAccessible(true);
+        for (boolean strict : new boolean[]{false, true}) {
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(new ArrayList<>(), params,
+                resultSet(new String[]{"DDL"}, new Object[][]{{"CREATE OR REPLACE PACKAGE APP.P AS END;"}})));
+            String response = (String) request.invoke(new JsonRpcServer(agent),
+                "{\"id\":1,\"method\":\"get_object_source\",\"params\":{\"schema\":\"APP\",\"name\":\"P\",\"object_type\":\"PACKAGE\",\"include_source_origin\":" + strict + "}}");
+            Assertions.assertFalse(JsonParser.parseString(response).getAsJsonObject().has("error"), response);
+            Assertions.assertEquals(List.of("APP", "P", "PACKAGE", strict ? "PACKAGE_SPEC" : "PACKAGE", "P", "APP"), params);
+        }
     }
 
     @Test

@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import TreeItem from "@/components/sidebar/TreeItem.vue";
 import { createSidebarTreeRuntime, sidebarTreeRuntimeKey, type SidebarTreeRuntimeHost } from "@/lib/sidebar/sidebarTreeRuntime";
-import type { TreeNode } from "@/types/database";
-import type { SidebarDensity } from "@/stores/settingsStore";
+import type { ConnectionConfig, TreeNode } from "@/types/database";
+import type { SidebarConnectionIconStyle, SidebarDensity } from "@/stores/settingsStore";
 
 const mockSettings = reactive({
   editorSettings: {
@@ -16,6 +16,7 @@ const mockSettings = reactive({
     sidebarHiddenTablePrefixes: [],
     sidebarObjectInfoMode: "none",
     sidebarDensity: "default" as SidebarDensity,
+    sidebarConnectionIconStyle: "classic" as SidebarConnectionIconStyle,
     sidebarShowTooltips: false,
     sidebarIndent: 16,
     sidebarTableSearchLocal: true,
@@ -24,12 +25,12 @@ const mockSettings = reactive({
 
 const connectionStore = {
   activeConnectionId: "connection-1",
-  connectedIds: new Set(["connection-1"]),
+  connectedIds: reactive(new Set(["connection-1"])),
   connectingIds: new Set<string>(),
   connectionErrors: {},
   connectionMultiSelectActive: false,
   connections: [],
-  getConfig: () => undefined,
+  getConfig: vi.fn<(id: string) => ConnectionConfig | undefined>(() => undefined),
   getSidebarVisibleFilterSummary: () => null,
   clearConnectionError: vi.fn(),
   isDefaultDatabase: () => false,
@@ -41,6 +42,7 @@ const connectionStore = {
   selectedTreeNodeIds: [] as string[],
   selectedTreeNodeIdsSet: new Set<string>(),
   sidebarTableSearchQueries: {},
+  sidebarLayout: { groups: [], order: [] },
   tableNameFilterForScope: () => undefined,
   treeNodes: [],
   treeSelectionAnchorId: null as string | null,
@@ -63,6 +65,10 @@ vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
 
+vi.mock("@/lib/plugins/pluginIconResolver", () => ({
+  resolvePluginIcon: async () => "https://example.invalid/plugin-icon.svg",
+}));
+
 const mountedApps: App[] = [];
 
 afterEach(() => {
@@ -71,6 +77,9 @@ afterEach(() => {
   }
   document.body.innerHTML = "";
   mockSettings.editorSettings.sidebarDensity = "default";
+  mockSettings.editorSettings.sidebarConnectionIconStyle = "classic";
+  connectionStore.connectedIds.add("connection-1");
+  connectionStore.getConfig.mockReset();
 });
 
 function createTreeRuntimeHost(): SidebarTreeRuntimeHost {
@@ -122,6 +131,63 @@ function mountTreeItem(node: TreeNode) {
 
   return container;
 }
+
+describe("TreeItem connection icon style", () => {
+  const node: TreeNode = { id: "connection-1", type: "connection", label: "Example", connectionId: "connection-1" };
+
+  it("switches an existing connection row between its original icon and the state badge", async () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "mysql" } as ConnectionConfig);
+    const container = mountTreeItem(node);
+    expect(container.querySelector('img[src$="/icons/database/mysql.svg"]')).not.toBeNull();
+
+    mockSettings.editorSettings.sidebarConnectionIconStyle = "badge";
+    await nextTick();
+    const badge = container.querySelector<HTMLElement>('[data-connection-badge="mysql"]');
+    expect(badge?.dataset.connected).toBe("true");
+    expect(badge?.parentElement?.style.width).toBe("16px");
+
+    connectionStore.connectedIds.delete(node.id);
+    mockSettings.editorSettings.sidebarDensity = "compact";
+    await nextTick();
+    expect(badge?.dataset.connected).toBe("false");
+    expect(badge?.style.backgroundColor).toBe("#737373");
+    expect(badge?.parentElement?.style.width).toBe("16px");
+
+    mockSettings.editorSettings.sidebarConnectionIconStyle = "classic";
+    await nextTick();
+    expect(container.querySelector('img[src$="/icons/database/mysql.svg"]')?.classList.contains("opacity-70")).toBe(true);
+    expect(container.querySelector("[data-connection-badge]")).toBeNull();
+  });
+
+  it("renders a generic mark in a full-size badge for a future database without artwork", () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "future-database" } as ConnectionConfig);
+    mockSettings.editorSettings.sidebarConnectionIconStyle = "badge";
+    const container = mountTreeItem(node);
+    const badge = container.querySelector('[data-connection-badge="generic"]');
+    expect(badge?.querySelector("svg")).not.toBeNull();
+    expect(badge?.parentElement?.style.width).toBe("16px");
+  });
+
+  it("keeps connection group folders the same size as colored badges when density changes", async () => {
+    mockSettings.editorSettings.sidebarConnectionIconStyle = "badge";
+    const container = mountTreeItem({ id: "group", type: "connection-group", label: "Example group", isExpanded: true });
+    const folder = container.querySelector("svg.lucide-folder-open");
+    expect(folder?.parentElement?.style.width).toBe("16px");
+
+    mockSettings.editorSettings.sidebarDensity = "compact";
+    await nextTick();
+    expect(folder?.parentElement?.style.width).toBe("16px");
+    expect(container.querySelector("[data-connection-badge]")).toBeNull();
+  });
+
+  it.each(["classic", "badge"] as const)("uses the plugin's own icon in %s mode", async (style) => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "plugin", plugin_id: "example", plugin_connection_provider: "example-provider" } as ConnectionConfig);
+    mockSettings.editorSettings.sidebarConnectionIconStyle = style;
+    const container = mountTreeItem(node);
+    await vi.waitFor(() => expect(container.querySelector('img[src="https://example.invalid/plugin-icon.svg"]')).not.toBeNull());
+    expect(container.querySelector("[data-connection-badge]")).toBeNull();
+  });
+});
 
 describe("TreeItem sidebarDensity layout", () => {
   it("renders default min-h-7 and py-1 when sidebarDensity is default", async () => {

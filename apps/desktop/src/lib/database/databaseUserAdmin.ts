@@ -5,7 +5,7 @@ import { supportsOracleSecurity } from "@/lib/database/oracleSecurity";
 
 export type UserAdminDialect = "mysql" | "postgres";
 export type PrivilegeScope = "mysql" | "database" | "schema" | "table" | "role" | "system";
-export type AuthorizationModel = "mysql" | "postgres" | "starrocks";
+export type AuthorizationModel = "mysql" | "postgres" | "starrocks" | "doris";
 
 export interface DatabaseUserIdentity {
   user: string;
@@ -24,6 +24,7 @@ export interface PrivilegeChangeInput {
   catalog?: string;
   database: string;
   table?: string;
+  objectType?: StarrocksViewObjectType;
   grantOption?: boolean;
   scope?: PrivilegeScope;
   role?: string;
@@ -46,6 +47,7 @@ export interface DatabaseTablePrivilegeGrant {
   database: string;
   schema?: string;
   table: string;
+  objectType?: StarrocksViewObjectType;
   privilege: string;
   grantOption: boolean;
 }
@@ -59,6 +61,7 @@ export interface DatabaseUserAdminProvider {
   defaultScope: PrivilegeScope;
   authorizationModel?: AuthorizationModel;
   supportsTableGrantsOnCreate?: boolean;
+  supportsTableGrantsOnEdit?: boolean;
   listUsersSql(): string;
   fallbackListUsersSql?: () => string;
   parseUsers(result: QueryResult): DatabaseUserIdentity[];
@@ -92,6 +95,18 @@ export const DORIS_TABLE_PRIVILEGES = ["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV",
 // StarRocks' v3.0+ privilege framework uses these table action names; legacy
 // *_PRIV names belong to the incompatible pre-v3.0 framework.
 export const STARROCKS_TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT", "ALL"] as const;
+export type StarrocksViewObjectType = "VIEW" | "MATERIALIZED_VIEW";
+
+export function starrocksViewObjectType(type: string | undefined): StarrocksViewObjectType | undefined {
+  const normalized = type?.trim().toUpperCase().replace(/\s+/g, "_");
+  return normalized === "VIEW" || normalized === "MATERIALIZED_VIEW" ? normalized : undefined;
+}
+
+export function starrocksObjectPrivileges(type?: StarrocksViewObjectType): readonly string[] {
+  if (type === "VIEW") return ["SELECT", "ALTER", "DROP", "ALL"];
+  if (type === "MATERIALIZED_VIEW") return ["SELECT", "ALTER", "REFRESH", "DROP", "ALL"];
+  return STARROCKS_TABLE_PRIVILEGES;
+}
 
 export const POSTGRES_DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
 export const POSTGRES_SCHEMA_PRIVILEGES = ["USAGE", "CREATE"] as const;
@@ -229,14 +244,15 @@ export function mysqlRevokePrivilegesSql(input: PrivilegeChangeInput): string {
   return `REVOKE ${privileges} ON ${mysqlPrivilegeTargetSql(input.database, input.table)} FROM ${mysqlUserAccount(input.user)};`;
 }
 
-export function starrocksPrivilegeTargetSql(database: string, table = "*"): string {
+export function starrocksPrivilegeTargetSql(database: string, table = "*", objectType?: StarrocksViewObjectType): string {
   const db = database.trim();
   const tbl = table.trim();
+  const kind = objectType === "MATERIALIZED_VIEW" ? "MATERIALIZED VIEW" : (objectType ?? "TABLE");
   if (!tbl || tbl === "*") {
-    return !db || db === "*" ? "ALL TABLES IN ALL DATABASES" : `ALL TABLES IN DATABASE ${quoteMySqlIdentifier(db)}`;
+    return !db || db === "*" ? `ALL ${kind}S IN ALL DATABASES` : `ALL ${kind}S IN DATABASE ${quoteMySqlIdentifier(db)}`;
   }
   const tableName = quoteMySqlIdentifier(tbl);
-  return !db || db === "*" ? `TABLE ${tableName}` : `TABLE ${quoteMySqlIdentifier(db)}.${tableName}`;
+  return !db || db === "*" ? `${kind} ${tableName}` : `${kind} ${quoteMySqlIdentifier(db)}.${tableName}`;
 }
 
 function starrocksCatalogPrefix(catalog: string | undefined): string {
@@ -247,12 +263,12 @@ function starrocksCatalogPrefix(catalog: string | undefined): string {
 export function starrocksGrantPrivilegesSql(input: PrivilegeChangeInput): string {
   const privileges = normalizePrivileges(input.privileges).join(", ");
   const grantOption = input.grantOption ? " WITH GRANT OPTION" : "";
-  return `${starrocksCatalogPrefix(input.catalog)}GRANT ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} TO USER ${mysqlUserAccount(input.user)}${grantOption};`;
+  return `${starrocksCatalogPrefix(input.catalog)}GRANT ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table, input.objectType)} TO USER ${mysqlUserAccount(input.user)}${grantOption};`;
 }
 
 export function starrocksRevokePrivilegesSql(input: PrivilegeChangeInput): string {
   const privileges = normalizePrivileges(input.privileges).join(", ");
-  return `${starrocksCatalogPrefix(input.catalog)}REVOKE ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table)} FROM USER ${mysqlUserAccount(input.user)};`;
+  return `${starrocksCatalogPrefix(input.catalog)}REVOKE ${privileges} ON ${starrocksPrivilegeTargetSql(input.database, input.table, input.objectType)} FROM USER ${mysqlUserAccount(input.user)};`;
 }
 
 export function dorisPrivilegeTargetSql(database: string, table = "*"): string {
@@ -752,6 +768,7 @@ function parseStarrocksTableGrant(sql: string, catalog: string | undefined): Dat
   if (privileges.length === 0) return [];
 
   const rawTarget = match[2].trim();
+  let objectType: StarrocksViewObjectType | undefined;
   let database = "";
   let table = "";
   const allInDatabase = /^ALL\s+TABLES\s+IN\s+DATABASE\s+(.+)$/i.exec(rawTarget);
@@ -762,8 +779,10 @@ function parseStarrocksTableGrant(sql: string, catalog: string | undefined): Dat
     database = "*";
     table = "*";
   } else {
-    const tableTarget = rawTarget.replace(/^TABLE\s+/i, "");
-    if (/^(?:DATABASE|CATALOG|VIEW|MATERIALIZED\s+VIEW|FUNCTION|RESOURCE|USER)\b/i.test(tableTarget)) return [];
+    const explicitKind = /^(TABLE|VIEW|MATERIALIZED\s+VIEW)\s+/i.exec(rawTarget);
+    objectType = starrocksViewObjectType(explicitKind?.[1]);
+    const tableTarget = explicitKind ? rawTarget.slice(explicitKind[0].length) : rawTarget;
+    if (!explicitKind && /^(?:DATABASE|CATALOG|FUNCTION|RESOURCE|USER|ALL)\b/i.test(tableTarget)) return [];
     const identifiers = splitMySqlIdentifierPath(tableTarget);
     if (!identifiers || identifiers.length < 2 || identifiers.length > 3) return [];
     if (identifiers.length === 3) catalog = normalizeStarrocksCatalog(identifiers.shift() ?? "") ?? catalog;
@@ -772,7 +791,7 @@ function parseStarrocksTableGrant(sql: string, catalog: string | undefined): Dat
   if (!database || !table) return [];
 
   const grantOption = /\s+WITH\s+GRANT\s+OPTION\s*;?\s*$/i.test(sql);
-  return privileges.map((privilege) => ({ catalog, database, table, privilege, grantOption }));
+  return privileges.map((privilege) => ({ catalog, database, table, privilege, grantOption, ...(objectType ? { objectType } : {}) }));
 }
 
 function splitMySqlIdentifierPath(value: string): string[] | null {
@@ -923,6 +942,9 @@ export const gaussdbMUserAdminProvider: DatabaseUserAdminProvider = {
 export const dorisUserAdminProvider: DatabaseUserAdminProvider = {
   dialect: "mysql",
   defaultScope: "table",
+  authorizationModel: "doris",
+  supportsTableGrantsOnCreate: true,
+  supportsTableGrantsOnEdit: false,
   listUsersSql: dorisListUsersSql,
   fallbackListUsersSql: dorisListCurrentUserSql,
   parseUsers: dorisUsersResult,

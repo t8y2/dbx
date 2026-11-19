@@ -10,7 +10,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { QueryEditorProps } from "../queryEditorTypes";
 
-vi.mock("@/lib/common/clipboard", () => ({
+vi.mock("@/lib/common/clipboard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/common/clipboard")>()),
   copyToClipboard: vi.fn().mockResolvedValue(undefined),
   readTextFromClipboard: vi.fn().mockResolvedValue(""),
 }));
@@ -30,6 +31,7 @@ async function mountEditor(modelValue: string, overrides: Partial<QueryEditorPro
   settingsStore.editorSettings.showExecutionTargetPicker = false;
   settingsStore.editorSettings.executeMode = "current";
   settingsStore.editorSettings.executeAllOnBlankLine = false;
+  settingsStore.editorSettings.sidebarMenuLayout = "full";
   // 快捷键用显式修饰键（而不是 Mod）书写，让用例在所有平台上确定性地触发，
   // 与 QueryEditorSearchKeymap.spec.ts 的做法一致。
   settingsStore.editorSettings.shortcuts.selectCurrentStatement = "Ctrl+Shift+E";
@@ -108,6 +110,26 @@ describe("QueryEditor select current statement", () => {
     await nextTick();
 
     expect(selectedText(view)).toBe("SELECT 2");
+  });
+
+  it("copies the statement at the cursor from the context menu without changing the selection (#13261)", async () => {
+    const sql = "SELECT 1;\nSELECT 2 FROM t;\nSELECT 3;";
+    const { view } = await mountEditor(sql);
+    placeCursor(view, sql.indexOf("SELECT 2") + 5);
+
+    // happy-dom has no layout, so the click position resolves to the caret.
+    vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue(null);
+    document.querySelector("[data-query-editor-root]")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    const copyButton = await vi.waitFor(() => {
+      const found = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((b) => b.textContent?.includes("editor.contextMenu.copyCurrentStatement"));
+      expect(found).toBeDefined();
+      return found!;
+    });
+    copyButton.click();
+
+    const { copyToClipboard } = await import("@/lib/common/clipboard");
+    await vi.waitFor(() => expect(vi.mocked(copyToClipboard)).toHaveBeenCalledExactlyOnceWith("SELECT 2 FROM t"));
+    expect(selectedText(view)).toBe("");
   });
 
   it("leaves the selection untouched when there is no executable statement", async () => {

@@ -79,6 +79,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
                 failure_log_enabled: true,
+                resolve_includes: false,
                 encoding: Default::default(),
             };
             execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |_| {}).await?;
@@ -98,6 +99,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         let mut events = Vec::new();
@@ -147,6 +149,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
         schema: database.clone(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -154,6 +157,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -163,6 +167,9 @@ async fn live_mysql_database_export_restores_dependent_views() {
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
     let test_result = async {
         export_database_sql_core(&state, &export_request, |_| {}).await?;
@@ -188,6 +195,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         execute_sql_file_path(
@@ -293,6 +301,7 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 schema: database.clone(),
                 file_path: file_path.to_string_lossy().to_string(),
                 selected_tables: Vec::new(),
+                selected_objects: None,
                 excluded_tables: Vec::new(),
                 include_structure: true,
                 include_data: true,
@@ -300,6 +309,7 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 include_create_database: false,
                 drop_table_if_exists: false,
                 omit_auto_increment: false,
+                omit_database_qualifier: false,
                 preserve_original_language: false,
                 fail_on_error: false,
                 prevent_overwrite: false,
@@ -309,6 +319,9 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 snapshot_session_id: None,
                 batch_size: 1000,
                 split_max_mb: None,
+                row_limit_per_table: None,
+                row_limit_sort_column: None,
+                row_limit_sort_descending: false,
             };
 
             export_database_sql_core(&state, &request, |_| {}).await?;
@@ -391,6 +404,7 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         schema: database.clone(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -398,6 +412,7 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -407,6 +422,9 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
 
     let result = export_database_sql_core(&state, &export_request, |_| {}).await;
@@ -471,6 +489,7 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         schema: database.clone(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -478,6 +497,7 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -487,6 +507,9 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
 
     export_database_sql_core(&state, &export_request, |_| {}).await.expect("first export should succeed");
@@ -562,6 +585,7 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         schema: database.clone(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -569,6 +593,7 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -578,6 +603,9 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
     };
 
     // The mount disappears before the scheduler ever runs this schedule for

@@ -1,0 +1,78 @@
+name: Cancel superseded PR CI
+
+on:
+  pull_request_target:
+    types: [synchronize]
+    branches: [main]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const repo = context.repo;
+            const eventPull = context.payload.pull_request;
+            const readPull = async () => (await github.rest.pulls.get({ ...repo, pull_number: eventPull.number })).data;
+            const isCurrent = (pull) => pull.state === 'open'
+              && pull.base.ref === 'main'
+              && pull.base.repo.id === context.payload.repository.id
+              && pull.head.repo?.id
+              && pull.head.repo.id === eventPull.head.repo?.id
+              && pull.head.ref === eventPull.head.ref
+              && pull.head.sha === eventPull.head.sha;
+            const pull = await readPull();
+            if (!isCurrent(pull)) return;
+
+            const { data: workflow } = await github.rest.actions.getWorkflow({ ...repo, workflow_id: 'ci.yml' });
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              ...repo,
+              workflow_id: workflow.id,
+              event: 'pull_request',
+              branch: pull.head.ref,
+              per_page: 100,
+            });
+            let uniquePull;
+            for (const run of runs) {
+              if (run.workflow_id !== workflow.id || run.event !== 'pull_request'
+                || run.head_repository?.id !== pull.head.repo.id || run.head_branch !== pull.head.ref
+                || !['queued', 'pending', 'in_progress', 'waiting', 'requested'].includes(run.status)
+                || !run.head_sha || run.head_sha === pull.head.sha
+                || !Array.isArray(run.pull_requests)) continue;
+              if (run.pull_requests.length) {
+                if (!run.pull_requests.some((pr) => pr.number === pull.number)) continue;
+              } else {
+                // Fork runs may omit PR metadata. Only infer ownership for a branch never shared by multiple PRs.
+                if (uniquePull === undefined) {
+                  const history = await github.paginate(github.rest.pulls.list, {
+                    ...repo,
+                    state: 'all',
+                    head: `${pull.head.repo.owner.login}:${pull.head.ref}`,
+                    per_page: 100,
+                  });
+                  const matches = history.filter((pr) => pr.head.ref === pull.head.ref
+                    && (!pr.head.repo?.id || pr.head.repo.id === pull.head.repo.id));
+                  uniquePull = matches.length === 1 && matches[0].number === pull.number
+                    && matches[0].head.repo?.id === pull.head.repo.id;
+                }
+                if (!uniquePull) {
+                  core.info(`Skipping CI run ${run.id}: its PR ownership is ambiguous.`);
+                  continue;
+                }
+              }
+              if (!isCurrent(await readPull())) return;
+              try {
+                await github.rest.actions.cancelWorkflowRun({ ...repo, run_id: run.id });
+                core.info(`Requested cancellation of superseded CI run ${run.id}.`);
+              } catch (error) {
+                if (error.status !== 409) throw error;
+                const { data: latest } = await github.rest.actions.getWorkflowRun({ ...repo, run_id: run.id });
+                if (latest.status !== 'completed') throw error;
+              }
+            }

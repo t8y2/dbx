@@ -83,7 +83,7 @@ export function nextDataGridSortState(current: DataGridSortState, column: string
   return { column, columnIndex, direction: "asc" };
 }
 
-type DataGridCellValue = string | number | boolean | null | undefined;
+type DataGridCellValue = string | number | bigint | boolean | null | undefined;
 type DataGridRow = DataGridCellValue[];
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -122,9 +122,21 @@ export function compareDataGridValues(left: DataGridCellValue, right: DataGridCe
   if (typeof left === "number" && typeof right === "number") {
     return compareNumbers(left, right);
   }
+  if (typeof left === "bigint" && typeof right === "bigint") {
+    return compareBigInts(left, right);
+  }
   if (typeof left === "boolean" && typeof right === "boolean") {
     return Number(left) - Number(right);
   }
+
+  // When columnType is not specified (e.g. untyped results, omitted columnType),
+  // if both values represent valid numbers/bigints, compare them numerically so
+  // numeric columns and primary keys do not fall back to string dictionary collation (#13668).
+  if (!columnType) {
+    const numericCompared = compareNumericCellValues(left, right);
+    if (numericCompared !== null) return numericCompared;
+  }
+
   if (typeof left === "string" && typeof right === "string") {
     const leftDate = dateSortValue(left);
     const rightDate = dateSortValue(right);
@@ -157,6 +169,12 @@ function compareNumericCellValues(left: DataGridCellValue, right: DataGridCellVa
 }
 
 function parseNumericSortValue(value: DataGridCellValue): NumericSortValue | null {
+  if (typeof value === "bigint") {
+    if (value === 0n) return { sign: 0, magnitude: 0n, digits: "0" };
+    const sign = value < 0n ? -1 : 1;
+    const unsigned = (sign === -1 ? -value : value).toString();
+    return { sign, magnitude: BigInt(unsigned.length), digits: unsigned };
+  }
   if (typeof value !== "string" && typeof value !== "number") return null;
   const text = String(value).trim();
   const negative = text.startsWith("-");

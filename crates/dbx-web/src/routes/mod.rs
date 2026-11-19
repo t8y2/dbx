@@ -23,6 +23,8 @@ pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;
+pub mod native_jobs;
+pub mod pl_debug;
 pub mod plugins;
 pub mod prompt_template;
 pub mod query;

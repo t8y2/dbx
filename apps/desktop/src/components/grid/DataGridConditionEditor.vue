@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
+import KeyCap from "@/components/ui/KeyCap.vue";
 import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestion, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
 import { tokenizeDataGridCondition, type DataGridConditionTokenType } from "@/lib/dataGrid/dataGridConditionHighlight";
 import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
@@ -129,6 +130,9 @@ function onEditorScroll(event: Event) {
 }
 const emptyHistoryText = computed(() => (modelValue.value.trim() ? props.historyNoMatchesText : props.historyEmptyText));
 const activeSuggestionId = computed(() => (editor.highlightedIndex.value >= 0 ? `${suggestionListId}-${editor.highlightedIndex.value}` : undefined));
+// Tab accepts the highlighted suggestion, or the first one when nothing is
+// highlighted yet, so the keycap marks that same row.
+const acceptTargetIndex = computed(() => Math.max(0, editor.highlightedIndex.value));
 const suggestionPreferredWidth = computed(() => getDataGridConditionSuggestionPreferredWidth(editor.suggestions.value));
 const suggestionStyle = computed<CSSProperties>(() => ({
   left: `${suggestionPosition.value.left}px`,
@@ -763,6 +767,10 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
             {{ suggestion.value }}
           </span>
           <span v-if="suggestion.comment" class="ml-3 min-w-0 flex-1 truncate text-right text-muted-foreground" :title="suggestion.comment">{{ suggestion.comment }}</span>
+          <!-- The slot keeps its width on every row so the hint never shifts the text. -->
+          <span class="ml-2 flex w-7 shrink-0 justify-end">
+            <KeyCap v-if="index === acceptTargetIndex" label="Tab" />
+          </span>
           <button v-if="suggestion.kind === 'history'" type="button" class="ml-2 shrink-0 text-muted-foreground hover:text-foreground" @mousedown.stop.prevent="editor.deleteHistory(suggestion.value)">
             <X class="h-3 w-3" />
           </button>

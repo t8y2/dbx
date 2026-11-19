@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Copy, Loader2, PlugZap, RefreshCcw, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,8 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { processListSelectionAfterClick } from "@/lib/database/processListSelection";
 import { oracleMajorVersion } from "@/lib/database/oracleSessionManagement";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
+
+const SessionDiagnostics = defineAsyncComponent(() => import("./SessionDiagnostics.vue"));
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -90,6 +92,7 @@ let managedClientSession: ManagedClientSession | null = null;
 
 // Full-text preview for long cells (SQL statement / info), opened by clicking them.
 const previewText = ref<string | null>(null);
+const diagnosticRow = ref<ProcessRow | null>(null);
 const lockTarget = ref<ProcessRow | null>(null);
 const lockColumns = ref<string[]>([]);
 const lockRows = ref<unknown[][]>([]);
@@ -103,6 +106,11 @@ trackUiState(() => ({ search: search.value, sortKey: sortKey.value, sortDir: sor
 function openPreview(value: string | number | null) {
   if (value === null || value === undefined || String(value).length === 0) return;
   previewText.value = String(value);
+}
+
+function showDiagnostics(row: ProcessRow) {
+  if (!driver.value?.diagnosticEngine || actionsLocked.value || refreshing.value) return;
+  diagnosticRow.value = { ...row };
 }
 
 function closeManagedSession(session: ManagedClientSession) {
@@ -346,7 +354,9 @@ async function load(options: { silent?: boolean } = {}) {
   loadError.value = "";
   versionProbeWarning.value = "";
   try {
-    await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true });
+    // 轮询/静默刷新走被动重连：失败后退避，避免后台每次 tick 都新建连接
+    // （企业安全/零信任客户端会为每次新连接弹一次授权框）。手动刷新不受影响。
+    await connectionStore.ensureConnected(connectionId, { skipIfClosedByUser: true, ...(options.silent === true ? { passive: true } : {}) });
     if (!isCurrent()) return;
     if (activeDriver.versionSql && versionMajor.value === null) {
       try {
@@ -404,6 +414,8 @@ async function load(options: { silent?: boolean } = {}) {
     truncated.value = result.truncated === true;
   } catch (error: any) {
     if (isCurrent()) {
+      autoRefresh.value = false;
+      stopTimer();
       if (activeDriver.mode === "transaction") {
         // A failed refresh must not leave stale kill targets on screen. A
         // connection failure is not evidence that there are no transactions.
@@ -672,6 +684,7 @@ watch(
     lockTruncated.value = false;
     loadingLocks.value = false;
     lockRequestGeneration++;
+    diagnosticRow.value = null;
     search.value = "";
     sortKey.value = driver.value?.defaultSortKey ?? "time";
     sortDir.value = "desc";
@@ -819,6 +832,10 @@ onBeforeUnmount(() => {
             </td>
             <td class="px-3 py-1.5 text-right">
               <span class="inline-flex items-center justify-end gap-1">
+                <Button v-if="driver?.diagnosticEngine" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing" @click="showDiagnostics(row)">
+                  <Activity class="h-3.5 w-3.5" />
+                  {{ t("sessionDiagnostics.open") }}
+                </Button>
                 <Button v-if="driver?.buildLockDetailsSql" variant="ghost" size="sm" class="h-6 gap-1 px-1.5 text-[11px]" :disabled="actionsLocked || refreshing || loadingLocks" :title="t('processList.oracleLockDetails')" @click="showLocks(row)">
                   <Search class="h-3.5 w-3.5" />
                   {{ t("processList.oracleLockDetails") }}
@@ -858,6 +875,8 @@ onBeforeUnmount(() => {
         </tbody>
       </table>
     </div>
+
+    <SessionDiagnostics v-if="diagnosticRow && driver?.diagnosticEngine" :connection="connection" :row="diagnosticRow" :engine="driver.diagnosticEngine" :version-major="versionMajor ?? undefined" :database="driver.database ?? ''" @close="diagnosticRow = null" />
 
     <Dialog
       :open="cancelTarget !== null"

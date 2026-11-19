@@ -1,6 +1,6 @@
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isDangerousSql, requiresConnectionSelection, requiresDatabaseSelection, snapshotResultForMerge, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
@@ -13,9 +13,16 @@ import type { ConnectionConfig, QueryTab } from "@/types/database";
 import { formatSqlText } from "@/lib/sql/sqlFormatter";
 import { normalizeSqlVariableSyntaxOverrides, updateSqlVariableSyntaxToggle } from "@/lib/sql/sqlVariableSyntax";
 import type { SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
+import * as api from "@/lib/backend/api";
+import * as gridEditor from "@/composables/useDataGridEditor";
+import { resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
+
+const { toast } = vi.hoisted(() => ({ toast: vi.fn() }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
 
 vi.mock("vue-i18n", () => ({
-  createI18n: () => ({ global: { locale: { value: "en" }, setLocaleMessage: vi.fn() } }),
+  createI18n: () => ({ global: { locale: { value: "en" }, setLocaleMessage: vi.fn(), t: (key: string) => key } }),
   useI18n: () => ({ t: (key: string) => key }),
 }));
 
@@ -68,6 +75,199 @@ function queryTab(database = ""): QueryTab {
     isExplaining: false,
   };
 }
+
+describe("unsaved result changes before query execution", () => {
+  beforeEach(() => {
+    installLocalStorage();
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function setup(state: "pending" | "saving" | undefined = "pending") {
+    const tab = ref<QueryTab>({ ...queryTab("app"), sql: "SELECT * FROM ts", result: { columns: ["name"], rows: [["BB"]], affected_rows: 0, execution_time_ms: 0 } });
+    const activeTab = ref(tab.value);
+    const config = connection("mysql");
+    const store = useQueryStore();
+    store.tabs.push(tab.value);
+    vi.spyOn(useConnectionStore(), "getConfig").mockReturnValue(config);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execute = vi.spyOn(store, "executeCurrentSql").mockResolvedValue(undefined);
+    const pendingState = vi.spyOn(gridEditor, "dataGridPendingChangesState").mockReturnValue(state);
+    const cancelled = vi.fn();
+    const output = ref<"result" | "summary">("result");
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => config), executableSql: computed(() => tab.value.sql), activeOutputView: output, onExecutionCancelled: cancelled });
+    return { tab, activeTab, store, execute, pendingState, execution, cancelled, output };
+  }
+
+  it("cancels without executing, changing the result, or switching the output view", async () => {
+    const { tab, execute, execution, cancelled, output, pendingState } = setup();
+    const previousResult = tab.value.result;
+    const running = execution.doExecute("SELECT * FROM ts", undefined, { editorViewportRequestId: 7 });
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    expect(execute).not.toHaveBeenCalled();
+    execution.onResultChangesConfirm(false);
+    expect(await running).toEqual({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(tab.value.result).toBe(previousResult);
+    expect(output.value).toBe("result");
+    expect(cancelled).toHaveBeenCalledWith(7);
+    expect(pendingState).toHaveBeenCalledWith(resultGridInstanceKey(tab.value), "tab-1", undefined);
+  });
+
+  it("executes once only after discard is confirmed", async () => {
+    const { execute, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    expect(execute).not.toHaveBeenCalled();
+    execution.onResultChangesConfirm(true);
+    await running;
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execution.showResultChangesDialog.value).toBe(false);
+  });
+
+  it("keeps execution attached to its originating tab after focus changes", async () => {
+    const { activeTab, store, execute, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    const otherTab = { ...queryTab("other"), id: "tab-2" };
+    store.tabs.push(otherTab);
+    activeTab.value = otherTab;
+    execution.onResultChangesConfirm(true);
+    await running;
+    expect(execute).toHaveBeenCalledWith("SELECT * FROM ts", expect.objectContaining({ tabId: "tab-1" }));
+  });
+
+  it("refuses to replace a result while its save is running", async () => {
+    const { execute, execution } = setup("saving");
+    expect(await execution.tryExecute()).toEqual({ status: "not-started", reason: "busy", tabId: "tab-1" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(execution.showResultChangesDialog.value).toBe(false);
+  });
+
+  it("does not bypass a save that starts while the discard dialog is open", async () => {
+    const { execute, pendingState, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    pendingState.mockReturnValue("saving");
+    execution.onResultChangesConfirm(true);
+    expect(await running).toEqual({ status: "not-started", reason: "busy", tabId: "tab-1" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not execute a stale request after the result was replaced", async () => {
+    const { tab, execute, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    tab.value.resultGridRevision = "replacement";
+    execution.onResultChangesConfirm(true);
+    expect(await running).toEqual({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("protects edits cached in another result set of the same execution", async () => {
+    const { tab, execute, pendingState, execution } = setup();
+    tab.value.results = [tab.value.result!, { columns: ["name"], rows: [["other"]], affected_rows: 0, execution_time_ms: 0 }];
+    const editedKey = resultGridInstanceKey(tab.value);
+    tab.value.activeResultIndex = 1;
+    tab.value.result = tab.value.results[1];
+    pendingState.mockImplementation((key) => (key === editedKey ? "pending" : undefined));
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    execution.onResultChangesConfirm(false);
+    expect(await running).toMatchObject({ status: "not-started", reason: "cancelled" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each(["clean", "new-result"] as const)("does not prompt for %s execution", async (mode) => {
+    const { execute, execution, pendingState } = setup();
+    if (mode === "clean") pendingState.mockReturnValue(undefined);
+    await (mode === "new-result" ? execution.tryExecuteInNewResultTab() : execution.tryExecute());
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execution.showResultChangesDialog.value).toBe(false);
+  });
+});
+
+describe("compatibility write denial outcomes", () => {
+  beforeEach(() => {
+    installLocalStorage();
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  function setup(legacy = true, sql = "UPDATE users SET name='test' WHERE id=1") {
+    const tab = ref<QueryTab>({ ...queryTab("app"), sql });
+    const config = ref<ConnectionConfig>({ ...connection("mysql"), url_params: legacy ? "dataCharset=GBK" : "" });
+    vi.spyOn(useConnectionStore(), "getConfig").mockImplementation(() => config.value);
+    const store = useQueryStore();
+    const executeCurrentSql = vi.spyOn(store, "executeCurrentSql").mockResolvedValue(undefined);
+    const executeTabSql = vi.spyOn(store, "executeTabSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const onDeferredExecutionSettled = vi.fn();
+    const execution = useSqlExecution({ activeTab: computed(() => tab.value), activeConnection: computed(() => config.value), executableSql: computed(() => sql), activeOutputView: ref("result"), onDeferredExecutionSettled });
+    return { tab, config, execution, executeCurrentSql, executeTabSql, onDeferredExecutionSettled };
+  }
+
+  it.each([false, true])("reports blocked without submitting SQL or unlocking (new result: %s)", async (newResult) => {
+    const { config, execution, executeCurrentSql, executeTabSql } = setup();
+    useReadOnlyUnlockStore().rememberWindow(config.value.id, 60000);
+    const before = { ...config.value };
+    const result = await (newResult ? execution.tryExecuteInNewResultTab() : execution.tryExecute());
+    expect(result).toEqual({ status: "not-started", reason: "blocked", tabId: "tab-1" });
+    expect(toast).toHaveBeenCalledExactlyOnceWith("connection.mysqlDataCharsetWriteBlocked", 5000);
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(executeTabSql).not.toHaveBeenCalled();
+    expect(api.unlockConnectionWrites).not.toHaveBeenCalled();
+    expect(useReadOnlyUnlockStore().pending).toBeUndefined();
+    expect(config.value).toEqual(before);
+  });
+
+  it.each([true, false])("allows SELECT silently (compatibility: %s)", async (legacy) => {
+    const { execution, executeCurrentSql } = setup(legacy, "SELECT 1");
+    await execution.tryExecute();
+    expect(executeCurrentSql).toHaveBeenCalledOnce();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("preserves ordinary write execution without the compatibility notification", async () => {
+    const { execution, executeCurrentSql } = setup(false);
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;
+    await execution.tryExecute();
+    expect(executeCurrentSql).toHaveBeenCalledOnce();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary unlock dismissal cancelled", async () => {
+    const { config, execution, executeCurrentSql } = setup(false);
+    config.value.read_only = true;
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(useReadOnlyUnlockStore().pending).toBeDefined());
+    useReadOnlyUnlockStore().cancel();
+    expect(await running).toEqual({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("rechecks compatibility after danger confirmation and reports blocked", async () => {
+    const { config, execution, executeCurrentSql, onDeferredExecutionSettled } = setup(false);
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = true;
+    expect(await execution.tryExecute()).toMatchObject({ status: "deferred" });
+    config.value.url_params = "dataCharset=GBK";
+    await execution.onDangerConfirm();
+    expect(onDeferredExecutionSettled).toHaveBeenCalledWith({ status: "not-started", reason: "blocked", tabId: "tab-1" });
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledExactlyOnceWith("connection.mysqlDataCharsetWriteBlocked", 5000);
+  });
+
+  it("reports the explicit compatibility reason for multi-database denial", async () => {
+    const { config, tab, execution, executeCurrentSql, executeTabSql } = setup();
+    const result = await execution.executeTargetSql({ tab: tab.value, connection: config.value, sql: tab.value.sql });
+    expect(result).toMatchObject({ status: "skipped", errorMessage: "connection.mysqlDataCharsetWriteBlocked" });
+    expect(executeCurrentSql).not.toHaveBeenCalled();
+    expect(executeTabSql).not.toHaveBeenCalled();
+    expect(api.unlockConnectionWrites).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledExactlyOnceWith("connection.mysqlDataCharsetWriteBlocked", 5000);
+  });
+});
 
 describe("requiresDatabaseSelection", () => {
   beforeEach(() => {
@@ -165,6 +365,29 @@ describe("useSqlExecution", () => {
     vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
   });
 
+  it.each(["sqlserver", "kingbase"] as const)("sends undeclared module variables unchanged to the %s server", async (databaseType) => {
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;
+    const sql = "ALTER PROCEDURE dbo.p AS BEGIN DECLARE @known INT; SELECT @undeclared; END";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const config: ConnectionConfig = { ...connection(databaseType), ...(databaseType === "kingbase" ? { database_info: { compatibilityMode: "sqlserver" } } : {}) };
+    const activeConnection = ref<ConnectionConfig | undefined>(config);
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const error = 'Must declare the scalar variable "@undeclared".';
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      activeTab.value!.result = { columns: ["Error"], rows: [[error]], affected_rows: 0, execution_time_ms: 1, execution_error: true };
+    });
+    const addHistory = vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView });
+
+    const outcome = await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+    expect(outcome).toMatchObject({ status: "started", ok: false });
+    expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ sql, success: false, error }));
+  });
+
   it.each([
     ["pg", "SELECT data ? 'name' FROM events"],
     ["oracle", "SELECT 1 FROM DUAL@remote_db"],
@@ -178,6 +401,26 @@ describe("useSqlExecution", () => {
     const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView: ref("result") });
     await execution.tryExecute();
     expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execute).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+  });
+
+  it.each([
+    ["BEGIN", "DROP PROCEDURE IF EXISTS p;\nCREATE DEFINER=`root`@`127.0.0.1` PROCEDURE p(IN in_username VARCHAR(200))\nrun:BEGIN IF in_username = '' THEN LEAVE run; END IF; SELECT in_username; END;"],
+    ["LOOP", "CREATE PROCEDURE p() lbl:LOOP LEAVE lbl; END LOOP lbl;"],
+    ["WHILE", "CREATE PROCEDURE p() lbl:WHILE FALSE DO SELECT 1; END WHILE lbl;"],
+    ["REPEAT", "CREATE PROCEDURE p() lbl:REPEAT LEAVE lbl; UNTIL TRUE END REPEAT lbl;"],
+  ])("executes a MySQL procedure with a compact outer %s label without opening the parameter dialog (#13242)", async (_kind, sql) => {
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;
+    const execute = vi.spyOn(useQueryStore(), "executeCurrentSql").mockResolvedValue(undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView: ref("result") });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
     expect(execute).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
   });
 
@@ -517,7 +760,7 @@ describe("useSqlExecution", () => {
     expect(activeOutputView.value).toBe("result");
   });
 
-  it("opens the execution summary for a multi-statement batch when configured", async () => {
+  it("reads the latest multi-statement default view on each execution in the same tab", async () => {
     const sql = "SELECT 1;\nSELECT 2;";
     const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
     const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
@@ -536,9 +779,11 @@ describe("useSqlExecution", () => {
       activeOutputView,
     });
 
-    await execution.tryExecute();
-
-    expect(activeOutputView.value).toBe("summary");
+    for (const view of ["summary", "result", "summary"] as const) {
+      useSettingsStore().editorSettings.multiStatementDefaultView = view;
+      await execution.tryExecute();
+      expect(activeOutputView.value).toBe(view);
+    }
   });
 
   it("does not change the current output view when a background tab finishes", async () => {

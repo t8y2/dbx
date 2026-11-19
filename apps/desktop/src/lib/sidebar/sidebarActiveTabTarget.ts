@@ -10,7 +10,7 @@ export type ActiveTabSidebarTarget =
   | {
       type: "management";
       connectionId: string;
-      nodeType: "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin";
+      nodeType: "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin" | "database-job-admin";
     }
   | {
       type: "table";
@@ -131,6 +131,7 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     "dameng-users": "dameng-users",
     "dameng-roles": "dameng-roles",
     "dameng-jobs": "dameng-job-admin",
+    "database-jobs": "database-job-admin",
   } as const;
   if (Object.prototype.hasOwnProperty.call(managementNodeTypes, tab.mode)) {
     if (!tab.connectionId) return null;
@@ -416,6 +417,40 @@ export function findSidebarNodeForTarget(target: ActiveTabSidebarTarget, flatNod
 export function shouldScrollActiveSidebarSelection(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): boolean {
   if (!options.autoSelectEnabled) return false;
   return options.activeTabId !== options.previousActiveTabId || (options.autoSelectEnabled && options.previousAutoSelectEnabled === false);
+}
+
+/**
+ * Tracks whether the auto-select reveal for the current tab is still pending, so retries can
+ * finish it once async tree children arrive, while user-initiated collapses after it settled
+ * are left alone: re-running the reveal on every flatNodes change re-expanded whatever the
+ * user had just collapsed, making connection/database nodes impossible to fold (#13839, #13849).
+ */
+export class ActiveTabSidebarRevealTracker {
+  private initialized = false;
+  private pending = false;
+  private pendingScroll = false;
+  private pendingTabId: string | null | undefined;
+
+  /** Feed the watcher's previous/current values; returns whether the reveal should run now and with which scroll intent. */
+  onWatchTrigger(options: { activeTabId: string | null | undefined; previousActiveTabId: string | null | undefined; autoSelectEnabled: boolean; previousAutoSelectEnabled: boolean | undefined }): { run: boolean; scroll: boolean } {
+    const changed = !this.initialized || options.activeTabId !== options.previousActiveTabId || options.autoSelectEnabled !== options.previousAutoSelectEnabled;
+    this.initialized = true;
+    if (!options.autoSelectEnabled || !options.activeTabId) {
+      this.pending = false;
+      return { run: false, scroll: false };
+    }
+    if (changed) {
+      this.pending = true;
+      this.pendingTabId = options.activeTabId;
+      this.pendingScroll = shouldScrollActiveSidebarSelection(options);
+    }
+    return { run: this.pending, scroll: this.pending ? this.pendingScroll : false };
+  }
+
+  /** Settles the pending reveal once it landed (found); a miss stays pending so the next tree load retries. */
+  onSettled(found: boolean, tabId: string | null | undefined): void {
+    if (found && tabId === this.pendingTabId) this.pending = false;
+  }
 }
 
 // nearest is used for passive auto-selection; smart keeps context for the existing toolbar action.

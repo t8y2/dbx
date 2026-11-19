@@ -1,8 +1,19 @@
 import type { QueryResultSourceLabelKind, QueryTab, TabOutputView } from "@/types/database";
 import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
+import { restoreOracleTypeManagementDraft } from "@/lib/table/oracleTypeManagement";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
+
+/**
+ * Hard cap on how much SQL we persist per tab. The open-tabs state is a session
+ * snapshot, not a document store: a multi-megabyte body (an imported dump, a
+ * generated script) would otherwise be re-parsed and re-rendered on every launch
+ * and can stall WebView2 before the workspace even appears. Oversized bodies are
+ * spilled to a recovery file by `planOpenTabSqlSpill`; only a truncated preview
+ * is persisted here.
+ */
+export const MAX_PERSISTED_TAB_SQL_CHARS = 2 * 1024 * 1024;
 
 export interface SavedQueryResultRun {
   id: string;
@@ -37,6 +48,12 @@ export interface SavedOpenTab {
   catalog?: string;
   schema?: string;
   sql: string;
+  /** Set when `sql` was truncated to MAX_PERSISTED_TAB_SQL_CHARS for persistence. */
+  sqlTruncated?: boolean;
+  /** Original SQL length before truncation, surfaced in the restore notice. */
+  sqlTruncatedChars?: number;
+  /** Absolute path of the recovery file holding the full SQL, when it was spilled. */
+  sqlRecoveryPath?: string;
   editorViewport?: QueryTab["editorViewport"];
   editorSelection?: QueryTab["editorSelection"];
   originalSql?: string;
@@ -68,16 +85,19 @@ export interface SavedOpenTab {
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureExactIdentity?: boolean;
   structureDraft?: QueryTab["structureDraft"];
   databaseSearchState?: QueryTab["databaseSearchState"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
+  typeManagementDraft?: QueryTab["typeManagementDraft"];
   objectDetails?: QueryTab["objectDetails"];
   sourceView?: boolean;
   ddlViewer?: QueryTab["ddlViewer"];
   tableComment?: QueryTab["tableComment"];
   tableMeta?: QueryTab["tableMeta"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
+  mongoQueryLanguage?: QueryTab["mongoQueryLanguage"];
   resultEvicted?: boolean;
   resultCacheKey?: string;
   resultRuns?: SavedQueryResultRun[];
@@ -108,7 +128,7 @@ export interface OpenTabsStatePayload {
   sizes?: number[];
 }
 
-export type OpenTabsRestoreFilter = "all" | "pinned";
+export type OpenTabsRestoreFilter = "all" | "pinned" | "recovery";
 export interface OpenTabsRestoreOptions {
   queryOnly?: boolean;
   filter?: OpenTabsRestoreFilter;
@@ -124,7 +144,7 @@ function shouldPersistTabSql(tab: QueryTab) {
 // its request is in flight would restore an empty source tab after restart,
 // because the request itself is intentionally not durable.
 function shouldPersistOpenTab(tab: QueryTab): boolean {
-  return !tab.sourceLoad;
+  return !tab.sourceLoad || !!tab.typeManagementDraft;
 }
 
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
@@ -173,91 +193,120 @@ function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
   return Object.keys(restored).length > 0 ? restored : undefined;
 }
 
+function truncateForPersistence(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return value.length > MAX_PERSISTED_TAB_SQL_CHARS ? value.slice(0, MAX_PERSISTED_TAB_SQL_CHARS) : value;
+}
+
+function persistedTabSql(tab: QueryTab): Pick<SavedOpenTab, "sql" | "sqlTruncated" | "sqlTruncatedChars" | "sqlRecoveryPath"> {
+  if (!shouldPersistTabSql(tab)) return { sql: "" };
+  const recovery = tab.sqlRecoveryPath ? { sqlRecoveryPath: tab.sqlRecoveryPath } : {};
+  if (tab.sql.length > MAX_PERSISTED_TAB_SQL_CHARS) {
+    return { sql: tab.sql.slice(0, MAX_PERSISTED_TAB_SQL_CHARS), sqlTruncated: true, sqlTruncatedChars: tab.sql.length, ...recovery };
+  }
+  // A tab restored from a truncated payload keeps its marker (and recovery path)
+  // so later saves keep pointing at the full content instead of silently
+  // forgetting that the editor only holds a preview.
+  return {
+    sql: tab.sql,
+    ...(tab.sqlTruncated ? { sqlTruncated: true, sqlTruncatedChars: tab.sqlTruncatedChars ?? tab.sql.length } : {}),
+    ...recovery,
+  };
+}
+
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
-  return tabs.filter(shouldPersistOpenTab).map((tab) => ({
-    id: tab.id,
-    ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
-    title: tab.title,
-    ...(tab.customTitle ? { customTitle: true } : {}),
-    ...(tab.titleSuffix?.trim() ? { titleSuffix: tab.titleSuffix.trim() } : {}),
-    connectionId: tab.connectionId,
-    database: tab.database,
-    ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),
-    ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
-    schema: tab.schema,
-    sql: shouldPersistTabSql(tab) ? tab.sql : "",
-    ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
-    ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
-    // File-backed drafts retain their baseline, including when the edited SQL is empty.
-    // Clean file-backed tabs omit it so startup can hydrate the current file content.
-    ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
-    savedSqlId: tab.savedSqlId,
-    ...(tab.isDefaultQuery ? { isDefaultQuery: true } : {}),
-    externalSqlPath: tab.externalSqlPath,
-    ...(tab.externalSqlFileVersion ? { externalSqlFileVersion: tab.externalSqlFileVersion } : {}),
-    ...(tab.externalSqlIgnoredFileVersion ? { externalSqlIgnoredFileVersion: tab.externalSqlIgnoredFileVersion } : {}),
-    ...(tab.externalSqlFileMissing ? { externalSqlFileMissing: true } : {}),
-    ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: tab.lastExecutedSql } : {}),
-    ...(tab.resultBaseSql !== undefined ? { resultBaseSql: tab.resultBaseSql } : {}),
-    ...(tab.resultSortedSql !== undefined ? { resultSortedSql: tab.resultSortedSql } : {}),
-    ...(tab.resultSortColumn !== undefined ? { resultSortColumn: tab.resultSortColumn } : {}),
-    ...(tab.resultSortColumnIndex !== undefined ? { resultSortColumnIndex: tab.resultSortColumnIndex } : {}),
-    ...(tab.resultSortDirection !== undefined ? { resultSortDirection: tab.resultSortDirection } : {}),
-    ...(tab.resultSortMode !== undefined ? { resultSortMode: tab.resultSortMode } : {}),
-    ...(tab.orderByInput !== undefined ? { orderByInput: tab.orderByInput } : {}),
-    ...(tab.structuredOrderByInput !== undefined ? { structuredOrderByInput: tab.structuredOrderByInput } : {}),
-    ...(tab.resultPageLimit !== undefined ? { resultPageLimit: tab.resultPageLimit } : {}),
-    ...(tab.resultPageOffset !== undefined ? { resultPageOffset: tab.resultPageOffset } : {}),
-    ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
-    pinned: tab.pinned,
-    mode: tab.mode,
-    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
-    ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
-    ...(tab.mode === "query" && tab.autoCommit !== undefined ? { autoCommit: tab.autoCommit } : {}),
-    ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
-    ...(tab.mqInitialTab !== undefined ? { mqInitialTab: tab.mqInitialTab } : {}),
-    ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
-    ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
-    ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
-    ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
-    ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
-    objectBrowser: tab.objectBrowser,
-    objectSource: tab.objectSource,
-    ...(tab.objectDetails ? { objectDetails: { ...tab.objectDetails } } : {}),
-    ...(tab.sourceView ? { sourceView: true } : {}),
-    ...(tab.ddlViewer ? { ddlViewer: { ...tab.ddlViewer } } : {}),
-    ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
-    tableMeta: tab.tableMeta,
-    ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
-    ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
-    ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
-    ...(tab.mode === "query" && tab.resultRuns?.length
-      ? {
-          resultRuns: tab.resultRuns.map((run) => ({
-            id: run.id,
-            ...(run.multiDbExecution?.kind === "multi-db" ? { connectionId: run.multiDbExecution.target.connectionId } : run.connectionId !== undefined ? { connectionId: run.connectionId } : {}),
-            title: run.title,
-            sequence: run.sequence,
-            sql: run.sql,
-            createdAt: run.createdAt,
-            ...(run.sourceLabel ? { sourceLabel: run.sourceLabel } : {}),
-            ...(run.sourceName ? { sourceName: run.sourceName } : {}),
-            ...(run.sourceLabelKind ? { sourceLabelKind: run.sourceLabelKind } : {}),
-            ...(run.customTitle ? { customTitle: true } : {}),
-            ...(run.pinned ? { pinned: true } : {}),
-            activeResultIndex: run.activeResultIndex,
-            ...(run.resultCacheKey !== undefined ? { resultCacheKey: run.resultCacheKey } : {}),
-            ...(run.resultEvicted ? { resultEvicted: true } : {}),
-          })),
-        }
-      : {}),
-    ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
-    ...(tab.mode === "query" && typeof tab.resultAutoSave === "boolean" ? { resultAutoSave: tab.resultAutoSave } : {}),
-    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
-    ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
-    ...(tab.uiState ? { uiState: sanitizeTabUiState(tab.uiState) } : {}),
-    ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
-  }));
+  return tabs.filter(shouldPersistOpenTab).map((tab) => {
+    const persistedSql = persistedTabSql(tab);
+    return {
+      id: tab.id,
+      ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
+      title: tab.title,
+      ...(tab.customTitle ? { customTitle: true } : {}),
+      ...(tab.titleSuffix?.trim() ? { titleSuffix: tab.titleSuffix.trim() } : {}),
+      connectionId: tab.connectionId,
+      database: tab.database,
+      ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),
+      ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
+      schema: tab.schema,
+      sql: persistedSql.sql,
+      ...(persistedSql.sqlTruncated ? { sqlTruncated: true, sqlTruncatedChars: persistedSql.sqlTruncatedChars } : {}),
+      ...(persistedSql.sqlRecoveryPath ? { sqlRecoveryPath: persistedSql.sqlRecoveryPath } : {}),
+      ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
+      ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
+      // File-backed drafts retain their baseline, including when the edited SQL is empty.
+      // Clean file-backed tabs omit it so startup can hydrate the current file content.
+      ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
+      savedSqlId: tab.savedSqlId,
+      ...(tab.isDefaultQuery ? { isDefaultQuery: true } : {}),
+      externalSqlPath: tab.externalSqlPath,
+      ...(tab.externalSqlFileVersion ? { externalSqlFileVersion: tab.externalSqlFileVersion } : {}),
+      ...(tab.externalSqlIgnoredFileVersion ? { externalSqlIgnoredFileVersion: tab.externalSqlIgnoredFileVersion } : {}),
+      ...(tab.externalSqlFileMissing ? { externalSqlFileMissing: true } : {}),
+      ...(tab.lastExecutedSql !== undefined ? { lastExecutedSql: truncateForPersistence(tab.lastExecutedSql) } : {}),
+      ...(tab.resultBaseSql !== undefined ? { resultBaseSql: truncateForPersistence(tab.resultBaseSql) } : {}),
+      ...(tab.resultSortedSql !== undefined ? { resultSortedSql: truncateForPersistence(tab.resultSortedSql) } : {}),
+      ...(tab.resultSortColumn !== undefined ? { resultSortColumn: tab.resultSortColumn } : {}),
+      ...(tab.resultSortColumnIndex !== undefined ? { resultSortColumnIndex: tab.resultSortColumnIndex } : {}),
+      ...(tab.resultSortDirection !== undefined ? { resultSortDirection: tab.resultSortDirection } : {}),
+      ...(tab.resultSortMode !== undefined ? { resultSortMode: tab.resultSortMode } : {}),
+      ...(tab.orderByInput !== undefined ? { orderByInput: tab.orderByInput } : {}),
+      ...(tab.structuredOrderByInput !== undefined ? { structuredOrderByInput: tab.structuredOrderByInput } : {}),
+      ...(tab.resultPageLimit !== undefined ? { resultPageLimit: tab.resultPageLimit } : {}),
+      ...(tab.resultPageOffset !== undefined ? { resultPageOffset: tab.resultPageOffset } : {}),
+      ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
+      pinned: tab.pinned,
+      mode: tab.mode,
+      ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+      ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
+      ...(tab.mode === "query" && tab.autoCommit !== undefined ? { autoCommit: tab.autoCommit } : {}),
+      ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
+      ...(tab.mqInitialTab !== undefined ? { mqInitialTab: tab.mqInitialTab } : {}),
+      ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
+      ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
+      ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
+      ...(tab.structureExactIdentity ? { structureExactIdentity: true } : {}),
+      ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
+      ...(tab.databaseSearchState ? { databaseSearchState: tab.databaseSearchState } : {}),
+      objectBrowser: tab.objectBrowser,
+      objectSource: tab.objectSource,
+      ...(tab.typeManagementDraft ? { typeManagementDraft: JSON.parse(JSON.stringify(tab.typeManagementDraft)) } : {}),
+      ...(tab.objectDetails ? { objectDetails: { ...tab.objectDetails } } : {}),
+      ...(tab.sourceView ? { sourceView: true } : {}),
+      ...(tab.ddlViewer ? { ddlViewer: { ...tab.ddlViewer } } : {}),
+      ...(tab.tableComment !== undefined ? { tableComment: tab.tableComment } : {}),
+      tableMeta: tab.tableMeta,
+      ...(tab.mongoEditTarget !== undefined ? { mongoEditTarget: tab.mongoEditTarget } : {}),
+      ...(tab.mongoQueryLanguage === "sql" ? { mongoQueryLanguage: "sql" as const } : {}),
+      ...(tab.mode !== "data" && tab.resultEvicted ? { resultEvicted: true } : {}),
+      ...(tab.mode !== "data" && tab.resultEvicted && tab.resultCacheKey !== undefined ? { resultCacheKey: tab.resultCacheKey } : {}),
+      ...(tab.mode === "query" && tab.resultRuns?.length
+        ? {
+            resultRuns: tab.resultRuns.map((run) => ({
+              id: run.id,
+              ...(run.multiDbExecution?.kind === "multi-db" ? { connectionId: run.multiDbExecution.target.connectionId } : run.connectionId !== undefined ? { connectionId: run.connectionId } : {}),
+              title: run.title,
+              sequence: run.sequence,
+              sql: truncateForPersistence(run.sql) ?? "",
+              createdAt: run.createdAt,
+              ...(run.sourceLabel ? { sourceLabel: run.sourceLabel } : {}),
+              ...(run.sourceName ? { sourceName: run.sourceName } : {}),
+              ...(run.sourceLabelKind ? { sourceLabelKind: run.sourceLabelKind } : {}),
+              ...(run.customTitle ? { customTitle: true } : {}),
+              ...(run.pinned ? { pinned: true } : {}),
+              activeResultIndex: run.activeResultIndex,
+              ...(run.resultCacheKey !== undefined ? { resultCacheKey: run.resultCacheKey } : {}),
+              ...(run.resultEvicted ? { resultEvicted: true } : {}),
+            })),
+          }
+        : {}),
+      ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
+      ...(tab.mode === "query" && typeof tab.resultAutoSave === "boolean" ? { resultAutoSave: tab.resultAutoSave } : {}),
+      ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+      ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
+      ...(tab.uiState ? { uiState: sanitizeTabUiState(tab.uiState) } : {}),
+      ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
+    };
+  });
 }
 
 function isSavedOpenTab(value: unknown): value is SavedOpenTab {
@@ -272,11 +321,21 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
   try {
     const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
     const saved = parsed.filter(isSavedOpenTab);
+    let restoredDebugger = false;
     const filtered = saved.filter((tab) => {
       const mode = tab.mode ?? "query";
+      const recovery = restoreOracleTypeManagementDraft(tab.typeManagementDraft);
+      const unfinishedTypeChange = !!recovery && recovery.state !== "complete";
       if (options.queryOnly && mode !== "query") return false;
-      if (options.filter === "pinned" && !tab.pinned) return false;
-      if (mode !== "query" && validConnectionIds && !validConnectionIds.has(tab.connectionId)) return false;
+      if (options.filter === "pinned" && !tab.pinned && !unfinishedTypeChange) return false;
+      if (options.filter === "recovery" && !unfinishedTypeChange) return false;
+      // 删除连接时按策略保留下来的非 SQL 页签会带 detachedConnectionName，等新建同名连接后
+      // 重绑；不能在恢复阶段因为连接「暂时不存在」就把它们丢掉，否则 keep-all-tabs 形同虚设。
+      if (mode !== "query" && !tab.detachedConnectionName && validConnectionIds && !validConnectionIds.has(tab.connectionId)) return false;
+      if (mode === "pl-debug") {
+        if (restoredDebugger) return false;
+        restoredDebugger = true;
+      }
       return true;
     });
     const tabs: QueryTab[] = filtered.map((tab) => {
@@ -293,6 +352,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
       return {
         ...tab,
         mode,
+        mongoQueryLanguage: tab.mongoQueryLanguage === "sql" ? "sql" : undefined,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
         redisMonitorActive: false,
@@ -301,6 +361,8 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         // sourceLoad 是纯运行期态（serializeOpenTabs 不落盘）。这里显式清空，
         // 让「恢复后的 tab 不会停在加载中」成为不变量，而不是依赖白名单的副作用。
         sourceLoad: undefined,
+        typeManagementDraft: mode === "query" ? restoreOracleTypeManagementDraft(tab.typeManagementDraft) : undefined,
+        typeSourceEditing: false,
         executingResultRunId: undefined,
         editorViewport: restoredEditorViewport(tab),
         editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),
@@ -339,4 +401,30 @@ export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: str
   } catch {
     return { tabs: [], activeTabId: null };
   }
+}
+
+export interface OpenTabSqlSpill {
+  tabId: string;
+  /** Full editor SQL that exceeded the cap; the caller writes it to a recovery file. */
+  sql: string;
+}
+
+export interface PlannedOpenTabs {
+  savedTabs: SavedOpenTab[];
+  spills: OpenTabSqlSpill[];
+}
+
+/**
+ * Serialize tabs for persistence and report which editor SQL bodies were too
+ * large to inline. The caller is responsible for writing each spill to a
+ * recovery file and stamping `sqlRecoveryPath` on the matching saved tab; when
+ * the spill cannot be written the tab still restores with a truncated preview.
+ */
+export function planOpenTabSqlSpill(tabs: QueryTab[]): PlannedOpenTabs {
+  const spills: OpenTabSqlSpill[] = [];
+  for (const tab of tabs) {
+    if (!shouldPersistOpenTab(tab) || !shouldPersistTabSql(tab)) continue;
+    if (tab.sql.length > MAX_PERSISTED_TAB_SQL_CHARS) spills.push({ tabId: tab.id, sql: tab.sql });
+  }
+  return { savedTabs: serializeOpenTabs(tabs), spills };
 }

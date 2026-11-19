@@ -250,7 +250,7 @@ export function isActionableWriteSqlProposal(content: string): boolean {
 export interface WriteSqlGrantMessage {
   role: "user" | "assistant";
   content: string;
-  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked" | "outputTruncated";
 }
 
 /**
@@ -261,7 +261,7 @@ export interface WriteSqlGrantMessage {
  * have to pass the English/Chinese text detectors.
  */
 export function isActionableWriteProposalMessage(msg: WriteSqlGrantMessage): boolean {
-  if (msg.role !== "assistant" || !msg.content) return false;
+  if (msg.role !== "assistant" || !msg.content || msg.kind === "outputTruncated") return false;
   if (msg.kind === "writeSqlConfirmation") return extractSingleSqlCodeBlock(msg.content) !== undefined;
   return isActionableWriteSqlProposal(msg.content);
 }
@@ -327,6 +327,7 @@ export function shouldGrantWriteSqlOnShortAffirmative(params: WriteSqlGrantParam
   for (let i = params.messages.length - 1; i >= 0; i--) {
     const msg = params.messages[i];
     if (msg.kind === "contextSummary") continue;
+    if (msg.kind === "outputTruncated") return false;
     if (isActionableWriteProposalMessage(msg)) return true;
     if (msg.role === "user") return false;
   }

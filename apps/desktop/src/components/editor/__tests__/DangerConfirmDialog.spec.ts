@@ -31,22 +31,26 @@ vi.mock("@/lib/common/clipboard", () => ({
 
 const mountedApps: App[] = [];
 
-async function mountDialog(sql: string, extraProps: Record<string, unknown> = {}, listeners: Record<string, (...args: any[]) => void> = {}) {
+async function mountDialog(sql: string, extraProps: Record<string, unknown> = {}, listeners: Record<string, (...args: any[]) => void> = {}, previewSlot?: () => ReturnType<typeof h>) {
   const state = reactive({ open: true });
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
     defineComponent({
       setup: () => () =>
-        h(DangerConfirmDialog, {
-          open: state.open,
-          sql,
-          ...extraProps,
-          ...listeners,
-          "onUpdate:open": (value: boolean) => {
-            state.open = value;
+        h(
+          DangerConfirmDialog,
+          {
+            open: state.open,
+            sql,
+            ...extraProps,
+            ...listeners,
+            "onUpdate:open": (value: boolean) => {
+              state.open = value;
+            },
           },
-        }),
+          previewSlot ? { preview: previewSlot } : undefined,
+        ),
     }),
   );
   mountedApps.push(app);
@@ -66,6 +70,29 @@ afterEach(() => {
 });
 
 describe("DangerConfirmDialog SQL preview", () => {
+  it("hosts editable review in the existing confirmation and keeps its final action disabled until validation", async () => {
+    const confirmed = vi.fn();
+    const draft = reactive({ sql: "CREATE PACKAGE P AS END;" });
+    await mountDialog(draft.sql, { confirmDisabled: true, closeOnConfirm: false, confirmLabel: "Start reviewed transfer" }, { onConfirm: confirmed }, () =>
+      h("textarea", {
+        value: draft.sql,
+        onInput: (event: Event) => {
+          draft.sql = (event.target as HTMLTextAreaElement).value;
+        },
+      }),
+    );
+    expect(document.body.querySelector('[data-testid="danger-code-preview"]')).toBeNull();
+    const input = document.body.querySelector("textarea")!;
+    input.value = "CREATE PACKAGE P AS n NUMBER; END;";
+    input.dispatchEvent(new Event("input"));
+    await nextTick();
+    expect(draft.sql).toContain("n NUMBER");
+    const confirm = [...document.body.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Start reviewed transfer")!;
+    expect(confirm.disabled).toBe(true);
+    confirm.click();
+    expect(confirmed).not.toHaveBeenCalled();
+  });
+
   it("starts optional details collapsed and keeps the complete SQL available to copy", async () => {
     const sql = "CREATE TABLE target (id NUMBER);";
     await mountDialog(sql, { detailsLabel: "View SQL" });

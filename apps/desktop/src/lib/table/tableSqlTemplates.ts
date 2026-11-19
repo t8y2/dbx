@@ -10,6 +10,8 @@ export interface TableSqlTemplateOptions {
   catalog?: string;
   database?: string;
   includeDatabaseName?: boolean;
+  /** Connection default schema; the PostgreSQL family qualifies tables outside it (#13235). */
+  defaultSchema?: string;
   /** Omit optional identifier quotes while retaining quotes required by the dialect. */
   quoteIdentifiers?: boolean;
   keywordCase?: SqlFormatterCase;
@@ -47,6 +49,11 @@ export function buildTableSelectTemplate(options: TableSqlTemplateOptions): stri
   }
   const selectColumns = columns.map((column) => templateIdentifier(options, column.name));
   return `${selectKw} ${selectColumns.join(", ")}\n${fromKw} ${tableName};`;
+}
+
+export function buildColumnSelectTemplate(options: TableSqlTemplateOptions, columnName: string): string {
+  const lower = options.keywordCase === "lower";
+  return `${lower ? "select" : "SELECT"} *\n${lower ? "from" : "FROM"} ${templateTableName(options)}\n${lower ? "where" : "WHERE"} ${templateIdentifier(options, columnName)} = '';`;
 }
 
 export function buildTableInsertTemplate(options: TableSqlTemplateOptions): string {
@@ -158,6 +165,7 @@ function templateTableName(options: TableSqlTemplateOptions): string {
     catalog: options.catalog,
     database: options.database,
     includeDatabaseName: options.includeDatabaseName,
+    defaultSchema: options.defaultSchema,
     quoteIdentifiers: options.quoteIdentifiers,
     schema: options.schema,
     tableName: options.tableName,

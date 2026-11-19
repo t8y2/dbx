@@ -38,6 +38,9 @@ fn initial_import_progress(import_id: &str, started_at: Instant) -> TableImportP
         total_bytes: 0,
         elapsed_ms: started_at.elapsed().as_millis(),
         error: None,
+        rows_failed: 0,
+        failures: Vec::new(),
+        failures_truncated: false,
     }
 }
 
@@ -53,6 +56,9 @@ fn failed_import_progress(import_id: &str, started_at: Instant, error: String) -
         total_bytes: 0,
         elapsed_ms: started_at.elapsed().as_millis(),
         error: Some(error),
+        rows_failed: 0,
+        failures: Vec::new(),
+        failures_truncated: false,
     }
 }
 
@@ -558,6 +564,9 @@ mod tests {
             total_bytes: 20,
             elapsed_ms: 10,
             error: None,
+            rows_failed: 0,
+            failures: Vec::new(),
+            failures_truncated: false,
         };
         send_import_progress(&tx, &terminal);
 

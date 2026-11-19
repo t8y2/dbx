@@ -349,6 +349,7 @@ fn series_result_to_query_result(series: Vec<SeriesResult>, start: Instant) -> Q
             .chain(std::iter::once("double".to_string()))
             .chain(std::iter::repeat_n("string".to_string(), columns.len().saturating_sub(2)))
             .collect(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![true; columns.len()],
         columns,
         affected_rows: rows.len() as u64,
@@ -357,6 +358,7 @@ fn series_result_to_query_result(series: Vec<SeriesResult>, start: Instant) -> Q
         server_execute_time_us: None,
         query_timings_ms: None,
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         truncated: false,
         session_id: None,
@@ -389,6 +391,7 @@ fn simple_result(rows: Vec<Vec<Value>>, value_type: &str, start: Instant) -> Que
     QueryResult {
         columns: vec!["timestamp".to_string(), "value".to_string()],
         column_types: vec!["timestamp".to_string(), value_type.to_string()],
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![true, true],
         affected_rows: rows.len() as u64,
         rows,
@@ -396,6 +399,7 @@ fn simple_result(rows: Vec<Vec<Value>>, value_type: &str, start: Instant) -> Que
         server_execute_time_us: None,
         query_timings_ms: None,
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         truncated: false,
         session_id: None,

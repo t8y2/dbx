@@ -93,6 +93,7 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             schema: schema.clone(),
             file_path: file_path.to_string_lossy().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,
@@ -100,6 +101,7 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+        omit_database_qualifier: false,
             preserve_original_language: false,
             fail_on_error: true,
             prevent_overwrite: false,
@@ -109,6 +111,9 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
         };
         export_database_sql_core(&state, &request, |_| {}).await?;
         let exported = std::fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
@@ -140,6 +145,7 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         execute_sql_file_path(

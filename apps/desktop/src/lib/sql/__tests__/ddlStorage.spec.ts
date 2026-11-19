@@ -130,6 +130,17 @@ const oracleSequenceDdl = `
 const oracleViewSource = `SELECT ID, "PCTFREE" FROM DBX_QUOTED`;
 
 describe("Oracle DDL storage preference", () => {
+  it("preserves block and line comments inside removed storage clauses", () => {
+    const ddl = "CREATE TABLE T(ID NUMBER) STORAGE(/*keep*/ INITIAL 65536 -- keep line\n NEXT 65536) TABLESPACE USERS;";
+    const result = applyDdlStoragePreference(ddl, "oracle");
+    expect(result).not.toContain("STORAGE");
+    expect(result).not.toContain("65536");
+    expect(result).not.toContain("TABLESPACE");
+    expect(result).toContain("/*keep*/");
+    expect(result).toContain("-- keep line\n");
+    expect(result.trimEnd().endsWith(";")).toBe(true);
+    expect(applyDdlStoragePreference(ddl, "oracle", false)).toBe(ddl);
+  });
   it("drops the physical attributes of a heap table and of its index, keeping the rest verbatim", () => {
     expect(applyDdlStoragePreference(oracleHeapTableDdl, "oracle")).toBe(oracleHeapTableDdlWithoutStorage);
   });

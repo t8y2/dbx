@@ -95,15 +95,15 @@ describe("connectionStore password retirement", () => {
           finishDisconnect = resolve;
         }),
     );
-    const retirement = store.retirePasswordAfterChange(config.id);
-    await expect(store.ensureConnected(config.id)).rejects.toThrow();
-    await expect(store.connect(config)).rejects.toThrow();
     let retainedTabError: unknown;
     retainedTabRefresh.mockImplementation(() => {
       void store.ensureConnected(config.id).catch((error) => {
         retainedTabError = error;
       });
     });
+    const retirement = store.retirePasswordAfterChange(config.id);
+    await expect(store.ensureConnected(config.id)).rejects.toThrow();
+    await expect(store.connect(config)).rejects.toThrow();
     await vi.waitFor(() => expect(retainedTabRefresh).toHaveBeenCalled());
     finishDisconnect();
     await expect(retirement).resolves.toEqual({ status: "retired", fingerprint: connectionConfigFingerprint({ ...config, password: "", save_password: false }) });

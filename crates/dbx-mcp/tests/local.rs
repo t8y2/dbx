@@ -93,7 +93,7 @@ async fn local_backend_reads_dbx_storage_without_desktop_process() {
 async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
-    let storage = Storage::open(&db_path).await.expect("open storage");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open isolated storage");
     storage
         .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
             read_only: false,
@@ -255,7 +255,7 @@ async fn duplicate_connection_preserves_secrets_ssh_and_sidebar_group() {
     client.cancel().await.expect("close client");
     server_task.abort();
 
-    let reopened = Storage::open(&db_path).await.expect("reopen storage");
+    let reopened = dbx_core::persistence::test_storage::open(&db_path).await.expect("reopen isolated storage");
     let connections = reopened.load_connections().await.expect("reload connections");
     assert_eq!(connections.len(), 4, "failed duplicates must not add connections");
     let copied = connections

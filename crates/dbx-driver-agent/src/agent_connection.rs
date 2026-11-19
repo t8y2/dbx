@@ -407,13 +407,10 @@ pub fn oracle_alternate_connect_configs(config: &ConnectionConfig, err: &str) ->
     let normalized = err.to_lowercase();
     let candidates = if normalized.contains("ora-12505") {
         vec![service_url, descriptor_service_url, legacy_service_url]
-    } else if normalized.contains("ora-12514") {
-        vec![sid_url, descriptor_sid_url, legacy_service_url]
     } else {
-        match config.oracle_connection_type.as_deref() {
-            Some("sid") => vec![service_url, legacy_service_url, descriptor_sid_url, descriptor_service_url],
-            _ => vec![sid_url, legacy_service_url, descriptor_service_url, descriptor_sid_url],
-        }
+        // ORA-12514: the listener answered but does not know the service name, so a
+        // SID/legacy/descriptor spelling is the only thing that can help.
+        vec![sid_url, descriptor_sid_url, legacy_service_url]
     };
     // The retries travel through `oracle_jdbc_connection_string` as a stored
     // connection string, so they must already carry the profile's protocol.
@@ -481,13 +478,25 @@ fn oracle_jdbc_connection_string(
     Ok(oracle_url_for_profile(config, url))
 }
 
+/// Whether Oracle's alternate connection descriptors can plausibly fix this error.
+///
+/// The alternates only rewrite how the *connect descriptor* names the service/SID
+/// (`//host:port/service`, `host:port:SID`, `(DESCRIPTION=...)`); they never change
+/// host, port or route. ORA-12505/ORA-12514 are answered by a listener that is
+/// reachable on host:port, so a wrong service/SID spelling is exactly what they
+/// diagnose. ORA-12541 ("no listener"), timeouts and resets mean the listener was
+/// never reached, so retrying three more descriptor spellings only opens three
+/// more TCP connections that cannot succeed.
+///
+/// That matters beyond wasted time: enterprise zero-trust/security clients in
+/// front of the database run an authorization check for every new connection and
+/// pop a native warning per failed check, so one failed connect used to stack up
+/// to five dialogs (1 initial + 4 alternates) per attempt. Keep the failure to one
+/// connection; ORA-12541 keeps the "try Service Name/SID" hint
+/// (`oracle_error_with_driver_hint`), it just no longer auto-retries.
 fn oracle_listener_error_can_retry(err: &str) -> bool {
     let normalized = err.to_lowercase();
-    normalized.contains("ora-12505")
-        || normalized.contains("ora-12514")
-        || normalized.contains("ora-12541")
-        || normalized.contains("no listener")
-        || err.contains("没有监听程序")
+    normalized.contains("ora-12505") || normalized.contains("ora-12514")
 }
 
 fn oracle_service_jdbc_url(host: &str, port: u16, database: &str) -> String {
@@ -705,6 +714,65 @@ fn normalize_etcd_endpoints(config: &ConnectionConfig, host: &str, port: u16) ->
     format!("{scheme}://{host}:{port}")
 }
 
+/// Apply runtime-only forwarding destinations without rewriting logical TLS peers.
+pub fn with_zookeeper_endpoint_routes(
+    mut params: serde_json::Value,
+    routes: Option<&std::collections::BTreeMap<String, String>>,
+) -> serde_json::Value {
+    if let Some(routes) = routes {
+        params["zookeeper_endpoint_routes"] = serde_json::json!(routes);
+    }
+    params
+}
+
+/// Logical ensemble members, using the same default port and chroot split as the Agent.
+pub fn zookeeper_connection_endpoints(config: &ConnectionConfig) -> Result<Vec<(String, u16)>, String> {
+    let value = normalize_zookeeper_connect_string(config, &config.host, config.port);
+    let value = value.strip_prefix("zookeeper://").unwrap_or(&value);
+    let hosts = value.split('/').next().unwrap_or("");
+    let mut endpoints = Vec::new();
+    for server in hosts.split(',').map(str::trim).filter(|server| !server.is_empty()) {
+        let invalid = || format!("Invalid ZooKeeper endpoint: {server}");
+        let (host, port) = if let Some(rest) = server.strip_prefix('[') {
+            let (host, suffix) = rest.split_once(']').ok_or_else(invalid)?;
+            let port = if suffix.is_empty() {
+                2181
+            } else {
+                suffix.strip_prefix(':').ok_or_else(invalid)?.parse::<u16>().map_err(|_| invalid())?
+            };
+            if host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(invalid());
+            }
+            (host.to_owned(), port)
+        } else if server.parse::<std::net::Ipv6Addr>().is_ok() {
+            (server.to_owned(), 2181)
+        } else if let Some((host, port)) = server.split_once(':') {
+            (host.to_owned(), port.parse::<u16>().map_err(|_| invalid())?)
+        } else {
+            (server.to_owned(), 2181)
+        };
+        if host.is_empty() || host.chars().any(char::is_whitespace) || port == 0 {
+            return Err(invalid());
+        }
+        let endpoint = (host, port);
+        if !endpoints.contains(&endpoint) {
+            endpoints.push(endpoint);
+        }
+    }
+    if endpoints.is_empty() {
+        return Err("ZooKeeper connect string contains no servers".to_owned());
+    }
+    Ok(endpoints)
+}
+
+pub fn zookeeper_endpoint_address(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{}]:{port}", host.trim_matches(['[', ']']))
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 fn normalize_zookeeper_connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
     config
         .connection_string
@@ -712,7 +780,7 @@ fn normalize_zookeeper_connect_string(config: &ConnectionConfig, host: &str, por
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{host}:{port}"))
+        .unwrap_or_else(|| zookeeper_endpoint_address(host, port))
 }
 
 fn normalize_agent_url_params(params: Option<&str>) -> &str {
@@ -809,6 +877,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -856,6 +926,40 @@ mod tests {
             production_databases: vec![],
             production_badge_scope: None,
             database_info: None,
+        }
+    }
+
+    #[test]
+    fn zookeeper_routes_preserve_full_logical_ensemble_and_namespace() {
+        let mut cfg = config(DatabaseType::ZooKeeper, None);
+        cfg.connection_string = Some("zookeeper:// zk1, [2001:db8::1]:2281,zk3:2182/app".into());
+        let endpoints = super::zookeeper_connection_endpoints(&cfg).unwrap();
+        assert_eq!(endpoints, vec![("zk1".into(), 2181), ("2001:db8::1".into(), 2281), ("zk3".into(), 2182)]);
+        let routes = std::collections::BTreeMap::from([
+            ("zk1:2181".into(), "127.0.0.1:31001".into()),
+            ("[2001:db8::1]:2281".into(), "127.0.0.1:31002".into()),
+            ("zk3:2182".into(), "127.0.0.1:31003".into()),
+        ]);
+        let params =
+            super::with_zookeeper_endpoint_routes(agent_connect_params(&cfg, "zk1", 2181, "").unwrap(), Some(&routes));
+        assert_eq!(params["zookeeper_connect_string"], cfg.connection_string.unwrap());
+        assert_eq!(params["zookeeper_endpoint_routes"], serde_json::json!(routes));
+    }
+
+    #[test]
+    fn zookeeper_endpoint_parser_handles_empty_string_ipv6_and_rejects_bad_ports() {
+        let mut cfg = config(DatabaseType::ZooKeeper, None);
+        cfg.host = "2001:db8::2".into();
+        cfg.port = 2281;
+        assert_eq!(super::zookeeper_connection_endpoints(&cfg).unwrap(), vec![("2001:db8::2".into(), 2281)]);
+        cfg.connection_string = Some("[::1], ::2, zk1,zk1:2181/root".into());
+        assert_eq!(
+            super::zookeeper_connection_endpoints(&cfg).unwrap(),
+            vec![("::1".into(), 2181), ("::2".into(), 2181), ("zk1".into(), 2181)]
+        );
+        for value in ["/app", "zk:0", "zk:65536", "zk:bad", "[bad]:2181"] {
+            cfg.connection_string = Some(value.into());
+            assert!(super::zookeeper_connection_endpoints(&cfg).is_err(), "{value}");
         }
     }
 
@@ -1409,7 +1513,9 @@ mod tests {
 
         assert_eq!(retry.connection_string.as_deref(), Some("jdbc:oracle:thin:@127.0.0.1:3306:ORCL"));
         assert!(oracle_alternate_connect_config(&retry, "ORA-01017: invalid username/password").is_none());
-        assert!(oracle_alternate_connect_config(&cfg, "ORA-12541: TNS:no listener").is_some());
+        // ORA-12541 is TCP-level: the listener was never reached, so a descriptor
+        // spelling change cannot help and only opens more connections/dialogs.
+        assert!(oracle_alternate_connect_config(&cfg, "ORA-12541: TNS:no listener").is_none());
     }
 
     #[test]
@@ -1423,25 +1529,27 @@ mod tests {
     }
 
     #[test]
-    fn oracle_no_listener_errors_try_common_jdbc_url_variants() {
+    fn oracle_no_listener_errors_do_not_fan_out_into_extra_connections() {
+        // ORA-12541 / "no listener" means host:port was never reached. Rewriting only
+        // the CONNECT_DATA spelling cannot fix reachability, and every alternate is a
+        // brand-new TCP connection — i.e. another authorization popup in front of an
+        // enterprise zero-trust/security client. One failure must stay one connection.
         let mut cfg = config(DatabaseType::Oracle, Some("ORCL"));
         cfg.host = "oracle.example.com".to_string();
         cfg.port = 1521;
         cfg.driver_profile = Some("oracle".to_string());
         cfg.oracle_connection_type = Some("service_name".to_string());
 
-        let retries = oracle_alternate_connect_configs(&cfg, "ORA-12541: TNS:no listener");
-        let urls: Vec<_> = retries.iter().filter_map(|retry| retry.connection_string.as_deref()).collect();
+        assert!(oracle_alternate_connect_configs(&cfg, "ORA-12541: TNS:no listener").is_empty());
+        assert!(oracle_alternate_connect_configs(&cfg, "ORA-12541: TNS:no listener\n没有监听程序").is_empty());
+        assert!(oracle_alternate_connect_config(&cfg, "ORA-12541: TNS:no listener").is_none());
+        // The actionable hint survives, it just no longer auto-retries.
+        assert!(oracle_error_with_driver_hint(&cfg, "ORA-12541: TNS:no listener").contains("Service Name"));
 
-        assert_eq!(
-            urls,
-            vec![
-                "jdbc:oracle:thin:@oracle.example.com:1521:ORCL",
-                "jdbc:oracle:thin:@oracle.example.com:1521/ORCL",
-                "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCL)))",
-                "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))",
-            ]
-        );
+        // Listener-answered errors keep their single-purpose alternates: those arrive
+        // after a successful TCP handshake, so the descriptor really can be the fix.
+        let listener_answered = oracle_alternate_connect_configs(&cfg, "ORA-12514: no service");
+        assert_eq!(listener_answered.len(), 3);
     }
 
     #[test]

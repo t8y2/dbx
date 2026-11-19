@@ -50,4 +50,42 @@ describe("connection list display sort", () => {
 
     expect(orderConnectionsForSidebarDisplay(connections, tree, "asc").map((connection) => connection.id)).toEqual(["alpha", "beta", "zebra"]);
   });
+
+  it("sorts multiple root connection groups in ascending and descending order (#13738)", () => {
+    const tree = [group("group-z", "Zeta Group", [connection("conn-1", "Conn 1")]), group("group-b", "Beta Group", [connection("conn-2", "Conn 2")]), group("group-a", "Alpha Group", [connection("conn-3", "Conn 3")])];
+
+    const asc = sortConnectionListForDisplay(tree, "asc");
+    expect(asc.map((node) => node.id)).toEqual(["group-a", "group-b", "group-z"]);
+
+    const desc = sortConnectionListForDisplay(tree, "desc");
+    expect(desc.map((node) => node.id)).toEqual(["group-z", "group-b", "group-a"]);
+  });
+
+  it("sorts newly created group into its alphabetical position (#13738)", () => {
+    // When a new group is created, it is appended to the bottom in manual order.
+    const initialTree = [group("group-prod", "Production", [connection("c-prod", "Prod")]), group("group-staging", "Staging", [connection("c-stg", "Staging")])];
+    // Newly created group appended at the end
+    const treeWithNewGroup = [...initialTree, group("group-dev", "Development", [connection("c-dev", "Dev")])];
+
+    const sortedAsc = sortConnectionListForDisplay(treeWithNewGroup, "asc");
+    expect(sortedAsc.map((node) => node.id)).toEqual(["group-dev", "group-prod", "group-staging"]);
+  });
+
+  it("sorts nested subgroups within a connection group (#13738)", () => {
+    const tree = [group("parent", "Parent Group", [group("sub-z", "Sub Z", [connection("c-1", "Conn 1")]), group("sub-a", "Sub A", [connection("c-2", "Conn 2")])])];
+
+    const sortedAsc = sortConnectionListForDisplay(tree, "asc");
+    expect(sortedAsc[0]?.children?.map((node) => node.id)).toEqual(["sub-a", "sub-z"]);
+
+    const sortedDesc = sortConnectionListForDisplay(tree, "desc");
+    expect(sortedDesc[0]?.children?.map((node) => node.id)).toEqual(["sub-z", "sub-a"]);
+  });
+
+  it("projects configs with multiple groups ordered alphabetically (#13738)", () => {
+    const connections = [{ id: "c-z" }, { id: "c-a" }];
+    const tree = [group("group-z", "Zeta Group", [connection("c-z", "Z Conn")]), group("group-a", "Alpha Group", [connection("c-a", "A Conn")])];
+
+    expect(orderConnectionsForSidebarDisplay(connections, tree, "asc").map((c) => c.id)).toEqual(["c-a", "c-z"]);
+    expect(orderConnectionsForSidebarDisplay(connections, tree, "desc").map((c) => c.id)).toEqual(["c-z", "c-a"]);
+  });
 });

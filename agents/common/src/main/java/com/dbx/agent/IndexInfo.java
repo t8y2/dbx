@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Objects;
 
 public final class IndexInfo {
+    private String owner;
     private String name;
     private List<String> columns;
     private boolean is_unique;
@@ -75,6 +76,10 @@ public final class IndexInfo {
     public String getName() {
         return name;
     }
+
+    public String getOwner() { return owner; }
+
+    public void setOwner(String owner) { this.owner = owner; }
 
     public List<String> getColumns() {
         return columns;
@@ -193,6 +198,7 @@ public final class IndexInfo {
             && is_primary == that.is_primary
             && constraint_backed == that.constraint_backed
             && Objects.equals(name, that.name)
+            && Objects.equals(owner, that.owner)
             && Objects.equals(columns, that.columns)
             && Objects.equals(filter, that.filter)
             && Objects.equals(index_type, that.index_type)
@@ -208,6 +214,7 @@ public final class IndexInfo {
     @Override
     public int hashCode() {
         return Objects.hash(
+            owner,
             name,
             columns,
             is_unique,

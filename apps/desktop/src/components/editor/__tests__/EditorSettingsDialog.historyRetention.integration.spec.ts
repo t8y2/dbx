@@ -236,6 +236,16 @@ describe("query history retention settings", { timeout: 30_000 }, () => {
     expect(reopened.querySelector("#history-retention-limit")!.textContent).toContain("1000");
   });
 
+  it("Apply and Close closes the settings page when nothing is staged (#13862)", async () => {
+    const host = await mountDataTab();
+    const applyAndClose = button(host, "settings.applyAndClose");
+    expect(applyAndClose.disabled).toBe(false);
+    applyAndClose.click();
+    await flushAsyncUpdates();
+    expect(hoisted.closes).toEqual([false]);
+    expect(hoisted.saves).toEqual([]);
+  });
+
   it("discarding an unapplied change does not save it", async () => {
     const host = await mountDataTab();
     button(host, "settings.resetDefaults").click();

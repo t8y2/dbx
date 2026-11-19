@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   openPluginConnection: vi.fn(),
   openPluginWorkbench: vi.fn(),
   listPlugins: vi.fn(),
+  getAiPluginToolPlugins: vi.fn(async () => []),
   listPluginTrustedKeys: vi.fn(),
   listPluginRepositories: vi.fn(),
   fetchPluginMarketplaceCatalogs: vi.fn(),
@@ -279,6 +280,26 @@ afterEach(() => {
 });
 
 describe("PluginContributionsPanel batch source validation", () => {
+  it("keeps the MCP filter available after the last matching plugin is removed", async () => {
+    const marked = installed("mcp");
+    marked.manifest.entrypoints = { backend: { executable: "sidecar" } };
+    marked.manifest.contributions = [{ type: "mcp", id: "mcp.tools" }];
+    state.installedPlugins = [marked, installed("ordinary")];
+    state.activeSection = "installed";
+    await flushUi();
+    host.querySelector<HTMLInputElement>("[data-plugin-mcp-filter] input")!.click();
+    await nextTick();
+    state.installedPlugins = [installed("ordinary")];
+    await flushUi();
+    const filter = host.querySelector<HTMLInputElement>("[data-plugin-mcp-filter] input");
+    expect(filter).not.toBeNull();
+    expect(filter!.checked).toBe(true);
+    filter!.click();
+    await nextTick();
+    expect(host.textContent).toContain("ordinary");
+    expect(host.querySelector("[data-plugin-mcp-filter]")).toBeNull();
+  });
+
   it.each(["first", "second"])("does not silently resolve selected source conflicts by filtering to %s", async (repositoryId) => {
     state.catalogResults = [catalog("first", ["a"]), catalog("second", ["a"], "2.0.0")];
     state.selectAllUpdatable();

@@ -5,12 +5,13 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { HelpTooltip } from "@/components/ui/tooltip";
-import { Check, ChevronDown, FolderOpen, Loader2, Search } from "@lucide/vue";
+import { Check, ChevronDown, Filter, FolderOpen, Loader2, Search, X } from "@lucide/vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
-import { databaseBackupFileNamePatternHasRunId, databaseBackupFileNamePatternIsValid, type DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
+import { databaseBackupFileNamePatternHasRunId, databaseBackupFileNamePatternIsValid, supportsNavicatBackupFormat, type DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
 import type { ConnectionConfig } from "@/types/database";
 import BackupTableSelector from "./BackupTableSelector.vue";
 import type { DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
@@ -42,6 +43,7 @@ const emit = defineEmits<{
   toggleDatabase: [database: string];
   tableSelectionState: [state: DatabaseBackupTableSelectionState];
   "update:allDatabases": [value: boolean];
+  "update:selectedDatabases": [value: string[]];
   "update:tablePatternsInput": [value: string];
   "update:runDirectoryPattern": [value: string];
 }>();
@@ -57,6 +59,13 @@ const selectedConnectionName = computed(() => props.connections.find((connection
 const selectedConnectionType = computed(() => props.connections.find((connection) => connection.id === props.draft.connectionId)?.db_type);
 // Database names and exact table lists belong to one connection, so they only apply when a single connection is selected.
 const multipleConnectionsSelected = computed(() => props.multiSelectConnections && props.selectedConnectionIds.length > 1);
+const selectedConnectionTypes = computed(() => {
+  const connectionIds = props.multiSelectConnections ? props.selectedConnectionIds : props.draft.connectionId ? [props.draft.connectionId] : [];
+  return connectionIds.map((connectionId) => props.connections.find((connection) => connection.id === connectionId)?.db_type);
+});
+const navicatFormatSupported = computed(() => supportsNavicatBackupFormat(selectedConnectionTypes.value));
+// A saved schedule may still carry `.nb3` after its connection changed to an unsupported type.
+const navicatFormatUnsupported = computed(() => props.draft.outputCompression === "nb3" && !navicatFormatSupported.value);
 const connectionPickerLabel = computed(() => (multipleConnectionsSelected.value ? t("databaseBackup.connectionsSelected", { count: props.selectedConnectionIds.length }) : selectedConnectionName.value));
 const fileNamePatternNeedsRunId = computed(() => multipleConnectionsSelected.value && !databaseBackupFileNamePatternHasRunId(props.draft.fileNamePattern));
 const filteredConnections = computed(() => {
@@ -64,11 +73,54 @@ const filteredConnections = computed(() => {
   if (!query) return props.connections;
   return props.connections.filter((connection) => connection.name.toLocaleLowerCase().includes(query));
 });
+const showOnlySelected = ref(false);
+const selectedDatabaseSet = computed(() => new Set(props.selectedDatabases));
+// Chips removal and the count badge are only valid against a successfully loaded option list:
+// during a load the options are cleared, and after a failed load they stay empty, so removing
+// one chip would silently drop the entire seeded selection.
+const databaseOptionsReady = computed(() => !props.loadingDatabases && !props.databaseLoadError);
+
 const filteredDatabaseOptions = computed(() => {
+  let list = props.databaseOptions;
+  if (showOnlySelected.value) {
+    list = list.filter((database) => selectedDatabaseSet.value.has(database));
+  }
   const query = databaseSearch.value.trim().toLocaleLowerCase();
-  if (!query) return props.databaseOptions;
-  return props.databaseOptions.filter((database) => database.toLocaleLowerCase().includes(query));
+  if (!query) return list;
+  return list.filter((database) => database.toLocaleLowerCase().includes(query));
 });
+
+const allFilteredDatabasesSelected = computed(() => {
+  if (filteredDatabaseOptions.value.length === 0) return false;
+  return filteredDatabaseOptions.value.every((database) => selectedDatabaseSet.value.has(database));
+});
+
+const hasAnyFilteredDatabasesSelected = computed(() => {
+  return filteredDatabaseOptions.value.some((database) => selectedDatabaseSet.value.has(database));
+});
+
+function clearAllSelectedDatabases() {
+  emit("update:selectedDatabases", []);
+}
+
+function selectAllFilteredDatabases() {
+  const next = new Set(props.selectedDatabases);
+  for (const db of filteredDatabaseOptions.value) {
+    next.add(db);
+  }
+  emit(
+    "update:selectedDatabases",
+    props.databaseOptions.filter((d) => next.has(d)),
+  );
+}
+
+function deselectAllFilteredDatabases() {
+  const removing = new Set(filteredDatabaseOptions.value);
+  emit(
+    "update:selectedDatabases",
+    props.selectedDatabases.filter((d) => !removing.has(d)),
+  );
+}
 const runDirectoryTemplateVariables = computed(() => [
   { token: "{schedule}", description: t("databaseBackup.templateVariableSchedule") },
   { token: "{date}", description: t("databaseBackup.templateVariableDate") },
@@ -127,6 +179,7 @@ watch(
     connectionPickerOpen.value = false;
     connectionSearch.value = "";
     databaseSearch.value = "";
+    showOnlySelected.value = false;
   },
 );
 
@@ -138,6 +191,7 @@ watch(
   () => props.draft.connectionId,
   () => {
     databaseSearch.value = "";
+    showOnlySelected.value = false;
   },
 );
 </script>
@@ -238,11 +292,17 @@ watch(
     </div>
 
     <div class="space-y-2">
-      <Label>{{ t("databaseBackup.compression") }}</Label>
-      <label class="flex items-center gap-2 text-sm">
-        <input :checked="draft.outputCompression === 'gzip'" type="checkbox" class="h-4 w-4 accent-primary" @change="draft.outputCompression = ($event.target as HTMLInputElement).checked ? 'gzip' : 'none'" />
-        {{ t("databaseBackup.compressionGzip") }}
-      </label>
+      <Label>{{ t("databaseBackup.backupFormat") }}</Label>
+      <Select v-model="draft.outputCompression">
+        <SelectTrigger data-backup-output-format class="w-full sm:w-65" :aria-invalid="navicatFormatUnsupported"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">{{ t("databaseBackup.formatSql") }}</SelectItem>
+          <SelectItem value="gzip">{{ t("databaseBackup.compressionGzip") }}</SelectItem>
+          <SelectItem value="nb3" :disabled="!navicatFormatSupported">{{ t("databaseBackup.formatNb3") }}</SelectItem>
+        </SelectContent>
+      </Select>
+      <p v-if="navicatFormatUnsupported" data-backup-nb3-unsupported class="text-xs text-destructive">{{ t("databaseBackup.formatNb3Unsupported") }}</p>
+      <p v-else-if="draft.outputCompression === 'nb3'" data-backup-nb3-hint class="text-xs text-muted-foreground">{{ t("databaseBackup.formatNb3Hint") }}</p>
     </div>
 
     <div v-if="multipleConnectionsSelected" data-backup-multi-connection-hint class="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
@@ -250,17 +310,81 @@ watch(
     </div>
     <div v-else class="space-y-3">
       <div class="flex items-center justify-between gap-4">
-        <Label>{{ t("databaseBackup.databases") }}</Label>
+        <div class="flex items-center gap-2">
+          <Label>{{ t("databaseBackup.databases") }}</Label>
+          <Badge v-if="!allDatabases && databaseOptionsReady" variant="secondary" data-backup-selected-databases-badge class="h-5 px-1.5 text-[11px] font-normal">
+            {{ t("databaseBackup.selectedDatabasesCount", { selected: selectedDatabases.length, total: databaseOptions.length }) }}
+          </Badge>
+        </div>
         <label class="flex items-center gap-2 text-sm">
           <input :checked="allDatabases" type="checkbox" class="h-4 w-4 rounded border-border accent-primary" @change="emit('update:allDatabases', ($event.target as HTMLInputElement).checked)" />
           {{ t("databaseBackup.allDatabases") }}
         </label>
       </div>
-      <div v-if="!allDatabases" class="space-y-2">
-        <div class="relative">
-          <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="databaseSearch" data-backup-database-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchDatabases')" :placeholder="t('databaseBackup.searchDatabases')" />
+      <div v-if="!allDatabases" class="space-y-2.5">
+        <!-- Visual Selected Databases Preview Area (Chips / Tags) -->
+        <div v-if="databaseOptionsReady && selectedDatabases.length > 0" data-backup-selected-databases-preview class="space-y-1.5 rounded-md border border-border/70 bg-muted/20 p-2.5">
+          <div class="flex items-center justify-between gap-2 text-xs">
+            <div class="flex items-center gap-1.5 font-medium text-muted-foreground">
+              <span>{{ t("databaseBackup.selectedDatabasesList") }}</span>
+              <span class="rounded-full bg-muted px-1.5 py-0.2 text-[10px] text-foreground">{{ selectedDatabases.length }}</span>
+            </div>
+            <button type="button" data-backup-clear-selected-databases class="text-xs text-muted-foreground transition-colors hover:text-destructive focus:outline-none" @click="clearAllSelectedDatabases">
+              {{ t("databaseBackup.clearSelection") }}
+            </button>
+          </div>
+          <div class="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto pt-0.5" data-backup-selected-database-tags>
+            <Badge v-for="database in selectedDatabases" :key="database" variant="secondary" data-backup-selected-database-chip class="inline-flex max-w-[200px] items-center gap-1 py-0.5 pl-2 pr-1 text-xs font-normal" :title="database">
+              <span class="truncate">{{ database }}</span>
+              <button
+                type="button"
+                data-backup-remove-selected-database
+                class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground focus:outline-none"
+                :aria-label="t('databaseBackup.removeDatabase', { name: database })"
+                @click.stop="emit('toggleDatabase', database)"
+              >
+                <X class="h-3 w-3" />
+              </button>
+            </Badge>
+          </div>
         </div>
+
+        <!-- Search & Filter Controls -->
+        <div class="flex items-center gap-2">
+          <div class="relative min-w-0 flex-1">
+            <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="databaseSearch" data-backup-database-search class="h-9 pl-8 text-xs" :aria-label="t('databaseBackup.searchDatabases')" :placeholder="t('databaseBackup.searchDatabases')" />
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-backup-filter-selected-toggle
+            class="h-9 shrink-0 gap-1.5 px-2.5 text-xs font-normal"
+            :class="showOnlySelected ? 'border-primary bg-primary/10 text-primary hover:bg-primary/15' : ''"
+            :title="t('databaseBackup.showOnlySelectedHint')"
+            @click="showOnlySelected = !showOnlySelected"
+          >
+            <Filter class="h-3.5 w-3.5" />
+            <span>{{ t("databaseBackup.showOnlySelected") }}</span>
+            <span v-if="selectedDatabases.length" class="ml-0.5 rounded-full bg-primary/20 px-1.5 py-0.2 text-[10px] font-medium leading-tight">{{ selectedDatabases.length }}</span>
+          </Button>
+        </div>
+
+        <!-- Quick actions: Available count & Select all / Deselect all -->
+        <div v-if="databaseOptions.length > 0 && !loadingDatabases" class="flex items-center justify-between px-0.5 text-xs text-muted-foreground">
+          <span>{{ t("databaseBackup.availableDatabasesCount", { count: filteredDatabaseOptions.length }) }}</span>
+          <div class="flex items-center gap-3">
+            <button v-if="!allFilteredDatabasesSelected" type="button" data-backup-select-all-filtered class="text-xs text-muted-foreground transition-colors hover:text-foreground focus:outline-none" @click="selectAllFilteredDatabases">
+              {{ t("databaseBackup.selectAll") }}
+            </button>
+            <button v-if="hasAnyFilteredDatabasesSelected" type="button" data-backup-deselect-all-filtered class="text-xs text-muted-foreground transition-colors hover:text-foreground focus:outline-none" @click="deselectAllFilteredDatabases">
+              {{ t("databaseBackup.deselectAll") }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Database Checklist -->
         <div class="max-h-40 overflow-y-auto rounded-md border border-border/70 p-2">
           <div v-if="loadingDatabases" class="flex items-center justify-center gap-2 py-5 text-sm text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t("common.loading") }}</div>
           <template v-else-if="filteredDatabaseOptions.length">
@@ -269,7 +393,9 @@ watch(
               <span class="truncate">{{ database }}</span>
             </label>
           </template>
-          <div v-else class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingDatabases") }}</div>
+          <div v-else class="px-2 py-2 text-sm text-muted-foreground">
+            {{ showOnlySelected ? t("databaseBackup.noSelectedDatabasesMatching") : t("databaseBackup.noMatchingDatabases") }}
+          </div>
         </div>
         <p v-if="databaseLoadError" data-backup-database-load-error class="text-xs text-destructive">{{ databaseLoadError }}</p>
       </div>

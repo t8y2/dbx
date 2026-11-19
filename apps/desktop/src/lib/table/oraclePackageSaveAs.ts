@@ -5,6 +5,7 @@ import { invalidateObjectDdlCache } from "@/lib/metadata/objectDdlCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { DatabaseType, QueryResult } from "@/types/database";
 import { oraclePackageCatalogSource, rewriteOraclePackageSource } from "@/lib/table/oraclePackageSource";
+import { prepareOracleRoutineSourceSave, type PreparedOracleRoutineSave } from "@/lib/table/oracleRoutineWrite";
 
 export interface OraclePackageSaveAsTarget {
   connectionId: string;
@@ -251,13 +252,33 @@ async function verifyCreatedPackage(target: OraclePackageSaveAsTarget, expected:
   return snapshot;
 }
 
+export async function prepareOraclePackageSaveAsExecution(plan: OraclePackageSaveAsPlan, isCurrent: () => boolean = () => true) {
+  if (!isCurrent()) throw new Error("The package Save As target changed. Refresh the preview.");
+  if (!plan.executable || !plan.snapshot) throw new Error("Resolve the package Save As preview issues before execution.");
+  const specification = await prepareOracleRoutineSourceSave({ connectionId: plan.target.connectionId, database: plan.target.database, identity: { owner: plan.target.schema, name: plan.canonicalNewName, kind: "PACKAGE" }, sql: plan.specSource, requireAbsent: true }, { retainTerminalResult: true });
+  return Object.assign(() => executePreparedOraclePackageSaveAs(plan, isCurrent, specification), {
+    dispose: async () => {
+      await specification.dispose?.();
+    },
+  });
+}
+
 export async function executeOraclePackageSaveAs(plan: OraclePackageSaveAsPlan, isCurrent: () => boolean = () => true): Promise<void> {
+  const execute = await prepareOraclePackageSaveAsExecution(plan, isCurrent);
+  try {
+    await execute();
+  } finally {
+    await execute.dispose();
+  }
+}
+
+async function executePreparedOraclePackageSaveAs(plan: OraclePackageSaveAsPlan, isCurrent: () => boolean, specification: PreparedOracleRoutineSave): Promise<void> {
   if (!isCurrent()) throw new Error("The package Save As target changed. Refresh the preview.");
   if (!plan.executable || !plan.snapshot) throw new Error("Resolve the package Save As preview issues before execution.");
   const current = await prepareOraclePackageSaveAs(plan.target, packageDrafts(plan));
   if (!current.executable || planIdentity(current) !== planIdentity(plan)) throw new Error("The package or its members changed. Refresh the Save As preview.");
 
-  const lock = freezeSourceIdentities(["PACKAGE", "PACKAGE_BODY"].map((objectType) => ({ connectionId: plan.target.connectionId, database: plan.target.database, schema: plan.target.schema, objectType, name: plan.target.oldName })));
+  const lock = freezeSourceIdentities([plan.target.oldName, plan.canonicalNewName].flatMap((name) => ["PACKAGE", "PACKAGE_BODY"].map((objectType) => ({ connectionId: plan.target.connectionId, database: plan.target.database, schema: plan.target.schema, objectType, name }))));
   const completed: string[] = [];
   let dispatched = false;
   let active = `PACKAGE ${plan.canonicalNewName}`;
@@ -271,7 +292,7 @@ export async function executeOraclePackageSaveAs(plan: OraclePackageSaveAsPlan, 
     if (!isCurrent()) throw new Error("The Save As dialog changed before package creation.");
     active = `PACKAGE ${plan.canonicalNewName}`;
     dispatched = true;
-    await query(plan.target, plan.specSource);
+    const specificationResult = await specification();
     const specState = (await objectStates(plan.target, plan.canonicalNewName, ["PACKAGE"])).filter((row) => row[0] === plan.canonicalNewName && row[1] === "PACKAGE");
     const specSource = await readSource(plan.target, plan.canonicalNewName, "PACKAGE");
     if (specState.length !== 1 || oraclePackageCatalogSource(specSource) !== oraclePackageCatalogSource(plan.specSource)) throw new Error(`Created package ${plan.canonicalNewName} specification did not match the preview.`);
@@ -286,7 +307,19 @@ export async function executeOraclePackageSaveAs(plan: OraclePackageSaveAsPlan, 
       if (!isCurrent()) throw new Error("The Save As dialog changed before package body creation.");
       if (currentSpec.length !== 1 || String(currentSpec[0]![2]) !== createdSpecId || oraclePackageCatalogSource(currentSource) !== oraclePackageCatalogSource(plan.specSource)) throw new Error("The new package specification identity or definition changed before body creation.");
       active = `PACKAGE BODY ${plan.canonicalNewName}`;
-      await query(plan.target, plan.bodySource);
+      const body = await prepareOracleRoutineSourceSave({
+        connectionId: plan.target.connectionId,
+        database: plan.target.database,
+        identity: { owner: plan.target.schema, name: plan.canonicalNewName, kind: "PACKAGE_BODY" },
+        sql: plan.bodySource,
+        requireAbsent: true,
+        prerequisiteOperationId: specificationResult.operationId,
+      });
+      try {
+        await body();
+      } finally {
+        await body.dispose?.();
+      }
       const bodyState = (await objectStates(plan.target, plan.canonicalNewName, ["PACKAGE BODY"])).filter((row) => row[0] === plan.canonicalNewName && row[1] === "PACKAGE BODY");
       const bodySource = await readSource(plan.target, plan.canonicalNewName, "PACKAGE BODY");
       if (bodyState.length !== 1 || oraclePackageCatalogSource(bodySource) !== oraclePackageCatalogSource(plan.bodySource)) throw new Error(`Created package body ${plan.canonicalNewName} did not match the preview.`);

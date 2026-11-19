@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<!-- Monochrome sidebar adaptation of ../meilisearch.svg. Original vector geometry retained; foreground extraction / transparent detail treatment only. -->
+<defs><mask id="meilisearch-mono" x="0.0" y="0.0" width="64.0" height="64.0" maskUnits="userSpaceOnUse" mask-type="luminance">
+<defs xmlns="http://www.w3.org/2000/svg">
+    <linearGradient id="m" x1="8" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF5CAA" />
+      <stop offset="1" stop-color="#FFB03A" />
+    </linearGradient>
+  </defs>
+
+<path xmlns="http://www.w3.org/2000/svg" fill="white" d="M10 47.5 18.5 17a5 5 0 0 1 9.2-1.2L32 23l4.3-7.2a5 5 0 0 1 9.2 1.2L54 47.5a4.5 4.5 0 0 1-8.6 2.6L40.2 31l-4.3 7.1a4.5 4.5 0 0 1-7.8 0L23.8 31l-5.2 19.1a4.5 4.5 0 0 1-8.6-2.6Z" />
+
+</mask></defs><rect x="0.0" y="0.0" width="64.0" height="64.0" fill="white" mask="url(#meilisearch-mono)"/>
+</svg>

@@ -45,10 +45,14 @@ LEFT JOIN SYSJOB.DBA_JOBS_RUNNING R ON R.JOB = J.ID
 ORDER BY J.NAME`;
 }
 
+// SP_INIT_JOB_SYS 创建的 SYSJOB 对象集随构建版本变化：8.1.3.62 建出 50 个对象（含
+// USER_JOBS_VIEW 等 USER_* 视图），8.1.3.12 只建出 43 个（视图仅 DBA_JOBS /
+// DBA_JOBS_RUNNING / USER_JOBS，没有 USER_JOBS_VIEW）。SYSJOBS 是作业系统的主表，
+// 任何已初始化的构建都有，因此用它判定“已初始化”，否则旧构建会永远显示未初始化。
 export const DAMENG_JOB_ENVIRONMENT_SQL = `SELECT COUNT(*) AS CNT
 FROM ALL_OBJECTS
 WHERE OWNER = 'SYSJOB'
-  AND OBJECT_NAME = 'USER_JOBS_VIEW'`;
+  AND OBJECT_NAME = 'SYSJOBS'`;
 
 export function damengJobStepsSql(jobId: string | number, useSystemTables = false): string {
   return `SELECT * FROM ${useSystemTables ? "SYSJOB.SYSJOBSTEPS" : "SYSJOB.USER_JOBSTEPS_VIEW"} WHERE JOBID = ${quoteDamengNumber(jobId)}`;
@@ -145,6 +149,13 @@ export function parseDamengJobEnvironmentReady(result: QueryResult): boolean {
 
 export function isDamengJobEnvironmentMissingError(message: string): boolean {
   return /SYSJOB/i.test(message) && (/无效的模式名/.test(message) || /invalid schema/i.test(message));
+}
+
+// SP_INIT_JOB_SYS 不幂等：环境已存在时达梦在 anonymous block 里撞到第一个已创建的对象
+// 就中断，返回 -2124（实测 8.1.3.12 = line 826、8.1.3.62 = line 969，首个对象均为
+// SYSMAILINFO）。语义上这是“环境已就绪”，不是初始化失败。
+export function isDamengJobAlreadyInitializedError(message: string): boolean {
+  return (/已存在/.test(message) || /already exists/i.test(message)) && (/-2124/.test(message) || /对象\[|object\s*\[/i.test(message));
 }
 
 export function queryResultToObjects(result: QueryResult): Record<string, unknown>[] {

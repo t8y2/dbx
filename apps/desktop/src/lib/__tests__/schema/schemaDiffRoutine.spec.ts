@@ -30,6 +30,61 @@ describe("schemaDiffRoutine", () => {
     expect(schemaDiffRoutineKeyFromFunction(fn("add", "integer, text"))).toBe("add(integer, text)");
   });
 
+  it("keeps a package specification and its same-name body as separate identities", () => {
+    const specification = { ...fn("Pkg.With.Dot"), function_type: "PACKAGE" };
+    const body = { ...fn("Pkg.With.Dot"), function_type: "PACKAGE_BODY" };
+    expect(schemaDiffRoutineKeyFromFunction(specification)).not.toBe(schemaDiffRoutineKeyFromFunction(body));
+  });
+
+  it("does not include a package specification when only its body is selected", () => {
+    const specification = { ...fn("Pkg.With.Dot"), function_type: "PACKAGE" };
+    const body = { ...fn("Pkg.With.Dot"), function_type: "PACKAGE_BODY" };
+    const selected = schemaDiffRoutineKeyFromFunction(body);
+    const filtered = filterSchemaDiffFunctions([specification, body], [specification, body], [selected]);
+    expect(filtered.sourceFunctions).toEqual([body]);
+    expect(filtered.targetFunctions).toEqual([body]);
+  });
+
+  it("does not confuse a quoted function name with a serialized package key", () => {
+    const body = { ...fn("Pkg.With.Dot"), function_type: "PACKAGE_BODY" };
+    const selected = schemaDiffRoutineKeyFromFunction(body);
+    const quotedFunction = fn(selected);
+    expect(schemaDiffRoutineKeyFromFunction(quotedFunction)).toBe(selected);
+    const filtered = filterSchemaDiffFunctions([body, quotedFunction], [body, quotedFunction], [selected]);
+    expect(filtered.sourceFunctions).toEqual([body]);
+    expect(filtered.targetFunctions).toEqual([body]);
+  });
+
+  it("uses exact kinds only when the caller selects the typed program contract", () => {
+    const routine = fn("same", "");
+    const key = schemaDiffRoutineKeyFromFunction(routine, true);
+    expect(key).not.toBe(schemaDiffRoutineKeyFromFunction(routine));
+    expect(filterSchemaDiffFunctions([routine], [routine], [key], [], true)).toEqual({ sourceFunctions: [routine], targetFunctions: [routine] });
+    expect(() => schemaDiffRoutineKeyFromFunction({ name: "same", arguments: "" }, true)).toThrow("object kind");
+  });
+
+  it("retains the opposite standalone kind so typed selection still reports a procedure/function conflict", () => {
+    const procedure = { ...fn("same"), function_type: "PROCEDURE" };
+    const target = fn("same");
+    const filtered = filterSchemaDiffFunctions([procedure], [target], [schemaDiffRoutineKeyFromFunction(procedure, true)], [], true);
+    expect(filtered.sourceFunctions).toEqual([procedure]);
+    expect(filtered.targetFunctions).toEqual([target]);
+    expect(filterSchemaDiffFunctions([procedure], [fn("same", "integer")], [schemaDiffRoutineKeyFromFunction(procedure, true)], [], true).targetFunctions).toEqual([]);
+  });
+
+  it("can select a target-only body without selecting its specification", () => {
+    const specification = { ...fn("P"), function_type: "PACKAGE" };
+    const body = { ...fn("P"), function_type: "PACKAGE_BODY" };
+    expect(filterSchemaDiffFunctions([], [specification, body], [schemaDiffRoutineKeyFromFunction(body)], [], true)).toEqual({ sourceFunctions: [], targetFunctions: [body] });
+  });
+
+  it("retains a same-name foreign namespace kind as conflict evidence, not a package counterpart write", () => {
+    const body = { ...fn("P"), function_type: "PACKAGE_BODY" };
+    const target = fn("P");
+    const filtered = filterSchemaDiffFunctions([body], [target], [schemaDiffRoutineKeyFromFunction(body)], [], true);
+    expect(filtered.targetFunctions).toEqual([target]);
+  });
+
   it("blocks unrestricted compare when routine count exceeds the soft limit", () => {
     expect(SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT).toBe(200);
     expect(isSchemaDiffUnrestrictedRoutineLoadTooLarge(200, undefined)).toBe(false);

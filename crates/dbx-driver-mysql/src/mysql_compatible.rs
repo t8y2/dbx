@@ -26,31 +26,35 @@ pub async fn list_indexes_with_ddl_fallback(
     table: &str,
 ) -> Result<Vec<IndexInfo>, String> {
     let statistics_result = list_indexes(pool, database, table).await;
-    let mut indexes = match &statistics_result {
-        Ok(indexes) => indexes.clone(),
-        Err(err) => {
-            log::debug!(
-                "Falling back to SHOW CREATE TABLE for MySQL-compatible distributed indexes on `{database}`.`{table}` after information_schema.STATISTICS failed: {err}"
-            );
-            Vec::new()
-        }
-    };
+    if let Err(err) = &statistics_result {
+        log::debug!(
+            "Falling back to SHOW CREATE TABLE for MySQL-compatible distributed indexes on `{database}`.`{table}` after information_schema.STATISTICS failed: {err}"
+        );
+    }
+    let ddl_result = show_create_table_ddl(pool, database, table).await;
+    combine_statistics_and_ddl_indexes(statistics_result, ddl_result)
+}
 
-    match show_create_table_ddl(pool, database, table).await {
-        Ok(ddl) => {
+// Doris and StarRocks keep secondary indexes (BITMAP, INVERTED, NGRAM_BF) and table keys out of
+// information_schema.STATISTICS, so an empty STATISTICS answer is normal and the DDL is the only
+// source. A failed DDL read must surface as an error, not as "no indexes" (t8y2/dbx#14067).
+fn combine_statistics_and_ddl_indexes(
+    statistics_result: Result<Vec<IndexInfo>, String>,
+    ddl_result: Result<String, String>,
+) -> Result<Vec<IndexInfo>, String> {
+    match (statistics_result, ddl_result) {
+        (statistics_result, Ok(ddl)) => {
+            let mut indexes = statistics_result.unwrap_or_default();
             merge_index_infos(&mut indexes, indexes_from_create_table_ddl(&ddl));
             Ok(indexes)
         }
-        Err(ddl_err) => {
-            if indexes.is_empty() {
-                if let Err(statistics_err) = statistics_result {
-                    return Err(format!(
-                        "{statistics_err}; SHOW CREATE TABLE fallback failed for MySQL-compatible distributed indexes: {ddl_err}"
-                    ));
-                }
-            }
-            Ok(indexes)
+        (Ok(indexes), Err(_)) if !indexes.is_empty() => Ok(indexes),
+        (Ok(_), Err(ddl_err)) => {
+            Err(format!("SHOW CREATE TABLE failed for MySQL-compatible distributed indexes: {ddl_err}"))
         }
+        (Err(statistics_err), Err(ddl_err)) => Err(format!(
+            "{statistics_err}; SHOW CREATE TABLE fallback failed for MySQL-compatible distributed indexes: {ddl_err}"
+        )),
     }
 }
 
@@ -84,7 +88,7 @@ fn catalog_table_ref(catalog: &str, database: &str, table: &str) -> String {
 /// `default_catalog` in StarRocks (both with `Type=internal`); detection is
 /// type-based (see `CatalogInfo::is_internal`), not name-based.
 pub async fn list_catalogs(pool: &MySqlPool) -> Result<Vec<crate::db::CatalogInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter("SHOW CATALOGS").await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let catalogs: Vec<crate::db::CatalogInfo> = rows
@@ -124,7 +128,7 @@ fn normalize_catalogs(mut catalogs: Vec<crate::db::CatalogInfo>) -> Vec<crate::d
 
 /// `SHOW DATABASES FROM <catalog>` → databases in the given catalog.
 pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let sql = format!("SHOW DATABASES FROM {}", quote_identifier(catalog));
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -137,7 +141,7 @@ pub async fn list_databases_show_from(pool: &MySqlPool, catalog: &str) -> Result
 /// not fetched (the caller only needs names + types for browsing).
 pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &str) -> Result<Vec<TableInfo>, String> {
     let sql = format!("SHOW TABLES FROM {}", catalog_database_ref(catalog, database));
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     let mut tables: Vec<TableInfo> = rows
@@ -282,23 +286,37 @@ fn merge_index_infos(target: &mut Vec<IndexInfo>, parsed: Vec<IndexInfo>) {
 
 fn indexes_from_create_table_ddl(ddl: &str) -> Vec<IndexInfo> {
     let mut indexes = Vec::new();
-    for raw_line in ddl.lines() {
-        let line = trim_ddl_definition_line(raw_line);
+    let lines: Vec<&str> = ddl.lines().collect();
+    let mut idx = 0;
+    while idx < lines.len() {
+        let raw_line = lines[idx];
+        let line = raw_line.trim();
+        idx += 1;
         if line.is_empty() {
             continue;
         }
         let upper = line.to_ascii_uppercase();
-        if upper.starts_with("PRIMARY KEY") {
-            if let Some(index) = table_key_index("PRIMARY", line, true, true, "PRIMARY KEY") {
-                indexes.push(index);
+        if upper.starts_with("PRIMARY KEY") || upper.starts_with("UNIQUE KEY") || upper.starts_with("INDEX ") {
+            let mut combined = line.to_string();
+            while first_parenthesized_content(&combined).is_none() && idx < lines.len() {
+                combined.push(' ');
+                combined.push_str(lines[idx].trim());
+                idx += 1;
             }
-        } else if upper.starts_with("UNIQUE KEY") {
-            if let Some(index) = table_key_index("UNIQUE KEY", line, true, false, "UNIQUE KEY") {
-                indexes.push(index);
-            }
-        } else if upper.starts_with("INDEX ") {
-            if let Some(index) = secondary_index(line) {
-                indexes.push(index);
+            let trimmed = trim_ddl_definition_line(&combined);
+            let upper_combined = trimmed.to_ascii_uppercase();
+            if upper_combined.starts_with("PRIMARY KEY") {
+                if let Some(index) = table_key_index("PRIMARY", trimmed, true, true, "PRIMARY KEY") {
+                    indexes.push(index);
+                }
+            } else if upper_combined.starts_with("UNIQUE KEY") {
+                if let Some(index) = table_key_index("UNIQUE KEY", trimmed, true, false, "UNIQUE KEY") {
+                    indexes.push(index);
+                }
+            } else if upper_combined.starts_with("INDEX ") {
+                if let Some(index) = secondary_index(trimmed) {
+                    indexes.push(index);
+                }
             }
         }
     }
@@ -322,6 +340,7 @@ fn table_key_index(name: &str, line: &str, is_unique: bool, is_primary: bool, in
         return None;
     }
     Some(IndexInfo {
+        owner: None,
         key_directions: Vec::new(),
         visibility: None,
         key_metadata_complete: false,
@@ -348,6 +367,7 @@ fn secondary_index(line: &str) -> Option<IndexInfo> {
         return None;
     }
     Some(IndexInfo {
+        owner: None,
         key_directions: Vec::new(),
         visibility: None,
         key_metadata_complete: false,
@@ -570,6 +590,105 @@ UNIQUE KEY(`tenant_id`, `name``part`)
         assert_eq!(indexes[0].comment.as_deref(), Some("name's index"));
         assert_eq!(indexes[1].columns, vec!["tenant_id", "name`part"]);
         assert!(indexes[1].is_unique);
+    }
+
+    #[test]
+    fn doris_create_table_ddl_handles_multiline_unique_key() {
+        let ddl = r#"
+CREATE TABLE `test_multi` (
+  `id` bigint NULL,
+  `data_type` varchar(255) NULL
+) ENGINE=OLAP
+UNIQUE KEY(
+  `id`,
+  `data_type`
+)
+DISTRIBUTED BY HASH(`id`) BUCKETS 3
+"#;
+
+        let indexes = indexes_from_create_table_ddl(ddl);
+
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "UNIQUE KEY");
+        assert_eq!(indexes[0].columns, vec!["id", "data_type"]);
+        assert!(indexes[0].is_unique);
+        assert!(!indexes[0].is_primary);
+        assert_eq!(indexes[0].index_type.as_deref(), Some("UNIQUE KEY"));
+    }
+
+    const STARROCKS_BITMAP_DDL: &str = r#"
+CREATE TABLE `t` (
+  `id` bigint(20) NOT NULL COMMENT "",
+  `comm_id` varchar(65533) NULL COMMENT "",
+  INDEX idx_comm_id (`comm_id`) USING BITMAP COMMENT ''
+) ENGINE=OLAP
+PRIMARY KEY(`id`)
+DISTRIBUTED BY HASH(`id`) BUCKETS 1
+"#;
+
+    fn index_names(indexes: &[IndexInfo]) -> Vec<&str> {
+        indexes.iter().map(|index| index.name.as_str()).collect()
+    }
+
+    #[test]
+    fn starrocks_create_table_ddl_indexes_include_bitmap_and_primary_key() {
+        let indexes = indexes_from_create_table_ddl(STARROCKS_BITMAP_DDL);
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+        assert_eq!(indexes[0].columns, vec!["comm_id"]);
+        assert_eq!(indexes[0].index_type.as_deref(), Some("BITMAP"));
+        assert!(indexes[1].is_primary);
+        assert_eq!(indexes[1].columns, vec!["id"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_uses_ddl_when_statistics_is_empty() {
+        let indexes = combine_statistics_and_ddl_indexes(Ok(Vec::new()), Ok(STARROCKS_BITMAP_DDL.to_string())).unwrap();
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_reports_ddl_failure_instead_of_empty_indexes() {
+        // StarRocks returns no STATISTICS rows, so an empty list here would hide every index
+        // whenever the DDL read fails (t8y2/dbx#14067).
+        let error =
+            combine_statistics_and_ddl_indexes(Ok(Vec::new()), Err("Pool was disconnected".to_string())).unwrap_err();
+
+        assert!(error.contains("SHOW CREATE TABLE failed"), "{error}");
+        assert!(error.contains("Pool was disconnected"), "{error}");
+    }
+
+    #[test]
+    fn ddl_index_merge_keeps_statistics_indexes_when_ddl_fails() {
+        let statistics = indexes_from_create_table_ddl(STARROCKS_BITMAP_DDL);
+
+        let indexes =
+            combine_statistics_and_ddl_indexes(Ok(statistics), Err("Pool was disconnected".to_string())).unwrap();
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_uses_ddl_when_statistics_fails() {
+        let indexes = combine_statistics_and_ddl_indexes(
+            Err("Unknown table 'STATISTICS'".to_string()),
+            Ok(STARROCKS_BITMAP_DDL.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_reports_both_failures() {
+        let error = combine_statistics_and_ddl_indexes(
+            Err("statistics unavailable".to_string()),
+            Err("Pool was disconnected".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("statistics unavailable; SHOW CREATE TABLE fallback failed"), "{error}");
     }
 
     fn catalog_info(name: &str, catalog_type: &str, is_current: bool) -> crate::db::CatalogInfo {

@@ -172,6 +172,8 @@ export function manifestDatabaseTypes(): DatabaseType[] {
 }
 
 export function usesAgentCursorForQuery(dbType?: DatabaseType, driverProfile?: string): boolean {
+  // DuckDB's native worker captures one bounded result for all subsequent pages.
+  if (dbType === "duckdb") return true;
   if (dbType === "sqlserver" && driverProfile?.trim().toLowerCase() === "sqlserver-legacy") return true;
   const runtimeMode = databaseRuntimeMode(dbType);
   return runtimeMode === "agent" || runtimeMode === "external";

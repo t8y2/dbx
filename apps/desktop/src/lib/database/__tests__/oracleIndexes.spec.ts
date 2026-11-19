@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/backend/api";
-import { executeOracleIndexPlan, mergeOracleIndexDraftsAfterRefresh, oracleIndexSnapshotMatchesLoadedColumns, prepareOracleIndexPlan } from "../oracleIndexes";
+import { executeOracleIndexPlan, mergeOracleIndexDraftsAfterRefresh, oracleIndexSnapshotMatchesLoaded, oracleIndexSnapshotMatchesLoadedColumns, prepareOracleIndexPlan } from "../oracleIndexes";
+import { createIndexDrafts } from "@/lib/table/tableStructureEditorState";
 import { readOracleConstraintSnapshot, readOracleIndexSnapshot } from "../oracleConstraints";
 
 vi.mock("@/lib/backend/api", () => ({ executeQuery: vi.fn(), listConstraints: vi.fn() }));
@@ -110,6 +111,71 @@ describe("Oracle index plans", () => {
     const snapshot = await readOracleIndexSnapshot(target);
 
     expect(snapshot.indexes.map((index) => index.name)).toEqual(["IX_OLD"]);
+  });
+
+  it("does not accept a different dictionary owner as the same loaded index", async () => {
+    const snapshot = await readOracleIndexSnapshot(target);
+    const loaded = { ...drafts[0]!.original!, owner: "Other" };
+    expect(oracleIndexSnapshotMatchesLoaded(snapshot, target, createIndexDrafts([loaded]))).toBe(false);
+    expect(oracleIndexSnapshotMatchesLoaded(snapshot, target, createIndexDrafts([{ ...loaded, owner: "APP" }]))).toBe(true);
+  });
+
+  it("keeps draft IDs and refresh matching independent for equal index names under different owners", () => {
+    const actual = ["APP", "Other"].map((owner) => ({ ...drafts[0]!.original!, owner }));
+    const current = createIndexDrafts(actual);
+    expect(new Set(current.map((draft) => draft.id)).size).toBe(2);
+    const merged = mergeOracleIndexDraftsAfterRefresh(current, actual, []);
+    expect(merged.map((draft) => draft.original?.owner)).toEqual(["APP", "Other"]);
+    expect(merged.every((draft) => !draft.oracleOriginalMissing)).toBe(true);
+    expect(createIndexDrafts([drafts[0]!.original!])[0]!.id).toBe("existing:IX_OLD");
+  });
+
+  it("refreshes an ownerless legacy draft from a unique dictionary row without changing its ID", () => {
+    const [legacy] = createIndexDrafts([drafts[0]!.original!]);
+    const actual = { ...drafts[0]!.original!, owner: "APP" };
+    const merged = mergeOracleIndexDraftsAfterRefresh([legacy!], [actual], []);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: "existing:IX_OLD", original: actual, oracleOriginalMissing: false });
+  });
+
+  it("does not resolve an ambiguous legacy owner after another draft consumes one same-name row", () => {
+    const actual = ["APP", "Other"].map((owner) => ({ ...drafts[0]!.original!, owner }));
+    const [known] = createIndexDrafts([actual[0]!]);
+    const [legacy] = createIndexDrafts([drafts[0]!.original!]);
+    const merged = mergeOracleIndexDraftsAfterRefresh([known!, { ...legacy!, markedForDrop: true }], actual, []);
+
+    expect(merged).toHaveLength(3);
+    expect(merged[0]).toMatchObject({ id: known!.id, original: { owner: "APP" }, oracleOriginalMissing: false });
+    expect(merged[1]).toMatchObject({ id: legacy!.id, markedForDrop: true, oracleOriginalMissing: true });
+    expect(merged[1]!.original!.owner).toBeUndefined();
+    expect(merged[2]!.original!.owner).toBe("Other");
+  });
+
+  it("keeps a deletion draft unverifiable when dictionary identity is duplicated", () => {
+    const actual = { ...drafts[0]!.original!, owner: "APP" };
+    const [draft] = createIndexDrafts([actual]);
+    const merged = mergeOracleIndexDraftsAfterRefresh([{ ...draft!, markedForDrop: true }], [actual, { ...actual }], []);
+
+    expect(merged[0]).toMatchObject({ id: draft!.id, markedForDrop: true, oracleOriginalMissing: true });
+  });
+
+  it.each(["APP", "Other", undefined])("reconciles a completed CREATE only with its authoritative or uniquely ownerless readback (%s)", async (owner) => {
+    const expected = (await readOracleIndexSnapshot(target)).indexes[0]!;
+    const draft = { ...drafts[1]!, name: expected.name };
+    const actual = { ...drafts[0]!.original!, owner };
+    const merged = mergeOracleIndexDraftsAfterRefresh([draft], [actual], [expected]);
+
+    expect(merged[0]!.id).toBe(draft.id);
+    if (owner === "Other") {
+      expect(merged).toHaveLength(2);
+      expect(merged[0]!.original).toBeUndefined();
+      expect(merged[1]!.original!.owner).toBe("Other");
+    } else {
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.original!.owner).toBe(owner);
+      expect(merged[0]!.oracleOriginalMissing).toBe(false);
+    }
   });
 
   it("reads a target snapshot when unrelated owner index names exceed the row limit", async () => {

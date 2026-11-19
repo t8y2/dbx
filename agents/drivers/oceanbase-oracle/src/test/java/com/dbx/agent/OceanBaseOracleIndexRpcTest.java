@@ -32,6 +32,7 @@ class OceanBaseOracleIndexRpcTest {
         var indexes = response.getAsJsonArray("result");
         assertEquals(1, indexes.size());
         JsonObject index = indexes.get(0).getAsJsonObject();
+        assertEquals(" Index Owner ", index.get("owner").getAsString());
         assertEquals(List.of("LOWER(\"EVENT_NAME\")", "EVENT_TS"), index.getAsJsonArray("columns").asList()
             .stream().map(value -> value.getAsString()).toList());
         assertEquals(List.of(true, false), index.getAsJsonArray("key_is_expression").asList()
@@ -67,6 +68,7 @@ class OceanBaseOracleIndexRpcTest {
                                             String descend, String visibility) {
         Map<String, String> row = new HashMap<>();
         row.put("INDEX_NAME", name);
+        row.put("INDEX_OWNER", " Index Owner ");
         row.put("COLUMN_NAME", column);
         row.put("COLUMN_POSITION", position);
         row.put("UNIQUENESS", uniqueness);
@@ -77,6 +79,21 @@ class OceanBaseOracleIndexRpcTest {
         row.put("DESCEND", descend);
         row.put("VISIBILITY", visibility);
         return row;
+    }
+
+    @Test
+    void keepsSameNameIndexesFromDifferentDictionaryOwnersSeparate() {
+        var first = row(" Ix(a) ", "ID", "1", "NONUNIQUE", "I", "NORMAL", "NO", null, "ASC", "VISIBLE");
+        var other = row(" Ix(a) ", "CODE", "1", "NONUNIQUE", "I", "NORMAL", "NO", null, "ASC", "VISIBLE");
+        other.put("INDEX_OWNER", "Other");
+        var response = new Fixture(List.of(first, other)).request(" Parent ", " T(a) ");
+        assertFalse(response.has("error"), response.toString());
+        var indexes = response.getAsJsonArray("result");
+        assertEquals(2, indexes.size());
+        assertEquals(" Index Owner ", indexes.get(0).getAsJsonObject().get("owner").getAsString());
+        assertEquals("Other", indexes.get(1).getAsJsonObject().get("owner").getAsString());
+        assertEquals(1, indexes.get(0).getAsJsonObject().getAsJsonArray("columns").size());
+        assertEquals(1, indexes.get(1).getAsJsonObject().getAsJsonArray("columns").size());
     }
 
     private static final class Fixture {

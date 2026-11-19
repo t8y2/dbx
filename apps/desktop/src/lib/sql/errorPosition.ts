@@ -132,7 +132,13 @@ export function sqlErrorHasMessagePosition(message: string): boolean {
  * jumping anywhere in that case would be wrong.
  */
 export function sqlErrorEditorOffset(options: SqlErrorOffsetOptions): EditorErrorPosition | undefined {
-  return resolveSqlErrorOffset(options);
+  const resolved = resolveSqlErrorOffset(options);
+  return resolved ? { offset: resolved.offset, line: resolved.line, column: resolved.column } : undefined;
+}
+
+export function sqlErrorEditorRange(options: SqlErrorOffsetOptions): { from: number; to: number } | undefined {
+  const resolved = resolveSqlErrorOffset(options);
+  return resolved ? { from: resolved.offset, to: resolved.to } : undefined;
 }
 
 /**
@@ -147,7 +153,7 @@ export function sqlErrorDisplayPosition(options: SqlErrorOffsetOptions): SqlErro
   return resolved ? { line: resolved.line, column: resolved.column } : undefined;
 }
 
-function resolveSqlErrorOffset(options: SqlErrorOffsetOptions): EditorErrorPosition | undefined {
+function resolveSqlErrorOffset(options: SqlErrorOffsetOptions): (EditorErrorPosition & { to: number }) | undefined {
   const position = options.result?.error?.errorPosition;
   const messageText = position ? "" : sqlErrorMessageText(options.result);
   if (!position && !sqlErrorHasMessagePosition(messageText)) {
@@ -173,24 +179,29 @@ function resolveSqlErrorOffset(options: SqlErrorOffsetOptions): EditorErrorPosit
   const positionBasis = executedStatement ?? range.sql;
 
   let basisOffset: number;
+  let basisEnd: number;
   if (position) {
     // Walk the line/column in the text the position is relative to (scalar
     // values, matching PostgreSQL's character-based cursor), then convert to UTF-16.
     basisOffset = scalarPositionToUtf16Offset(positionBasis, position.line, position.column);
+    basisEnd = Math.min(positionBasis.length, basisOffset + ((positionBasis.codePointAt(basisOffset) ?? 0) > 0xffff ? 2 : 1));
   } else {
     // Engines without a typed position report it inside the message text
     // (Oracle's Agent offset, `LINE n:` carets). Parse against the same basis the
     // typed position would use, and reuse the exact range the editor already
     // underlines in red so both surfaces agree.
-    const derived = sqlErrorDecorationRange(positionBasis, messageText);
+    const derived = sqlErrorDecorationRange(positionBasis, messageText, options.databaseType);
     if (!derived) {
       if (isSqlErrorPositionDebugEnabled()) logDiagnostics("unresolved:message-position", options, { hasMessagePosition: true });
       return undefined;
     }
     basisOffset = Math.min(derived.from, positionBasis.length);
+    basisEnd = derived.to;
   }
   const drifted = Boolean(executedStatement && executedStatement !== range.sql);
   const sourceOffset = drifted ? mapExecutedOffsetToSource(executedStatement!, range.sql, basisOffset) : basisOffset;
+  const sourceEnd = drifted ? mapExecutedOffsetToSource(executedStatement!, range.sql, basisEnd) : basisEnd;
+  const exactRange = sourceEnd > sourceOffset && range.sql.slice(sourceOffset, sourceEnd) === positionBasis.slice(basisOffset, basisEnd);
 
   // Clamp inside the resolved statement range so a residual mismatch can never
   // place the caret outside the statement it belongs to.
@@ -213,7 +224,8 @@ function resolveSqlErrorOffset(options: SqlErrorOffsetOptions): EditorErrorPosit
       display,
     });
   }
-  return { offset: editorOffset, line: display.line, column: display.column };
+  const width = (options.editorSql.codePointAt(editorOffset) ?? 0) > 0xffff ? 2 : 1;
+  return { offset: editorOffset, to: Math.min(range.to, exactRange ? range.from + sourceEnd : editorOffset + width), line: display.line, column: display.column };
 }
 
 /**

@@ -1,5 +1,5 @@
 dependencies {
-    implementation 'com.google.code.gson:gson:2.14.0'
+    implementation 'com.google.code.gson:gson:2.15.0'
     compileOnly 'com.zaxxer:HikariCP:7.1.0'
     testImplementation 'com.zaxxer:HikariCP:7.1.0'
     testImplementation 'com.h2database:h2:2.3.232'

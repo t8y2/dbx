@@ -300,6 +300,7 @@ pub async fn list_indexes(client: &CloudflareD1Client, _schema: &str, table: &st
         let columns =
             column_result.rows.iter().filter_map(|row| value_by_column(&column_result.columns, row, "name")).collect();
         indexes.push(IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -371,6 +372,7 @@ pub async fn list_triggers(
                 valid: None,
                 comment: None,
                 created_at: None,
+                oracle_metadata: None,
                 statement,
             }
         })
@@ -414,6 +416,7 @@ pub async fn object_source(
         source,
         editable: None,
         routine_parameters: None,
+        trigger: None,
     })
 }
 
@@ -478,8 +481,10 @@ fn query_result(
     QueryResult {
         columns: result.columns,
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: result.rows,
         affected_rows,

@@ -1,4 +1,5 @@
 import type { EditorView, ViewPlugin, ViewUpdate } from "@codemirror/view";
+import { uiTuning } from "@/lib/app/uiTuning";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 
 /**
@@ -12,16 +13,23 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
  * thread and makes right click, Esc and the whole window feel frozen.
  *
  * The browser selection does not have to cover the selection for the editor to
- * behave: CodeMirror paints the selection itself (`drawSelection` keeps the
- * native one transparent), it copies from its own state, and it ignores a
- * selection parked outside its content element. So the browser selection is
- * parked on the editor chrome while an overlay menu covers the editor, and for
- * as long as a pointer gesture is dragging a long selection out, and restored
- * as soon as the menu closes or the pointer is released. On macOS desktop a
- * view plugin also holds long keyboard selections, including during execution.
- * Its collapsed caret stays inside the editable so native input without a
- * keydown still arrives. The observer cache is updated together with that caret
- * so CodeMirror does not mistake the parked position for a user selection.
+ * behave: CodeMirror paints the selection itself (`trimmedSelectionLayer`, and
+ * `drawSelection` keeps the native one transparent), it copies from its own
+ * state, and it ignores a selection parked outside its content element. So the
+ * browser selection is parked on the editor chrome while an overlay menu covers
+ * the editor, for as long as a pointer gesture is dragging a long selection
+ * out, and restored as soon as the menu closes or the pointer is released. On
+ * macOS desktop a view plugin also holds any long selection for as long as it
+ * exists, focused or not: a parked selection that survives focus loss cannot be
+ * published again by a focus repair or by CodeMirror's next write, which is what
+ * kept long documents stuttering with third-party fonts installed. Its
+ * collapsed caret stays inside the editable so native input without a keydown
+ * still arrives. The observer cache is updated together with that caret so
+ * CodeMirror does not mistake the parked position for a user selection.
+ *
+ * A park never collapses a selection that already belongs to another element,
+ * so a long editor selection can stay parked while the user selects text in the
+ * grid, a chat, or a settings field.
  *
  * The drag is the case that is easiest to misread from a bug report: sweeping
  * the pointer to the edge of the editor autoscrolls and never leaves the
@@ -320,7 +328,11 @@ function createNativeSelectionPark(currentView: EditorView, config: NativeSelect
   const park = () => {
     if (released || !shouldKeepParked()) return;
     const selection = editorRootSelection(currentView);
-    if (!selection || (!currentView.hasFocus && (!selection.anchorNode || !currentView.dom.contains(selection.anchorNode)))) return;
+    // Only ever collapse a selection that already belongs to the editor. A park
+    // can outlive focus now, and the user may be selecting text in the grid or
+    // a chat while it is held: re-collapsing there would steal that selection
+    // every frame.
+    if (!selection || !selection.anchorNode || !currentView.dom.contains(selection.anchorNode)) return;
     if (suppressWrites && !restoreWrites) restoreWrites = suppressEditorSelectionWrites(currentView);
     if (insideContent && !restoreWrites) return;
     const parkInsideContent = insideContent && parks.outside === 0;
@@ -521,8 +533,21 @@ export function keepNativeSelectionParkedDuringDrag(currentView: EditorView, opt
   });
 }
 
-export function createQueryEditorNativeSelectionGuard(plugin: typeof ViewPlugin, options: EditorNativeSelectionParkOptions & { enabled: boolean; inputHandler: typeof EditorView.inputHandler }) {
+export function createQueryEditorNativeSelectionGuard(
+  plugin: typeof ViewPlugin,
+  options: EditorNativeSelectionParkOptions & {
+    enabled: boolean;
+    inputHandler: typeof EditorView.inputHandler;
+    /**
+     * Hold a long selection parked for as long as it exists instead of only
+     * while the editor has focus. Defaults to the `uiTuning` dial; pass an
+     * explicit value in tests.
+     */
+    parkLongSelections?: boolean;
+  },
+) {
   if (!options.enabled) return [];
+  const parkLongSelections = options.parkLongSelections ?? uiTuning.value.nativeSelectionParkLongSelections;
   return plugin.fromClass(
     class {
       private park: EditorNativeSelectionPark | null = null;
@@ -548,7 +573,21 @@ export function createQueryEditorNativeSelectionGuard(plugin: typeof ViewPlugin,
         this.sync();
       }
 
-      private canPark = () => this.currentView.hasFocus && !this.nativeInputPending && !this.composing && !this.currentView.compositionStarted && isLargeEditorSelection(this.currentView);
+      private browserSelectionInsideEditor() {
+        const selection = editorRootSelection(this.currentView);
+        const anchor = selection?.anchorNode ?? null;
+        return !!anchor && this.currentView.dom.contains(anchor);
+      }
+
+      private canPark = () => {
+        if (this.nativeInputPending || this.composing || this.currentView.compositionStarted) return false;
+        if (!isLargeEditorSelection(this.currentView)) return false;
+        if (!parkLongSelections) return this.currentView.hasFocus;
+        // A parked caret already lives in the editor chrome, so an unfocused
+        // editor still owns the browser selection as long as nothing else
+        // claimed it (see the ownership check in `createNativeSelectionPark`).
+        return this.currentView.hasFocus || this.browserSelectionInsideEditor();
+      };
 
       private sync() {
         if (!this.canPark() || !canGuardNativeSelection(this.currentView)) {
@@ -620,7 +659,24 @@ export function createQueryEditorNativeSelectionGuard(plugin: typeof ViewPlugin,
 
       private onBlur = () => {
         this.nativeInputPending = false;
-        this.release(false);
+        // Keep a long selection parked after focus leaves: the park already
+        // left a collapsed caret behind, and releasing here is what let a focus
+        // repair or the next CodeMirror write publish the full range again —
+        // the macOS 26/27 serialization cost scales with that range, so a
+        // third-party font turned it into a multi-second stall. Short
+        // selections and the `uiTuning` kill switch still hand it back.
+        if (!parkLongSelections) {
+          this.release(false);
+          return;
+        }
+        this.sync();
+        // Field diagnosis for a report of "selecting then executing stalls":
+        // this line shows whether a long selection was still parked after the
+        // click moved focus to the execute button.
+        if (this.park) {
+          const main = this.currentView.state.selection.main;
+          appendDebugLog("info", "[DBX][QueryEditor:native-selection:hold]", { chars: main.to - main.from });
+        }
       };
 
       private onFocus = () => {

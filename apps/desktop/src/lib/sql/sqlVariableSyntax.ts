@@ -1,7 +1,7 @@
 // Per-database-type configuration for SQL variable/placeholder substitution.
 //
 // DBX runs two client-side substitution systems before sending SQL to a backend:
-// the placeholder parameter dialog (`sqlParameters.ts`, six syntaxes) and the
+// the placeholder parameter dialog (`sqlParameters.ts`, seven syntaxes) and the
 // `@set name = value;` expansion (`sqlVariables.ts`). This module lets users opt
 // out of individual syntaxes per database type. SQL syntaxes default to `true`,
 // except Neo4j's `:label` patterns, which are not named parameters, and Oracle
@@ -19,6 +19,7 @@ export interface SqlVariableSyntaxToggles {
   positional: boolean; // ?
   named: boolean; // :name
   shell: boolean; // ${name}
+  bracketedShell: boolean; // [${name}]
   mybatis: boolean; // #{name}
   sqlserver: boolean; // @name
   substitution: boolean; // &name, &&name
@@ -29,6 +30,7 @@ export const DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES: SqlVariableSyntaxToggles = {
   positional: true,
   named: true,
   shell: true,
+  bracketedShell: true,
   mybatis: true,
   sqlserver: true,
   substitution: false,
@@ -36,21 +38,22 @@ export const DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES: SqlVariableSyntaxToggles = {
 };
 
 // Fixed order for iterating the toggles in the settings UI.
-export const SQL_VARIABLE_SYNTAX_KEYS = ["positional", "named", "shell", "mybatis", "sqlserver", "substitution", "atSet"] as const satisfies readonly (keyof SqlVariableSyntaxToggles)[];
+export const SQL_VARIABLE_SYNTAX_KEYS = ["positional", "named", "shell", "bracketedShell", "mybatis", "sqlserver", "substitution", "atSet"] as const satisfies readonly (keyof SqlVariableSyntaxToggles)[];
 
 // Display tokens (code symbols, not translated) shown next to each toggle.
 export const SQL_VARIABLE_SYNTAX_TOKENS: Record<keyof SqlVariableSyntaxToggles, string> = {
   positional: "?",
   named: ":name",
   shell: "${name}",
+  bracketedShell: "[${name}]",
   mybatis: "#{name}",
   sqlserver: "@name",
   substitution: "&name",
   atSet: "@set …;",
 };
 
-// The first six toggles map one-to-one onto placeholder parameter syntaxes.
-const PARAMETER_SYNTAX_KEYS = ["positional", "named", "shell", "mybatis", "sqlserver", "substitution"] as const satisfies readonly SqlParameterSyntax[];
+// The first seven toggles map one-to-one onto placeholder parameter syntaxes.
+const PARAMETER_SYNTAX_KEYS = ["positional", "named", "shell", "bracketed-shell", "mybatis", "sqlserver", "substitution"] as const satisfies readonly SqlParameterSyntax[];
 
 export type SqlVariableSyntaxOverrides = Partial<Record<DatabaseType, Partial<SqlVariableSyntaxToggles>>>;
 
@@ -89,6 +92,7 @@ export function defaultSqlVariableSyntaxToggles(dbType?: DatabaseType, compatibi
     positional: true,
     named: dbType !== "neo4j" && dbType !== "nebula",
     shell: true,
+    bracketedShell: true,
     mybatis: true,
     sqlserver: true,
     substitution: isOracleSubstitutionDatabase(dbType, compatibilityMode),
@@ -108,6 +112,7 @@ export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOver
       positional: false,
       named: false,
       shell: false,
+      bracketedShell: false,
       mybatis: false,
       sqlserver: false,
       substitution: false,
@@ -120,6 +125,7 @@ export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOver
     positional: partial?.positional ?? defaults.positional,
     named: dbType === "neo4j" || dbType === "nebula" ? false : (partial?.named ?? defaults.named),
     shell: partial?.shell ?? defaults.shell,
+    bracketedShell: partial?.bracketedShell ?? defaults.bracketedShell,
     mybatis: partial?.mybatis ?? defaults.mybatis,
     sqlserver: partial?.sqlserver ?? defaults.sqlserver,
     substitution: partial?.substitution ?? defaults.substitution,
@@ -129,7 +135,9 @@ export function resolveSqlVariableSyntaxToggles(overrides: SqlVariableSyntaxOver
 
 /** Derive the enabled placeholder parameter syntaxes (excludes `atSet`). */
 export function enabledSqlParameterSyntaxes(toggles: SqlVariableSyntaxToggles): SqlParameterSyntax[] {
-  return PARAMETER_SYNTAX_KEYS.filter((key) => toggles[key]);
+  // The toggle property is camelCase (`bracketedShell`) while the syntax id is
+  // kebab-case ("bracketed-shell"), so map explicitly instead of indexing by id.
+  return PARAMETER_SYNTAX_KEYS.filter((key) => toggles[key === "bracketed-shell" ? "bracketedShell" : key]);
 }
 
 /**

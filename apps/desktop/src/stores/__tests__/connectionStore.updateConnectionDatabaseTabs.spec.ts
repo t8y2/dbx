@@ -50,6 +50,47 @@ describe("connectionStore updateConnection re-syncs open query tabs' database", 
     setActivePinia(createPinia());
   });
 
+  it("disconnects a changed MySQL codec before publishing config and preserves SQL drafts", async () => {
+    const { connectionStore, queryStore } = await createStores();
+    const api = await import("@/lib/backend/api");
+    const connection = postgresConnection({ db_type: "mysql", url_params: "dataCharset=GBK" });
+    connectionStore.connections = [connection];
+    const tabId = queryStore.createTab(connection.id, "testdb", "draft");
+    queryStore.updateSql(tabId, "SELECT 'unsaved';");
+    vi.mocked(api.disconnectDb).mockImplementation(async () => {
+      expect(connectionStore.getConfig(connection.id)?.url_params).toBe("dataCharset=GBK");
+    });
+    await connectionStore.updateConnection({ ...connection, url_params: "" });
+    expect(api.disconnectDb).toHaveBeenCalled();
+    expect(connectionStore.getConfig(connection.id)?.url_params || "").toBe("");
+    expect(queryStore.tabs.find((tab) => tab.id === tabId)?.sql).toBe("SELECT 'unsaved';");
+  });
+
+  it("does not publish writable settings after codec disconnect fails", async () => {
+    const { connectionStore } = await createStores();
+    const api = await import("@/lib/backend/api");
+    const connection = postgresConnection({ db_type: "mysql", url_params: "dataCharset=GBK" });
+    connectionStore.connections = [connection];
+    vi.mocked(api.disconnectDb).mockRejectedValue(new Error("disconnect failed"));
+    await expect(connectionStore.updateConnection({ ...connection, url_params: "" })).rejects.toThrow("disconnect failed");
+    expect(connectionStore.getConfig(connection.id)?.url_params).toBe("dataCharset=GBK");
+    expect(api.saveConnections).not.toHaveBeenCalled();
+  });
+
+  it("rejects codec changes with old results without discarding them", async () => {
+    const { connectionStore, queryStore } = await createStores();
+    const api = await import("@/lib/backend/api");
+    const connection = postgresConnection({ db_type: "mysql", url_params: "dataCharset=GBK" });
+    connectionStore.connections = [connection];
+    const tabId = queryStore.createTab(connection.id, "testdb", "old result");
+    const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+    tab.result = { columns: ["text"], rows: [["缤纷彩虹"]], affected_rows: 0, execution_time_ms: 0 };
+    await expect(connectionStore.updateConnection({ ...connection, url_params: "" })).rejects.toThrow();
+    expect(tab.result.rows).toEqual([["缤纷彩虹"]]);
+    expect(api.disconnectDb).not.toHaveBeenCalled();
+    expect(api.saveConnections).not.toHaveBeenCalled();
+  });
+
   it("re-points a tab still on the connection's old default database, but leaves a tab the user pointed elsewhere alone", async () => {
     const { connectionStore, queryStore } = await createStores();
     const connection = postgresConnection();

@@ -15,9 +15,24 @@ import {
 import type { TreeNode } from "@/types/database";
 
 describe("sidebar tree item layout", () => {
-  it("keeps a table row constrained when it displays a comment", () => {
+  it("keeps a table row wide enough when it displays a comment", () => {
     expect(usesFullWidthTreeLabel("table", true)).toBe(true);
-    expect(usesFullWidthTreeLabel("table", true, true)).toBe(false);
+    expect(usesFullWidthTreeLabel("table", true, true)).toBe(true);
+  });
+
+  it("supports ordinary nodes but excludes controls and group headings", () => {
+    for (const type of ["database", "schema", "column", "index", "connection", "connection-group", "mongo-db", "elasticsearch-index"] as const) {
+      expect(usesFullWidthTreeLabel(type, true, true)).toBe(true);
+      expect(usesFullWidthTreeLabel(type, false)).toBe(false);
+    }
+    for (const type of ["group-tables", "group-columns", "table-search-control", "load-more"] as const) expect(usesFullWidthTreeLabel(type, true)).toBe(false);
+  });
+
+  it("includes aligned names, badges, comments and size without letting right comments grow unbounded", () => {
+    const row = { depth: 4, label: "id", usesNaturalWidth: true, leadingWidth: 200, comment: "x".repeat(1000), trailingText: "1 KB", trailingWidth: 24 };
+    const measure = (text: string) => text.length * 7;
+    expect(sidebarTreeNaturalContentWidth([{ ...row, rightAlignedComment: true }], measure)).toBe(64 + 8 + 54 + 200 + 8 + 240 + 8 + 28 + 24);
+    expect(sidebarTreeNaturalContentWidth([row], measure)).toBe(64 + 8 + 54 + 200 + 16 + 7000 + 8 + 28 + 24);
   });
 
   it("shows connection notes only after the user opts in", () => {
@@ -138,9 +153,9 @@ describe("sidebar tree item layout", () => {
     expect(isSidebarCommentAlignableNode(func)).toBe(true);
 
     expect(usesFullWidthTreeLabel("procedure", true)).toBe(true);
-    expect(usesFullWidthTreeLabel("procedure", true, true)).toBe(false);
+    expect(usesFullWidthTreeLabel("procedure", true, true)).toBe(true);
     expect(usesFullWidthTreeLabel("function", true)).toBe(true);
-    expect(usesFullWidthTreeLabel("function", true, true)).toBe(false);
+    expect(usesFullWidthTreeLabel("function", true, true)).toBe(true);
   });
 
   it("aligns routine comments among sibling procedures and functions", () => {

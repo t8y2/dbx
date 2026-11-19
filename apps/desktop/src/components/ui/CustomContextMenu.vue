@@ -19,7 +19,7 @@ const emit = defineEmits<{
 }>();
 
 defineSlots<{
-  default(props: { onContextMenu: (event: MouseEvent) => void; isOpen: boolean }): any;
+  default(props: { onContextMenu: (event: MouseEvent, itemsOverride?: ContextMenuItem[]) => void; isOpen: boolean }): any;
 }>();
 
 // The pointer must settle on another row before it takes the submenu over from
@@ -57,10 +57,12 @@ let subGraceArea: GraceAreaPoint[] | null = null;
 // anchor the panel without waiting for another hover.
 let hoveredRow: { index: number; trigger: HTMLElement } | null = null;
 let contextMenuRegistration: ContextMenuRegistration | null = null;
+let contextTriggerTarget: Node | null = null;
 let menuRevision = 0;
 
 function close() {
   if (!show.value) return;
+  contextTriggerTarget = null;
   menuRevision += 1;
   activeSubIndex.value = null;
   subAnchorRect = null;
@@ -108,6 +110,13 @@ function onScroll(e: Event) {
     }
     return;
   }
+  if (contextTriggerTarget?.isConnected) {
+    const target = e.target;
+    const isRootScroll = !(target instanceof Node) || target === document || target === document.documentElement || target === document.body;
+    if (!isRootScroll && !target.contains(contextTriggerTarget)) {
+      return;
+    }
+  }
   close();
 }
 
@@ -121,7 +130,7 @@ function onResize() {
 }
 
 watch(show, (val) => {
-  contextMenuRegistration?.setOpen(val);
+  contextMenuRegistration?.setOpen(val, contextTriggerTarget);
   if (val) {
     document.addEventListener("pointerdown", onPointerDownOutside, true);
     document.addEventListener("keydown", onKeydown, true);
@@ -204,9 +213,10 @@ function onContextMenu(event: MouseEvent, itemsOverride?: ContextMenuItem[]) {
   event.stopPropagation();
   x.value = event.clientX;
   y.value = event.clientY;
+  contextTriggerTarget = event.target instanceof Node ? event.target : null;
   // The pointer direction is only meaningful from the point the menu opened at.
   pointerSamples = [{ x: event.clientX, y: event.clientY }];
-  contextMenuRegistration?.activate();
+  contextMenuRegistration?.activate(contextTriggerTarget);
   show.value = true;
   emit("open");
   nextTick(adjustMenuPosition);

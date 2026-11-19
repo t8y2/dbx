@@ -146,7 +146,9 @@ async function fetchStatus(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true;
   error.value = "";
   try {
-    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
+    // 轮询/静默刷新走被动重连：失败后退避，避免后台每次 tick 都新建连接
+    // （企业安全/零信任客户端会为每次新连接弹一次授权框）。手动刷新不受影响。
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true, ...(options.silent === true ? { passive: true } : {}) });
     const sql = fallbackStatusSql.value ?? activeDriver.statusSql;
     let result;
     try {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pluginConditionValueText, pluginFieldConditionMatches, pluginFieldConditionReferencedFields, pluginFieldIsRequired, pluginFieldIsVisible } from "./pluginFieldConditions";
+import { pluginConditionValueText, pluginFieldConditionMatches, pluginFieldConditionReferencedFields, pluginFieldHasValue, pluginFieldIsRequired, pluginFieldIsVisible } from "./pluginFieldConditions";
 import type { PluginFieldCondition, PluginFormField, PluginFormFieldValue } from "@/types/database";
 
 function field(overrides: Partial<PluginFormField>): PluginFormField {
@@ -247,5 +247,28 @@ describe("pluginFieldIsVisible", () => {
         (key) => (key === "loop" ? selfRef : undefined),
       ),
     ).toBe(true);
+  });
+});
+
+describe("pluginFieldHasValue", () => {
+  it("keeps treating whitespace-only text as empty", () => {
+    expect(pluginFieldHasValue(field({ type: "text" }), "  ")).toBe(false);
+    expect(pluginFieldHasValue(field({ type: "text" }), "db")).toBe(true);
+  });
+
+  it("counts whitespace-only passwords as values (#215)", () => {
+    // A single space is a real password on some servers; trimming it marked
+    // the required password field permanently missing and disabled
+    // save-and-connect.
+    expect(pluginFieldHasValue(field({ type: "password" }), " ")).toBe(true);
+    expect(pluginFieldHasValue(field({ type: "password" }), "\t")).toBe(true);
+    expect(pluginFieldHasValue(field({ type: "password" }), "")).toBe(false);
+    expect(pluginFieldHasValue(field({ type: "password" }), undefined)).toBe(false);
+  });
+
+  it("treats non-string values by presence, not emptiness", () => {
+    expect(pluginFieldHasValue(field({ type: "number" }), 0)).toBe(true);
+    expect(pluginFieldHasValue(field({ type: "boolean" }), false)).toBe(true);
+    expect(pluginFieldHasValue(field({ type: "select" }), undefined)).toBe(false);
   });
 });

@@ -115,12 +115,18 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   // A single-use token rather than a boolean flag: it is immune to Vue's async
   // watcher flush and self-invalidates if the user types during the restore window.
   let restoreToken: { searchText: string; matchIndex: number } | null = null;
+  let lastMatchKeys: number[] = [];
+  let userQueryRevision = 0;
+  let lastHandledUserQueryRevision = 0;
 
   watch([searchText, () => toValue(options.caseSensitive), () => toValue(options.literalQuery)], ([value]) => {
     clearTimer();
     const text = toValue(options.literalQuery) ? value : value.trim();
     const query = toValue(options.literalQuery) || effectiveCaseSensitive.value ? text : text.toLowerCase();
     const restoring = restoreToken !== null && restoreToken.searchText === value;
+    if (!restoring) {
+      userQueryRevision++;
+    }
     if (!query) deferredSearchText.value = "";
     // Restoring is not typing: resolve the query now so the row set (and, in
     // "filter" search mode, the content height) is settled before the grid's
@@ -156,8 +162,12 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   watch(matchKeys, (value) => {
     const restored = restoreToken;
     restoreToken = null;
+    const isUserQuery = userQueryRevision !== lastHandledUserQueryRevision;
+    lastHandledUserQueryRevision = userQueryRevision;
+
     if (!value.length) {
       currentMatchIndex.value = -1;
+      lastMatchKeys = [];
       return;
     }
     if (restored) {
@@ -165,11 +175,30 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
       // scroll restore owns the viewport (#8524). Clamp because the match list may
       // have shifted while the tab was away.
       currentMatchIndex.value = Math.min(Math.max(restored.matchIndex, 0), value.length - 1);
+      lastMatchKeys = value;
       return;
     }
-    currentMatchIndex.value = 0;
-    const firstMatch = matchAt(0);
-    if (firstMatch) nextTick(() => options.onNavigate?.(firstMatch));
+    if (isUserQuery) {
+      currentMatchIndex.value = 0;
+      lastMatchKeys = value;
+      const firstMatch = matchAt(0);
+      if (firstMatch) nextTick(() => options.onNavigate?.(firstMatch));
+      return;
+    }
+
+    // Rows or cell edits changed the underlying data without a search query change:
+    // retain the current match position and do not navigate/scroll the viewport (#13241).
+    if (lastMatchKeys.length > 0 && currentMatchIndex.value >= 0 && currentMatchIndex.value < lastMatchKeys.length) {
+      const prevKey = lastMatchKeys[currentMatchIndex.value];
+      const nextIndex = value.indexOf(prevKey);
+      if (nextIndex >= 0) {
+        currentMatchIndex.value = nextIndex;
+        lastMatchKeys = value;
+        return;
+      }
+    }
+    currentMatchIndex.value = Math.min(Math.max(currentMatchIndex.value, 0), value.length - 1);
+    lastMatchKeys = value;
   });
 
   function acceptSuggestion(index = suggestionIndex.value) {

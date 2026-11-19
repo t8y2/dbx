@@ -37,7 +37,7 @@ describe("databaseDriverManifest", () => {
     }
   });
 
-  it("uses agent cursor only for agent or external runtimes", () => {
+  it("uses result cursors for agent, external, and native DuckDB queries", () => {
     expect(databaseRuntimeMode("gaussdb")).toBe("native");
     expect(databaseRuntimeMode("meilisearch")).toBe("native");
     expect(databaseRuntimeMode("dynamodb")).toBe("native");
@@ -45,6 +45,7 @@ describe("databaseDriverManifest", () => {
     expect(usesAgentCursorForQuery("meilisearch")).toBe(false);
     expect(usesAgentCursorForQuery("dynamodb")).toBe(false);
     expect(usesAgentCursorForQuery("mysql")).toBe(false);
+    expect(usesAgentCursorForQuery("duckdb")).toBe(true);
     expect(usesAgentCursorForQuery("cassandra")).toBe(true);
     expect(usesAgentCursorForQuery("jdbc")).toBe(true);
     expect(usesAgentCursorForQuery("prestosql")).toBe(true);

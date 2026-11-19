@@ -5,6 +5,10 @@ import type { useSettingsStore } from "@/stores/settingsStore";
 import type { TreeNode } from "@/types/database";
 import { allDatabasesExportSourceForNode, databaseExportSourceForNode, sidebarSameSchemaStructureTargets } from "@/lib/sidebar/sidebarExportRuntime";
 import { schemaDiffRoutineKey } from "@/lib/schema/schemaDiffRoutine";
+import { schemaIndexIsSameOwner, schemaIndexNodeIdentity } from "@/lib/table/schemaIndexNavigation";
+import { supportsSchemaIndexManagement } from "@/lib/database/databaseObjectCapabilities";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 interface SidebarTreeToolRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -78,6 +82,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     connectionStore.diagramSource = {
       connectionId: node.connectionId,
       database: node.database,
+      catalog: node.catalog,
       schema: node.schema,
       tableName: tableNames?.length ? tableNames[0] : node.type === "table" ? node.label : undefined,
       tableNames,
@@ -186,6 +191,17 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
   function openStructureEditor() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
+    if (node.type === "index" && node.objectScope === "schema") {
+      const target = schemaIndexNodeIdentity(node);
+      const config = connectionStore.getConfig(node.connectionId);
+      if (!target || !config || !supportsSchemaIndexManagement(effectiveDatabaseTypeForConnection(config))) return;
+      if (schemaIndexIsSameOwner(target) && !connectionIsEffectivelyReadOnly(config)) {
+        queryStore.openTableStructure(node.connectionId, node.database, target.parentSchema, target.parentName, "indexes", { kind: "index", name: target.name, owner: target.schema }, node.catalog, "table", true);
+      } else {
+        queryStore.openObjectBrowser(node.connectionId, node.database, target.schema, node.catalog, undefined, false, "indexes", undefined, { view: target });
+      }
+      return;
+    }
     if (node.type === "table") {
       queryStore.openTableStructure(node.connectionId, node.database, node.schema, node.label, undefined, undefined, node.catalog);
       return;

@@ -16,10 +16,21 @@ export interface UiTuning {
    * tracking), 5 ≈ 12fps stepping, 10 ≈ 6fps. Clamped to 1..10.
    */
   panelResizeTrackEveryFrames: number;
+  /**
+   * macOS 26/27 serializes the browser selection into an attributed string for
+   * text services whenever the pointer dwells over text, at a cost that grows
+   * with the number of highlighted lines. With this on, a long editor
+   * selection stays parked (the browser selection is collapsed while
+   * CodeMirror keeps drawing its own) for as long as it exists, including
+   * after the editor loses focus. Set to `false` to only park during
+   * gestures, the context menu and focused keyboard selections.
+   */
+  nativeSelectionParkLongSelections: boolean;
 }
 
 export const DEFAULT_UI_TUNING: UiTuning = {
   panelResizeTrackEveryFrames: 5,
+  nativeSelectionParkLongSelections: true,
 };
 
 const MAX_TRACK_EVERY_FRAMES = 10;
@@ -31,6 +42,10 @@ function sanitizeFrames(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return DEFAULT_UI_TUNING.panelResizeTrackEveryFrames;
   return Math.min(MAX_TRACK_EVERY_FRAMES, Math.max(1, Math.round(parsed)));
+}
+
+function sanitizeParkLongSelections(value: unknown): boolean {
+  return typeof value === "boolean" ? value : DEFAULT_UI_TUNING.nativeSelectionParkLongSelections;
 }
 
 let loading: Promise<void> | null = null;
@@ -47,6 +62,7 @@ export function loadUiTuning(): Promise<void> {
       const parsed = JSON.parse(await readTextFile(file)) as Partial<UiTuning>;
       state.value = {
         panelResizeTrackEveryFrames: sanitizeFrames(parsed.panelResizeTrackEveryFrames),
+        nativeSelectionParkLongSelections: sanitizeParkLongSelections(parsed.nativeSelectionParkLongSelections),
       };
       console.info("[ui-tuning] loaded", file, state.value);
     } catch (error) {

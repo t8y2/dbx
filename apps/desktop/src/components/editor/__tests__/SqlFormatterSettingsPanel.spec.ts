@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, serializeSqlFormatterConfig } from "@/lib/sql/sqlFormatterConfig";
 import { formatSqlText } from "@/lib/sql/sqlFormatter";
@@ -22,8 +22,8 @@ vi.mock("@/components/ui/select", async () => {
   const Select = defineComponent({
     props: { modelValue: { type: [String, Number], default: "" } },
     emits: ["update:modelValue"],
-    setup(_props, { emit, slots }) {
-      return () => h("div", { onPick: (event: CustomEvent<{ value: string }>) => emit("update:modelValue", event.detail.value) }, [slots.default?.()]);
+    setup(props, { emit, slots }) {
+      return () => h("div", { "data-stub": "Select", "data-model-value": props.modelValue, onPick: (event: CustomEvent<{ value: string }>) => emit("update:modelValue", event.detail.value) }, [slots.default?.()]);
     },
   });
   return { Select, SelectContent: createPassthroughStub("SelectContent"), SelectItem: createPassthroughStub("SelectItem", "button"), SelectTrigger: createPassthroughStub("SelectTrigger", "button"), SelectValue: createPassthroughStub("SelectValue", "span") };
@@ -68,11 +68,33 @@ describe("SQL formatter settings panel rules and preview", () => {
 
   function mountPanel(value = DEFAULT_SQL_FORMATTER_SETTINGS) {
     const update = vi.fn();
+    const current = ref(value);
     host = document.createElement("div");
     document.body.append(host);
-    app = createApp(SqlFormatterSettingsPanel, { modelValue: value, "onUpdate:modelValue": update });
+    app = createApp({
+      setup: () => () =>
+        h(SqlFormatterSettingsPanel, {
+          modelValue: current.value,
+          "onUpdate:modelValue": (settings) => {
+            current.value = settings;
+            update(settings);
+          },
+        }),
+    });
     app.mount(host);
     return { root: host, update };
+  }
+
+  function selectForLabel(root: HTMLElement, labelKey: string): HTMLElement {
+    const label = Array.from(root.querySelectorAll("label")).find((item) => item.textContent?.trim() === labelKey);
+    expect(label?.htmlFor).toBeTruthy();
+    const select = root.querySelector(`#${label!.htmlFor}`)?.closest<HTMLElement>('[data-stub="Select"]');
+    expect(select).toBeTruthy();
+    return select!;
+  }
+
+  function pick(select: HTMLElement, value: string) {
+    select.dispatchEvent(new CustomEvent("pick", { detail: { value } }));
   }
 
   afterEach(() => {
@@ -86,27 +108,22 @@ describe("SQL formatter settings panel rules and preview", () => {
   it("emits real rule values and keeps them when the feature is switched off", async () => {
     const current = { ...DEFAULT_SQL_FORMATTER_SETTINGS, selectListLayout: "wrap" as const, customRulesEnabled: true };
     const { root, update } = mountPanel(current);
-    const selectLayout = Array.from(root.querySelectorAll("label"))
-      .find((label) => label.textContent?.includes("settings.sqlFormatterSelectListLayout"))
-      ?.querySelector("select");
-    expect(selectLayout).not.toBeNull();
-    selectLayout!.value = "fit";
-    selectLayout!.dispatchEvent(new Event("change", { bubbles: true }));
+    const selectLayout = selectForLabel(root, "settings.sqlFormatterSelectListLayout");
+    pick(selectLayout, "fit");
+    await nextTick();
     expect(update).toHaveBeenLastCalledWith({ ...current, selectListLayout: "fit" });
+    expect(selectLayout.dataset.modelValue).toBe("fit");
 
     const enabled = root.querySelector<HTMLInputElement>("#sql-formatter-custom-rules")!;
     enabled.checked = false;
     enabled.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(update).toHaveBeenLastCalledWith({ ...current, customRulesEnabled: false });
-    expect(selectLayout!.value).toBe("fit");
+    expect(update).toHaveBeenLastCalledWith({ ...current, selectListLayout: "fit", customRulesEnabled: false });
   });
 
   it("labels DML comma positions as comma placement and associates the width label", () => {
     const { root } = mountPanel({ ...DEFAULT_SQL_FORMATTER_SETTINGS, customRulesEnabled: true });
-    const commaSelect = Array.from(root.querySelectorAll("label"))
-      .find((label) => label.textContent?.includes("settings.sqlFormatterSelectCommaPosition"))
-      ?.querySelector("select");
-    expect(Array.from(commaSelect!.options).map((option) => [option.value, option.textContent])).toEqual([
+    const commaSelect = selectForLabel(root, "settings.sqlFormatterSelectCommaPosition");
+    expect(Array.from(commaSelect.querySelectorAll('[data-stub="SelectItem"]')).map((option) => [option.getAttribute("value"), option.textContent])).toEqual([
       ["inherit", "settings.sqlFormatterRule_inherit"],
       ["after", "settings.sqlFormatterCommaPositionAfter"],
       ["before", "settings.sqlFormatterCommaPositionBefore"],
@@ -179,19 +196,19 @@ describe("SQL formatter settings panel rules and preview", () => {
     vi.useFakeTimers();
     const { root } = mountPanel({ ...DEFAULT_SQL_FORMATTER_SETTINGS, customRulesEnabled: true, selectListLayout: "vertical" });
     const source = root.querySelector<HTMLTextAreaElement>('textarea[aria-label="settings.sqlFormatterPreviewSource"]')!;
-    const dialect = Array.from(root.querySelectorAll("select")).find((select) => Array.from(select.options).some((option) => option.value === "postgres"))!;
+    const dialect = selectForLabel(root, "settings.sqlFormatterPreviewDialect");
     source.value = "BEGIN\n  UPDATE users SET name = 'Ada' WHERE id = 1;\nEND;";
     source.dispatchEvent(new Event("input", { bubbles: true }));
     await vi.advanceTimersByTimeAsync(200);
     await nextTick();
     expect(root.querySelector('[role="status"]')?.textContent).toContain("settings.sqlFormatterFallbackNotice");
 
-    dialect.value = "postgres";
-    dialect.dispatchEvent(new Event("change", { bubbles: true }));
-    source.value = "SELECT id, name FROM users;";
+    pick(dialect, "postgres");
+    source.value = "SELECT payload->>'name' FROM users;";
     source.dispatchEvent(new Event("input", { bubbles: true }));
     await vi.advanceTimersByTimeAsync(200);
     await nextTick();
+    expect(dialect.dataset.modelValue).toBe("postgres");
     const expected = await formatSqlText(source.value, "postgres", { ...DEFAULT_SQL_FORMATTER_SETTINGS, customRulesEnabled: true, selectListLayout: "vertical" });
     expect(root.querySelector("pre")?.textContent).toBe(expected);
     expect(root.querySelector('[role="status"]')).toBeNull();

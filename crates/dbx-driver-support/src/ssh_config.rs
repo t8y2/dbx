@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use glob::{glob_with, MatchOptions};
+use russh::keys::ssh_key::{HashAlg, PublicKey};
 use serde::Serialize;
 
 use crate::models::connection::SshTunnelConfig;
@@ -21,6 +22,12 @@ pub struct SshConfigHostEntry {
     pub port: Option<u16>,
     pub user: Option<String>,
     pub identity_file: Option<String>,
+    /// Every `IdentityFile` for this entry, in config order. `identity_file`
+    /// keeps the last one for the one-key consumers that predate this list.
+    pub identity_files: Vec<String>,
+    /// `IdentitiesOnly yes`: the client may offer only these identities, so
+    /// the agent must not be asked for everything it holds.
+    pub identities_only: bool,
     /// The `ProxyJump` alias, if any. Only a single hop is parsed (OpenSSH's
     /// comma-separated multi-jump form is not supported); the jump itself
     /// may declare its own `ProxyJump`, which `resolve_ssh_tunnel_chain`
@@ -39,6 +46,7 @@ pub fn list_hosts() -> Result<Vec<SshConfigHostEntry>, String> {
     let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(expand_tilde("~/.ssh")));
     let mut loader = SshConfigLoader::new(base_dir);
     loader.load_file(&path, 0, true)?;
+    loader.merge_match_entries();
     Ok(loader.entries)
 }
 
@@ -152,6 +160,14 @@ fn resolve_chain_from_entries(ssh: &SshTunnelConfig, entries: &[SshConfigHostEnt
 /// entirely from `~/.ssh/config` (falling back to the leaf's own settings
 /// for anything the config entry doesn't specify).
 fn jump_hop_from_entry(leaf: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunnelConfig {
+    // A jump host that pins its identities in `~/.ssh/config` uses those; one
+    // that doesn't keeps inheriting the leaf's selection, the way it already
+    // inherits the leaf's agent socket and auth method.
+    let ssh_agent_key_fingerprint = if entry.identities_only {
+        single_agent_fingerprint(&entry.identity_files).unwrap_or_default()
+    } else {
+        leaf.ssh_agent_key_fingerprint.clone()
+    };
     SshTunnelConfig {
         id: format!("{}::proxyjump::{}", leaf.id, entry.alias),
         name: entry.alias.clone(),
@@ -164,8 +180,10 @@ fn jump_hop_from_entry(leaf: &SshTunnelConfig, entry: SshConfigHostEntry) -> Ssh
         key_passphrase: leaf.key_passphrase.clone(),
         connect_timeout_secs: leaf.connect_timeout_secs,
         expose_lan: false,
+        local_port: None,
         use_ssh_agent: leaf.use_ssh_agent,
         ssh_agent_sock_path: leaf.ssh_agent_sock_path.clone(),
+        ssh_agent_key_fingerprint,
         auth_method: leaf.auth_method.clone(),
         allow_exec_channel_proxy: leaf.allow_exec_channel_proxy,
         proxy_command: entry.proxy_command.unwrap_or_default(),
@@ -194,6 +212,10 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
             resolved.port = port;
         }
     }
+    // Computed before `entry` is consumed below: `IdentitiesOnly yes` pins the
+    // host to the listed identities.
+    let config_agent_fingerprint =
+        if entry.identities_only { single_agent_fingerprint(&entry.identity_files) } else { None };
     if resolved.key_path.is_empty() {
         if let Some(identity_file) = entry.identity_file {
             resolved.key_path = identity_file;
@@ -203,6 +225,17 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
             if resolved.auth_method.is_empty() || (resolved.auth_method == "password" && resolved.password.is_empty()) {
                 resolved.auth_method = "key".to_string();
             }
+        }
+    }
+    // Offering every identity of an agent exhausts a server's per-connection
+    // authentication attempts long before the matching key comes up, so when
+    // the config pins the identities and the layer authenticates through the
+    // agent, select that one key unless the user already picked another.
+    if resolved.ssh_agent_key_fingerprint.trim().is_empty()
+        && (resolved.use_ssh_agent || resolved.auth_method == "agent")
+    {
+        if let Some(fingerprint) = config_agent_fingerprint {
+            resolved.ssh_agent_key_fingerprint = fingerprint;
         }
     }
     // A ProxyCommand typed into the connection form wins; otherwise inherit
@@ -216,6 +249,31 @@ fn apply_host_entry(ssh: &SshTunnelConfig, entry: SshConfigHostEntry) -> SshTunn
     resolved
 }
 
+/// The fingerprint of the one key named by `identity_files`, read from the
+/// companion `.pub` files. `None` when no file can be read or the entries name
+/// more than one key: in that case the caller keeps the "offer everything"
+/// default rather than guessing.
+fn single_agent_fingerprint(identity_files: &[String]) -> Option<String> {
+    let mut fingerprints: Vec<String> =
+        identity_files.iter().filter_map(|path| identity_file_fingerprint(path)).collect();
+    fingerprints.sort();
+    fingerprints.dedup();
+    if fingerprints.len() == 1 {
+        fingerprints.pop()
+    } else {
+        None
+    }
+}
+
+fn identity_file_fingerprint(path: &str) -> Option<String> {
+    let expanded = expand_tilde(path);
+    let public_path =
+        if expanded.ends_with(".pub") { PathBuf::from(&expanded) } else { PathBuf::from(format!("{expanded}.pub")) };
+    let content = std::fs::read_to_string(public_path).ok()?;
+    let key = PublicKey::from_openssh(content.trim()).ok()?;
+    Some(key.fingerprint(HashAlg::Sha256).to_string())
+}
+
 /// OpenSSH gives up after 16 nested `Include`s; mirror that so a config that
 /// includes itself can never recurse without bound.
 const MAX_INCLUDE_DEPTH: usize = 16;
@@ -227,6 +285,14 @@ const MAX_INCLUDE_DEPTH: usize = 16;
 struct SshConfigLoader {
     entries: Vec<SshConfigHostEntry>,
     current_aliases: Vec<String>,
+    /// Entries collected from `Match Host` blocks. They are kept apart so a
+    /// `Match` block that precedes the real `Host` block cannot shadow it
+    /// (the loader resolves aliases first-match-wins), then folded in by
+    /// [`SshConfigLoader::merge_match_entries`].
+    match_entries: Vec<SshConfigHostEntry>,
+    /// Whether directives currently land in `match_entries` instead of
+    /// `entries`.
+    current_is_match: bool,
     /// Canonical paths already parsed, so include cycles terminate.
     visited: HashSet<PathBuf>,
     /// Directory that relative `Include` patterns resolve against (`~/.ssh`).
@@ -235,7 +301,14 @@ struct SshConfigLoader {
 
 impl SshConfigLoader {
     fn new(base_dir: PathBuf) -> Self {
-        Self { entries: Vec::new(), current_aliases: Vec::new(), visited: HashSet::new(), base_dir }
+        Self {
+            entries: Vec::new(),
+            current_aliases: Vec::new(),
+            match_entries: Vec::new(),
+            current_is_match: false,
+            visited: HashSet::new(),
+            base_dir,
+        }
     }
 
     /// Reads `path` and folds its directives into this loader's entries.
@@ -259,11 +332,14 @@ impl SshConfigLoader {
     }
 
     /// Parses a minimal subset of OpenSSH client config syntax: `Host`,
-    /// `HostName`, `Port`, `User`, `IdentityFile`, `ProxyJump`, `Include`.
+    /// `Match Host`, `HostName`, `Port`, `User`, `IdentityFile`,
+    /// `IdentitiesOnly`, `ProxyJump`, `ProxyCommand`, `Include`.
     /// Wildcard host patterns (containing `*` or `?`) are skipped since they
-    /// aren't usable as a literal alias in the host field. `ProxyJump`'s
-    /// comma-separated multi-hop form is read as a single alias (its first
-    /// hop). Unknown directives are ignored.
+    /// aren't usable as a literal alias in the host field. `Match` blocks with
+    /// any criterion other than `Host` (`all`, `User`, `exec`, ...) cannot be
+    /// evaluated here and are ignored, as are unknown directives.
+    /// `ProxyJump`'s comma-separated multi-hop form is read as a single alias
+    /// (its first hop).
     fn parse_lines(&mut self, content: &str, follow_includes: bool, depth: usize) -> Result<(), String> {
         for raw_line in content.lines() {
             let line = strip_comment(raw_line).trim();
@@ -291,17 +367,24 @@ impl SshConfigLoader {
                         .map(str::to_string)
                         .collect();
                     for alias in &aliases {
-                        self.entries.push(SshConfigHostEntry {
-                            alias: alias.clone(),
-                            host_name: None,
-                            port: None,
-                            user: None,
-                            identity_file: None,
-                            proxy_jump: None,
-                            proxy_command: None,
-                        });
+                        self.entries.push(SshConfigHostEntry::new(alias));
                     }
                     self.current_aliases = aliases;
+                    self.current_is_match = false;
+                }
+                // `Match Host a b` is the conditional twin of `Host`; its
+                // directives are collected separately and merged afterwards so
+                // an include that precedes the matching `Host` block (1Password
+                // writes `Match Host <alias>` + `IdentitiesOnly yes` +
+                // `IdentityFile` that way) cannot shadow that block.
+                "match" => {
+                    self.current_aliases = match_host_aliases(value).unwrap_or_default();
+                    for alias in &self.current_aliases {
+                        if !self.match_entries.iter().any(|entry| &entry.alias == alias) {
+                            self.match_entries.push(SshConfigHostEntry::new(alias));
+                        }
+                    }
+                    self.current_is_match = true;
                 }
                 "hostname" => self.set_current_field(|entry| {
                     entry.host_name = Some(value.to_string());
@@ -318,7 +401,15 @@ impl SshConfigLoader {
                 }),
                 "identityfile" => self.set_current_field(|entry| {
                     entry.identity_file = Some(value.to_string());
+                    entry.identity_files.push(value.to_string());
                 }),
+                "identitiesonly" => {
+                    if let Some(identities_only) = parse_yes_no(value) {
+                        self.set_current_field(move |entry| {
+                            entry.identities_only = identities_only;
+                        });
+                    }
+                }
                 "proxycommand" => self.set_current_field(|entry| {
                     entry.proxy_command = Some(value.to_string());
                 }),
@@ -365,11 +456,79 @@ impl SshConfigLoader {
 
     fn set_current_field(&mut self, apply: impl Fn(&mut SshConfigHostEntry)) {
         let aliases = self.current_aliases.as_slice();
-        for entry in self.entries.iter_mut() {
+        let entries = if self.current_is_match { &mut self.match_entries } else { &mut self.entries };
+        for entry in entries.iter_mut() {
             if aliases.contains(&entry.alias) {
                 apply(entry);
             }
         }
+    }
+
+    /// Folds `Match Host` blocks into the real entries. Values from the
+    /// conditional block only fill fields the `Host` block left unset, so a
+    /// `Match` that precedes its `Host` (the 1Password layout) enriches it
+    /// instead of replacing its `HostName`/`Port`/`User`.
+    fn merge_match_entries(&mut self) {
+        for condition in std::mem::take(&mut self.match_entries) {
+            match self.entries.iter_mut().find(|entry| entry.alias == condition.alias) {
+                Some(entry) => {
+                    entry.host_name = entry.host_name.take().or(condition.host_name);
+                    entry.port = entry.port.or(condition.port);
+                    entry.user = entry.user.take().or(condition.user);
+                    entry.proxy_command = entry.proxy_command.take().or(condition.proxy_command);
+                    entry.proxy_jump = entry.proxy_jump.take().or(condition.proxy_jump);
+                    entry.identities_only |= condition.identities_only;
+                    for identity_file in condition.identity_files {
+                        if !entry.identity_files.contains(&identity_file) {
+                            entry.identity_files.push(identity_file);
+                        }
+                    }
+                    if entry.identity_file.is_none() {
+                        entry.identity_file = condition.identity_file;
+                    }
+                }
+                None => self.entries.push(condition),
+            }
+        }
+    }
+}
+
+impl SshConfigHostEntry {
+    fn new(alias: &str) -> Self {
+        Self {
+            alias: alias.to_string(),
+            host_name: None,
+            port: None,
+            user: None,
+            identity_file: None,
+            identity_files: Vec::new(),
+            identities_only: false,
+            proxy_jump: None,
+            proxy_command: None,
+        }
+    }
+}
+
+/// Returns the aliases a `Match` line applies to, or `None` when the block
+/// uses a criterion that cannot be evaluated statically (`all`, `User`,
+/// `exec`, ...) or names only wildcard hosts.
+fn match_host_aliases(value: &str) -> Option<Vec<String>> {
+    let mut tokens = value.split_whitespace();
+    if !tokens.next()?.eq_ignore_ascii_case("host") {
+        return None;
+    }
+    let aliases: Vec<String> =
+        tokens.filter(|alias| !alias.contains('*') && !alias.contains('?')).map(str::to_string).collect();
+    (!aliases.is_empty()).then_some(aliases)
+}
+
+fn parse_yes_no(value: &str) -> Option<bool> {
+    if value.eq_ignore_ascii_case("yes") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("no") {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -379,6 +538,7 @@ impl SshConfigLoader {
 fn parse_ssh_config(content: &str) -> Vec<SshConfigHostEntry> {
     let mut loader = SshConfigLoader::new(PathBuf::new());
     let _ = loader.parse_lines(content, false, 0);
+    loader.merge_match_entries();
     loader.entries
 }
 
@@ -420,8 +580,10 @@ mod tests {
             key_passphrase: String::new(),
             connect_timeout_secs: 5,
             expose_lan: false,
+            local_port: None,
             use_ssh_agent: false,
             ssh_agent_sock_path: String::new(),
+            ssh_agent_key_fingerprint: String::new(),
             auth_method: String::new(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
@@ -523,6 +685,8 @@ mod tests {
             port: Some(2222),
             user: Some("deploy".to_string()),
             identity_file: Some("~/.ssh/id_ed25519".to_string()),
+            identity_files: vec!["~/.ssh/id_ed25519".to_string()],
+            identities_only: false,
             proxy_jump: None,
             proxy_command: None,
         }
@@ -664,6 +828,8 @@ mod tests {
             port: None,
             user: None,
             identity_file: None,
+            identity_files: Vec::new(),
+            identities_only: false,
             proxy_jump: proxy_jump.map(str::to_string),
             proxy_command: None,
         }
@@ -734,6 +900,124 @@ mod tests {
         assert!(chain.len() <= entries.len());
         assert_eq!(chain.last().unwrap().host, "1.1.1.1");
     }
+
+    #[test]
+    fn jump_hop_inherits_the_leaf_agent_key_without_identities_only() {
+        let mut leaf = config("target");
+        leaf.ssh_agent_key_fingerprint = "SHA256:leaf".to_string();
+
+        let hop = jump_hop_from_entry(&leaf, jump_entry("gateway", "1.1.1.1", None));
+
+        assert_eq!(hop.ssh_agent_key_fingerprint, "SHA256:leaf");
+    }
+
+    #[test]
+    fn jump_hop_uses_its_own_identities_only_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let public_path = dir.path().join("jump.pub");
+        std::fs::write(
+            &public_path,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIDjAWVPHn2gq7JpSrD5jpUBnnOMn4hB9ieE0UcpM654 fixture-one\n",
+        )
+        .unwrap();
+        let mut leaf = config("target");
+        leaf.ssh_agent_key_fingerprint = "SHA256:leaf".to_string();
+        let mut gateway = jump_entry("gateway", "1.1.1.1", None);
+        gateway.identity_files = vec![public_path.to_string_lossy().into_owned()];
+        gateway.identities_only = true;
+
+        let hop = jump_hop_from_entry(&leaf, gateway);
+
+        assert_eq!(hop.ssh_agent_key_fingerprint, "SHA256:6Dkiwer56XB8PoBi8F2PZ7loWKttQNnE8wBhPB34Bd0");
+    }
+
+    #[test]
+    fn match_host_block_enriches_the_host_block_that_follows_it() {
+        let entries = parse_ssh_config(
+            "Match Host chanel\n  IdentitiesOnly yes\n  IdentityFile ~/.ssh/1Password/key.pub\n\
+             Host chanel\n  HostName 36.133.78.129\n  Port 19022\n  User root\n",
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].alias, "chanel");
+        assert_eq!(entries[0].host_name.as_deref(), Some("36.133.78.129"));
+        assert_eq!(entries[0].port, Some(19022));
+        assert_eq!(entries[0].user.as_deref(), Some("root"));
+        assert!(entries[0].identities_only);
+        assert_eq!(entries[0].identity_files, vec!["~/.ssh/1Password/key.pub"]);
+    }
+
+    #[test]
+    fn match_block_criteria_that_cannot_be_evaluated_are_ignored() {
+        let entries = parse_ssh_config(
+            "Match all\n  IdentitiesOnly yes\nHost direct\n  HostName 10.0.0.1\n\
+             Match User deploy\n  IdentityFile ~/.ssh/deploy\n",
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].identities_only);
+        assert!(entries[0].identity_files.is_empty());
+    }
+
+    #[test]
+    fn match_host_without_a_host_block_still_resolves() {
+        let entries = parse_ssh_config("Match Host solo\n  IdentitiesOnly yes\n  IdentityFile ~/.ssh/solo.pub\n");
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].identities_only);
+        assert_eq!(entries[0].identity_files, vec!["~/.ssh/solo.pub"]);
+    }
+
+    #[test]
+    fn identities_only_fills_the_agent_key_from_the_public_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let public_path = dir.path().join("agent.pub");
+        std::fs::write(
+            &public_path,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIDjAWVPHn2gq7JpSrD5jpUBnnOMn4hB9ieE0UcpM654 fixture-one\n",
+        )
+        .unwrap();
+
+        let mut ssh = config("chanel");
+        ssh.auth_method = "agent".to_string();
+        ssh.use_ssh_agent = true;
+        let mut host = entry("chanel");
+        host.identity_file = Some(public_path.to_string_lossy().into_owned());
+        host.identity_files = vec![public_path.to_string_lossy().into_owned()];
+        host.identities_only = true;
+
+        let resolved = apply_host_entry(&ssh, host);
+
+        assert_eq!(resolved.ssh_agent_key_fingerprint, "SHA256:6Dkiwer56XB8PoBi8F2PZ7loWKttQNnE8wBhPB34Bd0");
+    }
+
+    #[test]
+    fn identities_only_with_several_keys_or_an_explicit_selection_is_not_guessed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = dir.path().join("first.pub");
+        let second = dir.path().join("second.pub");
+        std::fs::write(
+            &first,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIDjAWVPHn2gq7JpSrD5jpUBnnOMn4hB9ieE0UcpM654 fixture-one\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIISjubSpkMgLWOaYIdP6TfTeRoFA6M1ojv6vyqunJpUb fixture-two\n",
+        )
+        .unwrap();
+
+        let mut ssh = config("chanel");
+        ssh.auth_method = "agent".to_string();
+        let mut host = entry("chanel");
+        host.identity_files = vec![first.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()];
+        host.identities_only = true;
+        assert_eq!(apply_host_entry(&ssh, host.clone()).ssh_agent_key_fingerprint, "");
+
+        ssh.ssh_agent_key_fingerprint = "SHA256:explicit".to_string();
+        host.identity_files = vec![first.to_string_lossy().into_owned()];
+        assert_eq!(apply_host_entry(&ssh, host).ssh_agent_key_fingerprint, "SHA256:explicit");
+    }
 }
 
 #[cfg(test)]
@@ -756,6 +1040,7 @@ mod include_tests {
     fn hosts_from(path: &Path, base_dir: &Path) -> Vec<SshConfigHostEntry> {
         let mut loader = SshConfigLoader::new(base_dir.to_path_buf());
         loader.load_file(path, 0, true).expect("load config");
+        loader.merge_match_entries();
         loader.entries
     }
 
@@ -790,6 +1075,32 @@ mod include_tests {
         // missing host resolution, not this), so it must not leak into the
         // resolved tunnel config.
         assert_eq!(abc.proxy_jump, None);
+    }
+
+    #[test]
+    fn included_match_host_block_applies_to_a_host_block_declared_after_it() {
+        // The layout 1Password writes: the generated include is pulled in at
+        // the top of ~/.ssh/config, so its `Match Host` block is parsed before
+        // the user's own `Host` block for the same alias.
+        let dir = TempDir::new().unwrap();
+        let main = write_config(
+            dir.path(),
+            "config",
+            "Include 1Password/config\nHost chanel\n  HostName 36.133.78.129\n  Port 19022\n  User root\n",
+        );
+        write_config(
+            dir.path(),
+            "1Password/config",
+            "Match Host chanel\n  IdentitiesOnly yes\n  IdentityFile ~/.ssh/1Password/SHA256_key.pub\n",
+        );
+
+        let entries = hosts_from(&main, dir.path());
+
+        assert_eq!(aliases(&entries), vec!["chanel"]);
+        assert_eq!(entries[0].host_name.as_deref(), Some("36.133.78.129"));
+        assert_eq!(entries[0].port, Some(19022));
+        assert!(entries[0].identities_only);
+        assert_eq!(entries[0].identity_files, vec!["~/.ssh/1Password/SHA256_key.pub"]);
     }
 
     #[test]

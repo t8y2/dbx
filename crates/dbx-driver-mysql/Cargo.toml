@@ -16,6 +16,7 @@ dbx-sql-dialect = { path = "../dbx-sql-dialect" }
 dbx-types = { path = "../dbx-types", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+encoding_rs = "0.8"
 log = "0.4"
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 percent-encoding = "2"
@@ -27,3 +28,4 @@ tokio-util = { version = "0.7", features = ["compat"] }
 
 [dev-dependencies]
 mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }

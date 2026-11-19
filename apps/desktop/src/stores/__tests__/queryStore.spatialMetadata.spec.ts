@@ -14,6 +14,23 @@ function make(rows: number, spatial?: QueryResult["spatial_columns"]): QueryResu
 }
 
 describe("appendQueryResultSegment spatial merge", () => {
+  it("rebases original key and pending preview metadata and excludes capped rows", () => {
+    const previous = { ...make(1), raw_key_cells: [{ row_index: 0, column_index: 0, value: "raw A" }] };
+    const segment = {
+      ...make(2),
+      raw_key_cells: [
+        { row_index: 0, column_index: 0, value: "raw B" },
+        { row_index: 1, column_index: 0, value: "discard" },
+      ],
+      large_value_cells: [{ row_index: 0, column_index: 0, original_bytes: 20000, pending_decode: true }],
+    };
+    const merged = appendQueryResultSegment(previous, segment, 2);
+    expect(merged.raw_key_cells).toEqual([
+      { row_index: 0, column_index: 0, value: "raw A" },
+      { row_index: 1, column_index: 0, value: "raw B" },
+    ]);
+    expect(merged.large_value_cells).toEqual([{ row_index: 1, column_index: 0, original_bytes: 20000, pending_decode: true }]);
+  });
   it("sums client request wait across loaded pages", () => {
     const previous = { ...make(1), client_request_wait_ms: 45 };
     const segment = { ...make(1), client_request_wait_ms: 30 };

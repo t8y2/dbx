@@ -50,7 +50,8 @@ pub use manifest::{
     PluginDriverManifest, PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause,
     PluginFieldConditionLiteral, PluginFilesystemCapability, PluginFilesystemProviderContribution,
     PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker,
-    PluginFormFieldPickerKind, PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
+    PluginFormFieldPickerKind, PluginFormFieldType, PluginManifest, PluginMcpAccess, PluginMcpContribution,
+    PluginMcpScope, PluginMcpToolDeclaration, PluginMcpToolset, PluginUiEntrypoint, PluginWorkbenchContribution,
     PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
     PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_HOST_FEATURES,
     SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
@@ -552,6 +553,34 @@ impl PluginDriverSession {
         if let Some(logical) = &self.logical {
             logical.close().await;
             return Ok(());
+        }
+        self.sidecar.shutdown().await
+    }
+
+    /// Confirm JDBC cleanup for an owned native-operation scope. Ordinary shutdown remains best effort.
+    pub async fn shutdown_confirmed(&self) -> Result<(), String> {
+        if let Some(logical) = &self.logical {
+            return logical.close_confirmed().await;
+        }
+        if self.driver_id == "jdbc" {
+            let closed: Result<serde_json::Value, _> = self
+                .sidecar
+                .invoke_with_timeout(
+                    "close",
+                    serde_json::json!({}),
+                    Some(&self.driver_id),
+                    Some(Duration::from_secs(3)),
+                )
+                .await;
+            let acknowledged = closed.and_then(|value| {
+                if value["ok"] == true {
+                    Ok(())
+                } else {
+                    Err("JDBC session cleanup was not confirmed".to_string())
+                }
+            });
+            let stopped = self.sidecar.shutdown().await;
+            return acknowledged.and(stopped);
         }
         self.sidecar.shutdown().await
     }

@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { Button } from "@/components/ui/button";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
-import { databaseBackupTableSelectionScopeKey, databaseBackupTableTargetKey, type DatabaseBackupTableTarget, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
+import { databaseBackupTableSelectionScopeKey, databaseBackupTableTargetKey, supportsScheduledDatabaseBackup, type DatabaseBackupTableTarget, type DatabaseBackupTableSelectionState } from "@/lib/backup/scheduledDatabaseBackup";
 
 const props = defineProps<{
   connectionId: string;
@@ -55,7 +55,7 @@ async function loadTables() {
   loading.value = !!connectionId && databases.length > 0;
   if (!connectionId || databases.length === 0) return;
   try {
-    if (databaseType !== "mysql" && databaseType !== "postgres") throw new Error("Unsupported backup connection");
+    if (!supportsScheduledDatabaseBackup(databaseType)) throw new Error("Unsupported backup connection");
     const result = await Promise.all(
       databases.map(async (database) => {
         const schemas = databaseType === "mysql" ? [database] : (await api.listSchemas(connectionId, database)).filter((schema) => schema !== "information_schema" && !schema.startsWith("pg_"));

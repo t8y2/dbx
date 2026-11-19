@@ -115,6 +115,13 @@ export function useScheduledDatabaseBackups(_options: { scheduler?: boolean } = 
     await refreshAfterMutation();
   }
 
+  /** Adds backup files created outside DBX to the history; returns the new runs. */
+  async function importBackupFiles(files: readonly string[]) {
+    const imported = await api.databaseBackupCommand<DatabaseBackupRun[]>({ action: "import", files: [...files] });
+    await refreshAfterMutation();
+    return imported;
+  }
+
   async function renameRun(id: string, name: string) {
     if (activeRunIds.has(id)) return false;
     await api.databaseBackupCommand({ action: "rename", id, name: name.trim() });
@@ -203,6 +210,7 @@ export function useScheduledDatabaseBackups(_options: { scheduler?: boolean } = 
     deleteSchedule,
     deleteRuns,
     deleteRun: (id: string) => deleteRuns([id]),
+    importBackupFiles,
     renameRun,
     runSchedule,
     runOneShot,

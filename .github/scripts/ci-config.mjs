@@ -13,6 +13,7 @@ export const goAgents = [
   { driver: "cassandra-go", binary: "cassandra", race: false },
   { driver: "hive-go", binary: "hive", race: false },
   { driver: "vastbase-go", binary: "vastbase", race: false },
+  { driver: "kingbase-go", binary: "kingbase", race: false },
   { driver: "neo4j-go", binary: "neo4j", race: false },
   { driver: "nebula-go", binary: "nebula", race: false },
   { driver: "iotdb", binary: "iotdb", race: false },

@@ -10,6 +10,17 @@ The JSON report distinguishes synchronous input-dispatch time from animation-fra
 gaps, including delayed analysis after typing. This is an offline browser benchmark:
 it does not measure database metadata latency or the native desktop WebView.
 
+## SQL editor large-content scenarios
+
+Run `node scripts/bench/editor-scenarios.mjs [scenario ...]` (scenarios live in
+`editor-scenarios.definitions.mjs`: 100k/10k data lines, a 1.5 MB single line, a
+300-line stored procedure, 300 MyBatis-style lines, five 200-line tabs). It starts the
+Vite server, drives headless Chrome (override with `CHROME_PATH`) over CDP, and for each
+phase (mount, typing at the end and in the middle, select all, drag selection, scroll)
+prints the page timings plus the top self-time functions from a CPU profile
+(`TOP=<n>`, `NO_PROFILE=1` to skip). Chrome has no macOS text-services selection cost, so
+selection results here say nothing about WKWebView; use a WebKit build for that.
+
 ## Startup dependencies
 
 Run `pnpm bench:startup` from the repository root. The benchmark uses the current

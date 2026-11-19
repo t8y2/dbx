@@ -17,7 +17,8 @@ export type DatabaseBackupCommand =
   | { action: "run"; request: { scheduleId?: string; config?: DatabaseBackupExecutionConfig; displayName?: string; timeZone?: string } }
   | { action: "cancel"; id: string }
   | { action: "rename"; id: string; name: string }
-  | { action: "deleteRuns"; ids: string[] };
+  | { action: "deleteRuns"; ids: string[] }
+  | { action: "import"; files: string[] };
 
 export interface DatabaseBackupBackgroundStatus {
   enabled: boolean;

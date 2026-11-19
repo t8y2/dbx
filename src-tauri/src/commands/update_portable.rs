@@ -35,12 +35,21 @@ pub(super) fn ensure_portable_version_is_newer(
     current_version: &str,
 ) -> Result<(), String> {
     let current = parse_portable_version(current_version, "current app")?;
-    if requested_version <= &current {
+    if !is_portable_upgrade(requested_version, &current) {
         return Err(format!(
             "Portable update version {requested_version} must be newer than the current version {current}."
         ));
     }
     Ok(())
+}
+
+fn is_portable_upgrade(requested: &Version, current: &Version) -> bool {
+    let channel = if requested.pre.is_empty() {
+        dbx_core::update::UpdateChannel::Stable
+    } else {
+        dbx_core::update::UpdateChannel::Beta
+    };
+    dbx_core::update::is_channel_update_available(channel, &requested.to_string(), &current.to_string())
 }
 
 fn parse_portable_version(value: &str, label: &str) -> Result<Version, String> {
@@ -60,7 +69,10 @@ fn portable_arch_label(arch: &str) -> Result<&'static str, String> {
 pub(super) fn portable_asset_name(version: &str, arch: &str) -> Result<String, String> {
     let version = parse_portable_version(version, "requested")?;
     let arch = portable_arch_label(arch)?;
-    Ok(format!("DBX_{version}_{arch}-portable.zip"))
+    // Release workflows keep asset filenames at the stable base version even
+    // when the signed executable carries a beta prerelease version.
+    let base_version = format!("{}.{}.{}", version.major, version.minor, version.patch);
+    Ok(format!("DBX_{base_version}_{arch}-portable.zip"))
 }
 
 pub(super) fn verify_portable_archive(
@@ -126,7 +138,7 @@ fn validated_portable_executable(
         return Err(format!("Unsupported portable update manifest schema version {}.", manifest.schema_version));
     }
     let manifest_version = parse_portable_version(&manifest.version, "manifest")?;
-    if &manifest_version != expected_version {
+    if !portable_versions_match(&manifest_version, expected_version) {
         return Err(format!(
             "Portable update manifest version {manifest_version} does not match requested version {expected_version}."
         ));
@@ -164,6 +176,14 @@ fn validated_portable_executable(
         return Err("Portable update executable hash does not match the signed manifest.".to_string());
     }
     Ok(executable)
+}
+
+fn portable_versions_match(manifest_version: &Version, expected_version: &Version) -> bool {
+    manifest_version == expected_version
+        || (expected_version.pre.is_empty()
+            && manifest_version.major == expected_version.major
+            && manifest_version.minor == expected_version.minor
+            && manifest_version.patch == expected_version.patch)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -374,7 +394,7 @@ mod tests {
     #[test]
     fn builds_portable_asset_names_for_windows_architectures() {
         assert_eq!(portable_asset_name("0.5.64", "x86_64").unwrap(), "DBX_0.5.64_x64-portable.zip");
-        assert_eq!(portable_asset_name("v0.5.64-beta.1", "aarch64").unwrap(), "DBX_0.5.64-beta.1_arm64-portable.zip");
+        assert_eq!(portable_asset_name("v0.5.64-beta.1", "aarch64").unwrap(), "DBX_0.5.64_arm64-portable.zip");
         assert!(portable_asset_name("0.5.64", "x86").is_err());
         assert!(portable_asset_name("../../0.5.64", "x86_64").is_err());
     }
@@ -429,6 +449,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_same_base_beta_from_stable_portable_build() {
+        assert!(validate_requested_portable_version("0.5.64-beta.20261029.1", "0.5.64").is_ok());
+        assert!(validate_requested_portable_version("0.5.64", "0.5.64-beta.20261029.1").is_err());
+        assert!(validate_requested_portable_version("0.5.65", "0.5.64-beta.20261029.1").is_ok());
+        assert!(validate_requested_portable_version("0.5.63", "0.5.64-beta.20261029.1").is_err());
+        assert!(validate_requested_portable_version("0.5.64-beta.20261029.2", "0.5.64-beta.20261029.1").is_ok());
+        assert!(validate_requested_portable_version("0.5.64-beta.20261029.1", "0.5.64-beta.20261029.2").is_err());
+    }
+
+    #[test]
     fn decodes_tauri_base64_text() {
         let encoded = BASE64_STANDARD.encode("untrusted comment: test\nAAAA");
         assert_eq!(decode_tauri_text(&encoded, "test").unwrap(), "untrusted comment: test\nAAAA");
@@ -454,6 +484,15 @@ mod tests {
         let archive = portable_zip("0.5.62", "x64", b"MZolder executable", None);
         let error = validated_portable_executable(&archive, &Version::parse("0.5.64").unwrap(), "x86_64").unwrap_err();
         assert!(error.contains("does not match requested version"));
+    }
+
+    #[test]
+    fn accepts_beta_binary_manifest_for_promoted_stable_base_version() {
+        let archive = portable_zip("0.5.64-beta.20261029.1", "x64", b"MZbeta executable", None);
+        assert_eq!(
+            validated_portable_executable(&archive, &Version::parse("0.5.64").unwrap(), "x86_64").unwrap(),
+            b"MZbeta executable"
+        );
     }
 
     #[test]

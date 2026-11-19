@@ -201,6 +201,7 @@ fn index_info_from_row(row: &mysql_async::Row) -> IndexInfo {
     .collect();
 
     IndexInfo {
+        owner: None,
         key_directions: Vec::new(),
         visibility: None,
         key_metadata_complete: false,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serializeOpenTabs, restoreOpenTabsPayload } from "@/lib/app/openTabsPersistence";
+import { MAX_PERSISTED_TAB_SQL_CHARS, planOpenTabSqlSpill, serializeOpenTabs, restoreOpenTabsPayload } from "@/lib/app/openTabsPersistence";
 import type { QueryTab } from "@/types/database";
 
 function queryTab(overrides: Partial<QueryTab>): QueryTab {
@@ -399,9 +399,90 @@ describe("openTabsPersistence detached connection tabs", () => {
     expect(tabs[0].detachedConnectionName).toBe("prod");
   });
 
+  it("keeps a detached data/structure tab even though its connection no longer exists", () => {
+    // keep-all-tabs 会连同非 SQL 页签一起保留，它们带着 detachedConnectionName 等新建同名连接重绑；
+    // 若恢复阶段按 validConnectionIds 丢掉，重启后 keep-all-tabs 就形同虚设。
+    const saved = serializeOpenTabs([
+      queryTab({ id: "orphan-data", connectionId: "deleted-conn", database: "app", title: "users", mode: "data", detachedConnectionName: "prod" }),
+      queryTab({ id: "orphan-structure", connectionId: "deleted-conn", database: "app", title: "users 结构", mode: "structure", detachedConnectionName: "prod" }),
+      // 没有脱离标记的非 SQL 页签仍然要按连接有效性过滤掉。
+      queryTab({ id: "stray-data", connectionId: "deleted-conn", database: "app", title: "orders", mode: "data" }),
+    ]);
+
+    const { tabs } = restoreOpenTabsPayload({ tabs: saved, activeTabId: "orphan-data" }, { validConnectionIds: ["other-conn"] });
+
+    expect(tabs.map((tab) => tab.id)).toEqual(["orphan-data", "orphan-structure"]);
+    expect(tabs[0].detachedConnectionName).toBe("prod");
+  });
+
   it("omits the detached connection name when the tab is bound to a live connection", () => {
     const [saved] = serializeOpenTabs([queryTab({})]);
 
     expect(saved.detachedConnectionName).toBeUndefined();
+  });
+});
+
+describe("openTabsPersistence oversized SQL", () => {
+  const oversizedSql = `-- head\n${"SELECT 1;\n".repeat(MAX_PERSISTED_TAB_SQL_CHARS / 10)}`;
+
+  it("truncates an oversized editor body and records the original length", () => {
+    const [saved] = serializeOpenTabs([queryTab({ sql: oversizedSql })]).map((tab) => tab as Record<string, unknown>);
+
+    expect((saved.sql as string).length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.sqlTruncated).toBe(true);
+    expect(saved.sqlTruncatedChars).toBe(oversizedSql.length);
+  });
+
+  it("reports the full body as a spill and leaves small tabs alone", () => {
+    const tabs = [queryTab({ id: "big", sql: oversizedSql }), queryTab({ id: "small", sql: "SELECT 1" })];
+
+    const { savedTabs, spills } = planOpenTabSqlSpill(tabs);
+
+    expect(spills.map((spill) => spill.tabId)).toEqual(["big"]);
+    expect(spills[0].sql).toBe(oversizedSql);
+    expect(savedTabs.map((tab) => tab.id)).toEqual(["big", "small"]);
+    expect(savedTabs[0].sqlTruncated).toBe(true);
+    expect(savedTabs[1].sql).toBe("SELECT 1");
+    expect(savedTabs[1].sqlTruncated).toBeUndefined();
+  });
+
+  it("restores the truncation marker and recovery path onto the tab", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        sql: oversizedSql,
+        sqlTruncated: true,
+        sqlTruncatedChars: oversizedSql.length,
+        sqlRecoveryPath: "/tmp/recovery/t1.sql",
+      }),
+    ]);
+
+    expect(restored.sqlTruncated).toBe(true);
+    expect(restored.sqlTruncatedChars).toBe(oversizedSql.length);
+    expect(restored.sqlRecoveryPath).toBe("/tmp/recovery/t1.sql");
+  });
+
+  it("keeps the recovery marker sticky across a re-save", () => {
+    const [restored] = roundTrip([queryTab({ sql: oversizedSql, sqlTruncated: true, sqlTruncatedChars: oversizedSql.length, sqlRecoveryPath: "/tmp/recovery/t1.sql" })]);
+    const [saved] = serializeOpenTabs([restored]);
+
+    expect(saved.sqlTruncated).toBe(true);
+    expect(saved.sqlRecoveryPath).toBe("/tmp/recovery/t1.sql");
+  });
+
+  it("truncates redundant SQL copies (lastExecutedSql, resultBases, result runs)", () => {
+    const [saved] = serializeOpenTabs([
+      queryTab({
+        sql: "SELECT 1",
+        lastExecutedSql: oversizedSql,
+        resultBaseSql: oversizedSql,
+        resultSortedSql: oversizedSql,
+        resultRuns: [{ id: "run-1", title: "Result", sequence: 1, sql: oversizedSql, createdAt: 1 }],
+      }),
+    ]);
+
+    expect(saved.lastExecutedSql?.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.resultBaseSql?.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.resultSortedSql?.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
+    expect(saved.resultRuns?.[0]?.sql.length).toBe(MAX_PERSISTED_TAB_SQL_CHARS);
   });
 });

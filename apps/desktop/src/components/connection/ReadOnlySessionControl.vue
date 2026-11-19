@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 import { formatWriteUnlockRemaining } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 
 const props = defineProps<{
   connectionId: string;
@@ -17,16 +18,19 @@ const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const unlockStore = useReadOnlyUnlockStore();
 
-const persistentlyReadOnly = computed(() => connectionStore.getConfig(props.connectionId)?.read_only === true);
+const compatibilityReadOnly = computed(() => mysqlDataCharsetEnabled(connectionStore.getConfig(props.connectionId)));
+const persistentlyReadOnly = computed(() => compatibilityReadOnly.value || connectionStore.getConfig(props.connectionId)?.read_only === true);
 const remainingMs = computed(() => unlockStore.remainingMs(props.connectionId));
-const unlocked = computed(() => remainingMs.value > 0);
+const unlocked = computed(() => !compatibilityReadOnly.value && remainingMs.value > 0);
 const remainingLabel = computed(() => formatWriteUnlockRemaining(remainingMs.value));
 const tooltip = computed(() => {
+  if (compatibilityReadOnly.value) return t("connection.mysqlDataCharsetReadOnly");
   if (unlocked.value) return `${t("readOnlyUnlock.unlockedBadge")} · ${t("readOnlyUnlock.remaining", { time: remainingLabel.value })}`;
   return t("connection.readOnlyBadge");
 });
 
 async function onActivate() {
+  if (compatibilityReadOnly.value) return;
   if (!persistentlyReadOnly.value) return;
   if (unlocked.value) {
     await unlockStore.lockNow(props.connectionId);
@@ -58,8 +62,9 @@ onMounted(() => {
         type="button"
         class="inline-flex items-center gap-0.5 rounded text-muted-foreground hover:bg-muted-foreground/15 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="compact ? 'h-4 px-0.5' : 'h-4 px-1'"
-        :aria-label="unlocked ? t('readOnlyUnlock.lockNow') : t('readOnlyUnlock.unlockAction')"
-        :title="unlocked ? t('readOnlyUnlock.lockNow') : t('readOnlyUnlock.unlockAction')"
+        :aria-disabled="compatibilityReadOnly"
+        :aria-label="compatibilityReadOnly ? tooltip : unlocked ? t('readOnlyUnlock.lockNow') : t('readOnlyUnlock.unlockAction')"
+        :title="compatibilityReadOnly ? tooltip : unlocked ? t('readOnlyUnlock.lockNow') : t('readOnlyUnlock.unlockAction')"
         @click.stop.prevent="onActivate"
       >
         <Unlock v-if="unlocked" class="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />

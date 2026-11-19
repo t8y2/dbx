@@ -47,9 +47,12 @@ function Remove-McpReplacementTempFiles([string]$Directory) {
         if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return }
         Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop | Where-Object {
             !$_.PSIsContainer -and !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
-            $_.Name -imatch '\Adbx-mcp\.exe~RF[0-9a-f]+\.TMP\z'
+            $_.Name -imatch '\Adbx-mcp\.exe[~.]RF[0-9a-f]+\.TMP\z'
         } | ForEach-Object {
             # A running MCP process may still hold the old executable; retry on the next run.
+            # A READONLY attribute makes [IO.File]::Delete throw, so one read-only
+            # leftover would otherwise survive every install; clear it first.
+            try { $_.Attributes = $_.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly) } catch {}
             try { [IO.File]::Delete($_.FullName) } catch {}
         }
     } catch {}
@@ -139,7 +142,17 @@ function Install-DbxMcp {
             try { $actual = 'sha512-' + [Convert]::ToBase64String($hasher.ComputeHash($stream)) }
             finally { $stream.Dispose(); $hasher.Dispose() }
             if ($actual -cne $integrity) { throw "Integrity verification failed for $registry; refusing to install." }
-            & tar.exe -xzf $archive -C $workDir 'package/bin/dbx-mcp.exe' 2>$null
+            # GNU tar (Git for Windows / MSYS2) parses an absolute archive path such as
+            # C:\...\archive.tgz as a remote "host:file" operand and fails with
+            # "tar (child): Cannot connect to C: resolve failed". Extract through a
+            # relative archive name from inside the work directory so both GNU tar and
+            # the bsdtar shipped with Windows treat it as a local file.
+            Push-Location $workDir
+            try {
+                & tar.exe -xzf 'archive.tgz' -C '.' 'package/bin/dbx-mcp.exe' 2>$null
+            } finally {
+                Pop-Location
+            }
             if ($LASTEXITCODE -ne 0) { throw 'Binary missing from npm archive.' }
             [IO.File]::Move((Join-Path $workDir 'package\bin\dbx-mcp.exe'), $stagedBinary)
             $downloaded = $true

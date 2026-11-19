@@ -1,6 +1,6 @@
 ---
 title: Connection Import
-description: Import connections, groups, and recognized database profiles from Navicat, DBeaver, and DataGrip.
+description: Import connections and groups from Navicat, DBeaver, DataGrip, RedisDesktopManager, and Another Redis Desktop Manager.
 ---
 
 DBX can import connections from other database tools, saving you from manually re-creating dozens of connections when switching tools.
@@ -12,6 +12,8 @@ DBX can import connections from other database tools, saving you from manually r
 | Navicat | `.ncx` export files            | Host, port, username, database type, connection name |
 | DBeaver | Connection configuration files | Host, port, username, database type, connection name |
 | DataGrip | Project or global files such as `dataSources.xml` | JDBC URL, driver, connection name, groups, and readable credentials |
+| RedisDesktopManager | JSON export | Redis connections, nested groups, authentication, TLS, and SSH settings |
+| Another Redis Desktop Manager | `.ano` export | Redis connections, groups, ACL, SSH/TLS, Sentinel, and Cluster settings |
 
 <Callout type="info">Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools cannot be decrypted — you will need to re-enter passwords after import.</Callout>
 
@@ -101,6 +103,22 @@ DBX can import connections from other database tools, saving you from manually r
 
   </Step>
 </Steps>
+
+## Import RedisDesktopManager Connections
+
+Export a JSON file from RedisDesktopManager, then choose **Import RedisDesktopManager** from the sidebar or welcome-page import menu. Review the connection selector, select the connections to migrate, and confirm. Connections and nested groups are imported without overwriting existing connections.
+
+Standalone Redis host, port, ACL username, `auth` password, key separator and filter, and SSH password, private-key or agent settings are supported. Connection and execution timeouts are converted from milliseconds to seconds.
+
+TLS CA, client certificate and private-key paths are preserved, but files are not read or copied. Check paths after moving between machines. RDM's ignore-certificate-errors setting is not inherited. Export files may contain plaintext passwords; keep them secure. Importing does not automatically connect to Redis.
+
+## Import Another Redis Desktop Manager Connections
+
+Export `connections.ano` from Another Redis Desktop Manager settings. Choose **Import Another Redis Desktop Manager** in the sidebar or welcome-screen import menu, select connections, confirm, and optionally restore their groups. Both legacy connection arrays and newer `connections` / `groups` bundles are supported, including standalone, Sentinel, Cluster, and read-only settings.
+
+The file is Base64-wrapped UTF-8 JSON, not encryption, and may contain plaintext Redis, SSH, and Sentinel credentials. Keep it private. SSH key passphrases and certificate/key file paths are preserved without reading or copying local files; review paths after moving machines. Sentinel credentials remain separate from Redis node credentials.
+
+Custom TLS `servername` overrides and nonempty NAT mappings cannot be faithfully represented and are explicitly rejected rather than silently dropped. Limits are 16 MiB and 10,000 connections/groups each. Invalid files fail before saving any connections. Runtime `key` / current `db` fields are ignored; importing neither overwrites existing connections nor connects automatically.
 
 ## After Import
 

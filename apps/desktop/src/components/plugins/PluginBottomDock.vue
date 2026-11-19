@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 // PR-A4/P2 global bottom panel dock (HOST_PLUGIN_UI_SPEC §8.3) — a generic host container:
 // it only provides the panel frame (tab strip, drag-resize height, collapse/maximize/hide) and hosts any plugin's
 // panel webviews, with zero plugin business inside; multi-terminal/shell selection/connection switching all live in the plugin
@@ -274,7 +275,7 @@ function onPlusAction(value: string) {
           host: connection.host,
           port: connection.port,
           username: connection.username,
-          readOnly: connection.read_only === true,
+          readOnly: mysqlDataCharsetEnabled(connection) || connection.read_only === true,
         },
       },
     });

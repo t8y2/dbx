@@ -287,6 +287,8 @@ test("query toolbar refresh reruns the complete multi-result SQL and keeps the a
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
         preserveActiveResultIndex: true,
+        refreshActiveResultRun: true,
+        publicationOrigin: "refresh",
       });
     }
     assert.equal(tab.results?.length, 2);

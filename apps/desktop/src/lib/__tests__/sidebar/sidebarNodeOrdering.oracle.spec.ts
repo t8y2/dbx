@@ -1,8 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
+import { orderSidebarConnectionUtilitiesForDisplay, sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import type { TreeNode } from "@/types/database";
 
 describe("Oracle sidebar ordering", () => {
+  it("projects an already-loaded grouped connection without changing schema order, nested objects, or the live tree", () => {
+    const children: TreeNode[] = [
+      { id: "links", type: "oracle-db-links", label: "links" },
+      { id: "z", type: "schema", label: "Z", children: [{ id: "table", type: "table", label: "table" }] },
+      { id: "a", type: "schema", label: "A" },
+      { id: "users", type: "user-admin", label: "users" },
+      { id: "jobs", type: "database-job-admin", label: "jobs" },
+      { id: "sql", type: "saved-sql-root", label: "sql" },
+    ];
+    const nodes: TreeNode[] = [{ id: "folder", type: "connection-group", label: "folder", children: [{ id: "c1", type: "connection", label: "c1", children }] }];
+    const result = orderSidebarConnectionUtilitiesForDisplay(nodes);
+    expect(result[0].children![0].children!.map((node) => node.id)).toEqual(["sql", "z", "a", "links", "jobs", "users"]);
+    expect(children.map((node) => node.id)).toEqual(["links", "z", "a", "users", "jobs", "sql"]);
+    expect(result[0].children![0].children![1]).toBe(children[1]);
+    expect(orderSidebarConnectionUtilitiesForDisplay(result)).toBe(result);
+  });
+  it("keeps schemas sorted before the three connection tools after cache normalization", () => {
+    const children: TreeNode[] = [
+      { id: "users", type: "user-admin", label: "users" },
+      { id: "jobs", type: "database-job-admin", label: "jobs" },
+      { id: "z", type: "schema", label: "ZEBRA" },
+      { id: "links", type: "oracle-db-links", label: "links" },
+      { id: "a", type: "schema", label: "ALPHA" },
+    ];
+    const result = sortSidebarTreeChildrenForParent({ type: "connection" }, children, "oracle");
+    expect(result.map((node) => node.id)).toEqual(["a", "z", "links", "jobs", "users"]);
+    expect(sortSidebarTreeChildrenForParent({ type: "connection" }, result, "oracle")).toEqual(result);
+  });
   it("sorts schema nodes alphabetically and places database links at the bottom", () => {
     const children: TreeNode[] = [
       { id: "c1:__oracle_db_links", label: "tree.databaseLinks", type: "oracle-db-links", connectionId: "c1" },

@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
+import { TAB_WINDOW_TRANSFER } from "@/composables/useTabWindowTransfer";
+import TabDragPreviewChip from "./TabDragPreviewChip.vue";
 import { tabDisplayTitle, tabDisplayTitles } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
 import "./appTabBar.css";
@@ -45,6 +47,8 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
+const tabWindowTransfer = inject(TAB_WINDOW_TRANSFER, null);
+const visibleTabWindowPreview = computed(() => tabWindowTransfer?.visibleTabWindowPreview.value);
 const isVerticalLayout = computed(() => ["left", "right"].includes(settingsStore.editorSettings.tabPlacement));
 const layoutClass = computed(() => {
   switch (settingsStore.editorSettings.tabPlacement) {
@@ -70,6 +74,9 @@ function setTabBarTarget(groupId: string, element: unknown) {
 const closeConfirmDirtyCount = computed(() => queryStore.closeConfirmDirtyTabIds.length);
 const showCloseConfirmBulkActions = computed(() => closeConfirmDirtyCount.value > 1);
 const closeConfirmDirtyTabs = computed(() => queryStore.closeConfirmDirtyTabIds.map((id) => queryStore.tabs.find((tab) => tab.id === id)).filter((tab): tab is NonNullable<ReturnType<typeof queryStore.tabs.find>> => !!tab));
+const closeHasTypeRecovery = computed(() => closeConfirmDirtyTabs.value.some((tab) => tab.typeManagementDraft && tab.typeManagementDraft.state !== "complete"));
+const closeConfirmCurrentTab = computed(() => closeConfirmDirtyTabs.value.find((tab) => tab.id === queryStore.pendingCloseTabId) ?? closeConfirmDirtyTabs.value[0]);
+const closeCurrentHasTypeRecovery = computed(() => closeConfirmCurrentTab.value?.typeManagementDraft && closeConfirmCurrentTab.value.typeManagementDraft.state !== "complete");
 // Numbered across every open tab so unsaved-change confirmations show the
 // same suffixed titles as the tab strip.
 const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
@@ -77,7 +84,7 @@ function closeConfirmTabTitle(tab: QueryTab): string {
   return tabTitles.value.get(tab.id) ?? tabDisplayTitle(tab, t);
 }
 const closeConfirmCurrentTitle = computed(() => {
-  const focusedTab = closeConfirmDirtyTabs.value.find((tab) => tab.id === queryStore.pendingCloseTabId) ?? closeConfirmDirtyTabs.value[0];
+  const focusedTab = closeConfirmCurrentTab.value;
   return focusedTab ? closeConfirmTabTitle(focusedTab) : "";
 });
 const closeConfirmMessage = computed(() => {
@@ -212,6 +219,14 @@ function handleCancelClose() {
 </script>
 
 <template>
+  <Teleport to="body">
+    <TabDragPreviewChip
+      v-if="visibleTabWindowPreview"
+      :title="tabWindowTransfer?.visibleTabWindowPreviewTitle.value ?? ''"
+      class="pointer-events-none fixed z-[9998]"
+      :style="{ left: `${visibleTabWindowPreview.left}px`, top: `${visibleTabWindowPreview.top}px`, width: `${visibleTabWindowPreview.width}px`, height: `${visibleTabWindowPreview.height}px` }"
+    />
+  </Teleport>
   <!-- Targets remain mounted while inactive so the original group bars can
        move here without losing their local presentation state. -->
   <div v-show="driverStoreActive || pluginCenterActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">
@@ -227,7 +242,7 @@ function handleCancelClose() {
     :open="queryStore.showCloseConfirm"
     @update:open="
       (open) => {
-        if (!open) queryStore.cancelClosePendingTab();
+        if (!open) handleCancelClose();
       }
     "
   >
@@ -242,6 +257,7 @@ function handleCancelClose() {
       <!-- 限制最大高度并允许滚动，确保内容超长时底部操作按钮始终可见可点-->
       <div class="max-h-120 min-h-0 min-w-0 overflow-y-auto space-y-2">
         <p class="wrap-anywhere text-sm text-muted-foreground">{{ closeConfirmMessage }}</p>
+        <p v-if="closeHasTypeRecovery" role="alert" class="wrap-anywhere text-sm text-destructive">{{ t("objects.typeManagementCloseWarning") }}</p>
         <Popover v-if="showCloseConfirmBulkActions" :open="closeConfirmListOpen" @update:open="closeConfirmListOpen = $event">
           <PopoverTrigger as-child>
             <button
@@ -271,9 +287,9 @@ function handleCancelClose() {
       <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
-        <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
-        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
-        <Button @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
+        <Button v-if="showCloseConfirmBulkActions && !closeHasTypeRecovery" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
+        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t(closeCurrentHasTypeRecovery ? "objects.typeManagementDiscardClose" : "editor.discardChanges") }}</Button>
+        <Button v-if="!closeCurrentHasTypeRecovery" @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

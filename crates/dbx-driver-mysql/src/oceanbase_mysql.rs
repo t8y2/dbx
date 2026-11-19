@@ -16,7 +16,7 @@ fn materialized_views_sql(database: &str) -> String {
 }
 
 async fn list_materialized_view_names(pool: &MySqlPool, database: &str) -> Result<HashSet<String>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     let result = conn.query_iter(materialized_views_sql(database)).await.map_err(|error| error.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|error| error.to_string())?;
     Ok(rows

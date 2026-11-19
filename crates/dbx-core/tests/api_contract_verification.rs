@@ -40,6 +40,7 @@ fn prepare_schema_diff_function_signature() {
         target_details: vec![],
         source_functions: vec![],
         target_functions: vec![],
+        oracle_routines: None,
         source_sequences: vec![],
         target_sequences: vec![],
         source_rules: vec![],
@@ -80,6 +81,7 @@ fn schema_diff_case_options_are_backward_compatible_and_use_camel_case() {
     .unwrap();
     assert!(!legacy.ignore_table_name_case);
     assert!(!legacy.ignore_column_name_case);
+    assert!(legacy.oracle_routines.is_none());
 
     let mut options = legacy;
     options.ignore_table_name_case = true;
@@ -89,6 +91,7 @@ fn schema_diff_case_options_are_backward_compatible_and_use_camel_case() {
     assert_eq!(json["ignoreColumnNameCase"], true);
     assert!(json.get("ignore_table_name_case").is_none());
     assert!(json.get("ignore_column_name_case").is_none());
+    assert!(json.get("oracleRoutines").is_none());
 }
 
 /// Verify generate_schema_sync_sql accepts all arg types
@@ -142,6 +145,7 @@ fn schema_diff_preparation_field_names() {
         target_details: vec![],
         source_functions: vec![],
         target_functions: vec![],
+        oracle_routines: None,
         source_sequences: vec![],
         target_sequences: vec![],
         source_rules: vec![],

@@ -1,5 +1,5 @@
 import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo, ConnectionConfig } from "@/types/database";
-import type { SchemaDiffTableMapping } from "@/types/schemaDiff";
+import type { OracleRoutineCompareContext, OracleRoutineKind, SchemaDiffTableMapping } from "@/types/schemaDiff";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 
@@ -171,8 +171,9 @@ export interface TriggerDiff {
 }
 
 export interface FunctionDiff {
-  type: "added" | "removed" | "modified";
+  type: "added" | "removed" | "modified" | "equal" | "unreadable" | "conflict";
   name: string;
+  programKind?: OracleRoutineKind;
   source?: FunctionInfo;
   target?: FunctionInfo;
   changes?: string[];
@@ -214,6 +215,10 @@ export interface TableDiff {
   ddl?: string;
   targetDdl?: string;
   sourceTableComment?: string | null;
+  tableCharset?: {
+    source: { characterSet?: string | null; collation?: string | null };
+    target: { characterSet?: string | null; collation?: string | null };
+  };
   targetTableComment?: string | null;
   syncSql?: string;
 }
@@ -241,6 +246,7 @@ export interface SchemaDiffPreparationOptions {
   targetDetails: TableSchemaDetail[];
   sourceFunctions?: FunctionInfo[];
   targetFunctions?: FunctionInfo[];
+  oracleRoutines?: OracleRoutineCompareContext;
   sourceSequences?: SequenceInfo[];
   targetSequences?: SequenceInfo[];
   sourceRules?: RuleInfo[];
@@ -367,10 +373,13 @@ export interface SchemaSyncSqlPlan {
   rollbackSyncSql?: string;
   rollbackCompleteness: RollbackCompleteness;
   missingRollbackObjects: MissingRollbackObject[];
+  forwardCompleteness?: RollbackCompleteness;
+  generationIssues?: Array<{ direction: "forward" | "rollback"; kind: string; name: string; table?: string; reason: string }>;
 }
 
 export interface GenerateSchemaSyncPlanOptions {
   databaseType: DatabaseType;
+  compareCharset?: boolean;
   targetSchema?: string;
   cascadeDelete?: boolean;
   sourceDialect?: string;
@@ -383,20 +392,32 @@ export interface GenerateSchemaSyncPlanOptions {
    * targets only and returns every other engine's script unchanged.
    */
   ignoreForeignKeyChecks?: boolean;
+  oracleDdl?: {
+    separateIndexes: boolean;
+    source?: { connectionId: string; database: string; schema: string };
+    target?: { connectionId: string; database: string; schema: string };
+    tableMappings?: SchemaDiffTableMapping[];
+  };
 }
 
 const MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "sundb", "databend", "gbase"]);
 
-export function schemaDiffDeployTargetSchema(databaseType: DatabaseType | undefined, targetDatabase: string, targetSchema?: string): string | undefined {
-  const schema = targetSchema?.trim();
-  if (schema) return schema;
+/** Resolve the schema that qualifies an object: an explicit schema wins; engines without a
+ * separate schema namespace use the selected database as the schema. */
+export function schemaDiffEffectiveSchema(databaseType: DatabaseType | undefined, database: string, schema?: string): string | undefined {
+  const trimmedSchema = schema?.trim();
+  if (trimmedSchema) return trimmedSchema;
 
-  const database = targetDatabase.trim();
-  if (databaseType && MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES.has(databaseType) && database) {
-    return database;
+  const trimmedDatabase = database.trim();
+  if (databaseType && MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES.has(databaseType) && trimmedDatabase) {
+    return trimmedDatabase;
   }
 
   return undefined;
+}
+
+export function schemaDiffDeployTargetSchema(databaseType: DatabaseType | undefined, targetDatabase: string, targetSchema?: string): string | undefined {
+  return schemaDiffEffectiveSchema(databaseType, targetDatabase, targetSchema);
 }
 
 // Unified object type for UI display
@@ -422,7 +443,8 @@ export interface SchemaDiffObject {
   /** Function arguments signature (for PostgreSQL overloaded functions) */
   arguments?: string;
   /** PROCEDURE vs FUNCTION when objectKind is function (for getObjectSource). */
-  routineType?: "PROCEDURE" | "FUNCTION";
+  routineType?: OracleRoutineKind;
+  routineComparisonState?: FunctionDiff["type"];
   renameMetadata?: {
     confirmed: boolean;
     sourceName?: string;
@@ -626,6 +648,23 @@ export function getOperationType(diffType: string): DiffOperationType {
   }
 }
 
+/**
+ * Whether a diff object starts selected in the review tree.
+ *
+ * Drops stay unselected so a review cannot turn into a destructive deploy by
+ * accident: comparing a sharded database against an unsharded one marks every
+ * table missing on the target as `delete`, and pre-checking those turned "review
+ * the diff" into "drop the extra tables" for one click (#14726). Anything the
+ * user actually wants to drop has to be ticked explicitly.
+ *
+ * Child units keep their own defaults: a modified index or foreign key is a
+ * DROP + CREATE pair that only makes sense as a whole, so it must not be split
+ * by this rule.
+ */
+export function defaultDiffObjectSelected(operationType: DiffOperationType): boolean {
+  return operationType !== "none" && operationType !== "delete";
+}
+
 export function getOperationLabel(operationType: DiffOperationType): string {
   switch (operationType) {
     case "modify":
@@ -653,6 +692,17 @@ function buildSequenceDdl(seq: SequenceInfo): string {
     parts.push(`SELECT setval('${seq.name}', ${seq.last_value});`);
   }
   return parts.join("\n");
+}
+
+function functionDiffIdentity(diff: FunctionDiff): { id: string; kind: OracleRoutineKind } {
+  const args = diff.source?.arguments || diff.target?.arguments || "";
+  if (diff.programKind) {
+    if (!["PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"].includes(diff.programKind)) throw new Error("Unsupported explicit program kind");
+    return { id: `program-${JSON.stringify([diff.programKind, diff.name, args])}`, kind: diff.programKind };
+  }
+  const functionType = (diff.source?.function_type || diff.target?.function_type || "").toUpperCase();
+  if ([diff.source?.function_type, diff.target?.function_type].some((kind) => ["PACKAGE", "PACKAGE_BODY", "PACKAGE BODY"].includes((kind ?? "").toUpperCase()))) throw new Error("Package comparison requires an explicit program kind");
+  return { id: `func-${diff.name}-${args}`, kind: functionType.includes("PROC") ? "PROCEDURE" : "FUNCTION" };
 }
 
 export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiffs: FunctionDiff[] = [], sequenceDiffs: SequenceDiff[] = [], ruleDiffs: RuleDiff[] = [], ownerDiffs: OwnerDiff[] = [], renameCandidates?: RenameCandidate[]): SchemaDiffObject[] {
@@ -720,7 +770,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
               parentId: tableId,
               parentName: diff.name,
             })),
-            ...(diff.sourceTableComment !== diff.targetTableComment
+            ...(diff.sourceTableComment !== diff.targetTableComment || diff.tableCharset
               ? [
                   {
                     id: tableOptionObjectId(diff.name),
@@ -728,7 +778,15 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
                     objectKind: "tableOption" as DiffObjectKind,
                     name: "tableOption",
                     selected: true,
-                    changes: [`comment: ${diff.targetTableComment ?? ""} -> ${diff.sourceTableComment ?? ""}`],
+                    changes: [
+                      ...(diff.sourceTableComment !== diff.targetTableComment ? [`comment: ${diff.targetTableComment ?? ""} -> ${diff.sourceTableComment ?? ""}`] : []),
+                      ...(diff.tableCharset?.source.characterSet && diff.tableCharset?.target.characterSet && diff.tableCharset.source.characterSet.toLowerCase() !== diff.tableCharset.target.characterSet.toLowerCase()
+                        ? [`character set: ${diff.tableCharset.target.characterSet} → ${diff.tableCharset.source.characterSet}`]
+                        : []),
+                      ...(diff.tableCharset?.source.collation && diff.tableCharset?.target.collation && diff.tableCharset.source.collation.toLowerCase() !== diff.tableCharset.target.collation.toLowerCase()
+                        ? [`collation: ${diff.tableCharset.target.collation} → ${diff.tableCharset.source.collation}`]
+                        : []),
+                    ],
                     parentId: tableId,
                     parentName: diff.name,
                   },
@@ -744,7 +802,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       name: diff.name,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : isRenamed ? newName : (diff.targetName ?? diff.name),
-      selected: opType !== "none",
+      selected: defaultDiffObjectSelected(opType),
       sourceDdl: diff.ddl,
       targetDdl: diff.targetDdl,
       deploySql: isRenamed && newName ? (diff.objectType === "view" ? `ALTER VIEW ${diff.name} RENAME TO ${newName};` : `RENAME TABLE ${diff.name} TO ${newName};`) : diff.syncSql,
@@ -757,18 +815,18 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
 
   for (const diff of functionDiffs) {
     const args = diff.source?.arguments || diff.target?.arguments || "";
-    const functionType = (diff.source?.function_type || diff.target?.function_type || "").toUpperCase();
-    const routineType: "PROCEDURE" | "FUNCTION" = functionType.includes("PROC") ? "PROCEDURE" : "FUNCTION";
+    const identity = functionDiffIdentity(diff);
     objects.push({
-      id: `func-${diff.name}-${args}`,
+      id: identity.id,
       operationType: getOperationType(diff.type),
       objectKind: "function",
       name: diff.name,
       arguments: args,
-      routineType,
+      routineType: identity.kind,
+      routineComparisonState: diff.type,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
-      selected: true,
+      selected: defaultDiffObjectSelected(getOperationType(diff.type)),
       sourceDdl: diff.source?.definition,
       targetDdl: diff.target?.definition,
       changes: diff.changes,
@@ -783,7 +841,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       name: diff.name,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
-      selected: true,
+      selected: defaultDiffObjectSelected(getOperationType(diff.type)),
       sourceDdl: diff.source ? buildSequenceDdl(diff.source) : undefined,
       targetDdl: diff.target ? buildSequenceDdl(diff.target) : undefined,
       changes: diff.changes,
@@ -798,7 +856,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       name: diff.name,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
-      selected: true,
+      selected: defaultDiffObjectSelected(getOperationType(diff.type)),
       changes: diff.changes,
     });
   }
@@ -811,7 +869,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       name: diff.objectName,
       sourceName: diff.type === "added" ? undefined : diff.objectName,
       targetName: diff.type === "removed" ? undefined : diff.objectName,
-      selected: true,
+      selected: defaultDiffObjectSelected(getOperationType(diff.type)),
       changes: diff.changes,
     });
   }
@@ -881,6 +939,7 @@ export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: Sc
         triggers,
         sourceTableComment: includeTableOptions ? diff.sourceTableComment : undefined,
         targetTableComment: includeTableOptions ? diff.targetTableComment : undefined,
+        tableCharset: includeTableOptions ? diff.tableCharset : undefined,
         syncSql: undefined,
       },
     ];
@@ -888,7 +947,7 @@ export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: Sc
 
   return {
     diffs,
-    functionDiffs: (result.functionDiffs ?? []).filter((diff) => selectedIds.has(`func-${diff.name}-${diff.source?.arguments || diff.target?.arguments || ""}`)),
+    functionDiffs: (result.functionDiffs ?? []).filter((diff) => selectedIds.has(functionDiffIdentity(diff).id)),
     sequenceDiffs: (result.sequenceDiffs ?? []).filter((diff) => selectedIds.has(`seq-${diff.name}`)),
     ruleDiffs: (result.ruleDiffs ?? []).filter((diff) => selectedIds.has(`rule-${diff.name}`)),
     ownerDiffs: (result.ownerDiffs ?? []).filter((diff) => selectedIds.has(`owner-${diff.objectName}`)),

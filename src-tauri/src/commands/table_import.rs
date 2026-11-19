@@ -147,6 +147,9 @@ mod tests {
             total_bytes: 100,
             elapsed_ms: 25,
             error: None,
+            rows_failed: 0,
+            failures: Vec::new(),
+            failures_truncated: false,
         }
     }
 

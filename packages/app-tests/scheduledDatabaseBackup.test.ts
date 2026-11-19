@@ -16,6 +16,7 @@ import {
   normalizeDatabaseBackupTablePatterns,
   resolveScheduledDatabaseBackupTableScope,
   resolveScheduledDatabaseBackupTargets,
+  supportsNavicatBackupFormat,
   supportsScheduledDatabaseBackup,
   type DatabaseBackupRun,
   type DatabaseBackupSchedule,
@@ -138,6 +139,24 @@ test("backup file names retain the target suffix without an implicit run suffix"
   const path = databaseBackupFilePath("C:\\backups", "Nightly", "app", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd", "gzip", "before-migration");
 
   assert.equal(path, "C:\\backups\\before-migration__app.sql.gz");
+});
+
+test("Navicat backups use the .nb3 suffix and survive schedule normalization", () => {
+  const path = databaseBackupFilePath("/backups", "Nightly", "app", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd", "nb3", "before-migration");
+
+  assert.equal(path, "/backups/before-migration__app.nb3");
+  assert.equal(normalizeDatabaseBackupSchedule({ ...schedule(), outputCompression: "nb3" })?.outputCompression, "nb3");
+  assert.equal(normalizeDatabaseBackupSchedule({ ...schedule(), outputCompression: "zip" })?.outputCompression, "none");
+});
+
+test("Navicat backups are limited to MySQL and PostgreSQL connections", () => {
+  assert.equal(supportsNavicatBackupFormat(["mysql"]), true);
+  assert.equal(supportsNavicatBackupFormat(["postgres"]), true);
+  assert.equal(supportsNavicatBackupFormat(["mysql", "postgres"]), true);
+  assert.equal(supportsNavicatBackupFormat(["opengauss"]), false);
+  assert.equal(supportsNavicatBackupFormat(["mysql", "opengauss"]), false);
+  assert.equal(supportsNavicatBackupFormat([undefined]), false);
+  assert.equal(supportsNavicatBackupFormat([]), false);
 });
 
 test("scheduled runs render a user-defined relative directory template", () => {
@@ -275,6 +294,10 @@ test("all-database PostgreSQL backups exclude template databases", () => {
   assert.deepEqual(resolveScheduledDatabaseBackupTargets([], ["template0", "postgres", "template1", "app"], "postgres"), ["postgres", "app"]);
 });
 
+test("all-database openGauss backups exclude template databases", () => {
+  assert.deepEqual(resolveScheduledDatabaseBackupTargets([], ["template0", "opengauss", "template1", "app"], "opengauss"), ["opengauss", "app"]);
+});
+
 test("explicit system database targets remain available", () => {
   assert.deepEqual(resolveScheduledDatabaseBackupTargets(["mysql"], ["mysql", "app"], "mysql"), ["mysql"]);
 });
@@ -286,6 +309,7 @@ test("explicit backup databases fail when any configured target is missing", () 
 test("scheduled backups are limited to databases with consistent snapshot support", () => {
   assert.equal(supportsScheduledDatabaseBackup("postgres"), true);
   assert.equal(supportsScheduledDatabaseBackup("mysql"), true);
+  assert.equal(supportsScheduledDatabaseBackup("opengauss"), true);
   assert.equal(supportsScheduledDatabaseBackup("dameng"), false);
   assert.equal(supportsScheduledDatabaseBackup("sqlite"), false);
   assert.equal(supportsScheduledDatabaseBackup("sqlserver"), false);

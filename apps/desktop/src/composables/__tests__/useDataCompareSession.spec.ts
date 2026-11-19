@@ -1,3 +1,4 @@
+import { isCompareRowSelected, setCompareSelection, toggleCompareSelection, countCompareSelection } from "@/lib/dataGrid/dataCompareSelection";
 import { strict as assert } from "node:assert";
 import { beforeEach, test, vi } from "vitest";
 import type { ColumnInfo } from "@/types/database";
@@ -108,7 +109,7 @@ test("runs a data compare session independently of the dialog and retains its re
   assert.equal(session.status, "completed");
   assert.equal(session.batchResults.length, 1);
   assert.equal(session.batchResults[0]?.status, "different");
-  assert.equal(session.batchResults[0]?.diff.added[0]?.selected, true);
+  assert.equal(isCompareRowSelected(session.batchResults[0]!.selection.added, 0), true);
   assert.equal(session.syncPlan.statementCount, 1);
   assert.equal(trackerMock.addDataCompareTask.mock.calls.length, 1);
   assert.equal(trackerMock.updateCompareTask.mock.calls.at(-1)?.[1].status, "Done");
@@ -228,6 +229,24 @@ test("keeps the configured per-table match columns after cloning the session con
   assert.deepEqual(session.config.keyColumnsByTable, { users: ["user_id", "email"] });
 });
 
+test("selects missing-target rows independently when their chosen match keys are equal", async () => {
+  const rows = [
+    { key: "same", keyValues: { email: "same" }, values: { user_id: 1, email: "same" } },
+    { key: "same", keyValues: { email: "same" }, values: { user_id: 2, email: "same" } },
+  ];
+  apiMock.prepareDataCompareMissingTarget.mockResolvedValue({ ...preparationFor("users"), result: { added: rows, removed: [], modified: [] } });
+  const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users", keyColumnsByTable: { users: ["email"] }, targetTables: [] }), [{ sourceTable: "users", targetTable: "users" }]);
+  const table = session.batchResults[0]!;
+  toggleCompareSelection(table.selection.added, 0);
+  assert.equal(countCompareSelection(table.selection.added, rows.length), 1);
+  assert.equal(isCompareRowSelected(table.selection.added, 0), false);
+  assert.equal(isCompareRowSelected(table.selection.added, 1), true);
+  assert.deepEqual(buildDataCompareSyncPlanTables([table], "public")[0]?.diff.added, [rows[1]]);
+  setCompareSelection(table.selection.added, false);
+  toggleCompareSelection(table.selection.added, 0);
+  assert.deepEqual(buildDataCompareSyncPlanTables([table], "public")[0]?.diff.added, [rows[0]]);
+});
+
 test("carries the row budget and truncation flags from the backend into the table result", async () => {
   apiMock.prepareDataCompareFromTables.mockImplementation((options: { targetTable: string }) => Promise.resolve({ ...preparationFor(options.targetTable), sourceRowCount: 4_000_000, sourceTruncated: true, targetTruncated: true, rowBudget: 100_000, syncEligible: false }));
 
@@ -238,7 +257,7 @@ test("carries the row budget and truncation flags from the backend into the tabl
   assert.equal(session.batchResults[0]?.targetTruncated, true);
   assert.equal(session.batchResults[0]?.syncEligible, false);
   assert.equal(buildDataCompareSyncPlanTables(session.batchResults, "public").length, 0);
-  assert.equal(session.batchResults[0]?.diff.added[0]?.selected, false);
+  assert.equal(isCompareRowSelected(session.batchResults[0]!.selection.added, 0), false);
 });
 
 test("keeps a truncated missing-target table on the same row budget", async () => {
@@ -260,4 +279,35 @@ test("keeps a truncated missing-target table on the same row budget", async () =
 test("normalizes a per-table match-column map", () => {
   assert.deepEqual(normalizeKeyColumnOverrides({ users: [" id ", ""], orders: [], "": ["x"] }), { users: ["id"], orders: [] });
   assert.deepEqual(normalizeKeyColumnOverrides(undefined), {});
+});
+
+test("keeps selection counts and generated plans consistent without changing diff rows", async () => {
+  apiMock.prepareDataCompareFromTables.mockResolvedValue({
+    ...preparationFor("users"),
+    result: {
+      added: [
+        { key: "1", keyValues: { id: 1 }, values: { id: 1 } },
+        { key: "2", keyValues: { id: 2 }, values: { id: 2 } },
+      ],
+      removed: [],
+      modified: [],
+    },
+  });
+  const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users" }), [{ sourceTable: "users", targetTable: "users" }]);
+  const table = session.batchResults[0]!;
+  const rows = table.diff.added;
+  const keys = () => buildDataCompareSyncPlanTables(session.batchResults, "public")[0]?.diff.added.map((row) => row.key) ?? [];
+  assert.deepEqual(keys(), ["1", "2"]);
+  toggleCompareSelection(table.selection.added, 0);
+  assert.equal(countCompareSelection(table.selection.added, rows.length), 1);
+  assert.deepEqual(keys(), ["2"]);
+  setCompareSelection(table.selection.added, false);
+  assert.deepEqual(keys(), []);
+  toggleCompareSelection(table.selection.added, 0);
+  assert.deepEqual(keys(), ["1"]);
+  setCompareSelection(table.selection.added, true);
+  assert.equal(countCompareSelection(table.selection.added, rows.length), 2);
+  assert.deepEqual(keys(), ["1", "2"]);
+  assert.equal(table.diff.added, rows);
+  assert.deepEqual(rows[0], { key: "1", keyValues: { id: 1 }, values: { id: 1 } });
 });

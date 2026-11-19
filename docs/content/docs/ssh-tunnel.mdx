@@ -17,7 +17,7 @@ DBX supports three tunnel / proxy types:
 | Proxy       | Your network requires SOCKS5 or HTTP CONNECT proxy access.               |
 | HTTP tunnel | Only a web server can reach the database, and SSH/VPN is not available. |
 
-For network databases, DBX opens a temporary port in its current runtime and points the database driver at that port. The tunnel / proxy layer forwards protocol bytes to the real target. A connection may combine multiple transport layers, which DBX establishes in the order shown in the connection dialog.
+For network databases, DBX opens a local port in its current runtime (a random one by default, or a fixed one for an SSH layer) and points the database driver at that port. The tunnel / proxy layer forwards protocol bytes to the real target. A connection may combine multiple transport layers, which DBX establishes in the order shown in the connection dialog.
 
 ## Per-Connection and Shared Profiles
 
@@ -41,6 +41,7 @@ SSH tunnels are built in. You do not need to create a manual terminal port forwa
 | SSH Port        | Port for SSH (default: 22)                                                    |
 | SSH User        | Username for SSH authentication                                               |
 | Connect Timeout | Maximum time DBX waits while opening the SSH connection; default is 5 seconds |
+| Local Port      | Optional fixed port the tunnel listens on; empty uses a random free port      |
 
 <Tabs groupId="ssh-auth" items={['Private Key (Recommended)', 'Private Key + Password', 'Password', 'No Credential']}>
   <Tab value="Private Key (Recommended)">
@@ -83,6 +84,23 @@ DBX verifies the SSH host key before it sends a credential. Trusted keys come fr
 <Callout type="warn">LAN exposure changes the SSH listener from `127.0.0.1` to `0.0.0.0`. This expands the attack surface of the DBX runtime and should only be used on trusted networks with appropriate firewall rules.</Callout>
 
 On Desktop, this may make the temporary port reachable through your computer. In Docker/Web, the listener is inside the server or container; external reachability still depends on published ports, container networking, and the host firewall.
+
+### Fixed Local Port
+
+By default, DBX picks a random free local port for the SSH tunnel. Set **Local Port** (1-65535) to make the tunnel listen on a port you choose instead, for example `4059`. Other local tools, such as `psql` or a script, can then connect through the same tunnel at `127.0.0.1:4059`.
+
+- The port is held only while the connection is open in DBX. It is released when the connection is closed.
+- Only the last enabled layer can use it, and only when that layer is an SSH layer configured directly on the connection. A layer that references a shared profile from **Settings → Tunnels** has no Local Port field. Setting Local Port on an earlier layer fails with an error.
+- If the port is already in use or cannot be bound, connecting fails with a message that asks you to close the other program or choose another port.
+- The connection **Test** button, **Test SSH tunnel**, the production-database picker and other one-time drafts, scheduled backups, and a standalone stdio MCP server or the CLI use a random port, so they do not collide with a connection that is already open. Kafka with a single `127.0.0.1` bootstrap server is the exception described below.
+- A host alias from `~/.ssh/config` that resolves to a multi-hop `ProxyJump` chain does not support a fixed local port yet, and connecting returns an error. Add the jump host as its own first layer and point the last layer at the target's real `HostName` or at an alias without `ProxyJump`, or leave Local Port empty.
+- RabbitMQ uses the fixed port for the AMQP connection. The management API tunnel keeps a random port.
+- Kafka with a single `127.0.0.1` bootstrap server always listens on the bootstrap port. Leave Local Port empty or set it to that port; a different port returns an error.
+- Local Port is not supported for SQLite over SSH, ClickHouse, Turso, RocketMQ, Redis Cluster, Redis Sentinel, or plugin connections that route through SOCKS5 (`proxy_route`), because they connect through a remote worker, a SOCKS5 route, or per-node tunnels instead of one local tunnel port. The connection dialog shows an error if it is set. If the setting arrives some other way, such as an import, cloud sync, or a hand-edited config, **Test** and connecting fail with an error instead of ignoring it.
+- The connection dialog has no tunnel settings for Cloudflare D1. An imported Cloudflare D1 config that has Local Port set fails when connecting; opening the connection in the dialog and saving it removes its tunnel settings.
+- In Docker/Web, the fixed port is opened on the server or container, not on the computer running the browser.
+
+<Callout type="warn">With **Expose tunnel to LAN** on, the fixed port listens on `0.0.0.0`, so any device that can reach your machine on that port can use the tunnel. Use it only on trusted networks with appropriate firewall rules.</Callout>
 
 ## Proxy
 

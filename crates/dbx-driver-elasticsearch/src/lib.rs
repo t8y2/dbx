@@ -1,5 +1,6 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use regex::Regex;
+use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,6 +62,7 @@ pub struct EsClient {
     base_url: String,
     fallback_base_urls: Vec<String>,
     auth: Option<(String, String)>,
+    api_key: Option<HeaderValue>,
     transport_mode: ElasticsearchTransportMode,
     /// GET path used for connect / health / test (default "/").
     connectivity_check_path: String,
@@ -137,6 +139,7 @@ impl EsClient {
             base_url,
             fallback_base_urls,
             auth,
+            api_key: None,
             transport_mode,
             connectivity_check_path,
             connectivity_check_disabled,
@@ -168,7 +171,7 @@ impl EsClient {
         let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
         let connectivity_check_disabled = elasticsearch_connectivity_check_disabled(external_config);
         let index_grouping = elasticsearch_index_grouping(external_config);
-        Self::new_with_mode(
+        let mut client = Self::new_with_mode(
             &base_url,
             username,
             password,
@@ -181,7 +184,20 @@ impl EsClient {
             ca_cert_path,
             client_cert_path,
             client_key_path,
-        )
+        )?;
+        if external_config.and_then(|config| config.get("authType")).and_then(Value::as_str) == Some("apiKey") {
+            // Reuse the encrypted main password slot rather than storing a secret in external_config.
+            let key = password
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .ok_or_else(|| "Elasticsearch API key is required".to_string())?;
+            let mut header = HeaderValue::from_str(&format!("ApiKey {key}"))
+                .map_err(|_| "Invalid Elasticsearch API key".to_string())?;
+            header.set_sensitive(true);
+            client.auth = None;
+            client.api_key = Some(header);
+        }
+        Ok(client)
     }
 
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
@@ -214,7 +230,9 @@ impl EsClient {
     }
 
     fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some((ref user, ref pass)) = self.auth {
+        if let Some(ref api_key) = self.api_key {
+            req.header(AUTHORIZATION, api_key.clone())
+        } else if let Some((ref user, ref pass)) = self.auth {
             req.basic_auth(user, Some(pass))
         } else {
             req
@@ -260,6 +278,7 @@ impl Clone for EsClient {
             base_url: self.base_url.clone(),
             fallback_base_urls: self.fallback_base_urls.clone(),
             auth: self.auth.clone(),
+            api_key: self.api_key.clone(),
             transport_mode: self.transport_mode,
             connectivity_check_path: self.connectivity_check_path.clone(),
             connectivity_check_disabled: self.connectivity_check_disabled,
@@ -2356,8 +2375,10 @@ fn parse_elasticsearch_response_with_sql_parser(
             Ok(crate::types::QueryResult {
                 columns,
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows,
                 affected_rows: row_count,
@@ -2384,8 +2405,10 @@ fn parse_elasticsearch_response_with_sql_parser(
         Ok(crate::types::QueryResult {
             columns,
             column_types,
+            deferred_large_value_cells: Vec::new(),
             column_sortables: vec![],
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows,
             affected_rows: row_count,
@@ -2558,8 +2581,10 @@ fn raw_json_response_result(
     crate::types::QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(body_text.into())]],
         affected_rows: 0,
@@ -2627,8 +2652,10 @@ fn parse_elasticsearch_rest_response_with_sql_parser(
     Ok(crate::types::QueryResult {
         columns: vec!["response".to_string()],
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows,
         affected_rows,
@@ -3135,8 +3162,10 @@ pub fn parse_tabular_sql_response(
     Some(QueryResult {
         columns: column_names,
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: vec![],
         spatial_columns: vec![],
+        raw_key_cells: Vec::new(),
         spatial_values: vec![],
         rows: result_rows,
         affected_rows: total_key
@@ -3683,6 +3712,93 @@ mod tests {
 
         assert!(response.status().is_success());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_key_authenticates_connectivity_and_query_requests_in_both_modes() {
+        for mode in ["direct", "kibana"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let request = read_http_request(&mut socket).await;
+                    let auth = request
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                        .map(|(_, value)| value.trim());
+                    assert_eq!(auth, Some("ApiKey c3ludGhldGljOmtleQ=="));
+                    if mode == "kibana" {
+                        assert!(request.starts_with("POST /api/console/proxy?"));
+                        assert!(request.contains("kbn-xsrf: true"));
+                    }
+                    write_json_http_response(&mut socket, 200, "{}").await;
+                }
+            });
+            let config = json!({ "mode": mode, "authType": "apiKey" });
+            let mut client = EsClient::from_config(
+                &format!("http://{addr}"),
+                Some("ignored-user"),
+                Some(" c3ludGhldGljOmtleQ== "),
+                false,
+                None,
+                Some(&config),
+                Duration::from_secs(2),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
+            let cloned = client.clone();
+            super::execute_rest_query(&cloned, "GET /_cluster/health").await.unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn api_key_mode_rejects_missing_or_invalid_keys_without_echoing_the_credential() {
+        for key in [None, Some(" "), Some("synthetic-secret\r\nX-Injected: yes")] {
+            let result = EsClient::from_config(
+                "http://localhost:9200",
+                None,
+                key,
+                false,
+                None,
+                Some(&json!({ "authType": "apiKey" })),
+                Duration::from_secs(1),
+                None,
+                None,
+                None,
+            );
+            let error = result.err().expect("invalid API key should be rejected");
+            assert!(!error.contains("synthetic-secret"));
+        }
+    }
+
+    #[test]
+    fn existing_connections_keep_basic_or_anonymous_authentication() {
+        for (username, expected) in [(Some("elastic"), Some("Basic ZWxhc3RpYzpzZWNyZXQ=")), (None, None)] {
+            let client = EsClient::from_config(
+                "http://localhost:9200",
+                username,
+                Some("secret"),
+                false,
+                None,
+                None,
+                Duration::from_secs(1),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let request = client.get("/").build().unwrap();
+            assert_eq!(
+                request.headers().get(reqwest::header::AUTHORIZATION).map(|value| value.to_str().unwrap()),
+                expected
+            );
+        }
     }
 
     #[test]

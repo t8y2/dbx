@@ -68,6 +68,7 @@ async fn live_oceanbase_sql_files_commit_rollback_failure_and_cancel() {
             database: database.clone(), schema: None, file_path: String::new(), continue_on_error: false,
             selected_tables: None, part_cooldown_ms: 0, skip_relational_constraints: false, txn_session_id: None,
             failure_log_enabled: true,
+            resolve_includes: false,
             encoding: Default::default(),
         };
         let first = directory.path().join("first.sql");

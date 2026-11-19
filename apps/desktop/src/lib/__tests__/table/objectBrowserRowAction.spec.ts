@@ -43,10 +43,15 @@ describe("singleClickRowAction", () => {
     expect(singleClickRowAction(row(type, "programmable_test"), "xugu")).toBe("open-source");
   });
 
-  it("only Xugu TYPE rows open source", () => {
+  it("routes Oracle-family TYPE to details and TYPE_BODY to read-only source", () => {
     expect(singleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
     expect(doubleClickRowAction(row("TYPE", "app_status"), "xugu")).toBe("open-source");
     expect(singleClickRowAction(row("TYPE_BODY", "app_status"), "xugu")).toBe("open-source");
+    for (const dbType of ["oracle", "oceanbase-oracle", "dameng"] as const) {
+      expect(singleClickRowAction(row("TYPE", "app_status"), dbType), dbType).toBe("type-info");
+      expect(doubleClickRowAction(row("TYPE", "app_status"), dbType), dbType).toBe("type-info");
+      expect(singleClickRowAction(row("TYPE_BODY", "app_status"), dbType), dbType).toBe("open-source");
+    }
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
       // Verified PG-family TYPE rows open the read-only details panel.
       expect(singleClickRowAction(row("TYPE", "app_status"), dbType), String(dbType)).toBe("type-info");

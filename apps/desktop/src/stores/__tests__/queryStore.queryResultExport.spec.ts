@@ -1,11 +1,17 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { QueryResult } from "@/types/database";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 
 const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   getConfig: vi.fn(),
   connectionIdentifierQuote: vi.fn(),
   executeMulti: vi.fn(),
+  getColumns: vi.fn(),
+  listIndexes: vi.fn(),
+  buildTableSelectSql: vi.fn(),
+  buildDataGridContextFilterCondition: vi.fn(),
   prepareQueryPaginationExecutionPlan: vi.fn(),
   closeClientConnectionSession: vi.fn(),
   closeQuerySession: vi.fn(),
@@ -15,6 +21,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/backend/api", () => ({
   saveOpenTabsState: vi.fn().mockResolvedValue(undefined),
   executeMulti: mocks.executeMulti,
+  getColumns: mocks.getColumns,
+  listIndexes: mocks.listIndexes,
+  buildTableSelectSql: mocks.buildTableSelectSql,
+  buildDataGridContextFilterCondition: mocks.buildDataGridContextFilterCondition,
   prepareQueryPaginationExecutionPlan: mocks.prepareQueryPaginationExecutionPlan,
   closeClientConnectionSession: mocks.closeClientConnectionSession,
   closeQuerySession: mocks.closeQuerySession,
@@ -25,6 +35,7 @@ vi.mock("@/stores/connectionStore", () => ({
     ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConfig,
     connectionIdentifierQuote: mocks.connectionIdentifierQuote,
+    lookupLocalCompletionTables: () => [],
   }),
 }));
 
@@ -53,6 +64,7 @@ describe("queryStore query result export", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.exportSettings.exportRowLimitEnabled = false;
+    mocks.exportSettings.exportRowLimit = 100;
     installLocalStorage();
     setActivePinia(createPinia());
     mocks.ensureConnected.mockResolvedValue(undefined);
@@ -60,6 +72,242 @@ describe("queryStore query result export", () => {
     mocks.closeQuerySession.mockResolvedValue(undefined);
     mocks.getConfig.mockReturnValue({ id: "kingbase-1", name: "Kingbase", db_type: "kingbase", database: "app", query_timeout_secs: 30 });
     mocks.connectionIdentifierQuote.mockReturnValue("[");
+  });
+
+  async function legacySheetFixture() {
+    const config = { id: "oracle-1", name: "Oracle", db_type: "oracle" as const, database: "XE" };
+    mocks.getConfig.mockReturnValue(config);
+    mocks.getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_primary_key: true },
+      { name: "BODY", data_type: "CLOB" },
+    ]);
+    mocks.listIndexes.mockResolvedValue([{ name: "PK_ITEMS", columns: ["ID"], is_primary: true, is_unique: true }]);
+    mocks.buildDataGridContextFilterCondition.mockImplementation(async ({ columnName, value }) => `${columnName} = ${value}`);
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT ID, BODY FROM HR.ITEMS WHERE ID = 7");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("oracle-1", "XE", "Query");
+    const result: QueryResult = {
+      columns: ["KEY_ALIAS", "BODY_ALIAS"],
+      rows: [[7, "preview"]],
+      affected_rows: 0,
+      execution_time_ms: 0,
+      large_value_cells: [{ row_index: 0, column_index: 1, original_bytes: 100 }],
+      legacy_export_source: { connectionId: "oracle-1", database: "XE", schema: "HR", databaseType: "oracle", connectionFingerprint: connectionConfigFingerprint(config), statementSql: "SELECT i.ID AS KEY_ALIAS, i.BODY AS BODY_ALIAS FROM HR.ITEMS i", ordinaryReadSafe: true },
+    };
+    return { store, id, result };
+  }
+
+  it("resolves a non-active sheet from its captured table and aliases without replaying the query", async () => {
+    const { store, id, result } = await legacySheetFixture();
+    const capture = store.captureResultLegacyValuesForExport(id, result);
+    expect(capture.unavailableReason).toBeUndefined();
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.database = "OTHER";
+    tab.sql = "CALL other_procedure()";
+    result.rows[0]![0] = 99;
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["ID", "BODY"], rows: [[7, "complete"]], affected_rows: 0, execution_time_ms: 0 }]);
+    const values = await capture.read!(new AbortController().signal);
+    expect(values.get(0)?.get(1)).toBe("complete");
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ schema: "HR", tableName: "ITEMS", columns: ["ID", "BODY"], whereInput: "((ID = 7))" }));
+    expect(mocks.executeMulti).toHaveBeenCalledWith("oracle-1", "XE", "SELECT ID, BODY FROM HR.ITEMS WHERE ID = 7", undefined, expect.any(String), expect.any(Object));
+    expect(result.rows).toEqual([[99, "preview"]]);
+  });
+
+  it.each(["missing", "procedure", "expression", "setup"])("does not infer missing or unsafe legacy sheet provenance (%s)", async (kind) => {
+    const { store, id, result } = await legacySheetFixture();
+    if (kind === "missing") delete result.legacy_export_source;
+    if (kind === "procedure") result.legacy_export_source!.statementSql = "CALL fill_items()";
+    if (kind === "expression") result.legacy_export_source!.statementSql = "SELECT ID, BODY || 'suffix' AS BODY_ALIAS FROM HR.ITEMS";
+    if (kind === "setup") result.legacy_export_source!.ordinaryReadSafe = false;
+    const capture = store.captureResultLegacyValuesForExport(id, result);
+    if (capture.read) await expect(capture.read(new AbortController().signal)).rejects.toMatchObject({ status: "failed" });
+    else expect(capture.unavailableReason).toBeTruthy();
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("does not borrow the active grid row identifier for a different sheet", async () => {
+    const { store, id, result } = await legacySheetFixture();
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.tableMeta = { tableName: "OTHER", schema: "HR", primaryKeys: ["BODY"], columns: [{ name: "BODY", data_type: "VARCHAR" }] };
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "ID", data_type: "NUMBER" },
+      { name: "BODY", data_type: "CLOB" },
+    ]);
+    mocks.listIndexes.mockResolvedValueOnce([]);
+    await expect(store.captureResultLegacyValuesForExport(id, result).read!(new AbortController().signal)).rejects.toMatchObject({ status: "failed" });
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    expect(tab.tableMeta.tableName).toBe("OTHER");
+  });
+
+  it.each(["success", "transport"])("waits for the actual metadata reply after cancellation (%s)", async (outcome) => {
+    const { store, id, result } = await legacySheetFixture();
+    let resolve!: (value: unknown[]) => void;
+    let reject!: (error: Error) => void;
+    mocks.getColumns.mockImplementationOnce(
+      () =>
+        new Promise((yes, no) => {
+          resolve = yes;
+          reject = no;
+        }),
+    );
+    const controller = new AbortController();
+    const pending = store.captureResultLegacyValuesForExport(id, result).read!(controller.signal).catch((error) => error);
+    await vi.waitFor(() => expect(mocks.getColumns).toHaveBeenCalledOnce());
+    controller.abort();
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(mocks.listIndexes).not.toHaveBeenCalled();
+    if (outcome === "transport") reject(new Error("metadata reply lost"));
+    else resolve([]);
+    expect(await pending).toMatchObject({ status: outcome === "transport" ? "unknown" : "cancelled" });
+    expect(mocks.listIndexes).not.toHaveBeenCalled();
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
+  it("captures SQL, location and export settings before a queued request starts", async () => {
+    mocks.exportSettings.exportRowLimitEnabled = true;
+    mocks.exportSettings.exportRowLimit = 100;
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("kingbase-1", "original", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = "SELECT id FROM original_items";
+    tab.result = { columns: ["id"], rows: [[1]], execution_time_ms: 0, affected_rows: 0 };
+    const build = store.captureQueryResultExportRequest(id, true)!;
+    tab.lastExecutedSql = "SELECT secret FROM other_items";
+    tab.database = "other";
+    mocks.exportSettings.exportRowLimit = 9;
+    store.tabs.splice(store.tabs.indexOf(tab), 1);
+
+    const request = await build({ exportId: "queued", filePath: "original.csv", format: "csv" });
+    expect(request).toEqual(expect.objectContaining({ connectionId: "kingbase-1", database: "original", sql: "SELECT id FROM original_items", rowLimit: 100 }));
+  });
+
+  it("rejects a queued request when the connection identity changes during reconnect", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("kingbase-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = "SELECT id FROM items";
+    tab.result = { columns: ["id"], rows: [[1]], execution_time_ms: 0, affected_rows: 0 };
+    const build = store.captureQueryResultExportRequest(id, true)!;
+    mocks.ensureConnected.mockImplementationOnce(async () => {
+      mocks.getConfig.mockReturnValue({ id: "kingbase-1", name: "Kingbase", db_type: "kingbase", host: "different-target" });
+    });
+    await expect(build({ exportId: "queued", filePath: "original.csv", format: "csv" })).rejects.toThrow((await import("@/i18n")).default.global.t("exportProgress.connectionChanged"));
+  });
+
+  it("captures fallback pagination and waits for its independent session to close", async () => {
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (request) => ({ sqlToExecute: request.sql, pageLimit: 2, pageOffset: 0, useAgentResultSession: false }));
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[1]], execution_time_ms: 0, affected_rows: 0 }]);
+    let close!: () => void;
+    mocks.closeClientConnectionSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          close = resolve;
+        }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("kingbase-1", "original", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = "SELECT id FROM original_items";
+    tab.result = { columns: ["id"], rows: [[0]], has_more: true, execution_time_ms: 0, affected_rows: 0 };
+    const fetch = store.captureTabResultForExport(id)!;
+    tab.lastExecutedSql = "SELECT secret FROM other_items";
+    tab.database = "other";
+    let settled = false;
+    const result = fetch().then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.waitFor(() => expect(mocks.closeClientConnectionSession).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    expect(mocks.executeMulti).toHaveBeenCalledWith("kingbase-1", "original", "SELECT id FROM original_items", undefined, expect.any(String), expect.objectContaining({ clientSessionId: expect.stringContaining(`${id}:export:`) }));
+    close();
+    expect((await result)?.rows).toEqual([[1]]);
+  });
+
+  it.each(["success", "transport", "cursor_cleanup"] as const)("keeps captured export cancellation behind the actual read and cleanup (%s)", async (completion) => {
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ sqlToExecute: "SELECT id FROM items", pageLimit: 1, pageOffset: 0, useAgentResultSession: true });
+    let resolveRead!: (value: unknown) => void;
+    let rejectRead!: (error: Error) => void;
+    mocks.executeMulti.mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          resolveRead = resolve;
+          rejectRead = reject;
+        }),
+    );
+    if (completion === "cursor_cleanup") mocks.closeQuerySession.mockRejectedValueOnce(new Error("cursor close lost"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("kingbase-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = "SELECT id FROM items";
+    tab.result = { columns: ["id"], rows: [[0]], has_more: true, execution_time_ms: 0, affected_rows: 0 };
+    const controller = new AbortController();
+    const pending = store.captureTabResultForExport(id)!(undefined, { signal: controller.signal }).catch((error) => error);
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledOnce());
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    controller.abort();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(mocks.closeClientConnectionSession).not.toHaveBeenCalled();
+    if (completion === "transport") rejectRead(new Error("read transport lost"));
+    else resolveRead([{ columns: ["id"], rows: [[1]], has_more: true, session_id: "owned-cursor", execution_time_ms: 0, affected_rows: 0 }]);
+    expect(await pending).toMatchObject({ status: completion === "success" ? "cancelled" : "unknown" });
+    expect(mocks.executeMulti).toHaveBeenCalledOnce();
+    expect(mocks.executeMulti.mock.calls[0]![5]).toMatchObject({ deferLobs: false });
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledOnce();
+    if (completion !== "transport") expect(mocks.closeQuerySession).toHaveBeenCalledWith("kingbase-1", "app", "owned-cursor", expect.any(String), undefined);
+  });
+
+  it.each(["preview", "unknown_error", "not_started"] as const)("does not return incomplete captured export data (%s)", async (reason) => {
+    mocks.prepareQueryPaginationExecutionPlan.mockResolvedValue({ sqlToExecute: "SELECT id FROM items", pageLimit: 2, pageOffset: 0, useAgentResultSession: false });
+    mocks.executeMulti.mockResolvedValueOnce([
+      {
+        columns: ["id"],
+        rows: [["preview"]],
+        execution_time_ms: 0,
+        affected_rows: 0,
+        ...(reason === "preview"
+          ? { large_value_cells: [{ row_index: 0, column_index: 0, original_bytes: 5000 }] }
+          : { execution_error: true, error: { version: 1, code: "DBX-JDBC-4001", messageKey: "backendErrors.jdbc.sqlFailed", messageParams: {}, operationOutcome: reason === "not_started" ? "not_started" : "unknown" } }),
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("kingbase-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = "SELECT id FROM items";
+    tab.result = { columns: ["id"], rows: [[0]], has_more: true, execution_time_ms: 0, affected_rows: 0 };
+    await expect(store.captureTabResultForExport(id)!()).rejects.toMatchObject({ status: reason === "unknown_error" ? "unknown" : "failed" });
+    expect(mocks.closeClientConnectionSession).toHaveBeenCalledOnce();
+  });
+
+  it.each(["ending", "lost", "unknown"] as const)("rejects a queued request whose transaction is %s", async (status) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("kingbase-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.lastExecutedSql = "SELECT id FROM items";
+    tab.result = { columns: ["id"], rows: [[1]], execution_time_ms: 0, affected_rows: 0 };
+    tab.autoCommit = false;
+    tab.txnSessionId = "original-transaction";
+    const build = store.captureQueryResultExportRequest(id, true)!;
+    tab.txnStatus = status;
+    await expect(build({ exportId: "queued", filePath: "original.csv", format: "csv" })).rejects.toThrow((await import("@/i18n")).default.global.t("exportProgress.transactionUnavailable"));
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
   });
 
   it.each([99, 100, 101])("probes a result of %i rows without a cached total", async (count) => {

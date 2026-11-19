@@ -5,7 +5,7 @@ description: Stream structure, data, and readable database objects from one or m
 
 Database Export creates reviewable SQL scripts for small backups, migrations, test datasets, or snapshots before risky changes. It can export one database/schema or orchestrate separate exports for multiple databases in a connection.
 
-<Callout type="info">SQL export is a logical export, not a database-native physical backup. Use official database tools for large production systems, point-in-time recovery, incremental backup, or strict consistency. For scheduled consistent MySQL and PostgreSQL exports, see [Database Backup](/en/docs/database-backup).</Callout>
+<Callout type="info">SQL export is a logical export, not a database-native physical backup. Use official database tools for large production systems, point-in-time recovery, incremental backup, or strict consistency. For scheduled consistent MySQL, PostgreSQL, and openGauss exports, see [Database Backup](/en/docs/database-backup).</Callout>
 
 ## Exported Content
 
@@ -18,6 +18,8 @@ Database Export creates reviewable SQL scripts for small backups, migrations, te
 | Import helpers | Engine-specific setup and cleanup for foreign-key checks, identity writes, routine delimiters, and similar requirements |
 
 When exporting only selected tables, structure and data are limited to that subset. Schema-wide routines are not pulled in merely because a few tables were selected. Object coverage always depends on the database and driver.
+
+openGauss exports currently omit `CREATE SEQUENCE`, `ALTER SEQUENCE ... OWNED BY`, and `setval`, so restored serial counters start at 1 and custom sequences are missing; the same PostgreSQL-only handling means schemas with cyclic foreign keys are not restorable.
 
 ## Single-Database Export
 
@@ -76,6 +78,10 @@ MySQL exports can add `CREATE DATABASE IF NOT EXISTS` and `USE` at the beginning
 
 By default, table-level `AUTO_INCREMENT=N` is preserved. Omit Auto Increment removes only that table option; it does not remove the column's `AUTO_INCREMENT` attribute. This is useful when a fresh environment should choose its own starting sequence value.
 
+### MySQL Table Name Prefix
+
+MySQL-family data inserts qualify every table with its source database (`db.table`). **Omit database prefix in table names** drops that qualifier from the generated `INSERT` statements. Without a `USE` preamble the rows go to whatever database the replay session selects; when the export also writes a `USE` statement, that line still switches the context back to the source database, so targeting a different database requires editing or removing it. The switch applies to MySQL-family data inserts only (MySQL, GoldenDB, Doris, StarRocks), shows when data export is enabled, and is off by default.
+
 ## Data Writing and Consistency
 
 DBX uses paged or streaming reads and writes rows incrementally. Interactive exports currently use a batch size of 1000 rows. Generated inserts may be multi-row or single-row depending on database capabilities.
@@ -113,7 +119,7 @@ Use [SQL File Execution](/en/docs/sql-file) to preview and run an exported scrip
 
 <Cards>
   <Card title="Database Backup" href="/en/docs/database-backup">
-    Schedule consistent MySQL and PostgreSQL SQL backups in Desktop.
+    Schedule consistent MySQL, PostgreSQL, and openGauss SQL backups in Desktop.
   </Card>
   <Card title="SQL File Execution" href="/en/docs/sql-file">
     Preview, batch-execute, and review SQL file results.

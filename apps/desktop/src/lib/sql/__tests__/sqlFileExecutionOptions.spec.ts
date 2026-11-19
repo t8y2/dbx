@@ -17,13 +17,14 @@ describe("sqlFileExecutionOptions", () => {
   }
 
   describe("readSqlFileCloseOnSuccess", () => {
-    it("defaults to true when storage is unpopulated", () => {
+    // Results must stay visible by default: auto-closing hid the execution outcome entirely (#14078).
+    it("defaults to false when storage is unpopulated", () => {
       const storage = createMockStorage();
-      expect(readSqlFileCloseOnSuccess(storage)).toBe(true);
+      expect(readSqlFileCloseOnSuccess(storage)).toBe(false);
     });
 
-    it("defaults to true when storage is undefined", () => {
-      expect(readSqlFileCloseOnSuccess(undefined)).toBe(true);
+    it("defaults to false when storage is undefined", () => {
+      expect(readSqlFileCloseOnSuccess(undefined)).toBe(false);
     });
 
     it("returns true when stored value is true", () => {
@@ -36,13 +37,13 @@ describe("sqlFileExecutionOptions", () => {
       expect(readSqlFileCloseOnSuccess(storage)).toBe(false);
     });
 
-    it("falls back to true when storage throws an exception", () => {
+    it("falls back to false when storage throws an exception", () => {
       const errorStorage = {
         getItem: () => {
           throw new Error("SecurityError: access denied");
         },
       } as unknown as Storage;
-      expect(readSqlFileCloseOnSuccess(errorStorage)).toBe(true);
+      expect(readSqlFileCloseOnSuccess(errorStorage)).toBe(false);
     });
   });
 

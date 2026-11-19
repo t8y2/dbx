@@ -9,6 +9,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { uuid } from "@/lib/common/utils";
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
+import { withoutSshLocalPorts } from "@/lib/connection/sshLocalPort";
 import { hasEnabledTransportLayers } from "@/lib/backend/connectionTransport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { revealPathInFileManager } from "@/lib/backend/tauri";
@@ -153,7 +154,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     for (const target of targets) {
       const config = connectionStore.getConfig(target.connectionId);
       if (!config) continue;
-      const newConfig = { ...config, id: uuid(), name: `${config.name} (Copy)` };
+      const newConfig = { ...withoutSshLocalPorts(config), id: uuid(), name: `${config.name} (Copy)` };
       await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(target.connectionId));
       duplicatedCount += 1;
     }

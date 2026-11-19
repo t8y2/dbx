@@ -403,6 +403,7 @@ class Gbase8sAgentTest {
                     {1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null}
                 }
             ),
+            resultSet(new String[]{"colname", "column_default", "default_class"}, new Object[][]{}),
             resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
             resultSet(
                 new String[]{"colname", "coltype", "colno", "collength", "comments"},
@@ -420,13 +421,19 @@ class Gbase8sAgentTest {
 
         List<ColumnInfo> columns = agent.getColumns("root", "products");
 
-        Assertions.assertEquals(3, sql.size());
+        Assertions.assertEquals(4, sql.size());
         Assertions.assertTrue(sql.get(0).contains("FROM sysconstraints"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
-        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("e.default AS column_default"), sql.get(1));
-        Assertions.assertTrue(sql.get(2).contains("FROM syscolumns"), sql.get(2));
-        Assertions.assertTrue(sql.get(2).contains("t.owner = ?"), sql.get(2));
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaults"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("gbasedbt.get_default_value("), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("WHEN 'L' THEN gbasedbt.get_default_value(c.coltype, c.extended_id, c.collength, d.`default`::lvarchar(256))"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("ELSE d.`default`"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("d.class = 'T'"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("seqno"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("JOIN sysdefaultsexpr"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("e.`default` AS column_default"), sql.get(2));
+        Assertions.assertTrue(sql.get(3).contains("FROM syscolumns"), sql.get(3));
+        Assertions.assertTrue(sql.get(3).contains("t.owner = ?"), sql.get(3));
         Assertions.assertEquals(3, columns.size());
         Assertions.assertEquals("product_id", columns.get(0).getName());
         Assertions.assertEquals("INTEGER", columns.get(0).getData_type());
@@ -439,7 +446,7 @@ class Gbase8sAgentTest {
         Assertions.assertEquals(2, columns.get(2).getNumeric_scale());
         Assertions.assertEquals("Product identifier", columns.get(0).getComment());
         Assertions.assertEquals("Unit price", columns.get(2).getComment());
-        Assertions.assertTrue(sql.get(2).contains("LEFT JOIN syscolcomms"), sql.get(2));
+        Assertions.assertTrue(sql.get(3).contains("LEFT JOIN syscolcomms"), sql.get(3));
     }
 
     @Test
@@ -448,6 +455,7 @@ class Gbase8sAgentTest {
         TestSupport.setPrivateConnection(agent, preparedConnection(
             new ArrayList<>(),
             resultSet(new String[]{"part1"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "column_default", "default_class"}, new Object[][]{}),
             resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
             resultSet(
                 new String[]{"colname", "coltype", "colno", "collength", "comments"},
@@ -503,6 +511,7 @@ class Gbase8sAgentTest {
         TestSupport.setPrivateConnection(agent, preparedConnection(
             sql,
             resultSet(new String[]{"part1"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "column_default", "default_class"}, new Object[][]{}),
             resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
             resultSet(
                 new String[]{"colname", "coltype", "colno", "collength", "comments", "extended_name"},
@@ -518,7 +527,7 @@ class Gbase8sAgentTest {
 
         List<ColumnInfo> columns = agent.getColumns("root", "media");
 
-        Assertions.assertTrue(sql.get(2).contains("LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id"), sql.get(2));
+        Assertions.assertTrue(sql.get(3).contains("LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id"), sql.get(3));
         Assertions.assertEquals(5, columns.size());
 
         // BLOB and CLOB must NOT be misidentified as BOOLEAN
@@ -558,6 +567,7 @@ class Gbase8sAgentTest {
         TestSupport.setPrivateConnection(agent, fallbackOnSysxtdtypesFailureConnection(
             sql,
             resultSet(new String[]{"part1"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "column_default", "default_class"}, new Object[][]{}),
             resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
             // When query with sysxtdtypes fails, fallback query without sysxtdtypes succeeds
             resultSet(
@@ -586,6 +596,7 @@ class Gbase8sAgentTest {
                 new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
                 new Object[][]{{1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null}}
             ),
+            resultSet(new String[]{"colname", "column_default", "default_class"}, new Object[][]{}),
             resultSet(
                 new String[]{"colname", "column_default"},
                 new Object[][]{{"op_id", "'0'"}, {"created_at", "current_timestamp"}}
@@ -613,14 +624,119 @@ class Gbase8sAgentTest {
 
         List<ColumnInfo> columns = agent.getColumns("root", "system_user");
 
-        Assertions.assertEquals(3, sql.size());
-        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("e.type = 'T'"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("e.`default` AS column_default"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("t.owner = ?"), sql.get(1));
+        Assertions.assertEquals(4, sql.size());
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaults"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("gbasedbt.get_default_value("), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("d.`default`::lvarchar(256)"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("JOIN sysdefaultsexpr"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("e.type = 'T'"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("e.`default` AS column_default"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("t.owner = ?"), sql.get(2));
         Assertions.assertNull(columns.get(0).getColumn_default());
         Assertions.assertEquals("'0'", columns.get(1).getColumn_default());
         Assertions.assertEquals("current_timestamp", columns.get(2).getColumn_default());
+    }
+
+    @Test
+    void getColumnsLoadsDefaultsFromSysdefaultsTypeMarkers() throws Exception {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        Connection connection = preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{}
+            ),
+            // Rows shaped like the decoding query: type='L' rows carry the
+            // gbasedbt.get_default_value() result — decoded ("0", unencoded)
+            // for the INTEGER column and unquoted for the VARCHAR column.
+            resultSet(
+                new String[]{"colname", "coltype", "column_default", "default_class"},
+                new Object[][]{
+                    {"status", 13, "active", "L"},
+                    {"quantity", 2, "0", "L"},
+                    {"created_by", 13, null, "U"},
+                    {"created_at", 10, null, "C"}
+                }
+            ),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{
+                    {"id", 258, 1, 4, null},
+                    {"status", 13, 2, 20, null},
+                    {"quantity", 2, 3, 4, null},
+                    {"created_by", 13, 4, 32, null},
+                    {"created_at", 10, 5, 8, null}
+                }
+            )
+        );
+        TestSupport.setPrivateConnection(agent, connection);
+        agent.afterConnect(new ConnectParams("localhost", 9088, "appdb", "", "", "GBASEDBTSERVER=gbase8s;", "", false), connection);
+
+        List<ColumnInfo> columns = agent.getColumns("root", "orders");
+
+        Assertions.assertEquals(4, sql.size());
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaults"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("gbasedbt.get_default_value("), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("WHEN 'L' THEN gbasedbt.get_default_value(c.coltype, c.extended_id, c.collength, d.`default`::lvarchar(256))"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("d.class = 'T'"), sql.get(1));
+        Assertions.assertFalse(sql.get(1).contains("seqno"), sql.get(1));
+        Assertions.assertNull(columns.get(0).getColumn_default());
+        // Character literals come back unquoted from the builtin, so quotes are re-added.
+        Assertions.assertEquals("'active'", columns.get(1).getColumn_default());
+        // Non-character literals are decoded without any 6-bit prefix or quotes.
+        Assertions.assertEquals("0", columns.get(2).getColumn_default());
+        Assertions.assertEquals("USER", columns.get(3).getColumn_default());
+        Assertions.assertEquals("CURRENT", columns.get(4).getColumn_default());
+    }
+
+    @Test
+    void sysdefaultsValuesWinOverExpressionCatalogEntriesForTheSameColumn() throws Exception {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        Connection connection = preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{}
+            ),
+            resultSet(
+                new String[]{"colname", "coltype", "column_default", "default_class"},
+                new Object[][]{{"level", 2, "1", "L"}}
+            ),
+            resultSet(
+                new String[]{"colname", "column_default"},
+                new Object[][]{{"level", "level_seq.nextval"}, {"extra", "expr"}}
+            ),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{
+                    {"id", 258, 1, 4, null},
+                    {"level", 2, 2, 4, null}
+                }
+            )
+        );
+        TestSupport.setPrivateConnection(agent, connection);
+        agent.afterConnect(new ConnectParams("localhost", 9088, "appdb", "", "", "GBASEDBTSERVER=gbase8s;", "", false), connection);
+
+        List<ColumnInfo> columns = agent.getColumns("root", "levels");
+
+        // The canonical sysdefaults value is kept; the expression row for the
+        // same column is ignored, while a column only the expression catalog
+        // knows still contributes.
+        Assertions.assertEquals("1", columns.get(1).getColumn_default());
+    }
+
+    @Test
+    void defaultClassKeywordMapsInformixDefaultClauseKeywords() {
+        Assertions.assertEquals("USER", Gbase8sAgent.defaultClassKeyword("U"));
+        Assertions.assertEquals("CURRENT", Gbase8sAgent.defaultClassKeyword("C"));
+        Assertions.assertEquals("TODAY", Gbase8sAgent.defaultClassKeyword("T"));
+        Assertions.assertEquals("DBSERVERNAME", Gbase8sAgent.defaultClassKeyword("S"));
+        Assertions.assertEquals("NULL", Gbase8sAgent.defaultClassKeyword("N"));
+        Assertions.assertNull(Gbase8sAgent.defaultClassKeyword("L"));
+        Assertions.assertNull(Gbase8sAgent.defaultClassKeyword(null));
     }
 
     @Test
@@ -645,21 +761,26 @@ class Gbase8sAgentTest {
                 new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
                 new Object[][]{{1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null}}
             ),
+            // Rows shaped like the decoding query: decoded literals per column
+            // type, possibly with stray NUL padding from the catalog column.
             resultSet(
-                new String[]{"colname", "column_default"},
+                new String[]{"colname", "coltype", "column_default", "default_class"},
                 new Object[][]{
-                    {"show_status", "'2'\0\0\0\0\0"},
-                    {"name", "''\0\0\0\0\0"},
-                    {"empty_default", "\0\0\0"}
+                    {"show_status", 257, "2", "L"},
+                    {"name", 13, "", "L"},
+                    {"banner", 256, "hi\0\0", "L"},
+                    {"empty_default", 258, null, "L"}
                 }
             ),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
             resultSet(
                 new String[]{"colname", "coltype", "colno", "collength", "comments"},
                 new Object[][]{
                     {"id", 258, 1, 4, null},
                     {"show_status", 257, 2, 2, null},
-                    {"name", 269, 3, 765, null},
-                    {"empty_default", 258, 4, 4, null}
+                    {"name", 13, 3, 765, null},
+                    {"banner", 256, 4, 8, null},
+                    {"empty_default", 258, 5, 4, null}
                 }
             )
         );
@@ -669,48 +790,61 @@ class Gbase8sAgentTest {
         ), connection);
 
         List<ColumnInfo> columns = agent.getColumns("root", "test_table");
-        Assertions.assertEquals(4, columns.size());
+        Assertions.assertEquals(5, columns.size());
         Assertions.assertNull(columns.get(0).getColumn_default());
-        Assertions.assertEquals("'2'", columns.get(1).getColumn_default());
+        // Non-character literals decode to plain unquoted SQL.
+        Assertions.assertEquals("2", columns.get(1).getColumn_default());
+        // An empty character literal keeps its quotes.
         Assertions.assertEquals("''", columns.get(2).getColumn_default());
-        Assertions.assertNull(columns.get(3).getColumn_default());
+        // NUL padding is cut before the character literal is re-quoted.
+        Assertions.assertEquals("'hi'", columns.get(3).getColumn_default());
+        Assertions.assertNull(columns.get(4).getColumn_default());
 
         String ddl = DdlBuilder.buildTableDdl("root", "test_table", columns, List.of(), List.of());
         Assertions.assertFalse(ddl.contains("\0"), "DDL must not contain NUL bytes");
-        Assertions.assertTrue(ddl.contains("\"show_status\" SMALLINT NOT NULL DEFAULT '2'"));
-        Assertions.assertTrue(ddl.contains("\"name\" VARCHAR(765) NOT NULL DEFAULT ''"));
+        Assertions.assertTrue(ddl.contains("\"show_status\" SMALLINT NOT NULL DEFAULT 2"));
+        Assertions.assertTrue(ddl.contains("\"name\" VARCHAR(765) DEFAULT ''"));
+        Assertions.assertTrue(ddl.contains("\"banner\" CHAR(8) NOT NULL DEFAULT 'hi'"));
         Assertions.assertTrue(ddl.contains("\"empty_default\" INTEGER NOT NULL"));
         Assertions.assertFalse(ddl.contains("\"empty_default\" INTEGER NOT NULL DEFAULT"));
     }
 
     @Test
-    void getColumnsUsesMysqlModeFromCustomConnectionStringBeforeUrlParams() {
-        String sql = defaultExpressionSql(
-            "SQLMODE=ansi",
-            "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=mysql"
-        );
+    void defaultsQueriesBacktickTheReservedDefaultColumnInEverySqlMode() {
+        // The GBase JDBC driver rejects a bare `default` column reference with a
+        // syntax error regardless of SQLMODE, so both defaults catalogs are
+        // always queried through the backtick-quoted form (verified against a
+        // real GBase 8s 8.8 server with driver 3.6.5.21 in standard mode and
+        // SQLMODE=mysql).
+        String[][] configs = {
+            {"SQLMODE=ansi", "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=mysql"},
+            {"SQLMODE=mysql", "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=ansi"},
+            {"SQLMODE=mysql", "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s"}
+        };
+        for (String[] config : configs) {
+            List<String> sql = new ArrayList<>();
+            Gbase8sAgent agent = new Gbase8sAgent();
+            Connection connection = preparedConnection(
+                sql,
+                resultSet(
+                    new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                    new Object[][]{}
+                ),
+                resultSet(new String[]{"colname", "coltype", "column_default", "default_class"}, new Object[][]{}),
+                resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+                resultSet(new String[]{"colname", "coltype", "colno", "collength", "comments"}, new Object[][]{})
+            );
+            TestSupport.setPrivateConnection(agent, connection);
+            agent.afterConnect(new ConnectParams(
+                "localhost", 9088, "appdb", "", "", config[0], config[1], false
+            ), connection);
 
-        Assertions.assertTrue(sql.contains("e.`default` AS column_default"), sql);
-    }
+            agent.getColumns("root", "system_user");
 
-    @Test
-    void getColumnsUsesAnsiModeFromCustomConnectionStringBeforeUrlParams() {
-        String sql = defaultExpressionSql(
-            "SQLMODE=mysql",
-            "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=ansi"
-        );
-
-        Assertions.assertTrue(sql.contains("e.default AS column_default"), sql);
-    }
-
-    @Test
-    void getColumnsIgnoresUrlParamsWhenCustomConnectionStringOmitsSqlMode() {
-        String sql = defaultExpressionSql(
-            "SQLMODE=mysql",
-            "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s"
-        );
-
-        Assertions.assertTrue(sql.contains("e.default AS column_default"), sql);
+            Assertions.assertTrue(sql.get(1).contains("d.`default`::lvarchar(256)"), sql.get(1));
+            Assertions.assertFalse(sql.get(1).contains("ELSE d.default "), sql.get(1));
+            Assertions.assertTrue(sql.get(2).contains("e.`default` AS column_default"), sql.get(2));
+        }
     }
 
     @Test
@@ -731,11 +865,92 @@ class Gbase8sAgentTest {
 
         List<ColumnInfo> columns = agent.getColumns("root", "system_user");
 
-        Assertions.assertEquals(3, sql.size());
-        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
+        // Both default catalogs fail; the columns query still runs and columns
+        // come back without defaults.
+        Assertions.assertEquals(4, sql.size());
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaults"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("JOIN sysdefaultsexpr"), sql.get(2));
         Assertions.assertEquals(2, columns.size());
         Assertions.assertNull(columns.get(0).getColumn_default());
         Assertions.assertNull(columns.get(1).getColumn_default());
+    }
+
+    @Test
+    void getColumnsFallsBackToRawSysdefaultsWhenDecodeRoutineIsMissing() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, decodeRoutineMissingConnection(
+            sql,
+            resultSet(
+                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{}
+            ),
+            // Rows shaped like the plain undecoded query: raw `default` text,
+            // where character literals are unquoted and non-character ones
+            // carry the 6-bit prefix documented by IBM SYSDEFAULTS.
+            resultSet(
+                new String[]{"colname", "coltype", "column_default", "default_class"},
+                new Object[][]{
+                    {"status", 13, "active", "L"},
+                    {"quantity", 2, "xn9g 0", "L"},
+                    {"created_by", 13, null, "U"}
+                }
+            ),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{
+                    {"status", 13, 1, 20, null},
+                    {"quantity", 2, 2, 4, null},
+                    {"created_by", 13, 3, 32, null}
+                }
+            )
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("root", "orders");
+
+        // The decoding query fails on the missing builtin, the plain sysdefaults
+        // query runs in its place, and defaults are still populated (character
+        // literals still re-quoted by column type).
+        Assertions.assertEquals(5, sql.size());
+        Assertions.assertTrue(sql.get(1).contains("gbasedbt.get_default_value("), sql.get(1));
+        Assertions.assertFalse(sql.get(2).contains("get_default_value"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("d.`default` AS column_default"), sql.get(2));
+        Assertions.assertTrue(sql.get(3).contains("JOIN sysdefaultsexpr"), sql.get(3));
+        Assertions.assertEquals("'active'", columns.get(0).getColumn_default());
+        Assertions.assertEquals("xn9g 0", columns.get(1).getColumn_default());
+        Assertions.assertEquals("USER", columns.get(2).getColumn_default());
+    }
+
+    @Test
+    void charFamilyColTypesCoverInformixCharacterTypesOnly() {
+        // CHAR, VARCHAR, NCHAR, NVARCHAR, LVARCHAR — with and without the
+        // nullable-flag bits above the base type.
+        Assertions.assertTrue(Gbase8sAgent.isCharFamilyColType(0));
+        Assertions.assertTrue(Gbase8sAgent.isCharFamilyColType(13));
+        Assertions.assertTrue(Gbase8sAgent.isCharFamilyColType(15));
+        Assertions.assertTrue(Gbase8sAgent.isCharFamilyColType(16));
+        Assertions.assertTrue(Gbase8sAgent.isCharFamilyColType(40));
+        Assertions.assertTrue(Gbase8sAgent.isCharFamilyColType(13 + 256));
+        // Numeric, date/time and extended (BOOLEAN/BLOB) literals stay unquoted.
+        Assertions.assertFalse(Gbase8sAgent.isCharFamilyColType(1));
+        Assertions.assertFalse(Gbase8sAgent.isCharFamilyColType(2));
+        Assertions.assertFalse(Gbase8sAgent.isCharFamilyColType(5));
+        Assertions.assertFalse(Gbase8sAgent.isCharFamilyColType(7));
+        Assertions.assertFalse(Gbase8sAgent.isCharFamilyColType(10));
+        Assertions.assertFalse(Gbase8sAgent.isCharFamilyColType(41));
+    }
+
+    @Test
+    void quoteCharacterDefaultWrapsAndDoublesQuotes() {
+        Assertions.assertEquals("'active'", Gbase8sAgent.quoteCharacterDefault("active"));
+        // An empty character literal still gets its quotes.
+        Assertions.assertEquals("''", Gbase8sAgent.quoteCharacterDefault(""));
+        Assertions.assertEquals("''", Gbase8sAgent.quoteCharacterDefault(null));
+        // Embedded quotes are doubled, NUL padding is cut, inner blanks kept.
+        Assertions.assertEquals("'it''s'", Gbase8sAgent.quoteCharacterDefault("it's"));
+        Assertions.assertEquals("'hi'", Gbase8sAgent.quoteCharacterDefault("hi\0\0"));
+        Assertions.assertEquals("' padded '", Gbase8sAgent.quoteCharacterDefault(" padded "));
     }
 
     @Test
@@ -925,28 +1140,6 @@ class Gbase8sAgentTest {
         });
     }
 
-    private static String defaultExpressionSql(String urlParams, String connectionString) {
-        List<String> sql = new ArrayList<>();
-        Gbase8sAgent agent = new Gbase8sAgent();
-        Connection connection = preparedConnection(
-            sql,
-            resultSet(
-                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
-                new Object[][]{}
-            ),
-            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
-            resultSet(new String[]{"colname", "coltype", "colno", "collength", "comments"}, new Object[][]{})
-        );
-        TestSupport.setPrivateConnection(agent, connection);
-        agent.afterConnect(new ConnectParams(
-            "localhost", 9088, "appdb", "", "", urlParams, connectionString, false
-        ), connection);
-
-        agent.getColumns("root", "system_user");
-
-        return sql.get(1);
-    }
-
     private static Connection defaultQueryFailureConnection(List<String> sql, ResultSet... resultSets) {
         int[] resultIndex = {0};
         return proxy(Connection.class, (method, args) -> {
@@ -958,8 +1151,34 @@ class Gbase8sAgentTest {
                 sql.add(query);
                 return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
                     if ("executeQuery".equals(statementMethod.getName())) {
-                        if (query.contains("sysdefaultsexpr")) {
+                        if (query.contains("sysdefault")) {
                             throw new SQLException("Backtick identifiers are not supported");
+                        }
+                        return resultSets[resultIndex[0]++];
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection decodeRoutineMissingConnection(List<String> sql, ResultSet... resultSets) {
+        int[] resultIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("getCatalog".equals(method.getName())) {
+                return "appdb";
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                String query = String.valueOf(args[0]);
+                sql.add(query);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        if (query.contains("get_default_value")) {
+                            throw new SQLException("Routine (get_default_value) cannot be resolved.");
                         }
                         return resultSets[resultIndex[0]++];
                     }

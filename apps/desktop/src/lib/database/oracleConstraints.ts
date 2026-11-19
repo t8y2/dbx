@@ -10,6 +10,7 @@ export interface OracleConstraintTarget {
   tableName: string;
   catalog?: string;
   databaseType: "oracle" | "oceanbase-oracle";
+  exactIdentity?: boolean;
 }
 
 export interface OracleConstraintSnapshot {

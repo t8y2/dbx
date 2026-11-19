@@ -1,4 +1,6 @@
-import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { initialVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
+import type { ConnectionConfig } from "@/types/database";
+import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, databaseNameMatchesVisiblePatterns, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 
 export type VisibleDatabaseSaveAction = { type: "none" } | { type: "clear" } | { type: "set"; databaseNames: string[] | undefined; patterns: string[] };
 
@@ -8,6 +10,30 @@ export type VisibleDatabaseSaveAction = { type: "none" } | { type: "clear" } | {
  */
 export function visibleDatabasePatternsWithoutMatchAll(patterns: readonly string[] | undefined): string[] {
   return (patterns ?? []).filter((pattern) => pattern.trim() !== MATCH_ALL_VISIBLE_DATABASE_PATTERN);
+}
+
+/**
+ * 弹窗把命中通配符的库画成锁定的勾选行，所以这里只返回用户手动勾选的库。
+ * 如果把命中项也算进勾选，改掉或删掉通配符后，它们仍会被当成手动勾选保存下来。
+ */
+export function initialVisibleDatabaseDialogSelection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases" | "visible_database_patterns"> | undefined): string[] {
+  if (visibleDatabasePatternsWithoutMatchAll(connection?.visible_database_patterns).length === 0) {
+    return initialVisibleDatabaseSelection(databaseNames, connection?.visible_databases, connection);
+  }
+  return normalizeVisibleDatabaseSelection(connection?.visible_databases ?? [], databaseNames);
+}
+
+/** 命中通配符的库：无论是否勾选都会显示，弹窗里画成锁定的勾选行。 */
+export function visibleDatabasePatternMatches(databaseNames: readonly string[], patterns: readonly string[]): Set<string> {
+  return new Set(databaseNames.filter((name) => databaseNameMatchesVisiblePatterns(name, [...patterns])));
+}
+
+/**
+ * 没有勾选、通配符又一个库都没命中时，保存后侧栏这个连接下不会显示任何库。
+ * 仍然允许保存（通配符可以提前写给之后新建的库），只提示用户。
+ */
+export function visibleDatabaseFilterShowsNothing(selection: ReadonlySet<string>, patterns: readonly string[], patternMatches: ReadonlySet<string>): boolean {
+  return selection.size === 0 && patterns.length > 0 && patternMatches.size === 0;
 }
 
 export interface VisibleDatabaseSaveInput {
@@ -55,7 +81,8 @@ export function resolveVisibleDatabaseSaveAction(input: VisibleDatabaseSaveInput
     nextPatternValues = [MATCH_ALL_VISIBLE_DATABASE_PATTERN];
   } else {
     // 通配符存在时不能丢掉名单：两者取并集，名单缺失会让未命中通配符的库一起消失。
-    nextNames = selectedNames;
+    // 一个都没勾选时只按通配符筛选；空名单会被当成"一个库都不显示"，所以存成 undefined。
+    nextNames = selectedNames.length > 0 ? selectedNames : undefined;
     nextPatternValues = nextPatterns.length > 0 ? nextPatterns : undefined;
   }
 

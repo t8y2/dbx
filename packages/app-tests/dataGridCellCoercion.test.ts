@@ -223,3 +223,35 @@ test("Oracle and OceanBase-Oracle text BLOB editor decodes UTF-8 and writes edit
   }
 });
 
+test("PostgreSQL text BYTEA editor decodes UTF-8 and writes edited bytes as hex (#11987)", () => {
+  const oldValueHex = "0x48656c6c6f";
+  const oldValuePgEscape = "\\x48656c6c6f";
+  const columnInfo = { data_type: "bytea" };
+
+  for (const oldValue of [oldValueHex, oldValuePgEscape]) {
+    assert.equal(dataGridCellEditorText({ value: oldValue, databaseType: "postgres", columnInfo }), "Hello");
+    assert.strictEqual(coerceDataGridCellValue({ value: "Hello", oldValue, databaseType: "postgres", columnInfo }), oldValue);
+    assert.equal(coerceDataGridCellValue({ value: "新内容", oldValue, databaseType: "postgres", columnInfo }), "0xe696b0e58685e5aeb9");
+    assert.equal(coerceDataGridCellValue({ value: "", oldValue, databaseType: "postgres", columnInfo }), "0x");
+    assert.equal(coerceDataGridCellValue({ value: "", oldValue, databaseType: "postgres", columnInfo, emptyStringAsNull: true }), null);
+  }
+});
+
+test("PostgreSQL binary BYTEA editor keeps non-text bytes in hex (#11987)", () => {
+  const oldValueHex = "0x89504e470d0a1a0a";
+  const oldValuePgEscape = "\\x89504e470d0a1a0a";
+  const columnInfo = { data_type: "bytea" };
+
+  for (const oldValue of [oldValueHex, oldValuePgEscape]) {
+    assert.equal(dataGridCellEditorText({ value: oldValue, databaseType: "postgres", columnInfo }), oldValue);
+    assert.equal(coerceDataGridCellValue({ value: oldValue, oldValue, databaseType: "postgres", columnInfo }), oldValue);
+  }
+});
+
+test("non-PostgreSQL BYTEA editor keeps bytes in hex", () => {
+  const oldValue = "0x48656c6c6f";
+  const columnInfo = { data_type: "bytea" };
+
+  assert.equal(dataGridCellEditorText({ value: oldValue, databaseType: "sqlite", columnInfo }), oldValue);
+  assert.equal(coerceDataGridCellValue({ value: "Hello", oldValue, databaseType: "sqlite", columnInfo }), "Hello");
+});

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -348,6 +348,13 @@ pub async fn test_connection(client: &DynamoDbClient, timeout: Duration) -> Resu
 
 pub async fn execute_statement(client: &DynamoDbClient, source: &str, max_rows: usize) -> Result<QueryResult, String> {
     let started = Instant::now();
+    let header = source.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
+    if !header.to_ascii_uppercase().starts_with("DBX DYNAMODB") {
+        // Do not expose the SDK pagination future's layout depth to public async callers.
+        let execution: futures::future::BoxFuture<'_, Result<QueryResult, String>> =
+            Box::pin(execute_partiql(client, source, max_rows, started));
+        return execution.await;
+    }
     let statement = parse_dynamodb_statement(source)?;
     match statement.operation {
         DynamoDbStatementOperation::Read => {
@@ -391,6 +398,76 @@ pub async fn execute_statement(client: &DynamoDbClient, source: &str, max_rows: 
             Ok(affected_query_result(affected, started))
         }
     }
+}
+
+fn partiql_is_read(source: &str) -> Result<bool, String> {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::keywords::Keyword;
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = Tokenizer::new(&GenericDialect {}, source).tokenize().map_err(|error| error.to_string())?;
+    match tokens.into_iter().find(|token| !matches!(token, Token::Whitespace(_))) {
+        Some(Token::Word(word)) => match word.keyword {
+            Keyword::SELECT => Ok(true),
+            Keyword::INSERT | Keyword::UPDATE | Keyword::DELETE => Ok(false),
+            _ => Err("DynamoDB PartiQL supports SELECT, INSERT, UPDATE, and DELETE statements".to_string()),
+        },
+        None => Err("DynamoDB statement is empty".to_string()),
+        _ => Err("DynamoDB PartiQL must start with SELECT, INSERT, UPDATE, or DELETE".to_string()),
+    }
+}
+
+async fn execute_partiql(
+    client: &DynamoDbClient,
+    source: &str,
+    max_rows: usize,
+    started: Instant,
+) -> Result<QueryResult, String> {
+    let read = partiql_is_read(source)?;
+    let limit = max_rows.max(1);
+    let mut documents = Vec::new();
+    let mut next_token = None;
+    let mut seen_tokens = HashSet::new();
+    // Bound scans even when a selective WHERE keeps returning empty pages.
+    for page in 0..1000 {
+        let mut request = client.client.execute_statement().statement(source).set_next_token(next_token.take());
+        if read {
+            request = request.limit((limit - documents.len()).min(MAX_PAGE_SIZE as usize) as i32);
+        }
+        let output = request.send().await.map_err(|error| dynamodb_sdk_error!("DynamoDB PartiQL failed", error))?;
+        let omitted_items = output.items().len() > limit - documents.len();
+        for item in output.items() {
+            if documents.len() == limit {
+                break;
+            }
+            documents.push(Value::Object(attribute_map_to_json(item)?));
+        }
+        next_token = output.next_token().filter(|token| !token.is_empty()).map(str::to_string);
+        let truncated =
+            omitted_items || next_token.is_some() || output.last_evaluated_key().is_some_and(|key| !key.is_empty());
+        if !read || !truncated || next_token.is_none() || documents.len() >= limit || page == 999 {
+            let mut result = documents_query_result(documents, truncated, started);
+            if !read {
+                result.affected_rows = 1;
+            }
+            if truncated {
+                result.messages.push(crate::types::QueryMessage {
+                    severity: "WARNING".to_string(),
+                    message: "DynamoDB PartiQL result is incomplete: row, page, or service pagination limit reached."
+                        .to_string(),
+                    code: Some("DYNAMODB_PARTIQL_TRUNCATED".to_string()),
+                    detail: None,
+                    hint: Some(
+                        "Increase the result row limit or use a more selective partition-key condition.".to_string(),
+                    ),
+                });
+            }
+            return Ok(result);
+        }
+        if !seen_tokens.insert(next_token.clone().unwrap()) {
+            return Err("DynamoDB PartiQL returned a repeated pagination token".to_string());
+        }
+    }
+    unreachable!("the final page returns an explicitly truncated result")
 }
 
 fn parse_dynamodb_statement(source: &str) -> Result<DynamoDbStatement, String> {
@@ -535,8 +612,10 @@ fn take_dynamodb_object_field(fields: &mut HashMap<String, String>, name: &str) 
 }
 
 fn document_query_result(result: DocumentQueryResult, started: Instant) -> QueryResult {
-    let truncated = result.next_cursor.is_some();
-    let documents = result.documents;
+    documents_query_result(result.documents, result.next_cursor.is_some(), started)
+}
+
+fn documents_query_result(documents: Vec<Value>, truncated: bool, started: Instant) -> QueryResult {
     let mut column_names = BTreeSet::new();
     for document in &documents {
         if let Some(object) = document.as_object() {
@@ -556,7 +635,7 @@ fn document_query_result(result: DocumentQueryResult, started: Instant) -> Query
                         .as_object()
                         .and_then(|object| object.get(column))
                         .cloned()
-                        .or_else(|| (column == "value").then(|| document.clone()))
+                        .or_else(|| (!document.is_object() && column == "value").then(|| document.clone()))
                         .unwrap_or(Value::Null)
                 })
                 .collect()
@@ -565,8 +644,10 @@ fn document_query_result(result: DocumentQueryResult, started: Instant) -> Query
     QueryResult {
         columns,
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: Vec::new(),
+        raw_key_cells: Vec::new(),
         spatial_values: Vec::new(),
         rows,
         affected_rows: 0,
@@ -585,8 +666,10 @@ fn affected_query_result(affected_rows: u64, started: Instant) -> QueryResult {
     QueryResult {
         columns: Vec::new(),
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: Vec::new(),
+        raw_key_cells: Vec::new(),
         spatial_values: Vec::new(),
         rows: Vec::new(),
         affected_rows,
@@ -1567,6 +1650,248 @@ fn tagged_json_to_attribute_map(value: &Value) -> Result<HashMap<String, Attribu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn partiql_test_server(
+        pages: Vec<Value>,
+    ) -> (DynamoDbClient, Arc<tokio::sync::Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+        use axum::{routing::post, Json, Router};
+        use std::collections::VecDeque;
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let pages = Arc::new(tokio::sync::Mutex::new(VecDeque::from(pages)));
+        let router = Router::new().route(
+            "/",
+            post(move |body: axum::body::Bytes| {
+                let recorded = recorded.clone();
+                let pages = pages.clone();
+                async move {
+                    recorded.lock().await.push(serde_json::from_slice(&body).unwrap());
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/x-amz-json-1.0")],
+                        Json(pages.lock().await.pop_front().expect("unexpected SDK request")),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({"id":"partiql-test","name":"PartiQL test","db_type":"dynamodb","host":"127.0.0.1","port":address.port(),"username":"dummy","password":"dummy","database":"us-east-1"})).unwrap();
+        let client = connect(&config, "127.0.0.1", address.port()).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (client, requests, server)
+    }
+
+    #[tokio::test]
+    async fn partiql_paginates_past_empty_filtered_pages_using_native_sdk_tokens() {
+        let (client, requests, server) = partiql_test_server(vec![
+            serde_json::json!({"Items":[],"NextToken":"second"}),
+            serde_json::json!({"Items":[{"pk":{"S":"one"}}],"NextToken":"third"}),
+            serde_json::json!({"Items":[{"pk":{"S":"two"}}]}),
+        ])
+        .await;
+        let result = execute_statement(&client, "SELECT * FROM \"items\" WHERE flag=true", 3).await.unwrap();
+        assert_eq!(result.rows, [vec![Value::String("one".into())], vec![Value::String("two".into())]]);
+        assert!(!result.truncated);
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["Limit"], 3);
+        assert_eq!(requests[1]["NextToken"], "second");
+        assert_eq!(requests[2]["NextToken"], "third");
+        assert_eq!(requests[2]["Limit"], 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn partiql_marks_unresumable_or_capped_pages_incomplete_and_does_not_retry_writes() {
+        for page in [
+            serde_json::json!({"Items":[{"pk":{"S":"one"}}],"NextToken":"more"}),
+            serde_json::json!({"Items":[{"pk":{"S":"one"}}],"LastEvaluatedKey":{"pk":{"S":"one"}}}),
+        ] {
+            let (client, requests, server) = partiql_test_server(vec![page]).await;
+            let result = execute_statement(&client, "SELECT * FROM \"items\"", 1).await.unwrap();
+            assert!(result.truncated);
+            assert_eq!(result.rows.len(), 1);
+            assert_eq!(result.messages[0].code.as_deref(), Some("DYNAMODB_PARTIQL_TRUNCATED"));
+            assert_eq!(requests.lock().await.len(), 1);
+            server.abort();
+        }
+        let (client, requests, server) = partiql_test_server(vec![serde_json::json!({})]).await;
+        let result = execute_statement(&client, "INSERT INTO \"items\" VALUE {'pk':'new'}", 100).await.unwrap();
+        assert_eq!(result.affected_rows, 1);
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].get("Limit").is_none());
+        assert!(requests[0].get("NextToken").is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn partiql_rejects_repeated_continuation_tokens_instead_of_looping() {
+        let (client, requests, server) =
+            partiql_test_server(vec![serde_json::json!({"NextToken":"same"}), serde_json::json!({"NextToken":"same"})])
+                .await;
+        assert!(execute_statement(&client, "SELECT * FROM \"items\"", 100)
+            .await
+            .unwrap_err()
+            .contains("repeated pagination token"));
+        assert_eq!(requests.lock().await.len(), 2);
+        server.abort();
+    }
+
+    #[test]
+    fn partiql_recognizes_operations_without_treating_literals_or_comments_as_keywords() {
+        assert!(partiql_is_read("-- UPDATE is only a comment\nSELECT \"name\" FROM \"items\"").unwrap());
+        assert!(partiql_is_read("/* comment */ SELECT 'DELETE' FROM \"items\"").unwrap());
+        for sql in [
+            "INSERT INTO \"items\" VALUE {'pk':'new'}",
+            "UPDATE \"items\" SET flag=true WHERE pk='x'",
+            "DELETE FROM \"items\" WHERE pk='x'",
+        ] {
+            assert!(!partiql_is_read(sql).unwrap());
+        }
+        for sql in ["", "-- comment only", "DROP TABLE items", "EXEC arbitrary", "'SELECT'", "SELECT 'unclosed"] {
+            assert!(partiql_is_read(sql).is_err(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn partiql_projection_preserves_types_missing_fields_and_truncation() {
+        let binary = attribute_value_to_json(&AttributeValue::B(Blob::new(vec![0, 255]))).unwrap();
+        let number = attribute_value_to_json(&AttributeValue::N("12345678901234567890".into())).unwrap();
+        let result = documents_query_result(
+            vec![serde_json::json!({"value": binary, "number": number}), serde_json::json!({"flag": true})],
+            true,
+            Instant::now(),
+        );
+        assert_eq!(result.columns, ["flag", "number", "value"]);
+        assert!(result.truncated);
+        assert_eq!(result.rows[0][0], Value::Null);
+        assert_eq!(result.rows[1][0], true);
+        assert_eq!(result.rows[1][2], Value::Null);
+        assert_eq!(result.rows[0][1], dynamodb_extended_json("number", Value::String("12345678901234567890".into())));
+        assert!(!result.columns.iter().any(|column| column == "_id"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated DynamoDB Local endpoint in DBX_DYNAMODB_ENDPOINT"]
+    async fn live_executes_partiql_with_pagination_projection_and_singleton_writes() {
+        use aws_sdk_dynamodb::types::{AttributeDefinition, BillingMode, ScalarAttributeType};
+        let endpoint = std::env::var("DBX_DYNAMODB_ENDPOINT").expect("DBX_DYNAMODB_ENDPOINT is required");
+        let address = endpoint
+            .strip_prefix("http://127.0.0.1:")
+            .expect("this write test only runs against loopback DynamoDB Local");
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({"id":"partiql-live","name":"PartiQL live","db_type":"dynamodb","host":"127.0.0.1","port":address.parse::<u16>().unwrap(),"username":"dummy","password":"dummy","database":"us-east-1"})).unwrap();
+        let client = connect(&config, "127.0.0.1", config.port).unwrap();
+        let table = format!("dbx_partiql_{}", uuid::Uuid::new_v4().simple());
+        client
+            .client
+            .create_table()
+            .table_name(&table)
+            .billing_mode(BillingMode::PayPerRequest)
+            .attribute_definitions(
+                AttributeDefinition::builder()
+                    .attribute_name("pk")
+                    .attribute_type(ScalarAttributeType::S)
+                    .build()
+                    .unwrap(),
+            )
+            .key_schema(KeySchemaElement::builder().attribute_name("pk").key_type(KeyType::Hash).build().unwrap())
+            .send()
+            .await
+            .unwrap();
+        let outcome: Result<(), String> = async {
+            for index in 0..30 {
+                client
+                    .client
+                    .put_item()
+                    .table_name(&table)
+                    .item("pk", AttributeValue::S(format!("key-{index:02}")))
+                    .item("status", AttributeValue::S("PENDING".into()))
+                    .item("payload", AttributeValue::S("x".repeat(100000)))
+                    .item("large", AttributeValue::N("12345678901234567890".into()))
+                    .item("binary", AttributeValue::B(Blob::new(vec![0, 255])))
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            // More than 1 MiB forces service-side pagination independently of the UI row cap.
+            let all = execute_statement(&client, &format!("SELECT * FROM \"{table}\""), 100).await?;
+            assert_eq!(all.rows.len(), 30);
+            assert!(!all.truncated);
+            assert!(!all.columns.iter().any(|column| column == "_id"));
+            let large = all.columns.iter().position(|column| column == "large").unwrap();
+            assert_eq!(
+                all.rows[0][large],
+                dynamodb_extended_json("number", Value::String("12345678901234567890".into()))
+            );
+            let pk = all.columns.iter().position(|column| column == "pk").unwrap();
+            let last_key = all.rows.last().unwrap()[pk].as_str().unwrap().to_string();
+            client
+                .client
+                .update_item()
+                .table_name(&table)
+                .key("pk", AttributeValue::S(last_key))
+                .update_expression("SET #s = :s")
+                .expression_attribute_names("#s", "status")
+                .expression_attribute_values(":s", AttributeValue::S("RARE".into()))
+                .send()
+                .await
+                .map_err(|error| error.to_string())?;
+            let filtered =
+                execute_statement(&client, &format!("SELECT * FROM \"{table}\" WHERE \"status\"='RARE'"), 100).await?;
+            assert_eq!(filtered.rows.len(), 1);
+            assert!(!filtered.truncated);
+            let limited = execute_statement(&client, &format!("SELECT * FROM \"{table}\""), 15).await?;
+            assert_eq!(limited.rows.len(), 15);
+            assert!(limited.truncated);
+            assert!(!limited.messages.is_empty());
+            let projection = execute_statement(&client, &format!("SELECT \"status\" FROM \"{table}\""), 100).await?;
+            assert_eq!(projection.columns, ["status"]);
+            assert_eq!(projection.rows.len(), 30);
+            let insert = execute_statement(
+                &client,
+                &format!("INSERT INTO \"{table}\" VALUE {{'pk':'partiql-write','status':'NEW'}}"),
+                100,
+            )
+            .await?;
+            assert_eq!(insert.affected_rows, 1);
+            execute_statement(
+                &client,
+                &format!("UPDATE \"{table}\" SET \"status\"='UPDATED' WHERE \"pk\"='partiql-write'"),
+                100,
+            )
+            .await?;
+            let updated = execute_statement(
+                &client,
+                &format!("SELECT \"status\" FROM \"{table}\" WHERE \"pk\"='partiql-write'"),
+                100,
+            )
+            .await?;
+            assert_eq!(updated.rows, [vec![Value::String("UPDATED".into())]]);
+            execute_statement(&client, &format!("DELETE FROM \"{table}\" WHERE \"pk\"='partiql-write'"), 100).await?;
+            assert!(execute_statement(
+                &client,
+                &format!("SELECT * FROM \"{table}\" WHERE \"pk\"='partiql-write'"),
+                100
+            )
+            .await?
+            .rows
+            .is_empty());
+            let legacy =
+                execute_statement(&client, &format!("DBX DYNAMODB SCAN\ntable: \"{table}\"\nlimit: 1"), 100).await?;
+            assert_eq!(legacy.rows.len(), 1);
+            assert!(execute_statement(&client, &format!("SELECT * FROM \"{table}\" WHERE"), 100)
+                .await
+                .unwrap_err()
+                .contains("ValidationException"));
+            Ok(())
+        }
+        .await;
+        client.client.delete_table().table_name(&table).send().await.unwrap();
+        outcome.unwrap();
+    }
 
     fn table_description() -> DynamoDbTableDescription {
         DynamoDbTableDescription {

@@ -64,6 +64,7 @@ fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
         | DataGridExtractorId::JsonLines
         | DataGridExtractorId::SqlInList
         | DataGridExtractorId::SqlInserts
+        | DataGridExtractorId::SqlDeletes
         | DataGridExtractorId::SqlDeletesInserts
         | DataGridExtractorId::SqlUpdates
         | DataGridExtractorId::SqlSelect
@@ -101,7 +102,9 @@ pub fn neutralize_spreadsheet_formulas(mut request: DataGridExtractRequest) -> D
         if needs_formula_guard(&column.display_name) {
             column.display_name.insert(0, '\'');
         }
-        if request.options.dsv.header_format == DataGridHeaderFormat::Description {
+        if request.options.dsv.header_format == DataGridHeaderFormat::Description
+            || request.options.dsv.header_format == DataGridHeaderFormat::NameAndDescriptionTwoRows
+        {
             if let Some(description) = &mut column.description {
                 if needs_formula_guard(description) {
                     description.insert(0, '\'');
@@ -157,6 +160,8 @@ mod tests {
             rows,
             selection_kind: DataGridSelectionKind::Cells,
             options: Default::default(),
+            spatial_columns: None,
+            spatial_values: None,
         }
     }
 
@@ -189,6 +194,7 @@ mod tests {
         for extractor in [
             DataGridExtractorId::SqlInList,
             DataGridExtractorId::SqlInserts,
+            DataGridExtractorId::SqlDeletes,
             DataGridExtractorId::SqlUpdates,
             DataGridExtractorId::SqlSelect,
             DataGridExtractorId::WhereClause,

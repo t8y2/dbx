@@ -23,10 +23,14 @@ import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.OracleObjectPrivilege;
+import com.dbx.agent.OracleTriggerReader;
 import com.dbx.agent.PartitionInfo;
+import com.dbx.agent.PlDebugBreakpoint;
+import com.dbx.agent.PlDebugStartRequest;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -79,6 +83,8 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private boolean captureDbmsOutput;
     private boolean dbmsOutputEnabled;
     private String dbmsOutputWarning;
+    private final PlDebugManager plDebug;
+    private final PlDebugCompile.Manager plDebugCompile;
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -95,14 +101,31 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     };
 
     public OceanBaseOracleAgent() {
-        super(OCEANBASE_ORACLE_PROFILE);
+        this(null);
     }
+
+    OceanBaseOracleAgent(PlDebugManager.ConnectionFactory debugConnections) {
+        super(OCEANBASE_ORACLE_PROFILE);
+        Object debugAdmission = dedicatedAdmission();
+        plDebug = debugConnections == null
+            ? new PlDebugManager(this::registerPlDebugConnections, debugAdmission, this::compilationInProgress)
+            : new PlDebugManager(debugConnections, debugAdmission, this::compilationInProgress);
+        plDebugCompile = new PlDebugCompile.Manager(debugAdmission, () -> plDebug.hasUnreleased() || hasNativeJobReservation());
+    }
+
+    private boolean compilationInProgress() { return plDebugCompile.hasUnresolved() || hasNativeJobReservation(); }
+
+    @Override
+    protected boolean hasDedicatedDebugReservation() { return plDebug.hasUnreleased() || plDebugCompile.hasUnresolved(); }
 
     @Override
     public boolean supportsQueryTiming() { return true; }
 
     @Override
     public boolean supportsBlobBindStatements() { return true; }
+
+    @Override
+    public boolean supportsNativeLegacyJobs() { return true; }
 
     @Override
     public QueryResult executeBlobBoundStatements(List<String> previews, List<BlobBoundStatement> statements,
@@ -353,6 +376,44 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     static String buildUrl(ConnectParams params) {
         return appendDefaultCompatibilityOption(OCEANBASE_ORACLE_PROFILE.buildUrl(params));
+    }
+
+    static String typedLobUrl(ConnectParams params) {
+        String url = buildUrl(params);
+        if (!url.startsWith("jdbc:oceanbase:") || url.indexOf('#') >= 0) {
+            throw new IllegalArgumentException("Typed LOB debugging requires an unambiguous OceanBase JDBC URL");
+        }
+        int queryStart = url.indexOf('?');
+        String base = queryStart < 0 ? url : url.substring(0, queryStart);
+        List<String> options = new ArrayList<>();
+        if (queryStart >= 0) {
+            for (String part : url.substring(queryStart + 1).split("[&;]", -1)) {
+                if (part.isBlank()) continue;
+                int equals = part.indexOf('=');
+                String key;
+                try {
+                    key = java.net.URLDecoder.decode(equals < 0 ? part : part.substring(0, equals), java.nio.charset.StandardCharsets.UTF_8).trim();
+                } catch (IllegalArgumentException error) {
+                    throw new IllegalArgumentException("Typed LOB debugging could not parse a JDBC option name");
+                }
+                if (!key.matches("[A-Za-z][A-Za-z0-9_.-]*")) {
+                    throw new IllegalArgumentException("Typed LOB debugging encountered an ambiguous JDBC option name");
+                }
+                if (!key.equalsIgnoreCase("useServerPrepStmts") && !key.equalsIgnoreCase("usePieceData")
+                    && !key.equalsIgnoreCase("rewriteBatchedStatements") && !key.equalsIgnoreCase("continueBatchOnError")) options.add(part);
+            }
+        }
+        options.add("useServerPrepStmts=true");
+        options.add("usePieceData=true");
+        options.add("rewriteBatchedStatements=false");
+        options.add("continueBatchOnError=false");
+        return base + "?" + String.join("&", options);
+    }
+
+    private DedicatedConnectionOwner registerPlDebugConnections(PlDebugStartRequest request, Runnable onRetire, Runnable onCompletion) {
+        if (!PlDebugTarget.requiresTypedLobConnection(request)) return registerDedicatedConnections(onRetire, onCompletion);
+        return registerDedicatedConnections(onRetire, onCompletion,
+            params -> openConnection(params, typedLobUrl(params)));
     }
 
     @Override
@@ -671,27 +732,43 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public boolean supportsExactMetadataIdentity() { return true; }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
         return queryObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints, MetadataReadOptions options) {
+        return queryObjects(schema, MetadataListConstraints.orNone(constraints), options != null && options.exact());
+    }
+
     private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints) {
+        return queryObjects(schema, constraints, false);
+    }
+
+    private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints, boolean exact) {
         return unchecked(() -> {
-            String owner = normalizeSchema(schema);
-            List<String> objectTypes = oceanBaseObjectTypes(constraints);
+            if (exact && (schema == null || schema.isEmpty())) throw new IllegalArgumentException("Exact metadata requires an owner");
+            String owner = exact ? schema : normalizeSchema(schema);
+            List<String> objectTypes = oceanBaseObjectTypes(constraints, exact);
             if (objectTypes.isEmpty()) {
                 return List.of();
             }
             String baseSql = """
-                SELECT o.OBJECT_NAME, o.OBJECT_TYPE, c.COMMENTS
+                SELECT o.OBJECT_NAME, o.OBJECT_TYPE, c.COMMENTS,
+                    i.TABLE_OWNER AS PARENT_SCHEMA, i.TABLE_NAME AS PARENT_NAME
                 FROM ALL_OBJECTS o
                 LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
                     AND o.OBJECT_TYPE IN ('TABLE', 'VIEW')
+                LEFT JOIN ALL_INDEXES i ON o.OBJECT_TYPE = 'INDEX'
+                    AND i.OWNER = o.OWNER AND i.INDEX_NAME = o.OBJECT_NAME
                 WHERE o.OWNER = ? AND o.OBJECT_TYPE IN (%s)
                 """.stripIndent().trim();
             MetadataSql query = oceanBaseMetadataSql(
                 String.format(baseSql, placeholders(objectTypes.size())),
-                "OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+                "OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
                 "OBJECT_NAME",
                 """
                 ORDER BY CASE OBJECT_TYPE
@@ -716,12 +793,21 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String objectType = rs.getString(2);
-                        result.add(new ObjectInfo(rs.getString(1),
-                            objectType.replace(' ', '_'), owner, rs.getString(3)));
+                        ObjectInfo object = new ObjectInfo(rs.getString(1),
+                            objectType.replace(' ', '_'), owner, rs.getString(3));
+                        if ("INDEX".equals(objectType)) {
+                            object.setParent_schema(rs.getString(4));
+                            object.setParent_name(rs.getString(5));
+                        }
+                        result.add(object);
                     }
                 }
             }
-            return constraints.withoutPaging().filterObjects(result);
+            List<ObjectInfo> objects = constraints.withoutPaging().filterObjects(result);
+            if (exact && objects.stream().anyMatch(object -> "TRIGGER".equals(object.getObject_type()))) {
+                new OracleTriggerReader(requireConnection(), "oceanbase-oracle").enrichObjects(objects, owner);
+            }
+            return objects;
         });
     }
 
@@ -1291,8 +1377,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return result;
     }
 
-    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
-        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY");
+    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints, boolean exact) {
+        List<String> supported = new ArrayList<>(List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY", "INDEX"));
+        if (exact) supported.add("TRIGGER");
         if (!constraints.hasObjectTypes()) {
             return supported;
         }
@@ -1307,12 +1394,21 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        return getObjectSource(schema, name, objectType, false);
+    }
+
+    @Override
+    public ObjectSource getObjectSourceWithOrigin(String schema, String name, String objectType) {
+        return getObjectSource(schema, name, objectType, true);
+    }
+
+    private ObjectSource getObjectSource(String schema, String name, String objectType, boolean exactMetadataKind) {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
             String objectName = normalizeObjectName(name);
             String normalizedType = normalizeObjectSourceType(objectType);
             if (prefersDictionarySource(normalizedType)) {
-                return getDictionaryFirstObjectSource(owner, objectName, normalizedType);
+                return getDictionaryFirstObjectSource(owner, objectName, normalizedType, exactMetadataKind);
             }
             String source;
             SQLException metadataError = null;
@@ -1343,8 +1439,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         });
     }
 
-    private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType) throws SQLException {
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType, MetadataReadOptions options) {
+        if (options == null || !options.exact() || !"TRIGGER".equals(normalizeObjectSourceType(objectType))) {
+            return getObjectSource(schema, name, objectType);
+        }
+        return unchecked(() -> new OracleTriggerReader(requireConnection(), "oceanbase-oracle").getObjectSource(schema, name));
+    }
+
+    private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType, boolean exactMetadataKind) throws SQLException {
         String source;
+        String origin = "oceanbase-dictionary";
         SQLException dictionaryError = null;
         try {
             source = queryDictionarySource(owner, name, objectType);
@@ -1355,7 +1460,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
         if (source == null || source.trim().isEmpty()) {
             try {
-                source = queryDbmsMetadataSource(owner, name, objectType);
+                source = queryDbmsMetadataSource(owner, name,
+                    exactMetadataKind && "PACKAGE".equals(objectType) ? "PACKAGE_SPEC" : objectType);
+                origin = "oracle-metadata";
             } catch (SQLException metadataError) {
                 if (dictionaryError != null) {
                     dictionaryError.addSuppressed(metadataError);
@@ -1364,7 +1471,15 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 throw metadataError;
             }
         }
-        return new ObjectSource(name, objectType, owner, source == null ? "" : source);
+        if ("TYPE".equals(objectType) || "TYPE_BODY".equals(objectType)) {
+            if (source == null || source.trim().isEmpty()) {
+                throw new SQLException("No complete source available for " + owner + "." + name + " (" + objectType + ")");
+            }
+            return new ObjectSource(name, objectType, owner, source, false);
+        }
+        ObjectSource result = new ObjectSource(name, objectType, owner, source == null ? "" : source);
+        result.setSourceOrigin(origin);
+        return result;
     }
 
     private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
@@ -1942,7 +2057,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String tableName = normalizeObjectName(table);
             String sql = """
                 SELECT i.INDEX_NAME, ic.COLUMN_NAME, ic.COLUMN_POSITION, i.UNIQUENESS,
-                    c.CONSTRAINT_TYPE, i.INDEX_TYPE, i.PARTITIONED, i.VISIBILITY, ic.DESCEND, ie.COLUMN_EXPRESSION
+                    c.CONSTRAINT_TYPE, i.INDEX_TYPE, i.PARTITIONED, i.VISIBILITY, ic.DESCEND, ie.COLUMN_EXPRESSION, i.OWNER AS INDEX_OWNER
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic
                     ON i.INDEX_NAME = ic.INDEX_NAME
@@ -1959,29 +2074,33 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     ON i.INDEX_NAME = c.INDEX_NAME
                     AND i.TABLE_OWNER = c.OWNER
                     AND i.TABLE_NAME = c.TABLE_NAME
+                    AND i.OWNER = c.INDEX_OWNER
                     AND c.CONSTRAINT_TYPE = 'P'
                 WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
-                ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION
+                ORDER BY i.OWNER, i.INDEX_NAME, ic.COLUMN_POSITION
                 """.stripIndent().trim();
 
-            Map<String, IndexInfo> indexesByName = new LinkedHashMap<>();
+            Map<List<String>, IndexInfo> indexesByName = new LinkedHashMap<>();
             try (var stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String indexName = rs.getString("INDEX_NAME");
-                        IndexInfo index = indexesByName.get(indexName);
+                        String indexOwner = rs.getString("INDEX_OWNER");
+                        var identity = java.util.Arrays.asList(indexOwner, indexName);
+                        IndexInfo index = indexesByName.get(identity);
                         if (index == null) {
                             IndexInfo item = new IndexInfo(indexName, new ArrayList<>(),
                                 "UNIQUE".equalsIgnoreCase(rs.getString("UNIQUENESS")),
                                 "P".equalsIgnoreCase(rs.getString("CONSTRAINT_TYPE")),
                                 null, rs.getString("INDEX_TYPE"), null, null);
                             item.setKey_is_expression(new ArrayList<>());
+                            item.setOwner(indexOwner);
                             item.setKey_directions(new ArrayList<>());
                             item.setKey_metadata_complete(true);
                             item.setVisibility(rs.getString("VISIBILITY"));
-                            indexesByName.put(indexName, item);
+                            indexesByName.put(identity, item);
                             index = item;
                         }
                         String column = rs.getString("COLUMN_NAME");
@@ -2290,11 +2409,246 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public List<TriggerInfo> listTriggers(String schema, String table, MetadataReadOptions options) {
+        if (options == null || !options.exact()) return listTriggers(schema, table);
+        return unchecked(() -> new OracleTriggerReader(requireConnection(), "oceanbase-oracle").listTriggers(schema, table));
+    }
+
+    @Override
     public String setSchemaSQL(String schema) {
         if (schema == null || schema.isBlank()) {
             return "";
         }
         return "ALTER SESSION SET CURRENT_SCHEMA = " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
+    }
+
+    @Override
+    public Map<String, Object> plDebugProbe() {
+        return PlDebugCapabilities.probe(requireConnected());
+    }
+
+    @Override
+    public Map<String, Object> plDebugInspect(PlDebugStartRequest target) {
+        if (target != null && "debug_compile".equals(target.getMetadataPreparation())) {
+            if (target.getObjectName() == null || target.getObjectName().isEmpty()
+                || !("PROCEDURE".equals(target.getObjectType()) || "FUNCTION".equals(target.getObjectType()))) {
+                throw new IllegalArgumentException("Debug compilation preview requires an exact named routine");
+            }
+            return unchecked(() -> PlDebugMetadataInspection.run(this::registerDedicatedConnections, (connection, deadline) -> {
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("capabilities", PlDebugCapabilities.probe(connection));
+                result.putAll(PlDebugCompile.inspect(connection, target, deadline));
+                return result;
+            }));
+        }
+        if (typePreparationRequested(target)) {
+            return unchecked(() -> PlDebugMetadataInspection.run(this::registerDedicatedConnections, (connection, deadline) -> {
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("capabilities", PlDebugCapabilities.probe(connection));
+                result.put("targetPreview", PlDebugTarget.previewTypes(connection, target, deadline));
+                return result;
+            }));
+        }
+        Connection connection = requireConnected();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("capabilities", PlDebugCapabilities.probe(connection));
+        if (target != null) result.put("targetPreview", unchecked(() -> PlDebugTarget.preview(connection, target)));
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> plDebugResolveTarget(PlDebugStartRequest request) {
+        if (typePreparationRequested(request)) {
+            return unchecked(() -> PlDebugMetadataInspection.run(this::registerDedicatedConnections,
+                (connection, deadline) -> PlDebugTarget.previewTypes(connection, request, deadline)));
+        }
+        return unchecked(() -> PlDebugTarget.preview(requireConnected(), request));
+    }
+
+    private static boolean typePreparationRequested(PlDebugStartRequest request) {
+        if (request == null || request.getMetadataPreparation() == null) return false;
+        if (!"type_only".equals(request.getMetadataPreparation())) throw new IllegalArgumentException("Unsupported type metadata preparation policy");
+        if (!"PROCEDURE".equals(request.getObjectType()) && !"FUNCTION".equals(request.getObjectType())) {
+            throw new IllegalArgumentException("Type metadata preparation requires a named routine");
+        }
+        return true;
+    }
+
+    @Override
+    public Map<String, Object> plDebugStart(PlDebugStartRequest request) {
+        if (request != null && "debug_compile".equals(request.getMetadataPreparation())) {
+            throw new IllegalArgumentException("Debug compilation preparation is only available through inspection");
+        }
+        return unchecked(() -> plDebug.start(request));
+    }
+
+    @Override
+    public Map<String, Object> plDebugCompile(String operationId, PlDebugStartRequest target, Map<String, Object> preview) {
+        return plDebugCompile.execute(operationId, target, preview, this::registerDedicatedConnections);
+    }
+
+    @Override
+    public Map<String, Object> plDebugCompileStatus(String operationId) {
+        return plDebugCompile.status(operationId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.setBreakpoints(breakpoints)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugMutateBreakpoint(String debugId, String action, com.dbx.agent.PlDebugBreakpointMutation request) {
+        return unchecked(() -> plDebug.mutateBreakpoint(debugId, action, request));
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpoints(String debugId, String operationId, Long stopRevision,
+                                                    List<PlDebugBreakpoint> breakpoints) {
+        if (operationId == null) return plDebugSetBreakpoints(debugId, breakpoints);
+        return unchecked(() -> plDebug.changeBreakpoints(debugId, operationId, stopRevision, breakpoints, false));
+    }
+
+    @Override
+    public Map<String, Object> plDebugDeleteBreakpoints(String debugId, String operationId, Long stopRevision,
+                                                       List<PlDebugBreakpoint> breakpoints) {
+        if (operationId == null) return plDebugDeleteBreakpoints(debugId, breakpoints);
+        return unchecked(() -> plDebug.changeBreakpoints(debugId, operationId, stopRevision, breakpoints, true));
+    }
+
+    @Override
+    public Map<String, Object> plDebugDeleteBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.deleteBreakpoints(breakpoints)));
+    }
+
+    @Override
+    public List<PlDebugBreakpoint> plDebugListBreakpoints(String debugId) {
+        return unchecked(() -> plDebug.breakpoints(debugId));
+    }
+
+    @Override
+    public Map<String, Object> plDebugResume(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::resume));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepOver(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stepOver));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepIn(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stepIn));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepOut(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stepOut));
+    }
+
+    @Override
+    public Map<String, Object> plDebugResumeIgnoreBreakpoints(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::resumeIgnoreBreakpoints));
+    }
+
+    @Override
+    public Map<String, Object> plDebugAbort(String debugId) {
+        return unchecked(() -> plDebug.abort(debugId));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetVariables(String debugId, int frame) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.variables(frame)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetValue(String debugId, String name, int frame) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.variable(name, frame)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetResults(String debugId) {
+        return plDebug.results(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetResultPage(String debugId, String generation, String resultId, int offset, int limit) {
+        return plDebug.resultPage(debugId, generation, resultId, offset, limit);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetValue(String debugId, String name, int frame, int index, String value) {
+        return plDebugSetValue(debugId, null, null, name, frame, index, value);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetValue(String debugId, String operationId, Long stopRevision,
+                                              String name, int frame, int index, String value) {
+        return unchecked(() -> plDebug.setValue(debugId, operationId, stopRevision, name, frame, index, value));
+    }
+
+    @Override
+    public Map<String, Object> plDebugOperationStatus(String debugId, String operationId) {
+        return plDebug.operationStatus(debugId, operationId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpointEnabled(String debugId, int breakpointNumber, boolean enabled) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.setBreakpointEnabled(breakpointNumber, enabled)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpointEnabled(String debugId, String operationId, Long stopRevision,
+                                                          int breakpointNumber, boolean enabled) {
+        if (operationId == null) return plDebugSetBreakpointEnabled(debugId, breakpointNumber, enabled);
+        return unchecked(() -> plDebug.setBreakpointEnabled(debugId, operationId, stopRevision, breakpointNumber, enabled));
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetExceptionBreakpoint(String debugId, boolean enabled) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.setExceptionBreakpoint(enabled)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetStack(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stack));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStatus(String debugId) {
+        return plDebug.status(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugHeartbeat(String debugId) {
+        return plDebug.heartbeat(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetLog(String debugId) {
+        return plDebug.log(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetLogPage(String debugId, int offset, int limit) {
+        return plDebug.log(debugId, offset, limit);
+    }
+
+    @Override
+    public boolean plDebugClose(String debugId) {
+        return unchecked(() -> plDebug.close(debugId));
+    }
+
+    @Override
+    public Map<String, Object> plDebugExecute(String debugId, String sql, int maxRows) {
+        return unchecked(() -> plDebug.map(debugId, session -> {
+            throw new UnsupportedOperationException("No verified DBMS_DEBUG.EXECUTE binding is available in this OceanBase adapter; no SQL was dispatched");
+        }));
+    }
+
+    @Override
+    protected void afterDisconnect() throws Exception {
+        plDebug.closeAll();
     }
 
     private List<String> querySchemas() throws SQLException {
@@ -2433,6 +2787,6 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        MultiSessionJsonRpcServer.withBlobBindings(OceanBaseOracleAgent::new).run();
+        MultiSessionJsonRpcServer.withNativeLegacyJobs(OceanBaseOracleAgent::new, true).withExactMetadataIdentity().withNativePlDebug(true).withBreakpointOperationStatus().withRetainedPlDebugResults().run();
     }
 }

@@ -2,6 +2,8 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 import { classifySqlRisk, endsWithEscapeStringPrefix, isSqlRiskMutation, readOracleAlternativeQuoteEnd, usesMysqlLexerRules, usesOracleAlternativeQuotes, usesPostgresEscapeStrings } from "@/lib/sql/sqlRisk";
 
+export type ProductionConnection = Pick<ConnectionConfig, "db_type" | "is_production" | "production_databases">;
+
 export type ProductionContextReason = "connection" | "database" | "sql_target";
 
 export interface ProductionContext {
@@ -94,7 +96,7 @@ export function normalizeProductionDatabase(value: string | undefined | null): s
     .toLowerCase();
 }
 
-export function productionDatabases(connection: ConnectionConfig | undefined): string[] {
+export function productionDatabases(connection: ProductionConnection | undefined): string[] {
   if (!connection?.production_databases?.length) return [];
   if (connection.db_type === "nacos") {
     return [...new Set(connection.production_databases.map(nacosNamespaceIdentity))];
@@ -102,7 +104,7 @@ export function productionDatabases(connection: ConnectionConfig | undefined): s
   return [...new Set(connection.production_databases.map(normalizeProductionDatabase).filter(Boolean))];
 }
 
-export function productionContextForDatabase(connection: ConnectionConfig | undefined, database: string | undefined | null): ProductionContext {
+export function productionContextForDatabase(connection: ProductionConnection | undefined, database: string | undefined | null): ProductionContext {
   if (!connection) return { active: false, databases: [] };
   if (connection.is_production) return { active: true, reason: "connection", databases: [] };
 
@@ -123,7 +125,7 @@ export function isProductionMutation(sql: string): boolean {
  * authoritative for ordinary statements; MySQL-style USE and qualified names
  * additionally protect production databases referenced from another context.
  */
-export function assessProductionSql(sql: string, connection: ConnectionConfig | undefined, activeDatabase: string | undefined | null): ProductionSqlAssessment {
+export function assessProductionSql(sql: string, connection: ProductionConnection | undefined, activeDatabase: string | undefined | null): ProductionSqlAssessment {
   const activeContext = productionContextForDatabase(connection, activeDatabase);
   const targetText = sqlTargetSafetyText(sql, connection?.db_type);
   const statements = splitTargetStatements(targetText.text);

@@ -28,6 +28,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { blockTabDragTextSelection } from "@/lib/tabs/tabDragSelection";
 import type { Component, CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -41,13 +42,16 @@ import {
   ChevronsUpDown,
   Clock3,
   Copy,
+  Crosshair,
   Database,
+  ExternalLink,
   FoldHorizontal,
   ListFilter,
   ListOrdered,
   Maximize2,
   Minimize2,
   Package,
+  FilePlus2,
   PanelBottom,
   PanelLeft,
   PanelRight,
@@ -55,7 +59,6 @@ import {
   Pencil,
   Pin,
   PlugZap,
-  Plus,
   RotateCcw,
   RotateCw,
   Rows2,
@@ -85,6 +88,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
+import { TAB_WINDOW_TRANSFER } from "@/composables/useTabWindowTransfer";
 import { useTabTitleTruncation } from "@/composables/useTabTitleTruncation";
 import { useToast } from "@/composables/useToast";
 import { hexToRgba } from "@/lib/common/color";
@@ -118,6 +122,7 @@ import {
   tabIconClass,
   tabTooltipLines,
 } from "@/lib/tabs/tabPresentation";
+import { queryTabExternalFilePath } from "@/lib/sql/sqlFileOpen";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -142,6 +147,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   "activate-tab": [tabId: string];
   "locate-tab": [tab: QueryTab];
+  "locate-sql-file": [tab: QueryTab];
+  "locate-sql-library-file": [tab: QueryTab];
   "toggle-zen-mode": [];
   "start-resize": [event: PointerEvent];
   "toggle-collapse": [];
@@ -160,6 +167,8 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, null);
+const tabWindowTransfer = inject(TAB_WINDOW_TRANSFER, null);
+let releaseTabDragSelection: (() => void) | undefined;
 const canNewQuery = computed(() => toolbar?.canNewQuery.value ?? false);
 const { toast } = useToast();
 const tabsContainerRef = ref<HTMLElement | null>(null);
@@ -285,7 +294,9 @@ const hasHorizontalFixedRows = computed(() => !isVerticalLayout.value && !isTwoR
 const tabBarClass = computed(() => [
   isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout",
   isVerticalLayout.value
-    ? `vertical-tab-layout h-full w-60 flex-col bg-background ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
+    ? // Same rail tone as the classic top bar (issue #13236): a background-colored
+      // rail made active and inactive pills hard to tell apart.
+      `vertical-tab-layout h-full w-60 flex-col bg-muted ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
     : isClassicLayout.value
       ? "bg-muted"
       : `bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`,
@@ -377,14 +388,19 @@ function revealActiveTabAfterLayout() {
 
 const showOverflowControl = computed(() => {
   void tabLayoutRevision.value;
+  // In two-row mode the detail strip represents a selected semantic group.
+  // Keep its tab-list affordance available for every rendered group, including
+  // single-tab plugin pages, instead of deriving it from physical overflow.
+  if (isTwoRowLayout.value) return twoRowSelectedTabCount.value > 0;
+
   // A single-row strip hides tabs in two ways: they scroll out of the viewport
   // (real overflow) or they stay in it and ellipsize their labels, which the
   // scroll box cannot see because a capped pill narrows itself instead of
-  // overflowing (useTabTitleTruncation). The two-row layout decides from its
+  // overflowing (useTabTitleTruncation). The fixed-row layout decides from its
   // rows' scroll extents alone: its first row narrows itself by the arrow's
   // reserved width (.tab-section-frame--with-overflow-control), so feeding
-  // clipping back into the arrow there would rebuild the loop that the constant
-  // reservation exists to break.
+  // clipping back into the arrow there would rebuild the loop that the
+  // constant reservation exists to break.
   const hasHiddenTab = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value || hasTruncatedTabTitle.value;
   return props.tabs.length > 0 && hasHiddenTab && !isWrapLayout.value && !isVerticalLayout.value;
 });
@@ -493,6 +509,8 @@ function databaseTabGroupKey(tab: QueryTab) {
 }
 
 function tabGroupKey(tab: QueryTab) {
+  // Standalone plugin pages must not share the unbound SQL tabs' empty key.
+  if (isConnectionlessPluginTab(tab)) return "connectionless:plugin";
   const connection = connectionStore.getConfig(tab.connectionId);
   if (settingsStore.editorSettings.tabGroupMode === "sidebar") return tab.connectionId;
   if (settingsStore.editorSettings.tabGroupMode === "connection") return tab.connectionId;
@@ -609,6 +627,7 @@ const editingTabGroupColor = ref("");
 const editingTabGroupFallbackColor = ref(tabGroupPalette[0]!);
 
 function tabGroupDefaultLabel(tab: QueryTab) {
+  if (!tab.connectionId) return t(isConnectionlessPluginTab(tab) ? "tabs.pluginTabs" : "tabs.ungroupedTabs");
   const connection = connectionStore.getConfig(tab.connectionId);
   if (settingsStore.editorSettings.tabGroupMode === "sidebar") return tabConnectionLabel(tab);
   if (settingsStore.editorSettings.tabGroupMode === "connection") return connection?.name || tab.connectionId;
@@ -1005,9 +1024,28 @@ function selectTabOrganizationItem(value: string) {
   else if (section === "maxwidth") updateTabMaxWidth(Number(option));
 }
 
+function getTabGroupWindowMenuItems(tabIds: readonly string[]): ContextMenuItem[] {
+  const tabs = [...new Set(tabIds)].map((id) => props.tabs.find((tab) => tab.id === id)).filter((tab): tab is QueryTab => !!tab);
+  const enabled = !!props.canDetachTabs && !!tabWindowTransfer && tabs.length > 0;
+  return [
+    { label: t("contextMenu.openTabGroupInNewWindow"), action: () => void tabWindowTransfer?.openTabsInNewWindow(tabs), icon: ExternalLink, visible: enabled },
+    {
+      label: t("contextMenu.moveTabGroupToAnotherWindow"),
+      icon: ExternalLink,
+      visible: enabled && !!tabWindowTransfer?.otherTabWindows.value.length,
+      children: tabWindowTransfer?.otherTabWindows.value.map((window) => ({
+        label: tabWindowTransfer.tabWindowTargetLabel(window),
+        action: () => void tabWindowTransfer.moveTabsToWindow(tabs, window.label),
+      })),
+    },
+    { label: "", separator: true, visible: enabled },
+  ];
+}
+
 function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
   const customization = tabGroupCustomization(tab);
   return [
+    ...getTabGroupWindowMenuItems(tabsInSemanticGroup(tab).map((member) => member.id)),
     {
       label: t("contextMenu.editTabGroup"),
       action: () => openTabGroupEditor(tab),
@@ -1054,6 +1092,7 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
         ]
       : [];
   return [
+    ...getTabGroupWindowMenuItems(entry.tabIds),
     ...customizationItems,
     { label: t("contextMenu.collapseAll"), action: collapseAllTabGroups, icon: ChevronsDownUp },
     { label: t("contextMenu.expandAll"), action: () => expandAllTabGroups(), icon: ChevronsUpDown },
@@ -1062,9 +1101,12 @@ function getTabGroupHeaderMenuItems(entry: Extract<StripEntry, { kind: "header" 
   ];
 }
 
-function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+async function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
   event.preventDefault();
+  event.stopPropagation();
   document.getSelection()?.removeAllRanges();
+  await tabWindowTransfer?.refreshOtherTabWindows();
+  await nextTick();
   open(event);
 }
 
@@ -1185,9 +1227,7 @@ const twoRowGroupItems = computed<TwoRowGroupItem[]>(() => {
     const tab = tabs[0]!;
     return {
       key,
-      // An unlabeled cluster is usually connectionless plugin tabs: a lone one
-      // names itself, several of them read better as "Plugins" than "Ungrouped".
-      label: tabGroupLabel(tab) || (tabs.length === 1 ? tabTitleText(tab) : tabs.every(isConnectionlessPluginTab) ? t("tabs.pluginTabs") : t("tabs.ungroupedTabs")),
+      label: tabGroupLabel(tab) || (tabs.length === 1 ? tabTitleText(tab) : t("tabs.ungroupedTabs")),
       count: tabs.length,
       tab,
       tabIds: tabs.map((item) => item.id),
@@ -1233,6 +1273,7 @@ const twoRowSelectedKey = computed<string | null>(() => {
   if (twoRowFocusedGroupKey.value !== null && items.some((item) => item.key === twoRowFocusedGroupKey.value)) return twoRowFocusedGroupKey.value;
   return items[0]!.key;
 });
+const twoRowSelectedTabCount = computed(() => twoRowGroupItems.value.find((group) => group.key === twoRowSelectedKey.value)?.count ?? 0);
 
 type SpecialPageSurface = "pluginCenter" | "settings" | "driverStore";
 
@@ -1302,6 +1343,7 @@ const twoRowTabEntries = computed<StripEntry[]>(() => {
 function getTwoRowGroupMenuItems(group: TwoRowGroupItem): ContextMenuItem[] {
   const customization = group.key ? tabGroupCustomization(group.tab) : undefined;
   return [
+    ...getTabGroupWindowMenuItems(group.tabIds),
     { label: t("contextMenu.editTabGroup"), action: () => openTabGroupEditor(group.tab), icon: Pencil, visible: !!group.key },
     { label: t("contextMenu.resetTabGroup"), action: () => resetTabGroupCustomization(group.tab), icon: RotateCcw, visible: !!group.key && !!(customization?.name || customization?.color) },
     { label: "", separator: true, visible: !!group.key },
@@ -1379,6 +1421,12 @@ function isConnectionlessPluginTab(tab: QueryTab): boolean {
   return (tab.mode === "plugin-workbench" || tab.mode === "plugin-filesystem") && !tab.connectionId;
 }
 
+function isPluginTabGroup(tab: QueryTab): boolean {
+  const connection = connectionStore.getConfig(tab.connectionId);
+  // A plugin page can also belong to a regular database connection.
+  return connection ? connection.db_type === "plugin" : tab.mode === "plugin-workbench" || tab.mode === "plugin-filesystem";
+}
+
 /**
  * Drag visuals for a pill, ported from the legacy tab bar's tabDropStyle: the
  * dragged pill dims, and the hovered pill shows an inset ring line marking
@@ -1426,7 +1474,7 @@ function removeTabDragGhost() {
 }
 
 function isDirtyTab(tab: QueryTab) {
-  return queryStore.isTabDirty(tab);
+  return queryStore.dirtyTabIds.has(tab.id);
 }
 
 function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
@@ -1476,7 +1524,10 @@ function handleTabPointerDown(event: PointerEvent, tab: QueryTab) {
   if ((event.buttons & 1) !== 1) {
     return;
   }
+  releaseTabDragSelection?.();
+  releaseTabDragSelection = blockTabDragTextSelection();
   groupTabDragSourceEl = event.currentTarget as HTMLElement | null;
+  void tabWindowTransfer?.refreshOtherTabWindows();
   groupTabDrag.active = false;
   groupTabDrag.tabId = tab.id;
   groupTabDrag.sourceGroupId = props.groupId;
@@ -1644,13 +1695,16 @@ function handleSaveAllTabs() {
   emit("save-all-tabs");
 }
 
+async function openTabContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+  event.preventDefault();
+  event.stopPropagation();
+  await tabWindowTransfer?.refreshOtherTabWindows();
+  await nextTick();
+  open(event);
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
-    {
-      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
-      action: toggleCompactTabTitle,
-      icon: compactTabTitle.value ? Maximize2 : Minimize2,
-    },
     ...createRenameDuplicateTabItems({
       tab,
       t,
@@ -1665,7 +1719,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       visible: canSetTabSuffix(tab),
     },
     {
-      label: t("contextMenu.copyName"),
+      label: t("contextMenu.copyTabName"),
       action: async () => {
         try {
           await copyToClipboard(tabTitleText(tab));
@@ -1678,80 +1732,64 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     },
     {
       label: t("tabs.openInNewWindow"),
-      action: () => emit("detach-tab", tab),
-      icon: Maximize2,
-      visible: !!props.canDetachTabs && isDetachableTab(tab),
+      action: () => (tabWindowTransfer ? void tabWindowTransfer.openTabInNewWindow(tab) : emit("detach-tab", tab)),
+      icon: ExternalLink,
+      visible: !!props.canDetachTabs && (!!tabWindowTransfer || isDetachableTab(tab)),
     },
-    createLocateTabMenuItem({
-      t,
-      visible: !!activeTabSidebarTarget(tab),
-      onLocate: () => emit("locate-tab", tab),
-    }),
-    { label: "", separator: true },
-    createPinTabMenuItem({
-      label: tab.pinned ? t("contextMenu.unpinTab") : t("contextMenu.pinTab"),
-      onToggle: () => queryStore.togglePinnedTab(tab.id),
-    }),
+    {
+      label: t("contextMenu.moveTabToAnotherWindow"),
+      icon: ExternalLink,
+      visible: !!tabWindowTransfer?.otherTabWindows.value.length,
+      children: tabWindowTransfer?.otherTabWindows.value.map((window) => ({
+        label: tabWindowTransfer.tabWindowTargetLabel(window),
+        action: () => void tabWindowTransfer.moveTabToWindow(tab, window.label),
+      })),
+    },
     // Split actions stay visible but render disabled when they cannot produce
     // a new layout — at the four-group cap, or with a single open tab (the
     // store rejects with the same rules). Every tab type can split: groups
     // host non-query tabs via ContentArea, same as moving them between groups.
     {
-      label: t("contextMenu.splitRight"),
-      action: () => queryStore.splitTabRight(tab.id),
-      disabled: splitUnavailable.value,
+      label: t("contextMenu.splitTab"),
       icon: ArrowRight,
+      children: [
+        {
+          label: t("contextMenu.splitRight"),
+          action: () => queryStore.splitTabRight(tab.id),
+          disabled: splitUnavailable.value,
+          icon: ArrowRight,
+        },
+        {
+          label: t("contextMenu.splitDown"),
+          action: () => queryStore.splitTabDown(tab.id),
+          disabled: splitUnavailable.value,
+          icon: ArrowDown,
+        },
+        ...(canChangeOrientation.value
+          ? [
+              {
+                label: t("contextMenu.changeOrientation"),
+                action: () => queryStore.setOrientation(queryStore.orientation === "vertical" ? "horizontal" : "vertical"),
+                icon: RotateCw,
+              },
+            ]
+          : []),
+        ...(isSecondaryGroup.value
+          ? [
+              {
+                label: t("contextMenu.unsplit"),
+                action: () => queryStore.unsplitTab(tab.id),
+                icon: ArrowRight,
+                visible: true,
+              },
+            ]
+          : []),
+      ],
     },
-    {
-      label: t("contextMenu.splitDown"),
-      action: () => queryStore.splitTabDown(tab.id),
-      disabled: splitUnavailable.value,
-      icon: ArrowDown,
-    },
-    ...(canChangeOrientation.value
-      ? [
-          {
-            label: t("contextMenu.changeOrientation"),
-            action: () => queryStore.setOrientation(queryStore.orientation === "vertical" ? "horizontal" : "vertical"),
-            icon: RotateCw,
-          },
-        ]
-      : []),
-    ...(isSecondaryGroup.value
-      ? [
-          {
-            label: t("contextMenu.unsplit"),
-            action: () => queryStore.unsplitTab(tab.id),
-            icon: ArrowRight,
-            visible: true,
-          },
-        ]
-      : []),
-    createCloseOtherTabMenuItem({
-      label: t("contextMenu.closeOtherTabs"),
-      onClose: () => queryStore.closeOtherTabsInGroup(props.groupId, tab.id),
-    }),
-    createCloseLeftTabMenuItem({
-      label: t("contextMenu.closeLeftTabs"),
-      disabled: !hasTabsToLeft(tab),
-      onClose: () => {
-        const tabsToClose = tabsToLeftInDisplayOrder(tab).map((item) => item.id);
-        const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
-        queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
-      },
-    }),
-    createCloseRightTabMenuItem({
-      label: t("contextMenu.closeRightTabs"),
-      disabled: !hasTabsToRight(tab),
-      onClose: () => {
-        const tabsToClose = tabsToRightInDisplayOrder(tab).map((item) => item.id);
-        const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
-        queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
-      },
-    }),
-    createCloseAllTabMenuItem({
-      label: t("contextMenu.closeAllTabs"),
-      onClose: () => queryStore.closeAllTabsInGroup(props.groupId, tab.id),
+    { label: "", separator: true },
+    createPinTabMenuItem({
+      label: tab.pinned ? t("contextMenu.unpinTab") : t("contextMenu.pinTab"),
+      onToggle: () => queryStore.togglePinnedTab(tab.id),
     }),
     createSaveAllTabsMenuItem({
       label: t("contextMenu.saveAllTabs"),
@@ -1759,22 +1797,77 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.saveAllTabs ?? ""),
       onSaveAll: () => handleSaveAllTabs(),
     }),
-    {
-      label: t("contextMenu.closeTabGroup"),
-      action: () => closeTabGroup(tab),
-      visible: settingsStore.editorSettings.tabGroupMode !== "none",
-      icon: X,
-    },
-    createCloseTabMenuItem({
-      label: t("contextMenu.closeTab"),
-      onClose: () => closeTab(tab),
-    }),
     createReopenClosedTabMenuItem({
       label: t("contextMenu.reopenClosedTab"),
       disabled: !queryStore.canReopenClosedTab,
       shortcut: formatShortcut(settingsStore.editorSettings.shortcuts?.reopenClosedTab ?? "Shift+Mod+T"),
       onReopen: () => queryStore.reopenClosedTab(),
     }),
+    createCloseTabMenuItem({
+      label: t("contextMenu.closeTab"),
+      onClose: () => closeTab(tab),
+    }),
+    {
+      label: t("contextMenu.batchCloseTabs"),
+      icon: X,
+      children: [
+        createCloseOtherTabMenuItem({
+          label: t("contextMenu.closeOtherTabs"),
+          onClose: () => queryStore.closeOtherTabsInGroup(props.groupId, tab.id),
+        }),
+        createCloseLeftTabMenuItem({
+          label: t("contextMenu.closeLeftTabs"),
+          disabled: !hasTabsToLeft(tab),
+          onClose: () => {
+            const tabsToClose = tabsToLeftInDisplayOrder(tab).map((item) => item.id);
+            const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
+            queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
+          },
+        }),
+        createCloseRightTabMenuItem({
+          label: t("contextMenu.closeRightTabs"),
+          disabled: !hasTabsToRight(tab),
+          onClose: () => {
+            const tabsToClose = tabsToRightInDisplayOrder(tab).map((item) => item.id);
+            const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : tab.id;
+            queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
+          },
+        }),
+        createCloseAllTabMenuItem({
+          label: t("contextMenu.closeAllTabs"),
+          onClose: () => queryStore.closeAllTabsInGroup(props.groupId, tab.id),
+        }),
+        {
+          label: t("contextMenu.closeTabGroup"),
+          action: () => closeTabGroup(tab),
+          visible: settingsStore.editorSettings.tabGroupMode !== "none",
+          icon: X,
+        },
+      ],
+    },
+    { label: "", separator: true },
+    {
+      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
+      action: toggleCompactTabTitle,
+      icon: compactTabTitle.value ? Maximize2 : Minimize2,
+    },
+    createLocateTabMenuItem({
+      t,
+      visible: !!activeTabSidebarTarget(tab),
+      onLocate: () => emit("locate-tab", tab),
+    }),
+    {
+      label: t("sidebar.locateSqlFile"),
+      icon: Crosshair,
+      visible: !!queryTabExternalFilePath(tab),
+      action: () => emit("locate-sql-file", tab),
+    },
+    {
+      label: t("sqlFileTree.locateActiveFile"),
+      icon: Crosshair,
+      visible: !!tab.savedSqlId,
+      action: () => emit("locate-sql-library-file", tab),
+    },
   ];
   return items;
 }
@@ -1782,6 +1875,10 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
 function handleTabDoubleClick(tab: QueryTab, event: MouseEvent) {
   event.stopPropagation();
   if (event.target instanceof Element && event.target.closest("button, input, [role='button']")) {
+    return;
+  }
+  if (settingsStore.editorSettings.tabDoubleClickAction === "close") {
+    closeTab(tab);
     return;
   }
   if (tab.mode === "data") {
@@ -1811,9 +1908,12 @@ function cleanupTabDrag(event?: Event) {
   window.removeEventListener("pointerup", handleTabPointerUp);
   window.removeEventListener("pointercancel", cleanupTabDrag);
   window.removeEventListener("blur", cleanupTabDrag);
+  releaseTabDragSelection?.();
+  releaseTabDragSelection = undefined;
   // The shared drag session belongs to the bar that started it: another
   // group's tab bar unmounting mid-drag must not kill the source's drag.
   if (groupTabDrag.sourceGroupId === props.groupId) {
+    if (event?.type === "pointercancel") tabWindowTransfer?.cancel();
     groupTabDrag.active = false;
     groupTabDrag.tabId = null;
     groupTabDrag.sourceGroupId = null;
@@ -1825,7 +1925,6 @@ function cleanupTabDrag(event?: Event) {
     groupTabDragSourceEl = null;
     removeTabDragGhost();
     document.body.style.cursor = "";
-    document.body.style.userSelect = "";
   }
 }
 
@@ -1856,9 +1955,16 @@ function handleTabPointerMove(event: PointerEvent) {
       groupTabDragGhost = createTabDragGhost(groupTabDragSourceEl, event.clientX, event.clientY);
     }
     document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
   }
   event.preventDefault();
+  const sourceBar = groupTabDragSourceEl?.closest<HTMLElement>("[data-main-tab-bar]");
+  if (sourceBar && tabWindowTransfer?.move(drag.tabId, event, () => cleanupTabDrag())) {
+    removeTabDragGhost();
+    drag.targetTabId = null;
+    drag.targetGroupId = null;
+    drag.position = null;
+    return;
+  }
   moveTabDragGhost(event.clientX, event.clientY);
 
   const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -1888,7 +1994,12 @@ function handleTabPointerUp(event: PointerEvent) {
     targetTabId: groupTabDrag.targetTabId,
     position: groupTabDrag.position,
   };
+  const transferred = drag.active && drag.tabId ? tabWindowTransfer?.end(drag.tabId, event) : false;
   cleanupTabDrag();
+  if (transferred) {
+    event.preventDefault();
+    return;
+  }
   if (!drag.active) {
     return;
   }
@@ -1926,6 +2037,7 @@ function handleTabPointerUp(event: PointerEvent) {
 }
 
 onUnmounted(() => {
+  if (groupTabDrag.sourceGroupId === props.groupId) tabWindowTransfer?.cancel();
   cleanupTabDrag();
   tabGroupCollapseTimers.forEach((timer) => window.clearTimeout(timer));
   tabGroupCollapseTimers.clear();
@@ -1935,10 +2047,12 @@ const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 
 watch(
   () => props.activeTabId,
-  (tabId) => {
+  (tabId, previousTabId) => {
     lastDispatchedSwitchTabId = null;
-    // A tab that just became active must be visible: reveal its group if collapsed.
-    expandTabGroupForTab(tabId);
+    // Closing the active tab selects a fallback without changing other groups.
+    if (!previousTabId || queryStore.tabs.some((tab) => tab.id === previousTabId)) {
+      expandTabGroupForTab(tabId);
+    }
     if (isTwoRowLayout.value && tabId) {
       const tab = queryStore.tabs.find((item) => item.id === tabId);
       if (tab) {
@@ -2051,7 +2165,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
       <Tooltip v-if="canNewQuery">
         <TooltipTrigger as-child>
           <button type="button" data-new-query-tab :class="verticalTabToolbarButtonClass" :aria-label="t('toolbar.newQuery')" @click="toolbar?.newQuery(groupId)">
-            <Plus class="h-4 w-4" />
+            <FilePlus2 class="h-4 w-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
@@ -2133,7 +2247,8 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             >
               <span class="tab-group-header-content">
                 <span class="tab-group-marker" aria-hidden="true" />
-                <ConnectionIcon v-if="group.key && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(group.tab.connectionId)" class="tab-group-database-icon" aria-hidden="true" />
+                <PlugZap v-if="isPluginTabGroup(group.tab)" class="tab-group-database-icon text-violet-600 dark:text-violet-400" aria-hidden="true" />
+                <ConnectionIcon v-else-if="group.key && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(group.tab.connectionId)" class="tab-group-database-icon" aria-hidden="true" />
                 <DatabaseIcon v-else :db-type="tabDatabaseIconType(group.tab)" class="tab-group-database-icon" aria-hidden="true" />
                 <span class="tab-group-label">{{ group.label }}</span>
                 <span class="tab-group-count">{{ group.count }}</span>
@@ -2171,7 +2286,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         </div>
       </div>
     </div>
-    <div class="relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl }]">
+    <div
+      class="relative flex w-full min-w-0 shrink-0 overflow-hidden"
+      :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl, 'has-tab-action-controls': showOverflowControl && canNewQuery }]"
+    >
       <LightDropdown
         v-if="!isVerticalLayout && !isTwoRowLayout"
         model-value=""
@@ -2251,7 +2369,8 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                         <span class="tab-group-marker" aria-hidden="true" />
                         <Pin v-if="entry.pinned" class="tab-group-pin" aria-hidden="true" />
                         <ChevronDown class="tab-group-chevron" :class="{ 'tab-group-chevron--collapsed': isGroupCollapsed(entry.groupId) }" aria-hidden="true" />
-                        <ConnectionIcon v-if="entry.level === 'connection' && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(entry.tab.connectionId)" class="tab-group-database-icon tab-group-connection-icon" aria-hidden="true" />
+                        <PlugZap v-if="entry.level === 'connection' && isPluginTabGroup(entry.tab)" class="tab-group-database-icon tab-group-connection-icon text-violet-600 dark:text-violet-400" aria-hidden="true" />
+                        <ConnectionIcon v-else-if="entry.level === 'connection' && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(entry.tab.connectionId)" class="tab-group-database-icon tab-group-connection-icon" aria-hidden="true" />
                         <DatabaseIcon v-else-if="entry.level === 'connection'" :db-type="tabDatabaseIconType(entry.tab)" class="tab-group-database-icon tab-group-connection-icon" aria-hidden="true" />
                         <Database v-else class="tab-group-database-icon tab-group-library-icon text-yellow-500" aria-hidden="true" />
                         <span class="tab-group-label">{{ entry.label }}</span>
@@ -2273,7 +2392,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       :style="tabGroupTreeRowStyle(entry)"
                       :aria-hidden="entry.grouping && !tabSearchQuery.trim() && isEntryHidden(entry)"
                       :inert="entry.grouping && !tabSearchQuery.trim() && isEntryHidden(entry)"
-                      @contextmenu="onContextMenu"
+                      @contextmenu="openTabContextMenu($event, onContextMenu)"
                       @transitionend.self="handleTabGroupTransitionEnd"
                     >
                       <TabGroupTreeGuides v-if="showTabTreeGuides" :guides="entry.treeGuides ?? []" />
@@ -2350,10 +2469,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                         <TooltipContent v-if="isConnectionlessPluginTab(entry.tab)" :side="tabTooltipSide" data-plugin-title-tooltip>
                           {{ tabTitleText(entry.tab) }}
                         </TooltipContent>
-                        <TooltipContent v-else :side="tabTooltipSide" class="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 text-xs">
+                        <TooltipContent v-else :side="tabTooltipSide" surface="popover" class="grid w-max min-w-40 max-w-[min(28rem,calc(100vw-24px))] grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 p-2 text-xs leading-5">
                           <template v-for="line in tabTooltipLines(entry.tab, t)" :key="line.label">
-                            <span class="whitespace-nowrap font-medium opacity-70">{{ line.label }}</span>
-                            <span class="min-w-0 break-all">{{ line.value }}</span>
+                            <span class="whitespace-nowrap text-muted-foreground">{{ line.label }}</span>
+                            <span class="min-w-0 whitespace-pre-wrap break-all font-mono text-foreground/90">{{ line.value }}</span>
                           </template>
                         </TooltipContent>
                       </Tooltip>
@@ -2456,19 +2575,20 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           <button
             type="button"
             data-new-query-tab
-            class="mx-0.5 inline-flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            class="tab-bar-action-button inline-flex shrink-0 self-center items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :class="showOverflowControl ? ['absolute right-7', 'top-1/2 z-30 -translate-y-1/2'] : 'mx-0.5'"
             :aria-label="t('toolbar.newQuery')"
             @click="toolbar?.newQuery(groupId)"
           >
-            <Plus class="h-4 w-4" />
+            <FilePlus2 class="h-4 w-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.newQuery") }}</TooltipContent>
       </Tooltip>
-      <div v-if="showOverflowControl" class="tab-overflow-control absolute top-0 z-30 flex h-full items-center" :class="canNewQuery ? (isClassicLayout ? 'right-[2.125rem]' : 'right-[2.625rem]') : 'right-0'">
+      <div v-if="showOverflowControl" class="tab-overflow-control absolute right-0 top-0 z-30 flex h-full items-center">
         <Popover v-model:open="tabOverflowOpen">
           <PopoverTrigger as-child>
-            <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
+            <button type="button" class="tab-bar-action-button inline-flex shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>
@@ -2489,7 +2609,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                     activateTab(tab.id);
                     tabOverflowOpen = false;
                   "
-                  @contextmenu="onContextMenu"
+                  @contextmenu="openTabContextMenu($event, onContextMenu)"
                   @keydown.enter.prevent="
                     activateTab(tab.id);
                     tabOverflowOpen = false;

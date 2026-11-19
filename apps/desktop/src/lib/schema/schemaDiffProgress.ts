@@ -17,13 +17,13 @@ export function shouldLoadSchemaDiffExtraObjects(dbType: string | null | undefin
 }
 
 /** True when session will load routines via listFunctions for a supported source/target pair. */
-export function shouldLoadSchemaDiffRoutines(sourceDbType: string | null | undefined, targetDbType: string | null | undefined, options: Pick<SchemaDiffCompareOptions, "functions">): boolean {
+export function shouldLoadSchemaDiffRoutines(sourceDbType: string | null | undefined, targetDbType: string | null | undefined, options: Pick<SchemaDiffCompareOptions, "functions"> & Partial<Pick<SchemaDiffCompareOptions, "routineObjectKinds">>): boolean {
   if (!options.functions) return false;
-  return schemaDiffRoutineObjectTypesIntersection(sourceDbType as DatabaseType | undefined, targetDbType as DatabaseType | undefined).length > 0;
+  return schemaDiffRoutineObjectTypesIntersection(sourceDbType as DatabaseType | undefined, targetDbType as DatabaseType | undefined, options.routineObjectKinds).length > 0;
 }
 
 /** Unified extra-object progress phase used by session + dialog next-step hints. */
-export function shouldLoadSchemaDiffExtraObjectPhase(sourceDbType: string | null | undefined, targetDbType: string | null | undefined, options: Pick<SchemaDiffCompareOptions, "functions" | "sequences" | "rules" | "owners">): boolean {
+export function shouldLoadSchemaDiffExtraObjectPhase(sourceDbType: string | null | undefined, targetDbType: string | null | undefined, options: Pick<SchemaDiffCompareOptions, "functions" | "sequences" | "rules" | "owners"> & Partial<Pick<SchemaDiffCompareOptions, "routineObjectKinds">>): boolean {
   return shouldLoadSchemaDiffExtraObjects(targetDbType, options) || shouldLoadSchemaDiffRoutines(sourceDbType, targetDbType, options);
 }
 

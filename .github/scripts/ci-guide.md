@@ -22,8 +22,10 @@ The PR author, not the trigger actor or author association, determines this
 policy, so a maintainer retrigger cannot bypass contributor limits.
 `cancel-in-progress: false` preserves the executing PR, and `queue: max` retains
 up to 100 pending runs rather than replacing earlier pending PRs. Further runs
-beyond that limit are cancelled by GitHub. Updates to the same contributor PR
-also enqueue separate runs; this policy does not deduplicate superseded commits.
+beyond that limit are cancelled by GitHub. Superseded commits on the same
+contributor PR (base `main`) are cancelled by the separate
+`cancel-superseded-ci.yml` workflow: on `synchronize` it re-reads the PR and
+cancels that PR's older runs unless the event SHA is once again the head.
 
 The repository owner (`t8y2` here, compared with `github.repository_owner`) is
 exempt from author-level limits. Owner PRs retain one cancellation group per PR,

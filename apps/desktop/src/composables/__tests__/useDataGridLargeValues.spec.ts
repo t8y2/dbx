@@ -6,7 +6,8 @@ import { binaryCellDisplayText, binaryCellDownloadPayload } from "@/lib/dataGrid
 import { useDataGridLargeValues } from "@/composables/useDataGridLargeValues";
 import { useDataGridEditor } from "@/composables/useDataGridEditor";
 import { createDataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
-import type { DatabaseType, QueryResult } from "@/types/database";
+import { fetchLegacyLargeValueRequestChunk, type LegacyLargeValueContext, type LegacyResolvedLargeValueCells } from "@/lib/dataGrid/legacyLargeValueExport";
+import type { ConnectionConfig, DatabaseType, QueryResult } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   buildDataGridContextFilterCondition: vi.fn(),
@@ -40,9 +41,11 @@ const disposers: Array<() => void> = [];
 afterEach(() => {
   for (const dispose of disposers.splice(0)) dispose();
   vi.resetAllMocks();
+  vi.useRealTimers();
 });
 
-function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, withEditor = false) {
+function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, withEditor = false, settings: { primaryKeys?: string[]; visible?: boolean; legacy?: boolean } = {}) {
+  const config = ref({ id: `${databaseType}-1`, name: "Test", db_type: databaseType, host: "original", url_params: settings.legacy ? "dataCharset=GBK" : undefined } as ConnectionConfig);
   const runtimeScope = createDataGridRuntimeScope();
   const toast = vi.fn();
   const formatCell = (value: unknown, columnIndex?: number, originalBytes?: number) => binaryCellDisplayText(value, result.value.column_types?.[columnIndex ?? 0], originalBytes, databaseType) ?? String(value ?? "");
@@ -59,18 +62,18 @@ function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, 
             tableName: "APP_DATA",
             tableType: "TABLE",
             columns: result.value.columns.map((name, index) => ({ name, data_type: result.value.column_types![index]!, is_nullable: index !== 0, column_default: null, is_primary_key: index === 0, extra: null })),
-            primaryKeys: ["ID"],
+            primaryKeys: settings.primaryKeys ?? ["ID"],
           })),
           databaseType: computed(() => databaseType),
           connectionId: computed(() => `${databaseType}-1`),
           executionDatabase: computed(() => "MAXIMO"),
           resultSourceColumns: computed(() => result.value.columns),
           allColumnTypes: computed(() => result.value.column_types ?? []),
-          renderedGridColumns: computed(() => []),
+          renderedGridColumns: computed(() => (settings.visible ? result.value.columns.map((_, actualColIdx) => ({ actualColIdx })) : [])),
           showTranspose: ref(false),
-          displayRowCount: computed(() => 1),
-          gridScrollerElement: () => null,
-          displayItemAt: () => undefined,
+          displayRowCount: computed(() => result.value.rows.length),
+          gridScrollerElement: () => (settings.visible ? ({ scrollTop: 0, clientHeight: 200 } as HTMLElement) : null),
+          displayItemAt: (index) => item(index + 1),
           getRowItem: (rowId) => (rowId >= 1 && rowId <= result.value.rows.length ? item(rowId) : undefined),
           tableColumnForGridColumn: () => undefined,
           formatCell,
@@ -79,7 +82,7 @@ function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, 
           clearCellFormatCache: vi.fn(),
           invalidateResultEstimate: vi.fn(),
           connectionIdentifierQuote: () => '"',
-          getConnectionConfig: () => undefined,
+          getConnectionConfig: () => config.value,
           includeDatabaseName: computed(() => true),
           globalQueryTimeoutSecs: computed(() => 30),
           resultLifecycle: { beginOperation: () => 1, isCurrent: () => true },
@@ -132,7 +135,7 @@ function mountLargeValues(databaseType: DatabaseType, result: Ref<QueryResult>, 
     app.unmount();
   });
   if (!largeValues) throw new Error("useDataGridLargeValues was not mounted");
-  return { largeValues, toast, item, editor, runtimeScope };
+  return { largeValues, toast, item, editor, runtimeScope, config };
 }
 
 function previewResult(columnType = "bytea", value = "\\x00017f80ff...", originalBytes = 9645) {
@@ -147,6 +150,280 @@ function previewResult(columnType = "bytea", value = "\\x00017f80ff...", origina
 }
 
 describe("useDataGridLargeValues", () => {
+  it.each(["metadata", "target"] as const)("uses target identity rather than incidental connection fields for legacy exports (%s)", async (change) => {
+    const result = previewResult();
+    const { largeValues, config } = mountLargeValues("postgres", result);
+    const run = largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }]);
+    if (change === "metadata") Object.assign(config.value, { note: "updated note", default_schema: "other display schema", database_info: { product_name: "PostgreSQL" } });
+    else config.value.host = "other target";
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue('"ID" = 1');
+    mocks.buildTableSelectSql.mockResolvedValue("original select");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP"], rows: [[1, "complete"]] }]);
+    if (change === "metadata") expect((await run(new AbortController().signal)).get(1)?.get(1)).toBe("complete");
+    else {
+      await expect(run(new AbortController().signal)).rejects.toMatchObject({ status: "failed" });
+      expect(mocks.executeMulti).not.toHaveBeenCalled();
+    }
+  });
+  it("captures legacy PK values and columns before deferred export reads", async () => {
+    const result = previewResult();
+    const { largeValues } = mountLargeValues("postgres", result);
+    const run = largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }]);
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    result.value = { ...result.value, columns: ["NEW_ID", "OTHER"], rows: [[99, "different"]] };
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue('"ID" = 1');
+    mocks.buildTableSelectSql.mockResolvedValue("original select");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP"], rows: [[1, "complete"]] }]);
+    const values = await run(new AbortController().signal);
+    expect(mocks.buildDataGridContextFilterCondition).toHaveBeenCalledWith(expect.objectContaining({ columnName: "ID", value: 1 }));
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ tableName: "APP_DATA", columns: ["ID", "APP"] }));
+    expect(mocks.executeMulti).toHaveBeenCalledWith("postgres-1", "MAXIMO", "original select", undefined, "execution-1", expect.objectContaining({ maxRows: 1 }));
+    expect(values.get(1)?.get(1)).toBe("complete");
+  });
+
+  it.each(["resolve", "reject"] as const)("waits for an in-flight legacy export read on cancellation (%s)", async (completion) => {
+    const result = previewResult();
+    const { largeValues } = mountLargeValues("postgres", result);
+    const controller = new AbortController();
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("ID = 1");
+    mocks.buildTableSelectSql.mockResolvedValue("select");
+    let resolveRead!: (value: unknown) => void;
+    let rejectRead!: (reason: Error) => void;
+    mocks.executeMulti.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          resolveRead = resolve;
+          rejectRead = reject;
+        }),
+    );
+    const pending = largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }])(controller.signal);
+    const outcome = pending.catch((error) => error);
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledOnce());
+    let finished = false;
+    void outcome.then(() => {
+      finished = true;
+    });
+    controller.abort();
+    await nextTick();
+    expect(finished).toBe(false);
+    expect(mocks.cancelQuery).not.toHaveBeenCalled();
+    if (completion === "resolve") resolveRead([{ columns: ["ID", "APP"], rows: [[1, "complete"]] }]);
+    else rejectRead(new Error("transport lost"));
+    expect(await outcome).toMatchObject({ status: completion === "resolve" ? "cancelled" : "unknown" });
+  });
+
+  it("keeps distinct quoted result names when resolving a captured legacy value", async () => {
+    const result = previewResult();
+    result.value.columns = ["ID", "id"];
+    const { largeValues } = mountLargeValues("postgres", result);
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue('"ID" = 1');
+    mocks.buildTableSelectSql.mockResolvedValue('SELECT "ID", "id" FROM "APP_DATA"');
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "id"], rows: [[1, "complete"]] }]);
+    const resolved = await largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }])(new AbortController().signal);
+    expect(resolved.get(1)?.get(1)).toBe("complete");
+  });
+
+  it.each(["duplicate_identity", "unknown_after_not_started"] as const)("rejects unsafe legacy export results (%s)", async (reason) => {
+    const result = previewResult();
+    const { largeValues } = mountLargeValues("postgres", result);
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("ID = 1");
+    mocks.buildTableSelectSql.mockResolvedValue("select");
+    const failed = { columns: ["message"], rows: [["failed"]], execution_error: true, error: { operationOutcome: "not_started" } };
+    mocks.executeMulti.mockResolvedValue(
+      reason === "duplicate_identity"
+        ? [
+            {
+              columns: ["ID", "APP"],
+              rows: [
+                [1, "first"],
+                [1, "second"],
+              ],
+            },
+          ]
+        : [failed, { ...failed, error: { operationOutcome: "unknown" } }],
+    );
+    await expect(largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }])(new AbortController().signal)).rejects.toMatchObject({ status: reason === "duplicate_identity" ? "failed" : "unknown" });
+  });
+
+  it("rejects a legacy export result that still contains a preview", async () => {
+    const result = previewResult();
+    const { largeValues } = mountLargeValues("postgres", result);
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("ID = 1");
+    mocks.buildTableSelectSql.mockResolvedValue("select");
+    mocks.executeMulti.mockResolvedValue([result.value]);
+    await expect(largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }])(new AbortController().signal)).rejects.toMatchObject({ status: "failed" });
+  });
+
+  it("renders pending text without mutating data or automatically fetching a prefix, then decodes on explicit full read", async () => {
+    vi.useFakeTimers();
+    const result = previewResult("TEXT", "unvalidated carrier prefix", 20000);
+    result.value.rows[0]![0] = "缤纷";
+    result.value.raw_key_cells = [{ row_index: 0, column_index: 0, value: "çÍ·×" }];
+    result.value.large_value_cells![0]!.pending_decode = true;
+    const { largeValues, item } = mountLargeValues("mysql", result, false, { visible: true, legacy: true });
+    expect(largeValues.formatGridItemCell(item(), 1)).toBe("grid.largeValuePendingDecode");
+    expect(result.value.rows[0]![1]).toBe("unvalidated carrier prefix");
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("`ID` = 'çÍ·×'");
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT ID, APP FROM APP_DATA");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP"], rows: [["缤纷", "完整文本"]], raw_key_cells: [{ row_index: 0, column_index: 0, value: "çÍ·×" }] }]);
+    expect(await largeValues.hydrateLargeValueCell(1, 1)).toBe(true);
+    expect(mocks.buildDataGridContextFilterCondition).toHaveBeenCalledWith(expect.objectContaining({ value: "çÍ·×" }));
+    expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "MAXIMO", expect.any(String), undefined, "execution-1", expect.objectContaining({ resultKeyColumns: ["ID"] }));
+    expect(result.value.large_value_cells).toEqual([]);
+    expect(result.value.raw_key_cells).toEqual([{ row_index: 0, column_index: 0, value: "çÍ·×" }]);
+    expect(largeValues.formatGridItemCell(item(), 1)).toBe("完整文本");
+  });
+
+  it("captures original charset keys for deferred exports after the grid result changes", async () => {
+    const result = previewResult("TEXT", "prefix", 20000);
+    result.value.rows[0]![0] = "缤纷";
+    result.value.raw_key_cells = [{ row_index: 0, column_index: 0, value: "çÍ·×" }];
+    result.value.large_value_cells![0]!.pending_decode = true;
+    const { largeValues } = mountLargeValues("mysql", result, false, { legacy: true });
+    const read = largeValues.captureSourceValues([{ rowId: 1, sourceIndex: 0, columnIndex: 1 }]);
+    result.value.raw_key_cells[0]!.value = "changed";
+    result.value = { ...result.value, rows: [["another", "new page"]] };
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("predicate");
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT ID, APP FROM APP_DATA");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["ID", "APP"], rows: [["缤纷", "完整文本"]], raw_key_cells: [{ row_index: 0, column_index: 0, value: "çÍ·×" }] }]);
+    const resolved = await read(new AbortController().signal);
+    expect(mocks.buildDataGridContextFilterCondition).toHaveBeenCalledWith(expect.objectContaining({ value: "çÍ·×" }));
+    expect(mocks.executeMulti).toHaveBeenCalledWith("mysql-1", "MAXIMO", expect.any(String), undefined, "execution-1", expect.objectContaining({ resultKeyColumns: ["ID"] }));
+    expect(resolved.get(1)?.get(1)).toBe("完整文本");
+  });
+
+  it("indexes captured original keys once per full export batch while matching reordered results", async () => {
+    const rowCount = 200;
+    let keyReads = 0;
+    const rawKeyCells = Array.from({ length: rowCount }, (_, row_index) => ({
+      row_index,
+      column_index: 0,
+      get value() {
+        keyReads++;
+        return `carrier-${row_index}`;
+      },
+    }));
+    const context: LegacyLargeValueContext = {
+      databaseType: "mysql",
+      connectionId: "mysql-1",
+      executionDatabase: "app",
+      tableMeta: { tableName: "items", columns: [], primaryKeys: ["id"] },
+      sourceColumns: ["id", "body"],
+      rows: Array.from({ length: rowCount }, () => ["same decoded key", "prefix"]),
+      rawKeyCells,
+      requiresOriginalKeys: true,
+      identifierQuote: "`",
+      serverVersion: undefined,
+      includeDatabaseName: true,
+      includeRowId: false,
+      timeoutSecs: 30,
+    };
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("predicate");
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT id, body FROM items");
+    mocks.executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "body"],
+        rows: Array.from({ length: rowCount }, (_, index) => ["same decoded key", `full-${rowCount - index - 1}`]),
+        raw_key_cells: Array.from({ length: rowCount }, (_, row_index) => ({ row_index, column_index: 0, value: `carrier-${rowCount - row_index - 1}` })),
+      },
+    ]);
+    const requests = Array.from({ length: rowCount }, (_, sourceIndex) => ({ rowId: sourceIndex + 1, sourceIndex, columnIndex: 1, originalBytes: 20000 }));
+    const resolved: LegacyResolvedLargeValueCells = new Map();
+    await fetchLegacyLargeValueRequestChunk(context, 1, requests, [0], resolved, { uuid: () => "export", translate: (key) => key, translateBackendError: String });
+    expect(keyReads).toBe(rowCount);
+    expect(mocks.buildDataGridContextFilterCondition).toHaveBeenCalledTimes(rowCount);
+    for (let index = 0; index < rowCount; index++) expect(resolved.get(index + 1)?.get(1)).toBe(`full-${index}`);
+  });
+
+  it("matches composite original keys when different carriers have identical decoded display keys", async () => {
+    const result = previewResult("TEXT", "prefix", 20000);
+    result.value.columns = ["ID", "PART", "APP"];
+    result.value.column_types = ["VARCHAR", "INT", "TEXT"];
+    result.value.rows = [
+      ["缤纷", 1, "prefix A"],
+      ["缤纷", 1, "prefix B"],
+    ];
+    result.value.raw_key_cells = [
+      { row_index: 0, column_index: 0, value: "çÍ·×" },
+      { row_index: 0, column_index: 1, value: 1 },
+      { row_index: 1, column_index: 0, value: "缤纷" },
+      { row_index: 1, column_index: 1, value: 1 },
+    ];
+    result.value.large_value_cells = [0, 1].map((row_index) => ({ row_index, column_index: 2, original_bytes: 20000, pending_decode: true }));
+    const { largeValues } = mountLargeValues("mysql", result, false, { primaryKeys: ["ID", "PART"], legacy: true });
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("predicate");
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT ID, PART, APP FROM APP_DATA");
+    mocks.executeMulti.mockResolvedValue([
+      {
+        columns: ["ID", "PART", "APP"],
+        rows: [
+          ["缤纷", 1, "full B"],
+          ["缤纷", 1, "full A"],
+        ],
+        raw_key_cells: result.value.raw_key_cells.map((cell) => ({ ...cell, row_index: 1 - cell.row_index })),
+      },
+    ]);
+    const resolved = await largeValues.resolveLargeValueCells([1, 2], [2]);
+    expect(resolved.get(1)?.get(2)).toBe("full A");
+    expect(resolved.get(2)?.get(2)).toBe("full B");
+    expect(result.value.rows.map((row) => row[2])).toEqual(["prefix A", "prefix B"]);
+    expect(mocks.buildDataGridContextFilterCondition.mock.calls.map(([request]) => request.value)).toEqual(["çÍ·×", 1, "缤纷", 1]);
+  });
+
+  it("rejects ambiguous projected key columns instead of picking the first display column", async () => {
+    const result = previewResult("TEXT", "prefix", 20000);
+    result.value.columns.push("ID");
+    result.value.rows[0]!.push(2);
+    result.value.raw_key_cells = [
+      { row_index: 0, column_index: 0, value: 1 },
+      { row_index: 0, column_index: 2, value: 2 },
+    ];
+    result.value.large_value_cells![0]!.pending_decode = true;
+    const { largeValues } = mountLargeValues("mysql", result, false, { legacy: true });
+    expect(await largeValues.hydrateLargeValueCell(1, 1)).toBe(false);
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    expect(result.value.rows[0]![1]).toBe("prefix");
+  });
+
+  it.each(["missing source", "duplicate source", "missing response", "duplicate response", "pending response"])("rejects %s metadata without publishing a guessed value", async (scenario) => {
+    const result = previewResult("TEXT", "prefix", 20000);
+    result.value.large_value_cells![0]!.pending_decode = true;
+    result.value.raw_key_cells = scenario === "missing source" ? [] : [{ row_index: 0, column_index: 0, value: 1 }];
+    if (scenario === "duplicate source") result.value.raw_key_cells.push({ row_index: 0, column_index: 0, value: 2 });
+    const { largeValues } = mountLargeValues("mysql", result, false, { legacy: true });
+    mocks.buildDataGridContextFilterCondition.mockResolvedValue("predicate");
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT ID, APP FROM APP_DATA");
+    mocks.executeMulti.mockResolvedValue([
+      {
+        columns: ["ID", "APP"],
+        rows:
+          scenario === "duplicate response"
+            ? [
+                [1, "first"],
+                [1, "second"],
+              ]
+            : [[1, "full"]],
+        raw_key_cells:
+          scenario === "missing response"
+            ? []
+            : scenario === "duplicate response"
+              ? [
+                  { row_index: 0, column_index: 0, value: 1 },
+                  { row_index: 1, column_index: 0, value: 1 },
+                ]
+              : [{ row_index: 0, column_index: 0, value: 1 }],
+        large_value_cells: scenario === "pending response" ? [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }] : [],
+      },
+    ]);
+    expect(await largeValues.hydrateLargeValueCell(1, 1)).toBe(false);
+    expect(result.value.rows[0]![1]).toBe("prefix");
+    expect(result.value.large_value_cells![0]!.pending_decode).toBe(true);
+    if (scenario.endsWith("source")) expect(mocks.executeMulti).not.toHaveBeenCalled();
+  });
+
   it.each(["result", "locator", "clientSessionId", "txnSessionId", "catalog", "disposal"] as const)("rejects a captured download target after its %s changes", async (change) => {
     const result = previewResult("CLOB", "preview", 5000);
     result.value.large_value_context = { connectionId: "oceanbase-oracle-1", database: "MAXIMO", clientSessionId: "original-session" };

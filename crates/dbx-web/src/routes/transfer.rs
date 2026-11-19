@@ -33,6 +33,9 @@ fn send_transfer_progress(channel: &TransferProgressChannel, progress: &transfer
 
 fn terminal_transfer_error(req: &TransferRequest, error: impl ToString) -> transfer::TransferProgress {
     transfer::TransferProgress {
+        oracle_package_approval: None,
+        oracle_package_preflight: None,
+        oracle_routine_operation: None,
         transfer_id: req.transfer_id.clone(),
         table: String::new(),
         table_index: 0,
@@ -85,6 +88,7 @@ pub async fn start_transfer(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let operation_timeout_secs = body.operation_timeout_secs;
     let req = body.request;
+    transfer::check_data_charset_transfer(&state.app, &req).await.map_err(AppError::from)?;
     transfer::validate_transfer_request(&req).map_err(AppError::from)?;
     transfer::validate_transfer_operation_timeout(operation_timeout_secs).map_err(AppError::from)?;
 
@@ -349,6 +353,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -425,6 +431,7 @@ mod tests {
             create_table: false,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            oracle_packages: None,
             content: TransferContent::DataOnly,
             objects: Some(Vec::new()),
             mode: TransferMode::Append,

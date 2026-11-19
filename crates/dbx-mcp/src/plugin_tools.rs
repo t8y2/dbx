@@ -14,7 +14,7 @@
 //! never cross the process boundary, and a connection saved for plugin A can
 //! never be reached through plugin B's tools.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -40,6 +40,12 @@ pub struct PluginToolProvider {
     pub plugin_id: String,
     pub plugin_name: String,
     pub tools: Vec<RawPluginTool>,
+    /// The plugin's declared sub-scope (`mcp.scope`): `(kind, argument)`.
+    pub scope: Option<(String, String)>,
+    pub scope_list_method: Option<String>,
+    /// Manifest-declared toolset for each listed tool. Tools without an
+    /// explicit declaration use the stable `default` toolset.
+    pub toolsets: BTreeMap<String, String>,
 }
 
 /// One externally exposed plugin tool.
@@ -49,9 +55,23 @@ pub struct PluginToolEntry {
     pub plugin_name: String,
     pub exposed_name: String,
     pub tool: RawPluginTool,
+    /// Declared sub-scope `(kind, argument)` of the owning plugin.
+    pub scope: Option<(String, String)>,
+    pub scope_list_method: Option<String>,
+    /// Manifest-declared toolset used for connection-level ceilings.
+    pub toolset: String,
     /// The plugin schema declares `connectionId`, so the host injects the
     /// bound connection's id into the forwarded arguments.
     pub injects_connection_id: bool,
+}
+
+impl PluginToolEntry {
+    /// A tool with a host-bound `connectionId` or a declared plugin scope must
+    /// run against one of the plugin's saved connections. Connection-less
+    /// tools deliberately keep working when a plugin has no connections.
+    pub fn requires_connection(&self) -> bool {
+        self.injects_connection_id || self.scope.is_some()
+    }
 }
 
 /// Whether `name` sits in the plugin-tool namespace (`dbx_<prefix>__<tool>`).
@@ -87,6 +107,9 @@ pub fn build_catalog(providers: &[PluginToolProvider]) -> Vec<PluginToolEntry> {
                 exposed_name: format!("dbx_{}", exposed_tool_name(prefix, &tool.name, &mut used)),
                 plugin_id: provider.plugin_id.clone(),
                 plugin_name: provider.plugin_name.clone(),
+                scope: provider.scope.clone(),
+                scope_list_method: provider.scope_list_method.clone(),
+                toolset: provider.toolsets.get(&tool.name).cloned().unwrap_or_else(|| "default".to_string()),
                 injects_connection_id: tool.input_schema.pointer("/properties/connectionId").is_some(),
                 tool: tool.clone(),
             });
@@ -196,8 +219,14 @@ pub fn connection_selector_from(arguments: &Value) -> Option<&str> {
 /// into the rmcp wire type, degrading to a plain text payload for plugins
 /// that return something else.
 pub fn call_result_to_rmcp(value: Value) -> rmcp::model::CallToolResult {
-    use rmcp::model::{CallToolResult, ContentBlock};
-    if let Ok(result) = serde_json::from_value::<CallToolResult>(value.clone()) {
+    use rmcp::model::{CallToolResult, ContentBlock, ResultType};
+    if let Ok(mut result) = serde_json::from_value::<CallToolResult>(value.clone()) {
+        // Deserialization bypasses the constructors, so a plugin answer
+        // without `resultType` decodes to `None` and the field disappears on
+        // the wire — but 2026-07-28 peers require it. Fill in `complete`
+        // while keeping a discriminator the plugin set itself; the server
+        // handler strips the field for legacy peers.
+        result.result_type.get_or_insert(ResultType::COMPLETE);
         return result;
     }
     let text = if value.is_null() { "(the tool returned no output)".to_string() } else { value.to_string() };
@@ -229,6 +258,9 @@ mod tests {
 
     fn provider(plugin_id: &str, plugin_name: &str, tools: Value) -> PluginToolProvider {
         PluginToolProvider {
+            scope: None,
+            scope_list_method: None,
+            toolsets: BTreeMap::new(),
             plugin_id: plugin_id.to_string(),
             plugin_name: plugin_name.to_string(),
             tools: parse_tool_list(&tools),
@@ -356,5 +388,30 @@ mod tests {
         let fallback = call_result_to_rmcp(json!({ "unexpected": "shape" }));
         assert_eq!(fallback.content.len(), 1);
         assert_eq!(fallback.is_error, None);
+    }
+
+    #[test]
+    fn call_results_always_carry_a_result_type() {
+        use rmcp::model::ResultType;
+        // A plugin answer without `resultType` (legacy protocol) gets
+        // `complete` filled in so 2026-07-28 clients accept the result.
+        let filled = call_result_to_rmcp(json!({
+            "content": [{ "type": "text", "text": "done" }]
+        }));
+        assert_eq!(filled.result_type, Some(ResultType::COMPLETE));
+        let wire = serde_json::to_value(&filled).unwrap();
+        assert_eq!(wire["resultType"], json!("complete"));
+        // A discriminator the plugin set itself is preserved. (`input_required`
+        // is not legal on CallToolResult: rmcp rejects it at deserialization,
+        // so `complete` is the only value that can arrive through this path.)
+        let explicit = call_result_to_rmcp(json!({
+            "content": [{ "type": "text", "text": "done" }],
+            "resultType": "complete"
+        }));
+        assert_eq!(explicit.result_type, Some(ResultType::COMPLETE));
+        assert!(explicit.is_error.is_none(), "explicit complete keeps the plugin's other fields");
+        // The constructor-built fallback carries `complete` too.
+        let fallback = call_result_to_rmcp(json!({ "unexpected": "shape" }));
+        assert_eq!(fallback.result_type, Some(ResultType::COMPLETE));
     }
 }

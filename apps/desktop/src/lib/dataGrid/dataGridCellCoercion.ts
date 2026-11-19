@@ -1,7 +1,7 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
-import { binaryCellBytesToHexValue, binaryCellUtf8Text, isBlobCellColumnType, isBlobTextPreviewDatabase } from "@/lib/dataGrid/binaryCellDownload";
-import { isNumericColumnType, resolveDataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
+import { binaryCellBytesToHexValue, binaryCellUtf8Text, decodeBinaryUuidText, isBinaryCellTextEditable } from "@/lib/dataGrid/binaryCellDownload";
+import { isNumericColumnType, isUuidColumnType, resolveDataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
 import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export interface CoerceDataGridCellValueOptions {
@@ -26,6 +26,8 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   const { value, oldValue } = options;
   if (value === "" && options.emptyStringAsNull) return null;
   if (value === "" && oldValue === null && !keepsEmptyStringInColumn(options)) return null;
+  const uuidValue = coerceUuidTextValue(options);
+  if (uuidValue !== undefined) return uuidValue;
   const blobValue = coerceBlobTextValue(options);
   if (blobValue !== undefined) return blobValue;
   const postgresArrayValue = coercePostgresArrayValue(options);
@@ -36,6 +38,9 @@ export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions)
   // the precision checks below so exact values survive as text.
   const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
   const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
+  // A cleared numeric cell is SQL NULL; Number("") and Number(" ") would
+  // otherwise silently turn it into zero (#13755).
+  if (numericInput && value.trim() === "") return null;
   const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue, options.numberFormat ?? runtimeNumberFormat());
   // Neo4j INTEGER is always signed 64-bit. Keep its input as text until the
   // Cypher builder validates it, including values outside JavaScript's range.
@@ -92,7 +97,9 @@ function parseBooleanInput(value: string, allowNumericAliases: boolean): boolean
 export function dataGridCellEditorText(options: { value: GridCellValue | undefined; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string {
   const value = options.value ?? null;
   if (value === null) return "";
-  if (isBlobTextPreviewDatabase(options.databaseType) && isBlobCellColumnType(options.columnInfo?.data_type)) {
+  const uuidText = decodeBinaryUuidText(value, options.columnInfo?.data_type);
+  if (uuidText !== null) return uuidText;
+  if (isBinaryCellTextEditable(options.columnInfo?.data_type, options.databaseType)) {
     const text = binaryCellUtf8Text(value, options.columnInfo?.data_type, options.databaseType);
     if (text !== null) return text;
   }
@@ -102,8 +109,25 @@ export function dataGridCellEditorText(options: { value: GridCellValue | undefin
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+function coerceUuidTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
+  if (!isUuidColumnType(options.columnInfo?.data_type)) return undefined;
+  const originalUuid = decodeBinaryUuidText(options.oldValue, options.columnInfo?.data_type);
+  if (originalUuid !== null) {
+    if (options.value === originalUuid) return options.oldValue;
+    if (options.value.trim() === "") return null;
+    return options.value.trim();
+  }
+  if (typeof options.oldValue === "string") {
+    if (options.value === options.oldValue) return options.oldValue;
+    if (options.value.trim() === "") return null;
+    return options.value.trim();
+  }
+  if (options.value.trim() === "") return null;
+  return options.value.trim();
+}
+
 function coerceBlobTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
-  if (!isBlobTextPreviewDatabase(options.databaseType) || !isBlobCellColumnType(options.columnInfo?.data_type)) return undefined;
+  if (!isBinaryCellTextEditable(options.columnInfo?.data_type, options.databaseType)) return undefined;
   const originalText = binaryCellUtf8Text(options.oldValue, options.columnInfo?.data_type, options.databaseType);
   if (originalText === null) return undefined;
   if (options.value === originalText) return options.oldValue;

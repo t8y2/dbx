@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { BackendError, SqlErrorPosition } from "@/lib/backend/errorUtils";
-import { mapExecutedOffsetToSource, scalarPositionToUtf16Offset, sqlErrorDisplayPosition, sqlErrorEditorOffset, sqlErrorHasMessagePosition } from "@/lib/sql/errorPosition";
+import { mapExecutedOffsetToSource, scalarPositionToUtf16Offset, sqlErrorDisplayPosition, sqlErrorEditorOffset, sqlErrorEditorRange, sqlErrorHasMessagePosition } from "@/lib/sql/errorPosition";
+import { sqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import type { QueryResult } from "@/types/database";
 
 function backendError(position?: SqlErrorPosition): BackendError {
@@ -164,6 +165,58 @@ describe("sqlErrorEditorOffset", () => {
 });
 
 describe("when the engine reports its position only in the error message", () => {
+  it("converts Oracle bytes in CRLF text while retaining typed, OB and older-call units", () => {
+    const sql = "SELECT /* 中文😀 */ 1\r\nFROM missing";
+    const offset = sql.indexOf("missing");
+    const byteOffset = new TextEncoder().encode(sql.slice(0, offset)).length;
+    const result = errorResult({ editorStatement: sql, message: `ORA-01722 error occur at position: ${byteOffset}` });
+    expect(sqlErrorEditorOffset({ editorSql: sql, result, databaseType: "oracle" })?.offset).toBe(offset);
+    for (const databaseType of [undefined, "oceanbase-oracle"] as const) {
+      const legacy = errorResult({ editorStatement: sql, message: `ORA-01722 error occur at position: ${offset}` });
+      expect(sqlErrorEditorOffset({ editorSql: sql, result: legacy, databaseType })?.offset).toBe(offset);
+    }
+    const typed = errorResult({ editorStatement: sql, position: { line: 2, column: 6, offset: byteOffset } });
+    expect(sqlErrorEditorOffset({ editorSql: sql, result: typed, databaseType: "oracle" })?.offset).toBe(offset);
+  });
+  it.each([0, 1, 4, 5, 13, 14])("expands a qualified Oracle object at relative offset %s including EOF", (relative) => {
+    const name = '"HR"."EMP_REF"';
+    const sql = `SELECT * FROM ${name}`;
+    const from = sql.indexOf(name);
+    const offset = from + Math.min(relative, name.length);
+    expect(sqlErrorDecorationRange(sql, `ORA-00942: table or view does not exist error occur at position: ${offset}`, "oracle")).toEqual({ from, to: sql.length });
+  });
+
+  it.each(["'missing'", "q'[missing]'", "nq'[missing]'", "/* missing */", '"unterminated'])("does not expand missing object names inside %s", (fragment) => {
+    const sql = `SELECT ${fragment}`;
+    const offset = sql.indexOf("missing") >= 0 ? sql.indexOf("missing") : sql.indexOf('"');
+    expect(sqlErrorDecorationRange(sql, `ORA-00942 error occur at position: ${offset}`, "oracle")).toEqual({ from: offset, to: offset + 1 });
+  });
+
+  it("rejects an Oracle offset inside a UTF-8 character or beyond the statement", () => {
+    const sql = "SELECT /* 中文 */ * FROM missing";
+    expect(sqlErrorDecorationRange(sql, "ORA-00942 error occur at position: 11", "oracle")).toBeNull();
+    expect(sqlErrorDecorationRange(sql, "ORA-00942 error occur at position: 1000", "oracle")).toBeNull();
+  });
+
+  it("maps both ends of a rewritten object back onto its selected source statement", () => {
+    const source = 'SELECT * FROM "HR"."EMP_REF"';
+    const executed = `SELECT *, "ID" AS "__dbx_hidden_pk" FROM "HR"."EMP_REF" LIMIT 100`;
+    const editorSql = `SELECT 1 FROM DUAL;\n${source};`;
+    const from = editorSql.indexOf(source);
+    const result = errorResult({ editorStatement: source, sourceFrom: from, sourceTo: from + source.length, executedStatement: executed, message: `ORA-00942 error occur at position: ${executed.indexOf('"HR"')}` });
+    expect(sqlErrorEditorRange({ editorSql, result, databaseType: "oracle" })).toEqual({ from: editorSql.indexOf('"HR"'), to: from + source.length });
+  });
+
+  it.each([
+    { prefix: "ascii", byteOffset: 26, offset: 26 },
+    { prefix: "中文", byteOffset: 27, offset: 23 },
+    { prefix: "😀", byteOffset: 25, offset: 23 },
+  ])("maps the native Oracle Agent UTF-8 offset with $prefix before the object", ({ prefix, byteOffset, offset }) => {
+    const sql = `SELECT /* ${prefix} */ * FROM DBX6071_MISSING`;
+    const result = errorResult({ editorStatement: sql, message: `ORA-00942: table or view does not exist error occur at position: ${byteOffset}` });
+    expect(sqlErrorEditorOffset({ editorSql: sql, result, databaseType: "oracle" })?.offset).toBe(offset);
+  });
+
   it("resolves the Oracle Agent offset and labels it with the caret's row/column", () => {
     const sql = "SELECT nope_col\nFROM dual";
     const result = errorResult({

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
-import { readWebDavAutoUploadConfig } from "@/lib/webdav/webdavAutoUploadConfig";
+import { readWebDavAutoUploadConfig, readWebDavLastUploadAt, writeWebDavLastUploadAt } from "@/lib/webdav/webdavAutoUploadConfig";
 
 const { webdavSyncSecretsStatusMock, webdavSyncUploadMock } = vi.hoisted(() => ({
   webdavSyncSecretsStatusMock: vi.fn(),
@@ -157,4 +157,191 @@ test("keeps WebDAV auto-upload running outside the settings dialog", async () =>
   await vi.advanceTimersByTimeAsync(60_000);
 
   assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+});
+
+test("triggers upload immediately on startup when last upload time is older than configured interval", async () => {
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "1440");
+
+  const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60_000;
+  writeWebDavLastUploadAt(threeDaysAgo, false);
+
+  useWebDavAutoUpload();
+
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 0);
+
+  await vi.advanceTimersByTimeAsync(0);
+
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+  const updatedLastUploadAt = readWebDavLastUploadAt();
+  assert.ok(updatedLastUploadAt !== null && updatedLastUploadAt >= Date.now() - 1000);
+});
+
+test("schedules upload for the remaining duration when last upload was within interval", async () => {
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "1440");
+
+  const tenHoursAgo = Date.now() - 10 * 60 * 60_000;
+  writeWebDavLastUploadAt(tenHoursAgo, false);
+
+  useWebDavAutoUpload();
+
+  await vi.advanceTimersByTimeAsync(13 * 60 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 0);
+
+  await vi.advanceTimersByTimeAsync(1 * 60 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+});
+
+test("manual upload resets the auto-upload countdown", async () => {
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "60");
+
+  useWebDavAutoUpload();
+
+  await vi.advanceTimersByTimeAsync(30 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 0);
+
+  writeWebDavLastUploadAt(Date.now());
+
+  await vi.advanceTimersByTimeAsync(30 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 0);
+
+  await vi.advanceTimersByTimeAsync(30 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+});
+
+test("retries after backoff when auto-upload fails instead of infinite loop", async () => {
+  webdavSyncUploadMock.mockRejectedValueOnce(new Error("Network offline"));
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "1440");
+
+  const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60_000;
+  writeWebDavLastUploadAt(threeDaysAgo, false);
+
+  useWebDavAutoUpload();
+
+  await vi.advanceTimersByTimeAsync(0);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+
+  await vi.advanceTimersByTimeAsync(4 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+
+  webdavSyncUploadMock.mockResolvedValueOnce({ bytes: 42, remotePath: "DBX/sync/snapshot.json" });
+  await vi.advanceTimersByTimeAsync(1 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 2);
+});
+
+test("auto-upload in-flight switching target records old target success without overwriting new target schedule", async () => {
+  const targetA = { endpoint: "https://dav.a.example.com/" };
+  const targetB = { endpoint: "https://dav.b.example.com/" };
+
+  localStorage.setItem("dbx-webdav-endpoint", targetA.endpoint);
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "60");
+
+  let resolveUploadA!: (value: any) => void;
+  webdavSyncUploadMock.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveUploadA = resolve;
+      }),
+  );
+
+  useWebDavAutoUpload();
+
+  // Advance timer to trigger Target A upload
+  await vi.advanceTimersByTimeAsync(60 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+  assert.equal(webdavSyncUploadMock.mock.calls[0][0].endpoint, targetA.endpoint);
+
+  // While Target A upload is in flight, user switches target to Target B with 1440 min interval
+  localStorage.setItem("dbx-webdav-endpoint", targetB.endpoint);
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "1440");
+  window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
+
+  const targetBBaseline = readWebDavLastUploadAt(targetB);
+  assert.ok(targetBBaseline !== null);
+
+  // Now Target A's upload completes
+  const uploadCompletedAt = Date.now() + 10_000;
+  vi.setSystemTime(uploadCompletedAt);
+  resolveUploadA({ bytes: 100, remotePath: "DBX/sync/snapshot.json" });
+  await vi.advanceTimersByTimeAsync(0);
+
+  // Target A's last upload time was recorded for Target A
+  assert.equal(readWebDavLastUploadAt(targetA), uploadCompletedAt);
+
+  // Target B's last upload time was NOT overwritten by Target A's completion
+  assert.equal(readWebDavLastUploadAt(targetB), targetBBaseline);
+
+  // Target B must not have triggered prematurely
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+});
+
+test("auto-upload in-flight disabling auto-upload prevents rescheduling", async () => {
+  localStorage.setItem("dbx-webdav-endpoint", "https://dav.example.com/");
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "60");
+
+  let resolveUpload!: (value: any) => void;
+  webdavSyncUploadMock.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+  );
+
+  useWebDavAutoUpload();
+
+  await vi.advanceTimersByTimeAsync(60 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+
+  // Disable while upload is in progress
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "false");
+  window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
+
+  resolveUpload({ bytes: 42, remotePath: "DBX/sync/snapshot.json" });
+  await vi.advanceTimersByTimeAsync(0);
+
+  // Advancing time should not trigger any more uploads
+  await vi.advanceTimersByTimeAsync(120 * 60_000);
+  assert.equal(webdavSyncUploadMock.mock.calls.length, 1);
+});
+
+test("manual upload in-flight switching target preserves target isolation", async () => {
+  const targetA = { endpoint: "https://dav.a.example.com/" };
+  const targetB = { endpoint: "https://dav.b.example.com/" };
+
+  localStorage.setItem("dbx-webdav-endpoint", targetA.endpoint);
+  localStorage.setItem("dbx-webdav-auto-upload-enabled", "true");
+  localStorage.setItem("dbx-webdav-auto-upload-interval-minutes", "60");
+
+  useWebDavAutoUpload();
+
+  // Target A is configured
+  writeWebDavLastUploadAt(targetA, 1_000, false);
+
+  // User starts manual sync for Target A
+  const uploadConfig = { ...targetA };
+  // While manual upload is running, user switches settings to Target B
+  localStorage.setItem("dbx-webdav-endpoint", targetB.endpoint);
+  window.dispatchEvent(new Event("dbx:webdav-auto-upload-config-changed"));
+
+  // Manual sync completes for Target A; checks whether targetA is still current
+  const currentConfig = readWebDavAutoUploadConfig();
+  const isCurrent = Boolean(currentConfig.enabled && currentConfig.webDavConfig && targetA.endpoint === currentConfig.webDavConfig.endpoint);
+  assert.equal(isCurrent, false);
+
+  const completionTime = Date.now() + 5000;
+  writeWebDavLastUploadAt(uploadConfig, completionTime, isCurrent);
+
+  // Target A has the updated timestamp
+  assert.equal(readWebDavLastUploadAt(targetA), completionTime);
+  // Target B does not have Target A's timestamp
+  assert.notEqual(readWebDavLastUploadAt(targetB), completionTime);
 });

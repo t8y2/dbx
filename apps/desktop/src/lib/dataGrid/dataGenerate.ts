@@ -20,6 +20,7 @@ export const GeneratorHierarchy: GeneratorNode[] = [
       { key: "time", label: "时间" },
       { key: "sequence", label: "序列" },
       { key: "enum", label: "枚举" },
+      { key: "bitmask", label: "位串" },
       { key: "text", label: "文本" },
       { key: "image", label: "图像或二进制" },
       { key: "foreign_key", label: "外键" },
@@ -125,6 +126,9 @@ export interface GeneratorParams {
   sequenceCycle?: boolean;
   // enum
   values?: string;
+  // bit string
+  bitWidth?: number;
+  bitVarying?: boolean;
   // regex
   pattern?: string;
   rawPattern?: boolean;
@@ -1196,20 +1200,100 @@ const KnownColumnPatterns: Array<{ pattern: RegExp; generatorKey: string }> = [
   { pattern: /owner|creator|author|created_by|updated_by|modified_by|operator|user$/i, generatorKey: "full_name" },
 ];
 
+/**
+ * Column metadata carries the full SQL type, modifiers included: `time(3)`,
+ * `bit(1)`, `numeric(10,2)`, `character varying(64)`,
+ * `timestamp(6) without time zone`. Comparing that raw string made every
+ * comparison below miss the moment a modifier was present — `time(3)` and
+ * `bit(1)` columns fell through to the plain text generator and received values
+ * the server rejects for that column (#12994). Strip the modifiers and collapse
+ * whitespace so the classifier sees the bare type name.
+ *
+ * `tinyint(1)` is the one type that still needs its modifier, which is why
+ * {@link isBooleanColumnType} looks at the original string.
+ */
+export function normalizeColumnDataType(dataType: string): string {
+  return dataType
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const BOOLEAN_COLUMN_TYPE_RE = /^(?:bool|boolean|bit)$/;
+const TINYINT_BOOLEAN_WIDTH_RE = /^tinyint\s*\(\s*1\s*\)$/;
+const BIT_WIDTH_RE = /^bit\s*\(\s*(\d+)\s*\)$/;
+
+/** `bool` / `boolean` / `bit(1)` / MySQL's `tinyint(1)` all hold a boolean flag. */
+export function isBooleanColumnType(dataType: string): boolean {
+  const raw = dataType.toLowerCase().trim();
+  if (TINYINT_BOOLEAN_WIDTH_RE.test(raw)) return true;
+  const bitWidth = BIT_WIDTH_RE.exec(raw);
+  if (bitWidth) return Number(bitWidth[1]) === 1;
+  return BOOLEAN_COLUMN_TYPE_RE.test(normalizeColumnDataType(raw));
+}
+
+const BIT_COLUMN_TYPE_RE = /^(bit|varbit)(?:\s+varying)?\s*(?:\(\s*(\d+)\s*\))?$/;
+
+export interface BitColumnShape {
+  /** Number of bits the column stores; 1 for a bare `bit`. */
+  width: number;
+  /** `bit varying` / `varbit` accept any length up to `width`. */
+  varying: boolean;
+}
+
+/**
+ * Width and variability of a `bit` family column, or null for every other type.
+ * PostgreSQL and MySQL keep the declared width in the type text (`bit(8)`,
+ * `bit varying(8)`, `varbit(8)`), and a value written to those columns must
+ * have exactly that many bits, so the generator needs the width rather than
+ * just the bare type name (#13014). The raw type text is parsed here because
+ * {@link normalizeColumnDataType} strips the parenthesized modifier.
+ */
+export function bitColumnShape(dataType: string): BitColumnShape | null {
+  const match = BIT_COLUMN_TYPE_RE.exec(dataType.toLowerCase().replace(/\s+/g, " ").trim());
+  if (!match) return null;
+  const varying = match[1] === "varbit" || /varying/.test(match[0]);
+  return { width: match[2] ? Number(match[2]) : 1, varying };
+}
+
+/**
+ * `serial` and its aliases are the only types whose name contains "serial":
+ * PostgreSQL's `serial` / `smallserial` / `bigserial` pseudo-type (and the
+ * `serial2` / `serial4` / `serial8` spellings). Matching the substring instead
+ * classified any other type whose text mentions serial, such as the
+ * `serial_number_code` column the app-tests cover, as an integer.
+ */
+const SERIAL_TYPE_RE = /^(?:big|small)?serial[248]?$/;
+
+function isSerialType(dataType: string): boolean {
+  return SERIAL_TYPE_RE.test(normalizeColumnDataType(dataType));
+}
+
 export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
   if (isAutoIncrement) return "sequence";
-  const type = dataType.toLowerCase();
-  const isNumeric = /^number(?:\s*\([^)]*\))?$/.test(type.trim()) || type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
-  const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
+  const type = normalizeColumnDataType(dataType);
+  // `serial` / `bigserial` increment by definition, so they stay on the sequence
+  // generator even when the driver does not report a default for them.
+  if (isSerialType(dataType)) return "sequence";
+  const isNumeric = /^number$/.test(type) || type.includes("int") || type.includes("bool") || /^bit\b/.test(type) || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+  const isDateTime = type.includes("date") || type.includes("timestamp") || /^time\b/.test(type);
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
-  const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
+  const isBoolType = isBooleanColumnType(dataType);
+  const bitShape = bitColumnShape(dataType);
   const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(columnName);
+  // A wider `bit(n)` / `bit varying(n)` column stores a bit string of exactly
+  // n bits, so it gets its own generator that honours the width; only `bit(1)`
+  // (and the bare `bit` boolean spellings) stay on the 0/1 enum. Checked before
+  // the numeric/date/binary split because `varbit` matches none of them.
+  if (bitShape && (bitShape.varying || bitShape.width > 1)) return "bitmask";
   if (isNumeric || isDateTime || isBinary) {
-    if (type.includes("serial")) return "sequence";
-    if (isBoolType || (isNumeric && isBoolName)) return "enum";
+    if (isBoolType || /^bit\b/.test(type) || (isNumeric && isBoolName)) return "enum";
     if (/status|state/i.test(columnName)) return "enum";
     if (isNumeric) return "number";
-    if (type === "time") return "time";
+    // `time`, `time(6)` and `time without time zone` must not fall through to the
+    // datetime generator: a full timestamp is not a valid value for a TIME column.
+    if (/^time\b/.test(type)) return "time";
     if (isDateTime) return "datetime";
     if (isBinary) return "text";
   }
@@ -1446,9 +1530,9 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
   }
 
   if (generatorKey === "enum") {
-    const t = attrs.dataType.toLowerCase();
-    const isNum = t.includes("int") || t.includes("bool") || t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real";
-    const isBoolType = t === "bool" || t === "boolean" || t === "bit" || t === "tinyint(1)";
+    const normalizedType = normalizeColumnDataType(attrs.dataType);
+    const isNum = normalizedType.includes("int") || normalizedType.includes("bool") || /^bit\b/.test(normalizedType) || normalizedType.includes("decimal") || normalizedType.includes("numeric") || normalizedType.includes("float") || normalizedType.includes("double") || normalizedType === "real";
+    const isBoolType = isBooleanColumnType(attrs.dataType);
     const isBoolName = /^(is|has|had|can|did|enable|disable|allow|use|visible|deleted|active|flag)[_-]?/i.test(_columnName);
     if (isBoolType || (isNum && isBoolName)) {
       params.values = "0\n1";
@@ -1457,6 +1541,13 @@ function buildDefaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, ge
     } else {
       params.values = "A\nB\nC\nD\nE";
     }
+    return params;
+  }
+
+  if (generatorKey === "bitmask") {
+    const shape = bitColumnShape(attrs.dataType);
+    params.bitWidth = shape?.width ?? 8;
+    params.bitVarying = shape?.varying ?? false;
     return params;
   }
 
@@ -1670,6 +1761,16 @@ export function generateValue(columnName: string, dataType: string, generatorKey
     if (vals.length === 0) return pick(["A", "B", "C", "D", "E"]);
     return vals[Math.floor(Math.random() * vals.length)];
   }
+  if (key === "bitmask") {
+    // A fixed `bit(n)` column rejects any value whose length differs from n,
+    // while `bit varying(n)` accepts 1..n bits; the width comes from the column
+    // declaration, falling back to the parameter panel value (#13014).
+    const shape = bitColumnShape(dataType);
+    const width = Math.max(1, params?.bitWidth ?? shape?.width ?? 8);
+    const varying = params?.bitVarying ?? shape?.varying ?? false;
+    const length = varying ? 1 + Math.floor(Math.random() * width) : width;
+    return Array.from({ length }, () => (Math.random() < 0.5 ? "0" : "1")).join("");
+  }
   if (key === "text") {
     const fmt = params?.textFormat ?? "lorem";
     if (fmt === "bcrypt") {
@@ -1763,12 +1864,15 @@ export function generateValue(columnName: string, dataType: string, generatorKey
 }
 
 function generateByType(type: string, rowIndex: number): unknown {
-  const t = type.toLowerCase();
-  if (t.includes("int") || t.includes("serial") || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
+  const t = normalizeColumnDataType(type);
+  if (t.includes("int") || isSerialType(type) || t === "bigint" || t === "smallint" || t === "tinyint") return randInt(1, 1000);
   if (t.includes("decimal") || t.includes("numeric") || t.includes("float") || t.includes("double") || t === "real") return randDecimal(0, 10000, 2);
   if (t.includes("bool")) return Math.random() > 0.5 ? 1 : 0;
+  // `datetime` / `timestamp` need a full timestamp; a bare TIME column only
+  // accepts a clock time, so it must not reuse the timestamp generator (#12994).
+  if (t.includes("timestamp") || t.includes("datetime")) return randTimestamp(new Date("2020-01-01"), new Date("2025-12-31"));
+  if (/^time\b/.test(t)) return generateTimeInRange();
   if (t.includes("date")) return randDate(new Date("2020-01-01"), new Date("2025-12-31"));
-  if (t.includes("time")) return randTimestamp(new Date("2020-01-01"), new Date("2025-12-31"));
   return `value_${rowIndex + 1}`;
 }
 
@@ -1802,6 +1906,8 @@ export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "1" : "0";
   const stringValue = String(value);
+  const bitLiteral = formatBitStringLiteral(stringValue, databaseType, dataType);
+  if (bitLiteral) return bitLiteral;
   if ((databaseType === "oracle" || databaseType === "oceanbase-oracle") && dataType) {
     const temporalValue = formatOracleTemporalValue(stringValue, dataType);
     if (temporalValue) return temporalValue;
@@ -1817,6 +1923,22 @@ export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType
     return quoteGeneratedString(jsonText);
   }
   return quoteGeneratedString(stringValue);
+}
+
+const POSTGRES_BIT_LITERAL_DATABASES = new Set<string>(["postgres", "kingbase", "highgo", "uxdb", "vastbase", "gaussdb", "opengauss", "redshift", "kwdb"]);
+const MYSQL_BIT_LITERAL_DATABASES = new Set<string>(["mysql", "doris", "starrocks", "goldendb", "databend", "sundb", "gbase"]);
+
+/**
+ * Bit strings need their dialect literal: PostgreSQL reads `B'1010'` and MySQL
+ * `b'1010'`, and MySQL rejects a bare `'1010'` for a `BIT(n)` column while
+ * PostgreSQL coerces it (#13014). Unknown dialects keep the quoted string so
+ * this never emits a literal the target cannot parse.
+ */
+function formatBitStringLiteral(value: string, databaseType: DatabaseType | undefined, dataType: string | undefined): string | null {
+  if (!databaseType || !dataType || !bitColumnShape(dataType) || !/^[01]+$/.test(value)) return null;
+  if (POSTGRES_BIT_LITERAL_DATABASES.has(databaseType)) return `B'${value}'`;
+  if (MYSQL_BIT_LITERAL_DATABASES.has(databaseType)) return `b'${value}'`;
+  return null;
 }
 
 function isJsonType(dataType: string | undefined): boolean {

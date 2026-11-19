@@ -39,6 +39,9 @@ pub async fn start_query_result_export(
     Json(body): Json<StartQueryResultExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    dbx_core::query::mysql_data_charset_policy::check_export(&state.app, &req.connection_id, &req.format)
+        .await
+        .map_err(AppError::from)?;
     let export_id = req.export_id.clone();
 
     let ext = match req.format.as_str() {

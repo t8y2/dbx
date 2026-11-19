@@ -560,7 +560,7 @@ watch(
         <pre v-else class="max-h-[56vh] min-h-64 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(structurePreviewSql)"></pre>
       </div>
       <DialogFooter>
-        <DdlStorageToggle :database-type="structurePreviewDdlStorageType" :disabled="isLoadingStructurePreview || !!structurePreviewError" class="mr-auto" />
+        <DdlStorageToggle :database-type="structurePreviewDdlStorageType" :disabled="isLoadingStructurePreview" class="mr-auto" />
         <Button variant="outline" @click="showStructurePreviewDialog = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button variant="outline" :disabled="isLoadingStructurePreview || !structurePreviewSql" @click="copyStructurePreview">
           <Clipboard class="h-4 w-4" />
@@ -947,6 +947,10 @@ watch(
       </DialogHeader>
       <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-destructive/5 p-3 text-sm text-destructive">{{ compileErrorMessage }}</pre>
       <DialogFooter>
+        <Button v-if="controller.hasTriggerActionFeedback" variant="outline" :disabled="controller.triggerRecoveryBusy" :aria-busy="controller.triggerRecoveryBusy" @click="controller.refreshTriggerActionFeedback()">
+          <Loader2 v-if="controller.triggerRecoveryBusy" class="mr-2 size-4 animate-spin" aria-hidden="true" />{{ t("oracleTrigger.verifyReadOnly") }}
+        </Button>
+        <Button v-if="controller.hasTriggerActionFeedback" variant="outline" @click="controller.viewTriggerActionSource()">{{ t("contextMenu.viewSource") }}</Button>
         <Button @click="showCompileErrorDialog = false">{{ t("common.close") }}</Button>
       </DialogFooter>
     </DialogContent>

@@ -27,6 +27,7 @@ pub async fn start_transfer(
     operation_timeout_secs: Option<u64>,
 ) -> Result<(), String> {
     let state = state.inner().clone();
+    dbx_core::transfer::check_data_charset_transfer(&state, &request).await?;
     dbx_core::transfer::validate_transfer_operation_timeout(operation_timeout_secs)?;
     // Reject transfer early if the target connection is read-only — writing to it is inherently required
     ensure_connection_writable(&state, &request.target_connection_id, "Transfer").await?;

@@ -1,4 +1,6 @@
 import type { ClickHouseFunctionDefinition, ClickHouseFunctionKind, ClickHouseFunctionRegistry } from "./functionTypes";
+import type { SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
+import { identifierMatchScore } from "@/lib/sql/identifierSearch";
 import { generateAggregateCombinatorCandidates } from "./aggregateCombinators";
 import { CLICKHOUSE_AGGREGATE_FUNCTIONS } from "./aggregateFunctions";
 import { CLICKHOUSE_REGULAR_FUNCTIONS } from "./regularFunctions";
@@ -32,9 +34,24 @@ export function createClickHouseFunctionRegistry(definitions: readonly ClickHous
   const ordered = [...definitions].sort((left, right) => left.name.localeCompare(right.name));
   return {
     get: (name) => byKey.get(name.toLowerCase()),
-    search: (prefix, limit, kind?: ClickHouseFunctionKind) => {
-      const normalized = prefix.toLowerCase();
-      return ordered.filter((definition) => (!kind || definition.kind === kind) && definitionKeys(definition).some((key) => key.startsWith(normalized))).slice(0, limit);
+    search: (prefix, limit, kind?: ClickHouseFunctionKind, matchMode: SqlCompletionMatchMode = "fuzzy") => {
+      if (!prefix) {
+        return ordered.filter((definition) => !kind || definition.kind === kind).slice(0, limit);
+      }
+      const matched: Array<{ definition: ClickHouseFunctionDefinition; score: number }> = [];
+      for (const definition of ordered) {
+        if (kind && definition.kind !== kind) continue;
+        let bestScore = -1;
+        for (const key of definitionKeys(definition)) {
+          const score = identifierMatchScore(key, prefix, matchMode);
+          if (score > bestScore) bestScore = score;
+        }
+        if (bestScore >= 0) {
+          matched.push({ definition, score: bestScore });
+        }
+      }
+      matched.sort((a, b) => b.score - a.score || a.definition.name.localeCompare(b.definition.name));
+      return matched.slice(0, limit).map((m) => m.definition);
     },
     all: () => ordered,
   };
@@ -42,9 +59,9 @@ export function createClickHouseFunctionRegistry(definitions: readonly ClickHous
 
 export const CLICKHOUSE_FUNCTION_REGISTRY = createClickHouseFunctionRegistry([...CLICKHOUSE_REGULAR_FUNCTIONS, ...CLICKHOUSE_AGGREGATE_FUNCTIONS, ...CLICKHOUSE_TABLE_FUNCTIONS]);
 
-export function searchClickHouseFunctions(prefix: string, limit: number, kind?: ClickHouseFunctionKind): ClickHouseFunctionDefinition[] {
-  const direct = CLICKHOUSE_FUNCTION_REGISTRY.search(prefix, limit, kind);
+export function searchClickHouseFunctions(prefix: string, limit: number, kind?: ClickHouseFunctionKind, matchMode: SqlCompletionMatchMode = "fuzzy"): ClickHouseFunctionDefinition[] {
+  const direct = CLICKHOUSE_FUNCTION_REGISTRY.search(prefix, limit, kind, matchMode);
   if (direct.length >= limit || (kind && kind !== "aggregate")) return direct;
-  const generated = generateAggregateCombinatorCandidates(prefix, limit - direct.length);
+  const generated = generateAggregateCombinatorCandidates(prefix, limit - direct.length, matchMode);
   return [...direct, ...generated].slice(0, limit);
 }

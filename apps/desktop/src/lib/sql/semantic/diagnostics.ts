@@ -288,6 +288,17 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     });
   }
 
+  // A two-part qualifier that names neither a table nor an alias in scope
+  // (`b.id` when only `a` is declared) is an error on its own: the column
+  // itself cannot be checked, because no relation owns it.
+  for (const unknown of analysis.unknown_qualifiers ?? []) {
+    diagnostics.push({
+      span: trimSqlTextSpanWhitespace(schema.sql, unknown.span),
+      message: `Unknown table alias ${unknown.qualifier}`,
+      severity: "error",
+    });
+  }
+
   for (const column of analysis.columns) {
     if (isUnquotedOracleBuiltinReference(column, schema)) continue;
     const table = resolveColumnTable(column, tables, knownTables, schema.sql, scopesById);
@@ -430,7 +441,7 @@ function sqlTextPositionToOffset(sql: string, line: number, column: number): num
   if (line < 1 || line > lines.length) return null;
   let offset = 0;
   for (let index = 0; index < line - 1; index += 1) {
-    offset += lines[index].length + 1;
+    offset = sql.indexOf("\n", offset) + 1;
   }
   return Math.min(offset + Math.max(column, 0), offset + lines[line - 1].length);
 }

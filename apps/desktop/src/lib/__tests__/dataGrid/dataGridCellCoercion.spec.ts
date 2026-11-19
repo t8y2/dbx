@@ -1,5 +1,70 @@
 import { describe, expect, it } from "vitest";
 import { coerceDataGridCellValue, dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { binaryCellClipboardText, canDownloadBinaryCellValue, parseBinaryCellBytes } from "@/lib/dataGrid/binaryCellDownload";
+
+describe("dataGridCellEditorText", () => {
+  it("decodes hex-encoded ASCII UUID values to readable UUID strings in uuid columns (#12911)", () => {
+    const hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+    expect(
+      dataGridCellEditorText({
+        value: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "uuid" },
+      }),
+    ).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+
+    // Ordinary binary and varbinary columns preserve canonical hex form
+    expect(
+      dataGridCellEditorText({
+        value: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "binary(36)" },
+      }),
+    ).toBe(hex);
+    expect(
+      dataGridCellEditorText({
+        value: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "varbinary(36)" },
+      }),
+    ).toBe(hex);
+    expect(
+      dataGridCellEditorText({
+        value: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "binary" },
+      }),
+    ).toBe(hex);
+  });
+
+  it("decodes 16-byte raw hex UUIDs in uuid columns to hyphenated UUID strings", () => {
+    expect(
+      dataGridCellEditorText({
+        value: "0x01a057bf2bbd70a6b3c356eb409a0f95",
+        databaseType: "mysql",
+        columnInfo: { data_type: "uuid" },
+      }),
+    ).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+  });
+
+  it("preserves plain UUID strings and arbitrary binary data", () => {
+    expect(
+      dataGridCellEditorText({
+        value: "01a057bf-2bbd-70a6-b3c3-56eb409a0f95",
+        databaseType: "mysql",
+        columnInfo: { data_type: "uuid" },
+      }),
+    ).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+
+    expect(
+      dataGridCellEditorText({
+        value: "0x01020304",
+        databaseType: "mysql",
+        columnInfo: { data_type: "binary(4)" },
+      }),
+    ).toBe("0x01020304");
+  });
+});
 
 describe("dataGridCellDisplayText", () => {
   it("keeps precision-sensitive decimal text through editor display and unchanged commit coercion", () => {
@@ -77,6 +142,33 @@ describe("dataGridCellDisplayText", () => {
 });
 
 describe("coerceDataGridCellValue", () => {
+  it.each([
+    ["INT", 639522],
+    ["INTEGER", "639522"],
+    ["SMALLINT", 12],
+    ["BIGINT", "9007199254740993"],
+    ["DECIMAL(31,2)", "639522.00"],
+    ["DOUBLE", 1.5],
+    [undefined, 639522],
+  ])("clears a DB2 %s numeric cell to NULL (#13755)", (dataType, oldValue) => {
+    for (const value of ["", " ", "\t\n"]) {
+      expect(
+        coerceDataGridCellValue({
+          value,
+          oldValue,
+          databaseType: "db2",
+          columnInfo: dataType ? { data_type: dataType } : undefined,
+          preserveEmptyString: true,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("keeps explicit DB2 zero and empty text distinct from a cleared numeric cell", () => {
+    expect(coerceDataGridCellValue({ value: "0", oldValue: 639522, databaseType: "db2", columnInfo: { data_type: "INT" } })).toBe(0);
+    expect(coerceDataGridCellValue({ value: "", oldValue: "before", databaseType: "db2", columnInfo: { data_type: "VARCHAR(32)" } })).toBe("");
+  });
+
   it.each(["Integer", "Long", "int"])("keeps Neo4j %s edits as exact text for the Cypher builder", (data_type) => {
     for (const value of ["1001", "9007199254740999", "9223372036854775807", "-9223372036854775808"]) {
       expect(coerceDataGridCellValue({ value, oldValue: "1", databaseType: "neo4j", columnInfo: { data_type } })).toBe(value);
@@ -374,5 +466,107 @@ describe("coerceDataGridCellValue", () => {
         columnInfo: { data_type: "decimal(18,2)" },
       }),
     ).toBe("1,23");
+  });
+
+  it("handles UUID cell edits cleanly (#12911)", () => {
+    const hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+    // Unchanged value preserves original hex oldValue
+    expect(
+      coerceDataGridCellValue({
+        value: "01a057bf-2bbd-70a6-b3c3-56eb409a0f95",
+        oldValue: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "uuid" },
+      }),
+    ).toBe(hex);
+
+    // Edited value in uuid column returns clean UUID string
+    expect(
+      coerceDataGridCellValue({
+        value: "01a057bf-2bbd-70a6-b3c3-56eb409a0f99",
+        oldValue: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "uuid" },
+      }),
+    ).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f99");
+
+    // Cleared value returns null
+    expect(
+      coerceDataGridCellValue({
+        value: "",
+        oldValue: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "uuid" },
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves canonical hex edits in BINARY(36) and VARBINARY(36)", () => {
+    const hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+    // Unchanged hex preserves oldValue
+    expect(
+      coerceDataGridCellValue({
+        value: hex,
+        oldValue: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "binary(36)" },
+      }),
+    ).toBe(hex);
+
+    // Edited hex preserves new hex value
+    const newHex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663939";
+    expect(
+      coerceDataGridCellValue({
+        value: newHex,
+        oldValue: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "binary(36)" },
+      }),
+    ).toBe(newHex);
+
+    expect(
+      coerceDataGridCellValue({
+        value: newHex,
+        oldValue: hex,
+        databaseType: "mysql",
+        columnInfo: { data_type: "varbinary(36)" },
+      }),
+    ).toBe(newHex);
+  });
+});
+
+describe("binaryCellClipboardText", () => {
+  it("copies hex-encoded UUID values as readable text for uuid columns (#12911)", () => {
+    const hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+    expect(binaryCellClipboardText(hex, "uuid", "mysql")).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+    expect(binaryCellClipboardText("0x01a057bf2bbd70a6b3c356eb409a0f95", "uuid", "mysql")).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+  });
+
+  it("preserves canonical hex or standard copy behavior for binary/varbinary storing ASCII UUID", () => {
+    const hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+    // BINARY(36) keeps canonical hex (null return signals clipboard to copy raw hex)
+    expect(binaryCellClipboardText(hex, "binary(36)", "mysql")).toBeNull();
+    expect(binaryCellClipboardText(hex, "binary", "mysql")).toBeNull();
+    // VARBINARY(36) in MySQL copies UTF-8 printable string per #7471
+    expect(binaryCellClipboardText(hex, "varbinary(36)", "mysql")).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+    expect(binaryCellClipboardText("0x01020304", "binary", "mysql")).toBeNull();
+  });
+});
+
+describe("canDownloadBinaryCellValue and parseBinaryCellBytes", () => {
+  it("allows downloading canonical hex in BINARY(36) and VARBINARY(36) even when storing ASCII UUID bytes", () => {
+    const hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+    expect(canDownloadBinaryCellValue(hex, "binary(36)", "mysql")).toBe(true);
+    expect(canDownloadBinaryCellValue(hex, "varbinary(36)", "mysql")).toBe(true);
+
+    const binaryBytes = parseBinaryCellBytes(hex, "binary(36)", "mysql");
+    expect(binaryBytes).not.toBeNull();
+    expect(binaryBytes?.length).toBe(36);
+    expect(new TextDecoder().decode(binaryBytes!)).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
+
+    const varbinaryBytes = parseBinaryCellBytes(hex, "varbinary(36)", "mysql");
+    expect(varbinaryBytes).not.toBeNull();
+    expect(varbinaryBytes?.length).toBe(36);
+    expect(new TextDecoder().decode(varbinaryBytes!)).toBe("01a057bf-2bbd-70a6-b3c3-56eb409a0f95");
   });
 });

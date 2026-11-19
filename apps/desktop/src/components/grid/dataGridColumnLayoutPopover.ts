@@ -15,6 +15,7 @@ export interface DataGridColumnLayoutHandle {
   toggleColumnVisibility: (columnIndex: number) => void;
   hideColumns: (columnIndexes: number[]) => void;
   showAllColumns: () => void;
+  showOnlyColumns?: (columnIndexes: number[]) => void;
   invertColumnVisibility: () => void;
   hasCustomColumnOrder: boolean;
   moveDisplayableColumn: (fromDisplayableIndex: number, toDisplayableIndex: number) => void;

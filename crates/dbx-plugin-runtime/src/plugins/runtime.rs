@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, oneshot, watch, Mutex, RwLock};
@@ -104,9 +104,22 @@ impl PluginSessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct PluginHandshake {
     pub protocol_version: u32,
-    #[serde(default)]
+    /// `#[serde(default)]` only covers a missing field. A sidecar built
+    /// against the Go SDK before #14972 answers with an explicit JSON `null`
+    /// for a nil capabilities slice; treat that as empty instead of failing
+    /// the whole plugin initialization.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     pub capabilities: Vec<String>,
     pub plugin: PluginHandshakeIdentity,
+}
+
+/// Accepts an explicit JSON `null` as an empty list.
+fn null_as_empty_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,8 +193,34 @@ pub struct PluginSidecarSession {
     /// fail a plugin `connection/test` or `connection/connect` call.
     prompts: PromptActivity,
     owner_runtime: tokio::runtime::Handle,
+    /// Last stderr lines, used to explain a sidecar that dies during startup.
+    stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    stderr_closed: watch::Sender<bool>,
+    stdout_closed: std::sync::atomic::AtomicBool,
     // Kept until the session (including its child/image handle) is completely dropped.
     _runtime_lease: Option<std::fs::File>,
+}
+
+/// Shown when a Java sidecar (the JDBC plugin) was started by a runtime older
+/// than its bytecode. Kept verbatim in sync with the desktop error catalog
+/// (apps/desktop/src/i18n/backend-errors.ts -> connection.agentJavaTooOld).
+pub const PLUGIN_JAVA_TOO_OLD_MESSAGE: &str =
+    "Plugin requires Java 21, but DBX started it with an older Java runtime. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.";
+const STDERR_TAIL_LINES: usize = 20;
+const STDERR_TAIL_LINE_CHARS: usize = 2000;
+const STDERR_CLOSE_WAIT: Duration = Duration::from_millis(500);
+
+fn plugin_stderr_hint(stderr: &str) -> Option<&'static str> {
+    let lower = stderr.to_ascii_lowercase();
+    // Match the JVM wording variants independently: the tail keeps only the
+    // last lines, so a long stack trace can push the exception header out.
+    if lower.contains("unsupportedclassversionerror")
+        || lower.contains("only recognizes class file versions up to")
+        || lower.contains("has been compiled by a more recent version of the java runtime")
+    {
+        return Some(PLUGIN_JAVA_TOO_OLD_MESSAGE);
+    }
+    None
 }
 
 /// Cancelled discovery/initialization must not leave the stdout task and child owning each other.
@@ -289,6 +328,9 @@ impl PluginSidecarSession {
             handshake: RwLock::new(None),
             prompts: PromptActivity::default(),
             owner_runtime: tokio::runtime::Handle::current(),
+            stderr_tail: Default::default(),
+            stderr_closed: watch::channel(stderr.is_none()).0,
+            stdout_closed: Default::default(),
             _runtime_lease: runtime_lease,
         });
 
@@ -307,7 +349,8 @@ impl PluginSidecarSession {
                         Some(shutdown_error) => format!("{error}; additionally failed to shut down: {shutdown_error}"),
                         None => error,
                     };
-                    return Err(format!("Plugin '{}' initialization failed: {message}", session.plugin.manifest.id));
+                    let message = format!("Plugin '{}' initialization failed: {message}", session.plugin.manifest.id);
+                    return Err(session.with_stderr_hint(message).await);
                 }
             };
             *session.handshake.write().await = Some(handshake);
@@ -324,10 +367,11 @@ impl PluginSidecarSession {
             let shutdown_error = session.shutdown().await.err();
             let message = status.message.map_or_else(String::new, |message| format!(": {message}"));
             let shutdown_error = shutdown_error.map_or_else(String::new, |error| format!("; shutdown failed: {error}"));
-            return Err(format!(
+            let message = format!(
                 "Plugin '{}' stopped during initialization{message}{shutdown_error}",
                 session.plugin.manifest.id
-            ));
+            );
+            return Err(session.with_stderr_hint(message).await);
         }
         startup.disarm();
         Ok(session)
@@ -467,8 +511,23 @@ impl PluginSidecarSession {
             permissions: &self.plugin.manifest.permissions,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
-        let handshake: PluginHandshake =
-            self.invoke_with_timeout("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT)).await?;
+        let value = self.invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT)).await?;
+        // Point a malformed `capabilities` value at the field instead of
+        // failing with a bare decode error (#14972): `null` and an array of
+        // strings are accepted (see `null_as_empty_vec`); anything else is
+        // the plugin's bug, and the reporter needs the field name to find it.
+        if let Some(capabilities) = value.get("capabilities") {
+            let valid = capabilities.is_null()
+                || capabilities.as_array().is_some_and(|items| items.iter().all(|item| item.is_string()));
+            if !valid {
+                return Err(format!(
+                    "Plugin '{}' initialize result has invalid 'capabilities': expected an array of strings",
+                    self.plugin.manifest.id
+                ));
+            }
+        }
+        let handshake: PluginHandshake = serde_json::from_value(value)
+            .map_err(|error| format!("Failed to decode plugin '{}' result: {error}", self.plugin.manifest.id))?;
         if handshake.protocol_version != SUPPORTED_PLUGIN_PROTOCOL_VERSION {
             return Err(format!(
                 "Plugin selected protocol version {}, expected {}",
@@ -485,6 +544,30 @@ impl PluginSidecarSession {
     }
 
     async fn invoke_value(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        driver: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<serde_json::Value, String> {
+        let result = self.invoke_value_unhinted(method, params, driver, timeout_duration).await;
+        match result {
+            // Legacy sidecars (the JDBC plugin) skip `plugin/initialize`, so a
+            // JVM that dies at startup first surfaces as a failed request.
+            // A write can hit the broken pipe before stdout reports EOF.
+            Err(error) if self.process_output_closed() || error.starts_with("Failed to write to plugin") => {
+                Err(self.with_stderr_hint(error).await)
+            }
+            result => result,
+        }
+    }
+
+    fn process_output_closed(&self) -> bool {
+        self.stdout_closed.load(Ordering::Acquire)
+            || !matches!(self.status().state, PluginSessionState::Starting | PluginSessionState::Running)
+    }
+
+    async fn invoke_value_unhinted(
         &self,
         method: &str,
         params: serde_json::Value,
@@ -638,6 +721,7 @@ impl PluginSidecarSession {
                 Ok(()) => session.exit_message().await,
                 Err(error) => error,
             };
+            session.stdout_closed.store(true, Ordering::Release);
             fail_pending(&session.pending, &message).await;
             // A plugin that died mid-prompt can no longer answer it.
             session.prompts.close();
@@ -657,11 +741,21 @@ impl PluginSidecarSession {
 
     fn spawn_stderr_reader(self: &Arc<Self>, stderr: tokio::process::ChildStderr) {
         let plugin_id = self.plugin.manifest.id.clone();
+        let tail = self.stderr_tail.clone();
+        let closed = self.stderr_closed.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             loop {
                 match read_limited_line(&mut reader, MAX_JSON_MESSAGE_BYTES).await {
-                    Ok(Some(line)) => log::warn!("[plugin:{plugin_id}] {}", String::from_utf8_lossy(&line).trim_end()),
+                    Ok(Some(line)) => {
+                        let line = String::from_utf8_lossy(&line).trim_end().to_string();
+                        log::warn!("[plugin:{plugin_id}] {line}");
+                        let mut tail = tail.lock().unwrap_or_else(|error| error.into_inner());
+                        if tail.len() == STDERR_TAIL_LINES {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line.chars().take(STDERR_TAIL_LINE_CHARS).collect());
+                    }
                     Ok(None) => break,
                     Err(error) => {
                         log::warn!("[plugin:{plugin_id}] failed to read stderr: {error}");
@@ -669,7 +763,27 @@ impl PluginSidecarSession {
                     }
                 }
             }
+            closed.send_replace(true);
         });
+    }
+
+    /// Puts a known cause found in the sidecar's stderr in front of a startup
+    /// error. Waits briefly for stderr to drain, since the JVM can close stdout
+    /// before its class-version error has been read.
+    async fn with_stderr_hint(&self, message: String) -> String {
+        if message.contains(PLUGIN_JAVA_TOO_OLD_MESSAGE) {
+            return message;
+        }
+        let mut closed = self.stderr_closed.subscribe();
+        let _ = tokio::time::timeout(STDERR_CLOSE_WAIT, closed.wait_for(|closed| *closed)).await;
+        let stderr = {
+            let tail = self.stderr_tail.lock().unwrap_or_else(|error| error.into_inner());
+            tail.iter().cloned().collect::<Vec<_>>().join("\n")
+        };
+        match plugin_stderr_hint(&stderr) {
+            Some(hint) => format!("{hint} Details: {message}; recent stderr:\n{stderr}"),
+            None => message,
+        }
     }
 
     async fn exit_message(&self) -> String {
@@ -1176,15 +1290,54 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PromptActivity,
-        UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
+        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PluginHandshake,
+        PromptActivity, UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
         USER_INPUT_MIN_TIMEOUT,
     };
+    use super::{plugin_stderr_hint, PLUGIN_JAVA_TOO_OLD_MESSAGE};
     #[cfg(unix)]
     use super::{PluginSessionState, PluginSidecarSession};
     #[cfg(unix)]
     use crate::plugins::{InstalledPlugin, PluginManifest, PluginRuntimeEnv};
     use tokio::io::BufReader;
+
+    #[test]
+    fn handshake_accepts_missing_null_and_array_capabilities() {
+        for (capabilities, expected) in [
+            (None, vec![]),
+            (Some(serde_json::Value::Null), vec![]),
+            (Some(serde_json::json!([])), vec![]),
+            (Some(serde_json::json!(["commands", "events"])), vec!["commands", "events"]),
+        ] {
+            let mut value = serde_json::json!({
+                "protocolVersion": 1,
+                "plugin": { "id": "sample.plugin", "version": "1.0.0" }
+            });
+            if let Some(capabilities) = capabilities {
+                value["capabilities"] = capabilities;
+            }
+            let handshake: PluginHandshake = serde_json::from_value(value).unwrap();
+            assert_eq!(handshake.capabilities, expected);
+            assert_eq!(serde_json::to_value(&handshake).unwrap()["capabilities"], serde_json::json!(expected));
+            assert_eq!(handshake.protocol_version, 1);
+            assert_eq!(handshake.plugin.id, "sample.plugin");
+            assert_eq!(handshake.plugin.version, "1.0.0");
+        }
+    }
+
+    #[test]
+    fn handshake_rejects_invalid_capabilities() {
+        for capabilities in
+            [serde_json::json!("commands"), serde_json::json!({}), serde_json::json!([1]), serde_json::json!([null])]
+        {
+            assert!(serde_json::from_value::<PluginHandshake>(serde_json::json!({
+                "protocolVersion": 1,
+                "plugin": { "id": "sample.plugin", "version": "1.0.0" },
+                "capabilities": capabilities
+            }))
+            .is_err());
+        }
+    }
 
     async fn assert_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) {
         std::future::poll_fn(|context| {
@@ -1776,6 +1929,104 @@ sleep 30
         assert_eq!(session.status().state, PluginSessionState::Stopped);
     }
 
+    /// A sidecar that answers `plugin/initialize` with an explicit JSON `null`
+    /// for `capabilities` (what a nil slice encodes as in the Go SDK, #14972)
+    /// must still initialize, with no capabilities.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initializes_sidecar_with_null_capabilities() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":null,"plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.sidecar",
+            "name": "Sample Sidecar",
+            "version": "1.0.0",
+            "publisher": "dbx",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": {
+                "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }
+            }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let session = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default())
+            .await
+            .expect("a null capabilities field should initialize as empty");
+        assert_eq!(session.status().state, PluginSessionState::Running);
+        assert!(session.handshake().await.unwrap().capabilities.is_empty());
+        session.shutdown().await.unwrap();
+        assert_eq!(session.status().state, PluginSessionState::Stopped);
+    }
+
+    /// A `capabilities` value that is neither null nor an array of strings
+    /// must fail with an error that names the field, not a bare decode error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_non_array_capabilities_with_field_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":"events","plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.sidecar",
+            "name": "Sample Sidecar",
+            "version": "1.0.0",
+            "publisher": "dbx",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": {
+                "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }
+            }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let error = match PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await {
+            Ok(_) => panic!("a string capabilities field should fail initialization"),
+            Err(error) => error,
+        };
+        assert!(error.contains("'capabilities'"), "unexpected error: {error}");
+        assert!(error.contains("array of strings"), "unexpected error: {error}");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_initialize_terminates_plugin_process() {
@@ -1871,6 +2122,61 @@ sleep 30
         let result: serde_json::Value = session.invoke("ping", serde_json::Value::Null).await.unwrap();
         assert_eq!(result["ok"], true);
         session.shutdown().await.unwrap();
+    }
+
+    /// The JDBC plugin is a legacy sidecar: started by Java 8 it dies on its
+    /// first request, and that error must name the Java version as the cause.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_runtime_explains_a_java_class_version_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+echo 'Exception in thread "main" java.lang.UnsupportedClassVersionError: app/dbx/jdbc/Main has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 52.0' >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy",
+            "executable": "plugin.sh"
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        // The process may already be gone when `start` returns, so either step can fail.
+        let error = match PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await {
+            Ok(session) => {
+                let error = session.invoke::<serde_json::Value>("ping", serde_json::Value::Null).await.unwrap_err();
+                let _ = session.shutdown().await;
+                error
+            }
+            Err(error) => error,
+        };
+
+        assert!(error.starts_with(PLUGIN_JAVA_TOO_OLD_MESSAGE), "unexpected error: {error}");
+        assert!(error.contains("UnsupportedClassVersionError"));
+    }
+
+    #[test]
+    fn stderr_hint_recognizes_java_class_version_failures() {
+        assert_eq!(
+            plugin_stderr_hint("java.lang.UnsupportedClassVersionError: app/dbx/jdbc/Main"),
+            Some(PLUGIN_JAVA_TOO_OLD_MESSAGE)
+        );
+        assert_eq!(
+            plugin_stderr_hint("this version of the Java Runtime only recognizes class file versions up to 52.0"),
+            Some(PLUGIN_JAVA_TOO_OLD_MESSAGE)
+        );
+        assert_eq!(plugin_stderr_hint("java.net.ConnectException: Connection refused"), None);
     }
 
     /// A legacy `stdio-jsonl` plugin answers with one line per response, so a whole

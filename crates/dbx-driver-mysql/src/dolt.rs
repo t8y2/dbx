@@ -40,7 +40,7 @@ fn is_profile(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
 }
 
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     if let Err(error) = conn.query_drop(ENABLE_BRANCH_DATABASES_SQL).await {
         log::debug!("Dolt branch database system variable is unavailable; falling back to dolt_branches: {error}");
         return list_databases_from_branches(&mut conn).await;
@@ -61,7 +61,7 @@ pub async fn list_system_tables(
 ) -> Result<Vec<TableInfo>, String> {
     // The visibility flag is session-scoped, so setup, metadata lookup, and
     // cleanup must use the same pooled connection.
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     conn.query_drop(ENABLE_SYSTEM_TABLES_SQL).await.map_err(|error| error.to_string())?;
     let server_filter = filter.map(str::trim).filter(|filter| !filter.is_empty()).unwrap_or(SYSTEM_TABLE_PREFIX);
     let tables = list_table_names_show_filtered_with_conn(&mut conn, database, Some(server_filter), &[])

@@ -148,6 +148,42 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
+
+### Nacos and Consul tool levels
+
+Nacos and Consul expose product-specific toolsets. The client tool list is filtered by connection-type coverage, enabled tools, and permissions. Each call still rechecks visibility and effective permissions for the target connection and sub-scope; a listed tool is not authorized for every target.
+
+| Tool | Level | Description |
+| --- | --- | --- |
+| `dbx_nacos_list_namespaces` | Read | List the Nacos namespaces visible for the connection |
+| `dbx_nacos_list_configs` | Read | List configurations in a namespace, with dataId, group, text, and paging filters |
+| `dbx_nacos_get_config` | Read | Read configuration content and metadata |
+| `dbx_nacos_config_history` | Read | Read the publish history of a configuration |
+| `dbx_nacos_publish_config` | Write | Create or overwrite one configuration, with an optional CAS MD5 |
+| `dbx_nacos_delete_config` | Full | Delete one configuration |
+| `dbx_nacos_list_services` | Read | List services in a namespace |
+| `dbx_nacos_list_instances` | Read | Read instance health, weight, and enabled state |
+| `dbx_nacos_update_instance` | Write | Change an instance's online state or weight |
+| `dbx_nacos_search_configs` | Read | Search configuration content in one or all allowed namespaces |
+| `dbx_nacos_rollback_config` | Write | Restore one configuration from its publish history |
+| `dbx_nacos_get_service` | Read | Read service details |
+| `dbx_nacos_register_instance` | Write | Register one service instance |
+| `dbx_nacos_deregister_instance` | Full | Deregister one service instance |
+| `dbx_consul_kv_list` | Read | List Consul KV keys by prefix, one page at a time |
+| `dbx_consul_kv_get` | Read | Read one KV and its ModifyIndex |
+| `dbx_consul_kv_put` | Write | Write one KV, with optional CAS protection |
+| `dbx_consul_kv_delete` | Full | Delete one KV |
+| `dbx_consul_list_services` | Read | List services and tags in the Consul catalog |
+| `dbx_consul_list_nodes` | Read | List catalog nodes |
+| `dbx_consul_service_health` | Read | Read service instances and health checks |
+| `dbx_consul_set_maintenance` | Write | Put a Consul Agent service into or out of maintenance mode |
+
+Nacos uses **namespace** as its sub-scope. In the access-control tree under **Permission management**, expand a Nacos connection and choose all namespaces, selected namespaces, or no namespaces. `dbx_nacos_list_namespaces` also returns only namespaces that are visible to MCP. A Consul connection is already bound to one datacenter, so the tree does not split datacenters and currently has no KV-prefix sub-scope.
+
+The public Nacos namespace uses `public` in permission rules; an omitted or empty namespace resolves to the same public scope when the connection default is empty.
+
+Nacos user, role, and namespace administration, and Consul ACL and Intentions administration, are not exposed by default. Snapshot restore, Raft or cluster-member changes, License writes, and other cluster operations whose risk cannot be reliably classified are not provided as MCP tools.
+
 `dbx_list_connections` and `dbx://connections` include saved connection notes regardless of the sidebar display setting. Notes are visible to MCP clients that can access the connection; do not store passwords or other secrets in notes.
 
 `dbx_execute_query` row controls:
@@ -163,12 +199,12 @@ DBX plugins whose sidecar implements the `mcp/tools` bridge can be served by the
 - Tools are exposed as `dbx_<prefix>__<tool>`, with the prefix derived from the plugin id's last segment: `io.dbx.ssh` → `dbx_ssh__sftp_list_dir`, `io.dbx.kafka` → `dbx_kafka__kafka_topics_list`.
 - Connections stay host-bound: the plugin schema's `connectionId` / `connectionName` are removed and replaced by an optional `dbx_connection` argument that selects among the plugin's **saved connections allowed by the DBX MCP settings**. With exactly one allowed connection you can omit it. The host generates the lifecycle payload (credentials, runtime endpoint) from the saved connection — credentials never reach the model or client.
 - Scoped sessions (`DBX_MCP_SCOPE_*`), the global tool allowlist, and the connection allowlist constrain plugin tools exactly like the `dbx_*` tools.
-- The tool allowlist matches exact names: after enabling plugin tools, add each `dbx_<prefix>__<tool>` you want exposed (or clear the allowlist to allow everything).
+- The tool allowlist supports exact names and plugin wildcards: `dbx_<prefix>__<tool>` allows one tool, `dbx_<prefix>__*` one plugin, and `dbx_*__*` every plugin.
 - The Web / Docker backend does not serve plugin tools.
 
 ### Lazy discovery (`DBX_MCP_PLUGIN_TOOLS`)
 
-With many plugins, one flat `tools/list` spends a lot of context on argument schemas. Set `DBX_MCP_PLUGIN_TOOLS=lazy` to expose only three meta tools — `dbx_plugin_list` (filterable plugin catalog), `dbx_plugin_tools` (one plugin's tools and schemas), and `dbx_plugin_call` (call by **plugin id** + tool) — so schemas enter the context on demand. `both` advertises the flat tools and the meta tools at once. The default stays `flat`.
+With many plugins, one flat `tools/list` spends a lot of context on argument schemas. Set `DBX_MCP_PLUGIN_TOOLS=lazy` to expose only three meta tools — `dbx_plugin_list` (filterable plugin catalog), `dbx_plugin_tools` (one plugin's tools and schemas), and `dbx_plugin_call` (call by **plugin id** + tool) — so schemas enter the context on demand. `both` advertises the flat tools and the meta tools at once. Without the environment variable, new configurations list tools directly and saved modes remain unchanged. **Automatic (compatibility)** preserves the existing threshold: list directly with up to 40 plugin tools in total, otherwise use on-demand discovery.
 
 ## Resources
 
@@ -369,25 +405,76 @@ For connections exposed to MCP, **Settings → MCP** can set a default execution
 
 The same page can also expose only selected MCP tools. This is enforced at every call, rather than being only a client-side display preference; a client that retained an old tool list is denied once the server-side allowlist changes.
 
-### Configure access in order
+### MCP settings tabs
 
-Use **Settings → MCP** to define the effective scope in this order:
+The MCP settings page uses the three labels shown in the UI: **Access methods**, **Capabilities**, and **Permission management**. They share one policy, so changes apply to every MCP client.
 
-1. Choose whether MCP can see **all connections** (including future connections) or only **specified connections**.
-2. For every exposed connection, choose **all databases**, **specified databases**, or **no access**. Specified database names are exact matches; use `dbx_list_databases` to discover the names that are currently allowed, then optionally set execution permissions for those databases.
-3. Set each connection's default execution permission. It applies to every database when all databases are exposed, and to selected databases that do not have an override.
-4. Select only the MCP tools that the client needs, then choose the global default execution permission.
+#### Access methods
+
+**Access methods** handles MCP Server installation, upgrades and removal, generates stdio/HTTP client configurations, and exposes runtime settings. Query timeout remains here; **External plugin tool delivery** is under **Capabilities → Advanced settings**. Generated client configurations contain only the runtime information needed to start MCP Server; they do not contain permission or connection-scope variables.
+
+#### Capabilities
+
+The **Capabilities** tab defaults to **Category management**: choose Database, Nacos, Consul, Message queues, Salesforce, or DBX General on the left and configure its toolsets on the right. **Global overview** displays all categories together. Plugins have separate entries marked with their source. Search covers categories, toolsets, tool names/IDs and plugins; **Only show enabled** filters by configuration without changing the selected category. Category batch actions include tools hidden by filters and take effect after **Apply**. Shared connection discovery belongs to DBX General, so disabling Database does not disable discovery for other products.
+
+Each toolset shows enabled counts, **Read / Write / High risk** badges and connection coverage by type. Badges describe tool risk and do not grant access. Toolsets without matching connections remain configurable. Built-in changes use **Apply / Cancel**; plugin grants save immediately. Custom tool allowlists are under **Advanced configuration**.
+
+Open a card to inspect its tools. Tool details include the tool ID, model-facing description, access level, supported database types, and every parameter's name, type, required flag, description, and default. Classified tools say that each call is classified as read, write, or high risk from its statement. A switch in the detail view can disable one built-in tool. **Apply this toolset** saves only the switches in the current toolset and keeps the dialog open. Unsaved changes to other toolsets, permissions, and runtime settings remain drafts. Closing the detail also keeps its draft for Apply or Discard in Settings; discarding other drafts does not undo a toolset already applied from its details. Save failures appear inside the dialog and can be retried.
+
+Plugin cards show the plugin name, version, plugin ID, level badges, and the **MCP tools** mark. They show whether the author opened external MCP, the external MCP switch, an **authorization ceiling** (read only / read & write / full), and the exposed count. The first time you enable a plugin, an authorization dialog appears; only tools and levels declared in the manifest are accepted. New read-only tools can become available automatically. New write or full tools, and existing tools whose declared level rises, require confirmation even when they are within the existing ceiling. Tools above the ceiling remain hidden; raising the ceiling does not replace confirmation of new tools. Plugin details group tools by toolset, show parameters and declared levels, and allow a single tool to be switched off. A tool with no manifest access declaration is never exposed, even when the sidecar marks it read-only.
+
+Plugin tool entries add another layer to the global MCP tool allowlist: `dbx_<prefix>__<tool>` allows one exact tool, `dbx_<prefix>__*` allows every tool from one plugin, and `dbx_*__*` allows every plugin tool. When an explicit allowlist is active, plugin tools without a matching entry stay hidden. Selecting all tools requires no individual entries. The plugin switch, ceiling, and per-tool switch always apply.
+
+Expand **External plugin tool delivery** under **Capabilities → Advanced settings** to choose how DBX provides authorized plugin tools to MCP clients. Click **Apply** at the bottom to save. New configurations default to **List directly** (`flat`), which lists each authorized tool in `tools/list`. **Lazy discovery** (`lazy`) provides the shared `dbx_plugin_list`, `dbx_plugin_tools`, and `dbx_plugin_call` entry points; enable **Plugin discovery and invocation** under **DBX general**. Both paths enforce the same plugin grants and resource permissions. Saved modes remain unchanged, and legacy saved policies without this field retain their previous automatic behavior. **Automatic (compatibility)** lists directly with up to 40 plugin tools in total and uses on-demand discovery above that. The `DBX_MCP_PLUGIN_TOOLS` environment variable takes priority over the page setting and accepts `flat`, `lazy`, or `both`; `both` advertises both the flat tools and the discovery tools.
+
+#### Permission management
+
+**Permission management** provides **Global default permission**, **Access control**, and independent **Call safety**. There are no quick presets or Custom mode. Permission changes do not change tool switches in Capabilities.
+
+**Global default permission** applies to resources without a more specific permission. Choose read only, data read/write, or full access. Changing the default updates the effective preview for resources that inherit it; groups, connections, and databases with their own permissions keep those settings. The comparison table is collapsed under **Permission details**. It describes permission levels; tools must also be enabled in Capabilities.
+
+Call safety is independent of permission inheritance and tool switches. Changing the global default does not alter the confirmation policy. Granting full access to a default, group, connection or database still asks for confirmation of that settings change; cancelling retains the previous value. This is separate from confirming a tool invocation.
+
+The global default and group, connection, and database permissions are staged until you click **Apply**. Switching tabs keeps the draft; closing and discarding changes restores the saved configuration.
+
+The access-control tree puts groups, connections, and sub-scopes in one table. Choose **All connections** (including future connections) or **Selected only**, then set group and connection visibility. Each connection shows a database scope summary. **Configure database access** opens a transfer dialog with **All databases**, **Selected**, and **No databases** modes. Move databases to the right and set each to inherit, read only, data read/write, or full access. Removing a database also removes its override.
+
+When individual connections or child groups are authorized, their ancestor group shows a mixed checkbox and the number of visible connections across the full group, regardless of collapsing or filtering. Even if all current connections are visible, the checkbox stays mixed until the whole group is authorized; future connections are not implicitly included. Clicking the mixed checkbox authorizes the entire group. Group permission defaults apply to child items without their own permission setting and do not change visibility.
+
+Check multiple databases on the right and use **Set access for checked** to update their permissions together. Unchecked databases are unchanged, and full access requires one confirmation for the batch. **Select current search results** includes matching databases beyond the currently rendered rows; changing the search clears the checkmarks. Batch changes are saved only when you click **Apply database access**. Each row's help icon explains the permission source and whether the database was found during discovery.
+
+Discovery loads every database visible to the database account. Both lists support search; refresh and manual entry of exact names are available. Lists over 100 entries render in batches, while search and **Select current search results** cover the entire list. Selected databases missing from discovery are retained. **All databases** includes future databases; selecting every currently discovered database does not. Unselected databases and cross-database requests are rejected.
+
+**Apply database access** saves only this connection’s database scope and individual permissions. Drafts for other connections, parent permissions, tools and runtime settings remain unchanged. Success keeps the dialog open; failures can be retried. Closing retains drafts, and discarding other drafts does not undo database permissions already applied. Pending parent changes are distinguished from currently saved inherited permissions.
+
+Permissions inherit from the most specific scope: **database → connection → nearest group → parent group → global default**. The **Permission** column is the row's setting; **Effective** shows the final level and its source. Search covers groups, connections, and databases, and **Only show individual settings** hides rows that only inherit their default. Rows saved by an older version are marked **legacy** and can only narrow the connection's inherited permission; choose a permission again to make the row a regular setting. Salesforce connections also have an **Allow DML** switch; it is off by default and unavailable at read-only level, while connection and production protections remain hard limits.
+
+Plugin connections can expose a plugin-declared sub-scope (for example, a namespace or directory) in the same tree. Load the values from the plugin and choose all, selected, or none. Nacos connections use the same editor for namespaces; Consul's datacenter is fixed by the connection. Sub-scope changes save immediately, as noted in their editor, and are unaffected by Apply or Cancel at the bottom. A failed save displays an error and keeps the previous configuration.
+
+#### Call safety
+
+Enable **Request human confirmation before high-risk tool calls** to check permissions first and reject insufficient access. Authorized high-risk calls also require confirmation at full access. This covers high-risk SQL, dangerous or unbounded MongoDB mutations, dangerous Redis commands, plugin tools declared `full`, Nacos/Consul deletion and connection removal. Ordinary reads and bounded ordinary writes do not prompt. Enabled tools, plugin grants, resource visibility, read-only connections and production protections remain mandatory.
+
+DBX Desktop shows the tool, target and operation. Each approval is for the current call only, without elevating permissions or granting a timed exemption. Denial, timeout or unavailable desktop confirmation prevents execution. Permissions are rechecked after approval; revocation wins. The policy applies to both stdio and HTTP; Web backends cannot provide desktop confirmation.
+
+**Compatibility:** Existing `promptHighRiskSql=true` or v2 `confirm="full"` remains **Legacy temporary authorization**: data-write access can confirm supported high-risk calls, while full access does not prompt. SQL's once/hour/day choices remain exclusive to that legacy mode. The UI explains the difference. Only explicitly choosing the new policy or disabling legacy authorization, then clicking Apply, changes the behavior. The new policy uses `callConfirmation="high_risk"` / v2 `confirm="high_risk"`, never a reinterpretation of the old boolean. Fresh configurations start without additional confirmation and can opt in. Older standalone MCP programs do not understand the new policy; use matching desktop and standalone MCP versions.
+
+#### MCP call history
+
+The **View MCP call history** button is on the right of the transport selector row in **Access methods**, displayed as a history icon in narrow layouts. It closes Settings and opens the history panel on its MCP view. If there are unsaved changes, you must first confirm discarding them; choosing to keep editing leaves the history panel closed. Entries include the time, transport (stdio or HTTP), MCP client name and version, tool, target connection/database or other resource, classified level, whether confirmation was used, duration, request/response summaries, and the success or failure reason. The client name is recorded only for auditing and does not affect authorization. MCP history has its own retention and cleanup settings.
 
 The most specific execution setting wins, but an allowed tool still cannot bypass a hidden connection, database scope, connection read-only status, production protection, or the database account's own privileges. Requests for a database outside the selected scope are rejected with `DATABASE_OUT_OF_SCOPE`. When database-specific execution permissions exist, cross-database SQL and MongoDB aggregation writes are rejected to prevent bypassing those limits.
 
+
 During upgrade, saved connection rules without an execution policy version keep the previous ceiling semantics and cannot widen the global permission. Only a rule saved by the current Settings UI is marked for scoped override semantics; editing an existing legacy rule first carries its effective ceiling forward before enabling the new behavior.
 
-Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until a central policy is saved for the first time. After that, the central policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
+Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. `DBX_MCP_ALLOW_WRITES=0` (or `false`) enforces read-only access for the current run, even after the central policy is saved and even when a group, connection, or database grants full access. This restriction applies to both local and Web backends without modifying saved settings. A value of `1`, `true`, or an unset variable still requires authorization from the central policy. Legacy connection-scope variables can only narrow the DBX allowlist.
 
 | Variable | Purpose |
 | --- | --- |
 | `DBX_DATA_DIR` | Override the local DBX data directory |
 | `DBX_SESSION_IDLE_TTL_SECS` | Stateful session idle timeout in positive whole seconds (default: `1800`). Invalid, zero, negative or unrepresentable values use the default. Applies to transaction-owned connections too; restart the MCP host after changing it. |
+| `DBX_MCP_PLUGIN_TOOLS` | Override External plugin tool delivery in Advanced settings with `flat`, `lazy`, or `both`; the environment variable takes priority. |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to DBX Web |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
@@ -399,7 +486,7 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `DBX_WEB_MCP_TOKEN_FILE` | Read the native Web MCP token from a file; cannot be combined with `DBX_WEB_MCP_TOKEN` |
 | `DBX_WEB_MCP_ALLOWED_HOSTS` | Required comma-separated public Host authorities for native Web MCP |
 | `DBX_WEB_MCP_ALLOWED_ORIGINS` | Comma-separated browser Origins allowed for native Web MCP |
-| `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
+| `DBX_MCP_ALLOW_WRITES` | `0`/`false` forces the current run to be read-only, including saved group, connection, and database overrides; `1`/`true` never widens the central policy. Applies to local and Web backends. |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict the session to one connection name |

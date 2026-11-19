@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone, Default)]
 pub struct TaskSupervisor {
@@ -99,18 +100,19 @@ impl TaskSupervisor {
     pub async fn shutdown(&self, deadline: Duration) {
         self.accepting.store(false, Ordering::Release);
         self.cancellation.cancel();
-        let mut handles: Vec<JoinHandle<()>> =
-            self.tasks.lock().unwrap_or_else(|error| error.into_inner()).drain().map(|(_, handle)| handle).collect();
+        let mut handles: Vec<AbortOnDropHandle<()>> = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain()
+            .map(|(_, handle)| AbortOnDropHandle::new(handle))
+            .collect();
         let wait = async {
             for handle in &mut handles {
                 let _ = handle.await;
             }
         };
-        if tokio::time::timeout(deadline, wait).await.is_err() {
-            for handle in handles {
-                handle.abort();
-            }
-        }
+        let _ = tokio::time::timeout(deadline, wait).await;
     }
 }
 
@@ -157,6 +159,26 @@ mod tests {
         assert!(supervisor.spawn_once("one-shot", |_| async {}));
         tokio::time::sleep(Duration::from_millis(1)).await;
         assert_eq!(supervisor.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_shutdown_aborts_tasks_already_taken_from_the_registry() {
+        let supervisor = TaskSupervisor::new();
+        let (cancelled, cancellation_observed) = tokio::sync::oneshot::channel();
+        let (finished, task_finished) = tokio::sync::oneshot::channel::<()>();
+        supervisor.spawn_once("held-during-shutdown", move |token| async move {
+            let _finished = finished;
+            token.cancelled().await;
+            let _ = cancelled.send(());
+            std::future::pending::<()>().await;
+        });
+        let shutting_down = supervisor.clone();
+        let shutdown = tokio::spawn(async move { shutting_down.shutdown(Duration::from_secs(60)).await });
+        cancellation_observed.await.unwrap();
+        assert_eq!(supervisor.active_count(), 0);
+        shutdown.abort();
+        assert!(shutdown.await.unwrap_err().is_cancelled());
+        assert!(tokio::time::timeout(Duration::from_secs(1), task_finished).await.unwrap().is_err());
     }
 
     #[tokio::test]

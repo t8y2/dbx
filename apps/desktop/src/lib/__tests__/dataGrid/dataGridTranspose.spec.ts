@@ -3,8 +3,11 @@ import {
   averageTransposeRecordWidth,
   buildVisibleTransposeRows,
   calculateTransposeRecordWidth,
+  calculateTransposeInfoWidth,
+  defaultTransposeInfoWidth,
   defaultTransposeRecordWidth,
   minTransposeFieldWidth,
+  minTransposeInfoWidth,
   shouldAutoTransposeSingleRow,
   transposeAnchorRowIndex,
   transposeEndAlignmentSpacerWidth,
@@ -57,6 +60,23 @@ describe("dataGridTranspose density widths", () => {
     expect(compactField).toBeLessThan(standardField);
     expect(standardField).toBeLessThan(comfortableField);
     expect(transposeFieldWidth([], { density: "compact" })).toBe(minTransposeFieldWidth("compact"));
+  });
+
+  it("scales default and min transpose info width with density", () => {
+    expect(defaultTransposeInfoWidth("compact")).toBeLessThan(defaultTransposeInfoWidth("standard"));
+    expect(defaultTransposeInfoWidth("standard")).toBe(360);
+    expect(defaultTransposeInfoWidth("standard")).toBeLessThan(defaultTransposeInfoWidth("comfortable"));
+
+    expect(minTransposeInfoWidth("compact")).toBeLessThan(minTransposeInfoWidth("standard"));
+    expect(minTransposeInfoWidth("standard")).toBe(120);
+    expect(minTransposeInfoWidth("standard")).toBeLessThan(minTransposeInfoWidth("comfortable"));
+
+    const longMetadata = ["varchar(255) · Nullable: Yes · " + "a".repeat(120)];
+    const compactWidth = calculateTransposeInfoWidth(longMetadata, { density: "compact" });
+    const standardWidth = calculateTransposeInfoWidth(longMetadata, { density: "standard" });
+    expect(compactWidth).toBeLessThan(standardWidth);
+    expect(standardWidth).toBeGreaterThan(defaultTransposeInfoWidth("standard"));
+    expect(calculateTransposeInfoWidth([])).toBe(defaultTransposeInfoWidth("standard"));
   });
 
   it("keeps compact record width independent of field order", () => {
@@ -112,10 +132,45 @@ describe("transpose record scrolling", () => {
     const endSpacerWidth = transposeEndAlignmentSpacerWidth({
       viewportWidth: 1200,
       pinnedWidth: 104,
+      recordsWidth: 1500,
+      lastRecordWidth: 300,
+    });
+
+    expect(endSpacerWidth).toBe(796);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 4,
+        totalRecords: 5,
+        viewportWidth: 1200,
+        pinnedWidth: 104,
+        recordWidth: 300,
+        currentScrollLeft: 0,
+        alignment: "start",
+        endSpacerWidth,
+      }),
+    ).toBe(1200);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 4,
+        totalRecords: 5,
+        viewportWidth: 1200,
+        pinnedWidth: 104,
+        recordWidth: 300,
+        currentScrollLeft: 404,
+        endSpacerWidth,
+      }),
+    ).toBe(404);
+  });
+
+  it("does not add horizontal scroll space when all records fit in the viewport", () => {
+    const endSpacerWidth = transposeEndAlignmentSpacerWidth({
+      viewportWidth: 1200,
+      pinnedWidth: 104,
+      recordsWidth: 5 * 168,
       lastRecordWidth: 168,
     });
 
-    expect(endSpacerWidth).toBe(928);
+    expect(endSpacerWidth).toBe(0);
     expect(
       transposeScrollLeftForRecord({
         recordIndex: 4,
@@ -125,17 +180,6 @@ describe("transpose record scrolling", () => {
         recordWidth: 168,
         currentScrollLeft: 0,
         alignment: "start",
-        endSpacerWidth,
-      }),
-    ).toBe(672);
-    expect(
-      transposeScrollLeftForRecord({
-        recordIndex: 4,
-        totalRecords: 5,
-        viewportWidth: 1200,
-        pinnedWidth: 104,
-        recordWidth: 168,
-        currentScrollLeft: 0,
         endSpacerWidth,
       }),
     ).toBe(0);
@@ -187,6 +231,7 @@ describe("transpose record scrolling", () => {
     const endSpacerWidth = transposeEndAlignmentSpacerWidth({
       viewportWidth: 300,
       pinnedWidth: 100,
+      recordsWidth: 692,
       lastRecordWidth: 96,
     });
 

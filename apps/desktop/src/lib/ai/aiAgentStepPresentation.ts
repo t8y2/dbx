@@ -184,3 +184,15 @@ function skippedTitleKey(reason: string): string {
       return "ai.agentStepTitles.skipped";
   }
 }
+
+/** Retire only unanswered approvals owned by the stopped session. */
+export function cancelSessionToolApprovals(messages: readonly { agentSteps?: AiAgentStepItem[] }[], sessionId: string) {
+  if (!sessionId) return;
+  for (const message of messages) {
+    for (const step of message.agentSteps ?? []) {
+      if (step.approval?.sessionId !== sessionId || (step.approval.status !== "pending" && step.approval.status !== "submitting")) continue;
+      step.approval.status = "cancelled";
+      step.tone = "muted";
+    }
+  }
+}

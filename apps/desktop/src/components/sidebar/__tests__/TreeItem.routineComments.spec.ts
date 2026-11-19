@@ -152,11 +152,11 @@ describe("TreeItem routine and object comments (#9962)", () => {
     expect(metadata.contains(label)).toBe(true);
     expect(metadata.contains(size)).toBe(false);
     expect(metadata.parentElement).toBe(size.parentElement);
-    expect(metadata.classList.contains("min-w-0")).toBe(true);
-    expect(metadata.classList.contains("overflow-hidden")).toBe(true);
-    expect((label.parentElement as HTMLElement).style.maxWidth).toBe("max(0px, calc(100% - 1rem))");
+    expect(metadata.classList.contains(horizontalScroll ? "min-w-max" : "min-w-0")).toBe(true);
+    expect(metadata.classList.contains("overflow-hidden")).toBe(!horizontalScroll);
+    expect((label.parentElement as HTMLElement).style.maxWidth).toBe(horizontalScroll ? "" : "max(0px, calc(100% - 1rem))");
     expect(comment.classList.contains("truncate")).toBe(true);
-    expect(label.classList.contains("truncate")).toBe(true);
+    expect(label.classList.contains("truncate")).toBe(horizontalScroll ? false : true);
     expect(size.classList.contains("shrink-0")).toBe(true);
     expect(size.classList.contains("ml-auto")).toBe(true);
   });
@@ -183,6 +183,34 @@ describe("TreeItem routine and object comments (#9962)", () => {
     await nextTick();
     expect(container.querySelector(".sidebar-object-comment--right")?.textContent).toBe("Customer orders");
     expect(container.querySelector(".tabular-nums")).toBeNull();
+  });
+
+  it("keeps right-aligned comments visible with a bounded width when the name overflows", async () => {
+    commentMode.value = "comment-right";
+    allowHorizontalScroll.value = true;
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const { container } = await mountTreeItem({ ...tableNode, label: "long_table_".repeat(30), comment: "comment ".repeat(200) });
+    for (const callback of frames.splice(0)) callback(0);
+    await nextTick();
+    const comment = container.querySelector<HTMLElement>(".sidebar-object-comment--right")!;
+    expect(comment.textContent).toBe("comment ".repeat(200));
+    expect(comment.style.maxWidth).toBe("240px");
+    expect(container.querySelector(".tree-object-label")!.classList.contains("truncate")).toBe(false);
+  });
+
+  it.each(["database", "schema", "column", "index", "trigger"] as const)("allows long %s names to scroll and restores truncation when disabled", async (type) => {
+    allowHorizontalScroll.value = true;
+    const { container } = await mountTreeItem({ ...tableNode, type, label: "long_name_".repeat(30), meta: { is_primary_key: false, is_nullable: true } as never });
+    const label = container.querySelector(".tree-object-label")!;
+    expect(label.classList.contains("whitespace-nowrap")).toBe(true);
+    expect(label.classList.contains("truncate")).toBe(false);
+    allowHorizontalScroll.value = false;
+    await nextTick();
+    expect(label.classList.contains("truncate")).toBe(true);
   });
 
   it("switches between existing and combined modes without remounting", async () => {

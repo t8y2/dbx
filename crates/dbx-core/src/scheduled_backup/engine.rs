@@ -168,13 +168,13 @@ impl BackupService {
             .into_iter()
             .find(|c| c.id == job.config.connection_id)
             .ok_or("Saved backup connection is unavailable")?;
-        if !matches!(connection.db_type, DatabaseType::Mysql | DatabaseType::Postgres) {
+        if !matches!(connection.db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::OpenGauss) {
             return Err("This connection does not support consistent scheduled backups".into());
         }
         if !connection.save_password || connection.one_time {
             return Err("Unattended backups require a saved connection and saved credentials".into());
         }
-        let postgres = connection.db_type == DatabaseType::Postgres;
+        let postgres = matches!(connection.db_type, DatabaseType::Postgres | DatabaseType::OpenGauss);
         job.run.connection_name = connection.name.clone();
         state.configs.write().await.insert(connection.id.clone(), connection);
         check_cancel(stop)?;
@@ -221,15 +221,8 @@ impl BackupService {
         let mut included_count = 0;
         for (db_index, database) in databases.iter().enumerate() {
             check_cancel(stop)?;
-            let schemas = if postgres {
-                schema::list_schemas_core(state, &job.config.connection_id, database)
-                    .await?
-                    .into_iter()
-                    .filter(|s| s != "information_schema" && !s.starts_with("pg_"))
-                    .collect::<Vec<_>>()
-            } else {
-                vec![database.clone()]
-            };
+            let schemas =
+                database_export::list_database_backup_schemas_core(state, &job.config.connection_id, database).await?;
             if schemas.is_empty() {
                 return Err(format!("Database {database} has no exportable schemas"));
             }
@@ -330,7 +323,11 @@ impl BackupService {
                         &job.time_zone,
                         false,
                     )?;
-                    let extension = if job.config.output_compression == "gzip" { "sql.gz" } else { "sql" };
+                    let extension = match job.config.output_compression.as_str() {
+                        "gzip" => "sql.gz",
+                        "nb3" => "nb3",
+                        _ => "sql",
+                    };
                     let path = output.join(format!("{name}.{extension}"));
                     check_output_ancestors(&path, Path::new(&job.config.destination_directory))?;
                     if path.try_exists().map_err(|e| e.to_string())? {
@@ -356,6 +353,7 @@ impl BackupService {
                         schema: schema_name.clone(),
                         file_path: file.file_path,
                         selected_tables: selected_tables.clone(),
+                        selected_objects: None,
                         excluded_tables: excluded_tables.clone(),
                         include_structure: job.config.include_structure,
                         include_data: job.config.include_data,
@@ -363,19 +361,25 @@ impl BackupService {
                         include_create_database: false,
                         drop_table_if_exists: job.config.drop_table_if_exists,
                         omit_auto_increment: false,
+                        omit_database_qualifier: false,
                         preserve_original_language: false,
                         fail_on_error: true,
                         prevent_overwrite: true,
-                        output_compression: if job.config.output_compression == "gzip" {
-                            DatabaseExportOutputCompression::Gzip
-                        } else {
-                            DatabaseExportOutputCompression::None
+                        output_compression: match job.config.output_compression.as_str() {
+                            "gzip" => DatabaseExportOutputCompression::Gzip,
+                            "nb3" => DatabaseExportOutputCompression::Nb3,
+                            _ => DatabaseExportOutputCompression::None,
                         },
                         insert_dialect: Default::default(),
                         insert_mode: Default::default(),
                         snapshot_session_id: Some(snapshot.session_id.clone()),
                         batch_size: 1000,
                         split_max_mb: None,
+                        // Scheduled backups stay full-table exports; the manual
+                        // dialog's rows-per-table preference must never shrink them (#14750).
+                        row_limit_per_table: None,
+                        row_limit_sort_column: None,
+                        row_limit_sort_descending: false,
                     };
                     let terminal_cancelled = std::sync::atomic::AtomicBool::new(false);
                     let created = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -443,7 +447,7 @@ fn check_cancel(stop: &CancellationToken) -> Result<(), String> {
     }
 }
 
-fn system_database(name: &str, postgres: bool) -> bool {
+pub(crate) fn system_database(name: &str, postgres: bool) -> bool {
     let name = name.to_ascii_lowercase();
     if postgres {
         matches!(name.as_str(), "template0" | "template1")

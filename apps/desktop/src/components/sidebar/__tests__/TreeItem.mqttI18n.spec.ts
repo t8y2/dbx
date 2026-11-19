@@ -67,7 +67,7 @@ function runtimeHost(): SidebarTreeRuntimeHost {
   };
 }
 
-async function mountMqttConsoleNode() {
+async function mountMqttConsoleNode(override?: Partial<TreeNode>) {
   const container = document.createElement("div");
   document.body.append(container);
   const node: TreeNode = {
@@ -76,6 +76,7 @@ async function mountMqttConsoleNode() {
     type: "mqtt-topic",
     connectionId: "mqtt-1",
     children: [],
+    ...override,
   };
   const runtime = createSidebarTreeRuntime();
   runtime.bindHost(runtimeHost());
@@ -114,5 +115,16 @@ describe("TreeItem MQTT console i18n", () => {
 
     expect(row.textContent).toContain("MQTT 控制台");
     expect(row.textContent).not.toContain("MQTT Console");
+  });
+
+  it("translates the native Job entry in an existing tree", async () => {
+    await setLocale("zh-CN");
+    const row = await mountMqttConsoleNode({ id: "ob-1:__native_jobs", type: "database-job-admin", label: "tree.nativeJobs" });
+    expect(row.textContent).toContain("原生作业");
+    expect(row.textContent).not.toContain("tree.nativeJobs");
+    await setLocale("en");
+    await nextTick();
+    expect(row.textContent).not.toContain("tree.nativeJobs");
+    expect(row.textContent).not.toContain("原生作业");
   });
 });

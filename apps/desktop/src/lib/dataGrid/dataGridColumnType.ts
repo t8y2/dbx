@@ -197,6 +197,9 @@ export function isNumericColumnType(dataType: string | undefined): boolean {
     if (openIndex <= 0 || !TRANSPARENT_NUMERIC_TYPE_WRAPPERS.has(normalized.slice(0, openIndex).trim())) break;
     normalized = normalized.slice(openIndex + 1, -1).trim();
   }
+  if (normalized.startsWith("unsigned ") || normalized.startsWith("signed ")) {
+    normalized = normalized.slice(normalized.indexOf(" ") + 1).trim();
+  }
   const base = normalized.split(/[\s([]/, 1)[0];
   return NUMERIC_COLUMN_TYPE_BASES.has(base);
 }
@@ -338,6 +341,12 @@ function dataGridColumnTypeBase(dataType: string): { base: string; array: boolea
   else if (base.startsWith("time without ")) base = "time";
   else if (base === "double precision") base = "double";
   return { base, array: unwrapped.array };
+}
+
+export function isUuidColumnType(dataType: string | undefined): boolean {
+  if (!dataType?.trim()) return false;
+  const { base, array } = dataGridColumnTypeBase(dataType);
+  return !array && (base === "uuid" || base === "uniqueidentifier");
 }
 
 /**

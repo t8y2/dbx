@@ -14,6 +14,37 @@ fn extracts_tables_aliases_and_qualified_columns() {
 }
 
 #[test]
+fn reports_qualifiers_that_name_no_table_or_alias() {
+    let analysis = analyze_sql_references(
+        "SELECT a.id, a.v, b.id FROM t_tx_demo a JOIN t_tx_demo qb ON a.id = b.id",
+        Some("mysql"),
+    )
+    .unwrap();
+
+    // The projection and the join condition both reference the missing alias.
+    let qualifiers: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.qualifier.as_str()).collect();
+    assert_eq!(qualifiers, vec!["b", "b"]);
+    // Each span covers the qualifier itself: "b" starts at column 19 in the
+    // projection and at column 69 in the join condition.
+    let mut columns: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.span.start_column).collect();
+    columns.sort_unstable();
+    assert_eq!(columns, vec![19, 69]);
+    assert!(analysis.unknown_qualifiers.iter().all(|unknown| unknown.span.end_column == unknown.span.start_column));
+}
+
+#[test]
+fn reports_a_qualifier_that_names_no_cte_alias() {
+    let sql = "WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d";
+    let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+
+    let qualifiers: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.qualifier.as_str()).collect();
+    assert_eq!(qualifiers, vec!["zz"]);
+    // The span covers the qualifier itself, not the whole `zz.id` reference.
+    let span = analysis.unknown_qualifiers[0].span;
+    assert_eq!(&sql[span.start_column - 1..span.end_column], "zz");
+}
+
+#[test]
 fn extracts_nested_query_scopes_for_correlated_subqueries() {
     let sql = "select aa.house_id from mds_base_house aa where exists (select 1 from mds_base_owner where HOUSE_ID = aa.HOUSE_ID)";
     let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
@@ -80,6 +111,22 @@ fn sqlserver_qualified_table_is_not_hidden_by_same_named_cte() {
     assert_eq!(analysis.tables.len(), 1);
     assert_eq!(analysis.tables[0].schema.as_deref(), Some("dbo"));
     assert_eq!(analysis.tables[0].name, "employees");
+}
+
+#[test]
+fn sqlserver_cross_database_table_keeps_its_database() {
+    let sql = "select top 10 * from mk_passport_api.dbo.orders order by id desc";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> = analysis
+        .tables
+        .iter()
+        .map(|table| (table.database.as_deref(), table.schema.as_deref(), table.name.as_str()))
+        .collect();
+    assert_eq!(tables, vec![(Some("mk_passport_api"), Some("dbo"), "orders")]);
+
+    let analysis = analyze_sql_references("select * from dbo.orders", Some("sqlserver")).unwrap();
+    assert_eq!(analysis.tables[0].database, None);
 }
 
 #[test]

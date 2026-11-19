@@ -7,8 +7,9 @@ import i18n from "@/i18n";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
-import type { ConnectionConfig } from "@/types/database";
+import type { ConnectionConfig, ObjectSource, TableStructureEditorDraft } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
@@ -31,25 +32,31 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   getTablePartitioning: vi.fn().mockResolvedValue(null),
   buildTableStructureChangeSql: vi.fn().mockResolvedValue({ statements: [], warnings: [] }),
   buildCreateTableSql: vi.fn().mockResolvedValue({ statements: [], warnings: [] }),
+  getObjectSource: vi.fn(),
+  prepareOracleTriggerSql: vi.fn(),
   saveHistory: vi.fn().mockResolvedValue(undefined),
   disconnectDb: vi.fn().mockResolvedValue(undefined),
-  executeQuery: vi.fn(async (_id, _database, sql: string) => ({
-    columns: [],
-    rows: sql.includes("SELECT USER")
-      ? [["APP"]]
-      : sql.includes("SYS.ALL_TABLES")
-        ? [["APP", "SOURCE"]]
-        : sql.includes("SYS.ALL_CONSTRAINTS") || sql.includes("SYS.USER_CONSTRAINTS")
-          ? [["FK_SOURCE", "ENABLED", "VALIDATED", "NOT DEFERRABLE", "IMMEDIATE", null, "PARENT_OWNER", "PK_PARENT", "CASCADE"]]
-          : [['ALTER TABLE "APP"."SOURCE" ADD CONSTRAINT "FK_SOURCE" FOREIGN KEY ("A", "B") REFERENCES "PARENT_OWNER"."PARENT" ("ID", "V") ON DELETE CASCADE ENABLE VALIDATE']],
-    execution_time_ms: 0,
-    rows_affected: 0,
-  })),
+  executeQuery: vi.fn(),
 }));
 
 let app: App | undefined;
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.executeQuery).mockImplementation(
+    async (_id, _database, sql: string) =>
+      ({
+        columns: [],
+        rows: sql.includes("SELECT USER")
+          ? [["APP"]]
+          : sql.includes("SYS.ALL_TABLES")
+            ? [["APP", "SOURCE"]]
+            : sql.includes("SYS.ALL_CONSTRAINTS") || sql.includes("SYS.USER_CONSTRAINTS")
+              ? [["FK_SOURCE", "ENABLED", "VALIDATED", "NOT DEFERRABLE", "IMMEDIATE", null, "PARENT_OWNER", "PK_PARENT", "CASCADE"]]
+              : [['ALTER TABLE "APP"."SOURCE" ADD CONSTRAINT "FK_SOURCE" FOREIGN KEY ("A", "B") REFERENCES "PARENT_OWNER"."PARENT" ("ID", "V") ON DELETE CASCADE ENABLE VALIDATE']],
+        execution_time_ms: 0,
+        rows_affected: 0,
+      }) as never,
+  );
   i18n.global.locale.value = "en";
   vi.stubGlobal(
     "fetch",
@@ -67,6 +74,143 @@ afterEach(() => {
 });
 
 describe("Oracle family foreign key editing entry", () => {
+  it.each([false, true])("keeps new-table FK preflight and readback around the exact trigger sequence (readback fails=%s)", async (failReadback) => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useConnectionStore(),
+      id = `foreign-key-trigger-create-${failReadback}`;
+    store.connections = [{ id, name: "Create trigger fixture", db_type: "oracle", username: "APP", database: "APP" } as ConnectionConfig];
+    store.connectedIds.add(id);
+    const createSql = 'CREATE TABLE "APP"."NEW_TABLE" ("ID" NUMBER PRIMARY KEY);';
+    const addSql = 'ALTER TABLE "APP"."NEW_TABLE" ADD CONSTRAINT "FK_SELF" FOREIGN KEY ("ID") REFERENCES "APP"."NEW_TABLE" ("ID") ENABLE VALIDATE;';
+    const triggerSql = 'CREATE TRIGGER "APP"."NEW_TRIGGER" BEFORE INSERT ON "APP"."NEW_TABLE" DISABLE BEGIN NULL; END;';
+    let tableExists = false,
+      triggerExists = false;
+    vi.mocked(api.buildCreateTableSql).mockResolvedValue({ statements: [createSql, addSql, triggerSql], warnings: [], triggerOperations: [{ draftId: "new:trigger", action: "create", owner: "APP", name: "NEW_TRIGGER", statementIndex: 2, statementCount: 1, enabled: false }] });
+    vi.mocked(api.getObjectSource).mockImplementation(
+      async () =>
+        ({
+          name: "NEW_TRIGGER",
+          schema: "APP",
+          object_type: "TRIGGER",
+          source: triggerExists ? triggerSql : "",
+          trigger: {
+            name: "NEW_TRIGGER",
+            timing: "BEFORE",
+            event: "INSERT",
+            statement: "BEGIN NULL; END;",
+            enabled: false,
+            valid: true,
+            oracle_metadata: {
+              contractVersion: 1,
+              identityMode: "exact",
+              engine: "oracle",
+              engineVersion: "19.0.0.0",
+              owner: "APP",
+              name: "NEW_TRIGGER",
+              scope: triggerExists ? "TABLE" : "UNKNOWN",
+              objectId: triggerExists ? "trigger-id" : null,
+              parent: triggerExists ? { owner: "APP", name: "NEW_TABLE", objectType: "TABLE" } : null,
+              definition: { origin: "ALL_SOURCE", format: "ddl", complete: triggerExists },
+              errors: [],
+              reads: {
+                identity: { state: triggerExists ? "available" : "empty" },
+                scope: { state: "available" },
+                parent: { state: "available" },
+                enabled: { state: "available" },
+                validity: { state: "available" },
+                definition: { state: triggerExists ? "available" : "empty" },
+                errors: { state: "available" },
+              },
+            },
+          },
+        }) as ObjectSource,
+    );
+    vi.mocked(api.prepareOracleTriggerSql).mockImplementation(async (input) => ({ definition: input.source, comparisonSource: input.source, header: { scope: "RELATION", owner: "APP", name: "NEW_TABLE", viewOnly: false, pluggable: false }, requiresStateRestore: false }));
+    const result = (rows: unknown[][] = []) => ({ columns: [], rows, execution_time_ms: 0, affected_rows: 0 });
+    vi.mocked(api.executeQuery).mockImplementation(async (_id, _db, sql) => {
+      if (sql.includes("SELECT USER, SYS_CONTEXT")) return result([["APP", "APP"]]) as never;
+      if (sql.includes("FROM ALL_OBJECTS")) {
+        if (!tableExists) throw new Error("No parent before CREATE TABLE");
+        return result([["APP", "NEW_TABLE", "TABLE", "parent-id"]]) as never;
+      }
+      if (sql.includes("SYS.ALL_TABLES")) {
+        if (failReadback) throw new Error("FK dictionary unavailable after write");
+        return result([["APP", "NEW_TABLE"]]) as never;
+      }
+      if (sql.includes("SYS.ALL_CONSTRAINTS")) return result([["FK_SELF", "ENABLED", "VALIDATED", "NOT DEFERRABLE", "IMMEDIATE", null, "APP", "PK_SELF", "NO ACTION"]]) as never;
+      if (sql.includes("DBMS_METADATA.GET_DDL")) return result([[addSql]]) as never;
+      if (sql === createSql) tableExists = true;
+      else if (sql === triggerSql) triggerExists = true;
+      else if (sql !== addSql) throw new Error(`Unexpected fixture SQL: ${sql}`);
+      return result() as never;
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const drafts: (TableStructureEditorDraft | undefined)[] = [],
+      saved: unknown[][] = [];
+    const editor = ref<InstanceType<typeof TableStructureEditor>>();
+    app = createApp({
+      render: () =>
+        h(
+          TooltipProvider,
+          {},
+          {
+            default: () =>
+              h(TableStructureEditor, {
+                connectionId: id,
+                originTabId: id,
+                database: "APP",
+                schema: "APP",
+                tableName: "",
+                initialTab: "foreignKeys",
+                draft: {
+                  dirty: true,
+                  activeTab: "foreignKeys",
+                  newTableName: "NEW_TABLE",
+                  tableComment: "",
+                  originalTableComment: "",
+                  columns: [{ id: "new:id", name: "ID", dataType: "NUMBER", isNullable: false, defaultValue: "", comment: "", isPrimaryKey: true, extra: {}, markedForDrop: false }],
+                  indexes: [],
+                  foreignKeys: [{ id: "new:fk", name: "FK_SELF", column: "ID", columns: ["ID"], refSchema: "APP", refTable: "NEW_TABLE", refColumn: "ID", refColumns: ["ID"], onUpdate: "", onDelete: "NO ACTION", markedForDrop: false }],
+                  triggers: [{ id: "new:trigger", name: "NEW_TRIGGER", timing: "BEFORE", event: "INSERT", statement: "BEGIN NULL; END;", enabled: false, markedForDrop: false }],
+                  initialized: true,
+                },
+                ref: editor,
+                "onUpdate:draft": (draft?: TableStructureEditorDraft) => drafts.push(draft && JSON.parse(JSON.stringify(draft))),
+                onSaved: (...args: unknown[]) => saved.push(args),
+              }),
+          },
+        ),
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.component("LightTooltip", LightTooltip);
+    app.mount(container);
+    const apply = () => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("structureEditor.apply"));
+    await vi.waitFor(() => expect(apply()?.disabled).toBe(false));
+    const applying = editor.value!.applyChanges();
+    const danger = useSqlExecutionDangerStore();
+    await vi.waitFor(() => expect(danger.pending).toBeDefined());
+    expect(danger.pending!.sql).toContain(addSql);
+    expect(danger.pending!.sql).toContain(triggerSql);
+    danger.confirm();
+    expect(await applying).toBe(!failReadback);
+    expect(
+      vi
+        .mocked(api.executeQuery)
+        .mock.calls.filter((call) => !call[2].startsWith("SELECT"))
+        .map((call) => call[2]),
+    ).toEqual([createSql, addSql, triggerSql]);
+    expect(vi.mocked(api.executeQuery).mock.calls.filter((call) => call[2].includes("SELECT USER, SYS_CONTEXT")).length).toBeGreaterThanOrEqual(2);
+    if (failReadback) {
+      expect(saved).toEqual([]);
+      expect(drafts.at(-1)?.oracleTriggerStructureRecovery?.details).toContain("FK dictionary unavailable");
+      expect(drafts.at(-1)?.triggers[0]?.name).toBe("NEW_TRIGGER");
+      expect(await editor.value!.applyChanges()).toBe(false);
+      expect(vi.mocked(api.executeQuery).mock.calls.filter((call) => !call[2].startsWith("SELECT"))).toHaveLength(3);
+    } else expect(saved).toEqual([[false, "NEW_TABLE", id]]);
+  });
   it.each([
     { databaseType: "oracle", readable: true },
     { databaseType: "oceanbase-oracle", readable: true },

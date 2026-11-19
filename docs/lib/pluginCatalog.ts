@@ -82,6 +82,16 @@ export function pluginDisplayName(plugin: MarketplacePlugin, lang: DocsLang): st
   return plugin.name;
 }
 
+// Catalog names are not unique: independent publishers may register the same
+// product name (two "XXL-JOB" plugins exist today). Page metadata needs a unique
+// title per language, so a colliding name is qualified with its publisher. The
+// visible heading keeps the plain name.
+export function pluginMetadataTitle(plugin: MarketplacePlugin, lang: DocsLang, catalog: PluginCatalog | null): string {
+  const title = pluginDisplayName(plugin, lang);
+  const collides = (catalog?.plugins ?? []).some((other) => other.id !== plugin.id && pluginDisplayName(other, lang) === title);
+  return collides ? `${title} by ${plugin.publisher}` : title;
+}
+
 export function pluginDisplayDescription(plugin: MarketplacePlugin, lang: DocsLang): string {
   if (lang === "cn") return plugin.localizations?.["zh-CN"]?.description || plugin.description;
   return plugin.description;

@@ -93,24 +93,26 @@ describe("query result connection colors", () => {
     expect(tab.resultRuns?.[0]?.connectionId).toBe("test");
   });
 
-  it("colors each run from its source and keeps the selected result color after changing the editor connection", async () => {
-    const { host, tab, connections } = await mountResults();
+  it.each(["tabs", "list"] as const)("keeps the selected source marker in %s mode when the editor connection changes", async (displayMode) => {
+    const { host, tab, connections, settings } = await mountResults();
     const markers = [...host.querySelectorAll<HTMLElement>("[data-result-run-tab] [data-result-connection-color]")];
     expect(markers.map((marker) => marker.style.backgroundColor)).toEqual(["#22c55e", "#ef4444"]);
-    const surface = host.querySelector<HTMLElement>("[data-query-result-surface]")!;
-    expect(surface.style.borderColor).toBe("#22c55e");
+    settings.editorSettings.resultRunDisplayMode = displayMode;
+    await nextTick();
+    const selectedMarker = () => host.querySelector<HTMLElement>(displayMode === "tabs" ? '[data-result-run-tab][aria-selected="true"] [data-result-connection-color]' : "[data-query-result-surface] [data-result-connection-color]");
+    expect(selectedMarker()?.style.backgroundColor).toBe("#22c55e");
     tab.connectionId = "production";
     await nextTick();
-    expect(surface.style.borderColor).toBe("#22c55e");
+    expect(selectedMarker()?.style.backgroundColor).toBe("#22c55e");
     tab.activeResultRunId = "production-run";
     await nextTick();
-    expect(surface.style.borderColor).toBe("#ef4444");
+    expect(selectedMarker()?.style.backgroundColor).toBe("#ef4444");
     connections.connections[1]!.color = "#3b82f6";
     await nextTick();
-    expect(surface.style.borderColor).toBe("#3b82f6");
+    expect(selectedMarker()?.style.backgroundColor).toBe("#3b82f6");
     connections.connections[1]!.color = "";
     await nextTick();
-    expect(surface.style.borderColor).toBe("");
+    expect(selectedMarker()).toBeNull();
   });
 
   it("colors ordinary result sets without retained runs and removes markers for an uncolored connection", async () => {

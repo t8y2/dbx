@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_EDITOR_SETTINGS, type EditorSettings } from "@/stores/settingsStore";
+import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, type EditorSettings } from "@/stores/settingsStore";
 import { EDITOR_SETTINGS_DRAFT_KEYS } from "../editorSettingsDraft";
-import { buildSettingsTransferFilename, collectTransferCategories, parseSettingsTransferFile, serializeSettingsTransfer, SETTINGS_TRANSFER_FORMAT_VERSION, transferCategoryForKey } from "../settingsTransfer";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, mergeToolbarItemOrder, type ToolbarItemKey } from "../toolbarCustomization";
+import { buildSettingsTransferFilename, collectTransferCategories, parseSettingsTransferFile, pickTransferableDesktopSettings, serializeSettingsTransfer, SETTINGS_TRANSFER_FORMAT_VERSION, transferCategoryForKey } from "../settingsTransfer";
 
 function fileWith(editor: Record<string, unknown>, overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -13,7 +14,44 @@ function fileWith(editor: Record<string, unknown>, overrides: Record<string, unk
   });
 }
 
+function fileWithSections(sections: Record<string, unknown>): string {
+  return JSON.stringify({
+    formatVersion: SETTINGS_TRANSFER_FORMAT_VERSION,
+    app: { name: "dbx", version: "1.2.3" },
+    exportedAt: "2026-09-06T00:00:00.000Z",
+    settings: sections,
+  });
+}
+
 describe("settingsTransfer", () => {
+  it.each([false, true])("round-trips database activation auto-expansion %s as a navigation preference", (enabled) => {
+    const result = parseSettingsTransferFile(serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarAutoExpandOnDatabaseActivation: enabled }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings.sidebarAutoExpandOnDatabaseActivation).toBe(enabled);
+    expect(transferCategoryForKey("sidebarAutoExpandOnDatabaseActivation")).toBe("navigation");
+    for (const invalid of ["false", 0, null]) {
+      expect(parseSettingsTransferFile(fileWith({ sidebarAutoExpandOnDatabaseActivation: invalid })).ok).toBe(false);
+    }
+  });
+
+  it("round-trips sidebar hover preferences in navigation and rejects invalid values", () => {
+    const result = parseSettingsTransferFile(serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarHoverEnabled: false, sidebarHoverDelay: 750 }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    expect(transferCategoryForKey("sidebarHoverEnabled")).toBe("navigation");
+    expect(transferCategoryForKey("sidebarHoverDelay")).toBe("navigation");
+    expect(parseSettingsTransferFile(fileWith({ sidebarHoverEnabled: "false" })).ok).toBe(false);
+    for (const invalid of [0, 99, 2001, 500.5, "500", null]) expect(parseSettingsTransferFile(fileWith({ sidebarHoverDelay: invalid })).ok).toBe(false);
+  });
+
+  it("does not export or reactivate the retired global user visibility setting", () => {
+    const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarShowUserAdmin: false });
+    expect(JSON.parse(text).settings.editor).not.toHaveProperty("sidebarShowUserAdmin");
+    const imported = parseSettingsTransferFile(fileWith({ sidebarShowUserAdmin: false, sidebarFontSize: 14 }));
+    expect(imported.ok).toBe(true);
+    if (imported.ok) expect(imported.value.editorSettings).not.toHaveProperty("sidebarShowUserAdmin");
+  });
+
   it("round-trips column comment placement as a data preference and rejects non-booleans", () => {
     const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, dataGridColumnCommentsInInfoArea: true, dataGridTransposeMetadataInInfoColumn: true });
     const result = parseSettingsTransferFile(text);
@@ -236,6 +274,31 @@ describe("settingsTransfer", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) return;
     expect(result.error.detail).toContain("toolbarItems");
+  });
+
+  it("keeps legacy toolbar objects partial during import", () => {
+    const fieldsAddedByToolbarCustomization = new Set(["newConnection", "newQuery", "openSql", "databaseBackups", "mcpSettings", "exportProgress", "settings", "logout"]);
+    const legacyToolbarItems = Object.fromEntries(Object.entries(DEFAULT_EDITOR_SETTINGS.toolbarItems).filter(([key]) => !fieldsAddedByToolbarCustomization.has(key)));
+    const result = parseSettingsTransferFile(fileWith({ toolbarItems: legacyToolbarItems }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.toolbarItems).toEqual(legacyToolbarItems);
+    expect(result.value.editorSettings.toolbarItemOrder).toBeUndefined();
+  });
+
+  it("keeps omitted toolbar order entries in their current slots", () => {
+    const currentOrder: ToolbarItemKey[] = ["newConnection", "alwaysOnTop", ...DEFAULT_TOOLBAR_ITEM_ORDER.filter((key) => key !== "newConnection" && key !== "alwaysOnTop")];
+    const importedOrder = DEFAULT_TOOLBAR_ITEM_ORDER.filter((key) => key !== "alwaysOnTop").reverse();
+    const merged = mergeToolbarItemOrder(currentOrder, importedOrder);
+    expect(merged[1]).toBe("alwaysOnTop");
+    expect(merged.filter((key) => key !== "alwaysOnTop")).toEqual(importedOrder);
+  });
+
+  it("can omit desktop-only toolbar entries from Web exports", () => {
+    const text = serializeSettingsTransfer(DEFAULT_EDITOR_SETTINGS, {}, {}, { omitToolbarItemKeys: ["alwaysOnTop"] });
+    const editor = JSON.parse(text).settings.editor;
+    expect(editor.toolbarItems).not.toHaveProperty("alwaysOnTop");
+    expect(editor.toolbarItemOrder).not.toContain("alwaysOnTop");
   });
 
   it("rejects empty active custom theme ids", () => {
@@ -676,5 +739,126 @@ describe("settingsTransfer", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.editorSettings.aiSqlApplyTargetMode).toBe("new");
     expect(parseSettingsTransferFile(fileWith({ aiSqlApplyTargetMode: "invalid" })).ok).toBe(false);
+  });
+
+  it("round-trips the app theme mode and desktop preferences (#13166)", () => {
+    const desktopSettings = {
+      show_tray_icon: false,
+      icon_theme: "black",
+      quit_on_close: true,
+      debug_logging_enabled: true,
+      metadata_cache_max_memory_mb: 128,
+      duckdb_worker_process_isolation: true,
+      duckdb_worker_max_processes: 8,
+      sidebar_table_page_size: 500,
+    };
+    const text = serializeSettingsTransfer(DEFAULT_EDITOR_SETTINGS, {}, { themeMode: "dark", desktopSettings });
+    const result = parseSettingsTransferFile(text);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.themeMode).toBe("dark");
+    expect(result.value.desktopSettings).toEqual(desktopSettings);
+    expect(result.value.categories).toContain("appearance");
+    expect(result.value.categories).toContain("other");
+  });
+
+  it("imports editor-only exports without theme mode or desktop preferences", () => {
+    const result = parseSettingsTransferFile(serializeSettingsTransfer(DEFAULT_EDITOR_SETTINGS));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.themeMode).toBeUndefined();
+    expect(result.value.desktopSettings).toEqual({});
+  });
+
+  it("imports a file that only carries the appearance and desktop sections", () => {
+    const result = parseSettingsTransferFile(fileWithSections({ appearance: { themeMode: "system" }, desktop: { show_tray_icon: false } }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings).toEqual({});
+    expect(result.value.themeMode).toBe("system");
+    expect(result.value.desktopSettings).toEqual({ show_tray_icon: false });
+    expect(result.value.categories).toEqual(["appearance", "other"]);
+  });
+
+  it("rejects invalid theme modes", () => {
+    const invalid = parseSettingsTransferFile(fileWithSections({ appearance: { themeMode: "blue" } }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) {
+      expect(invalid.error.code).toBe("invalid-fields");
+      expect(invalid.error.detail).toContain("appearance.themeMode");
+    }
+    expect(parseSettingsTransferFile(fileWithSections({ appearance: { themeMode: "soft-dark" } })).ok).toBe(false);
+  });
+
+  it("rejects wrong-typed desktop values", () => {
+    const flag = parseSettingsTransferFile(fileWithSections({ desktop: { show_tray_icon: "yes" } }));
+    expect(flag.ok).toBe(false);
+    if (!flag.ok) expect(flag.error.detail).toContain("show_tray_icon");
+
+    const numeric = parseSettingsTransferFile(fileWithSections({ desktop: { metadata_cache_max_memory_mb: "128" } }));
+    expect(numeric.ok).toBe(false);
+  });
+
+  it("rejects desktop values the normalizer would clamp or replace", () => {
+    const clamped = parseSettingsTransferFile(fileWithSections({ desktop: { duckdb_worker_max_processes: 99 } }));
+    expect(clamped.ok).toBe(false);
+    if (!clamped.ok) expect(clamped.error.detail).toContain("duckdb_worker_max_processes");
+
+    const iconTheme = parseSettingsTransferFile(fileWithSections({ desktop: { icon_theme: "blue" } }));
+    expect(iconTheme.ok).toBe(false);
+
+    const floored = parseSettingsTransferFile(fileWithSections({ desktop: { sidebar_table_page_size: 0 } }));
+    expect(floored.ok).toBe(false);
+
+    const belowMinimum = parseSettingsTransferFile(fileWithSections({ desktop: { metadata_cache_max_memory_mb: 5 } }));
+    expect(belowMinimum.ok).toBe(false);
+  });
+
+  it("ignores unknown and excluded keys in the desktop section", () => {
+    const result = parseSettingsTransferFile(fileWithSections({ desktop: { quit_on_close: true, driver_store_dir: "C:\\evil", close_action_prompted: true, injected: "x" } }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.desktopSettings).toEqual({ quit_on_close: true });
+  });
+
+  it("keeps device-specific desktop keys out of the serialized payload", () => {
+    const text = serializeSettingsTransfer(
+      DEFAULT_EDITOR_SETTINGS,
+      {},
+      {
+        desktopSettings: pickTransferableDesktopSettings({ ...DEFAULT_DESKTOP_SETTINGS, driver_store_dir: "C:\\drivers", quit_on_close: true }),
+      },
+    );
+    expect(text).not.toContain("driver_store_dir");
+    expect(text).not.toContain("saved_sql_sync_dir");
+    expect(text).not.toContain("close_action_prompted");
+    expect(text).toContain("quit_on_close");
+  });
+
+  it("rejects non-object appearance and desktop sections", () => {
+    expect(parseSettingsTransferFile(fileWithSections({ desktop: [1] })).ok).toBe(false);
+    expect(parseSettingsTransferFile(fileWithSections({ appearance: "dark" })).ok).toBe(false);
+  });
+
+  it("skips the desktop section on web imports but keeps the editor payload", () => {
+    const result = parseSettingsTransferFile(fileWithSections({ appearance: { themeMode: "dark" }, desktop: { show_tray_icon: false }, editor: { wordWrap: true } }), { includeDesktopSettings: false });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.themeMode).toBe("dark");
+    expect(result.value.desktopSettings).toEqual({});
+    expect(result.value.editorSettings.wordWrap).toBe(true);
+    expect(result.value.categories).toContain("appearance");
+    expect(result.value.categories).not.toContain("other");
+  });
+
+  it("ignores a malformed desktop section on web imports", () => {
+    expect(parseSettingsTransferFile(fileWithSections({ desktop: [1], editor: { wordWrap: true } }), { includeDesktopSettings: false }).ok).toBe(true);
+    expect(parseSettingsTransferFile(fileWithSections({ desktop: { show_tray_icon: "yes" }, editor: { wordWrap: true } }), { includeDesktopSettings: false }).ok).toBe(true);
+  });
+
+  it("reports an empty import when a desktop-only file is read on web", () => {
+    const result = parseSettingsTransferFile(fileWithSections({ desktop: { show_tray_icon: false } }), { includeDesktopSettings: false });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("empty-settings");
   });
 });

@@ -37,3 +37,16 @@ DBX pushes its dynamic toolbar-aligned position through the new method so the
 on the same explicit placement. Without it, the stored static inset and AppKit
 layout disagree on every resize pass (see upstream tauri-apps/wry#1747 and
 tauri-apps/tauri#15451).
+
+On Windows, DBX also makes the two documented WebView2 runtime environment
+overrides effective: `WEBVIEW2_USER_DATA_FOLDER` replaces the WebContext user
+data directory for the next environment creation, and
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is merged into the arguments that are
+actually handed to `CreateCoreWebView2EnvironmentWithOptions` (the WebView2
+loader ignores the variable when the options object sets arguments, and wry
+always sets them). `--disable-features` / `--enable-features` lists are unioned
+instead of replaced. `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` now also selects a
+fixed runtime on non-Windows-7 targets. This is what makes the runtime startup
+compatibility profiles in `src-tauri/src/startup_recovery.rs` able to retry a
+launch with different WebView2 arguments without rebuilding the app; without the
+merge those profiles were no-ops against wry's default options.

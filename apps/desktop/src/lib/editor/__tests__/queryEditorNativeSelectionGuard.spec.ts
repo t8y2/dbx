@@ -25,7 +25,7 @@ beforeEach(() => {
   });
 });
 
-function createView(options: { enabled?: boolean; readOnly?: boolean } = {}) {
+function createView(options: { enabled?: boolean; readOnly?: boolean; parkLongSelections?: boolean } = {}) {
   const execute = vi.fn((view: EditorView) => {
     view.focus();
     return view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to);
@@ -39,7 +39,12 @@ function createView(options: { enabled?: boolean; readOnly?: boolean } = {}) {
         history(),
         EditorState.readOnly.of(options.readOnly ?? false),
         EditorView.clipboardOutputFilter.of((text) => text.replaceAll("\n", "\r\n")),
-        createQueryEditorNativeSelectionGuard(ViewPlugin, { enabled: options.enabled ?? true, inputHandler: EditorView.inputHandler, finalizeClipboardText: (text) => text.replaceAll("\n", "\r\n") }),
+        createQueryEditorNativeSelectionGuard(ViewPlugin, {
+          enabled: options.enabled ?? true,
+          inputHandler: EditorView.inputHandler,
+          finalizeClipboardText: (text) => text.replaceAll("\n", "\r\n"),
+          parkLongSelections: options.parkLongSelections,
+        }),
         keymap.of([{ key: "Meta-a", run: selectAll }, { key: "Meta-Enter", run: (currentView) => !!execute(currentView) }, ...defaultKeymap]),
       ],
     }),
@@ -47,6 +52,36 @@ function createView(options: { enabled?: boolean; readOnly?: boolean } = {}) {
   views.push(view);
   view.focus();
   return { view, execute };
+}
+
+/**
+ * Drives animation frames by hand. The guard's park keeps itself alive with a
+ * `requestAnimationFrame` loop, and happy-dom never lets an awaited timer run
+ * while that loop is queued — so a test that needs a frame flushes it here.
+ */
+function useManualFrames() {
+  let handle = 0;
+  const pending = new Map<number, FrameRequestCallback>();
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    handle += 1;
+    pending.set(handle, callback);
+    return handle;
+  });
+  vi.stubGlobal("cancelAnimationFrame", (cancelled: number) => {
+    pending.delete(cancelled);
+  });
+  return (frames = 2) => {
+    for (let index = 0; index < frames; index += 1) {
+      const batch = [...pending.values()];
+      pending.clear();
+      for (const callback of batch) callback(performance.now());
+    }
+  };
+}
+
+function holdsSelectionWriteSuppression(view: EditorView) {
+  const internals = view as unknown as { docView: object };
+  return Object.prototype.hasOwnProperty.call(internals.docView, "updateSelection");
 }
 
 function press(view: EditorView, key: string, options: KeyboardEventInit = {}) {
@@ -72,6 +107,7 @@ function expectParked(view: EditorView) {
 afterEach(() => {
   for (const view of views.splice(0)) view.destroy();
   document.body.replaceChildren();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -263,5 +299,41 @@ describe("macOS long native selection guard", () => {
     expect(document.getSelection()?.toString()).toBe("Other editor");
     view.destroy();
     expect(document.getSelection()?.toString()).toBe("Other editor");
+  });
+
+  it("holds the parked selection after the editor loses focus", () => {
+    const runFrames = useManualFrames();
+    const { view } = createView();
+    selectAll(view);
+    expectParked(view);
+
+    const other = document.body.appendChild(document.createElement("input"));
+    other.focus();
+    view.dispatch({ selection: view.state.selection });
+    runFrames();
+    expectParked(view);
+    expect(holdsSelectionWriteSuppression(view)).toBe(true);
+  });
+
+  it("does not steal a selection made outside the editor while parked", () => {
+    const runFrames = useManualFrames();
+    const { view } = createView();
+    selectAll(view);
+    const other = document.body.appendChild(document.createElement("div"));
+    other.textContent = "grid text";
+    // Focus stays in the editor; another panel claims the browser selection.
+    document.getSelection()!.selectAllChildren(other);
+    runFrames();
+    expect(document.getSelection()?.toString()).toBe("grid text");
+    expect(holdsSelectionWriteSuppression(view)).toBe(true);
+  });
+
+  it("drops the park on blur when the long-selection hold is switched off", () => {
+    const { view } = createView({ parkLongSelections: false });
+    selectAll(view);
+    expect(holdsSelectionWriteSuppression(view)).toBe(true);
+    const other = document.body.appendChild(document.createElement("input"));
+    other.focus();
+    expect(holdsSelectionWriteSuppression(view)).toBe(false);
   });
 });

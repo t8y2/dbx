@@ -41,25 +41,13 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: |
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            update
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+        run: sudo python3 .github/scripts/ci-install-system-deps.py
 
       # Pin mold because runner image updates can change bundled C++ links.
       # See the ci.yml rust-test note for the pinned upstream build.
       - name: Install mold linker
-        run: |
-          curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
-            | sudo tar -C /usr/local --strip-components=1 -xz
-          mold --version
+        timeout-minutes: 8
+        run: bash .github/scripts/ci-install-mold.sh
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -117,7 +105,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 

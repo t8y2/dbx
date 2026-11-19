@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, Wrench, X } from "@lucide/vue";
+import { Loader2, CheckCircle2, XCircle, AlertCircle, Clock, FolderOpen, Minimize2, Wrench, X } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { autoRevealExportedPathIfConfigured, revealExportedPath } from "@/lib/export/exportPath";
@@ -60,7 +60,7 @@ const displayName = computed(() => {
   }
   return `${props.tableName} (.${props.format})`;
 });
-const isActive = computed(() => props.status === "Running" || props.status === "Writing");
+const isActive = computed(() => props.status === "Queued" || props.status === "PreparingSnapshot" || props.status === "Running" || props.status === "Writing" || props.status === "Cancelling");
 const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
 const canChangeQueryTimeout = computed(() => props.status === "Error" && !!props.connectionId && !!props.errorMessage && isQueryTimeoutErrorMessage(props.errorMessage));
 const canRevealFile = computed(() => props.status === "Done" && !!props.filePath && isTauriRuntime());
@@ -113,7 +113,7 @@ watch(
       }
     "
   >
-    <DialogContent class="sm:max-w-md" :class="{ 'pointer-events-none': isActive }" @interact-outside.prevent>
+    <DialogContent class="sm:max-w-md" :show-close-button="!isActive" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
       </DialogHeader>
@@ -124,8 +124,8 @@ watch(
 
         <!-- Progress bar -->
         <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
-          <template v-if="status === 'Running' || status === 'Writing'">
-            <div v-if="totalRows" class="h-full bg-primary rounded-full transition-[width] duration-300" :style="{ width: `${progressPercent}%` }" />
+          <template v-if="status === 'PreparingSnapshot' || status === 'Running' || status === 'Writing'">
+            <div v-if="totalRows && status !== 'PreparingSnapshot'" class="h-full bg-primary rounded-full transition-[width] duration-300" :style="{ width: `${progressPercent}%` }" />
             <div v-else class="h-full w-full overflow-hidden rounded-full">
               <div class="export-progress-indeterminate h-full rounded-full bg-primary" />
             </div>
@@ -135,7 +135,23 @@ watch(
 
         <!-- Status message -->
         <div class="flex items-center gap-2 text-sm">
-          <template v-if="status === 'Running'">
+          <template v-if="status === 'Queued'">
+            <Clock class="h-4 w-4 text-muted-foreground" />
+            <span>{{ t("exportProgress.queued") }}</span>
+          </template>
+          <template v-else-if="status === 'Unknown'">
+            <AlertCircle class="h-4 w-4 text-yellow-500" />
+            <span>{{ t("exportProgress.unknown") }}</span>
+          </template>
+          <template v-else-if="status === 'Cancelling'">
+            <Loader2 class="h-4 w-4 animate-spin text-primary" />
+            <span>{{ t("databaseBackup.cancelling") }}</span>
+          </template>
+          <template v-else-if="status === 'PreparingSnapshot'">
+            <Loader2 class="h-4 w-4 shrink-0 animate-spin text-primary" />
+            <span>{{ t("exportProgress.preparingSnapshot") }}</span>
+          </template>
+          <template v-else-if="status === 'Running'">
             <Loader2 class="h-4 w-4 animate-spin text-primary" />
             <span>{{ t("exportProgress.fetching") }}</span>
           </template>
@@ -157,8 +173,10 @@ watch(
           </template>
         </div>
 
+        <p v-if="status === 'PreparingSnapshot'" class="text-xs text-muted-foreground">{{ t("exportProgress.snapshotResources") }}</p>
+
         <!-- Row count -->
-        <div class="text-xs text-muted-foreground tabular-nums">
+        <div v-if="status !== 'Queued'" class="text-xs text-muted-foreground tabular-nums">
           {{ rowsText }}
           <span v-if="elapsedText" class="ml-2">{{ t("exportProgress.elapsed", { duration: elapsedText }) }}</span>
         </div>
@@ -170,12 +188,12 @@ watch(
             <Minimize2 class="h-3.5 w-3.5 mr-1" />
             {{ t("exportProgress.minimize") }}
           </Button>
-          <Button variant="outline" size="sm" :disabled="disableCancel" @click="emit('cancel')">
+          <Button variant="outline" size="sm" :disabled="disableCancel || status === 'Cancelling'" @click="emit('cancel')">
             <X class="h-3.5 w-3.5 mr-1" />
             {{ t("exportProgress.cancel") }}
           </Button>
         </template>
-        <template v-else-if="isFinished">
+        <template v-else-if="isFinished || status === 'Unknown'">
           <Button v-if="canChangeQueryTimeout" variant="outline" size="sm" @click="emit('changeQueryTimeout')">
             <Wrench class="mr-1 h-3.5 w-3.5" />
             {{ t("editor.changeQueryTimeout") }}

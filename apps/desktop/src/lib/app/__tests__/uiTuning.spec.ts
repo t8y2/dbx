@@ -57,6 +57,20 @@ describe("uiTuning", () => {
     expect(fs.readTextFile).toHaveBeenCalledWith("/home/tester/.dbx/ui-tuning.json");
   });
 
+  it("parks long editor selections by default and honors the opt-out", async () => {
+    fs.exists.mockResolvedValue(false);
+    const { uiTuning, DEFAULT_UI_TUNING } = await loadFresh();
+    expect(DEFAULT_UI_TUNING.nativeSelectionParkLongSelections).toBe(true);
+    expect(uiTuning.value.nativeSelectionParkLongSelections).toBe(true);
+
+    fs.exists.mockResolvedValue(true);
+    fs.readTextFile.mockResolvedValue(JSON.stringify({ nativeSelectionParkLongSelections: false }));
+    expect((await loadFresh()).uiTuning.value.nativeSelectionParkLongSelections).toBe(false);
+
+    fs.readTextFile.mockResolvedValue(JSON.stringify({ nativeSelectionParkLongSelections: "no" }));
+    expect((await loadFresh()).uiTuning.value.nativeSelectionParkLongSelections).toBe(true);
+  });
+
   it.each(["exists", "readTextFile"] as const)("keeps defaults when %s access is denied", async (command) => {
     fs.exists.mockResolvedValue(true);
     fs[command].mockRejectedValue(new Error("path not allowed"));

@@ -105,12 +105,14 @@ export function calculateDataGridColumnWidth(options: {
   compactColumnHeaderActions?: boolean;
   includeValues?: boolean;
   headerTextWidth?: number;
+  valueWidthScale?: number;
   hasIndexIndicator?: boolean;
 }): number {
   const density = options.density ?? "standard";
   const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
   const maxAllowedWidth = options.maxWidth ?? preset.maxWidth;
   const valueTextLimit = options.valueTextLimit ?? preset.valueTextLimit;
+  const valueCharWidth = preset.charWidth * (options.valueWidthScale ?? 1);
   const headerControl = options.compactColumnHeaderActions ? preset.headerControlWidthCompact : preset.headerControlWidth;
   const headerTextWidth = options.headerTextWidth ?? estimateTextWidth(options.columnName, 0, preset.charWidth);
   // Protect the grid from pathological identifiers while keeping normal names density-independent.
@@ -127,7 +129,7 @@ export function calculateDataGridColumnWidth(options: {
     const text = displaySampleValue(value);
     if (text == null) continue;
     const displayLen = Math.min(text.length, valueTextLimit);
-    valueWidths.push(displayLen * preset.charWidth + preset.cellPadding + DATA_GRID_VALUE_WIDTH_SLACK);
+    valueWidths.push(displayLen * valueCharWidth + preset.cellPadding + DATA_GRID_VALUE_WIDTH_SLACK);
   }
 
   const valueWidth = percentileValue(valueWidths, preset.valueWidthPercentile);

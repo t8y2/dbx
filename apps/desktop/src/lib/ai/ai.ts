@@ -14,6 +14,7 @@ import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 
@@ -130,7 +131,7 @@ export interface AiInlineImageContext {
  * model-facing data block name the origin without inventing a second channel —
  * adding a member here must not require touching the request pipeline.
  */
-export type AiSelectionSource = "editor" | "terminal";
+export type AiSelectionSource = "editor" | "terminal" | "query-error";
 
 /**
  * A user selection attached as *context*, never as an instruction (#10058 R8).
@@ -1073,7 +1074,7 @@ export async function buildAiContext(
     databaseType,
     database,
     schema,
-    currentSql: currentCollectionName ?? tab.sql ?? "",
+    currentSql: currentCollectionName ?? options.selections?.find((selection) => selection.source === "query-error")?.content ?? tab.sql ?? "",
     lastError: extractLastError(tab.result),
     lastResultPreview: (options.includeQueryResult !== undefined ? options.includeQueryResult : options.excludeQueryResult !== undefined ? !options.excludeQueryResult : false) ? formatResultPreview(tab.result) : undefined,
     tables,
@@ -1165,7 +1166,8 @@ async function loadCandidateSchemas(tab: AiContextTarget, connection: Connection
   if (!databaseOverride && schema) return [schema];
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
     const schemas = await api.listSchemas(tab.connectionId, scope);
-    return prioritizeSchemas(schemas);
+    // The public synonym and scheduler scopes are navigation groups, not table owners.
+    return prioritizeSchemas(connection.db_type === "xugu" ? schemas.filter((name) => !isXuguSyntheticScope(name)) : schemas);
   }
   return [scope];
 }

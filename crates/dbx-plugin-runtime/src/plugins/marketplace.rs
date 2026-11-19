@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use dbx_platform::fs_retry::rename_with_transient_lock_retry;
 use fs2::FileExt;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
@@ -12,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::installer::{ensure_update_continuity, validate_key_id, PluginPackageExpectation};
-use super::manifest::{parse_host_network_permission, MAX_PLUGIN_NETWORK_ORIGINS};
+use super::manifest::{
+    parse_host_network_permission, parse_host_open_url_permission, MAX_PLUGIN_NETWORK_ORIGINS,
+    MAX_PLUGIN_OPEN_URL_ORIGINS,
+};
 use super::{
     current_plugin_target, PluginInstallPolicy, PluginInstallResult, PluginPackageInstaller, PluginTrustStore,
     MAX_PLUGIN_PACKAGE_BYTES, SUPPORTED_PLUGIN_PERMISSIONS,
@@ -112,6 +116,10 @@ pub struct PluginMarketplacePlugin {
     pub tags: Vec<String>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// The plugin provides MCP tools (its manifest declares an `mcp`
+    /// contribution). Lets the store show the MCP mark before install.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_tools: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -583,6 +591,7 @@ fn validate_and_resolve_catalog(
         return Err("Plugin catalog repository name cannot be empty".to_string());
     }
     let mut plugin_ids = BTreeSet::new();
+    let mut incompatible_plugin_ids = BTreeSet::new();
     for plugin in &mut catalog.plugins {
         validate_plugin_id(&plugin.id)?;
         if !plugin_ids.insert(plugin.id.clone()) {
@@ -595,23 +604,36 @@ fn validate_and_resolve_catalog(
         if permissions.len() != plugin.permissions.len() {
             return Err(format!("Plugin '{}' contains duplicate permissions", plugin.id));
         }
-        if let Some(permission) = plugin.permissions.iter().find(|permission| {
-            !SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str())
-                && parse_host_network_permission(permission).is_none()
-        }) {
-            return Err(format!("Plugin '{}' declares unsupported permission '{}'", plugin.id, permission));
+        let mut network_origins = BTreeSet::new();
+        let mut open_url_origins = BTreeSet::new();
+        for permission in &plugin.permissions {
+            if let Some(origin) = parse_host_network_permission(permission) {
+                network_origins.insert(origin);
+            } else if let Some(origin) = parse_host_open_url_permission(permission) {
+                open_url_origins.insert(origin);
+            } else if !SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str()) {
+                if permission.starts_with("host.network:") || permission.starts_with("host.openUrl:") {
+                    return Err(format!("Plugin '{}' declares unsupported permission '{}'", plugin.id, permission));
+                }
+                // Catalogs can target newer DBX builds. The unsupported entry
+                // cannot be offered for install, but other entries stay usable.
+                incompatible_plugin_ids.insert(plugin.id.clone());
+            }
         }
-        let network_origins = plugin
-            .permissions
-            .iter()
-            .filter_map(|permission| parse_host_network_permission(permission))
-            .collect::<BTreeSet<_>>();
         if network_origins.len() > MAX_PLUGIN_NETWORK_ORIGINS {
             return Err(format!(
                 "Plugin '{}' declares {} network origins; at most {} are allowed",
                 plugin.id,
                 network_origins.len(),
                 MAX_PLUGIN_NETWORK_ORIGINS
+            ));
+        }
+        if open_url_origins.len() > MAX_PLUGIN_OPEN_URL_ORIGINS {
+            return Err(format!(
+                "Plugin '{}' declares {} external URL origins; at most {} are allowed",
+                plugin.id,
+                open_url_origins.len(),
+                MAX_PLUGIN_OPEN_URL_ORIGINS
             ));
         }
         let latest = Version::parse(&plugin.latest_version)
@@ -655,6 +677,14 @@ fn validate_and_resolve_catalog(
         if let Some(icon) = plugin.icon.as_deref().and_then(trimmed_nonempty) {
             plugin.icon = Some(resolve_http_url(catalog_url, icon, "Plugin icon URL")?.to_string());
         }
+    }
+    if !incompatible_plugin_ids.is_empty() {
+        log::warn!(
+            "Marketplace '{}' skipped plugins with unsupported permissions: {:?}",
+            repository.id,
+            incompatible_plugin_ids
+        );
+        catalog.plugins.retain(|plugin| !incompatible_plugin_ids.contains(&plugin.id));
     }
     Ok(())
 }
@@ -800,7 +830,7 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
     // std::fs::rename atomically replaces an existing destination on POSIX
     // and Windows alike; remove-then-rename could lose the repository
     // document to a crash between the two calls.
-    crate::plugins::installer::rename_with_transient_lock_retry(&temporary, path).map_err(|error| error.to_string())?;
+    rename_with_transient_lock_retry(&temporary, path).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -843,6 +873,7 @@ mod tests {
                 icon: Some("../assets/icon.svg".to_string()),
                 tags: vec!["hello".to_string()],
                 permissions: vec!["host.events".to_string()],
+                mcp_tools: false,
                 source: None,
                 homepage: None,
                 license: Some("Apache-2.0".to_string()),
@@ -1119,6 +1150,7 @@ mod tests {
                 icon: None,
                 tags: vec![],
                 permissions: vec![],
+                mcp_tools: false,
                 source: None,
                 homepage: None,
                 license: None,

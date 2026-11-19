@@ -3,6 +3,7 @@ import {
   createConcurrencyLimiter,
   loadSchemaDetails,
   mapWithConcurrency,
+  schemaDiffDeferredDdlTables,
   schemaDiffMetadataConcurrency,
   schemaDiffMetadataLaneCountForTests,
   schemaDiffMetadataLoadPlan,
@@ -13,6 +14,32 @@ import {
 import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjectPhase, shouldLoadSchemaDiffExtraObjects, shouldLoadSchemaDiffRoutines } from "../../schema/schemaDiffProgress";
 import { DEFAULT_MYSQL_OPTIONS, DEFAULT_POSTGRES_OPTIONS } from "../../../types/schemaDiff";
 import type { TableInfo } from "../../../types/database";
+
+const tableInfo = (name: string, table_type = "BASE TABLE") => ({ name, table_type }) as TableInfo;
+
+describe("deferred SQL Server table DDL", () => {
+  it("defers only base tables present on both sides", () => {
+    const source = [tableInfo("shared"), tableInfo("added"), tableInfo("v_shared", "VIEW"), tableInfo("was_table")];
+    const target = [tableInfo("shared"), tableInfo("removed"), tableInfo("v_shared", "VIEW"), tableInfo("was_table", "VIEW")];
+    expect([...schemaDiffDeferredDdlTables("sqlserver", source, target)]).toEqual(["shared"]);
+  });
+
+  it("keeps eager DDL for other engines and for explicit mappings", () => {
+    const tables = [tableInfo("shared")];
+    expect(schemaDiffDeferredDdlTables("postgres", tables, tables).size).toBe(0);
+    expect(schemaDiffDeferredDdlTables("sqlserver", tables, tables, [{ sourceTable: "shared", targetTable: "other" }]).size).toBe(0);
+  });
+
+  it("skips the DDL request but still reads the structured metadata", async () => {
+    const getTableDdl = vi.fn(async (..._args: unknown[]) => "CREATE TABLE added");
+    const getColumns = vi.fn(async () => []);
+    const api: SchemaDiffMetadataApi = { getTableDdl, getColumns, listIndexes: vi.fn(async () => []), listForeignKeys: vi.fn(async () => []), listTriggers: vi.fn(async () => []) };
+    const details = await loadSchemaDetails([tableInfo("shared"), tableInfo("added")], { connectionId: "c", database: "d", schema: "dbo", dbType: "sqlserver", options: DEFAULT_MYSQL_OPTIONS, deferredDdlTables: new Set(["shared"]) }, api);
+    expect(getTableDdl.mock.calls.map((call) => call[3])).toEqual(["added"]);
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(details.map((detail) => detail.ddl)).toEqual(["", "CREATE TABLE added"]);
+  });
+});
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -59,6 +86,32 @@ it("stops queued metadata after cancellation and waits for every issued request"
 });
 
 const METADATA_POOL_BUSY = "DBX metadata pool is busy; please retry";
+
+it("retains complete Oracle trigger definitions and firing state in each comparison snapshot", async () => {
+  const source = { name: "TR", event: "INSERT", timing: "BEFORE EACH ROW", statement: "CREATE TRIGGER APP.TR BEFORE INSERT ON APP.T FOR EACH ROW BEGIN NULL; END;", enabled: false };
+  const api: SchemaDiffMetadataApi = {
+    getTableDdl: async () => "CREATE TABLE APP.T(ID NUMBER);",
+    getColumns: async () => [],
+    listIndexes: async () => [],
+    listForeignKeys: async () => [],
+    listTriggers: async () => [source],
+  };
+  const details = await loadSchemaDetails([{ name: "T", table_type: "TABLE" } as TableInfo], { connectionId: "complete-trigger", database: "app", schema: "APP", dbType: "oracle", options: DEFAULT_POSTGRES_OPTIONS }, api);
+  expect(details[0].triggers).toEqual([source]);
+});
+
+it("rejects a comparison detail when trigger metadata reports a known contradiction", async () => {
+  const api: SchemaDiffMetadataApi = {
+    getTableDdl: async () => "CREATE TABLE APP.T(ID NUMBER);",
+    getColumns: async () => [],
+    listIndexes: async () => [],
+    listForeignKeys: async () => [],
+    listTriggers: async () => {
+      throw new Error("APP.TR: trigger firing state changed; compare again");
+    },
+  };
+  await expect(loadSchemaDetails([{ name: "T", table_type: "TABLE" } as TableInfo], { connectionId: "conflicting-trigger", database: "app", schema: "APP", dbType: "oracle", options: DEFAULT_POSTGRES_OPTIONS }, api)).rejects.toThrow("trigger firing state changed");
+});
 
 /**
  * Mirrors the backend metadata gate (`crates/dbx-core/src/connection/mod.rs`):

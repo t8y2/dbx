@@ -11,6 +11,7 @@ export function trimQueryPageProbe<T extends QueryResult>(result: T, pageLimit: 
     rows: result.rows.slice(0, pageLimit),
     spatial_values: result.spatial_values?.slice(0, pageLimit),
     large_value_cells: result.large_value_cells?.filter((cell) => cell.row_index < pageLimit),
+    raw_key_cells: result.raw_key_cells?.filter((cell) => cell.row_index < pageLimit),
     // Keep discarded preview refs owned by the result until its normal cleanup.
     large_value_refs: result.large_value_refs,
   };
@@ -29,6 +30,7 @@ export function stripPaginationRowNumber(result: QueryResult, column: string | u
     spatial_values: result.spatial_values?.map((row) => row.slice(0, index)),
     spatial_columns: result.spatial_columns?.filter((column) => column.column_index < index),
     large_value_cells: result.large_value_cells?.filter((cell) => cell.column_index < index),
+    raw_key_cells: result.raw_key_cells?.filter((cell) => cell.column_index < index),
     hidden_column_indexes: result.hidden_column_indexes?.filter((columnIndex) => columnIndex < index),
   };
 }

@@ -394,6 +394,22 @@ impl BackupStore {
         .await
     }
 
+    /// Records runs that are already complete, such as imported backup files.
+    pub(crate) async fn insert_completed(&self, runs: Vec<BackupRun>) -> Result<(), String> {
+        self.access(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql_error)?;
+            for run in runs {
+                tx.execute(
+                    "INSERT INTO runs(id,schedule_id,state,payload,job,created_at) VALUES(?,NULL,?,?,NULL,?)",
+                    params![run.id, run.status, encode(&run)?, run.started_at],
+                )
+                .map_err(sql_error)?;
+            }
+            tx.commit().map_err(sql_error)
+        })
+        .await
+    }
+
     pub async fn rename(&self, id: String, name: String) -> Result<(), String> {
         bounded_text(&name, 256, "Backup name")?;
         self.access(move |conn| {

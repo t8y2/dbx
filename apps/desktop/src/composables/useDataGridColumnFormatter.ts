@@ -22,6 +22,7 @@ import {
 import { filterModeNeedsValue, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { isBinaryColumnFormat } from "@/lib/dataGrid/binaryCellDownload";
 import { manualReferenceColumnValidation, manualReferenceKeyColumns, reconcileManualReferenceColumn, type ManualReferenceMetadataStatus } from "@/lib/dataGrid/dataGridForeignKeyDisplay";
 import type { ColumnInfo, DatabaseType, ForeignKeyInfo, QueryResultSourceColumnRef, ReferenceKeyInfo } from "@/types/database";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -85,6 +86,8 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
   const formatterJsonPath = ref("$.user.name");
   const formatterMaskPrefix = ref(4);
   const formatterMaskSuffix = ref(4);
+  const formatterNumberGrouping = ref(false);
+  const formatterNumberDecimalPlaces = ref<number | string>("");
   const formatterCustomId = ref(CUSTOM_FORMATTER_NEW);
   const formatterCustomCapturedDeleteVersion = ref<number>();
   const formatterCustomName = ref("");
@@ -131,19 +134,30 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
   const formatterForeignKeyReferenceValidation = computed(() => manualReferenceColumnValidation(formatterForeignKeyColumns.value, formatterForeignKeyReferenceKeys.value, formatterForeignKeyRefColumn.value, formatterForeignKeyReferenceMetadataStatus.value, formatterForeignKeyReferenceFilter.value));
   const savedCustomFormatters = computed(() => Object.values(settingsStore.editorSettings.customColumnFormatters).sort((left, right) => left.name.localeCompare(right.name)));
 
+  // Every header, cell format and menu asks for a column's keys several times per render, and building them
+  // is a database x schema x column product of string concatenations. Resolve all columns once per input change.
+  const formatterKeysByColumn = computed<string[][]>(() => {
+    const connectionId = props.connectionId;
+    if (!connectionId) return [];
+    const databaseType = options.resolvedDatabaseType.value;
+    return props.result.columns.map((resultColumn, columnIndex) =>
+      resultColumn
+        ? columnFormatterKeys({
+            connectionId,
+            database: props.database,
+            schema: props.schema,
+            databaseType,
+            resultColumn,
+            sourceColumn: props.sourceColumns?.[columnIndex],
+            displaySource: props.queryDisplaySourceColumns?.[columnIndex],
+            tableMeta: props.tableMeta,
+          })
+        : [],
+    );
+  });
+
   function formatterKeysForColumn(columnIndex: number): string[] {
-    const resultColumn = props.result.columns[columnIndex];
-    if (!props.connectionId || !resultColumn) return [];
-    return columnFormatterKeys({
-      connectionId: props.connectionId,
-      database: props.database,
-      schema: props.schema,
-      databaseType: options.resolvedDatabaseType.value,
-      resultColumn,
-      sourceColumn: props.sourceColumns?.[columnIndex],
-      displaySource: props.queryDisplaySourceColumns?.[columnIndex],
-      tableMeta: props.tableMeta,
-    });
+    return formatterKeysByColumn.value[columnIndex] ?? [];
   }
 
   function formatterKeyForColumn(columnIndex: number): string | null {
@@ -158,9 +172,16 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     return undefined;
   }
 
+  function canFormatBinaryColumn(columnIndex: number): boolean {
+    const resultType = props.result.column_types?.[columnIndex];
+    const sourceType = options.tableColumnForGridColumn(columnIndex)?.data_type;
+    return [resultType, sourceType].some((type) => /^(?:var)?binary\b/i.test(type?.trim() ?? ""));
+  }
+
   function columnFormatter(columnIndex: number): ColumnFormatterConfig | undefined {
     const columnType = props.result.column_types?.[columnIndex] ?? options.tableColumnForGridColumn(columnIndex)?.data_type;
-    const savedFormatter = savedColumnFormatterEntry(columnIndex)?.formatter;
+    const saved = savedColumnFormatterEntry(columnIndex)?.formatter;
+    const savedFormatter = saved && (!isBinaryColumnFormat(saved.kind) || canFormatBinaryColumn(columnIndex)) ? saved : undefined;
     const configured = resolveColumnFormatter(savedFormatter, settingsStore.editorSettings.customColumnFormatters, {
       pattern: settingsStore.editorSettings.globalDateTimeDisplayFormat,
       columnType,
@@ -178,7 +199,11 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
   }
 
   function currentFormatterDraft(): ColumnFormatterConfig {
+    if (formatterKind.value === "number") {
+      return { kind: "number", useGrouping: formatterNumberGrouping.value, decimalPlaces: formatterNumberDecimalPlaces.value === "" ? undefined : Number(formatterNumberDecimalPlaces.value) };
+    }
     if (formatterKind.value === "json-path") return { kind: "json-path", path: formatterJsonPath.value.trim() || "$" };
+    if (isBinaryColumnFormat(formatterKind.value)) return { kind: formatterKind.value };
     if (formatterKind.value === "mask") {
       return { kind: "mask", prefix: Math.max(0, Math.floor(Number(formatterMaskPrefix.value) || 0)), suffix: Math.max(0, Math.floor(Number(formatterMaskSuffix.value) || 0)) };
     }
@@ -225,6 +250,8 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     formatterForeignKeyFilterEndValue.value = "";
     const draft = formatter ?? { kind: "datetime", unit: "auto" as const, pattern: "YYYY-MM-DD HH:mm:ss" as const, timezone: dayjs.tz.guess() };
     formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind === "iotdb-timestamp" ? "datetime" : draft.kind;
+    formatterNumberGrouping.value = draft.kind === "number" ? draft.useGrouping : false;
+    formatterNumberDecimalPlaces.value = draft.kind === "number" ? (draft.decimalPlaces ?? "") : "";
     if (draft.kind === "datetime") {
       formatterDateUnit.value = draft.unit;
       formatterDatetimePattern.value = draft.pattern;
@@ -533,6 +560,8 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     formatterJsonPath,
     formatterMaskPrefix,
     formatterMaskSuffix,
+    formatterNumberGrouping,
+    formatterNumberDecimalPlaces,
     formatterCustomId,
     formatterCustomName,
     formatterCustomTemplate,
@@ -571,6 +600,7 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     savedColumnFormatter,
     columnFormatter,
     columnHasFormatter,
+    canFormatBinaryColumn,
     currentFormatterDraft,
     openColumnFormatter,
     closeColumnFormatter,

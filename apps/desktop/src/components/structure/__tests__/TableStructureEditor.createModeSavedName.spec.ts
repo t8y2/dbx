@@ -46,7 +46,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 // Render rows without browser layout measurements so drag controls can be exercised.
 vi.mock("vue-virtual-scroller", async () => {
@@ -290,6 +290,7 @@ vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: f
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
 vi.mock("@/lib/sql/sqlFormatter", () => ({
+  MAX_SQL_FORMAT_CHARS: 1_000_000,
   formatSqlForDisplay: vi.fn(async (sql: string) => sql),
   sqlFormatDialectForDbType: vi.fn(() => "mysql"),
 }));
@@ -336,7 +337,7 @@ type SavedPayload = { commentChanged: boolean; createdTableName?: string };
  * completion, and return what the `saved` event carried — the exact string
  * the converted edit tab would be assigned as its table name.
  */
-async function createTableAndCaptureSaved(dbType: string, newTableName: string): Promise<SavedPayload> {
+async function createTableAndCaptureSaved(dbType: string, newTableName: string, postgresForeignTable?: TableStructureEditorDraft["postgresForeignTable"]): Promise<SavedPayload> {
   const previousDbType = mocks.connection.db_type;
   mocks.connection.db_type = dbType;
   let saved: SavedPayload | undefined;
@@ -351,6 +352,7 @@ async function createTableAndCaptureSaved(dbType: string, newTableName: string):
         dirty: true,
         activeTab: "columns",
         newTableName,
+        postgresForeignTable,
         tableComment: "",
         originalTableComment: "",
         columns: [{ id: "new:id", name: "id", dataType: "number", isNullable: false, defaultValue: "", comment: "", isPrimaryKey: false, extra: {}, markedForDrop: false }],
@@ -413,6 +415,22 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor created-table name write-back", () => {
+  it("restores a PostgreSQL foreign table draft and saves its generated SQL", async () => {
+    const foreign = {
+      enabled: true,
+      server: "remote server",
+      options: [
+        { name: "schema_name", value: "source" },
+        { name: "table_name", value: "remote_table" },
+      ],
+    };
+    mocks.buildCreateTableSql.mockResolvedValue({ statements: ['CREATE FOREIGN TABLE "external_data" (id integer) SERVER "remote server"'], warnings: [] });
+    const saved = await createTableAndCaptureSaved("postgres", "external_data", foreign);
+    expect(mocks.buildCreateTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "postgres", tableName: "external_data" }), expect.anything(), { postgresForeignTable: { server: foreign.server, options: foreign.options } });
+    expect(mocks.executeBatch.mock.calls.some((call) => JSON.stringify(call).includes("CREATE FOREIGN TABLE"))).toBe(true);
+    expect(saved.createdTableName).toBe("external_data");
+  });
+
   it("emits the upper-folded storage name for a plain Oracle table", async () => {
     const saved = await createTableAndCaptureSaved("oracle", "MyTable");
     expect(saved.createdTableName).toBe("MYTABLE");

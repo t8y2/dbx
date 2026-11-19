@@ -21,10 +21,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
@@ -41,8 +44,12 @@ public final class KafkaAgent {
     private static final PrintStream JSON_RPC_OUT = System.out;
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+    private static final int MAX_GROUP_QUERY_ADMINS = 12;
+    private static final int GROUPS_PER_QUERY_ADMIN = 16;
     private static final int MAX_PEEK_MESSAGE_COUNT = 100;
     private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
+    // 最新优先回扫时每批向窗口左侧推进的记录数，凑满配额或扫到窗口起点即停。
+    private static final int REVERSE_PEEK_BATCH_RECORDS = 500;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
@@ -66,6 +73,7 @@ public final class KafkaAgent {
     ));
 
     private static AdminClient adminClient;
+    private static final List<AdminClient> groupQueryAdmins = new ArrayList<>();
     private static KafkaProducer<String, byte[]> producer;
     private static JsonObject activeConnection;
     private static volatile boolean shutdownRequested;
@@ -160,8 +168,8 @@ public final class KafkaAgent {
             case "mq_get_topic_config" -> getTopicConfig(params);
             case "mq_alter_topic_config" -> alterTopicConfig(params);
             // Consumer groups
-            case "mq_list_consumer_groups" -> listConsumerGroups(params);
-            case "mq_get_consumer_group_snapshot" -> getConsumerGroupSnapshot(params);
+            case "mq_list_consumer_groups" -> listConsumerGroups(params, requireAdmin(), KafkaAgent::consumerGroupAdmins);
+            case "mq_get_consumer_group_snapshot" -> getConsumerGroupSnapshot(params, requireAdmin(), KafkaAgent::consumerGroupAdmins);
             case "mq_describe_consumer_group" -> describeConsumerGroup(params);
             case "mq_delete_consumer_group" -> deleteConsumerGroup(params);
             case "mq_reset_consumer_group_offsets" -> resetConsumerGroupOffsets(params);
@@ -283,6 +291,10 @@ public final class KafkaAgent {
     }
 
     private static void closeClients() {
+        for (AdminClient groupAdmin : groupQueryAdmins) {
+            groupAdmin.close(Duration.ZERO);
+        }
+        groupQueryAdmins.clear();
         if (adminClient != null) {
             adminClient.close(Duration.ofSeconds(5));
             adminClient = null;
@@ -569,6 +581,37 @@ public final class KafkaAgent {
                     props.put("ssl.keystore.password", keystorePassword);
                 }
             }
+            // PEM 证书路径由 Rust 桥接透传（snake_case 字段）。kafka-clients >= 2.7 支持
+            // PEM truststore（走 location）与 PEM keystore（必须内联内容，没有 location），
+            // 两者均无密码，不需要设置 store password。
+            String caCertPath = stringOrEmpty(tls, "ca_cert_path");
+            if (!caCertPath.isBlank()) {
+                // 读取一次仅作 fail-fast 校验（truststore 本身走 location），
+                // 让坏路径在配置阶段就带着字段名报错，而不是等到客户端启动后埋在堆栈里。
+                readTlsFile(caCertPath, "ca_cert_path");
+                props.put("ssl.truststore.type", "PEM");
+                props.put("ssl.truststore.location", caCertPath);
+            }
+            String clientCertPath = stringOrEmpty(tls, "client_cert_path");
+            String clientKeyPath = stringOrEmpty(tls, "client_key_path");
+            if (!clientCertPath.isBlank() != !clientKeyPath.isBlank()) {
+                throw new IllegalStateException(
+                    "Kafka TLS client certificate needs both client_cert_path and client_key_path");
+            }
+            if (!clientCertPath.isBlank()) {
+                props.put("ssl.keystore.type", "PEM");
+                props.put("ssl.keystore.certificate.chain", readTlsFile(clientCertPath, "client_cert_path"));
+                props.put("ssl.keystore.key", readTlsFile(clientKeyPath, "client_key_path"));
+            }
+        }
+    }
+
+    /** 读取 PEM 文件内容并内联到 keystore 属性；失败时带上路径报错，便于用户定位。 */
+    static String readTlsFile(String path, String field) {
+        try {
+            return Files.readString(Path.of(path), StandardCharsets.US_ASCII);
+        } catch (IOException | java.nio.file.InvalidPathException e) {
+            throw new IllegalStateException("Failed to read Kafka TLS file for " + field + ": " + path, e);
         }
     }
 
@@ -1008,14 +1051,90 @@ public final class KafkaAgent {
     // Consumer groups
     // -----------------------------------------------------------------------
 
-    private static Object listConsumerGroups(JsonObject params) throws Exception {
-        AdminClient admin = requireAdmin();
+    /** Milliseconds left before {@code deadline}; at least 1 so an already-completed future is still read. */
+    static long remainingMillis(long deadline) {
+        return Math.max(1, deadline - System.currentTimeMillis());
+    }
+
+    /**
+     * Await each group's description against one shared deadline. Waiting the full request
+     * timeout per group let unreachable group coordinators stack N timeouts, keeping the agent
+     * busy long enough that topic requests behind it failed too (#13122).
+     */
+    static Map<String, ConsumerGroupDescription> awaitGroupDescriptions(
+        DescribeConsumerGroupsResult described,
+        List<String> groupIds,
+        long deadline,
+        java.util.function.BiConsumer<String, String> onError
+    ) {
+        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
+        for (String groupId : groupIds) {
+            try {
+                descriptions.put(groupId, described.describedGroups().get(groupId).get(remainingMillis(deadline), TimeUnit.MILLISECONDS));
+            } catch (Exception error) {
+                onError.accept(groupId, normalizeErrorMessage(error));
+            }
+        }
+        return descriptions;
+    }
+
+    private static List<Admin> consumerGroupAdmins(int groupCount) {
+        int count = Math.min(MAX_GROUP_QUERY_ADMINS, (groupCount + GROUPS_PER_QUERY_ADMIN - 1) / GROUPS_PER_QUERY_ADMIN);
+        while (groupQueryAdmins.size() < count - 1) {
+            groupQueryAdmins.add(buildAdminClient(activeConnection));
+        }
+        List<Admin> admins = new ArrayList<>();
+        admins.add(adminClient);
+        admins.addAll(groupQueryAdmins.subList(0, count - 1));
+        return admins;
+    }
+
+    private record ConsumerGroupQueries(
+        DescribeConsumerGroupsResult descriptions,
+        Map<String, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> offsets
+    ) {}
+
+    private static ConsumerGroupQueries startConsumerGroupQueries(List<String> groupIds, List<Admin> admins, long deadline) {
+        Map<String, KafkaFuture<ConsumerGroupDescription>> descriptions = new LinkedHashMap<>();
+        Map<String, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> offsets = new LinkedHashMap<>();
+        // Older brokers cannot batch coordinator lookups or offset fetches, and
+        // Kafka Admin allows one in-flight request per connection. Independent
+        // clients bound that otherwise sequential work for large group lists.
+        for (int index = 0; index < admins.size(); index++) {
+            List<String> shard = new ArrayList<>();
+            Map<String, ListConsumerGroupOffsetsSpec> specs = new LinkedHashMap<>();
+            for (int groupIndex = index; groupIndex < groupIds.size(); groupIndex += admins.size()) {
+                String groupId = groupIds.get(groupIndex);
+                shard.add(groupId);
+                specs.put(groupId, new ListConsumerGroupOffsetsSpec());
+            }
+            if (shard.isEmpty()) continue;
+            Admin admin = admins.get(index);
+            ListConsumerGroupOffsetsResult result = admin.listConsumerGroupOffsets(
+                specs, new ListConsumerGroupOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
+            );
+            descriptions.putAll(admin.describeConsumerGroups(
+                shard, new DescribeConsumerGroupsOptions().timeoutMs((int) remainingMillis(deadline))
+            ).describedGroups());
+            for (String groupId : shard) {
+                offsets.put(groupId, result.partitionsToOffsetAndMetadata(groupId));
+            }
+        }
+        return new ConsumerGroupQueries(new DescribeConsumerGroupsResult(descriptions), offsets);
+    }
+
+    static Object listConsumerGroups(JsonObject params, Admin admin) throws Exception {
+        return listConsumerGroups(params, admin, ignored -> List.of(admin));
+    }
+
+    static Object listConsumerGroups(JsonObject params, Admin admin, java.util.function.IntFunction<List<Admin>> groupAdmins) throws Exception {
         int timeout = requestTimeout(params);
+        long deadline = System.currentTimeMillis() + timeout;
         String filterTopic = stringOrEmpty(params, "topic");
 
         Collection<ConsumerGroupListing> groups = admin.listConsumerGroups(
                 new ListConsumerGroupsOptions().timeoutMs(timeout))
-            .all().get(timeout, TimeUnit.MILLISECONDS);
+            .all().get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
 
         List<String> groupIds = groups.stream()
             .map(ConsumerGroupListing::groupId)
@@ -1025,45 +1144,19 @@ public final class KafkaAgent {
             return Collections.singletonMap("groups", Collections.emptyList());
         }
 
-        // Batch-describe every group in one Kafka Admin request. Per-group
-        // failures degrade to an empty member list instead of failing the batch.
-        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
-        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
-            groupIds,
-            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
-        );
-        for (String groupId : groupIds) {
-            try {
-                descriptions.put(
-                    groupId,
-                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
-                );
-            } catch (Exception error) {
-                logger().debug("Consumer group details unavailable for {}: {}", groupId, normalizeErrorMessage(error));
-            }
-        }
-
-        // Batch-resolve committed offsets for every group in one Admin request.
-        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
-        for (String groupId : groupIds) {
-            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
-        }
+        ConsumerGroupQueries queries = startConsumerGroupQueries(groupIds, groupAdmins.apply(groupIds.size()), deadline);
         Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
-        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
-            offsetSpecs,
-            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
-        );
         for (String groupId : groupIds) {
             try {
-                Map<TopicPartition, OffsetAndMetadata> rows = offsetsResult
-                    .partitionsToOffsetAndMetadata(groupId)
-                    .get(timeout, TimeUnit.MILLISECONDS);
+                Map<TopicPartition, OffsetAndMetadata> rows = queries.offsets().get(groupId)
+                    .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                 committedOffsets.put(groupId, rows == null ? Collections.emptyMap() : rows);
             } catch (Exception error) {
                 committedOffsets.put(groupId, Collections.emptyMap());
                 logger().debug("Committed offsets unavailable for {}: {}", groupId, normalizeErrorMessage(error));
             }
         }
+        Map<String, ConsumerGroupDescription> descriptions = awaitGroupDescriptions(queries.descriptions(), groupIds, deadline, (groupId, message) -> logger().debug("Consumer group details unavailable for {}: {}", groupId, message));
 
         // End offsets: one batched Admin request limited to the requested
         // topic's partitions (deduplicated across groups). Without a topic
@@ -1086,13 +1179,13 @@ public final class KafkaAgent {
                 try {
                     ListOffsetsResult latestOffsets = admin.listOffsets(
                         endOffsetSpecs,
-                        new ListOffsetsOptions().timeoutMs(timeout)
+                        new ListOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
                     );
                     for (TopicPartition topicPartition : topicPartitions) {
                         try {
                             ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
                                 .partitionResult(topicPartition)
-                                .get(timeout, TimeUnit.MILLISECONDS);
+                                .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                             endOffsets.put(topicPartition, info.offset());
                         } catch (Exception error) {
                             // Leave the partition absent so callers can tell an
@@ -1119,6 +1212,7 @@ public final class KafkaAgent {
             g.put("groupId", groupId);
             g.put("state", listing == null ? "UNKNOWN" : listing.state().map(Enum::name).orElse("UNKNOWN"));
             g.put("simpleGroup", listing != null && listing.isSimpleConsumerGroup());
+            g.put("membersAvailable", description != null);
             g.put("members", memberMaps(description == null ? Collections.emptyList() : description.members()));
             g.put("committedOffsets", offsetRows(committed, filterTopic));
             g.put("endOffsets", endOffsetRows(committed, endOffsets, filterTopic));
@@ -1189,12 +1283,16 @@ public final class KafkaAgent {
         return rows;
     }
 
-    private static Object getConsumerGroupSnapshot(JsonObject params) throws Exception {
-        AdminClient admin = requireAdmin();
+    static Object getConsumerGroupSnapshot(JsonObject params, Admin admin) throws Exception {
+        return getConsumerGroupSnapshot(params, admin, ignored -> List.of(admin));
+    }
+
+    static Object getConsumerGroupSnapshot(JsonObject params, Admin admin, java.util.function.IntFunction<List<Admin>> groupAdmins) throws Exception {
         int timeout = requestTimeout(params);
+        long deadline = System.currentTimeMillis() + timeout;
         Collection<ConsumerGroupListing> listings = admin.listConsumerGroups(
                 new ListConsumerGroupsOptions().timeoutMs(timeout))
-            .all().get(timeout, TimeUnit.MILLISECONDS);
+            .all().get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
 
         List<ConsumerGroupListing> sortedListings = new ArrayList<>(listings);
         sortedListings.sort(Comparator.comparing(ConsumerGroupListing::groupId));
@@ -1210,34 +1308,11 @@ public final class KafkaAgent {
         Map<String, Boolean> committedOffsetsAvailable = new HashMap<>();
         Map<String, LinkedHashSet<String>> errors = new HashMap<>();
 
-        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
-            groupIds,
-            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
-        );
+        ConsumerGroupQueries queries = startConsumerGroupQueries(groupIds, groupAdmins.apply(groupIds.size()), deadline);
         for (String groupId : groupIds) {
             try {
-                descriptions.put(
-                    groupId,
-                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
-                );
-            } catch (Exception error) {
-                snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + normalizeErrorMessage(error));
-            }
-        }
-
-        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
-        for (String groupId : groupIds) {
-            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
-        }
-        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
-            offsetSpecs,
-            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
-        );
-        for (String groupId : groupIds) {
-            try {
-                Map<TopicPartition, OffsetAndMetadata> groupOffsets = offsetsResult
-                    .partitionsToOffsetAndMetadata(groupId)
-                    .get(timeout, TimeUnit.MILLISECONDS);
+                Map<TopicPartition, OffsetAndMetadata> groupOffsets = queries.offsets().get(groupId)
+                    .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                 committedOffsets.put(groupId, groupOffsets == null ? Collections.emptyMap() : groupOffsets);
                 committedOffsetsAvailable.put(groupId, true);
             } catch (Exception error) {
@@ -1246,6 +1321,7 @@ public final class KafkaAgent {
                 snapshotErrors(errors, groupId).add("Committed offsets unavailable: " + normalizeErrorMessage(error));
             }
         }
+        descriptions.putAll(awaitGroupDescriptions(queries.descriptions(), groupIds, deadline, (groupId, message) -> snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + message)));
 
         Map<String, Set<TopicPartition>> assignedPartitions = new HashMap<>();
         Set<TopicPartition> allPartitions = new LinkedHashSet<>();
@@ -1272,13 +1348,13 @@ public final class KafkaAgent {
             try {
                 ListOffsetsResult latestOffsets = admin.listOffsets(
                     endOffsetSpecs,
-                    new ListOffsetsOptions().timeoutMs(timeout)
+                    new ListOffsetsOptions().timeoutMs((int) remainingMillis(deadline))
                 );
                 for (TopicPartition topicPartition : allPartitions) {
                     try {
                         ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
                             .partitionResult(topicPartition)
-                            .get(timeout, TimeUnit.MILLISECONDS);
+                            .get(remainingMillis(deadline), TimeUnit.MILLISECONDS);
                         endOffsets.put(topicPartition, info.offset());
                     } catch (Exception error) {
                         endOffsetErrors.put(topicPartition, normalizeErrorMessage(error));
@@ -1627,7 +1703,14 @@ public final class KafkaAgent {
         int count = validatedPeekCount(intOrDefault(params, "count", 10));
         PeekStartPosition startPosition = peekStartPosition(params);
         boolean explicitStartPosition = stringOrNull(params, "startPosition") != null;
-        validatePeekRequest(startPosition, explicitStartPosition, partition, offset);
+        Long startTimestamp = longOrNull(params, "timestamp");
+        Long endTimestamp = longOrNull(params, "endTimestamp");
+        String sortOrder = stringOrNull(params, "sortOrder");
+        validatePeekRequest(
+            startPosition, explicitStartPosition, partition, offset, startTimestamp, endTimestamp, sortOrder
+        );
+        // 时间窗口 + 最新优先时，读取方向改为从截止时间一侧倒序回扫。
+        boolean newestFirst = startPosition == PeekStartPosition.TIMESTAMP && "newest".equals(sortOrder);
         boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
@@ -1650,14 +1733,38 @@ public final class KafkaAgent {
             Map<TopicPartition, Long> endOffsets =
                 consumer.endOffsets(candidatePartitions, requestTimeout);
 
+            Map<TopicPartition, Long> timestampOffsets = Collections.emptyMap();
+            if (startPosition == PeekStartPosition.TIMESTAMP) {
+                Map<TopicPartition, Long> byTime = new LinkedHashMap<>();
+                for (TopicPartition tp : candidatePartitions) {
+                    byTime.put(tp, startTimestamp);
+                }
+                timestampOffsets = peekTimestampOffsets(consumer.offsetsForTimes(byTime, requestTimeout));
+            }
+
+            // An end timestamp narrows each partition's snapshot boundary to the first
+            // record after the requested window, so the read never leaves the time range.
+            Map<TopicPartition, Long> timestampEndOffsets = Collections.emptyMap();
+            if (endTimestamp != null) {
+                Map<TopicPartition, Long> byEndTime = new LinkedHashMap<>();
+                for (TopicPartition tp : candidatePartitions) {
+                    byEndTime.put(tp, endTimestamp == Long.MAX_VALUE ? Long.MAX_VALUE : endTimestamp + 1);
+                }
+                timestampEndOffsets = peekTimestampOffsets(consumer.offsetsForTimes(byEndTime, requestTimeout));
+            }
+            Map<TopicPartition, Long> boundedEndOffsets =
+                boundedPeekEndOffsets(endOffsets, timestampEndOffsets);
+
             List<TopicPartition> readablePartitions = new ArrayList<>();
             Map<TopicPartition, Long> seekOffsets = new LinkedHashMap<>();
             for (TopicPartition tp : candidatePartitions) {
                 long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
-                long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
-                Long requestedOffset = requestedPeekOffset(
-                    startPosition, offset, legacyOffsetRequest, beginningOffset, endOffset
-                );
+                long endOffset = boundedEndOffsets.getOrDefault(tp, beginningOffset);
+                Long requestedOffset = startPosition == PeekStartPosition.TIMESTAMP
+                    ? timestampOffsets.get(tp)
+                    : requestedPeekOffset(
+                        startPosition, offset, legacyOffsetRequest, beginningOffset, endOffset
+                    );
                 if (requestedOffset == null) {
                     continue;
                 }
@@ -1682,14 +1789,27 @@ public final class KafkaAgent {
             if (startPosition == PeekStartPosition.LATEST) {
                 for (TopicPartition tp : readablePartitions) {
                     long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
-                    long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                    long endOffset = boundedEndOffsets.getOrDefault(tp, beginningOffset);
                     seekOffsets.put(tp, recentPeekStartOffset(
                         beginningOffset, endOffset, messagesPerPartition
                     ));
                 }
             }
             for (TopicPartition tp : readablePartitions) {
-                snapshotEndOffsets.put(tp, endOffsets.getOrDefault(tp, 0L));
+                snapshotEndOffsets.put(tp, boundedEndOffsets.getOrDefault(tp, 0L));
+            }
+
+            // 最新优先回扫：初始 seek 挪到窗口右侧靠前的一批，收集阶段按批向左回退。
+            Map<TopicPartition, Long> reverseWindowStarts = new LinkedHashMap<>();
+            Map<TopicPartition, Long> reverseWindowEnds = new LinkedHashMap<>();
+            if (newestFirst) {
+                for (TopicPartition tp : readablePartitions) {
+                    long floor = seekOffsets.get(tp);
+                    long windowEnd = boundedEndOffsets.getOrDefault(tp, floor);
+                    reverseWindowStarts.put(tp, floor);
+                    reverseWindowEnds.put(tp, windowEnd);
+                    seekOffsets.put(tp, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
+                }
             }
 
             consumer.assign(readablePartitions);
@@ -1699,6 +1819,8 @@ public final class KafkaAgent {
 
             long deadlineNs = System.nanoTime() + requestTimeout.toNanos();
             Duration pollTimeout = Duration.ofMillis(Math.min(500L, requestTimeout.toMillis()));
+            PeekRecordFilter windowFilter = record -> recordIsBeforeEndOffset(record, snapshotEndOffsets)
+                && recordIsWithinEndTimestamp(record, endTimestamp);
             PeekCollectionState collection;
             if (startPosition == PeekStartPosition.LATEST) {
                 collection = collectLatestPeekedMessages(
@@ -1713,6 +1835,21 @@ public final class KafkaAgent {
                     pollTimeout
                 );
                 collection.incomplete = collection.incomplete || latestBudgetLimited;
+            } else if (newestFirst) {
+                collection = new PeekCollectionState(readablePartitions, messagesPerPartition);
+                collection.incomplete = !collectPeekedMessagesNewestFirst(
+                    timeout -> consumer.poll(timeout),
+                    consumer::position,
+                    consumer::seek,
+                    windowFilter,
+                    readablePartitions,
+                    reverseWindowStarts,
+                    reverseWindowEnds,
+                    collection,
+                    scanLimit,
+                    deadlineNs,
+                    pollTimeout
+                );
             } else {
                 PeekCollectionCompletionChecker snapshotComplete = state -> allPeekPartitionsComplete(
                     readablePartitions,
@@ -1724,7 +1861,7 @@ public final class KafkaAgent {
                 collection.incomplete = !collectPeekedMessages(
                     timeout -> consumer.poll(timeout),
                     snapshotComplete,
-                    record -> recordIsBeforeEndOffset(record, snapshotEndOffsets),
+                    windowFilter,
                     collection,
                     scanLimit,
                     deadlineNs,
@@ -1732,7 +1869,7 @@ public final class KafkaAgent {
                 );
             }
             List<Map<String, Object>> messages = sortAndLimitPeekedMessages(
-                collection.messages, count, startPosition
+                collection.messages, count, newestFirst ? PeekStartPosition.LATEST : startPosition
             );
             return peekMessagesResult(messages, collection.incomplete);
         }
@@ -1860,6 +1997,139 @@ public final class KafkaAgent {
             }
         }
         return completionChecker.isComplete(collection);
+    }
+
+    /**
+     * Time-window queries with newest sort order need the newest records first, but Kafka
+     * only consumes forward. The read therefore starts near the window's right edge and
+     * seeks one fixed batch backward whenever the current batch is fully consumed, stopping
+     * when the page quota is met or the window's left edge is reached.
+     */
+    static List<Map<String, Object>> collectPeekedMessagesNewestFirst(
+        PeekRecordPoller poller,
+        PeekBatchPositionReader positionReader,
+        PeekBatchSeeker seeker,
+        PeekRecordFilter recordFilter,
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> windowEndOffsets,
+        int messagesPerPartition,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        PeekCollectionState collection = new PeekCollectionState(partitions, messagesPerPartition);
+        collectPeekedMessagesNewestFirst(
+            poller,
+            positionReader,
+            seeker,
+            recordFilter,
+            partitions,
+            windowStartOffsets,
+            windowEndOffsets,
+            collection,
+            maxScanRecords,
+            deadlineNs,
+            pollTimeout
+        );
+        return collection.messages;
+    }
+
+    private static boolean collectPeekedMessagesNewestFirst(
+        PeekRecordPoller poller,
+        PeekBatchPositionReader positionReader,
+        PeekBatchSeeker seeker,
+        PeekRecordFilter recordFilter,
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> windowEndOffsets,
+        PeekCollectionState collection,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        Map<TopicPartition, Long> batchStarts = new HashMap<>();
+        Map<TopicPartition, Long> batchEnds = new HashMap<>();
+        for (TopicPartition partition : partitions) {
+            long floor = windowStartOffsets.getOrDefault(partition, 0L);
+            long windowEnd = windowEndOffsets.getOrDefault(partition, floor);
+            batchStarts.put(partition, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
+            batchEnds.put(partition, windowEnd);
+        }
+        while (System.nanoTime() < deadlineNs) {
+            if (allReversePeekPartitionsExhausted(
+                partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
+            )) {
+                return true;
+            }
+            long remainingNs = deadlineNs - System.nanoTime();
+            if (remainingNs <= 0) {
+                break;
+            }
+            Duration timeout = pollTimeout.toNanos() > remainingNs
+                ? Duration.ofNanos(remainingNs)
+                : pollTimeout;
+            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            for (ConsumerRecord<String, byte[]> record : records) {
+                if (collection.scannedRecords >= maxScanRecords) {
+                    return false;
+                }
+                collection.scannedRecords++;
+                TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
+                if (remaining <= 0 || !recordFilter.include(record)) {
+                    continue;
+                }
+                collection.messages.add(peekedMessageFromRecord(record));
+                collection.remainingByPartition.put(partition, remaining - 1);
+            }
+            // Seek backward only after the current batch is fully consumed; seeking earlier
+            // would drop buffered records that poll has not returned yet.
+            for (TopicPartition partition : partitions) {
+                if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                    continue;
+                }
+                long floor = windowStartOffsets.getOrDefault(partition, 0L);
+                long batchStart = batchStarts.get(partition);
+                if (positionReader.position(partition) < batchEnds.get(partition) || batchStart <= floor) {
+                    continue;
+                }
+                long previousStart = Math.max(floor, batchStart - REVERSE_PEEK_BATCH_RECORDS);
+                batchEnds.put(partition, batchStart);
+                batchStarts.put(partition, previousStart);
+                seeker.seek(partition, previousStart);
+            }
+        }
+        return allReversePeekPartitionsExhausted(
+            partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
+        );
+    }
+
+    /**
+     * A partition is done when its page quota is satisfied; otherwise it needs its current
+     * batch fully consumed and its batch start sitting on the window's left edge.
+     */
+    static boolean allReversePeekPartitionsExhausted(
+        List<TopicPartition> partitions,
+        PeekCollectionState collection,
+        Map<TopicPartition, Long> windowStartOffsets,
+        Map<TopicPartition, Long> batchStarts,
+        Map<TopicPartition, Long> batchEnds,
+        PeekBatchPositionReader positionReader
+    ) {
+        for (TopicPartition partition : partitions) {
+            if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                continue;
+            }
+            long floor = windowStartOffsets.getOrDefault(partition, 0L);
+            if (batchStarts.getOrDefault(partition, floor) > floor) {
+                return false;
+            }
+            if (positionReader.position(partition) < batchEnds.getOrDefault(partition, 0L)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -2016,6 +2286,14 @@ public final class KafkaAgent {
         return endOffset != null && record.offset() < endOffset;
     }
 
+    /** Guards the time window even when a partition's timestamps are not monotonic. */
+    private static boolean recordIsWithinEndTimestamp(
+        ConsumerRecord<String, byte[]> record,
+        Long endTimestamp
+    ) {
+        return endTimestamp == null || record.timestamp() <= endTimestamp;
+    }
+
     private static Map<TopicPartition, Long> currentPeekPositions(
         KafkaConsumer<String, byte[]> consumer,
         List<TopicPartition> partitions
@@ -2081,6 +2359,16 @@ public final class KafkaAgent {
         boolean include(ConsumerRecord<String, byte[]> record);
     }
 
+    @FunctionalInterface
+    interface PeekBatchPositionReader {
+        long position(TopicPartition partition);
+    }
+
+    @FunctionalInterface
+    interface PeekBatchSeeker {
+        void seek(TopicPartition partition, long offset);
+    }
+
     private static final class PeekCollectionState {
         private final List<Map<String, Object>> messages = new ArrayList<>();
         private final Map<TopicPartition, Integer> remainingByPartition = new HashMap<>();
@@ -2139,6 +2427,7 @@ public final class KafkaAgent {
         EARLIEST,
         LATEST,
         OFFSET,
+        TIMESTAMP,
     }
 
     /** Omitting startPosition preserves the old earliest default (or explicit legacy offset) behavior. */
@@ -2151,16 +2440,87 @@ public final class KafkaAgent {
             case "earliest" -> PeekStartPosition.EARLIEST;
             case "latest" -> PeekStartPosition.LATEST;
             case "offset" -> PeekStartPosition.OFFSET;
+            case "timestamp" -> PeekStartPosition.TIMESTAMP;
             default -> throw new IllegalArgumentException("Unsupported peek startPosition: " + value);
         };
+    }
+
+    /**
+     * First offset whose batch timestamp is &gt;= {@code timestamp}, per partition. Kafka
+     * answers null for a partition whose newest record is older than the requested time;
+     * that partition is simply left out of the read rather than silently falling back to
+     * its tail, so a time window never shows data from outside itself.
+     */
+    static Map<TopicPartition, Long> peekTimestampOffsets(
+        Map<TopicPartition, OffsetAndTimestamp> located
+    ) {
+        Map<TopicPartition, Long> resolved = new LinkedHashMap<>();
+        located.forEach((tp, offsetAndTimestamp) -> {
+            if (offsetAndTimestamp != null) {
+                resolved.put(tp, offsetAndTimestamp.offset());
+            }
+        });
+        return resolved;
+    }
+
+    /**
+     * Clamps each partition's log end offset to the first record after the requested end
+     * time. Partitions without a timestamp match keep their log end offset, because every
+     * retained record is already inside the window.
+     */
+    static Map<TopicPartition, Long> boundedPeekEndOffsets(
+        Map<TopicPartition, Long> logEndOffsets,
+        Map<TopicPartition, Long> timestampEndOffsets
+    ) {
+        Map<TopicPartition, Long> bounded = new LinkedHashMap<>(logEndOffsets);
+        timestampEndOffsets.forEach((tp, timeEndOffset) ->
+            bounded.computeIfPresent(tp, (ignored, logEndOffset) -> Math.min(logEndOffset, timeEndOffset))
+        );
+        return bounded;
     }
 
     static void validatePeekRequest(
         PeekStartPosition startPosition,
         boolean explicitStartPosition,
         Integer partition,
-        Long offset
+        Long offset,
+        Long timestamp,
+        Long endTimestamp,
+        String sortOrder
     ) {
+        if (startPosition != PeekStartPosition.TIMESTAMP && sortOrder != null) {
+            throw new IllegalArgumentException("sortOrder is only supported when startPosition is timestamp");
+        }
+        if (startPosition == PeekStartPosition.TIMESTAMP
+            && sortOrder != null
+            && !"newest".equals(sortOrder)
+            && !"oldest".equals(sortOrder)) {
+            throw new IllegalArgumentException("Unsupported peek sortOrder: " + sortOrder);
+        }
+        if (startPosition != PeekStartPosition.TIMESTAMP && timestamp != null) {
+            throw new IllegalArgumentException("timestamp is only supported when startPosition is timestamp");
+        }
+        if (startPosition != PeekStartPosition.TIMESTAMP && endTimestamp != null) {
+            throw new IllegalArgumentException("endTimestamp is only supported when startPosition is timestamp");
+        }
+        if (startPosition == PeekStartPosition.TIMESTAMP) {
+            if (timestamp == null) {
+                throw new IllegalArgumentException("timestamp is required when startPosition is timestamp");
+            }
+            if (timestamp < 0) {
+                throw new IllegalArgumentException("timestamp must be a non-negative epoch millisecond value");
+            }
+            if (endTimestamp != null) {
+                if (endTimestamp < 0) {
+                    throw new IllegalArgumentException(
+                        "endTimestamp must be a non-negative epoch millisecond value"
+                    );
+                }
+                if (endTimestamp < timestamp) {
+                    throw new IllegalArgumentException("endTimestamp must not be earlier than timestamp");
+                }
+            }
+        }
         if (partition != null && partition < 0) {
             throw new IllegalArgumentException("partition must be non-negative");
         }
@@ -2195,6 +2555,8 @@ public final class KafkaAgent {
         return switch (startPosition) {
             case LATEST -> endOffset > beginningOffset ? beginningOffset : null;
             case OFFSET -> offset;
+            // Resolved per partition through offsetsForTimes before this is reached.
+            case TIMESTAMP -> null;
             case EARLIEST -> legacyOffsetRequest ? offset : beginningOffset;
         };
     }

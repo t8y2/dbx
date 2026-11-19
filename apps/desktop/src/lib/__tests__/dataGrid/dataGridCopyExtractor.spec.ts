@@ -153,6 +153,16 @@ describe("data-grid extractor options", () => {
     expect(extractorUnavailableForDatabase("sql-deletes-inserts", "tdengine")).toBe(true);
   });
 
+  it("allows SQL deletes for relational databases and blocks unsupported stores", () => {
+    expect(normalizeDataGridCopyPreference("sql-deletes")).toBe("sql-deletes");
+    expect(resolveDataGridCopyPreference("sql-deletes", 1)).toBe("sql-deletes");
+    expect(extractorUnavailableForDatabase("sql-deletes", "mysql")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes", "postgres")).toBe(false);
+    expect(extractorUnavailableForDatabase("sql-deletes", "mongodb")).toBe(true);
+    expect(extractorUnavailableForDatabase("sql-deletes", "neo4j")).toBe(true);
+    expect(extractorUnavailableForDatabase("sql-deletes", "tdengine")).toBe(true);
+  });
+
   it("adds DbUnit and PHP without changing the extractor contract version", () => {
     expect(DATA_GRID_COPY_EXTRACTOR_IDS).toContain("dbunit");
     expect(DATA_GRID_COPY_EXTRACTOR_IDS).toContain("php");
@@ -167,5 +177,11 @@ describe("data-grid extractor options", () => {
     expect(DATA_GRID_DEFAULT_COPY_PREFERENCES).not.toContain("sql-select");
     expect(normalizeVisibleDataGridCopyExtractors(["php", "php", "unknown", "csv"])).toEqual(["csv", "php"]);
     expect(normalizeVisibleDataGridCopyExtractors([])).toEqual([]);
+  });
+  it("keeps the two-row header format through normalization (#13305)", () => {
+    const normalized = normalizeDataGridExtractorOptions({ extractor: "tsv-with-headers", dsv: { headerFormat: "name-and-description-two-rows" } });
+    expect(normalized.dsv.headerFormat).toBe("name-and-description-two-rows");
+    const rejected = normalizeDataGridExtractorOptions({ extractor: "tsv", dsv: { headerFormat: "made-up" } });
+    expect(rejected.dsv.headerFormat).toBe("name");
   });
 });

@@ -298,6 +298,38 @@ describe("connectionStore delete-time tab handling", () => {
     expect(queryStore.tabs.find((tab) => tab.id === sqlId)?.connectionId).toBe("conn-a");
   });
 
+  it("rebinds kept data and structure tabs to a same-name connection created afterwards", async () => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().updateEditorSettings({ deleteConnectionTabHandlingMode: "keep-all-tabs", rememberConnectionDatabaseOnDelete: true });
+
+    const store = useConnectionStore();
+    store.connections = [pgConnection("conn-a", "prod", "app")];
+    const queryStore = useQueryStore();
+    const sqlId = queryStore.createTab("conn-a", "app", "draft.sql", "query");
+    const dataId = queryStore.createTab("conn-a", "app", "users", "data", "public", undefined, undefined, { forceNew: true });
+    const structureId = queryStore.createTab("conn-a", "app", "users 结构", "structure", "public", undefined, undefined, { forceNew: true });
+
+    await store.removeConnection("conn-a");
+
+    // 三个页签都保留，且都要记录原连接名——非 SQL 页签漏标记就会一直指向已删除的连接。
+    expect(queryStore.tabs.map((tab) => tab.id).sort()).toEqual([sqlId, dataId, structureId].sort());
+    for (const id of [sqlId, dataId, structureId]) {
+      expect(queryStore.tabs.find((tab) => tab.id === id)?.detachedConnectionName).toBe("prod");
+    }
+
+    // DeepLink 打开连接弹窗、用户保存后走的就是 addConnection。
+    await store.addConnection(pgConnection("conn-b", "prod", "app"));
+
+    for (const id of [sqlId, dataId, structureId]) {
+      const tab = queryStore.tabs.find((item) => item.id === id);
+      expect(tab?.connectionId).toBe("conn-b");
+      expect(tab?.detachedConnectionName).toBeUndefined();
+    }
+  });
+
   it("keeps tabs untouched when a new connection has a different name", async () => {
     installApiMocks();
     const { useConnectionStore } = await import("@/stores/connectionStore");

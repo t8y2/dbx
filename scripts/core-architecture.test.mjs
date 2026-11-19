@@ -175,6 +175,7 @@ test("CI and release tracking follow the new source owners", () => {
 test("the standalone DuckDB lockfile includes core's internal dependency closure", () => {
   const lockedPackages = new Map(
     read("agents/drivers/duckdb/Cargo.lock")
+      .replaceAll("\r\n", "\n")
       .split("\n[[package]]\n")
       .slice(1)
       .map((block) => [block.match(/^name = "([^"]+)"$/m)[1], block]),

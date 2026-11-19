@@ -44,7 +44,8 @@ describe("MCP execution permission selection", () => {
       { labelKey: "settings.mcpCapabilityScopedMutation", read_only: false, safe_write: true, high_risk_write: true },
       { labelKey: "settings.mcpCapabilityBroadMutation", read_only: false, safe_write: false, high_risk_write: true },
       { labelKey: "settings.mcpCapabilitySchemaAdmin", read_only: false, safe_write: false, high_risk_write: true },
-      { labelKey: "settings.mcpCapabilityConnectionManagement", read_only: false, safe_write: true, high_risk_write: true },
+      { labelKey: "settings.mcpCapabilityConnectionCreate", read_only: false, safe_write: true, high_risk_write: true },
+      { labelKey: "settings.mcpCapabilityConnectionRemove", read_only: false, safe_write: false, high_risk_write: true },
     ]);
   });
 });

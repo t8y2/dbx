@@ -2,11 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "enables the default permissions",
-  "windows": ["main", "detached-tab-*", "plugin-floating-*"],
+  "windows": ["main", "dbx-tab-*", "detached-tab-*", "plugin-floating-*"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
     "core:window:allow-hide",
+    "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-set-theme",
     "core:window:allow-minimize",
     "core:window:allow-unminimize",
@@ -58,7 +59,6 @@
     "fs:allow-read-file",
     "fs:allow-open",
     "fs:allow-read",
-    "process:default",
     "shell:allow-open",
     "updater:default",
     "window-state:default"

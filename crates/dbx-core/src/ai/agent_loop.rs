@@ -178,12 +178,17 @@ fn agent_event_observation_kind(event: &AgentEvent) -> Option<&'static str> {
 
 /// Publishes host observations for one agent run.
 ///
-/// Kept as a standalone type so the event sequence — including the final-text
-/// accumulation across turns — is testable without a live provider.
+/// Kept as a standalone type so the event sequence is testable without a live
+/// provider.
 ///
-/// Sidecars skip `ai.text_delta` (see `SIDECAR_SKIPPED_KINDS`), so the tap
-/// accumulates the run's final assistant text and attaches it to
-/// `ai.agent_finished`, the success terminal emitted for every provider.
+/// `ai.agent_finished` is deferred until the loop returns: the
+/// repair-exhaustion path re-emits the whole answer as a single text delta, so
+/// accumulating deltas would duplicate the text. The terminal observation
+/// carries the loop's authoritative final text instead.
+///
+/// A run that returns an error without emitting `AgentEnd` (a text-only
+/// provider failure, a cancelled CLI agent) is closed from here as well, so
+/// observers never keep it open.
 struct AgentObservationTap {
     observations: crate::observability::HostObservationBus,
     connection_id: String,
@@ -191,7 +196,8 @@ struct AgentObservationTap {
     session_id: Option<String>,
     provider: serde_json::Value,
     model: String,
-    text: crate::observability::ObservationTextAccumulator,
+    pending_agent_end: Mutex<Option<serde_json::Value>>,
+    error_emitted: AtomicBool,
 }
 
 impl AgentObservationTap {
@@ -204,15 +210,95 @@ impl AgentObservationTap {
         let Some(kind) = agent_event_observation_kind(event) else {
             return;
         };
-        match event {
-            // Mirror `run_agent_loop`'s `final_text`: only the last turn's
-            // response is the answer, so a new turn drops the previous turn's
-            // text instead of concatenating it.
-            AgentEvent::TurnStart { .. } => self.text.clear(),
-            AgentEvent::TextDelta { delta } => self.text.push_delta(delta),
-            _ => {}
-        }
         let mut payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        self.insert_context(&mut payload);
+        cap_observation_fields(&mut payload, &["sql", "args", "result", "summary", "text"]);
+        if matches!(event, AgentEvent::Error { .. }) {
+            // `finish` must not publish a second one for the same run.
+            self.error_emitted.store(true, Ordering::Relaxed);
+        }
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            // Published by `finish` once the loop's final text is known.
+            *self.pending_agent_end.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(payload);
+            return;
+        }
+        self.observations.publish(kind, Some(self.connection_id.clone()), Some(self.database.clone()), payload);
+    }
+
+    /// Publishes the run's terminal observation.
+    ///
+    /// Success: exactly one `ai.agent_finished`, carrying the authoritative
+    /// final text. Failure: the pending `ai.agent_finished` (if the loop had
+    /// already emitted one) plus one `ai.error`, unless the loop emitted an
+    /// error event itself. Some paths return an error without ever emitting
+    /// `AgentEnd` (a text-only provider failure, a cancelled CLI agent), so
+    /// observers would otherwise keep the run open forever.
+    fn finish(&self, outcome: Result<&str, &str>, cancelled: bool) {
+        match outcome {
+            Ok(text) => {
+                let content = self.text_payload(text);
+                let mut payload = self.take_pending_or_agent_end();
+                if let Some(object) = payload.as_object_mut() {
+                    object.extend(content);
+                }
+                self.observations.publish(
+                    KIND_AI_AGENT_FINISHED,
+                    Some(self.connection_id.clone()),
+                    Some(self.database.clone()),
+                    payload,
+                );
+            }
+            Err(error) => {
+                if let Some(payload) =
+                    self.pending_agent_end.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+                {
+                    self.observations.publish(
+                        KIND_AI_AGENT_FINISHED,
+                        Some(self.connection_id.clone()),
+                        Some(self.database.clone()),
+                        payload,
+                    );
+                }
+                if self.error_emitted.swap(true, Ordering::Relaxed) {
+                    return;
+                }
+                let mut payload = serde_json::json!({
+                    "type": "error",
+                    "cancelled": cancelled,
+                });
+                let (message, message_truncated) = dbx_types::models::observability::cap_observation_text(error);
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert("message".to_string(), serde_json::Value::String(message));
+                    object.insert("messageTruncated".to_string(), serde_json::Value::Bool(message_truncated));
+                }
+                self.insert_context(&mut payload);
+                self.observations.publish(
+                    KIND_AI_ERROR,
+                    Some(self.connection_id.clone()),
+                    Some(self.database.clone()),
+                    payload,
+                );
+            }
+        }
+    }
+
+    fn take_pending_or_agent_end(&self) -> serde_json::Value {
+        self.pending_agent_end
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_else(|| serde_json::json!({ "type": "agent_end" }))
+    }
+
+    fn text_payload(&self, text: &str) -> serde_json::Map<String, serde_json::Value> {
+        let (text, text_truncated) = dbx_types::models::observability::cap_observation_text(text);
+        let mut payload = serde_json::Map::new();
+        payload.insert("text".to_string(), serde_json::Value::String(text));
+        payload.insert("textTruncated".to_string(), serde_json::Value::Bool(text_truncated));
+        payload
+    }
+
+    fn insert_context(&self, payload: &mut serde_json::Value) {
         if let Some(object) = payload.as_object_mut() {
             object.insert(
                 "sessionId".to_string(),
@@ -221,18 +307,6 @@ impl AgentObservationTap {
             object.insert("provider".to_string(), self.provider.clone());
             object.insert("model".to_string(), serde_json::Value::String(self.model.clone()));
         }
-        cap_observation_fields(&mut payload, &["sql", "args", "result", "summary", "text"]);
-        // `AgentEnd` is every provider's success terminal. Only the CLI adapter
-        // emits `ResponseComplete`, and it is explicitly non-terminal, so the
-        // text rides the former.
-        if matches!(event, AgentEvent::AgentEnd { .. }) {
-            let (text, text_truncated) = self.text.take();
-            if let Some(object) = payload.as_object_mut() {
-                object.insert("text".to_string(), serde_json::Value::String(text));
-                object.insert("textTruncated".to_string(), serde_json::Value::Bool(text_truncated));
-            }
-        }
-        self.observations.publish(kind, Some(self.connection_id.clone()), Some(self.database.clone()), payload);
     }
 }
 
@@ -267,16 +341,18 @@ pub async fn run_agent_loop(
         session_id: agent_ctx.session_id.clone(),
         provider: serde_json::to_value(&config.provider).unwrap_or(serde_json::Value::Null),
         model: config.model.clone(),
-        text: crate::observability::ObservationTextAccumulator::default(),
+        pending_agent_end: Mutex::new(None),
+        error_emitted: AtomicBool::new(false),
     });
+    let tap_for_events = observation_tap.clone();
     let observed_on_event = {
         let original = on_event.clone();
         move |event: AgentEvent| {
-            observation_tap.observe(&event);
+            tap_for_events.observe(&event);
             original(event);
         }
     };
-    run_agent_loop_inner(
+    let result = run_agent_loop_inner(
         config,
         system_prompt,
         messages,
@@ -288,7 +364,12 @@ pub async fn run_agent_loop(
         is_agent_mode,
     )
     .boxed()
-    .await
+    .await;
+    // The terminal observation carries the loop's authoritative final text, so
+    // a repair-exhaustion re-emission cannot duplicate the answer.
+    let cancelled = cancelled.notified().now_or_never().is_some();
+    observation_tap.finish(result.as_deref().map_err(|error| error.as_str()), cancelled);
+    result
 }
 
 /// The built-in provider's tool table for one run.
@@ -1940,7 +2021,8 @@ mod tests {
             session_id: Some("session-1".into()),
             provider: serde_json::json!("openai"),
             model: "gpt-test".into(),
-            text: Default::default(),
+            pending_agent_end: Mutex::new(None),
+            error_emitted: AtomicBool::new(false),
         }
     }
 
@@ -1958,6 +2040,8 @@ mod tests {
 
         assert_eq!(receiver.recv().await.unwrap().kind, KIND_AI_TEXT_DELTA);
         assert_eq!(receiver.recv().await.unwrap().kind, KIND_AI_TEXT_DELTA);
+        // The terminal is deferred until the loop returns its final text.
+        tap.finish(Ok("The answer is 42."), false);
         let terminal = receiver.recv().await.unwrap();
         assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
         assert_eq!(terminal.payload["text"], "The answer is 42.");
@@ -1966,7 +2050,7 @@ mod tests {
     }
 
     /// The CLI adapter also emits `ResponseComplete`; it is non-terminal and
-    /// must not consume the accumulated text before `AgentEnd` arrives.
+    /// must not consume the text before `AgentEnd` arrives.
     #[tokio::test]
     async fn cli_sequence_keeps_the_text_until_agent_finished() {
         let bus = crate::observability::HostObservationBus::new();
@@ -1980,30 +2064,101 @@ mod tests {
         let response_complete = receiver.recv().await.unwrap();
         assert_eq!(response_complete.kind, KIND_AI_RESPONSE_COMPLETE);
         assert!(response_complete.payload.get("text").is_none());
+        tap.finish(Ok("cli answer"), false);
         let terminal = receiver.recv().await.unwrap();
         assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
         assert_eq!(terminal.payload["text"], "cli answer");
     }
 
-    /// Only the last turn's response is the answer, matching the text
-    /// `run_agent_loop` returns.
+    /// Answer-repair exhaustion re-emits the whole answer plus the warning as
+    /// one delta. The terminal must carry the loop's authoritative text, not a
+    /// duplicated accumulation of the deltas.
     #[tokio::test]
-    async fn a_new_turn_replaces_the_previous_turns_text() {
+    async fn repair_exhaustion_does_not_duplicate_the_answer() {
         let bus = crate::observability::HostObservationBus::new();
         let mut receiver = bus.subscribe();
         let tap = observation_tap(bus.clone());
-        tap.observe(&AgentEvent::TurnStart { turn: 1 });
-        tap.observe(&AgentEvent::TextDelta { delta: "checking tables".into() });
-        tap.observe(&AgentEvent::TurnEnd { turn: 1 });
-        tap.observe(&AgentEvent::TurnStart { turn: 2 });
-        tap.observe(&AgentEvent::TextDelta { delta: "final answer".into() });
+        tap.observe(&AgentEvent::TextDelta { delta: "answer".into() });
+        tap.observe(&AgentEvent::TextDelta {
+            delta: "answer\n\nTask contract warning: missing SQL deliverable".into(),
+        });
         tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        tap.finish(Ok("answer\n\nTask contract warning: missing SQL deliverable"), false);
 
         let mut terminal = receiver.recv().await.unwrap();
         while terminal.kind != KIND_AI_AGENT_FINISHED {
             terminal = receiver.recv().await.unwrap();
         }
-        assert_eq!(terminal.payload["text"], "final answer");
+        assert_eq!(terminal.payload["text"], "answer\n\nTask contract warning: missing SQL deliverable");
+    }
+
+    /// A text-only provider failure returns an error without emitting
+    /// `AgentEnd`; the boundary must still close the run for observers.
+    #[tokio::test]
+    async fn direct_error_without_agent_end_publishes_ai_error() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.finish(Err("provider down"), false);
+
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_ERROR);
+        assert_eq!(terminal.payload["type"], "error");
+        assert_eq!(terminal.payload["message"], "provider down");
+        assert_eq!(terminal.payload["cancelled"], false);
+        assert_eq!(terminal.payload["sessionId"], "session-1");
+    }
+
+    /// A cancelled CLI agent also returns an error directly; observers must be
+    /// able to tell the stop apart from a failure.
+    #[tokio::test]
+    async fn cancelled_direct_error_is_marked_cancelled() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.finish(Err("Agent run was cancelled"), true);
+
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_ERROR);
+        assert_eq!(terminal.payload["cancelled"], true);
+    }
+
+    /// When the loop already emitted `ai.agent_finished` and then failed, the
+    /// boundary must not publish a second one, and the observed error must not
+    /// be duplicated either.
+    #[tokio::test]
+    async fn existing_terminals_are_not_duplicated_on_error() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+        tap.observe(&AgentEvent::Error { message: "boom".into() });
+        tap.finish(Err("boom"), false);
+
+        // The loop's own `ai.error` publishes immediately; the deferred
+        // terminal follows it.
+        let error = receiver.recv().await.unwrap();
+        assert_eq!(error.kind, KIND_AI_ERROR);
+        assert_eq!(error.payload["message"], "boom");
+        let finished = receiver.recv().await.unwrap();
+        assert_eq!(finished.kind, KIND_AI_AGENT_FINISHED);
+        assert!(finished.payload.get("text").is_none());
+        // No third event: `finish` saw the test's `ai.error` and stayed quiet.
+        assert!(receiver.try_recv().is_err());
+    }
+
+    /// A success path that never emitted `AgentEnd` (defensive) still closes
+    /// the run with the authoritative text.
+    #[tokio::test]
+    async fn success_without_agent_end_still_publishes_the_terminal() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.finish(Ok("answer"), false);
+
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
+        assert_eq!(terminal.payload["text"], "answer");
     }
 
     fn plugin_tool_call(id: &str, name: &str) -> ToolCall {

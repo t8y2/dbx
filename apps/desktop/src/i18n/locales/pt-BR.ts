@@ -2453,6 +2453,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Colar e restaurar SQL de origem",
       pasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
       convertNamingStyle: "Alternar estilo de nomenclatura",
+      executeScriptFromHere: "Executar script SQL a partir daqui",
     },
     bookmarks: {
       workspaceTitle: "Marcadores",
@@ -2524,6 +2525,7 @@ export default withEnglishFallback({
     previewChangesNoStatement: "Selecione ou coloque o cursor em uma instrução UPDATE / INSERT / DELETE para pré-visualizar as alterações.",
     fullscreenResultsPane: "Exibir resultados em tela cheia",
     exitFullscreenResultsPane: "Sair da tela cheia dos resultados",
+    executeScriptBoundaryMismatch: "Este ponto depende do delimitador SQL anterior ou do limite do lote. Comece a execução a partir da linha do delimitador ou selecione o script completo para executar.",
   },
   tabs: {
     sql: "SQL",

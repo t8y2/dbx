@@ -2471,6 +2471,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "貼り付けてソース SQL を復元",
       pasteClipboardReadFailed: "クリップボードの読み取りに失敗しました：{message}",
       convertNamingStyle: "命名スタイルの切り替え",
+      executeScriptFromHere: "ここから SQL スクリプトを実行",
     },
     bookmarks: {
       workspaceTitle: "ブックマーク",
@@ -2544,6 +2545,7 @@ export default withEnglishFallback({
     previewChangesNoStatement: "変更をプレビューするには、UPDATE / INSERT / DELETE ステートメントを選択するか、その上にカーソルを置いてください。",
     fullscreenResultsPane: "結果を全画面表示",
     exitFullscreenResultsPane: "結果の全画面表示を終了",
+    executeScriptBoundaryMismatch: "この位置は前の SQL 区切り文字またはバッチ境界に依存しています。区切り文字のある行から実行するか、スクリプト全体を選択して実行してください。",
   },
   tabs: {
     sql: "SQL",

@@ -1,6 +1,7 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferColumnNameCase, TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import type { MysqlDelimiterCommand } from "@/lib/sql/sqlStatementRanges";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
@@ -1944,6 +1945,7 @@ export interface BatchStatementExecutionItem {
 export interface BatchSqlExecution {
   executionId: string;
   submittedSql: string;
+  mysqlDelimiterCommands?: readonly MysqlDelimiterCommand[];
   editorFingerprint: string;
   sourceOffset: number;
   completed: number;

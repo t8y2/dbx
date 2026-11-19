@@ -2381,6 +2381,7 @@ export default withEnglishFallback({
       deleteEmptyLines: "빈 줄 삭제",
       selectAll: "모두 선택",
       convertNamingStyle: "네이밍 스타일 전환",
+      executeScriptFromHere: "여기서 SQL 스크립트 실행",
     },
     delimitedList: {
       title: "구분자 목록으로 변환",
@@ -2446,6 +2447,7 @@ export default withEnglishFallback({
     previewChangesNoStatement: "변경 사항을 미리 보려면 UPDATE / INSERT / DELETE 문을 선택하거나 커서를 해당 문에 놓으십시오.",
     fullscreenResultsPane: "결과 전체 화면 표시",
     exitFullscreenResultsPane: "결과 전체 화면 종료",
+    executeScriptBoundaryMismatch: "이 위치는 앞의 SQL 구분 기호 또는 배치 경계에 의존합니다. 구분 기호가 있는 줄부터 실행하거나 전체 스크립트를 선택하여 실행하세요.",
   },
   tabs: {
     sql: "SQL",

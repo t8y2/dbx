@@ -2612,6 +2612,7 @@ export default withEnglishFallback({
       findReplace: "ค้นหา/แทนที่",
       deleteEmptyLines: "ลบบรรทัดว่าง",
       selectAll: "เลือกทั้งหมด",
+      executeScriptFromHere: "เรียกใช้สคริปต์ SQL จากที่นี่",
     },
     delimitedList: {
       title: "แปลงเป็นรายการคั่น",
@@ -2675,6 +2676,7 @@ export default withEnglishFallback({
     },
     fullscreenResultsPane: "แสดงผลลัพธ์แบบเต็มหน้าจอ",
     exitFullscreenResultsPane: "ออกจากโหมดเต็มหน้าจอผลลัพธ์",
+    executeScriptBoundaryMismatch: "ตำแหน่งนี้ขึ้นอยู่กับตัวคั่น SQL หรือขอบเขตแบตช์ก่อนหน้า โปรดเริ่มเรียกใช้จากบรรทัดที่มีตัวคั่น หรือเลือกสคริปต์ทั้งหมดเพื่อเรียกใช้",
   },
   tabs: {
     sql: "SQL",

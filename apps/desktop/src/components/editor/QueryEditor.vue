@@ -67,7 +67,7 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 import { resolveExecutableSql, type SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
 import { resolveContextMenuExportSql } from "@/lib/sql/contextMenuExportSql";
 import { supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
-import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { executableScriptFromStatement, executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { statementNavigationTarget, type StatementNavigationDirection } from "@/lib/sql/statementNavigation";
 
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
@@ -1040,6 +1040,28 @@ function executeAllFromContextMenu() {
   focusEditor();
 }
 
+function executeScriptFromContextPosition() {
+  const currentView = view.value;
+  if (!currentView || props.isExecuting) return;
+  const doc = currentView.state.doc;
+  const position = contextMenuPosition.value ?? currentView.state.selection.main.head;
+  const cache = executableStatementRangeCacheForDoc(executableStatementRangeCache, doc, statementDatabaseType(), sqlStatementParameterOptions());
+  executableStatementRangeCache = cache;
+  const currentStatement = executableStatementRangeAtCursor(cache, position);
+  const start = currentStatement ? cache.ranges.indexOf(currentStatement) : cache.ranges.findIndex((range) => range.to >= position);
+  if (start < 0) {
+    toast(t("editor.noExecutableStatementAtCursor"), 3000);
+    return;
+  }
+  const range = executableScriptFromStatement(cache, start, position);
+  if (!range) {
+    toast(t("editor.executeScriptBoundaryMismatch"), 5000);
+    return;
+  }
+  emitExecutionRequest(sqlExecutionSnapshotForRange(currentView, range));
+  focusEditor();
+}
+
 function executeInNewResultTabFromContextMenu() {
   if (!canExecuteContextSql.value) return;
   requestExecuteInNewResultTab();
@@ -1359,6 +1381,7 @@ const contextMenuActions: QueryEditorContextMenuActions = {
   },
   executeFromContextMenu,
   executeAllFromContextMenu,
+  executeScriptFromContextPosition,
   executeInNewResultTabFromContextMenu,
   explainFromContextMenu,
   requestPreviewChanges,
@@ -1413,6 +1436,8 @@ function getContextMenuState(): QueryEditorContextMenuState {
     expandSelectStar: target ? () => void expandSelectStar(target) : undefined,
     canExplain: props.canExplain ?? (canExecuteContextSql.value && !props.readOnly && !props.hideExecutionControls),
     hasContent: (view.value?.state.doc.length ?? 0) > 0,
+    showExecuteScriptFromHere: queryEditorSelectionLanguage() === "sql" && supportsExecutionTargetPicker(statementDatabaseType()),
+    canExecuteScriptFromHere: !props.isExecuting && (view.value?.state.doc.length ?? 0) > 0,
   };
 }
 

@@ -160,6 +160,7 @@ const frameReady = ref(false);
 const error = ref("");
 let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
+let unsubscribeObservationEvents: (() => void) | undefined;
 let disposed = false;
 let loadGeneration = 0;
 // Boot timing (§8.3 loading lifecycle): one console.debug line per iframe load
@@ -549,6 +550,9 @@ function createBridge() {
       invoke: api.invokePlugin,
       notify: api.notifyPlugin,
       sendBinary: api.sendPluginBinary,
+      // Desktop-only for now (web SSE delivery is a follow-up), so the bridge
+      // advertises `observations` only when this entry exists.
+      ...(isTauriRuntime() ? { subscribeHostObservations: api.subscribeHostObservations } : {}),
       readAsset: api.readPluginUiAsset,
       openAiConversation,
       ...(isTauriRuntime() ? aiCompletion : {}),
@@ -873,11 +877,14 @@ onMounted(async () => {
     (event) => bridge?.forwardEvent(event),
     (event) => bridge?.forwardBinary(event),
   );
+  const unsubscribeObservations = isTauriRuntime() ? await api.subscribeHostObservations((event) => bridge?.forwardObservation(event)) : undefined;
   if (disposed) {
     unsubscribe();
+    unsubscribeObservations?.();
     return;
   }
   unsubscribeEvents = unsubscribe;
+  unsubscribeObservationEvents = unsubscribeObservations;
   await loadWorkbench();
 });
 
@@ -932,6 +939,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("dbx:tauri-file-drop", onHostFileDrop);
   disposeLocalFileHandles();
   unsubscribeEvents?.();
+  unsubscribeObservationEvents?.();
 });
 </script>
 

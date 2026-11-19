@@ -144,6 +144,65 @@ struct PluginBinaryEventPayload {
     data_base64: String,
 }
 
+/// Event name for host observation events delivered to plugin UIs.
+pub const HOST_OBSERVATION_EVENT: &str = "dbx-host-observation";
+/// Method name used when forwarding host observations to sidecar backends.
+pub const HOST_OBSERVATION_SIDECAR_METHOD: &str = "host/observation";
+
+/// Wire the host observation bus to both plugin run surfaces.
+///
+/// * UI: every event goes out as `dbx-host-observation`; each plugin bridge
+///   filters by the `host.observe:*` permissions of its own manifest, so the
+///   permission boundary lives in one place (pluginHostBridge.ts).
+/// * Sidecar: events are pushed as `host/observation` notifications to
+///   already-running sessions that declared the matching permission. High
+///   frequency delta streams stay UI-only (see
+///   `HostObservationEvent::is_delivered_to_sidecar`).
+pub fn install_host_observation_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
+    let app_handle = app.clone();
+    let mut observations = state.host_observations.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match observations.recv().await {
+                Ok(event) => {
+                    let _ = app_handle.emit(HOST_OBSERVATION_EVENT, event);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("Desktop host observation bridge skipped {skipped} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let plugin_host = state.plugin_host.clone();
+    let mut observations = state.host_observations.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match observations.recv().await {
+                Ok(event) => {
+                    if !event.is_delivered_to_sidecar() {
+                        continue;
+                    }
+                    let Some(permission) =
+                        dbx_core::models::observability::HostObservationEvent::permission_for_kind(&event.kind)
+                    else {
+                        continue;
+                    };
+                    let Ok(params) = serde_json::to_value(&event) else {
+                        continue;
+                    };
+                    plugin_host.broadcast_observation(permission, HOST_OBSERVATION_SIDECAR_METHOD, params).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!("Desktop host observation sidecar bridge skipped {skipped} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 pub fn install_plugin_event_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
     let app_handle = app.clone();
     let mut events = state.plugin_host.subscribe_events();

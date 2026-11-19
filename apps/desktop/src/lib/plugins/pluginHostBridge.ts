@@ -13,6 +13,8 @@ import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_S
 import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, type PluginConnectionSummary } from "@/types/pluginConnection";
 import { floatingWindowLabel } from "@/lib/app/windowContext";
 import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
+import { pluginObservationPermission } from "./pluginObservation";
+import type { PluginHostObservationEvent } from "@/types/pluginObservation";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -313,6 +315,8 @@ export interface PluginHostBridgeApi {
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
   /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
   receiveOsDrops?: boolean;
+  /** Whether this host can subscribe to host observation events; presence gates the `observations` capability. */
+  subscribeHostObservations?(): Promise<() => void> | (() => void);
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
   storageGet?(pluginId: string, key: string): Promise<unknown>;
   storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;
@@ -549,6 +553,9 @@ export class PluginHostBridge {
           folderExpansion: !!this.api.receiveOsDrops,
         },
         [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
+        // Host observation bus: one flag; each event is still filtered by
+        // the matching host.observe:* permission in forwardObservation.
+        observations: !!this.api.subscribeHostObservations,
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -620,6 +627,27 @@ export class PluginHostBridge {
     if (!target) return;
     const buffer = base64ToBytes(event.dataBase64);
     target.postMessage({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "binary", channel: event.channel, data: buffer }, "*", [buffer]);
+  }
+
+  /**
+   * Forward one host observation event when the workbench plugin declared the
+   * matching `host.observe:*` permission. Unknown kinds are dropped (fail
+   * closed) so a future kind without a mapping cannot leak through.
+   */
+  forwardObservation(event: PluginHostObservationEvent): void {
+    const permission = pluginObservationPermission(event.kind);
+    if (!permission || !this.hasPermission(permission)) return;
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "hostevent",
+      id: event.id,
+      kind: event.kind,
+      tsMs: event.tsMs,
+      connectionId: event.connectionId,
+      database: event.database,
+      payload: event.payload,
+    });
   }
 
   /** Tell the plugin whether an OS-level file drag is currently over its workbench. */
@@ -1349,7 +1377,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set(), hostevent: new Set() };
     let sequence = 0;
     let contributionId;
     let context;
@@ -1607,6 +1635,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       }),
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
+      onHostEvent: (listener) => { listeners.hostevent.add(listener); return () => listeners.hostevent.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
       // §8.3 workbench/close handshake: the host sends workbench/close before
@@ -1657,6 +1686,17 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const payload = { channel: message.channel, data: message.data ? new Uint8Array(message.data) : new Uint8Array(0) };
         listeners.binary.forEach((listener) => listener(payload));
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
+      } else if (message.type === 'hostevent') {
+        const observation = {
+          id: typeof message.id === 'number' ? message.id : 0,
+          kind: typeof message.kind === 'string' ? message.kind : '',
+          tsMs: typeof message.tsMs === 'number' ? message.tsMs : Date.now(),
+          connectionId: typeof message.connectionId === 'string' ? message.connectionId : undefined,
+          database: typeof message.database === 'string' ? message.database : undefined,
+          payload: message.payload,
+        };
+        listeners.hostevent.forEach((listener) => listener(observation));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-host-event', { detail: observation }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
         const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')

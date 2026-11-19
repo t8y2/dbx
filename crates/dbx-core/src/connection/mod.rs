@@ -40,6 +40,7 @@ use crate::models::connection::{
     validate_jdbc_transport_url, ConnectionConfig, ConnectionIdleClosedEvent, ConnectionLivenessFailureKind,
     ConnectionLivenessMessage, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
+use crate::models::observability::{cap_observation_text, KIND_CONNECTION_OPENED, KIND_CONNECTION_OPEN_FAILED};
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
@@ -505,6 +506,9 @@ pub struct AppState {
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub plugin_host: PluginHost,
+    /// Structured host activity for observability plugins (`host.observe:*`).
+    /// Taps publish here; shells forward to plugin UIs and sidecars.
+    pub host_observations: crate::observability::HostObservationBus,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub pl_debug: Arc<crate::query::pl_debug::PlDebugRegistry>,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
@@ -2153,7 +2157,18 @@ impl AppState {
         let app_version = app_version.into();
         let data_dir = storage.data_dir().to_path_buf();
         let plugins = PluginRegistry::new_with_app_version(plugin_dir, app_version.clone());
-        let plugin_host = PluginHost::new(plugins.clone());
+        // One bus per AppState. Plugin lifecycle observations are wired into
+        // the same bus so a plugin watching `host.observe:plugins` sees its
+        // peers start/stop alongside queries and connections.
+        let host_observations = crate::observability::HostObservationBus::new();
+        let plugin_host = {
+            let bus = host_observations.clone();
+            let sink: dbx_plugin_runtime::plugins::observation::PluginObservationSink =
+                Arc::new(move |observation: dbx_plugin_runtime::plugins::observation::PluginObservation| {
+                    bus.publish(observation.kind, None, None, observation.payload);
+                });
+            PluginHost::new_with_observation_sink(plugins.clone(), Some(sink))
+        };
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -2171,6 +2186,7 @@ impl AppState {
             storage,
             plugins,
             plugin_host,
+            host_observations,
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,
@@ -3515,6 +3531,60 @@ impl AppState {
         }
     }
 
+    /// Publish a `connection.opened` observation when the core pool funnel
+    /// creates a pool on demand. Explicit user connects publish their own
+    /// event from the shell with `reason: "explicit"`; this funnel never runs
+    /// on that path, so the two cannot double count.
+    fn publish_connection_opened(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        reason: &str,
+        duration_ms: u64,
+    ) {
+        if self.host_observations.subscriber_count() == 0 {
+            return;
+        }
+        self.host_observations.publish(
+            KIND_CONNECTION_OPENED,
+            Some(connection_id.to_string()),
+            database.map(str::to_string),
+            serde_json::json!({
+                "dbType": serde_json::to_value(config.db_type).unwrap_or(serde_json::Value::Null),
+                "reason": reason,
+                "durationMs": duration_ms,
+            }),
+        );
+    }
+
+    fn publish_connection_open_failed(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+        database: Option<&str>,
+        reason: &str,
+        duration_ms: u64,
+        error: &str,
+    ) {
+        if self.host_observations.subscriber_count() == 0 {
+            return;
+        }
+        let (message, truncated) = cap_observation_text(error);
+        self.host_observations.publish(
+            KIND_CONNECTION_OPEN_FAILED,
+            Some(connection_id.to_string()),
+            database.map(str::to_string),
+            serde_json::json!({
+                "dbType": serde_json::to_value(config.db_type).unwrap_or(serde_json::Value::Null),
+                "reason": reason,
+                "durationMs": duration_ms,
+                "error": message,
+                "errorTruncated": truncated,
+            }),
+        );
+    }
+
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
@@ -3549,6 +3619,7 @@ impl AppState {
             let configs = self.configs.read().await;
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
+        let observation_started = Instant::now();
         validate_connection_url_params(&config)?;
         let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
@@ -4295,14 +4366,43 @@ impl AppState {
         }.await;
         let pool = match pool_result {
             Ok(ConnectionPoolBuild::Candidate(pool)) => *pool,
-            Ok(ConnectionPoolBuild::Published(receipt)) => return Ok(receipt),
+            Ok(ConnectionPoolBuild::Published(receipt)) => {
+                // Some driver branches (native MongoDB) publish their pool
+                // internally and return `Published`, skipping the outer
+                // publish below; report the open here so exactly one event
+                // fires for this pool either way.
+                self.publish_connection_opened(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                );
+                return Ok(receipt);
+            }
             Err(error) => {
                 self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                self.publish_connection_open_failed(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                    &error,
+                );
                 return Err(error);
             }
         };
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.discard_stale_connection_attempt_pool(connection_id, pool_key.clone(), pool, &transport_stamp).await;
+            self.publish_connection_open_failed(
+                connection_id,
+                &config,
+                database,
+                "on_demand",
+                observation_started.elapsed().as_millis() as u64,
+                &err,
+            );
             return Err(err);
         }
         let published = self
@@ -4314,8 +4414,25 @@ impl AppState {
                 connection_attempt,
             )
             .await;
-        if published.is_err() {
-            self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+        match &published {
+            Ok(_) => self.publish_connection_opened(
+                connection_id,
+                &config,
+                database,
+                "on_demand",
+                observation_started.elapsed().as_millis() as u64,
+            ),
+            Err(error) => {
+                self.reset_connection_transport_if_current(connection_id, &transport_stamp).await;
+                self.publish_connection_open_failed(
+                    connection_id,
+                    &config,
+                    database,
+                    "on_demand",
+                    observation_started.elapsed().as_millis() as u64,
+                    error,
+                );
+            }
         }
         published
     }
@@ -7787,6 +7904,15 @@ impl AppState {
         self.pool_routing_control().close_removed(removed).await;
     }
 
+    /// Whether any pool is currently registered for `connection_id` (the base
+    /// key itself or a `{connection_id}:…` session/database key). Lets shells
+    /// skip a `connection.closed` observation for a disconnect of a
+    /// never-connected id.
+    pub async fn has_connection_pools(&self, connection_id: &str) -> bool {
+        let pool_prefix = format!("{connection_id}:");
+        self.connections.read().await.keys().any(|key| *key == connection_id || key.starts_with(&pool_prefix))
+    }
+
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
         let pool_prefix = format!("{connection_id}:");
         let keys_to_remove: Vec<String> = self
@@ -9272,6 +9398,26 @@ mod tests {
             "https://example.test/tunnel.php"
         );
         assert_eq!(redact_transport_url("https://alice:secret@%/"), "<invalid-url>");
+    }
+
+    #[tokio::test]
+    async fn connection_open_failed_observation_carries_reason_and_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, directory.path().join("plugins"));
+        let config = mysql_config(None);
+        let mut events = state.host_observations.subscribe();
+
+        state.publish_connection_open_failed("conn-x", &config, Some("sales"), "on_demand", 42, "boom");
+
+        let event = events.recv().await.expect("connection.open_failed event");
+        assert_eq!(event.kind, dbx_types::models::observability::KIND_CONNECTION_OPEN_FAILED);
+        assert_eq!(event.connection_id.as_deref(), Some("conn-x"));
+        assert_eq!(event.database.as_deref(), Some("sales"));
+        assert_eq!(event.payload["reason"], "on_demand");
+        assert_eq!(event.payload["durationMs"], 42);
+        assert_eq!(event.payload["error"], "boom");
+        assert_eq!(event.payload["errorTruncated"], false);
     }
 
     #[tokio::test]

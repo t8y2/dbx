@@ -48,6 +48,7 @@ use crate::query_execution_sql::{is_oracle_proven_read_only_statement, is_write_
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
 use crate::sql_dialect::{quote_iris_identifier, resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
+use dbx_types::models::observability::{cap_observation_text, KIND_QUERY_FINISHED, KIND_QUERY_STARTED};
 
 pub const AGENT_PROTOCOL_MAX_ROWS: usize = i32::MAX as usize;
 pub const METADATA_POOL_BUSY_ERROR: &str = "DBX metadata pool is busy; please retry";
@@ -3056,6 +3057,77 @@ type ExecutedSqlStatementOutcome = Result<(db::QueryResult, Option<MysqlAutoComm
 /// the MySQL auto-commit settlement left the tab-scoped connection (see
 /// [`MysqlAutoCommitTransaction`]). `None` means the statement did not run on a
 /// tab-scoped MySQL connection, so there is no such state to report.
+/// Publish `query.started` for one funnel execution. The caller must have
+/// checked `host_observations.subscriber_count()` first — this helper
+/// allocates unconditionally.
+fn publish_query_started(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    catalog: Option<&str>,
+    execution_id: Option<&str>,
+) {
+    let (sql_text, sql_truncated) = cap_observation_text(sql);
+    state.host_observations.publish(
+        KIND_QUERY_STARTED,
+        Some(connection_id.to_string()),
+        Some(database.to_string()),
+        serde_json::json!({
+            "executionId": execution_id,
+            "sql": sql_text,
+            "sqlTruncated": sql_truncated,
+            "schema": schema,
+            "catalog": catalog,
+        }),
+    );
+}
+
+/// Publish `query.finished` for one funnel execution. `result` borrows the
+/// outcome so the caller keeps ownership of the execution result.
+#[allow(clippy::too_many_arguments)]
+fn publish_query_finished(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    execution_id: Option<&str>,
+    duration_ms: u64,
+    result: Result<&db::QueryResult, &QueryExecutionError>,
+    cancelled: bool,
+) {
+    let (sql_text, sql_truncated) = cap_observation_text(sql);
+    let mut payload = serde_json::json!({
+        "executionId": execution_id,
+        "sql": sql_text,
+        "sqlTruncated": sql_truncated,
+        "durationMs": duration_ms,
+    });
+    match result {
+        Ok(query_result) => {
+            payload["status"] = serde_json::json!("ok");
+            payload["rowCount"] = serde_json::json!(query_result.rows.len());
+            payload["affectedRows"] = serde_json::json!(query_result.affected_rows);
+            payload["truncated"] = serde_json::json!(query_result.truncated);
+            payload["serverExecuteTimeUs"] = serde_json::json!(query_result.server_execute_time_us);
+            payload["statementDurationMs"] = serde_json::json!(query_result.execution_time_ms as u64);
+        }
+        Err(error) => {
+            payload["status"] = serde_json::json!(if cancelled { "cancelled" } else { "error" });
+            let (message, message_truncated) = cap_observation_text(&error.to_string());
+            payload["error"] = serde_json::json!(message);
+            payload["errorTruncated"] = serde_json::json!(message_truncated);
+        }
+    }
+    state.host_observations.publish(
+        KIND_QUERY_FINISHED,
+        Some(connection_id.to_string()),
+        Some(database.to_string()),
+        payload,
+    );
+}
+
 pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
     state: &AppState,
     connection_id: &str,
@@ -3072,6 +3144,27 @@ pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
     // reported with the duration of the whole request, including creating or
     // reconnecting the pool, so the summary matches the loading indicator.
     let request_start = std::time::Instant::now();
+    // Observability tap. This is the single funnel for standalone statements,
+    // every statement of the generic sequential batch loop, AI agent tools and
+    // SQL-file imports, so it is also the only place that must publish query
+    // events. The subscriber check keeps the hot path allocation-free when no
+    // observability plugin is attached.
+    let observe = state.host_observations.subscriber_count() > 0;
+    let observation_execution_id = options.execution_id.clone();
+    if observe {
+        publish_query_started(
+            state,
+            connection_id,
+            database,
+            sql,
+            schema,
+            options.catalog.as_deref(),
+            observation_execution_id.as_deref(),
+        );
+    }
+    // The token is consumed by the inner call; keep a clone so a cancelled
+    // statement can be reported as such instead of as a generic error.
+    let cancel_token_for_observation = cancel_token.clone();
     let result = execute_sql_statement_with_options_typed_inner(
         state,
         connection_id,
@@ -3083,6 +3176,18 @@ pub(crate) async fn execute_sql_statement_with_options_typed_with_outcome(
         &mut transaction,
     )
     .await;
+    if observe {
+        publish_query_finished(
+            state,
+            connection_id,
+            database,
+            sql,
+            observation_execution_id.as_deref(),
+            request_start.elapsed().as_millis() as u64,
+            result.as_ref(),
+            is_canceled(&cancel_token_for_observation),
+        );
+    }
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
@@ -4198,6 +4303,74 @@ async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
             mysql_pool.as_ref().and_then(|(pool, _)| pool.data_charset()),
         );
     }
+
+    // Native batch paths (MySQL multi-statement pipeline and SQL Server GO
+    // batches) bypass the per-statement funnel, so their observations come
+    // from the progress reports. The generic sequential loop below re-enters
+    // `execute_sql_statement_with_options_typed` for each statement and is
+    // already covered by the funnel; wrapping it again would double count.
+    let native_batch = mysql_pool.is_some() || complete_sqlserver_agent_batch;
+    let observe_batch = native_batch && state.host_observations.subscriber_count() > 0;
+    let progress = if observe_batch {
+        let batch_execution_id = options.execution_id.clone();
+        let (batch_sql, batch_sql_truncated) = cap_observation_text(sql);
+        state.host_observations.publish(
+            KIND_QUERY_STARTED,
+            Some(connection_id.to_string()),
+            Some(database.to_string()),
+            serde_json::json!({
+                "executionId": batch_execution_id,
+                "sql": batch_sql,
+                "sqlTruncated": batch_sql_truncated,
+                "schema": schema,
+                "statementCount": statements.len(),
+                "batch": true,
+            }),
+        );
+        let bus = state.host_observations.clone();
+        let observed_connection_id = connection_id.to_string();
+        let observed_database = database.to_string();
+        let statements = statements.clone();
+        let original = progress;
+        let observed: ExecuteMultiProgressCallback = Arc::new(move |item: ExecuteMultiProgress| {
+            let mut payload = serde_json::json!({
+                "executionId": batch_execution_id,
+                "statementIndex": item.statement_index,
+                "statementTotal": item.total,
+                "durationMs": item.execution_time_ms as u64,
+                "affectedRows": item.affected_rows,
+                "batch": true,
+            });
+            // The generic loop reports `statement_index + offset` for grouped
+            // statements; `get` tolerates a report that runs past the split.
+            if let Some(statement_sql) = statements.get(item.statement_index) {
+                let (sql_text, sql_truncated) = cap_observation_text(statement_sql);
+                payload["sql"] = serde_json::json!(sql_text);
+                payload["sqlTruncated"] = serde_json::json!(sql_truncated);
+            }
+            payload["status"] = serde_json::json!(if item.success { "ok" } else { "error" });
+            if let Some(error) = &item.error {
+                // `BackendError` models structured failures and has no Display
+                // impl; its JSON form is the same shape the frontend receives.
+                let message = serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}"));
+                let (message, message_truncated) = cap_observation_text(&message);
+                payload["error"] = serde_json::json!(message);
+                payload["errorTruncated"] = serde_json::json!(message_truncated);
+            }
+            bus.publish(
+                KIND_QUERY_FINISHED,
+                Some(observed_connection_id.clone()),
+                Some(observed_database.clone()),
+                payload,
+            );
+            if let Some(original) = &original {
+                original(item);
+            }
+        });
+        Some(observed)
+    } else {
+        progress
+    };
 
     if let Some((pool, mode)) = mysql_pool {
         // Read-only check for MySQL batch path
@@ -8871,6 +9044,70 @@ mod tests {
         // just like any other statement failure.
         let result = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
         assert_eq!(result.rows[0][0], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn query_execution_publishes_observation_events() {
+        use dbx_types::models::observability::{KIND_CONNECTION_OPENED, KIND_QUERY_FINISHED, KIND_QUERY_STARTED};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let storage =
+            crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-observation";
+        let db_path = dir.path().join("observation.db");
+        std::fs::File::create(&db_path).expect("create SQLite database file");
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = connection_id.to_string();
+        config.host = db_path.to_string_lossy().into_owned();
+        config.query_timeout_secs = 0;
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        // Attach the observer before the pool exists so the connection tap is
+        // exercised from the same funnel the query tap uses.
+        let mut events = state.host_observations.subscribe();
+
+        state.get_or_create_pool_for_session(connection_id, Some(""), None).await.expect("create SQLite pool");
+
+        let opened = events.recv().await.expect("connection.opened event");
+        assert_eq!(opened.kind, KIND_CONNECTION_OPENED);
+        assert_eq!(opened.connection_id.as_deref(), Some(connection_id));
+        assert_eq!(opened.payload["reason"], "on_demand");
+        assert_eq!(opened.payload["dbType"], "sqlite");
+
+        let result = execute_sql_statement_with_options_typed(
+            &state,
+            connection_id,
+            "",
+            "SELECT 1 AS n",
+            None,
+            None,
+            QueryExecutionOptions { execution_id: Some("obs-1".to_string()), ..Default::default() },
+        )
+        .await
+        .expect("execute select");
+        assert_eq!(result.rows.len(), 1);
+
+        let started = loop {
+            let event = events.recv().await.expect("observation event");
+            if event.kind == KIND_QUERY_STARTED {
+                break event;
+            }
+        };
+        assert_eq!(started.connection_id.as_deref(), Some(connection_id));
+        assert_eq!(started.payload["executionId"], "obs-1");
+        assert_eq!(started.payload["sql"], "SELECT 1 AS n");
+
+        let finished = loop {
+            let event = events.recv().await.expect("observation event");
+            if event.kind == KIND_QUERY_FINISHED {
+                break event;
+            }
+        };
+        assert_eq!(finished.payload["executionId"], "obs-1");
+        assert_eq!(finished.payload["status"], "ok");
+        assert_eq!(finished.payload["rowCount"], 1);
+        assert!(finished.payload["durationMs"].is_u64());
     }
 
     #[tokio::test]

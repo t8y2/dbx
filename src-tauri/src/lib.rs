@@ -2377,6 +2377,7 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            commands::plugins::install_host_observation_bridge(app.handle(), state.clone());
             commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
             commands::connection::install_connection_idle_closed_bridge(app.handle(), state.clone());
             let app_identifier = app.config().identifier.clone();

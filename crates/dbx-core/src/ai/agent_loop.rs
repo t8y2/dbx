@@ -12,6 +12,13 @@ use crate::ai::{self, AiCompletionRequest, AiConfig, AiMessage, AiProvider, AiSt
 use crate::ai_cli_agent::CliAgentCommandSpec;
 use crate::connection::AppState;
 use crate::models::connection::DatabaseType;
+use crate::models::observability::{
+    KIND_AI_AGENT_FINISHED, KIND_AI_APPROVAL_REQUIRED, KIND_AI_APPROVAL_RESOLVED, KIND_AI_CONTEXT_COMPACTED,
+    KIND_AI_ERROR, KIND_AI_OUTPUT_TRUNCATED, KIND_AI_PRODUCTION_WRITE_BLOCKED, KIND_AI_REASONING_DELTA,
+    KIND_AI_RESPONSE_COMPLETE, KIND_AI_TEXT_DELTA, KIND_AI_TOOL_CALL_FINISHED, KIND_AI_TOOL_CALL_STARTED,
+    KIND_AI_TURN_ENDED, KIND_AI_TURN_STARTED, KIND_AI_WRITE_SQL_CONFIRMATION_REQUIRED,
+};
+use crate::observability::cap_observation_fields;
 use crate::plugin_tools::{self, PluginToolSet, PreparedPluginToolCall};
 use crate::skill_tools;
 use crate::token_usage::TokenUsage;
@@ -146,6 +153,29 @@ async fn provider_function_calling_support(config: &AiConfig) -> FunctionCalling
     }
 }
 
+/// Map an [`AgentEvent`] onto the host observation kind for plugins.
+/// Keep in sync with the frontend mirror in
+/// apps/desktop/src/lib/plugins/pluginObservation.ts.
+fn agent_event_observation_kind(event: &AgentEvent) -> Option<&'static str> {
+    Some(match event {
+        AgentEvent::TurnStart { .. } => KIND_AI_TURN_STARTED,
+        AgentEvent::TurnEnd { .. } => KIND_AI_TURN_ENDED,
+        AgentEvent::TextDelta { .. } => KIND_AI_TEXT_DELTA,
+        AgentEvent::ReasoningDelta { .. } => KIND_AI_REASONING_DELTA,
+        AgentEvent::WriteSqlConfirmationRequired { .. } => KIND_AI_WRITE_SQL_CONFIRMATION_REQUIRED,
+        AgentEvent::ProductionWriteBlocked { .. } => KIND_AI_PRODUCTION_WRITE_BLOCKED,
+        AgentEvent::ToolCallStart { .. } => KIND_AI_TOOL_CALL_STARTED,
+        AgentEvent::ToolCallEnd { .. } => KIND_AI_TOOL_CALL_FINISHED,
+        AgentEvent::ToolApprovalRequired { .. } => KIND_AI_APPROVAL_REQUIRED,
+        AgentEvent::ToolApprovalResolved { .. } => KIND_AI_APPROVAL_RESOLVED,
+        AgentEvent::ResponseComplete => KIND_AI_RESPONSE_COMPLETE,
+        AgentEvent::OutputTruncated { .. } => KIND_AI_OUTPUT_TRUNCATED,
+        AgentEvent::AgentEnd { .. } => KIND_AI_AGENT_FINISHED,
+        AgentEvent::ContextCompacted { .. } => KIND_AI_CONTEXT_COMPACTED,
+        AgentEvent::Error { .. } => KIND_AI_ERROR,
+    })
+}
+
 /// Run the agent loop: call LLM with tools, execute tool calls, feed results back, repeat.
 ///
 /// The `on_event` callback receives streaming events for the frontend.
@@ -166,12 +196,47 @@ pub async fn run_agent_loop(
     task_contract: Option<&AiTaskContract>,
     is_agent_mode: bool,
 ) -> Result<String, String> {
+    // Observation tap. `on_event` is the loop's only event exit, so wrapping
+    // it here captures every variant (turns, tool calls, approvals, context
+    // compaction, token usage) without touching the 20+ emit sites inside or
+    // the two shell callers. The subscriber check keeps the closure almost
+    // free when no observability plugin is attached.
+    let observations = agent_ctx.state.host_observations.clone();
+    let observation_context = (
+        agent_ctx.connection_id.clone(),
+        agent_ctx.database.clone(),
+        agent_ctx.session_id.clone(),
+        serde_json::to_value(&config.provider).unwrap_or(serde_json::Value::Null),
+        config.model.clone(),
+    );
+    let observed_on_event = {
+        let original = on_event.clone();
+        move |event: AgentEvent| {
+            if observations.subscriber_count() > 0 {
+                if let Some(kind) = agent_event_observation_kind(&event) {
+                    let mut payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+                    let (connection_id, database, session_id, provider, model) = &observation_context;
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert(
+                            "sessionId".to_string(),
+                            serde_json::to_value(session_id).unwrap_or(serde_json::Value::Null),
+                        );
+                        object.insert("provider".to_string(), provider.clone());
+                        object.insert("model".to_string(), serde_json::Value::String(model.clone()));
+                    }
+                    cap_observation_fields(&mut payload, &["sql", "args", "result", "summary"]);
+                    observations.publish(kind, Some(connection_id.clone()), Some(database.clone()), payload);
+                }
+            }
+            original(event);
+        }
+    };
     run_agent_loop_inner(
         config,
         system_prompt,
         messages,
         agent_ctx,
-        on_event,
+        observed_on_event,
         cancelled,
         max_tokens,
         task_contract,
@@ -1745,6 +1810,81 @@ mod tests {
                 ] }),
             )],
         )
+    }
+
+    /// The observation bus must see every agent event variant; this table is
+    /// exhaustive on purpose so adding an `AgentEvent` variant without a kind
+    /// fails to compile here instead of silently disappearing from the stream.
+    #[test]
+    fn agent_event_observation_kinds_cover_every_variant() {
+        let events = vec![
+            (AgentEvent::TurnStart { turn: 1 }, KIND_AI_TURN_STARTED),
+            (AgentEvent::TurnEnd { turn: 1 }, KIND_AI_TURN_ENDED),
+            (AgentEvent::TextDelta { delta: "x".into() }, KIND_AI_TEXT_DELTA),
+            (AgentEvent::ReasoningDelta { delta: "x".into() }, KIND_AI_REASONING_DELTA),
+            (
+                AgentEvent::WriteSqlConfirmationRequired { sql: "update t".into() },
+                KIND_AI_WRITE_SQL_CONFIRMATION_REQUIRED,
+            ),
+            (AgentEvent::ProductionWriteBlocked { sql: "update t".into() }, KIND_AI_PRODUCTION_WRITE_BLOCKED),
+            (
+                AgentEvent::ToolCallStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "list_tables".into(),
+                    args: json!({}),
+                },
+                KIND_AI_TOOL_CALL_STARTED,
+            ),
+            (
+                AgentEvent::ToolCallEnd {
+                    tool_call_id: "c1".into(),
+                    tool_name: "list_tables".into(),
+                    result: json!({}),
+                    is_error: false,
+                },
+                KIND_AI_TOOL_CALL_FINISHED,
+            ),
+            (
+                AgentEvent::ToolApprovalRequired {
+                    approval_id: "a1".into(),
+                    tool_call_id: "c1".into(),
+                    tool_name: "kafka__delete".into(),
+                    plugin_id: "io.dbx.kafka".into(),
+                    plugin_name: "Kafka".into(),
+                    plugin_tool: "delete".into(),
+                    connection_id: "k1".into(),
+                    connection_name: "prod".into(),
+                    args: json!({}),
+                    timeout_secs: 60,
+                },
+                KIND_AI_APPROVAL_REQUIRED,
+            ),
+            (
+                AgentEvent::ToolApprovalResolved {
+                    approval_id: "a1".into(),
+                    tool_call_id: "c1".into(),
+                    outcome: ToolApprovalOutcome::Approved,
+                },
+                KIND_AI_APPROVAL_RESOLVED,
+            ),
+            (AgentEvent::ResponseComplete, KIND_AI_RESPONSE_COMPLETE),
+            (AgentEvent::OutputTruncated { finish_reason: "length".into() }, KIND_AI_OUTPUT_TRUNCATED),
+            (AgentEvent::AgentEnd { input_tokens: Some(1), output_tokens: Some(2) }, KIND_AI_AGENT_FINISHED),
+            (
+                AgentEvent::ContextCompacted {
+                    summary: "s".into(),
+                    summary_tokens: 1,
+                    compacted_messages: 2,
+                    estimated_before: 3,
+                    estimated_after: 4,
+                },
+                KIND_AI_CONTEXT_COMPACTED,
+            ),
+            (AgentEvent::Error { message: "boom".into() }, KIND_AI_ERROR),
+        ];
+        for (event, expected) in events {
+            assert_eq!(agent_event_observation_kind(&event), Some(expected), "{event:?}");
+        }
     }
 
     fn plugin_tool_call(id: &str, name: &str) -> ToolCall {

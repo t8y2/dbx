@@ -7,6 +7,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+use super::observation::{
+    PluginObservation, PluginObservationSink, KIND_ACTIVATED, KIND_ACTIVATE_FAILED, KIND_STATUS_CHANGED, KIND_STOPPED,
+};
 use super::{
     InstalledPlugin, PluginBinaryMessage, PluginConnectionActionContribution, PluginConnectionCapability,
     PluginConnectionProviderContribution, PluginEvent, PluginFormFieldBinding, PluginFormFieldDefinition,
@@ -14,6 +17,11 @@ use super::{
     PluginSidecarSession, PluginTrustStore, PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD,
     PLUGIN_CONNECTION_DISCONNECT_METHOD, PLUGIN_CONNECTION_TEST_METHOD,
 };
+
+/// Upper bound for one sidecar notification during observation fan-out. A
+/// sidecar that stopped draining its stdin must not stall the whole fan-out
+/// (and with it every other observer) forever.
+const OBSERVATION_NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,10 +135,23 @@ struct PluginHostInner {
     connection_lifecycles: StdMutex<ConnectionLifecycleTable>,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
+    /// Receives plugin lifecycle observations (activated / failed / status /
+    /// stopped). `None` disables observation entirely (tests, MCP clients).
+    observation_sink: Option<PluginObservationSink>,
 }
 
 impl PluginHost {
     pub fn new(registry: PluginRegistry) -> Self {
+        Self::new_with_observation_sink(registry, None)
+    }
+
+    /// Build a host that reports plugin lifecycle observations through `sink`.
+    /// The sink is invoked from activation/stop paths and a per-session status
+    /// watcher, so it must not block.
+    pub fn new_with_observation_sink(
+        registry: PluginRegistry,
+        observation_sink: Option<PluginObservationSink>,
+    ) -> Self {
         let (events, _) = broadcast::channel(512);
         let (binary_messages, _) = broadcast::channel(128);
         Self {
@@ -141,7 +162,14 @@ impl PluginHost {
                 connection_lifecycles: StdMutex::new(HashMap::new()),
                 events,
                 binary_messages,
+                observation_sink,
             }),
+        }
+    }
+
+    fn emit_observation(&self, observation: PluginObservation) {
+        if let Some(sink) = self.inner.observation_sink.as_ref() {
+            sink(observation);
         }
     }
 
@@ -174,6 +202,27 @@ impl PluginHost {
     }
 
     pub async fn activate_with_env(
+        &self,
+        plugin_id: &str,
+        env: PluginRuntimeEnv,
+    ) -> Result<Arc<PluginSidecarSession>, String> {
+        match self.activate_with_env_inner(plugin_id, env).await {
+            Ok(session) => Ok(session),
+            Err(error) => {
+                // Report every failed activation attempt (including "not
+                // installed" / "incompatible"): audit plugins need to see
+                // retries and misconfiguration, not just successful starts.
+                self.emit_observation(PluginObservation {
+                    plugin_id: plugin_id.to_string(),
+                    kind: KIND_ACTIVATE_FAILED,
+                    payload: serde_json::json!({ "pluginId": plugin_id, "error": error }),
+                });
+                Err(error)
+            }
+        }
+    }
+
+    async fn activate_with_env_inner(
         &self,
         plugin_id: &str,
         env: PluginRuntimeEnv,
@@ -214,7 +263,102 @@ impl PluginHost {
         self.inner.sessions.write().await.insert(plugin_id.to_string(), session.clone());
         self.watch_session(&session, probe);
         startup.disarm();
+        self.emit_observation(PluginObservation {
+            plugin_id: plugin_id.to_string(),
+            kind: KIND_ACTIVATED,
+            payload: serde_json::json!({
+                "pluginId": plugin_id,
+                "version": session.plugin().manifest.version,
+            }),
+        });
+        self.watch_session_status(&session);
         Ok(session)
+    }
+
+    /// Forward `PluginSessionState` transitions (Running → Stopping →
+    /// Stopped/Exited) to the observation sink. The initial `Running`
+    /// snapshot is skipped because `plugin.activated` already reports it.
+    fn watch_session_status(&self, session: &Arc<PluginSidecarSession>) {
+        let Some(sink) = self.inner.observation_sink.clone() else {
+            return;
+        };
+        let plugin_id = session.plugin().manifest.id.clone();
+        let mut status = session.subscribe_status();
+        tokio::spawn(async move {
+            while status.changed().await.is_ok() {
+                let current = status.borrow_and_update().clone();
+                let terminal = matches!(current.state, PluginSessionState::Stopped | PluginSessionState::Exited);
+                // `plugin.stopped` is the terminal marker; non-terminal
+                // transitions keep their own kind so consumers can drive a
+                // state machine without guessing from `state`.
+                let kind = if terminal { KIND_STOPPED } else { KIND_STATUS_CHANGED };
+                let state = serde_json::to_value(&current.state).unwrap_or(serde_json::Value::Null);
+                sink(PluginObservation {
+                    plugin_id: plugin_id.clone(),
+                    kind,
+                    payload: serde_json::json!({
+                        "pluginId": plugin_id,
+                        "state": state,
+                        "message": current.message,
+                    }),
+                });
+                if terminal {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Deliver one observation event to every already-running plugin session
+    /// whose manifest declares `permission`.
+    ///
+    /// Deliberately does **not** activate plugins: observation must never
+    /// spawn a sidecar process for a plugin the user has not opened. This is
+    /// the key difference from [`PluginHost::notify`], which auto-activates.
+    ///
+    /// Delivery to one session is bounded by [`OBSERVATION_NOTIFY_TIMEOUT`].
+    /// On timeout the session is **stopped** rather than skipped: dropping the
+    /// in-flight `write_all` can leave a partial JSONL frame in the sidecar's
+    /// stdin pipe, and skipping alone would let every later frame splice onto
+    /// that fragment and corrupt the sidecar's RPC stream. Stopping the
+    /// process is the only safe containment, it is surfaced to observers as
+    /// `plugin.stopped`, and a healthy plugin (whose SDK loop reads stdin
+    /// continuously) never comes close to the deadline.
+    pub async fn broadcast_observation(&self, permission: &str, method: &str, params: serde_json::Value) {
+        let sessions: Vec<Arc<PluginSidecarSession>> = self.inner.sessions.read().await.values().cloned().collect();
+        for session in sessions {
+            if session.status().state != PluginSessionState::Running {
+                continue;
+            }
+            if !session.plugin().manifest.permissions.iter().any(|declared| declared == permission) {
+                continue;
+            }
+            let delivery =
+                tokio::time::timeout(OBSERVATION_NOTIFY_TIMEOUT, session.notify(method, params.clone(), None)).await;
+            match delivery {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    // One unhealthy sidecar must not starve the remaining observers.
+                    log::debug!(
+                        "Failed to deliver host observation to plugin '{}': {error}",
+                        session.plugin().manifest.id
+                    );
+                }
+                Err(_) => {
+                    // Cancel-safety containment (see the doc comment above).
+                    let plugin_id = session.plugin().manifest.id.clone();
+                    log::warn!(
+                        "Host observation to plugin '{plugin_id}' timed out after {OBSERVATION_NOTIFY_TIMEOUT:?}; \
+                         stopping its session to avoid a corrupted stdin frame"
+                    );
+                    if let Err(stop_error) = session.shutdown().await {
+                        log::warn!(
+                            "Failed to stop stalled plugin '{plugin_id}' after observation timeout: {stop_error}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Discovery must not leave one idle process per installed plugin in every MCP client.
@@ -1912,5 +2056,125 @@ while IFS= read -r _; do :; done
         // A follow-up activate starts a fresh process with a clean state.
         host.activate("sample.quarantine").await.unwrap();
         host.stop("sample.quarantine").await.unwrap();
+    }
+
+    /// Observation must never spawn a sidecar: plugins that only observe stay
+    /// dormant until the user actually opens their UI or connection.
+    #[tokio::test]
+    async fn broadcast_observation_never_activates_plugins() {
+        use crate::plugins::{PluginHost, PluginRegistry};
+
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_dir = temp.path().join("sample.observer");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.observer",
+                "name": "Observer",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.5.0", "host_api": "^1.0" },
+                "permissions": ["host.observe:queries"],
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "missing-binary"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let registry = PluginRegistry::new_with_app_version(temp.path().to_path_buf(), "0.5.67");
+        let host = PluginHost::new(registry);
+        host.broadcast_observation(
+            "host.observe:queries",
+            "host/observation",
+            serde_json::json!({ "kind": "query.started" }),
+        )
+        .await;
+        assert!(host.inner.sessions.read().await.is_empty(), "observation must not activate plugins");
+    }
+
+    /// Sidecar fan-out is permission-filtered and only reaches running sessions.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broadcast_observation_delivers_only_to_running_permitted_sessions() {
+        use crate::plugins::{PluginHost, PluginRegistry};
+        use std::os::unix::fs::PermissionsExt;
+
+        fn write_plugin(root: &std::path::Path, id: &str, permission: &str) {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let executable = dir.join("plugin.sh");
+            // Minimal sidecar: answers plugin/initialize, then echoes every
+            // id-less notification back as an `observed` event.
+            let script = r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":[],"plugin":{"id":"PLUGIN_ID","version":"1.0.0"}}}\n' "$initialize_id"
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | sed -E 's/.*"method":"([^"]+)".*/\1/')
+  printf '{"jsonrpc":"2.0","method":"observed","params":{"method":"%s"}}\n' "$method"
+done
+"#
+            .replace("PLUGIN_ID", id);
+            std::fs::write(&executable, script).unwrap();
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+            std::fs::write(
+                dir.join("manifest.json"),
+                serde_json::json!({
+                    "manifest_version": 1,
+                    "id": id,
+                    "name": id,
+                    "version": "1.0.0",
+                    "publisher": "dbx",
+                    "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                    "permissions": [permission],
+                    "entrypoints": { "backend": {
+                        "protocol_versions": [1],
+                        "transport": "stdio-jsonl",
+                        "executable": "plugin.sh"
+                    }}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        write_plugin(temp.path(), "sample.observed", "host.observe:queries");
+        write_plugin(temp.path(), "sample.unrelated", "host.observe:transfers");
+        let registry = PluginRegistry::new_with_app_version(temp.path().to_path_buf(), "0.5.67");
+        let host = PluginHost::new(registry);
+
+        let observed = host.activate("sample.observed").await.unwrap();
+        let unrelated = host.activate("sample.unrelated").await.unwrap();
+        let mut observed_events = observed.subscribe_events();
+        let mut unrelated_events = unrelated.subscribe_events();
+
+        host.broadcast_observation(
+            "host.observe:queries",
+            "host/observation",
+            serde_json::json!({ "kind": "query.started" }),
+        )
+        .await;
+
+        let event = tokio::time::timeout(Duration::from_secs(5), observed_events.recv())
+            .await
+            .expect("permitted sidecar should receive the observation")
+            .expect("event channel open");
+        assert_eq!(event.method, "observed");
+        assert_eq!(event.params["method"], "host/observation");
+
+        let unexpected = tokio::time::timeout(Duration::from_millis(300), unrelated_events.recv()).await;
+        assert!(unexpected.is_err(), "a plugin without the permission must not receive observations");
+
+        observed.shutdown().await.unwrap();
+        unrelated.shutdown().await.unwrap();
     }
 }

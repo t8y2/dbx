@@ -343,7 +343,17 @@ function draftWithColumns(count: number) {
 async function mountEditor(
   databaseType: "mysql" | "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix" | "clickhouse" | "saphana",
   isPrimaryKey = false,
-  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; tableType?: "table" | "view"; columnName?: string; foreignKeyRefTable?: string; draftOverride?: ReturnType<typeof draft>; onDraftUpdate?: (value: unknown) => void } = {},
+  options: {
+    database?: string;
+    dynamicTypes?: string[];
+    identity?: { seed: number; increment: number };
+    tableName?: string;
+    tableType?: "table" | "view" | "materialized_view";
+    columnName?: string;
+    foreignKeyRefTable?: string;
+    draftOverride?: ReturnType<typeof draft>;
+    onDraftUpdate?: (value: unknown) => void;
+  } = {},
 ) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
@@ -450,6 +460,16 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor primary key editing", () => {
+  it.each(["view", "materialized_view"] as const)("passes the PostgreSQL %s kind when generating comment SQL", async (tableType) => {
+    const root = await mountEditor("postgres", false, { tableName: "orders_view", tableType });
+    const input = root.querySelector<HTMLInputElement>("[data-table-comment-input]")!;
+    expect(input.disabled).toBe(false);
+    input.value = "new comment";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ databaseType: "postgres", tableName: "orders_view", tableType, tableComment: "new comment" })));
+  });
+
   it.each(["table", "view"] as const)("passes the HANA %s kind when generating comment SQL", async (tableType) => {
     const root = await mountEditor("saphana", false, { database: "", tableName: "V_6200_YGMBBK", tableType });
     const input = root.querySelector<HTMLInputElement>("[data-table-comment-input]")!;

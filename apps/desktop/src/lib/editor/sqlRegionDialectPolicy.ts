@@ -120,11 +120,11 @@ export type SqlRegionStringPolicy = "adapter" | "escape" | "google" | "spark" | 
 export const SQL_REGION_STRING_SPECS: Record<SqlRegionStringPolicy, Partial<SqlRegionDialectSpec>> = {
   adapter: {},
   escape: { regionEscapeStrings: true },
-  google: { regionTripleQuotes: true, backslashEscapes: true, doubleQuotedStrings: true, identifierQuotes: "`", regionIdentifierEscapes: true, hashComments: true },
+  google: { regionTripleQuotes: true, regionRawStrings: true, backslashEscapes: true, doubleQuotedStrings: true, identifierQuotes: "`", regionIdentifierEscapes: true, hashComments: true },
   spark: { regionRawStrings: true, backslashEscapes: true, doubleQuotedStrings: true, identifierQuotes: "`" },
   "dual-backslash": { backslashEscapes: true, doubleQuotedStrings: true, identifierQuotes: "`" },
   backslash: { backslashEscapes: true },
-  clickhouse: { regionIdentifierEscapes: true },
+  clickhouse: { backslashEscapes: true, regionIdentifierEscapes: true },
   influxql: { backslashEscapes: true, regionIdentifierEscapes: true },
   firebird: { plsqlQuotingMechanism: true },
   metricsql: { backslashEscapes: true, doubleQuotedStrings: true, identifierQuotes: "`", regionIdentifierEscapes: true, hashComments: true },

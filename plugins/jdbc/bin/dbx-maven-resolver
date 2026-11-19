@@ -2,22 +2,75 @@
 set -eu
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
-if [ -n "${DBX_JAVA_BIN:-}" ] && [ -x "$DBX_JAVA_BIN" ]; then
+java_major() {
+  "$1" -version 2>&1 | awk -F'[\".]' '/version/ { if ($2 == "1") print $3; else print $2; exit }'
+}
+
+supports_java_21() {
+  [ -x "$1" ] || return 1
+  JAVA_CANDIDATE_MAJOR="$(java_major "$1" || true)"
+  case "$JAVA_CANDIDATE_MAJOR" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$JAVA_CANDIDATE_MAJOR" -ge 21 ]
+}
+
+JAVA_BIN=""
+if [ -n "${DBX_JAVA_BIN:-}" ] && supports_java_21 "$DBX_JAVA_BIN"; then
   JAVA_BIN="$DBX_JAVA_BIN"
-elif [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+elif [ -n "${JAVA_HOME:-}" ] && supports_java_21 "$JAVA_HOME/bin/java"; then
   JAVA_BIN="$JAVA_HOME/bin/java"
-elif command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
-  JAVA_BIN="$(command -v java)"
-elif [ -x "/opt/homebrew/opt/openjdk/bin/java" ]; then
-  JAVA_BIN="/opt/homebrew/opt/openjdk/bin/java"
-elif [ -x "/usr/local/opt/openjdk/bin/java" ]; then
-  JAVA_BIN="/usr/local/opt/openjdk/bin/java"
 else
-  echo "Java runtime not found. Install Java or the optional DBX JDBC runtime." >&2
-  exit 127
+  PATH_ENTRIES="${PATH:-}"
+  PATH_LAST=0
+  while :; do
+    case "$PATH_ENTRIES" in
+      *:*)
+        PATH_DIR="${PATH_ENTRIES%%:*}"
+        PATH_ENTRIES="${PATH_ENTRIES#*:}"
+        ;;
+      *)
+        PATH_DIR="$PATH_ENTRIES"
+        PATH_ENTRIES=""
+        PATH_LAST=1
+        ;;
+    esac
+    [ -n "$PATH_DIR" ] || PATH_DIR="."
+    CANDIDATE="$PATH_DIR/java"
+    if [ -x "$CANDIDATE" ]; then
+      CANDIDATE_MAJOR="$(java_major "$CANDIDATE" || true)"
+      case "$CANDIDATE_MAJOR" in
+        ''|*[!0-9]*) ;;
+        *)
+          if [ "$CANDIDATE_MAJOR" -ge 21 ]; then
+            JAVA_BIN="$CANDIDATE"
+            break
+          fi
+          ;;
+      esac
+    fi
+    [ "$PATH_LAST" -eq 1 ] && break
+  done
+  if [ -z "$JAVA_BIN" ]; then
+    for CANDIDATE in "/opt/homebrew/opt/openjdk/bin/java" "/usr/local/opt/openjdk/bin/java"; do
+      [ -x "$CANDIDATE" ] || continue
+      CANDIDATE_MAJOR="$(java_major "$CANDIDATE" || true)"
+      case "$CANDIDATE_MAJOR" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      if [ "$CANDIDATE_MAJOR" -ge 21 ]; then
+        JAVA_BIN="$CANDIDATE"
+        break
+      fi
+    done
+  fi
+  if [ -z "$JAVA_BIN" ]; then
+    echo "Java 21 or newer was not found. Install Java or the optional DBX JDBC runtime." >&2
+    exit 127
+  fi
 fi
 
-JAVA_MAJOR="$($JAVA_BIN -version 2>&1 | awk -F'[\".]' '/version/ { if ($2 == "1") print $3; else print $2; exit }')"
+JAVA_MAJOR="$(java_major "$JAVA_BIN")"
 if [ -z "$JAVA_MAJOR" ] || [ "$JAVA_MAJOR" -lt 21 ]; then
   echo "Java 21 or newer is required for the DBX JDBC runtime." >&2
   exit 1

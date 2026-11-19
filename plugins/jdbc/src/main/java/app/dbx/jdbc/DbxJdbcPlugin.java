@@ -1893,6 +1893,7 @@ public final class DbxJdbcPlugin {
             restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
         }
+        QuerySession session = null;
         try {
             if (connectionState().closing) throw new SQLException("JDBC logical session is closed");
             applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
@@ -1925,7 +1926,7 @@ public final class DbxJdbcPlugin {
                 columns.add(label == null || label.isBlank() ? meta.getColumnName(i) : label);
             }
             String sessionId = UUID.randomUUID().toString();
-            QuerySession session = new QuerySession(
+            session = new QuerySession(
                 sessionId,
                 statement,
                 rs,
@@ -1942,18 +1943,17 @@ public final class DbxJdbcPlugin {
                 deferredLobMode(connection, conn)
             );
             connectionState().querySessions.put(sessionId, session);
-            try {
-                return readQuerySessionPage(session, pageSize);
-            } catch (Exception | LinkageError error) {
-                connectionState().querySessions.remove(sessionId);
-                throw error;
-            }
+            return readQuerySessionPage(session, pageSize);
         } catch (Exception | LinkageError error) {
-            try {
-                statement.close();
-            } catch (Exception ignored) {
+            if (session == null) {
+                try {
+                    statement.close();
+                } catch (Exception ignored) {
+                }
+                restorePagedQueryTransaction(conn, restoreAutoCommit);
+            } else if (connectionState().querySessions.containsKey(session.id)) {
+                discardQuerySession(session.id);
             }
-            restorePagedQueryTransaction(conn, restoreAutoCommit);
             throw error;
         }
     }

@@ -389,7 +389,7 @@ function sqlPolicyDatabaseType(dialectName: CodeMirrorSqlDialectName, databaseTy
 // Share the nesting decision between the syntax tree and custom region scanner.
 function sqlCommentDialectSpec(dialectName: CodeMirrorSqlDialectName, databaseType?: DatabaseType) {
   const commentPolicy = databaseType ? SQL_REGION_COMMENT_POLICIES[databaseType] : "dialect";
-  const resolvedCommentPolicy = commentPolicy === "dialect" ? (dialectName === "mysql" ? "mysql" : dialectName === "clickhouse" ? "clickhouse" : dialectName === "soql" ? "excluded" : "nested") : commentPolicy;
+  const resolvedCommentPolicy = commentPolicy === "dialect" ? (dialectName === "mysql" ? "mysql" : dialectName === "clickhouse" ? "clickhouse" : dialectName === "oracle" ? "flat" : dialectName === "soql" ? "excluded" : "nested") : commentPolicy;
   return SQL_REGION_COMMENT_SPECS[resolvedCommentPolicy];
 }
 

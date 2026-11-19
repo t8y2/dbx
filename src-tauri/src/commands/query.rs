@@ -764,9 +764,17 @@ pub fn find_statement_at_cursor(
     sql: String,
     cursor_pos: usize,
     database_type: Option<DatabaseType>,
+    syntax_dialect: Option<String>,
 ) -> Result<String, String> {
     Ok(database_type
-        .map(|db_type| dbx_core::sql::find_statement_at_cursor_for_database(&sql, cursor_pos, db_type))
+        .map(|db_type| {
+            dbx_core::sql::find_statement_at_cursor_for_database_with_syntax_dialect(
+                &sql,
+                cursor_pos,
+                db_type,
+                syntax_dialect.as_deref(),
+            )
+        })
         .unwrap_or_else(|| dbx_core::sql::find_statement_at_cursor(&sql, cursor_pos)))
 }
 

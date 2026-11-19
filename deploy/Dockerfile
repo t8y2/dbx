@@ -120,7 +120,7 @@ RUN case "$TARGETARCH" in \
     cp "/app/target/$rust_target/release/dbx-web" "/out/linux/$TARGETARCH/"
 
 # Stage 3: Final image
-FROM debian:bookworm-slim
+FROM eclipse-temurin:21-jre-jammy
 ARG TARGETPLATFORM
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -128,13 +128,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     libfreetype6 \
     libssl3 \
-    openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /out/${TARGETPLATFORM}/dbx-web /usr/local/bin/
 COPY --from=frontend /app/dist /app/static
 ENV DBX_STATIC_DIR=/app/static
 ENV DBX_DATA_DIR=/app/data
 ENV DBX_BACKUP_ROOT=/app/backups
-ENV DBX_JAVA_BIN=/usr/bin/java
+ENV DBX_JAVA_BIN=/opt/java/openjdk/bin/java
 EXPOSE 4224
 CMD ["dbx-web"]

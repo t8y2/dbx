@@ -9,6 +9,8 @@ import type { QueryEditorCodeMirrorRuntime } from "./queryEditorCodeMirrorRuntim
 import { createSqlStatementAnalysisWorker } from "@/lib/sql/sqlStatementAnalysisWorker";
 import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import { computeBlockFoldRanges, type FoldRange } from "@/lib/editor/codemirrorSqlBlockFolding";
+import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
+import { sqlRegionFoldRanges } from "@/lib/editor/sqlRegionFoldRanges";
 import type { SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 
 /** Statements (sorted, non-overlapping) that intersect [from, to]. */
@@ -240,8 +242,13 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     foldRangeForState(state: EditorState, lineStart: number): FoldRange | null | undefined {
       if (!shouldUseQueryEditorLargeDocumentModeForSize(state.doc.length, state.doc.lines)) return undefined;
       const lineEnd = state.doc.lineAt(lineStart).to;
+      const databaseType = queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);
       const boundaries = statementBoundariesForState(state);
       if (!shouldParseQueryEditorSyntax(state.doc.length)) ensureWindowFolds(state, boundaries, lineStart, lineEnd);
+      if (!shouldParseQueryEditorSyntax(state.doc.length) && (!databaseType || (supportsDatabaseFeature(databaseType, "sqlFileExecution") && databaseType !== "neo4j" && databaseType !== "nebula"))) {
+        const region = sqlRegionFoldRanges(state).get(state.doc.lineAt(lineStart).number);
+        if (region) return region;
+      }
       let range: FoldRange | null = null;
       boundaries.folds.between(lineEnd, lineEnd, (from, to) => {
         if (from !== lineEnd) return;

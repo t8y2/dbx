@@ -35,7 +35,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
-import { effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import { oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
 import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
@@ -74,6 +74,7 @@ interface TargetSqlExecutionInput {
     target: MultiDbExecutionTarget;
   };
   sourceOffset?: number;
+  syntaxDialect?: SqlExecutionSnapshot["syntaxDialect"];
   blockDangerousRedisCommands?: boolean;
   targetLabel?: string;
   /** Labels of every target in the batch, shown in the confirmation prompt. */
@@ -229,7 +230,9 @@ export function useSqlExecution(deps: {
   const pendingSqlParameterEditorViewportRequestId = ref<number | undefined>();
   const pendingDangerEditorViewportRequestId = ref<number | undefined>();
   const pendingDangerTabId = ref<string | undefined>();
+  const pendingDangerSyntaxDialect = ref<SqlExecutionSnapshot["syntaxDialect"]>();
   const pendingSqlParameterTabId = ref<string | undefined>();
+  const pendingSqlParameterSyntaxDialect = ref<SqlExecutionSnapshot["syntaxDialect"]>();
   let pendingSqlParameterContinuation: ((sql: string, sourceOffset?: number) => Promise<void> | void) | undefined;
 
   function cancelEditorViewportRequest(editorViewportRequestId?: number) {
@@ -419,6 +422,7 @@ export function useSqlExecution(deps: {
         pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
         pendingDangerEditorViewportRequestId.value = options.editorViewportRequestId;
         pendingDangerTabId.value = context.tabId;
+        pendingDangerSyntaxDialect.value = options.syntaxDialect;
         suppressDangerConfirm.value = false;
         showDangerDialog.value = true;
         // Parked on the Redis confirmation, not finished: `onDangerConfirm` reports
@@ -450,6 +454,7 @@ export function useSqlExecution(deps: {
       pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
       pendingDangerEditorViewportRequestId.value = options.editorViewportRequestId;
       pendingDangerTabId.value = context.tabId;
+      pendingDangerSyntaxDialect.value = options.syntaxDialect;
       suppressDangerConfirm.value = false;
       showDangerDialog.value = true;
       // Parked on the danger confirmation; `onDangerConfirm` reports the outcome.
@@ -478,6 +483,7 @@ export function useSqlExecution(deps: {
     pendingOpenInNewResultTab.value = options.openInNewResultTab === true;
     pendingSqlParameterEditorViewportRequestId.value = options.editorViewportRequestId;
     pendingSqlParameterTabId.value = options.tabId;
+    pendingSqlParameterSyntaxDialect.value = options.syntaxDialect;
     pendingSqlParameterContinuation = continuation;
     showSqlParameterDialog.value = true;
     return true;
@@ -490,7 +496,7 @@ export function useSqlExecution(deps: {
     }
     const { sql, sourceOffset } = await resolvedExecutableSql(undefined, context);
     if (!sql.trim()) return false;
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, onReady)) {
+    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId, syntaxDialect: context.connection ? codeMirrorSqlDialectForConnection(context.connection) : undefined }, onReady)) {
       return true;
     }
     await onReady(sql, sourceOffset);
@@ -756,6 +762,7 @@ export function useSqlExecution(deps: {
             targetLabel,
             targets: input.batchTargetLabels,
             databaseType: connection.db_type,
+            syntaxDialect: input.syntaxDialect,
             scopeId: input.scopeId,
           }),
         );
@@ -790,6 +797,7 @@ export function useSqlExecution(deps: {
           targetLabel,
           targets: input.batchTargetLabels,
           databaseType: connection.db_type,
+          syntaxDialect: input.syntaxDialect,
           scopeId: input.scopeId,
         }),
       );
@@ -891,7 +899,7 @@ export function useSqlExecution(deps: {
         const maxRows = agentProtocolQueryResultMaxRows(effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
         const databaseType = effectiveDatabaseTypeForConnection(connection);
         const compatibility = databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(executionTab.connectionId, executionTab.database) : databaseType === "kingbase" ? connection?.database_info?.compatibilityMode : undefined;
-        const statements = splitSqlStatementRanges(sql, databaseType, sqlStatementParameterOptionsForCompatibility(databaseType, compatibility));
+        const statements = splitSqlStatementRanges(sql, databaseType, { ...sqlStatementParameterOptionsForCompatibility(databaseType, compatibility), syntaxDialect: input.syntaxDialect });
         const results: NonNullable<QueryTab["results"]> = [];
         for (const [statementIndex, statement] of (statements.length ? statements : [{ sql, from: 0, to: sql.length }]).entries()) {
           if (cancelRequested()) return await failedManualResult("cancelled");
@@ -922,6 +930,7 @@ export function useSqlExecution(deps: {
           pagination: { limit: MULTI_SOURCE_MAX_ROWS_PER_SOURCE, offset: 0 },
           ...(input.targetContext ? { targetContext: input.targetContext } : {}),
           ...(sourceOffset !== undefined ? { sourceOffset } : {}),
+          ...(input.syntaxDialect ? { syntaxDialect: input.syntaxDialect } : {}),
           ...(connection.db_type === "redis" ? { skipRedisSafetyCheck: !blockRedisCommands } : {}),
         });
       const latest = queryStore.getExecutionTab(executionTabId) ?? tab;
@@ -1003,6 +1012,9 @@ export function useSqlExecution(deps: {
     pendingDangerKind.value = "sql";
     pendingOpenInNewResultTab.value = false;
     pendingDangerTabId.value = tabId;
+    const tab = resolveExecutionTab(tabId);
+    const connection = tab ? connectionStore.getConfig(tab.connectionId) : undefined;
+    pendingDangerSyntaxDialect.value = connection ? codeMirrorSqlDialectForConnection(connection) : undefined;
     suppressDangerConfirm.value = false;
     showDangerDialog.value = true;
   }
@@ -1074,7 +1086,7 @@ export function useSqlExecution(deps: {
     }
     // Resolve SQL template variables exactly like tryExecute so EXPLAIN never runs the raw
     // placeholders (e.g. `EXPLAIN (FORMAT JSON) SELECT :var;` fails on PostgreSQL).
-    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId }, (resolvedSql) => runExplain(resolvedSql, context))) {
+    if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, { tabId: context.tabId, syntaxDialect: context.connection ? codeMirrorSqlDialectForConnection(context.connection) : undefined }, (resolvedSql) => runExplain(resolvedSql, context))) {
       return;
     }
     await runExplain(sql, context);
@@ -1086,6 +1098,7 @@ export function useSqlExecution(deps: {
     const kind = pendingDangerKind.value;
     const openInNewResultTab = pendingOpenInNewResultTab.value;
     const editorViewportRequestId = pendingDangerEditorViewportRequestId.value;
+    const syntaxDialect = pendingDangerSyntaxDialect.value;
     const tabId = pendingDangerTabId.value;
     pendingDangerSql.value = "";
     pendingDangerSourceOffset.value = undefined;
@@ -1093,6 +1106,7 @@ export function useSqlExecution(deps: {
     pendingOpenInNewResultTab.value = false;
     pendingDangerEditorViewportRequestId.value = undefined;
     pendingDangerTabId.value = undefined;
+    pendingDangerSyntaxDialect.value = undefined;
     if (suppressDangerConfirm.value && kind === "sql") {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
@@ -1109,7 +1123,7 @@ export function useSqlExecution(deps: {
       return;
     }
     try {
-      reportDeferredExecution(await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: tab.id }));
+      reportDeferredExecution(await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, syntaxDialect, tabId: tab.id }));
     } catch (error) {
       reportDeferredExecutionFailure(error, tab.id);
     }
@@ -1118,6 +1132,7 @@ export function useSqlExecution(deps: {
   async function onSqlParametersConfirm(sql: string) {
     const openInNewResultTab = pendingOpenInNewResultTab.value;
     const editorViewportRequestId = pendingSqlParameterEditorViewportRequestId.value;
+    const syntaxDialect = pendingSqlParameterSyntaxDialect.value;
     const tabId = pendingSqlParameterTabId.value;
     showSqlParameterDialog.value = false;
     sqlParameterSourceSql.value = "";
@@ -1129,6 +1144,7 @@ export function useSqlExecution(deps: {
     pendingOpenInNewResultTab.value = false;
     pendingSqlParameterEditorViewportRequestId.value = undefined;
     pendingSqlParameterTabId.value = undefined;
+    pendingSqlParameterSyntaxDialect.value = undefined;
     const continuation = pendingSqlParameterContinuation;
     pendingSqlParameterContinuation = undefined;
     if (continuation) {
@@ -1141,7 +1157,7 @@ export function useSqlExecution(deps: {
       return;
     }
     try {
-      reportDeferredExecution(await continueExecute(context, sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, tabId: context.tabId }));
+      reportDeferredExecution(await continueExecute(context, sql, sourceOffset, { openInNewResultTab, editorViewportRequestId, syntaxDialect, tabId: context.tabId }));
     } catch (error) {
       reportDeferredExecutionFailure(error, context.tabId);
     }
@@ -1163,6 +1179,7 @@ export function useSqlExecution(deps: {
     pendingOpenInNewResultTab.value = false;
     pendingSqlParameterEditorViewportRequestId.value = undefined;
     pendingSqlParameterTabId.value = undefined;
+    pendingSqlParameterSyntaxDialect.value = undefined;
     pendingSqlParameterContinuation = undefined;
     cancelEditorViewportRequest(editorViewportRequestId);
     if (abandonedTabId) reportDeferredExecution(notStarted("cancelled", abandonedTabId));
@@ -1180,6 +1197,7 @@ export function useSqlExecution(deps: {
     pendingOpenInNewResultTab.value = false;
     pendingDangerEditorViewportRequestId.value = undefined;
     pendingDangerTabId.value = undefined;
+    pendingDangerSyntaxDialect.value = undefined;
     suppressDangerConfirm.value = false;
     cancelEditorViewportRequest(editorViewportRequestId);
     if (abandonedTabId) reportDeferredExecution(notStarted("cancelled", abandonedTabId));

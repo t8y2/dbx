@@ -989,6 +989,10 @@ pub fn statement_split_database_type(config: &ConnectionConfig) -> DatabaseType 
         DatabaseType::Oracle
     } else if crate::schema::is_sqlserver_external_driver_config(config) {
         DatabaseType::SqlServer
+    } else if crate::schema::is_clickhouse_external_driver_config(config) {
+        DatabaseType::ClickHouse
+    } else if let Some(database_type) = crate::schema::jdbc_common_external_driver_database_type(config) {
+        database_type
     } else {
         config.db_type
     }
@@ -11486,7 +11490,25 @@ for line in sys.stdin:
 
         let mut postgres = test_connection_config(DatabaseType::Jdbc);
         postgres.connection_string = Some("jdbc:postgresql://127.0.0.1:5432/demo".to_string());
-        assert_eq!(statement_split_database_type(&postgres), DatabaseType::Jdbc);
+        assert_eq!(statement_split_database_type(&postgres), DatabaseType::Postgres);
+
+        let mut mysql = test_connection_config(DatabaseType::Jdbc);
+        mysql.connection_string = Some("jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        assert_eq!(statement_split_database_type(&mysql), DatabaseType::Mysql);
+
+        let mut clickhouse = test_connection_config(DatabaseType::Jdbc);
+        clickhouse.connection_string = Some("jdbc:clickhouse://127.0.0.1:8123/default".to_string());
+        assert_eq!(statement_split_database_type(&clickhouse), DatabaseType::ClickHouse);
+
+        let mut clickhouse_wrapper = test_connection_config(DatabaseType::Jdbc);
+        clickhouse_wrapper.connection_string = Some("jdbc:clickhouse://127.0.0.1:8123/default".to_string());
+        clickhouse_wrapper.jdbc_driver_class = Some("com.example.WrappedDriver".to_string());
+        assert_eq!(statement_split_database_type(&clickhouse_wrapper), DatabaseType::ClickHouse);
+
+        let mut clickhouse_driver = test_connection_config(DatabaseType::Jdbc);
+        clickhouse_driver.connection_string = Some("jdbc:vendor://127.0.0.1:8123/default".to_string());
+        clickhouse_driver.jdbc_driver_class = Some("com.clickhouse.jdbc.ClickHouseDriver".to_string());
+        assert_eq!(statement_split_database_type(&clickhouse_driver), DatabaseType::ClickHouse);
 
         let mut jtds = test_connection_config(DatabaseType::Jdbc);
         jtds.connection_string = Some("jdbc:jtds:sqlserver://127.0.0.1:1433/demo".to_string());

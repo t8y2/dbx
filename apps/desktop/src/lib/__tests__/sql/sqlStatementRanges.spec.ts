@@ -2729,12 +2729,22 @@ describe("hasMultipleExecutionTargets", () => {
   });
 
   it("uses the selected ClickHouse line-comment policy for generic JDBC ranges", () => {
-    const sql = "// region comment\nSELECT 1;\nSELECT 2;";
+    const sql = "// slash; comment\nSELECT 1;\n# hash; comment\nSELECT 2;\n#! bang; comment\nSELECT 3;";
     const parameterOptions = { syntaxDialect: "clickhouse" as const };
 
-    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2"]);
-    expect(rangeSqlTexts(executableStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
     expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 2"), "jdbc", parameterOptions)?.sql.trim()).toBe("SELECT 2");
+  });
+
+  it("uses ClickHouse string escaping and ALTER UPDATE boundaries for generic JDBC ranges", () => {
+    const parameterOptions = { syntaxDialect: "clickhouse" as const };
+    const stringSql = String.raw`SELECT 'a\'; SELECT 2;'`;
+    const mutation = "ALTER TABLE events\nUPDATE value = 1\nWHERE id = 42";
+    const mutationSql = `${mutation};\nSELECT * FROM events;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(stringSql, "jdbc", parameterOptions))).toEqual([stringSql]);
+    expect(rangeSqlTexts(executableStatementRanges(mutationSql, "jdbc", parameterOptions))).toEqual([mutation, "SELECT * FROM events"]);
   });
 
   it("keeps nested comments in PostgreSQL EXPLAIN prefixes with the target", () => {

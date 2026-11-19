@@ -63,7 +63,7 @@ export function resolveExecutableSql(fullSql: string, selectedSql: string, optio
   return fullSql;
 }
 
-export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType; mongoQueryLanguage?: MongoQueryLanguage }): Promise<string> {
+export async function resolveExecutableSqlWithBackend(fullSql: string, selectedSql: string, options?: { mode?: ExecuteMode; cursorPos?: number; databaseType?: DatabaseType; syntaxDialect?: SqlStatementSyntaxDialect; mongoQueryLanguage?: MongoQueryLanguage }): Promise<string> {
   const trimmedSelection = selectedSql.trim();
   if (trimmedSelection) return trimmedSelection;
 
@@ -82,7 +82,7 @@ export async function resolveExecutableSqlWithBackend(fullSql: string, selectedS
   }
 
   if (options?.mode === "current" && options.cursorPos !== undefined) {
-    return await api.findStatementAtCursor(fullSql, options.cursorPos, options.databaseType);
+    return await api.findStatementAtCursor(fullSql, options.cursorPos, options.databaseType, options.syntaxDialect);
   }
 
   return fullSql;

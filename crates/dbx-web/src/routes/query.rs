@@ -113,6 +113,7 @@ pub struct FindStatementAtCursorRequest {
     pub sql: String,
     pub cursor_pos: usize,
     pub database_type: Option<dbx_core::models::connection::DatabaseType>,
+    pub syntax_dialect: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1070,7 +1071,14 @@ pub async fn analyze_sql_references(
 pub async fn find_statement_at_cursor(Json(req): Json<FindStatementAtCursorRequest>) -> Json<String> {
     Json(
         req.database_type
-            .map(|db_type| dbx_core::sql::find_statement_at_cursor_for_database(&req.sql, req.cursor_pos, db_type))
+            .map(|db_type| {
+                dbx_core::sql::find_statement_at_cursor_for_database_with_syntax_dialect(
+                    &req.sql,
+                    req.cursor_pos,
+                    db_type,
+                    req.syntax_dialect.as_deref(),
+                )
+            })
             .unwrap_or_else(|| dbx_core::sql::find_statement_at_cursor(&req.sql, req.cursor_pos)),
     )
 }

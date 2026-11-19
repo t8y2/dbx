@@ -12203,6 +12203,63 @@ pub(crate) fn is_oracle_external_driver_config(config: &ConnectionConfig) -> boo
     }
 }
 
+/// ClickHouse over a generic JDBC connection uses the ClickHouse statement
+/// profile so line comments and nested block comments are preserved while
+/// splitting scripts.
+pub(crate) fn is_clickhouse_external_driver_config(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Jdbc {
+        return false;
+    }
+
+    let identity = [
+        config.driver_profile.as_deref(),
+        config.driver_label.as_deref(),
+        config.connection_string.as_deref(),
+        config.jdbc_driver_class.as_deref(),
+        config.database_info.as_ref().and_then(|info| info.product_name.as_deref()),
+        config.database_info.as_ref().and_then(|info| info.server_comment.as_deref()),
+        config.database_info.as_ref().and_then(|info| info.driver_name.as_deref()),
+    ];
+    identity.into_iter().flatten().any(|value| value.to_ascii_lowercase().contains("clickhouse"))
+        || config.jdbc_driver_paths.iter().any(|path| path.to_ascii_lowercase().contains("clickhouse"))
+}
+
+/// Maps common generic JDBC connections to the SQL splitter profile that matches
+/// the vendor lexer. The transport remains `DatabaseType::Jdbc`.
+pub(crate) fn jdbc_common_external_driver_database_type(config: &ConnectionConfig) -> Option<DatabaseType> {
+    if config.db_type != DatabaseType::Jdbc {
+        return None;
+    }
+
+    let identity = [
+        config.driver_profile.as_deref(),
+        config.driver_label.as_deref(),
+        config.connection_string.as_deref(),
+        config.jdbc_driver_class.as_deref(),
+        config.database_info.as_ref().and_then(|info| info.product_name.as_deref()),
+        config.database_info.as_ref().and_then(|info| info.server_comment.as_deref()),
+        config.database_info.as_ref().and_then(|info| info.driver_name.as_deref()),
+    ];
+    let has = |needle: &str| {
+        identity.iter().flatten().any(|value| value.to_ascii_lowercase().contains(needle))
+            || config.jdbc_driver_paths.iter().any(|path| path.to_ascii_lowercase().contains(needle))
+    };
+
+    if has("postgres") {
+        return Some(DatabaseType::Postgres);
+    }
+    if has("mysql") || has("mariadb") {
+        return Some(DatabaseType::Mysql);
+    }
+    if has("db2") {
+        return Some(DatabaseType::Db2);
+    }
+    if has("firebird") {
+        return Some(DatabaseType::Firebird);
+    }
+    None
+}
+
 /// SQL Server over a generic JDBC connection runs T-SQL through the JDBC
 /// plugin, so its scripts split with the SQL Server statement rules (#13514).
 /// The plain `Jdbc` profile would cut a `BEGIN TRY ... END CATCH` batch at

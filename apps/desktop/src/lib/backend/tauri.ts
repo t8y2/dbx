@@ -16,6 +16,7 @@ import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWir
 import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import type { SqlStatementSyntaxDialect } from "@/lib/sql/sqlParameters";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return invoke("pl_debug_bootstrap");
@@ -2477,8 +2478,8 @@ export async function analyzeSqlReferences(sql: string, dialect?: string): Promi
   return invoke("analyze_sql_references", { sql, dialect });
 }
 
-export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType): Promise<string> {
-  return invoke("find_statement_at_cursor", { sql, cursorPos, databaseType });
+export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType, syntaxDialect?: SqlStatementSyntaxDialect): Promise<string> {
+  return invoke("find_statement_at_cursor", { sql, cursorPos, databaseType, syntaxDialect });
 }
 
 export async function prepareQueryPaginationExecutionPlan(options: QueryPaginationExecutionPlanOptions): Promise<QueryPaginationExecutionPlan> {

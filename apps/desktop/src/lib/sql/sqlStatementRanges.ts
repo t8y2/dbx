@@ -348,7 +348,7 @@ const POSTGRES_FAMILY_DATABASES: ReadonlySet<DatabaseType> = new Set(["postgres"
 // escape unconditionally makes ESCAPE '\' swallow its closing quote and the following statement
 // boundary, so the next statement loses its run button (#8189). Gate it by dialect, matching the
 // tokenizer/completion side.
-export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "transwarp", "impala", "spark", "databend"]);
+export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "clickhouse", "hive", "argo", "transwarp", "impala", "spark", "databend"]);
 function allowsBackslashStringEscape(databaseType?: DatabaseType): boolean {
   return !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType);
 }
@@ -2132,6 +2132,22 @@ function isOpenGaussOracleCompatibility(databaseType?: DatabaseType, options?: S
 }
 
 export function statementParsingDatabaseType(databaseType?: DatabaseType, options?: SqlParameterOptions): DatabaseType | undefined {
+  if (databaseType === "jdbc") {
+    switch (options?.syntaxDialect) {
+      case "mysql":
+        return "mysql";
+      case "postgres":
+        return "postgres";
+      case "sqlserver":
+        return "sqlserver";
+      case "oracle":
+        return "oracle";
+      case "clickhouse":
+        return "clickhouse";
+      default:
+        return databaseType;
+    }
+  }
   if (databaseType !== "kingbase") return databaseType;
   switch (options?.compatibilityMode?.trim().toLowerCase()) {
     case "oracle":

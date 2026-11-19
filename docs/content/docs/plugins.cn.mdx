@@ -29,7 +29,7 @@ Desktop 导入的是本机 JAR；Docker/Web 中 JAR 和插件安装在服务器�
 | 项目                       |     是否必需 | 说明                                                        |
 | -------------------------- | -----------: | ----------------------------------------------------------- |
 | DBX JDBC 插件              |         必需 | 在 DBX 设置中一键安装，用来让 DBX 调用 JDBC                 |
-| Java Runtime               |         必需 | 本机需要能运行 `java`；建议 Java 17 或更高版本              |
+| Java Runtime               |         必需 | 本机需要能运行 Java 21 或更高版本                         |
 | 数据库厂商 JDBC driver JAR |         必需 | 例如 PostgreSQL、MySQL、达梦、Oracle、H2、SQLite 等驱动 JAR |
 | JDBC URL                   |         必需 | JDBC URL 通常已经包含主机、端口、数据库名和参数             |
 | 用户名/密码                | 视数据库而定 | 文件型数据库或部分认证方式可能不需要                        |
@@ -68,13 +68,13 @@ java -version
     Debian / Ubuntu：
 
     ```bash
-    sudo apt install openjdk-17-jre
+    sudo apt install openjdk-21-jre
     ```
 
     Fedora：
 
     ```bash
-    sudo dnf install java-17-openjdk
+    sudo dnf install java-21-openjdk
     ```
 
   </Tab>

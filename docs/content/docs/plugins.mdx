@@ -29,7 +29,7 @@ Use JDBC when:
 | Item                   |         Required | Notes                                                                                  |
 | ---------------------- | ---------------: | -------------------------------------------------------------------------------------- |
 | DBX JDBC plugin        |              Yes | Installed from DBX settings; lets DBX call JDBC                                        |
-| Java Runtime           |              Yes | The local machine must be able to run `java`; Java 17 or newer is recommended          |
+| Java Runtime           |              Yes | The local machine must be able to run Java 21 or newer                                 |
 | Vendor JDBC driver JAR |              Yes | For example PostgreSQL, MySQL, Dameng DM, Oracle, H2, SQLite, or another vendor driver |
 | JDBC URL               |              Yes | The URL usually contains host, port, database name, and parameters                     |
 | Username/password      |          Depends | File databases or some auth modes may not need them                                    |
@@ -68,13 +68,13 @@ If the command is missing, install Java first. DBX checks `JAVA_HOME` first, the
     Debian / Ubuntu:
 
     ```bash
-    sudo apt install openjdk-17-jre
+    sudo apt install openjdk-21-jre
     ```
 
     Fedora:
 
     ```bash
-    sudo dnf install java-17-openjdk
+    sudo dnf install java-21-openjdk
     ```
 
   </Tab>

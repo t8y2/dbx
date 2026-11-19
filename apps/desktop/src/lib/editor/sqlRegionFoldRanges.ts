@@ -18,6 +18,11 @@ function hasStringPrefix(line: string, index: number, prefix: string): boolean {
   return start >= 0 && line.slice(start, index).toLowerCase() === prefix && (start === 0 || !/[\w$\p{ID_Continue}]/u.test(line[start - 1]));
 }
 
+function hasRawTripleStringPrefix(line: string, index: number): boolean {
+  const beforeQuote = line.slice(0, index).match(/(?:^|[^\w$\p{ID_Continue}])([bBrR]{1,2})$/u)?.[1] ?? "";
+  return beforeQuote.toLowerCase().includes("r");
+}
+
 function dollarQuoteAt(line: string, index: number, dialect: SqlRegionDialectSpec): string | undefined {
   const mode = dialect.regionDollarQuotes ?? (dialect.doubleDollarQuotedStrings ? "tagged" : "none");
   if (mode === "none" || (index > 0 && /[\w$\p{ID_Continue}]/u.test(line[index - 1]))) return undefined;
@@ -139,9 +144,8 @@ export function sqlRegionFoldRanges(state: EditorState): Map<number, FoldRange> 
         } else index++;
       } else if (dialect.regionTripleQuotes && (ch === "'" || ch === '"') && line[index + 1] === ch && line[index + 2] === ch) {
         literalEnd = ch.repeat(3);
-        // GoogleSQL raw/bytes prefixes change decoding, not quote protection:
-        // an odd backslash still prevents a triple delimiter from closing.
-        literalEscapes = true;
+        // Raw GoogleSQL literals do not treat backslashes as escapes.
+        literalEscapes = !dialect.regionRawStrings || !hasRawTripleStringPrefix(line, index);
         index += 3;
       } else if (ch === "'" || (ch === '"' && dialect.doubleQuotedStrings) || (dialect.identifierQuotes ?? '"').includes(ch)) {
         quote = ch === "[" ? "]" : ch;

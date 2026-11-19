@@ -1303,6 +1303,7 @@ jobs:
               - 'packages/**'
               - 'pnpm-lock.yaml'
               - 'package.json'
+              - 'patches/**'
               - '.oxfmtrc.json'
               - 'scripts/run-check.mjs'
               - 'crates/dbx-core/src/**'

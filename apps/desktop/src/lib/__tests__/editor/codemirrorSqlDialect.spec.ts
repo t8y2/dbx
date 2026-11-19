@@ -41,6 +41,20 @@ describe("codemirrorSqlDialect", () => {
     expect(background.folds?.get(6)).toEqual(sqlRegionFoldRanges(state).get(6));
   });
 
+  it("does not let raw GoogleSQL triple strings swallow following regions", () => {
+    const sql = [String.raw`SELECT r'''body\'''`, "-- region visible", "SELECT 1;", "-- endregion"].join("\n");
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "bigquery");
+    const state = EditorState.create({ doc: sql, extensions: [langSql.sql({ dialect }), sqlRegionDialect.of(sqlRegionDialectSpec(dialect, "mysql", "bigquery"))] });
+    expect([...sqlRegionFoldRanges(state).keys()]).toEqual([2]);
+  });
+
+  it("uses flat block comments for generic JDBC Oracle regions", () => {
+    const sql = ["SELECT 1 /* outer /* inner */", "-- region visible", "SELECT 2;", "-- endregion", "*/"].join("\n");
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "oracle", "jdbc");
+    const state = EditorState.create({ doc: sql, extensions: [langSql.sql({ dialect }), sqlRegionDialect.of(sqlRegionDialectSpec(dialect, "oracle", "jdbc"))] });
+    expect([...sqlRegionFoldRanges(state).keys()]).toEqual([2]);
+  });
+
   it("keeps common PostgreSQL identifier names out of keyword highlighting", () => {
     const keywords = new Set(postgresKeywordSyntaxTerms(langSql.PostgreSQL.spec.keywords || "").split(/\s+/));
 

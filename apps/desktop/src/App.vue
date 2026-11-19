@@ -231,7 +231,8 @@ import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTarg
 import { aiTargetFromTab, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import { queryErrorSelection, type AiExternalContextRequest } from "@/lib/ai/aiExternalContext";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
-import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { formatSqlSnapshotForSave } from "@/lib/sql/sqlFormatOnSave";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
@@ -1147,6 +1148,7 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, execu
     mode: settingsStore.editorSettings.executeMode,
     cursorPos: snapshot?.cursorPos ?? (tab.id === activeTab.value?.id ? cursorPos.value : (selection?.head ?? 0)),
     databaseType: connection?.db_type,
+    syntaxDialect: snapshot?.syntaxDialect ?? (connection?.db_type === "jdbc" ? codeMirrorSqlDialectForConnection(connection) : undefined),
     mongoQueryLanguage: tab.mongoQueryLanguage,
   });
 }
@@ -1363,6 +1365,7 @@ const multiExecuteManualTransaction = ref(false);
 // Launch-time input only. MultiDbExecuteDialog copies this into its immutable
 // batch context before the first target starts; execution never reads this ref.
 const multiExecuteSourceOffset = ref<number>();
+const multiExecuteSyntaxDialect = ref<CodeMirrorSqlDialectName>();
 
 function multiExecuteTargetLabel(target: { connectionId: string; catalog?: string; database: string; schema?: string }): string {
   const connection = connectionStore.getConfig(target.connectionId);
@@ -1384,6 +1387,7 @@ async function executeMultiDbTarget(input: { target: MultiDbExecutionTarget; sou
       target: input.target,
     },
     sourceOffset: input.context.sourceOffset,
+    syntaxDialect: codeMirrorSqlDialectForConnection(connection),
     manualTransaction: input.context.manualTransaction,
     blockDangerousRedisCommands: blockDangerousRedisCommands.value,
     targetLabel: multiExecuteTargetLabel(input.target),
@@ -1418,6 +1422,7 @@ async function requestMultiDbExecute() {
   await prepareMultiExecute(async (sql, sourceOffset) => {
     multiExecuteSql.value = sql;
     multiExecuteSourceOffset.value = sourceOffset;
+    multiExecuteSyntaxDialect.value = codeMirrorSqlDialectForConnection(sourceConnection);
     multiExecuteLaunchId.value += 1;
     multiExecuteSourceTabId.value = sourceTabId;
     multiExecuteManualTransaction.value = tab.autoCommit === false;
@@ -6217,6 +6222,7 @@ onUnmounted(() => {
           :cancel-target="cancelMultiDbTarget"
           :cancel-pending="cancelPendingMultiDbTarget"
           :source-offset="multiExecuteSourceOffset"
+          :syntax-dialect="multiExecuteSyntaxDialect"
         />
         <UpdateDialog
           v-if="showUpdateDialog"

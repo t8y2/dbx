@@ -6,12 +6,14 @@ function sqlRegionCommentPolicy(databaseType?: DatabaseType, syntaxDialect?: Sql
   if (databaseType === "jdbc") {
     if ((syntaxDialect ?? "mysql") === "mysql") return "mysql";
     if (syntaxDialect === "clickhouse") return "clickhouse";
+    if (syntaxDialect === "oracle") return "flat";
     if (syntaxDialect === "soql") return "excluded";
     return "nested";
   }
   if (!databaseType && syntaxDialect) {
     if (syntaxDialect === "mysql") return "mysql";
     if (syntaxDialect === "clickhouse") return "clickhouse";
+    if (syntaxDialect === "oracle") return "flat";
     if (syntaxDialect === "soql") return "excluded";
     return "nested";
   }

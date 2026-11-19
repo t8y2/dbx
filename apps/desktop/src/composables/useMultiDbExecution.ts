@@ -44,10 +44,11 @@ export interface MultiDbExecutionContext {
   readonly targets: readonly MultiDbExecutionTarget[];
   /** Offset of the submitted SQL in the source editor, captured at confirmation time. */
   readonly sourceOffset?: number;
+  readonly syntaxDialect?: "mysql" | "postgres" | "sqlserver" | "oracle" | "clickhouse" | "soql";
   readonly manualTransaction?: boolean;
 }
 
-export type MultiDbExecutionContextOverrides = Pick<MultiDbExecutionContext, "sourceOffset" | "manualTransaction">;
+export type MultiDbExecutionContextOverrides = Pick<MultiDbExecutionContext, "sourceOffset" | "syntaxDialect" | "manualTransaction">;
 
 export interface MultiDbExecutionOptions {
   sourceTabId: Ref<string> | ComputedRef<string> | string;

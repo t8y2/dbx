@@ -7,7 +7,8 @@ use super::{
     apply_http_proxy, apply_tls_certificates_for_driver, binary_value_to_json, http_client_builder,
     with_connection_timeout,
 };
-use crate::sql::starts_with_executable_sql_keyword;
+use crate::models::connection::DatabaseType;
+use crate::sql::{split_sql_statements_for_database, starts_with_executable_sql_keyword};
 use crate::types::{
     ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
     TriggerInfo,
@@ -376,14 +377,14 @@ pub async fn execute_query_with_max_rows(
 
     // Split multi-statement SQL: each statement in the pipeline is part of a
     // single implicit transaction, so BEGIN/INSERT/COMMIT must travel together.
-    let statements: Vec<&str> = split_sql_statements(sql);
+    let statements = split_sql_statements(sql);
     let is_reader = statements.len() == 1
-        && starts_with_executable_sql_keyword(statements[0], &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]);
+        && starts_with_executable_sql_keyword(&statements[0], &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]);
 
     // Single-statement transaction control: Turso pipelines are implicitly
     // auto-committed, so standalone BEGIN/COMMIT/ROLLBACK are no-ops.
     let is_tx_control = statements.len() == 1
-        && starts_with_executable_sql_keyword(statements[0], &["BEGIN", "COMMIT", "ROLLBACK", "START", "END"]);
+        && starts_with_executable_sql_keyword(&statements[0], &["BEGIN", "COMMIT", "ROLLBACK", "START", "END"]);
 
     if is_tx_control {
         return Ok(QueryResult {
@@ -408,10 +409,10 @@ pub async fn execute_query_with_max_rows(
     }
 
     if is_reader {
-        let result = query_inner(client, statements[0]).await?;
+        let result = query_inner(client, &statements[0]).await?;
         Ok(query_result_from_turso_result(result, start.elapsed().as_millis(), max_rows))
     } else if statements.len() == 1 {
-        let affected_rows = execute_inner(client, statements[0]).await?;
+        let affected_rows = execute_inner(client, &statements[0]).await?;
         Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -433,6 +434,7 @@ pub async fn execute_query_with_max_rows(
         })
     } else {
         // Batch multiple statements into a single pipeline for transactional integrity
+        let statements: Vec<&str> = statements.iter().map(String::as_str).collect();
         let result_set = send_pipeline_batch(client, &statements).await?;
         let affected = result_set.affected_row_count.unwrap_or(0);
         Ok(QueryResult {
@@ -457,37 +459,10 @@ pub async fn execute_query_with_max_rows(
     }
 }
 
-/// Split SQL text on statement boundaries (naive split on `;` that respects
-/// basic quoting; sufficient for the multi-statement batching use case).
-fn split_sql_statements(sql: &str) -> Vec<&str> {
-    let trimmed = sql.trim();
-    if trimmed.is_empty() {
-        return vec![];
-    }
-    let mut stmts: Vec<&str> = Vec::new();
-    let mut start = 0;
-    let bytes = trimmed.as_bytes();
-    let mut in_single = false;
-    let mut in_double = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
-            b';' if !in_single && !in_double => {
-                let stmt = trimmed[start..i].trim();
-                if !stmt.is_empty() {
-                    stmts.push(stmt);
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = trimmed[start..].trim();
-    if !last.is_empty() && last != ";" {
-        stmts.push(last);
-    }
-    stmts
+/// Split SQL text with the shared SQLite-family splitter, which keeps
+/// `CREATE TRIGGER ... BEGIN ...; END;` bodies in one statement.
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    split_sql_statements_for_database(sql, DatabaseType::Turso)
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -723,6 +698,17 @@ mod tests {
         assert_eq!(split_sql_statements("  ;  "), Vec::<&str>::new());
         assert_eq!(split_sql_statements("SELECT 'a;b' AS x"), vec!["SELECT 'a;b' AS x"]);
         assert_eq!(split_sql_statements("SELECT \"a;b\" AS x; SELECT 2"), vec!["SELECT \"a;b\" AS x", "SELECT 2"]);
+    }
+
+    #[test]
+    fn split_sql_statements_keeps_trigger_body_together() {
+        let trigger = "CREATE TRIGGER orders_audit AFTER INSERT ON orders\nBEGIN\n  INSERT INTO audit VALUES (NEW.id);\n  UPDATE stats SET n = n + 1;\nEND;";
+        let sql =
+            format!("CREATE TABLE orders(id INTEGER PRIMARY KEY);\n{trigger}\nINSERT INTO orders DEFAULT VALUES;");
+        assert_eq!(
+            split_sql_statements(&sql),
+            vec!["CREATE TABLE orders(id INTEGER PRIMARY KEY)", trigger, "INSERT INTO orders DEFAULT VALUES"]
+        );
     }
 
     #[test]

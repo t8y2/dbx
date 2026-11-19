@@ -146,6 +146,8 @@ struct PluginBinaryEventPayload {
 
 /// Event name for host observation events delivered to plugin UIs.
 pub const HOST_OBSERVATION_EVENT: &str = "dbx-host-observation";
+/// Event name signalling that the bus dropped events before delivery.
+pub const HOST_OBSERVATION_GAP_EVENT: &str = "dbx-host-observation-gap";
 /// Method name used when forwarding host observations to sidecar backends.
 pub const HOST_OBSERVATION_SIDECAR_METHOD: &str = "host/observation";
 
@@ -158,6 +160,12 @@ pub const HOST_OBSERVATION_SIDECAR_METHOD: &str = "host/observation";
 ///   already-running sessions that declared the matching permission. High
 ///   frequency delta streams stay UI-only (see
 ///   `HostObservationEvent::is_delivered_to_sidecar`).
+/// * Back-pressure: the bus is a bounded broadcast channel, so a lagging
+///   consumer is disconnected with a `Lagged(n)` error instead of blocking
+///   publishers. Both bridges turn that into an explicit gap signal
+///   (`dbx-host-observation-gap`, `host/observation_gap`) rather than leaving
+///   consumers to infer drops from `id` gaps, which permission filtering and
+///   concurrent publishers make meaningless.
 pub fn install_host_observation_bridge(app: &tauri::AppHandle, state: Arc<AppState>) {
     let app_handle = app.clone();
     let mut observations = state.host_observations.subscribe();
@@ -169,6 +177,7 @@ pub fn install_host_observation_bridge(app: &tauri::AppHandle, state: Arc<AppSta
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     log::warn!("Desktop host observation bridge skipped {skipped} events");
+                    let _ = app_handle.emit(HOST_OBSERVATION_GAP_EVENT, serde_json::json!({ "skipped": skipped }));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -196,6 +205,7 @@ pub fn install_host_observation_bridge(app: &tauri::AppHandle, state: Arc<AppSta
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     log::warn!("Desktop host observation sidecar bridge skipped {skipped} events");
+                    plugin_host.broadcast_observation_gap(skipped).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

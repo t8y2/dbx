@@ -130,7 +130,6 @@
         let paused = false;
         let received = 0;
         let dropped = 0;
-        let lastId;
 
         const plugin = window.dbxPlugin;
         if (!plugin || typeof plugin.onHostEvent !== "function") {
@@ -192,14 +191,22 @@
         const unsubscribe = plugin.onHostEvent((event) => {
           if (!event || typeof event.kind !== "string") return;
           received += 1;
-          if (lastId !== undefined && event.id > lastId + 1) dropped += event.id - lastId - 1;
-          lastId = event.id;
           countEl.textContent = String(received);
-          droppedEl.textContent = String(dropped);
           if (paused) return;
           if (!enabled().has(categoryOf(event.kind))) return;
           addRow(event);
         });
+
+        // Drops are reported by the host, never inferred from `id` gaps: ids are
+        // host-global while delivery is filtered per permission, so gaps are
+        // normal (another category was filtered out).
+        const unsubscribeGap =
+          typeof plugin.onHostGap === "function"
+            ? plugin.onHostGap((gap) => {
+                dropped += Number(gap && gap.skipped) || 0;
+                droppedEl.textContent = String(dropped);
+              })
+            : undefined;
 
         pauseButton.addEventListener("click", () => {
           paused = !paused;
@@ -210,11 +217,13 @@
           rows.replaceChildren();
           received = 0;
           dropped = 0;
-          lastId = undefined;
           countEl.textContent = "0";
           droppedEl.textContent = "0";
         });
-        window.addEventListener("beforeunload", () => unsubscribe && unsubscribe());
+        window.addEventListener("beforeunload", () => {
+          unsubscribe && unsubscribe();
+          unsubscribeGap && unsubscribeGap();
+        });
       })();
     </script>
   </body>

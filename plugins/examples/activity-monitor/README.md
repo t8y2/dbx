@@ -14,7 +14,7 @@ It declares all five observation permissions:
 | `host.observe:plugins` | `plugin.activated`, `plugin.activate_failed`, `plugin.status_changed`, `plugin.stopped` |
 
 UI features: per-category filters, pause/resume, clear, dropped-event counter
-(monotonic `id` gaps) and a payload inspector.
+(host gap notices) and a payload inspector.
 
 ## Run it
 
@@ -46,11 +46,13 @@ start an AI agent turn, or run an export — events appear live.
 ## Notes for real plugins
 
 - `ai.text_delta` / `ai.reasoning_delta` are UI-only; a sidecar receives every
-  other AI event but not the deltas, so persist final text from
-  `ai.response_complete` / `ai.agent_finished`.
+  other AI event but not the deltas, so persist the final answer from the
+  `text` field of `ai.agent_finished` (`response_complete` is CLI-only and
+  non-terminal).
 - SQL text, tool arguments/results and summaries are capped at 16 KiB; a
   clipped field carries `<field>Truncated: true`.
-- The bus drops events under back-pressure. Track gaps through `id` (this
-  plugin shows them as "dropped").
+- The bus drops events under back-pressure and tells subscribers through
+  `onHostGap(({ skipped }) => ...)`. Do not infer drops from `id` gaps: ids are
+  host-global while delivery is filtered per permission, so gaps are normal.
 - Sidecars only receive observations while already running; observation never
   activates a plugin.

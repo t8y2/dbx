@@ -8,7 +8,7 @@ aggregating the live event stream into requirement-shaped metrics.
 
 | Requirement | Metrics this plugin surfaces |
 | --- | --- |
-| 调试 (debugging) | Recent-error table (`query.finished` errors, `ai.error`, `connection.open_failed`, `plugin.activate_failed`), live event feed, per-kind counters, dropped-event counter from monotonic `id` gaps |
+| 调试 (debugging) | Recent-error table (`query.finished` errors, `ai.error`, `connection.open_failed`, `plugin.activate_failed`), live event feed, per-kind counters, dropped-event counter from explicit host gap notices |
 | 性能分析 (performance) | Query duration **p50 / p95 / max**, duration histogram, slowest-statement top 10, rows returned, avg connection-open duration, events/min throughput |
 | 审计 (audit) | Bounded JSONL audit buffer (20k events) with one-click clipboard export + preview, plugin activate-failure tracking, AI token accounting (`agent_finished` input/output) |
 

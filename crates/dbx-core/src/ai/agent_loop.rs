@@ -176,6 +176,66 @@ fn agent_event_observation_kind(event: &AgentEvent) -> Option<&'static str> {
     })
 }
 
+/// Publishes host observations for one agent run.
+///
+/// Kept as a standalone type so the event sequence — including the final-text
+/// accumulation across turns — is testable without a live provider.
+///
+/// Sidecars skip `ai.text_delta` (see `SIDECAR_SKIPPED_KINDS`), so the tap
+/// accumulates the run's final assistant text and attaches it to
+/// `ai.agent_finished`, the success terminal emitted for every provider.
+struct AgentObservationTap {
+    observations: crate::observability::HostObservationBus,
+    connection_id: String,
+    database: String,
+    session_id: Option<String>,
+    provider: serde_json::Value,
+    model: String,
+    text: crate::observability::ObservationTextAccumulator,
+}
+
+impl AgentObservationTap {
+    fn observe(&self, event: &AgentEvent) {
+        // Fast path: every token delta lands here, so skip all payload work
+        // when no observability plugin is attached.
+        if self.observations.subscriber_count() == 0 {
+            return;
+        }
+        let Some(kind) = agent_event_observation_kind(event) else {
+            return;
+        };
+        match event {
+            // Mirror `run_agent_loop`'s `final_text`: only the last turn's
+            // response is the answer, so a new turn drops the previous turn's
+            // text instead of concatenating it.
+            AgentEvent::TurnStart { .. } => self.text.clear(),
+            AgentEvent::TextDelta { delta } => self.text.push_delta(delta),
+            _ => {}
+        }
+        let mut payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "sessionId".to_string(),
+                serde_json::to_value(&self.session_id).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert("provider".to_string(), self.provider.clone());
+            object.insert("model".to_string(), serde_json::Value::String(self.model.clone()));
+        }
+        cap_observation_fields(&mut payload, &["sql", "args", "result", "summary", "text"]);
+        // `AgentEnd` is every provider's success terminal. Only the CLI adapter
+        // emits `ResponseComplete`, and it is explicitly non-terminal, so the
+        // text rides the former.
+        if matches!(event, AgentEvent::AgentEnd { .. }) {
+            let (text, text_truncated) = self.text.take();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("text".to_string(), serde_json::Value::String(text));
+                object.insert("textTruncated".to_string(), serde_json::Value::Bool(text_truncated));
+            }
+        }
+        self.observations.publish(kind, Some(self.connection_id.clone()), Some(self.database.clone()), payload);
+    }
+}
+
 /// Run the agent loop: call LLM with tools, execute tool calls, feed results back, repeat.
 ///
 /// The `on_event` callback receives streaming events for the frontend.
@@ -199,35 +259,20 @@ pub async fn run_agent_loop(
     // Observation tap. `on_event` is the loop's only event exit, so wrapping
     // it here captures every variant (turns, tool calls, approvals, context
     // compaction, token usage) without touching the 20+ emit sites inside or
-    // the two shell callers. The subscriber check keeps the closure almost
-    // free when no observability plugin is attached.
-    let observations = agent_ctx.state.host_observations.clone();
-    let observation_context = (
-        agent_ctx.connection_id.clone(),
-        agent_ctx.database.clone(),
-        agent_ctx.session_id.clone(),
-        serde_json::to_value(&config.provider).unwrap_or(serde_json::Value::Null),
-        config.model.clone(),
-    );
+    // the two shell callers.
+    let observation_tap = Arc::new(AgentObservationTap {
+        observations: agent_ctx.state.host_observations.clone(),
+        connection_id: agent_ctx.connection_id.clone(),
+        database: agent_ctx.database.clone(),
+        session_id: agent_ctx.session_id.clone(),
+        provider: serde_json::to_value(&config.provider).unwrap_or(serde_json::Value::Null),
+        model: config.model.clone(),
+        text: crate::observability::ObservationTextAccumulator::default(),
+    });
     let observed_on_event = {
         let original = on_event.clone();
         move |event: AgentEvent| {
-            if observations.subscriber_count() > 0 {
-                if let Some(kind) = agent_event_observation_kind(&event) {
-                    let mut payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-                    let (connection_id, database, session_id, provider, model) = &observation_context;
-                    if let Some(object) = payload.as_object_mut() {
-                        object.insert(
-                            "sessionId".to_string(),
-                            serde_json::to_value(session_id).unwrap_or(serde_json::Value::Null),
-                        );
-                        object.insert("provider".to_string(), provider.clone());
-                        object.insert("model".to_string(), serde_json::Value::String(model.clone()));
-                    }
-                    cap_observation_fields(&mut payload, &["sql", "args", "result", "summary"]);
-                    observations.publish(kind, Some(connection_id.clone()), Some(database.clone()), payload);
-                }
-            }
+            observation_tap.observe(&event);
             original(event);
         }
     };
@@ -1885,6 +1930,80 @@ mod tests {
         for (event, expected) in events {
             assert_eq!(agent_event_observation_kind(&event), Some(expected), "{event:?}");
         }
+    }
+
+    fn observation_tap(bus: crate::observability::HostObservationBus) -> AgentObservationTap {
+        AgentObservationTap {
+            observations: bus,
+            connection_id: "conn-1".into(),
+            database: "app".into(),
+            session_id: Some("session-1".into()),
+            provider: serde_json::json!("openai"),
+            model: "gpt-test".into(),
+            text: Default::default(),
+        }
+    }
+
+    /// Regular providers and the text fallback end with `TextDelta` →
+    /// `AgentEnd` and never emit `ResponseComplete`, so the final text must
+    /// ride `ai.agent_finished` or a sidecar (which skips deltas) gets nothing.
+    #[tokio::test]
+    async fn text_fallback_sequence_carries_the_answer_on_agent_finished() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::TextDelta { delta: "The answer".into() });
+        tap.observe(&AgentEvent::TextDelta { delta: " is 42.".into() });
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: Some(3), output_tokens: Some(4) });
+
+        assert_eq!(receiver.recv().await.unwrap().kind, KIND_AI_TEXT_DELTA);
+        assert_eq!(receiver.recv().await.unwrap().kind, KIND_AI_TEXT_DELTA);
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
+        assert_eq!(terminal.payload["text"], "The answer is 42.");
+        assert_eq!(terminal.payload["textTruncated"], false);
+        assert_eq!(terminal.payload["output_tokens"], 4);
+    }
+
+    /// The CLI adapter also emits `ResponseComplete`; it is non-terminal and
+    /// must not consume the accumulated text before `AgentEnd` arrives.
+    #[tokio::test]
+    async fn cli_sequence_keeps_the_text_until_agent_finished() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::TextDelta { delta: "cli answer".into() });
+        tap.observe(&AgentEvent::ResponseComplete);
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+
+        let _delta = receiver.recv().await.unwrap();
+        let response_complete = receiver.recv().await.unwrap();
+        assert_eq!(response_complete.kind, KIND_AI_RESPONSE_COMPLETE);
+        assert!(response_complete.payload.get("text").is_none());
+        let terminal = receiver.recv().await.unwrap();
+        assert_eq!(terminal.kind, KIND_AI_AGENT_FINISHED);
+        assert_eq!(terminal.payload["text"], "cli answer");
+    }
+
+    /// Only the last turn's response is the answer, matching the text
+    /// `run_agent_loop` returns.
+    #[tokio::test]
+    async fn a_new_turn_replaces_the_previous_turns_text() {
+        let bus = crate::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let tap = observation_tap(bus.clone());
+        tap.observe(&AgentEvent::TurnStart { turn: 1 });
+        tap.observe(&AgentEvent::TextDelta { delta: "checking tables".into() });
+        tap.observe(&AgentEvent::TurnEnd { turn: 1 });
+        tap.observe(&AgentEvent::TurnStart { turn: 2 });
+        tap.observe(&AgentEvent::TextDelta { delta: "final answer".into() });
+        tap.observe(&AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+
+        let mut terminal = receiver.recv().await.unwrap();
+        while terminal.kind != KIND_AI_AGENT_FINISHED {
+            terminal = receiver.recv().await.unwrap();
+        }
+        assert_eq!(terminal.payload["text"], "final answer");
     }
 
     fn plugin_tool_call(id: &str, name: &str) -> ToolCall {

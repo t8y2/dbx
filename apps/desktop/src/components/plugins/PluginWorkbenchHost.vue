@@ -877,7 +877,12 @@ onMounted(async () => {
     (event) => bridge?.forwardEvent(event),
     (event) => bridge?.forwardBinary(event),
   );
-  const unsubscribeObservations = isTauriRuntime() ? await api.subscribeHostObservations((event) => bridge?.forwardObservation(event)) : undefined;
+  const unsubscribeObservations = isTauriRuntime()
+    ? await api.subscribeHostObservations(
+        (event) => bridge?.forwardObservation(event),
+        (gap) => bridge?.forwardObservationGap(gap),
+      )
+    : undefined;
   if (disposed) {
     unsubscribe();
     unsubscribeObservations?.();

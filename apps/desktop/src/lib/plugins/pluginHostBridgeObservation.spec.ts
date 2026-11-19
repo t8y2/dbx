@@ -75,4 +75,19 @@ describe("PluginHostBridge.forwardObservation", () => {
     plain.sendInit();
     expect(plainMessages[plainMessages.length - 1]).toMatchObject({ type: "init", capabilities: { observations: false } });
   });
+
+  it("forwards drop gaps to any plugin that declared an observation permission", () => {
+    const messages: unknown[] = [];
+    const bridge = new PluginHostBridge(plugin(["host.observe:transfers"]), workbench, {}, () => messagesTarget(messages), minimalApi());
+    bridge.forwardObservationGap({ skipped: 12 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "hosteventgap", skipped: 12 });
+  });
+
+  it("drops gap notices for plugins without an observation permission", () => {
+    const messages: unknown[] = [];
+    const bridge = new PluginHostBridge(plugin(["host.events"]), workbench, {}, () => messagesTarget(messages), minimalApi());
+    bridge.forwardObservationGap({ skipped: 3 });
+    expect(messages).toHaveLength(0);
+  });
 });

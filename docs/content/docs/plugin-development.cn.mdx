@@ -400,6 +400,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `ai.clearRecommendations()`                                                  | 清空当前工作台的推荐问题；需要 `host.ai` 和 `capabilities.aiRecommendations`。                                                                                                                                                                                                                                                                                    |
 | `onInit(fn)` / `onEvent(fn)`                                                 | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。                                                                                                                                                                                                                                                                                                  |
 | `onHostEvent(fn)`                                                            | 接收结构化宿主活动（`query.*`、`connection.*`、`ai.*`、`transfer.*`、`plugin.*`）；需要对应的 `host.observe:*` 权限与 `capabilities.observations`（见 [宿主观测事件](#宿主观测事件)）。                                                                                                                                                                          |
+| `onHostGap(fn)`                                                              | 观测总线落后时接收显式丢弃通知（`{ skipped }`）；需要任意 `host.observe:*` 权限与 `capabilities.observations`。`id` 缺口不是丢事件信号。                                                                                                                                                                                                                          |
 | `storage`                                                                    | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。                                                                                                                                                                                                                                                                                                         |
 | `fileTransfer`                                                               | 本地文件流式传输、下载与（桌面端）系统拖放；见下文。                                                                                                                                                                                                                                                                                                              |
 | `clipboard`                                                                  | 沙箱内的系统剪贴板访问；见下文。                                                                                                                                                                                                                                                                                                                                  |
@@ -707,7 +708,11 @@ const unsubscribe = window.dbxPlugin.onHostEvent((event) => {
 
 先检查 init 消息中的 `capabilities.observations`：没有观测总线的宿主会省略该字段，而较旧的 DBX 也会在安装时拒绝未知权限。
 
-每个事件包含单调递增的 `id`（出现缺口说明有事件被丢弃）、墙钟时间 `tsMs`、点分格式的 `kind`、可选的 `connectionId` / `database`，以及按 kind 定义的 `payload`。`kind` 前缀决定所需权限：`query.*` → `host.observe:queries`，`connection.*` → `host.observe:connections`，`ai.*` → `host.observe:ai`，`transfer.*` → `host.observe:transfers`，`plugin.*` → `host.observe:plugins`。未映射的 kind 永远不会下发。
+每个事件包含宿主全局单调递增的 `id`、墙钟时间 `tsMs`、点分格式的 `kind`、可选的 `connectionId` / `database`，以及按 kind 定义的 `payload`。`kind` 前缀决定所需权限：`query.*` → `host.observe:queries`，`connection.*` → `host.observe:connections`，`ai.*` → `host.observe:ai`，`transfer.*` → `host.observe:transfers`，`plugin.*` → `host.observe:plugins`。未映射的 kind 永远不会下发。
+
+`id` 只用于排序和去重，**不能**用来判断丢事件：id 由整个宿主统一分配，而下发按权限过滤，因此出现缺口是正常的（其他类别被过滤掉了），并发发布时相邻 id 也可能略有乱序。真正的丢事件由宿主显式通知，见下文「背压与事件丢弃」。
+
+原生批量路径（MySQL 多语句管道、SQL Server `GO` 批次）会发出一个带 `batch: true` 与 `statementCount` 的 `query.started`、每条语句一个带 `batch: true` 与 `statementIndex` 的 `query.finished`，以及恰好一个带 `batchComplete: true` 的终态 `query.finished`（含 `status`：`ok` / `error` / `cancelled`、`completedStatements`、`failedStatements`，失败时附带上限截断的 `error`）。即使批次在跑任何语句之前就失败（只读拒绝、连接池启动失败、取消），终态事件也会发出，因此请用 `batchComplete` 而不是逐语句事件来配对 `query.started`。批次成功返回但内部含失败结果的情况（如获取连接失败，或 `continue_on_error` 批次中部分语句失败）同样会得到 `status: "error"`；用户取消优先于语句错误。
 
 | 类别   | 事件类型                                                                                                                                                                                                                                                                                                                                                              |
 | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -717,7 +722,21 @@ const unsubscribe = window.dbxPlugin.onHostEvent((event) => {
 | 传输   | `transfer.progress` —— `payload.taskKind` 取值为 `transfer`、`database-export`、`table-import`、`table-export`、`sql-file`、`mongo-dump`、`mongo-restore`、`mongo-import`、`mongo-export`、`query-result-export`、`dameng-dump`                                                                                                                                       |
 | 插件   | `plugin.activated`、`plugin.activate_failed`、`plugin.status_changed`、`plugin.stopped`                                                                                                                                                                                                                                                                                |
 
-SQL 文本、工具参数、工具结果和上下文摘要上限为 16 KiB；被截断的字段会在 `payload` 中设置 `<field>Truncated: true`。`ai.text_delta` 与 `ai.reasoning_delta` 属高频事件，仅投递到工作台 UI —— 声明 `host.observe:ai` 的 sidecar 会收到其他所有 AI 事件但收不到增量，持久化审计日志请使用 `ai.response_complete` / `ai.agent_finished` 中的最终文本。
+SQL 文本、工具参数、工具结果和上下文摘要上限为 16 KiB；被截断的字段会在 `payload` 中设置 `<field>Truncated: true`。`ai.text_delta` 与 `ai.reasoning_delta` 属高频事件，仅投递到工作台 UI —— 声明 `host.observe:ai` 的 sidecar 会收到其他所有 AI 事件但收不到增量，因此请从 `ai.agent_finished` 的 `text` 字段持久化最终回答（即该次运行最后一轮的助手文本，上限 16 KiB，被截断时带 `textTruncated`）。`ai.response_complete` 只有 CLI 适配器会发出，且明确是非终态事件。被取消的运行同样会以 `ai.agent_finished` 结束，其 `text` 包含宿主追加的取消提示；在终态事件之前就失败的运行不会附带 `text`。
+
+`transfer.progress` 按设计不含内容：只发布白名单内的 id、状态、计数器、耗时和对象名。SQL 语句、驱动错误文本、导入的行/文档数据和本地文件路径都不会进入传输事件流；它们属于已经单独授权的 `host.observe:queries` / `host.observe:ai`。
+
+#### 背压与事件丢弃
+
+观测总线是有界广播通道：落后太多的消费者会被断开而不是拖慢查询执行，因此事件可能被丢弃。丢事件由宿主显式通知，绝不能从 `id` 缺口推断：
+
+```js
+const stopGaps = window.dbxPlugin.onHostGap(({ skipped }) => {
+  // 有 skipped 个事件在下发前被丢弃；需要精确计数的审计场景应记录该缺口。
+});
+```
+
+只要插件声明了任意一个 `host.observe:*` 权限就会收到 `onHostGap`，因为丢事件发生在按类别过滤之前。
 
 sidecar 收到的同样是事件内容，但以无 id 的 JSON-RPC 通知下发：
 
@@ -726,6 +745,14 @@ sidecar 收到的同样是事件内容，但以无 id 的 JSON-RPC 通知下发�
 ```
 
 通知只投递给清单中声明了对应权限且**已在运行**的 sidecar；观测不会自行激活插件。处理应保持轻量、持久化异步执行，因为该帧与常规 RPC 共用 stdin。
+
+总线落后时，sidecar 也会以同样方式收到无 id 的丢弃通知：
+
+```json
+{"jsonrpc":"2.0","method":"host/observation_gap","params":{"skipped":12}}
+```
+
+该通知会发给所有声明了任意 `host.observe:*` 权限的在运行会话。
 
 ### 在 DBX AI 中分析插件数据
 

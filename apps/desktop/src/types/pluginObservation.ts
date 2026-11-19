@@ -21,3 +21,17 @@ export interface PluginHostObservationEvent {
 
 /** Tauri event name carrying host observation events. */
 export const HOST_OBSERVATION_EVENT = "dbx-host-observation";
+
+/**
+ * Gap notice: the host observation bus dropped `skipped` events before they
+ * reached delivery (bounded broadcast channel, lagging consumer).
+ *
+ * `id` gaps are NOT a drop signal: ids are host-global while delivery is
+ * filtered per permission, so gaps are normal.
+ */
+export interface PluginHostObservationGap {
+  skipped: number;
+}
+
+/** Tauri event name signalling dropped observation events. */
+export const HOST_OBSERVATION_GAP_EVENT = "dbx-host-observation-gap";

@@ -325,12 +325,43 @@ impl PluginHost {
     /// `plugin.stopped`, and a healthy plugin (whose SDK loop reads stdin
     /// continuously) never comes close to the deadline.
     pub async fn broadcast_observation(&self, permission: &str, method: &str, params: serde_json::Value) {
+        self.broadcast_to_observers(
+            |permissions| permissions.iter().any(|declared| declared == permission),
+            method,
+            params,
+        )
+        .await;
+    }
+
+    /// Tell running observers that the host observation bus dropped `skipped`
+    /// events before they reached delivery (the broadcast channel is bounded
+    /// and disconnects lagging consumers instead of blocking publishers).
+    ///
+    /// Gap notifications go to every running session that declared any
+    /// `host.observe:*` permission, because the drop happens before the
+    /// per-category filter; the UI path receives the same signal without a
+    /// permission filter for the same reason.
+    pub async fn broadcast_observation_gap(&self, skipped: u64) {
+        self.broadcast_to_observers(
+            |permissions| permissions.iter().any(|declared| declared.starts_with("host.observe:")),
+            "host/observation_gap",
+            serde_json::json!({ "skipped": skipped }),
+        )
+        .await;
+    }
+
+    async fn broadcast_to_observers(
+        &self,
+        matches: impl Fn(&[String]) -> bool,
+        method: &str,
+        params: serde_json::Value,
+    ) {
         let sessions: Vec<Arc<PluginSidecarSession>> = self.inner.sessions.read().await.values().cloned().collect();
         for session in sessions {
             if session.status().state != PluginSessionState::Running {
                 continue;
             }
-            if !session.plugin().manifest.permissions.iter().any(|declared| declared == permission) {
+            if !matches(&session.plugin().manifest.permissions) {
                 continue;
             }
             let delivery =

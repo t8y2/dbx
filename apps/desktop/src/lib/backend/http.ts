@@ -10,7 +10,7 @@ import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/li
 import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
-import type { PluginHostObservationEvent } from "@/types/pluginObservation";
+import type { PluginHostObservationEvent, PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return post("/api/pl-debug/bootstrap", {});
@@ -922,7 +922,7 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
  * host passes `subscribeHostObservations` only in the Tauri runtime, so
  * `capabilities.observations` stays absent on web and plugins gate on it.
  */
-export async function subscribeHostObservations(_onEvent: (event: PluginHostObservationEvent) => void): Promise<() => void> {
+export async function subscribeHostObservations(_onEvent: (event: PluginHostObservationEvent) => void, _onGap?: (gap: PluginHostObservationGap) => void): Promise<() => void> {
   return () => {};
 }
 

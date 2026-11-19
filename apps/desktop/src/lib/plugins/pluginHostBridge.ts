@@ -13,8 +13,8 @@ import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_S
 import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, type PluginConnectionSummary } from "@/types/pluginConnection";
 import { floatingWindowLabel } from "@/lib/app/windowContext";
 import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
-import { pluginObservationPermission } from "./pluginObservation";
-import type { PluginHostObservationEvent } from "@/types/pluginObservation";
+import { declaresAnyObservationPermission, pluginObservationPermission } from "./pluginObservation";
+import type { PluginHostObservationEvent, PluginHostObservationGap } from "@/types/pluginObservation";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -316,7 +316,7 @@ export interface PluginHostBridgeApi {
   /** Whether this host receives OS file drops on the plugin's behalf (desktop only). */
   receiveOsDrops?: boolean;
   /** Whether this host can subscribe to host observation events; presence gates the `observations` capability. */
-  subscribeHostObservations?(onEvent: (event: PluginHostObservationEvent) => void): Promise<() => void> | (() => void);
+  subscribeHostObservations?(onEvent: (event: PluginHostObservationEvent) => void, onGap?: (gap: PluginHostObservationGap) => void): Promise<() => void> | (() => void);
   /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
   storageGet?(pluginId: string, key: string): Promise<unknown>;
   storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;
@@ -647,6 +647,24 @@ export class PluginHostBridge {
       connectionId: event.connectionId,
       database: event.database,
       payload: event.payload,
+    });
+  }
+
+  /**
+   * Forward an explicit drop notice from the host observation bus.
+   *
+   * Gaps are stream-level: the drop happens before the per-category filter, so
+   * any plugin that declared a `host.observe:*` permission receives them,
+   * regardless of which categories it subscribed to. Consumers must count
+   * drops from this signal, never from `id` gaps.
+   */
+  forwardObservationGap(gap: PluginHostObservationGap): void {
+    if (!declaresAnyObservationPermission(this.plugin.manifest.permissions)) return;
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "hosteventgap",
+      skipped: gap.skipped,
     });
   }
 
@@ -1377,7 +1395,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set(), hostevent: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set(), hostevent: new Set(), hosteventgap: new Set() };
     let sequence = 0;
     let contributionId;
     let context;
@@ -1636,6 +1654,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onHostEvent: (listener) => { listeners.hostevent.add(listener); return () => listeners.hostevent.delete(listener); },
+      onHostGap: (listener) => { listeners.hosteventgap.add(listener); return () => listeners.hosteventgap.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
       // §8.3 workbench/close handshake: the host sends workbench/close before
@@ -1697,6 +1716,10 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         };
         listeners.hostevent.forEach((listener) => listener(observation));
         document.dispatchEvent(new CustomEvent('dbx-plugin-host-event', { detail: observation }));
+      } else if (message.type === 'hosteventgap') {
+        const gap = { skipped: typeof message.skipped === 'number' ? message.skipped : 0 };
+        listeners.hosteventgap.forEach((listener) => listener(gap));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-host-gap', { detail: gap }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
         const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')

@@ -76,7 +76,7 @@
     </div>
     <div class="kpis">
       <div class="kpi"><div class="label">EVENTS RECEIVED</div><div class="value" id="k-received">0</div><div class="sub" id="k-rate">0 events/min</div></div>
-      <div class="kpi warn"><div class="label">DROPPED (ID GAPS)</div><div class="value" id="k-dropped">0</div><div class="sub">bus back-pressure indicator</div></div>
+      <div class="kpi warn"><div class="label">DROPPED (HOST GAP)</div><div class="value" id="k-dropped">0</div><div class="sub">bus back-pressure indicator</div></div>
       <div class="kpi"><div class="label">QUERIES OK / ERROR / CANCELLED</div><div class="value" id="k-queries">0 / 0 / 0</div><div class="sub" id="k-rows">0 rows returned</div></div>
       <div class="kpi"><div class="label">QUERY DURATION p50 / p95 / MAX</div><div class="value" id="k-latency">– / – / –</div><div class="sub" id="k-slowest">no samples</div></div>
       <div class="kpi"><div class="label">CONNECTIONS OPENED / FAILED / CLOSED</div><div class="value" id="k-connections">0 / 0 / 0</div><div class="sub" id="k-conn-sub">–</div></div>
@@ -113,7 +113,6 @@
           paused: false,
           received: 0,
           dropped: 0,
-          lastId: undefined,
           audit: [],
           query: { ok: 0, error: 0, cancelled: 0, rows: 0, durations: [], slowest: [] },
           connection: { opened: 0, failed: 0, closed: 0, lost: 0, idle: 0, openMs: 0 },
@@ -328,8 +327,6 @@
         const unsubscribe = plugin.onHostEvent((event) => {
           if (!event || typeof event.kind !== "string") return;
           state.received += 1;
-          if (state.lastId !== undefined && event.id > state.lastId + 1) state.dropped += event.id - state.lastId - 1;
-          state.lastId = event.id;
           state.audit.push(event);
           if (state.audit.length > MAX_AUDIT) {
             state.audit.splice(0, state.audit.length - MAX_AUDIT);
@@ -348,12 +345,22 @@
           }
         });
 
+        // Drops come from the host's explicit gap notice. `id` gaps are not a
+        // drop signal: ids are host-global while delivery is permission-filtered.
+        const unsubscribeGap =
+          typeof plugin.onHostGap === "function"
+            ? plugin.onHostGap((gap) => {
+                state.dropped += Number(gap && gap.skipped) || 0;
+                $("k-dropped").textContent = String(state.dropped);
+              })
+            : undefined;
+
         $("pause").addEventListener("click", () => {
           state.paused = !state.paused;
           $("pause").textContent = state.paused ? "Resume" : "Pause";
         });
         $("reset").addEventListener("click", () => {
-          state.received = 0; state.dropped = 0; state.lastId = undefined; state.audit = [];
+          state.received = 0; state.dropped = 0; state.audit = [];
           state.query = { ok: 0, error: 0, cancelled: 0, rows: 0, durations: [], slowest: [] };
           state.connection = { opened: 0, failed: 0, closed: 0, lost: 0, idle: 0, openMs: 0 };
           state.ai = { toolCalls: 0, approvals: 0, errors: 0, deltas: 0, tokensIn: 0, tokensOut: 0 };
@@ -375,7 +382,10 @@
             $("audit-status").textContent = "clipboard unavailable — select the preview text and copy manually";
           });
         });
-        window.addEventListener("beforeunload", () => unsubscribe && unsubscribe());
+        window.addEventListener("beforeunload", () => {
+          unsubscribe && unsubscribe();
+          unsubscribeGap && unsubscribeGap();
+        });
         renderKpis();
       })();
     </script>

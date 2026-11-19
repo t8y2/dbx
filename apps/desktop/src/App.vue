@@ -128,8 +128,10 @@ import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceK
 import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
 import { createFrontendPluginRegistry, pluginConnectionProviderDefaultPort } from "@/lib/plugins/frontendPlugin";
-import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
-import { resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider } from "@/lib/connection/connectionDeepLink";
+import { resolveSavedConnectionForEdit } from "@/lib/connection/connectionDeepLinkUpdate";
+import { resolveConnectionEditPrefill, type ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
+import { PLUGIN_CONNECTION_EDITOR, pluginConnectionEditFields } from "@/lib/connection/pluginConnectionEdit";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
 import type { GlobalNavigationEntry, GlobalNavigationKind, GlobalNavigationSurface } from "@/lib/navigation/navigationEntry";
@@ -493,8 +495,14 @@ const appReady = computed(() => !setupRequired.value && (!needsAuth.value || aut
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
-const connectionDialogUpdate = ref<ConnectionDeepLinkUpdate | null>(null);
+const connectionDialogUpdate = ref<ConnectionEditPrefill | null>(null);
 const connectionDialogInitialTab = ref<ConfigTab | undefined>(undefined);
+if (isTauriRuntime() && !isDetachedWindowContext) {
+  provide(PLUGIN_CONNECTION_EDITOR, {
+    getFields: (connectionId) => pluginConnectionEditFields(resolveSavedConnectionForEdit(connectionId, connectionStore.connections)),
+    openEdit: ({ connectionId, fields = {} }) => openConnectionUpdate({ source: "plugin", connectionId, patch: fields }),
+  });
+}
 const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
@@ -3292,19 +3300,23 @@ async function deepLinkPluginConnectionProviders(): Promise<ConnectionDeepLinkPl
   }
 }
 
+function openConnectionUpdate(update: ConnectionEditPrefill) {
+  const config = resolveConnectionEditPrefill(update, connectionStore.connections, showConnectionDialog.value || !!connectionStore.editingConnectionId);
+  connectionDialogPrefill.value = null;
+  connectionDialogUpdate.value = update;
+  connectionPluginProvider.value = null;
+  connectionDialogInitialTab.value = "connection";
+  connectionStore.stopCreatingConnectionInGroup();
+  connectionStore.startEditing(config.id);
+  showConnectionDialog.value = true;
+}
+
 async function openConnectionDeepLink(url: string) {
   await connectionStore.initFromDisk();
   try {
     const update = parseConnectionDeepLinkUpdate(url);
     if (update) {
-      const config = resolveConnectionDeepLinkUpdate(update, connectionStore.connections, showConnectionDialog.value || !!connectionStore.editingConnectionId);
-      connectionDialogPrefill.value = null;
-      connectionDialogUpdate.value = update;
-      connectionPluginProvider.value = null;
-      connectionDialogInitialTab.value = "connection";
-      connectionStore.stopCreatingConnectionInGroup();
-      connectionStore.startEditing(config.id);
-      showConnectionDialog.value = true;
+      openConnectionUpdate(update);
       return;
     }
     const draft = parseConnectionDeepLink(url, { pluginProviders: await deepLinkPluginConnectionProviders() });

@@ -15,6 +15,7 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
+import { mapPersistedBookmarks } from "@/lib/editor/workspaceBookmarks";
 import { nativeJobAdminEngine, nativeJobAdminSelection, nativeJobAdminSupported, type NativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
 import type { DeletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionTabs";
 import type {
@@ -5886,7 +5887,7 @@ export const useQueryStore = defineStore("query", () => {
         return existing.id;
       }
       // Reopen the current document, not an old closed-tab SQL snapshot.
-      void openDefaultQuery(savedSqlExecutionTargetFromTab(restoredTab)!).catch(reportDefaultQuerySaveError);
+      void openDefaultQuery(savedSqlExecutionTargetFromTab(restoredTab)!, restoredTab).catch(reportDefaultQuerySaveError);
       return null;
     }
     if (tabs.value.some((t) => t.id === restoredTab.id)) {
@@ -6871,9 +6872,16 @@ export const useQueryStore = defineStore("query", () => {
     return synchronized;
   }
 
-  async function openDefaultQuery(target: SavedSqlExecutionTarget) {
+  async function openDefaultQuery(target: SavedSqlExecutionTarget, bookmarkSnapshot?: Pick<QueryTab, "savedSqlId" | "sql" | "editorBookmarks">) {
     const file = await useSavedSqlStore().ensureDefaultQuery({ ...target, schema: undefined });
-    return openSavedSql(file);
+    // Another action may have opened this file while loading it. Its live
+    // bookmarks take precedence over a recently closed snapshot.
+    const alreadyOpen = tabs.value.some((tab) => tab.savedSqlId === file.id);
+    const id = openSavedSql(file);
+    if (!alreadyOpen && bookmarkSnapshot?.savedSqlId === file.id && bookmarkSnapshot.editorBookmarks !== undefined) {
+      updateEditorBookmarks(id, mapPersistedBookmarks(bookmarkSnapshot.sql, file.sql, bookmarkSnapshot.editorBookmarks));
+    }
+    return id;
   }
 
   function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {

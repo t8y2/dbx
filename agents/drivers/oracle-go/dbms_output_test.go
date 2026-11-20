@@ -353,6 +353,9 @@ type oracleDBMSOutputDriver struct {
 	// whose declared size exceeds the limit (PLS-00215 through ORA-06550).
 	rejectRegisterAbove int
 	blockedFetch        chan struct{}
+	// compileErrors are the ALL_ERRORS rows (OWNER, NAME, TYPE, LINE, POSITION, TEXT)
+	// served to the compilation-error readback that follows a CREATE.
+	compileErrors [][]driver.Value
 }
 
 func openOracleDBMSOutputTestDB(t *testing.T) (*sql.DB, *oracleDBMSOutputDriver) {
@@ -561,6 +564,12 @@ func (c *oracleDBMSOutputConn) QueryContext(_ context.Context, query string, _ [
 	defer c.driver.mu.Unlock()
 	c.driver.statements = append(c.driver.statements, query)
 	c.driver.events = append(c.driver.events, "query")
+	if strings.Contains(query, "FROM ALL_ERRORS") {
+		return &oracleDBMSOutputRows{
+			columns: []string{"OWNER", "NAME", "TYPE", "LINE", "POSITION", "TEXT"},
+			values:  append([][]driver.Value(nil), c.driver.compileErrors...),
+		}, nil
+	}
 	lines := c.driver.takeStatementLines()
 	if c.enabled {
 		c.buffer = append(c.buffer, lines...)

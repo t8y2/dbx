@@ -96,10 +96,39 @@ func isInternalReadOnlySQL(sqlText string) bool {
 	return !strings.Contains(strings.ToUpper(sqlText), "FOR UPDATE")
 }
 
-// executeInternalQuery runs an internal query. Like a captured user statement it
-// pins one physical session so the schema switch and the statement share it, but
-// it never touches DBMS_OUTPUT: a dictionary read cannot write to the buffer, and
-// leaving the buffer alone keeps the capture bookkeeping of user statements intact.
+// isRoutineDefinitionDDL reports a CREATE [OR REPLACE] of a stored PL/SQL unit:
+// procedure, function, package (body), trigger or type (body). Creating one only
+// compiles it -- no PL/SQL runs, so the statement cannot write to DBMS_OUTPUT -- and
+// DBX's routine writer discards INFO messages anyway, so capturing around it was two
+// to three wasted round trips per save. Views, tables, ALTER ... COMPILE, anonymous
+// blocks and every other statement keep the capture.
+func isRoutineDefinitionDDL(sqlText string) bool {
+	object, ok := parseOracleCompiledObject(trimStatementSQL(sqlText))
+	if !ok || object.action != "created" || len(object.types) != 1 {
+		return false
+	}
+	switch object.types[0] {
+	case "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "TRIGGER", "TYPE", "TYPE BODY":
+		return true
+	default:
+		return false
+	}
+}
+
+// runsWithoutServerOutput reports whether a flagged statement may skip DBMS_OUTPUT
+// capture: a plain read, or a routine definition. Only reads may additionally reuse
+// the session schema (internalSchemaCacheKey); a routine definition still switches
+// CURRENT_SCHEMA on every run and clears the schema cache like any other write, and
+// its compilation errors are read back on the same pinned session as before.
+func runsWithoutServerOutput(opts queryOptions) bool {
+	return opts.SkipServerOutput && (isInternalReadOnlySQL(opts.SQL) || isRoutineDefinitionDDL(opts.SQL))
+}
+
+// executeInternalQuery runs a statement admitted by runsWithoutServerOutput. Like a
+// captured user statement it pins one physical session so the schema switch, the
+// statement and any compilation-error readback share it, but it never touches
+// DBMS_OUTPUT: neither a dictionary read nor compiling a routine writes to the
+// buffer, and leaving it alone keeps the capture bookkeeping of user statements intact.
 func (s *server) executeInternalQuery(opts queryOptions) (queryResult, error) {
 	run := func() (queryResult, error) {
 		result, err := s.executeQueryWithoutOutput(opts)

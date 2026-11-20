@@ -327,6 +327,7 @@ import {
   filterModeNeedsValue,
   filterModeUsesList,
   filterModeUsesRange,
+  parseDataGridWhereInputToRules,
   parseFilterValue,
   parseFilterValues,
   removeColumnValueFilterCondition,
@@ -2123,6 +2124,40 @@ async function applyStructuredFilters() {
   await applyStructuredWhere(await buildStructuredWhereFromRules(structuredFilterRules.value));
 }
 
+/**
+ * Move hand-written WHERE conditions into the filter panel below the grid
+ * (#15320): the panel only renders structured rules, so conditions typed in
+ * the WHERE box never showed there and the two surfaces never interacted.
+ * Runs when the panel opens (or the view switches to it) and after a WHERE
+ * apply while it is open. Only when the builder holds no complete rule yet,
+ * the manual input is already applied, and the whole input parses into
+ * rules; anything else leaves the manual text and the rules untouched, and
+ * the text only moves once the rules rebuild to a non-empty condition, so
+ * the executed query never changes.
+ */
+async function syncManualWhereInputIntoFilterBuilder(): Promise<void> {
+  try {
+    if (!canUseWhereSearch.value || !isPersistentFilterView.value || !filterBuilderOpen.value) return;
+    if (hasPendingConditionInputs()) return;
+    if (structuredFilterRules.value.some((rule) => rule.columnName && isStructuredFilterRuleComplete(rule))) return;
+    const columns = filterBuilderColumnOptions.value;
+    if (!columns.length) return;
+    const parsed = parseDataGridWhereInputToRules(whereFilterInput.value, columns);
+    if (!parsed) return;
+    const where = await buildStructuredWhereFromRules(parsed);
+    if (!where) return;
+    structuredFilterRules.value = parsed;
+    whereFilterInput.value = "";
+    appliedStructuredWhereInput.value = where;
+    // Clearing the manual input bumps its revision; the condition is already
+    // applied (it is the same one the grid ran), so mark it applied instead
+    // of leaving an "unapplied changes" state behind.
+    markConditionInputsApplied();
+  } catch {
+    return;
+  }
+}
+
 const applyingOnlyStructuredFilter = ref(false);
 async function applyOnlyStructuredFilter(ruleId: string) {
   if (!canUseWhereSearch.value || applyingOnlyStructuredFilter.value || isApplyingWhere.value) return;
@@ -2352,6 +2387,17 @@ watch(whereFilterInput, () => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
 });
+
+// Show hand-written WHERE conditions in the filter panel (#15320): when the
+// panel opens, or the editor switches to it, move an already-applied manual
+// WHERE into structured rules so the panel reflects (and can edit) it.
+watch(
+  [filterBuilderOpen, filterEditorView],
+  () => {
+    void syncManualWhereInputIntoFilterBuilder();
+  },
+  { immediate: true },
+);
 
 function clearOrderByInput() {
   void clearStructuredSortRules();
@@ -8592,6 +8638,9 @@ async function applyWhereFilter() {
     });
     markConditionInputsApplied();
     await props.onExecuteSql(sql);
+    // The panel below only renders structured rules: once the typed WHERE is
+    // applied while the panel is open, move it there so it shows (#15320).
+    await syncManualWhereInputIntoFilterBuilder();
   } catch (e: any) {
     queryControlError.value = String(e?.message || e);
   } finally {

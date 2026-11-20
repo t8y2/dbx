@@ -128,6 +128,7 @@ function mountGrid(
   options: {
     dataGridOrderByVisible?: boolean;
     initialOrderByInput?: string;
+    initialWhereInput?: string;
     sortColumn?: string;
     sortColumnIndex?: number;
     sortDirection?: "asc" | "desc";
@@ -166,6 +167,7 @@ function mountGrid(
                 databaseType: "mysql",
                 context: "table-data",
                 initialOrderByInput: options.initialOrderByInput,
+                initialWhereInput: options.initialWhereInput,
                 sortColumn: options.sortColumn,
                 sortColumnIndex: options.sortColumnIndex,
                 sortDirection: options.sortDirection,
@@ -244,6 +246,33 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     filterToggle(host).click();
     await settle();
     expect(host.querySelector(panelSelector(view))).toBeNull();
+  });
+
+  it("moves an applied manual WHERE into the panel when it opens (#15320)", async () => {
+    const { host, onExecuteSql } = mountGrid(view, false, { initialWhereInput: "`id` = 1" });
+    await settle();
+
+    expect(host.querySelector(panelSelector(view))).toBeNull();
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("`id` = 1");
+
+    filterToggle(host).click();
+    await vi.waitFor(() => expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE `id` = 1"));
+
+    // The condition moved into the panel: the WHERE box is empty, the panel
+    // shows the rule, and opening it did not re-run the query.
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("");
+    expect(onExecuteSql).not.toHaveBeenCalled();
+  });
+
+  it("leaves an unparseable manual WHERE in the WHERE box when the panel opens (#15320)", async () => {
+    const { host } = mountGrid(view, false, { initialWhereInput: "LOWER(id) = 'x'" });
+    await settle();
+
+    filterToggle(host).click();
+    await settle();
+
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("LOWER(id) = 'x'");
+    expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE LOWER(id) = 'x'");
   });
 
   it("uses the persisted expansion preference only as the initial state", async () => {

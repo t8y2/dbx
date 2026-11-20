@@ -435,6 +435,49 @@ async fn live_mysql_lost_session_cannot_commit_on_a_replacement_connection() {
 
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_tab_continues_on_a_replaced_session_pool_without_a_transaction() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let (state, storage_path, table) = setup_probe(&config, "mysql-replaced-pool").await;
+    let session = "replaced-pool-tab";
+    let pool_key = format!("{}:session:{session}", config.id);
+    let before = run_in_tab(&state, &config, "information_schema", session, "SELECT CONNECTION_ID()").await;
+    assert!(state.detach_pool_by_key(&pool_key, false).await);
+    let after = run_in_tab(&state, &config, "information_schema", session, "SELECT CONNECTION_ID(), DATABASE()").await;
+    assert_ne!(session_number(&after.rows[0][0]), session_number(&before.rows[0][0]));
+    assert_eq!(after.rows[0][1].as_str(), Some("information_schema"));
+    assert!(state.detach_pool_by_key(&pool_key, false).await);
+    let batch = run_batch_in_tab(&state, &config, "information_schema", session, "SELECT DATABASE()", false).await;
+    assert_eq!(last_result(&batch).result.rows[0][0].as_str(), Some("information_schema"));
+    cleanup(&state, &config, &table, storage_path).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_replaced_session_pool_cannot_commit_a_lost_transaction() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().unwrap();
+    let (state, storage_path, table) = setup_probe(&config, "mysql-replaced-pool-transaction").await;
+    let session = "replaced-pool-transaction-tab";
+    run_batch_in_tab(&state, &config, &database, session, &format!("BEGIN; UPDATE {table} SET v=7 WHERE id=1"), true)
+        .await;
+    assert!(state.detach_pool_by_key(&format!("{}:session:{session}", config.id), false).await);
+    let outcome = try_run_batch_in_tab(&state, &config, &database, session, "COMMIT", true, None).await;
+    let error = match outcome {
+        Err(error) => error.to_string(),
+        Ok(results) => {
+            assert!(last_result(&results).execution_error, "a new pool must not report the old commit as successful");
+            serde_json::to_string(&last_result(&results).result.rows).unwrap()
+        }
+    };
+    assert!(error.contains("MYSQL_CLIENT_SESSION_LOST"), "{error}");
+    assert_eq!(committed_value(&state, &config, &database, &table).await, 0);
+    let recovered = run_batch_in_tab(&state, &config, &database, session, "SELECT 1", false).await;
+    assert!(!last_result(&recovered).execution_error);
+    cleanup(&state, &config, &table, storage_path).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
 async fn live_mysql_statement_error_and_implicit_commit_follow_server_transaction_state() {
     let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
     let database = config.database.clone().unwrap();

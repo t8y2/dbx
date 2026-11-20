@@ -207,6 +207,7 @@ struct MysqlClientSession {
     publication: PoolPublication,
     physical_connection_id: u32,
     database: String,
+    kept_transaction: bool,
 }
 
 pub struct ConnectionPoolReceipt {
@@ -6389,17 +6390,13 @@ impl AppState {
         }
         let mut sessions = self.mysql_client_sessions.write().await;
         if let Some(previous) = sessions.get(pool_key) {
-            if !previous.publication.is_same_pool(&snapshot.publication) {
-                sessions.remove(pool_key);
-                drop(sessions);
-                self.clear_preserved_explicit_transaction(pool_key).await;
-                return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. User variables and temporary tables are no longer available, and the previous transaction outcome may be unknown. This statement was not executed.".to_string());
-            }
-            if previous.physical_connection_id != physical_connection_id {
-                let has_transaction = self.mysql_preserved_transactions.read().await.contains(pool_key);
-                if !has_transaction {
-                    // The pool recycled the idle connection. Without an open
-                    // transaction there is nothing that cannot be recovered:
+            if !previous.publication.is_same_pool(&snapshot.publication)
+                || previous.physical_connection_id != physical_connection_id
+            {
+                if !previous.kept_transaction {
+                    // The pool recycled the idle connection, or the pool itself
+                    // was replaced by a failed health check or a reconnect.
+                    // Without an open transaction there is nothing that cannot be recovered:
                     // the caller re-issues USE to restore the database
                     // context, and user variables or temporary tables that
                     // were never tracked surface as their own clear errors
@@ -6411,6 +6408,7 @@ impl AppState {
                             publication: snapshot.publication,
                             physical_connection_id,
                             database: String::new(),
+                            kept_transaction: false,
                         },
                     );
                     return Ok(!database.is_empty());
@@ -6431,6 +6429,7 @@ impl AppState {
                 // original database, which may predate the tab's latest USE.
                 // Record the requested database only after USE succeeds.
                 database: String::new(),
+                kept_transaction: false,
             },
         );
         Ok(!database.is_empty())
@@ -6455,10 +6454,16 @@ impl AppState {
 
     pub(crate) async fn mark_preserved_explicit_transaction(&self, pool_key: &str) {
         self.mysql_preserved_transactions.write().await.insert(pool_key.to_string());
+        if let Some(session) = self.mysql_client_sessions.write().await.get_mut(pool_key) {
+            session.kept_transaction = true;
+        }
     }
 
     pub(crate) async fn clear_preserved_explicit_transaction(&self, pool_key: &str) {
         self.mysql_preserved_transactions.write().await.remove(pool_key);
+        if let Some(session) = self.mysql_client_sessions.write().await.get_mut(pool_key) {
+            session.kept_transaction = false;
+        }
     }
 
     /// The `SCAN COUNT` this connection's server has answered at, once known.
@@ -13051,14 +13056,60 @@ sleep 30
             .unwrap_err()
             .contains("MYSQL_CLIENT_SESSION_LOST"));
         assert!(state.mysql_client_session_database_change(key, &pool, 12, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "second").await;
+        state.mark_preserved_explicit_transaction(key).await;
         let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/second", 1);
         state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
         // Server connection ids can repeat after a server restart.
         assert!(state
-            .mysql_client_session_database_change(key, &replacement, 11, "second")
+            .mysql_client_session_database_change(key, &replacement, 12, "second")
             .await
             .unwrap_err()
             .contains("MYSQL_CLIENT_SESSION_LOST"));
+        assert!(state.mysql_client_session_database_change(key, &replacement, 12, "second").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mysql_replaced_session_pool_is_adopted_without_transaction() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-replaced";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "app").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "app").await;
+        state.mark_preserved_explicit_transaction(key).await;
+        state.clear_preserved_explicit_transaction(key).await;
+        assert!(state.remove_pool_by_key(key).await);
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &replacement, 11, "app").await.unwrap());
+        state.record_mysql_client_session_database(key, &replacement, "app").await;
+        assert!(!state.mysql_client_session_database_change(key, &replacement, 11, "app").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mysql_session_lost_with_kept_transaction_is_reported_after_pool_removal() {
+        for detach in [false, true] {
+            let (state, _dir) = test_app_state().await;
+            let key = "conn:session:tab-transaction";
+            let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+            state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+            assert!(state.mysql_client_session_database_change(key, &pool, 10, "app").await.unwrap());
+            state.record_mysql_client_session_database(key, &pool, "app").await;
+            state.mark_preserved_explicit_transaction(key).await;
+            let removed =
+                if detach { state.detach_pool_by_key(key, false).await } else { state.remove_pool_by_key(key).await };
+            assert!(removed);
+            assert!(!state.has_preserved_explicit_transaction(key).await);
+            let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+            state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
+            assert!(state
+                .mysql_client_session_database_change(key, &replacement, 11, "app")
+                .await
+                .unwrap_err()
+                .contains("MYSQL_CLIENT_SESSION_LOST"));
+            assert!(state.mysql_client_session_database_change(key, &replacement, 11, "app").await.unwrap());
+        }
     }
 
     #[tokio::test]

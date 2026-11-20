@@ -969,6 +969,9 @@ const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [
   () => objectFilter.value,
   () => canCreateSchemaIndex.value,
   () => oracleInvalidObjectsSupported.value,
+  // The paste-table button is driven by the clipboard, which can change from
+  // another object browser's tab without resizing this row.
+  () => connectionStore.treeClipboard,
   () => settingsStore.editorSettings.objectBrowserViewMode,
 ]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
@@ -6638,7 +6641,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   />
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div v-if="!isEventEditor" ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>
       <Button v-if="oracleInvalidObjectsSupported" variant="ghost" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="setOracleInvalidObjectsOpen(true)">{{ t("processList.oracleInvalidObjects.title") }}</Button>

@@ -413,6 +413,10 @@ const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
   // action set grows at that point, so the row must be re-measured.
   () => !!dataGridRef.value?.canOpenTableStructureEditor,
   () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  // Hidden labels remove text without resizing the row; the breadcrumb shows
+  // the connection name, whose width can change on rename.
+  () => hideToolbarLabels.value,
+  () => props.activeConnection?.name,
 ]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
@@ -3395,7 +3399,7 @@ defineExpose({
     <!-- Data mode: full-height grid -->
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
-        <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
+        <div ref="dataToolbarRef" data-toolbar-row class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
           <!-- Context breadcrumb. The connection and database segments are
                capped so a long connection name can never eat half the row;
                the table name gets the remaining room and is the only filled

@@ -2471,6 +2471,15 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "貼り付けてソース SQL を復元",
       pasteClipboardReadFailed: "クリップボードの読み取りに失敗しました：{message}",
       convertNamingStyle: "命名スタイルの切り替え",
+      executeScriptFromHere: "ここから SQL スクリプトを実行",
+    },
+    bookmarks: {
+      workspaceTitle: "ブックマーク",
+      workspaceSearch: "ファイル名、SQL テキスト、行番号を検索",
+      workspaceEmpty: "開いているすべての SQL タブのブックマークが表示されます。行番号の横にあるブックマーク用の余白をクリックすると追加できます。",
+      line: "{line} 行目",
+      emptyLine: "（空行）",
+      noMatches: "一致するブックマークはありません",
     },
     gotoLine: {
       placeholder: "行番号",
@@ -2536,6 +2545,7 @@ export default withEnglishFallback({
     previewChangesNoStatement: "変更をプレビューするには、UPDATE / INSERT / DELETE ステートメントを選択するか、その上にカーソルを置いてください。",
     fullscreenResultsPane: "結果を全画面表示",
     exitFullscreenResultsPane: "結果の全画面表示を終了",
+    executeScriptBoundaryMismatch: "この位置は前の SQL 区切り文字またはバッチ境界に依存しています。区切り文字のある行から実行するか、スクリプト全体を選択して実行してください。",
   },
   tabs: {
     sql: "SQL",
@@ -6468,6 +6478,9 @@ export default withEnglishFallback({
     title: "テーブル構造を編集",
   },
   diagram: {
+    addTables: "テーブルを追加",
+    showMoreFields: "残り {count} 個の列を表示",
+    collapseFields: "列を折りたたむ",
     title: "リレーション図",
     open: "図を表示",
     selectConnection: "接続を選択",
@@ -12474,6 +12487,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "有効期限は 0 日より大きい必要があります",
   },
   mqBroker: {
+    searchConfigurations: "設定名を検索",
+    configuration: "ブローカー設定",
+    noConfigurations: "一致する設定項目がありません",
+    configurationUnsupported: "この Kafka ブローカーは設定の取得に対応していません。",
+    configName: "名前",
+    configValue: "値",
+    configSource: "ソース",
     title: "Broker クラスター",
     autoRefresh: "自動更新",
     refreshInterval5s: "5秒",

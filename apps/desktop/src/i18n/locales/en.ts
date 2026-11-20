@@ -2722,6 +2722,7 @@ export default {
     contextMenu: {
       executeSelection: "Execute selection",
       executeCurrent: "Execute SQL",
+      executeScriptFromHere: "Execute Script from Here",
       export: "Export",
       exportQueryResultTo: "Export current query result to {format}",
       copySelection: "Copy selection",
@@ -2775,6 +2776,14 @@ export default {
       drag: "Drag to move",
       empty: "No columns",
     },
+    bookmarks: {
+      workspaceTitle: "Bookmarks",
+      workspaceSearch: "Search files, SQL text or line numbers",
+      workspaceEmpty: "Bookmarks from all open SQL tabs appear here. Click the bookmark gutter beside a line number to add one.",
+      line: "Line {line}",
+      emptyLine: "(blank line)",
+      noMatches: "No matching bookmarks",
+    },
     gotoLine: {
       placeholder: "Line number",
       total: "{total} lines",
@@ -2801,6 +2810,7 @@ export default {
       inSelection: "In selection",
     },
     noExecutableStatementAtCursor: "There is no executable statement at the cursor.",
+    executeScriptBoundaryMismatch: "This position depends on a SQL delimiter or batch boundary. Start at the delimiter line, or select the complete script to execute.",
     executionPicker: {
       title: "Execution Target",
       currentStatement: "Current SQL",
@@ -7571,6 +7581,9 @@ export default {
     sqlServerIdentityTypeHint: "SQL Server identity only supports tinyint, smallint, int, bigint, and decimal/numeric with scale 0",
   },
   diagram: {
+    addTables: "Add tables",
+    showMoreFields: "Show {count} more fields",
+    collapseFields: "Collapse fields",
     title: "Relationship Diagram",
     open: "View Diagram",
     selectConnection: "Select connection",
@@ -13527,6 +13540,13 @@ export default {
     expiryMustBePositive: "Expiry must be greater than 0 days",
   },
   mqBroker: {
+    searchConfigurations: "Search configuration names",
+    configuration: "Broker configuration",
+    noConfigurations: "No matching configuration entries",
+    configurationUnsupported: "This Kafka broker does not support configuration lookup.",
+    configName: "Name",
+    configValue: "Value",
+    configSource: "Source",
     title: "Broker cluster",
     autoRefresh: "Auto refresh",
     refreshInterval5s: "5s",

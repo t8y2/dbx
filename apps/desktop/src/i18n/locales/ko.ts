@@ -2381,6 +2381,7 @@ export default withEnglishFallback({
       deleteEmptyLines: "빈 줄 삭제",
       selectAll: "모두 선택",
       convertNamingStyle: "네이밍 스타일 전환",
+      executeScriptFromHere: "여기서 SQL 스크립트 실행",
     },
     delimitedList: {
       title: "구분자 목록으로 변환",
@@ -2401,6 +2402,14 @@ export default withEnglishFallback({
       doubleClickInsert: "더블클릭하여 삽입",
       drag: "드래그하여 이동",
       empty: "열 없음",
+    },
+    bookmarks: {
+      workspaceTitle: "북마크",
+      workspaceSearch: "파일, SQL 텍스트 또는 줄 번호 검색",
+      workspaceEmpty: "열려 있는 모든 SQL 탭의 북마크가 여기에 표시됩니다. 줄 번호 옆의 북마크 여백을 클릭하여 추가하세요.",
+      line: "{line}행",
+      emptyLine: "(빈 줄)",
+      noMatches: "일치하는 북마크가 없습니다",
     },
     gotoLine: {
       placeholder: "줄 번호",
@@ -2438,6 +2447,7 @@ export default withEnglishFallback({
     previewChangesNoStatement: "변경 사항을 미리 보려면 UPDATE / INSERT / DELETE 문을 선택하거나 커서를 해당 문에 놓으십시오.",
     fullscreenResultsPane: "결과 전체 화면 표시",
     exitFullscreenResultsPane: "결과 전체 화면 종료",
+    executeScriptBoundaryMismatch: "이 위치는 앞의 SQL 구분 기호 또는 배치 경계에 의존합니다. 구분 기호가 있는 줄부터 실행하거나 전체 스크립트를 선택하여 실행하세요.",
   },
   tabs: {
     sql: "SQL",
@@ -6681,6 +6691,9 @@ export default withEnglishFallback({
     title: "테이블 구조 편집",
   },
   diagram: {
+    addTables: "테이블 추가",
+    showMoreFields: "필드 {count}개 더 보기",
+    collapseFields: "필드 접기",
     title: "관계 다이어그램",
     open: "다이어그램 보기",
     selectConnection: "연결 선택",
@@ -12163,6 +12176,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "만료는 0일보다 커야 합니다",
   },
   mqBroker: {
+    searchConfigurations: "구성 이름 검색",
+    configuration: "브로커 구성",
+    noConfigurations: "일치하는 구성 항목이 없습니다",
+    configurationUnsupported: "이 Kafka 브로커는 구성 조회를 지원하지 않습니다.",
+    configName: "이름",
+    configValue: "값",
+    configSource: "출처",
     title: "브로커 클러스터",
     autoRefresh: "자동 새로고침",
     refreshInterval5s: "5초",

@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Handle, Position } from "@vue-flow/core";
-import { Table2, KeyRound, Link2 } from "@lucide/vue";
+import { Table2, KeyRound, Link2, ChevronDown, ChevronUp } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import type { DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram";
 import { isDraftTable } from "@/lib/diagram/erDiagram";
 import type { InferredRelationship } from "@/types/diagram";
 import { useLayerStore } from "@/lib/diagram/layer-store";
-import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramVisibleColumns } from "@/lib/diagram/diagram-constants";
+import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramCardColumns } from "@/lib/diagram/diagram-constants";
 
 const layerStore = useLayerStore();
 
@@ -16,6 +16,9 @@ const props = defineProps<{
     table: DiagramTable;
     relationships?: (DiagramRelationship | InferredRelationship)[];
     isMultiSchema?: boolean;
+    fieldsExpanded?: boolean;
+    toggleFields?: () => void;
+    fieldsToggleLabel?: string;
   };
   selected?: boolean;
 }>();
@@ -24,10 +27,7 @@ const emit = defineEmits<{
 }>();
 
 const isDraft = computed(() => isDraftTable(props.data.table));
-
-function visibleColumns(table: DiagramTable) {
-  return diagramVisibleColumns(table);
-}
+const columns = computed(() => diagramCardColumns(props.data.table, !props.data.toggleFields || !!props.data.fieldsExpanded));
 
 /** Comments are optional metadata; blank/whitespace-only values render nothing. */
 function commentText(value: string | null | undefined): string {
@@ -89,13 +89,13 @@ const handleOffsetStyle = computed(() =>
           </span>
         </div>
         <Badge v-if="isDraft" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">Draft</Badge>
-        <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ visibleColumns(data.table).length }}</Badge>
+        <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ columns.total }}</Badge>
       </div>
       <div v-if="commentText(data.table.comment)" class="flex h-4 items-center gap-1.5 border-b border-border/40 bg-muted/20 px-3">
         <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(data.table.comment)">{{ commentText(data.table.comment) }}</span>
       </div>
       <div>
-        <div v-for="column in visibleColumns(data.table)" :key="column.name" class="border-b border-border/40 last:border-b-0">
+        <div v-for="column in columns.rows" :key="column.name" class="border-b border-border/40 last:border-b-0">
           <div class="flex h-6 min-w-0 items-center gap-1.5 px-3 text-xs">
             <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
             <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
@@ -112,6 +112,10 @@ const handleOffsetStyle = computed(() =>
             <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(column.comment)">{{ commentText(column.comment) }}</span>
           </div>
         </div>
+        <button v-if="data.toggleFields && columns.canToggle" type="button" class="nodrag nopan flex h-6 w-full items-center justify-center gap-1 border-t text-xs text-muted-foreground hover:bg-accent" :aria-expanded="!!data.fieldsExpanded" @click.stop="data.toggleFields()" @dblclick.stop>
+          <component :is="data.fieldsExpanded ? ChevronUp : ChevronDown" class="h-3.5 w-3.5" />
+          {{ data.fieldsToggleLabel }}
+        </button>
       </div>
     </div>
   </div>

@@ -5880,6 +5880,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "Kolumny Identity w SQL Server obsługują tylko tinyint, smallint, int, bigint oraz decimal/numeric ze skalą 0",
   },
   diagram: {
+    addTables: "Dodaj tabele",
+    showMoreFields: "Pokaż jeszcze {count} pól",
+    collapseFields: "Zwiń pola",
     title: "Aktualizacja zabezpieczeń danych",
     open: "Wyświetl diagram",
     selectConnection: "Wybierz połączenie",
@@ -11593,6 +11596,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Czas wygaśnięcia musi być większy niż 0 dni",
   },
   mqBroker: {
+    searchConfigurations: "Szukaj nazw ustawień",
+    configuration: "Konfiguracja brokera",
+    noConfigurations: "Brak pasujących ustawień",
+    configurationUnsupported: "Ten broker Kafka nie obsługuje odczytu konfiguracji.",
+    configName: "Nazwa",
+    configValue: "Wartość",
+    configSource: "Źródło",
     title: "Aktualizacja zabezpieczeń danych",
     autoRefresh: "Automatyczne odświeżanie",
     refreshInterval5s: "5s",

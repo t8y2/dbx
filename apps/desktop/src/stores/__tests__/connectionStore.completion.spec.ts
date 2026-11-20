@@ -2285,4 +2285,34 @@ describe("connectionStore completion assistant", () => {
     const matchedByPinyin = store.lookupLocalCompletionTables("pg-1", "app", "ddb", 20, "public");
     expect(matchedByPinyin.map((t) => t.name)).toEqual(["t_order"]);
   });
+
+  it("loads an Oracle simple-tree table for locate regardless of schema identifier case (#15212)", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listTables: vi.fn().mockResolvedValue([{ name: "EMP", table_type: "TABLE", comment: null }]),
+      listTablesByPage: vi.fn(),
+    }));
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    settings.editorSettings.sidebarObjectDisplay = "simple";
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+    store.treeNodes = [
+      {
+        id: "oracle-1",
+        label: "Oracle",
+        type: "connection",
+        connectionId: "oracle-1",
+        children: [{ id: "oracle-1:HR:HR", label: "HR", type: "schema", connectionId: "oracle-1", database: "HR", schema: "HR", children: [] }],
+      },
+    ];
+
+    const loaded = await store.loadTableForLocate({ connectionId: "oracle-1", database: "hr", schema: "hr", tableName: "EMP" });
+    expect(loaded).toBe(true);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((child) => child.label)).toContain("EMP");
+  });
 });

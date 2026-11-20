@@ -5860,6 +5860,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "Identity SQL Server hanya mendukung tinyint, smallint, int, bigint, dan decimal/numeric dengan skala 0",
   },
   diagram: {
+    addTables: "Tambah tabel",
+    showMoreFields: "Tampilkan {count} kolom lagi",
+    collapseFields: "Ciutkan kolom",
     title: "Diagram Relasi",
     open: "Lihat Diagram",
     selectConnection: "Pilih koneksi",
@@ -11540,6 +11543,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Masa berlaku harus lebih besar dari 0 hari",
   },
   mqBroker: {
+    searchConfigurations: "Cari nama konfigurasi",
+    configuration: "Konfigurasi broker",
+    noConfigurations: "Tidak ada entri konfigurasi yang cocok",
+    configurationUnsupported: "Broker Kafka ini tidak mendukung penayangan konfigurasi.",
+    configName: "Nama",
+    configValue: "Nilai",
+    configSource: "Sumber",
     title: "Cluster broker",
     autoRefresh: "Segarkan otomatis",
     refreshInterval5s: "5d",

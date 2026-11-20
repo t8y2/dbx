@@ -80,6 +80,47 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.io.TempDir;
 
 class KafkaAgentTest {
+    @Test
+    void brokerConfigPreservesModernEntriesWithoutExposingSensitiveValues() throws Exception {
+        Config config = new Config(Arrays.asList(
+            new ConfigEntry("num.partitions", "4"),
+            new ConfigEntry("ssl.keystore.password", "hidden fixture", ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG,
+                true, true, Collections.emptyList(), ConfigEntry.ConfigType.PASSWORD, null)
+        ));
+        var result = new Gson().toJsonTree(KafkaAgent.brokerConfigResult(() -> config)).getAsJsonObject();
+        assertFalse(result.has("configSupported"));
+        var entries = result.getAsJsonObject("configs");
+        assertEquals("4", entries.getAsJsonObject("num.partitions").get("value").getAsString());
+        var password = entries.getAsJsonObject("ssl.keystore.password");
+        assertTrue(password.get("isSensitive").getAsBoolean());
+        assertEquals("STATIC_BROKER_CONFIG", password.get("source").getAsString());
+        assertFalse(result.toString().contains("hidden fixture"));
+    }
+
+    @Test
+    void brokerConfigReturnsAnExplicitUnsupportedMarkerForLegacyBrokers() throws Exception {
+        var result = KafkaAgent.brokerConfigResult(() -> {
+            throw new ExecutionException(new UnsupportedVersionException("DESCRIBE_CONFIGS is not supported"));
+        });
+
+        assertEquals(Map.of(), result.get("configs"));
+        assertEquals(false, result.get("configSupported"));
+        assertTrue(((String) result.get("unsupportedReason")).contains("DescribeConfigs"));
+    }
+
+    @Test
+    void brokerConfigPropagatesAuthorizationNetworkAndTimeoutErrors() {
+        for (var cause : List.of(
+            new org.apache.kafka.common.errors.ClusterAuthorizationException("denied"),
+            new org.apache.kafka.common.errors.NetworkException("disconnected"),
+            new java.util.concurrent.TimeoutException("timed out")
+        )) {
+            var failure = new ExecutionException(cause);
+            assertEquals(failure, assertThrows(ExecutionException.class, () -> KafkaAgent.brokerConfigResult(() -> {
+                throw failure;
+            })));
+        }
+    }
     @TempDir
     Path tempDir;
 
@@ -615,8 +656,7 @@ class KafkaAgentTest {
 
     @Test
     void topicConfigReturnsAnExplicitUnsupportedMarkerForLegacyBrokers() throws Exception {
-        @SuppressWarnings("unchecked")
-        Map<String, Object> result = (Map<String, Object>) KafkaAgent.topicConfigResult(() -> {
+        var result = KafkaAgent.topicConfigResult(() -> {
             throw new ExecutionException(new UnsupportedVersionException(
                 "The node does not support DESCRIBE_CONFIGS"
             ));
@@ -631,8 +671,7 @@ class KafkaAgentTest {
     void topicConfigPreservesModernConfigEntries() throws Exception {
         Config config = new Config(Collections.singletonList(new ConfigEntry("retention.ms", "60000")));
 
-        @SuppressWarnings("unchecked")
-        Map<String, Object> result = (Map<String, Object>) KafkaAgent.topicConfigResult(() -> config);
+        var result = KafkaAgent.topicConfigResult(() -> config);
         @SuppressWarnings("unchecked")
         Map<String, Map<String, Object>> configs = (Map<String, Map<String, Object>>) result.get("configs");
 

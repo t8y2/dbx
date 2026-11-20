@@ -2453,6 +2453,15 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Colar e restaurar SQL de origem",
       pasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
       convertNamingStyle: "Alternar estilo de nomenclatura",
+      executeScriptFromHere: "Executar script SQL a partir daqui",
+    },
+    bookmarks: {
+      workspaceTitle: "Marcadores",
+      workspaceSearch: "Pesquisar arquivos, texto SQL ou números de linha",
+      workspaceEmpty: "Os marcadores de todas as abas SQL abertas aparecem aqui. Clique na margem de marcadores ao lado de um número de linha para adicionar um.",
+      line: "Linha {line}",
+      emptyLine: "(linha vazia)",
+      noMatches: "Nenhum marcador correspondente",
     },
     gotoLine: {
       placeholder: "Número da linha",
@@ -2516,6 +2525,7 @@ export default withEnglishFallback({
     previewChangesNoStatement: "Selecione ou coloque o cursor em uma instrução UPDATE / INSERT / DELETE para pré-visualizar as alterações.",
     fullscreenResultsPane: "Exibir resultados em tela cheia",
     exitFullscreenResultsPane: "Sair da tela cheia dos resultados",
+    executeScriptBoundaryMismatch: "Este ponto depende do delimitador SQL anterior ou do limite do lote. Comece a execução a partir da linha do delimitador ou selecione o script completo para executar.",
   },
   tabs: {
     sql: "SQL",
@@ -6409,6 +6419,9 @@ export default withEnglishFallback({
     title: "Editar estrutura da tabela",
   },
   diagram: {
+    addTables: "Adicionar tabelas",
+    showMoreFields: "Mostrar mais {count} campos",
+    collapseFields: "Recolher campos",
     title: "Diagrama de relacionamentos",
     open: "Ver diagrama",
     selectConnection: "Selecionar conexão",
@@ -12443,6 +12456,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "A expiração deve ser maior que 0 dias",
   },
   mqBroker: {
+    searchConfigurations: "Buscar nomes de configuração",
+    configuration: "Configuração do broker",
+    noConfigurations: "Nenhuma configuração correspondente",
+    configurationUnsupported: "Este broker Kafka não oferece suporte à consulta de configurações.",
+    configName: "Nome",
+    configValue: "Valor",
+    configSource: "Origem",
     title: "Cluster Broker",
     autoRefresh: "Atualização automática",
     refreshInterval5s: "5s",

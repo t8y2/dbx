@@ -5200,6 +5200,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "SQL Server identifikatoru yalnız tinyint, smallint, int, bigint və kəsr hissəsində 0 rəqəm olan decimal/numeric növlərini dəstəkləyir",
   },
   diagram: {
+    addTables: "Cədvəllər əlavə et",
+    showMoreFields: "Daha {count} sahə göstər",
+    collapseFields: "Sahələri yığ",
     title: "Əlaqələr diaqramı",
     open: "Diaqrama bax",
     selectConnection: "Əlaqə seç",
@@ -10699,6 +10702,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Etibarlılıq müddəti 0 gündən çox olmalıdır",
   },
   mqBroker: {
+    searchConfigurations: "Konfiqurasiya adını axtar",
+    configuration: "Broker konfiqurasiyası",
+    noConfigurations: "Uyğun konfiqurasiya qeydi yoxdur",
+    configurationUnsupported: "Bu Kafka brokeri konfiqurasiyaya baxmağı dəstəkləmir.",
+    configName: "Ad",
+    configValue: "Dəyər",
+    configSource: "Mənbə",
     title: "Broker klasteri",
     autoRefresh: "Avtomatik yeniləmə",
     refreshInterval5s: "5 san",

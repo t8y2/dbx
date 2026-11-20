@@ -2654,6 +2654,7 @@ export default withEnglishFallback({
     contextMenu: {
       executeSelection: "执行选中 SQL",
       executeCurrent: "执行 SQL",
+      executeScriptFromHere: "从此处执行 SQL 脚本",
       export: "导出",
       exportQueryResultTo: "导出当前查询结果集到 {format}",
       copySelection: "复制选中内容",
@@ -2707,6 +2708,14 @@ export default withEnglishFallback({
       drag: "拖动面板",
       empty: "暂无字段",
     },
+    bookmarks: {
+      workspaceTitle: "书签",
+      workspaceSearch: "搜索文件名、SQL 内容或行号",
+      workspaceEmpty: "所有已打开 SQL 标签页的书签会显示在这里。点击编辑器行号左侧的书签栏即可添加。",
+      line: "第 {line} 行",
+      emptyLine: "（空白行）",
+      noMatches: "没有匹配的书签",
+    },
     gotoLine: {
       placeholder: "行号",
       total: "共 {total} 行",
@@ -2733,6 +2742,7 @@ export default withEnglishFallback({
       inSelection: "选区内",
     },
     noExecutableStatementAtCursor: "光标所在位置没有可执行语句",
+    executeScriptBoundaryMismatch: "此处依赖前面的 SQL 分隔符或批次边界。请从分隔符所在行开始执行，或选中完整脚本执行。",
     executionPicker: {
       title: "执行目标",
       currentStatement: "当前 SQL",
@@ -7541,6 +7551,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "SQL Server 自增仅支持 tinyint、smallint、int、bigint、decimal/numeric(小数位为 0)",
   },
   diagram: {
+    addTables: "添加表",
+    showMoreFields: "展开其余 {count} 个字段",
+    collapseFields: "收起字段",
     title: "关系图",
     open: "查看关系图",
     selectConnection: "选择连接",
@@ -13487,6 +13500,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "有效期必须大于 0 天",
   },
   mqBroker: {
+    searchConfigurations: "搜索配置项名称",
+    configuration: "Broker 配置",
+    noConfigurations: "没有匹配的配置项",
+    configurationUnsupported: "此 Kafka Broker 不支持查询配置。",
+    configName: "名称",
+    configValue: "值",
+    configSource: "来源",
     title: "Broker 集群",
     autoRefresh: "自动刷新",
     refreshInterval5s: "5秒",

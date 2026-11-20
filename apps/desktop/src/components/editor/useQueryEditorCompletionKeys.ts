@@ -209,8 +209,15 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     const previousCharacter = cursor > 0 ? view.state.sliceDoc(cursor - 1, cursor) : "";
     if (/\s/.test(previousCharacter)) return true;
 
+    // Skipping an already-present space keeps the accepted keyword from doubling
+    // the one the user just typed, but only horizontally: inserting a statement
+    // above existing code puts the newline in front of the old statement directly
+    // after the accepted keyword, and `/\s/` matched it — the typed space was
+    // swallowed and the cursor dropped onto the next line (#15241). Mirror
+    // appendSqlCompletionSpace, which treats only a space/tab as existing spacing
+    // and still appends one before newlines and statement boundaries (#12948).
     const nextCharacter = view.state.sliceDoc(cursor, cursor + 1);
-    if (/\s/.test(nextCharacter)) {
+    if (/^[ \t]/.test(nextCharacter)) {
       view.dispatch({ selection: { anchor: cursor + 1 }, scrollIntoView: true });
     } else {
       view.dispatch({

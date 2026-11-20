@@ -5106,6 +5106,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "SQL Server identity yalnızca tinyint, smallint, int, bigint ve ölçeği 0 olan decimal/numeric türlerini destekler",
   },
   diagram: {
+    addTables: "Tablo ekle",
+    showMoreFields: "{count} alan daha göster",
+    collapseFields: "Alanları daralt",
     title: "İlişki Diyagramı",
     open: "Diyagramı Görüntüle",
     selectConnection: "Bağlantı seç",
@@ -10605,6 +10608,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "Sona erme 0 günden büyük olmalıdır",
   },
   mqBroker: {
+    searchConfigurations: "Yapılandırma adlarını ara",
+    configuration: "Broker yapılandırması",
+    noConfigurations: "Eşleşen yapılandırma kaydı yok",
+    configurationUnsupported: "Bu Kafka aracısı yapılandırma sorgulamayı desteklemiyor.",
+    configName: "Ad",
+    configValue: "Değer",
+    configSource: "Kaynak",
     title: "Broker kümesi",
     autoRefresh: "Otomatik yenile",
     refreshInterval5s: "5 sn",

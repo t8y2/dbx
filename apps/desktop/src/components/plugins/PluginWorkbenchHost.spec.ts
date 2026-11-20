@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   readPluginUiEntry: vi.fn(),
   readPluginUiAsset: vi.fn(),
   subscribePluginEvents: vi.fn(),
+  subscribeHostObservations: vi.fn(),
   repushPluginConnection: vi.fn(),
   reopenPluginConnection: vi.fn(),
   openDroppedPluginLocalFiles: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock("@/lib/backend/api", () => ({
   readPluginUiEntry: mocks.readPluginUiEntry,
   readPluginUiAsset: mocks.readPluginUiAsset,
   subscribePluginEvents: mocks.subscribePluginEvents,
+  subscribeHostObservations: mocks.subscribeHostObservations,
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.isTauriRuntime }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn() }));
@@ -96,6 +98,7 @@ describe("PluginWorkbenchHost initialization", () => {
     vi.stubGlobal("getComputedStyle", () => Object.assign([], { getPropertyValue: () => "" }));
     mocks.readPluginUiEntry.mockResolvedValue({ dataBase64: btoa("<!doctype html><html><body></body></html>"), contentType: "text/html" });
     mocks.subscribePluginEvents.mockResolvedValue(vi.fn());
+    mocks.subscribeHostObservations.mockResolvedValue(vi.fn());
     mocks.closePluginLocalFile.mockResolvedValue(undefined);
     mocks.repushPluginConnection.mockReset().mockResolvedValue(undefined);
     mocks.reopenPluginConnection.mockResolvedValue(undefined);

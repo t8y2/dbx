@@ -5013,7 +5013,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (result queryPage
 }
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
-	if opts.SkipServerOutput && isInternalReadOnlySQL(opts.SQL) {
+	if runsWithoutServerOutput(opts) {
 		return s.executeInternalQuery(opts)
 	}
 	var result queryResult

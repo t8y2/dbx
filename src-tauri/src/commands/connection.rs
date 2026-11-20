@@ -1538,6 +1538,13 @@ async fn connect_sqlite_from_config_with_state(
         return Ok(db::sqlite::SqliteHandle::from_worker(worker));
     }
 
+    // Android (ADB): the on-device worker speaks the same JSON line protocol
+    // as the SSH SQLite worker, so SqliteHandle::from_worker drives it.
+    if config.db_type == DatabaseType::AndroidAdb {
+        let worker = db::adb_worker::connect_adb_worker(config).await?;
+        return Ok(db::sqlite::SqliteHandle::from_worker(worker));
+    }
+
     let sqlite_path = expand_tilde(&config.host);
     db::sqlite::validate_persistent_attachments(&sqlite_path, &config.password, !config.attached_databases.is_empty())?;
     let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
@@ -1775,6 +1782,15 @@ async fn test_connection_with_info_impl(
                     )
                     .await
                     {
+                        Ok(pool) => {
+                            pool.shutdown().await;
+                            Ok("Connection successful".to_string())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                DatabaseType::AndroidAdb => {
+                    match connect_sqlite_from_config_with_state(None, connection_id, &config).await {
                         Ok(pool) => {
                             pool.shutdown().await;
                             Ok("Connection successful".to_string())
@@ -2382,6 +2398,9 @@ async fn connect_db_inner(
                 connect_sqlite_from_config_with_state(Some((state.inner().as_ref(), &prepared.stamp)), &id, &db_config)
                     .await?,
             ),
+            DatabaseType::AndroidAdb => {
+                PoolKind::Sqlite(connect_sqlite_from_config_with_state(None, &id, &db_config).await?)
+            }
             DatabaseType::Redis => {
                 let con = if db_config.uses_redis_cluster() {
                     db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(&id, &db_config).await?)

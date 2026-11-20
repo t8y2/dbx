@@ -20,6 +20,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mysql: { database: ["charsetCollation"] },
   postgres: { database: ["databaseComment"], schema: ["schemaComment"] },
   sqlite: { deferred: "file-backed database properties are not edited in-place" },
+  "android-adb": { deferred: "on-device app database properties are not edited in-place" },
   rqlite: { deferred: "single SQLite-compatible database per node" },
   turso: { deferred: "remote libSQL database lifecycle is provider-managed" },
   "cloudflare-d1": { deferred: "Cloudflare D1 database lifecycle is provider-managed" },

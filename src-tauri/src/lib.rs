@@ -2223,6 +2223,31 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
+
+            // Android (ADB) worker binaries. The NSIS installer keeps the
+            // repo-relative path, so packaged binaries live at
+            // `<install>/resources/android-worker/<abi>/...`; also accept
+            // `<dir>/android-worker` for portable layouts and dev runs.
+            {
+                let mut candidate: Option<std::path::PathBuf> = None;
+                let resource_root = app.path().resource_dir().ok();
+                let exe_root = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+                for root in [resource_root, exe_root].into_iter().flatten() {
+                    for suffix in ["resources/android-worker", "android-worker"] {
+                        let dir = root.join(suffix);
+                        if dir.is_dir() {
+                            candidate = Some(dir);
+                            break;
+                        }
+                    }
+                    if candidate.is_some() {
+                        break;
+                    }
+                }
+                if let Some(dir) = candidate {
+                    dbx_core::adb_transport::set_android_worker_resource_dir(dir);
+                }
+            }
             let alternative_data_dir = data_dir::alternative_data_dir(&data_dir_resolution);
             match maybe_import_user_data_db(&data_dir, alternative_data_dir.as_deref()) {
                 Ok(result) => eprintln!("[STARTUP] data db fallback import: {result:?}"),
@@ -3422,6 +3447,10 @@ pub fn run() {
             commands::agents::import_agent_driver_cmd,
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
+            commands::adb::adb_detect_binary,
+            commands::adb::list_adb_devices,
+            commands::adb::list_adb_packages,
+            commands::adb::list_adb_databases,
             commands::ssh_config::list_ssh_config_hosts,
             commands::ssh_keys::list_local_ssh_keys,
             commands::ssh_prompt::ssh_prompt_ready,

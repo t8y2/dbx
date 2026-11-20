@@ -228,6 +228,21 @@ impl SqliteWorkerClient {
         }
     }
 
+    /// Wrap an already-spawned local worker process. Used by the Android (ADB)
+    /// transport, which drives the same JSON line protocol through an
+    /// `adb exec-out run-as <pkg> ...` child process.
+    pub fn from_local_process(child: Child) -> Self {
+        let mut child = Box::new(child);
+        let stdin = Box::new(child.stdin.take().expect("adb worker child must have piped stdin"));
+        let stdout = Box::new(BufReader::new(child.stdout.take().expect("adb worker child must have piped stdout")));
+        Self {
+            io: AsyncMutex::new(WorkerIo::Process { child, stdin, stdout }),
+            next_id: AtomicU64::new(1),
+            ssh_session: None,
+            remove_remote_path: None,
+        }
+    }
+
     pub async fn session(&self) -> SqliteWorkerSession<'_> {
         SqliteWorkerSession { client: self, io: self.io.lock().await }
     }
@@ -311,7 +326,7 @@ impl SqliteWorkerClient {
         remove_uploaded_session_worker(session.as_ref(), path).await;
     }
 
-    async fn open_database(&self, path: &str) -> Result<(), String> {
+    pub async fn open_database(&self, path: &str) -> Result<(), String> {
         match self.roundtrip(WorkerOp::Open { path: path.to_string() }).await? {
             WorkerBody::Ok { .. } => Ok(()),
             WorkerBody::Err { error } => Err(error),

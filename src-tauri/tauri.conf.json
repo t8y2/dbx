@@ -37,6 +37,9 @@
     "active": true,
     "category": "DeveloperTool",
     "targets": "all",
+    "resources": [
+      "resources/android-worker/*/*"
+    ],
     "createUpdaterArtifacts": true,
     "fileAssociations": [
       {

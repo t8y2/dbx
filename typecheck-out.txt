@@ -1,0 +1,13 @@
+
+> dbx@0.6.71 pretypecheck E:\workspace-rust\dbx
+> pnpm generate:connection-types
+
+
+> dbx@0.6.71 generate:connection-types E:\workspace-rust\dbx
+> node scripts/sync-connection-types.mjs
+
+Generated 89 connection type descriptors and 110 connection profiles.
+
+> dbx@0.6.71 typecheck E:\workspace-rust\dbx
+> vue-tsc --noEmit --project apps/desktop/tsconfig.json
+

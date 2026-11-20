@@ -5558,7 +5558,14 @@ fn database_supports_transactional_ddl(db_type: DatabaseType) -> bool {
         return true;
     }
     // SQLite-family DDL is transactional even when dialect registry omits the flag.
-    matches!(db_type, DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    matches!(
+        db_type,
+        DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+            | DatabaseType::AndroidAdb
+    )
 }
 
 fn classify_schema_diff_atomicity(

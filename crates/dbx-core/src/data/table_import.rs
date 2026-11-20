@@ -1885,7 +1885,11 @@ fn sql_import_dialect_family(db_type: DatabaseType) -> SqlImportDialectFamily {
         SqlImportDialectFamily::MySql
     } else if matches!(
         db_type,
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+            | DatabaseType::AndroidAdb
     ) {
         SqlImportDialectFamily::Sqlite
     } else if matches!(db_type, DatabaseType::SqlServer) {
@@ -5621,7 +5625,11 @@ fn text_data_type(db_type: &DatabaseType) -> &'static str {
 
 fn integer_data_type(db_type: &DatabaseType) -> &'static str {
     match db_type {
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "INTEGER",
+        DatabaseType::Sqlite
+        | DatabaseType::Rqlite
+        | DatabaseType::Turso
+        | DatabaseType::CloudflareD1
+        | DatabaseType::AndroidAdb => "INTEGER",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "NUMBER(19)",
         DatabaseType::ClickHouse => "Int64",
         _ => "BIGINT",
@@ -5640,7 +5648,11 @@ fn decimal_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Kwdb
         | DatabaseType::Vastbase => "DOUBLE PRECISION",
         DatabaseType::SqlServer => "FLOAT",
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "REAL",
+        DatabaseType::Sqlite
+        | DatabaseType::Rqlite
+        | DatabaseType::Turso
+        | DatabaseType::CloudflareD1
+        | DatabaseType::AndroidAdb => "REAL",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "BINARY_DOUBLE",
         DatabaseType::ClickHouse => "Float64",
         _ => "DOUBLE",
@@ -5656,7 +5668,11 @@ fn boolean_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Sundb
         | DatabaseType::Databend => "TINYINT(1)",
         DatabaseType::SqlServer => "BIT",
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "INTEGER",
+        DatabaseType::Sqlite
+        | DatabaseType::Rqlite
+        | DatabaseType::Turso
+        | DatabaseType::CloudflareD1
+        | DatabaseType::AndroidAdb => "INTEGER",
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => "NUMBER(1)",
         DatabaseType::ClickHouse => "UInt8",
         _ => "BOOLEAN",
@@ -5665,7 +5681,11 @@ fn boolean_data_type(db_type: &DatabaseType) -> &'static str {
 
 fn date_data_type(db_type: &DatabaseType) -> &'static str {
     match db_type {
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "TEXT",
+        DatabaseType::Sqlite
+        | DatabaseType::Rqlite
+        | DatabaseType::Turso
+        | DatabaseType::CloudflareD1
+        | DatabaseType::AndroidAdb => "TEXT",
         DatabaseType::ClickHouse => "Date",
         _ => "DATE",
     }
@@ -5680,7 +5700,11 @@ fn timestamp_data_type(db_type: &DatabaseType) -> &'static str {
         | DatabaseType::Sundb
         | DatabaseType::Databend => "DATETIME",
         DatabaseType::SqlServer => "DATETIME2",
-        DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1 => "TEXT",
+        DatabaseType::Sqlite
+        | DatabaseType::Rqlite
+        | DatabaseType::Turso
+        | DatabaseType::CloudflareD1
+        | DatabaseType::AndroidAdb => "TEXT",
         DatabaseType::ClickHouse => "DateTime64",
         _ => "TIMESTAMP",
     }

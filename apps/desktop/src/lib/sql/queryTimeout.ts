@@ -69,37 +69,9 @@ export function queryTimeoutSecsForConcurrentIndex(configuredTimeoutSecs: number
  */
 export type StatementScope = "read" | "write" | "schema-change";
 
-const SCHEMA_CHANGE_KEYWORDS = new Set([
-  "create",
-  "alter",
-  "drop",
-  "truncate",
-  "rename",
-  "comment",
-  "grant",
-  "revoke",
-  "reindex",
-  "vacuum",
-  "analyze",
-  "analyse",
-  "optimize",
-  "repair",
-]);
+const SCHEMA_CHANGE_KEYWORDS = new Set(["create", "alter", "drop", "truncate", "rename", "comment", "grant", "revoke", "reindex", "vacuum", "analyze", "analyse", "optimize", "repair"]);
 
-const WRITE_KEYWORDS = new Set([
-  "insert",
-  "update",
-  "delete",
-  "merge",
-  "upsert",
-  "replace",
-  "copy",
-  "load",
-  "import",
-  "call",
-  "exec",
-  "execute",
-]);
+const WRITE_KEYWORDS = new Set(["insert", "update", "delete", "merge", "upsert", "replace", "copy", "load", "import", "call", "exec", "execute"]);
 
 function statementKeywordScope(statement: string, databaseType: DatabaseType | undefined): StatementScope | undefined {
   const tokens = tokenizeSqlSemantic(statement, databaseType ?? "mysql");
@@ -147,19 +119,11 @@ export interface StatementDeadline {
  * - writes: `writeTimeoutSecs`, and the deadline never cancels
  * - reads: `queryTimeoutSecs`, cancellable
  */
-export function frontendDeadlineForStatement(
-  sql: string,
-  databaseType: DatabaseType | undefined,
-  queryTimeoutSecs: number,
-  writeTimeoutSecs: number,
-  parameterOptions?: SqlParameterOptions,
-): StatementDeadline {
+export function frontendDeadlineForStatement(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number, writeTimeoutSecs: number, parameterOptions?: SqlParameterOptions): StatementDeadline {
   const scope = statementScopeForSql(sql, databaseType, parameterOptions);
   if (scope === "schema-change") return { afterSecs: 0, cancelOnTimeout: false };
   if (scope === "write") {
-    return writeTimeoutSecs > 0
-      ? { afterSecs: writeTimeoutSecs, cancelOnTimeout: false }
-      : { afterSecs: 0, cancelOnTimeout: false };
+    return writeTimeoutSecs > 0 ? { afterSecs: writeTimeoutSecs, cancelOnTimeout: false } : { afterSecs: 0, cancelOnTimeout: false };
   }
   if (queryTimeoutSecs === 0) return { afterSecs: 0, cancelOnTimeout: false };
   return { afterSecs: queryTimeoutSecs, cancelOnTimeout: true };
@@ -172,13 +136,7 @@ export function frontendDeadlineForConnection(
   globalQueryTimeoutSecs = DEFAULT_QUERY_TIMEOUT_SECS,
   parameterOptions?: SqlParameterOptions,
 ): StatementDeadline {
-  return frontendDeadlineForStatement(
-    sql,
-    databaseType,
-    queryTimeoutSecsForConnection(connection, globalQueryTimeoutSecs),
-    writeTimeoutSecsForConnection(connection),
-    parameterOptions,
-  );
+  return frontendDeadlineForStatement(sql, databaseType, queryTimeoutSecsForConnection(connection, globalQueryTimeoutSecs), writeTimeoutSecsForConnection(connection), parameterOptions);
 }
 
 export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number, parameterOptions?: SqlParameterOptions): number {

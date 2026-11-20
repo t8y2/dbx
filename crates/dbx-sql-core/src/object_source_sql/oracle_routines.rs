@@ -169,6 +169,7 @@ pub fn comparable_oracle_routine_definition(mut input: OracleRoutineDefinitionIn
 pub fn compact_oracle_ddl(source: &str) -> Result<String, String> {
     let tokens =
         Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
+    let locator = RoutineSourceLocator::new(source);
     let mut result = String::new();
     let mut cursor = 0;
     for token in tokens.iter().filter(|token| {
@@ -177,8 +178,8 @@ pub fn compact_oracle_ddl(source: &str) -> Result<String, String> {
             Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF
         )
     }) {
-        let start = routine_location_to_byte_offset(source, token.span.start).ok_or("Cannot locate DDL token")?;
-        let end = routine_location_to_byte_offset(source, token.span.end).ok_or("Cannot locate DDL token")?;
+        let start = locator.offset(token.span.start).ok_or("Cannot locate DDL token")?;
+        let end = locator.offset(token.span.end).ok_or("Cannot locate DDL token")?;
         let gap = &source[cursor..start];
         if let Some(last_newline) = gap.rfind(['\r', '\n']) {
             result.push_str(if gap.contains("\r\n") {

@@ -275,6 +275,57 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE LOWER(id) = 'x'");
   });
 
+  it("keeps mixed AND/OR precedence when a manual WHERE moves into the panel (#15323 review)", async () => {
+    const { host, onExecuteSql } = mountGrid(view, false, { initialWhereInput: "id = 1 OR id = 2 AND id = 3" });
+    await settle();
+
+    filterToggle(host).click();
+    await vi.waitFor(() => expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE `id` = 1 OR (`id` = 2 AND `id` = 3)"));
+
+    // The condition moved into the panel with its SQL meaning intact, and
+    // opening it did not re-run the query.
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("");
+    expect(onExecuteSql).not.toHaveBeenCalled();
+  });
+
+  it("does not commit a migration whose build finished after the WHERE changed (#15323 review)", async () => {
+    const { host, onExecuteSql } = mountGrid(view, false, { initialWhereInput: "`id` = 1" });
+    await settle();
+
+    let resolveBuild!: (condition: string) => void;
+    const buildPromise = new Promise<string>((resolve) => {
+      resolveBuild = resolve;
+    });
+    const callsBefore = backendMocks.buildDataGridContextFilterCondition.mock.calls.length;
+    backendMocks.buildDataGridContextFilterCondition.mockImplementationOnce(() => buildPromise);
+
+    filterToggle(host).click();
+    // Wait until the migration has actually started its (now pending) build.
+    await vi.waitFor(() => expect(backendMocks.buildDataGridContextFilterCondition.mock.calls.length).toBeGreaterThan(callsBefore));
+
+    // While the condition build is still pending, the user types a newer WHERE.
+    const whereInput = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]');
+    if (!whereInput) throw new Error("WHERE input not found");
+    whereInput.value = "`id` = 2";
+    whereInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    resolveBuild("`id` = 1");
+    // Let the migration's continuation run to completion before asserting:
+    // a single tick is not enough for the promise chain plus the Vue
+    // re-render to land, and asserting too early would pass vacuously even
+    // with the guard removed.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
+    await settle();
+
+    // The stale migration was dropped: the newer manual input is untouched,
+    // the panel still shows it, and nothing re-ran the query.
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("`id` = 2");
+    expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE `id` = 2");
+    expect(onExecuteSql).not.toHaveBeenCalled();
+  });
+
   it("uses the persisted expansion preference only as the initial state", async () => {
     const { host } = mountGrid(view, true);
     await settle();

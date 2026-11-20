@@ -345,17 +345,27 @@ function isNumericLiteral(text: string): boolean {
  * builder cannot represent (functions, subqueries, column-to-column
  * comparisons, unknown columns, ...) makes the whole parse fail and the
  * caller must leave the manual input and the existing rules untouched.
+ * The same applies to a literal the rebuild cannot reproduce exactly:
+ * an unquoted number or boolean against a text column would come back
+ * quoted (`code = 1` becoming `code = '1'`), so that condition stays
+ * manual instead of silently changing the comparison (#15323 review).
  * Identifiers may be bare, backtick-quoted (MySQL), double-quoted, or
  * bracket-quoted, and may carry a table qualifier (`t`.`col`).
  */
-export function parseDataGridWhereInputToRules(whereInput: string | undefined, columns: readonly string[], createId: () => string = uuid): DataGridStructuredFilterRule[] | null {
+export type DataGridWhereColumnContext = {
+  /** Column data types by lowercase column name; absent means unknown. */
+  dataTypes?: ReadonlyMap<string, string | undefined>;
+  databaseType?: DatabaseType;
+};
+
+export function parseDataGridWhereInputToRules(whereInput: string | undefined, columns: readonly string[], createId: () => string = uuid, columnContext?: DataGridWhereColumnContext): DataGridStructuredFilterRule[] | null {
   const normalized = normalizeWhereInput(whereInput);
   if (!normalized || !columns.length) return null;
   const segments = splitTopLevelConditions(normalized);
   if (!segments) return null;
   const rules: DataGridStructuredFilterRule[] = [];
   for (const segment of segments) {
-    const parsed = parseDataGridWhereCondition(segment.text, columns);
+    const parsed = parseDataGridWhereCondition(segment.text, columns, columnContext);
     if (!parsed) return null;
     rules.push({ id: createId(), conjunction: segment.conjunction, ...parsed });
   }
@@ -562,7 +572,13 @@ function resolveWhereColumnName(identifier: string, columns: readonly string[]):
 }
 
 /** A single literal the builder can round-trip: quoted string, number, true/false. */
-function parseWhereLiteral(text: string): string | null {
+type ParsedWhereLiteral = {
+  value: string;
+  quoted: boolean;
+  kind: "string" | "number" | "boolean";
+};
+
+function parseWhereLiteral(text: string): ParsedWhereLiteral | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
   const first = trimmed[0]!;
@@ -575,15 +591,38 @@ function parseWhereLiteral(text: string): string | null {
           continue;
         }
         if (end !== trimmed.length - 1) return null;
-        return unescapeDoubledQuotes(trimmed.slice(1, end), first);
+        return { value: unescapeDoubledQuotes(trimmed.slice(1, end), first), quoted: true, kind: "string" };
       }
       end += 1;
     }
     return null;
   }
-  if (/^(true|false)$/i.test(trimmed)) return trimmed;
-  if (isNumericLiteral(trimmed)) return trimmed;
+  if (/^(true|false)$/i.test(trimmed)) return { value: trimmed, quoted: false, kind: "boolean" };
+  if (isNumericLiteral(trimmed)) return { value: trimmed, quoted: false, kind: "number" };
   return null;
+}
+
+/**
+ * Whether a literal written in the manual WHERE rebuilds to the same
+ * comparison from its structured rule (#15323 review). A quoted string
+ * always does: the value parser unwraps it and the backend quotes it
+ * back. An unquoted number only does against a numeric column, where the
+ * parser preserves the spelling and the backend emits it unquoted — or
+ * against an untyped column, where the parser keeps it numeric, except
+ * leading-zero spellings and integers past JS safe range, which it keeps
+ * as text and the backend would quote. An unquoted boolean only does
+ * against a boolean column. Anything else (e.g. `code = 1` on VARCHAR,
+ * which would rebuild as `code = '1'`) must stay manual.
+ */
+function isWhereLiteralRoundTrippable(literal: ParsedWhereLiteral, dataType: string | undefined, databaseType?: DatabaseType): boolean {
+  if (literal.quoted) return true;
+  if (literal.kind === "number") {
+    if (dataType !== undefined) return isNumericType(dataType);
+    if (/^[+-]?0\d/.test(literal.value)) return false;
+    const numeric = Number(literal.value);
+    return Number.isFinite(numeric) && !(Number.isInteger(numeric) && Math.abs(numeric) > Number.MAX_SAFE_INTEGER);
+  }
+  return dataType !== undefined && isBooleanType(dataType, databaseType);
 }
 
 const WHERE_OPERATORS: Array<{ pattern: RegExp; mode: DataGridContextFilterMode }> = [
@@ -622,7 +661,7 @@ function parseLikePattern(pattern: string, negated: boolean): { mode: DataGridCo
 
 type ParsedWhereCondition = Omit<DataGridStructuredFilterRule, "id" | "conjunction" | "disabled">;
 
-function parseDataGridWhereCondition(segment: string, columns: readonly string[]): ParsedWhereCondition | null {
+function parseDataGridWhereCondition(segment: string, columns: readonly string[], columnContext?: DataGridWhereColumnContext): ParsedWhereCondition | null {
   let text = segment.trim();
   for (;;) {
     const unwrapped = unwrapOuterParentheses(text);
@@ -651,6 +690,8 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
   }
   const columnName = resolveWhereColumnName(lastName, columns);
   if (!columnName) return null;
+  const dataType = columnContext?.dataTypes?.get(columnName.toLowerCase());
+  const isLiteralRoundTrippable = (literal: ParsedWhereLiteral): boolean => isWhereLiteralRoundTrippable(literal, dataType, columnContext?.databaseType);
   rest = rest.trimStart();
   if (!rest) return null;
 
@@ -670,7 +711,7 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     const parts = splitTopLevelCommas(inner);
     if (!parts) return null;
     const values = parts.map((part) => parseWhereLiteral(part));
-    if (!values.length || values.some((value) => value === null)) return null;
+    if (!values.length || values.some((value) => value === null || !isLiteralRoundTrippable(value))) return null;
     return { columnName, mode, rawValue: inner.trim(), rawEndValue: "" };
   }
 
@@ -679,19 +720,19 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     if (!split) return null;
     const low = parseWhereLiteral(split.left);
     const high = parseWhereLiteral(split.right);
-    if (low === null || high === null) return null;
-    return { columnName, mode, rawValue: low, rawEndValue: high };
+    if (low === null || high === null || !isLiteralRoundTrippable(low) || !isLiteralRoundTrippable(high)) return null;
+    return { columnName, mode, rawValue: low.value, rawEndValue: high.value };
   }
 
   if (mode === "like" || mode === "not-like") {
     const value = parseWhereLiteral(rest);
     if (value === null) return null;
-    const mapped = parseLikePattern(value, mode === "not-like");
+    const mapped = parseLikePattern(value.value, mode === "not-like");
     if (!mapped) return null;
-    return { columnName, mode: mapped.mode, rawValue: mapped.rawValue, rawEndValue: "" };
+    return { columnName, mode: mapped.mode, rawValue: mapped.rawValue };
   }
 
   const value = parseWhereLiteral(rest);
-  if (value === null) return null;
-  return { columnName, mode, rawValue: value, rawEndValue: "" };
+  if (value === null || !isLiteralRoundTrippable(value)) return null;
+  return { columnName, mode, rawValue: value.value, rawEndValue: "" };
 }

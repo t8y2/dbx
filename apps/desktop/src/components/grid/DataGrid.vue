@@ -1448,6 +1448,7 @@ function onFilterModeOrderSaved() {
   filterModeOrderVersion.value += 1;
 }
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
+const columnDataTypeByName = computed(() => new Map(filterBuilderColumns.value.map((column) => [column.name.toLowerCase(), column.columnInfo?.data_type])));
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", props.tableMeta?.columns.map((column) => column.name).join("\0") ?? ""].join("\u0001"));
 const sortBuilderScopeKey = computed(() =>
@@ -2078,39 +2079,31 @@ async function clearAllFilters() {
   if (canUseWhereSearch.value) await applyWhereFilter();
 }
 
+/**
+ * Join per-rule conditions with SQL precedence: AND binds tighter than OR,
+ * so maximal runs of AND-joined conditions group first and the groups join
+ * with OR. The previous left-associative grouping rebuilt
+ * `a = 1 OR b = 2 AND c = 3` as `((a) OR (b)) AND (c)`, which changes the
+ * query the moment a hand-written WHERE moves into the panel — and the same
+ * for rules built in the panel itself (#15323 review).
+ */
 function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]): string {
   if (conditions.length === 0) return "";
   if (conditions.length === 1) return conditions[0];
 
-  const groups: { conditions: string[]; conjunction: string }[] = [];
-  let current = { conditions: [conditions[0]], conjunction: "AND" };
-
+  const andGroups: string[][] = [];
+  let current = [conditions[0]];
   for (let i = 1; i < conditions.length; i++) {
-    const conj = rules[i].conjunction;
-    if (conj !== current.conjunction) {
-      groups.push(current);
-      current = { conditions: [conditions[i]], conjunction: conj };
+    if (rules[i].conjunction === "AND") {
+      current.push(conditions[i]);
     } else {
-      current.conditions.push(conditions[i]);
+      andGroups.push(current);
+      current = [conditions[i]];
     }
   }
-  groups.push(current);
+  andGroups.push(current);
 
-  if (groups.length === 1) {
-    const g = groups[0];
-    return g.conditions.length > 1 ? `(${g.conditions.join(` ${g.conjunction} `)})` : g.conditions[0];
-  }
-
-  const groupClauses = groups.map((g) => {
-    const inner = g.conditions.join(` ${g.conjunction} `);
-    return g.conditions.length > 1 ? `(${inner})` : inner;
-  });
-
-  let result = groupClauses[0];
-  for (let i = 1; i < groupClauses.length; i++) {
-    result = `(${result}) ${groups[i].conjunction} (${groupClauses[i]})`;
-  }
-  return result;
+  return andGroups.map((group) => (group.length > 1 ? `(${group.join(" AND ")})` : group[0])).join(" OR ");
 }
 
 async function applyStructuredWhere(where: string) {
@@ -2142,10 +2135,20 @@ async function syncManualWhereInputIntoFilterBuilder(): Promise<void> {
     if (structuredFilterRules.value.some((rule) => rule.columnName && isStructuredFilterRuleComplete(rule))) return;
     const columns = filterBuilderColumnOptions.value;
     if (!columns.length) return;
-    const parsed = parseDataGridWhereInputToRules(whereFilterInput.value, columns);
+    const parsed = parseDataGridWhereInputToRules(whereFilterInput.value, columns, undefined, { dataTypes: columnDataTypeByName.value, databaseType: resolvedDatabaseType.value });
     if (!parsed) return;
+    // The condition build awaits the backend; the user may edit the WHERE
+    // box, switch tables, or change the panel rules while it is pending.
+    // Commit only if nothing moved meanwhile, or the stale result would
+    // overwrite the newer input and clear it (#15323 review).
+    const whereInputBefore = whereFilterInput.value;
+    const revisionBefore = conditionInputRevision.value;
+    const cacheKeyBefore = structuredFilterCacheKey.value;
+    const scopeKeyBefore = structuredFilterScopeKey.value;
+    const rulesBefore = JSON.stringify(structuredFilterRules.value);
     const where = await buildStructuredWhereFromRules(parsed);
     if (!where) return;
+    if (whereFilterInput.value !== whereInputBefore || conditionInputRevision.value !== revisionBefore || structuredFilterCacheKey.value !== cacheKeyBefore || structuredFilterScopeKey.value !== scopeKeyBefore || JSON.stringify(structuredFilterRules.value) !== rulesBefore) return;
     structuredFilterRules.value = parsed;
     whereFilterInput.value = "";
     appliedStructuredWhereInput.value = where;

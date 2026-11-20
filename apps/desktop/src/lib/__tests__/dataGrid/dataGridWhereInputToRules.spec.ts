@@ -10,6 +10,23 @@ function parse(whereInput: string | undefined) {
   return rules.map(({ id, ...rule }) => rule);
 }
 
+const TYPED_COLUMNS = ["id", "status", "age", "name", "created_at", "active"];
+const TYPED_COLUMN_TYPES = new Map<string, string | undefined>([
+  ["id", "int"],
+  ["status", "varchar"],
+  ["age", "int"],
+  ["name", "varchar"],
+  ["created_at", "datetime"],
+  ["active", "boolean"],
+]);
+
+function parseTyped(whereInput: string | undefined) {
+  let count = 0;
+  const rules = parseDataGridWhereInputToRules(whereInput, TYPED_COLUMNS, () => `rule-${++count}`, { dataTypes: TYPED_COLUMN_TYPES, databaseType: "mysql" });
+  if (rules === null) return null;
+  return rules.map(({ id, ...rule }) => rule);
+}
+
 describe("parseDataGridWhereInputToRules (#15320)", () => {
   it("parses a simple equals condition", () => {
     expect(parse("id = 1")).toEqual([{ columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }]);
@@ -86,5 +103,32 @@ describe("parseDataGridWhereInputToRules (#15320)", () => {
     expect(parse("name LIKE 'abc'")).toBeNull();
     expect(parse("name LIKE 'a%b'")).toBeNull();
     expect(parse("id = 1 AND status = 'x' AND")).toBeNull();
+  });
+
+  it("leaves unquoted numbers and booleans against text columns manual (#15323 review)", () => {
+    // The rebuild would quote them (`code = 1` becoming `code = '1'`), which
+    // changes MySQL comparison semantics, so the input stays manual.
+    expect(parseTyped("status = 1")).toBeNull();
+    expect(parseTyped("status = '1'")).not.toBeNull();
+    expect(parseTyped("status IN (1, 2)")).toBeNull();
+    expect(parseTyped("status IN ('1', '2')")).not.toBeNull();
+    expect(parseTyped("name BETWEEN 1 AND 9")).toBeNull();
+    expect(parseTyped("status = true")).toBeNull();
+  });
+
+  it("keeps unquoted literals that round-trip against typed columns (#15323 review)", () => {
+    expect(parseTyped("id = 1")).not.toBeNull();
+    expect(parseTyped("age BETWEEN 18 AND 65")).not.toBeNull();
+    expect(parseTyped("id IN (1, 2)")).not.toBeNull();
+    expect(parseTyped("active = true")).not.toBeNull();
+    expect(parseTyped("created_at = '2024-01-01'")).not.toBeNull();
+    expect(parseTyped("active = 1")).toBeNull();
+    expect(parseTyped("id = true")).toBeNull();
+  });
+
+  it("refuses literals the value parser would re-quote without a column type (#15323 review)", () => {
+    expect(parse("status = 01")).toBeNull();
+    expect(parse("status = true")).toBeNull();
+    expect(parse("id = 1")).not.toBeNull();
   });
 });

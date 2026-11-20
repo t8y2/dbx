@@ -613,6 +613,16 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT /* a; b */ 1", "SELECT 2"]);
   });
 
+  it.each(["saphana", "exasol", "access", "informix", "gbase8s", "sundb", "xugu", "iotdb", "iris"] as const)("keeps %s legacy block comments flat", (databaseType) => {
+    const sql = ["/* outer", "/* inner */", "-- region visible", "SELECT 1;", "-- endregion", "SELECT 2;"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, databaseType))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
+  it("keeps InfluxDB 3 nested comments out of execution ranges", () => {
+    const sql = ["/* outer", "/* inner */", "-- region hidden", "SELECT 1;", "*/", "SELECT 2;"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "influxdb3"))).toEqual(["SELECT 2"]);
+  });
+
   it("handles Postgres dollar quoting", () => {
     const sql = "SELECT $$ a; b $$;\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT $$ a; b $$", "SELECT 2"]);

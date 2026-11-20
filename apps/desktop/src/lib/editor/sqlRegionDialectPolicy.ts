@@ -236,7 +236,8 @@ export const SQL_REGION_COMMENT_SPECS: Record<SqlRegionCommentPolicy, Partial<Sq
   "slash-flat": { regionNestedBlockComments: false, hashComments: false, slashComments: true, spaceAfterDashes: false },
   spark: { regionNestedBlockComments: true, hashComments: false, slashComments: false, spaceAfterDashes: false, regionLineCommentContinuation: true },
   metricsql: { regionBlockComments: false, regionDashComments: false, hashComments: true, slashComments: false },
-  legacy: { regionNestedBlockComments: true },
+  // Legacy engines keep the conservative flat execution behavior until their comment semantics are verified.
+  legacy: { regionNestedBlockComments: false },
   excluded: {},
   dialect: {},
 };
@@ -324,7 +325,7 @@ export const SQL_REGION_COMMENT_POLICIES = {
   iotdb: "legacy",
   iris: "legacy",
   influxdb: "flat",
-  influxdb3: "legacy",
+  influxdb3: "nested",
   victoriametrics: "metricsql",
   jdbc: "dialect",
   spark: "spark",

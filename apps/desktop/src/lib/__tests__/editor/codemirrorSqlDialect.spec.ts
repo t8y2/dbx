@@ -55,6 +55,24 @@ describe("codemirrorSqlDialect", () => {
     expect([...sqlRegionFoldRanges(state).keys()]).toEqual([2]);
   });
 
+  it("keeps legacy region scanning aligned with flat execution comments", () => {
+    const sql = ["/* outer", "/* inner */", "-- region visible", "SELECT 1;", "-- endregion", "SELECT 2;"].join("\n");
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "saphana");
+    const state = EditorState.create({ doc: sql, extensions: [langSql.sql({ dialect }), sqlRegionDialect.of(sqlRegionDialectSpec(dialect, "mysql", "saphana"))] });
+    expect([...sqlRegionFoldRanges(state).keys()]).toEqual([3]);
+    const background = analyzeSqlStatements({ sql, databaseType: "saphana", includeFolds: true });
+    expect(background.folds?.get(3)).toEqual(sqlRegionFoldRanges(state).get(3));
+  });
+
+  it("keeps InfluxDB 3 nested comments out of region folds", () => {
+    const sql = ["/* outer", "/* inner */", "-- region hidden", "SELECT 1;", "*/", "SELECT 2;"].join("\n");
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "influxdb3");
+    const state = EditorState.create({ doc: sql, extensions: [langSql.sql({ dialect }), sqlRegionDialect.of(sqlRegionDialectSpec(dialect, "mysql", "influxdb3"))] });
+    expect([...sqlRegionFoldRanges(state).keys()]).toEqual([]);
+    const background = analyzeSqlStatements({ sql, databaseType: "influxdb3", includeFolds: true });
+    expect(background.folds?.has(3)).toBe(false);
+  });
+
   it("keeps common PostgreSQL identifier names out of keyword highlighting", () => {
     const keywords = new Set(postgresKeywordSyntaxTerms(langSql.PostgreSQL.spec.keywords || "").split(/\s+/));
 

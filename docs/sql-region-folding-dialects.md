@@ -50,7 +50,7 @@ The registry inventory below is a configuration/call-chain audit of all sources,
 
 ## Comment-rule audit
 
-Comment rules now have their own exhaustive policy table, applied after string overrides in the same editor/worker resolver. The table below describes the scanner behavior; the inventory includes a comment-policy decision for every source. `legacy` means a source was inspected but its active engine/version semantics could not be established, so the previous scanner behavior is retained rather than inventing a compatibility guarantee.
+Comment rules now have their own exhaustive policy table, applied after string overrides in the same editor/worker resolver. The table below describes the scanner behavior; the inventory includes a comment-policy decision for every source. `legacy` means a source was inspected but its active engine/version semantics could not be established, so the conservative flat comment behavior is retained rather than inventing a compatibility guarantee.
 
 | Policy | Line comments | Block comments |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ Comment rules now have their own exhaustive policy table, applied after string o
 | `slash-flat` | `--`, `//` | Non-nesting |
 | `spark` | `--`; trailing backslash continues over LF | Nested; hint bodies remain protected from region directives |
 | `metricsql` | `#` | No SQL block comments; `-- region` remains an editor directive only |
-| `legacy` | Existing adapter's `--`, `#`, `//` settings | Previous nested behavior; not independently certified |
+| `legacy` | Existing adapter's `--`, `#`, `//` settings | Flat; not independently certified |
 | `excluded` | Not used by region folding | Existing feature gate excludes this source |
 | `dialect` | Selected editor dialect | Generic JDBC: MySQL, PostgreSQL, SQL Server or ClickHouse policy; not inferred from arbitrary JDBC targets |
 
@@ -82,7 +82,7 @@ Evidence and differences checked:
 - [Doris lexer](https://github.com/apache/doris/blob/master/fe/fe-core/src/main/antlr4/org/apache/doris/nereids/DorisLexer.g4) recursively matches bracket comments and continues `--` comments over backslash-LF, so it uses the Spark comment profile independently of its string profile. [StarRocks lexer](https://github.com/StarRocks/starrocks/blob/main/fe/fe-grammar/src/main/antlr/com/starrocks/grammar/StarRocksLex.g4) accepts unspaced `--` and non-nested blocks/hints. Neither inherits MySQL whitespace or hash-comment rules.
 - [Introduction to Teradata 15.10, p. 70](https://assets.teradata.com/pdf/TCPP/database/Intro_to_Teradata_15_10.pdf) disallows nested bracketed comments; Teradata uses the flat profile. Newer server modes remain subject to manual verification.
 - [MetricsQL lexer](https://github.com/VictoriaMetrics/metricsql/blob/master/lexer.go) only treats `#` as a comment. SQL block markers must not create a persistent comment state in this editor.
-- `saphana`, `exasol`, `access`, `informix`, `sundb`, `xugu`, `iotdb`, `iris`, `influxdb3` retain `legacy` explicitly: registry/adapter paths were checked, but complete comment semantics across their active driver modes were not established. Informix braces/JDBC escapes, IoTDB tree/table differences and InfluxDB 3 SQL/InfluxQL selection require a reliable mode signal before changing shared rules.
+- `saphana`, `exasol`, `access`, `informix`, `gbase8s`, `sundb`, `xugu`, `iotdb`, and `iris` retain `legacy` explicitly: registry/adapter paths were checked, but complete comment semantics across their active driver modes were not established. Informix braces/JDBC escapes and IoTDB tree/table differences require a reliable mode signal before changing shared rules. Their editor and execution paths use the conservative flat block-comment fallback. InfluxDB 3 is handled separately because its DataFusion GenericDialect supports nested block comments.
 
 All comment bodies are scanned as text, not strings: quotes and alternative string delimiters inside comments do not change their boundaries. Conversely, comments inside a string/quoted identifier/dollar body never open a comment state. Hints and executable comments are opaque for custom region recognition; this does not change their execution semantics. Normal region directives are never parsed inside a continued line comment or any still-open block.
 
@@ -197,7 +197,7 @@ The inventory below was read from `database-drivers.manifest.json`, the generate
 | `iotdb` | SQL | `none` | `iotdb` | `legacy` | `double-backtick` | Existing adapter/registry; no dollar override |
 | `iris` | SQL | `none` | `adapter` | `legacy` | `double` | Existing adapter/registry; no dollar override |
 | `influxdb` | SQL | `none` | `influxql` | `flat` | `escaped-double` | Existing adapter/registry; no dollar override |
-| `influxdb3` | SQL | `none` | `adapter` | `legacy` | `double` | Existing adapter/registry; no dollar override |
+| `influxdb3` | SQL | `none` | `adapter` | `nested` | `double` | InfluxDB 3 uses DataFusion's GenericDialect |
 | `victoriametrics` | SQL | `none` | `metricsql` | `metricsql` | `string-policy` | Existing adapter/registry; no dollar override |
 | `jdbc` | SQL | `dialect` | `adapter` | `dialect` | `dialect` | Selected editor dialect; arbitrary JDBC server is not inferred |
 | `spark` | SQL | `none` | `spark` | `spark` | `backtick` | Existing adapter/registry; no dollar override |
@@ -241,7 +241,7 @@ The MySQL screenshot showed `/* text /* end */` followed by green SQL and a fold
 
 `patches/codemirror-lang-sql-6.10.0.patch` adds `nestedBlockComments` to both ESM/CommonJS tokenizers and both type declarations, defaulting to true for compatibility. The common dialect factory passes the same nesting decision as the region scanner. Flat comments now end at the first terminator, including overlapping `/*/*/`; nested dialects retain depth counting. Correcting the syntax node also removes the false multiline comment fold, without hiding fold controls or recoloring text after parsing.
 
-All registered types were checked against the existing exhaustive comment table. Profiles `flat`, `mysql`, `google`, and `slash-flat` disable nesting in highlighting too. Profiles `nested`, `spark`, `clickhouse`, and `h2` retain nesting. `legacy` retains previous behavior pending engine/mode evidence. Generic editors use their selected dialect's nesting decision. Excluded/other query languages are not newly assigned SQL lexical semantics. This change synchronizes block nesting only, not every line-comment, literal or identifier difference of the upstream grammar.
+All registered types were checked against the existing exhaustive comment table. Profiles `flat`, `mysql`, `google`, `slash-flat`, and `legacy` disable nesting in highlighting too. Profiles `nested`, `spark`, `clickhouse`, and `h2` retain nesting. `legacy` keeps the conservative flat fallback pending engine/mode evidence. Generic editors use their selected dialect's nesting decision. Excluded/other query languages are not newly assigned SQL lexical semantics. This change synchronizes block nesting only, not every line-comment, literal or identifier difference of the upstream grammar.
 
 The patch is registered in pnpm-workspace.yaml and pnpm-lock.yaml without changing dependency versions. Offline lockfile generation was attempted with scripts disabled but could not resolve existing @vitejs/plugin-vue metadata; the minimal patch hash and snapshot references were then updated using pnpm's SHA-256 format. The patch applicability was checked and the patch applied to the existing local SQL dependency for manual verification. No build, typecheck, test suite or SQL execution was performed. A clean dependency installation has not been verified.
 
@@ -253,7 +253,7 @@ The PostgreSQL sample exposed a separate pre-existing defect: `splitSqlStatement
 
 `sqlBlockComments.ts` now derives explicit nesting support from the same exhaustive comment-policy table. The main splitter, trivia/keyword readers, soft statement starts, top-level word scanning, balanced parentheses and trailing-comment trimming honor nested depth. Hint/directive executable-start lookup and same-line cursor checks use the same closing-boundary helper. Unclosed outer blocks consume the remaining comment text rather than exposing it as SQL.
 
-This covers the shared execution path for policies `nested`, `spark`, `clickhouse`, and `h2`: PostgreSQL, DuckDB, SQL Server, Redshift, Kingbase, HighGo, UXDB, Vastbase, GaussDB, KWDB, openGauss, Vertica, QuestDB, Hive, Argo, Transwarp, DB2, Spark, Databricks, Kyuubi, Doris, ClickHouse, H2 and Ignite. Unknown JDBC targets and `legacy` policies retain their existing execution behavior; they are not evidence of verified nesting support. The follow-up static review also covers routine comment boundaries: MySQL-style routine scanning receives the database type (notably for Doris) and carries block depth between incremental chunks; Oracle-style tokenization, body-keyword lookahead and PostgreSQL dollar-body prefix detection receive the same database policy, including GaussDB/openGauss compatibility paths. This does not establish full stored-routine syntax compatibility.
+This covers the shared execution path for policies `nested`, `spark`, `clickhouse`, and `h2`: PostgreSQL, DuckDB, SQL Server, Redshift, Kingbase, HighGo, UXDB, Vastbase, GaussDB, KWDB, openGauss, Vertica, QuestDB, Hive, Argo, Transwarp, DB2, Spark, Databricks, Kyuubi, Doris, ClickHouse, H2, Ignite and InfluxDB 3. Unknown JDBC targets retain their existing execution behavior, while `legacy` policies use the same conservative flat behavior in editor and execution paths. Neither case is evidence of verified nesting support. The follow-up static review also covers routine comment boundaries: MySQL-style routine scanning receives the database type (notably for Doris) and carries block depth between incremental chunks; Oracle-style tokenization, body-keyword lookahead and PostgreSQL dollar-body prefix detection receive the same database policy, including GaussDB/openGauss compatibility paths. This does not establish full stored-routine syntax compatibility.
 
 Static review only; no builds, typechecks, tests or SQL execution were run. Manual acceptance: in the PostgreSQL 22-line sample, lines 4 and 6 must lose their run buttons, while lines 8, 11, 17 and 21 retain execution targets. Region arrows remain at 7, 16 and 20. Also check comments between two statements, nested comments containing semicolons/SELECT/BEGIN/END/parentheses, three nesting levels, and an unclosed outer comment. Repeat on a long document to exercise worker analysis and use MySQL's first-terminator example as a non-nesting control.
 

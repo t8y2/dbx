@@ -334,6 +334,10 @@ impl SqlDialectProfile {
             return Self { supports_oracle_style_routine_bodies: true, ..Self::default() };
         }
 
+        if matches!(db_type, DatabaseType::InfluxDb3) {
+            return Self { supports_nested_block_comments: true, ..Self::default() };
+        }
+
         Self::default()
     }
 
@@ -5548,6 +5552,16 @@ mod tests {
 
         assert!(!statements.iter().any(|statement| statement.starts_with("UPDATE")), "{statements:?}");
         assert!(statements.iter().any(|statement| statement.contains("SELECT 1")), "{statements:?}");
+    }
+
+    #[test]
+    fn influxdb3_nested_block_comments_keep_commented_out_statements_out() {
+        let sql = "/* outer\n/* inner */\n-- region hidden\nSELECT 1;\n*/\nSELECT 2;";
+        let statements = split_sql_statements_for_database(sql, DatabaseType::InfluxDb3);
+
+        assert_eq!(statements.len(), 1);
+        assert!(!statements.iter().any(|statement| statement.trim_start().starts_with("SELECT 1")), "{statements:?}");
+        assert!(statements.iter().any(|statement| statement.contains("SELECT 2")), "{statements:?}");
     }
 
     #[test]

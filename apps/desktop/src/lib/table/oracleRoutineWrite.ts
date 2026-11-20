@@ -21,13 +21,15 @@ const pendingSaves = new Map<string, { input: OracleRoutineSaveInput; operation:
  * operation registry (no database round trip, never a replay); `unproven` is not waited
  * on because nothing will ever move it.
  *
- * "Done" is not the same as "left `running`": the worker records the write as terminal
- * with an empty readback the moment the DDL returns, then spends the long part reading
- * the object back, and only then fills the readback in. Stopping at the first terminal
- * record reports "not verified" for a save whose verification simply had not finished.
+ * "Done" is not the same as "left `running`": the worker records an acknowledged write as
+ * terminal with an empty readback the moment the DDL returns, then spends the long part
+ * reading the object back, and only then fills the readback in. Stopping at that record
+ * reports "not verified" for a save whose verification simply had not finished. A write
+ * that failed is terminal with its error already known, so it is reported right away.
  */
 function operationStillInFlight(operation: OracleRoutineOperation): boolean {
-  return operation.lifecycle === "running" || (operation.lifecycle === "terminal" && operation.readback === null);
+  if (operation.lifecycle === "running") return true;
+  return operation.lifecycle === "terminal" && operation.readback === null && operation.acknowledged && !operation.error;
 }
 
 const RUNNING_OPERATION_POLL_MS = 1500;

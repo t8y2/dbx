@@ -182,6 +182,18 @@ describe("Oracle routine source save", () => {
     expect(api.observeOracleRoutineOperation).toHaveBeenCalledWith("original-operation", false);
   });
 
+  it("reports a failed write at once instead of waiting for a readback", async () => {
+    // Only an acknowledged write has a verification readback still to come; a DDL that
+    // failed is final with its error, so watching it would only delay the report.
+    const { prepareOracleRoutineSourceSave } = await import("@/lib/table/oracleRoutineWrite");
+    const save = await prepareOracleRoutineSourceSave(input());
+    const failed = record({ acknowledged: false, readback: null, error: "ORA-01031: insufficient privileges" });
+    vi.mocked(api.executeOracleRoutineOperation).mockResolvedValue(failed);
+
+    await expect(save()).rejects.toMatchObject({ operation: failed, message: expect.stringContaining("ORA-01031") });
+    expect(api.observeOracleRoutineOperation).not.toHaveBeenCalledWith("original-operation", false);
+  });
+
   it("verification requires terminal lifecycle, write acknowledgement, and full readback", async () => {
     const { oracleRoutineOperationVerified } = await import("@/lib/table/oracleRoutineWrite");
     expect(oracleRoutineOperationVerified(record())).toBe(true);

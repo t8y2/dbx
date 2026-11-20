@@ -310,6 +310,18 @@ impl AgentObservationTap {
     }
 }
 
+/// Whether a finished run was cancelled by the user rather than failing.
+///
+/// `Notify` stores at most one permit, and the runner consumes it while it is
+/// waiting (the CLI agent selects on `cancelled.notified()`), so probing the
+/// token after the run usually reports "not cancelled". The provider layer's
+/// explicit cancellation error is the durable signal: every runner returns
+/// [`ai::AGENT_CANCELLED_ERROR`] instead of a plain failure when the user
+/// stops the run.
+fn outcome_was_cancelled(outcome: Result<&str, &str>, cancel_probe: bool) -> bool {
+    cancel_probe || outcome.err() == Some(ai::AGENT_CANCELLED_ERROR)
+}
+
 /// Run the agent loop: call LLM with tools, execute tool calls, feed results back, repeat.
 ///
 /// The `on_event` callback receives streaming events for the frontend.
@@ -366,9 +378,12 @@ pub async fn run_agent_loop(
     .boxed()
     .await;
     // The terminal observation carries the loop's authoritative final text, so
-    // a repair-exhaustion re-emission cannot duplicate the answer.
-    let cancelled = cancelled.notified().now_or_never().is_some();
-    observation_tap.finish(result.as_deref().map_err(|error| error.as_str()), cancelled);
+    // a repair-exhaustion re-emission cannot duplicate the answer. Cancellation
+    // is read from the run's explicit error, not only from the token: the
+    // runner usually consumed the single `Notify` permit while waiting.
+    let cancel_probe = cancelled.notified().now_or_never().is_some();
+    let outcome = result.as_deref().map_err(|error| error.as_str());
+    observation_tap.finish(outcome, outcome_was_cancelled(outcome, cancel_probe));
     result
 }
 
@@ -2109,18 +2124,40 @@ mod tests {
         assert_eq!(terminal.payload["sessionId"], "session-1");
     }
 
-    /// A cancelled CLI agent also returns an error directly; observers must be
-    /// able to tell the stop apart from a failure.
+    /// A cancelled CLI/Pi agent returns the explicit cancellation error and the
+    /// runner has already consumed the `Notify` permit, so the boundary must
+    /// classify from the error rather than from a post-run token probe.
     #[tokio::test]
     async fn cancelled_direct_error_is_marked_cancelled() {
         let bus = crate::observability::HostObservationBus::new();
         let mut receiver = bus.subscribe();
         let tap = observation_tap(bus.clone());
-        tap.finish(Err("Agent run was cancelled"), true);
+        let outcome = Err(ai::AGENT_CANCELLED_ERROR);
+        tap.finish(outcome, outcome_was_cancelled(outcome, false));
 
         let terminal = receiver.recv().await.unwrap();
         assert_eq!(terminal.kind, KIND_AI_ERROR);
         assert_eq!(terminal.payload["cancelled"], true);
+    }
+
+    #[test]
+    fn cancellation_comes_from_the_error_not_the_consumed_permit() {
+        assert!(outcome_was_cancelled(Err(ai::AGENT_CANCELLED_ERROR), false));
+        // A token probe still counts when it is the only evidence.
+        assert!(outcome_was_cancelled(Err("boom"), true));
+        assert!(!outcome_was_cancelled(Err("boom"), false));
+        assert!(!outcome_was_cancelled(Ok("text"), false));
+    }
+
+    /// Documents the Tokio behavior the helper works around: `notify_one`
+    /// wakes the runner's waiter, which consumes the only permit, so a later
+    /// `notified()` probe sees nothing.
+    #[tokio::test]
+    async fn consumed_cancel_permit_is_invisible_to_a_later_probe() {
+        let notify = Notify::new();
+        let waiter = notify.notified();
+        tokio::join!(waiter, async { notify.notify_one() });
+        assert!(notify.notified().now_or_never().is_none());
     }
 
     /// When the loop already emitted `ai.agent_finished` and then failed, the

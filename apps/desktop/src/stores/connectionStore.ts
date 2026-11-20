@@ -8450,7 +8450,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
         if (simpleObjectDisplay) {
           const schemaParents = target.schema
-            ? [findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`)]
+            ? [
+                findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`) ??
+                  findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database) && sameSidebarObjectName(node.schema || node.label, target.schema))[0],
+              ]
             : findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database));
           const parents = schemaParents.filter((node): node is TreeNode => !!node);
           if (!parents.length) {
@@ -9516,7 +9519,8 @@ export const useConnectionStore = defineStore("connection", () => {
       const identifiers = damengCompletionColumnIdentifiers(config, table, schema, context);
       return `${connectionId}:${database}:${catalog ?? ""}:${identifiers.schema ?? ""}:${identifiers.table}`;
     }
-    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+    if (effectiveDbType === "oracle" || effectiveDbType === "oceanbase-oracle") {
       const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
       const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
       return `${connectionId}:${database}:${catalog ?? ""}:${normalizedSchema}:${normalizedTable}`;

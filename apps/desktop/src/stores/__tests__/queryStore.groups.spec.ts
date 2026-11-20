@@ -56,6 +56,28 @@ describe("queryStore editor groups", () => {
     expect(store.orientation).toBe("vertical");
   });
 
+  it("reveals bookmarks in their owning split and supports repeated jumps", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const first = store.createTab("", "", "one.sql", "query");
+    const second = store.createTab("", "", "two.sql", "query");
+    store.updateSql(first, "one\ntwo\nthree");
+    store.updateEditorBookmarks(first, [2]);
+    store.splitTabRight(first);
+    store.activateTab(second);
+    expect(store.revealBookmark(first, 2)).toBe(true);
+    expect(store.activeTabId).toBe(first);
+    expect(store.focusedGroupId).toBe(store.groups.find((group) => group.tabIds.includes(first))?.id);
+    const tab = store.tabs.find((item) => item.id === first)!;
+    const request = tab.editorRevealRequest!;
+    expect(request.line).toBe(2);
+    expect(store.revealBookmark(first, 2)).toBe(true);
+    expect(tab.editorRevealRequest!.id).toBeGreaterThan(request.id);
+    expect(store.revealBookmark(first, 3)).toBe(false);
+    expect(store.revealBookmark("closed", 2)).toBe(false);
+    expect(tab.sql).toBe("one\ntwo\nthree");
+  });
+
   it("moves a tab across groups and removes the empty source group", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

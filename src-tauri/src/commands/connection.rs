@@ -1840,13 +1840,9 @@ async fn test_connection_with_info_impl(
                             })));
                     }
 
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        state.mongo_oidc_browser_opener(),
-                    )
-                    .await
+                    let native_err = match state
+                        .connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
+                        .await
                     {
                         Ok(client) => {
                             match db::mongo_driver::test_connection_for_url(
@@ -1873,7 +1869,7 @@ async fn test_connection_with_info_impl(
                         }
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         let mut client =
                             spawn_mongo_legacy_fallback_agent(state.as_ref(), &config.db_type, &native_err).await?;
                         client.connect(mongo_legacy_connect_params(&config, &host, port)?).await.map_err(|err| {
@@ -2432,13 +2428,9 @@ async fn connect_db_inner(
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
                     PoolKind::agent(client)
                 } else {
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        state.mongo_oidc_browser_opener(),
-                    )
-                    .await
+                    let native_err = match state
+                        .connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
+                        .await
                     {
                         Ok(client) => {
                             state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
@@ -2475,7 +2467,7 @@ async fn connect_db_inner(
                         }
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let mut client =
                             spawn_mongo_legacy_fallback_agent(state.inner().as_ref(), &db_config.db_type, &native_err)

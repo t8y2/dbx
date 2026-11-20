@@ -485,6 +485,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/tokens/list", post(routes::mq::list_token_records))
         .route("/mq/monitoring/backlog", post(routes::mq::get_backlog))
         .route("/mq/monitoring/cluster-info", post(routes::mq::get_cluster_info))
+        .route("/mq/monitoring/broker-config", post(routes::mq::get_broker_config))
         .route("/mq/overview", post(routes::mq::get_overview))
         .route("/mq/nodes", post(routes::mq::list_nodes))
         .route("/mq/raw", post(routes::mq::raw_request))

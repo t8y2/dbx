@@ -48,8 +48,9 @@ import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import ConnectionBadgeIcon from "@/components/icons/ConnectionBadgeIcon.vue";
+import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
+import { sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ConnectionDetailContent from "@/components/connection/ConnectionDetailContent.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
@@ -941,9 +942,10 @@ const tableSearchValue = computed(() => {
 
 const isConnecting = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && connectionStore.connectingIds.has(activeNode.value.connectionId));
 
-// Keep disconnected connections visually subdued without stripping their
-// database colors entirely; the trailing green dot still marks active ones.
-const connectionIconInactiveClass = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId && !connectionStore.connectedIds.has(activeNode.value.connectionId) ? "saturate-50 opacity-70" : ""));
+const iconConnection = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
+const isConnectionConnected = computed(() => !!activeNode.value.connectionId && connectionStore.connectedIds.has(activeNode.value.connectionId));
+const connectionIconStyle = computed(() => settingsStore.editorSettings.sidebarConnectionIconStyle);
+const treeIconSize = computed(() => sidebarTreeIconSize(activeNode.value.type, iconConnection.value, connectionIconStyle.value));
 
 const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (mysqlDataCharsetEnabled(connectionStore.getConfig(activeNode.value.connectionId)) || (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false)));
 
@@ -954,18 +956,6 @@ const databaseOpenVisual = computed(() => {
     iconClass: activeNode.value.type !== "database" || databaseOpen ? infoClass : "text-muted-foreground/65",
     showsIndicator: databaseOpen,
   };
-});
-
-function connectionIconType(connectionId?: string) {
-  const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
-  return config?.driver_profile || config?.db_type || "postgres";
-}
-
-const pluginConnectionIcon = computed(() => {
-  if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return undefined;
-  const config = connectionStore.getConfig(activeNode.value.connectionId);
-  if (config?.db_type !== "plugin" || !config.plugin_id) return undefined;
-  return { pluginId: config.plugin_id, contributionId: config.plugin_connection_provider };
 });
 
 const connectionColor = computed(() => {
@@ -1713,11 +1703,11 @@ function onKeydown(event: KeyboardEvent) {
           </button>
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
-        <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false || isDisabledTrigger }">
-          <PluginIcon v-if="node.type === 'connection' && pluginConnectionIcon" :plugin-id="pluginConnectionIcon.pluginId" :contribution-id="pluginConnectionIcon.contributionId" class="h-3.5 w-3.5 shrink-0" :class="connectionIconInactiveClass" />
-          <DatabaseIcon v-else-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" :class="connectionIconInactiveClass" />
+        <span class="relative flex shrink-0" :style="{ width: `${treeIconSize}px`, height: `${treeIconSize}px` }" :class="{ 'overflow-visible': node.valid === false || isDisabledTrigger }">
+          <ConnectionBadgeIcon v-if="node.type === 'connection' && connectionIconStyle === 'badge'" :connection="iconConnection" :connected="isConnectionConnected" />
+          <ConnectionIcon v-else-if="node.type === 'connection'" :connection="iconConnection" class="h-3.5 w-3.5 shrink-0" :class="node.connectionId && !isConnectionConnected ? 'saturate-50 opacity-70' : ''" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
-          <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
+          <component v-else :is="getIconInfo(node)?.icon || Database" class="size-full shrink-0" :class="databaseOpenVisual.iconClass" />
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
           <span
             v-if="isDisabledTrigger"

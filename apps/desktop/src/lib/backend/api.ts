@@ -913,6 +913,7 @@ export const mqGetBacklog = forward("mqGetBacklog");
 export const mqGetConsumerGroupConfig = forward("mqGetConsumerGroupConfig");
 export const mqAlterConsumerGroupConfig = forward("mqAlterConsumerGroupConfig");
 export const mqGetClusterInfo = forward("mqGetClusterInfo");
+export const mqGetBrokerConfig = forward("mqGetBrokerConfig");
 export const mqGetTopicRoute = forward("mqGetTopicRoute");
 export const mqAlterTopicConfig = forward("mqAlterTopicConfig");
 export const mqSkipTopicAccumulation = forward("mqSkipTopicAccumulation");

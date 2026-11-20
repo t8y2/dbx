@@ -369,6 +369,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.colorizeConnectionTabsScope", "settings.colorizeConnectionTabsScopeAll", "settings.colorizeConnectionTabsScopeActive"],
   },
   { id: "appearance-icons", category: "appearance", titleKey: "settings.iconTheme", targetId: "appearance", visible: desktopOnly },
+  { id: "appearance-connection-icon-style", category: "appearance", titleKey: "settings.sidebarConnectionIconStyle", descriptionKey: "settings.sidebarConnectionIconStyleDescription", targetId: "appearance" },
   {
     id: "appearance-web-logo-position",
     category: "appearance",

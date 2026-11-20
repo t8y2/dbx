@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { CONCURRENT_INDEX_QUERY_TIMEOUT_SECS, frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import {
+  CONCURRENT_INDEX_QUERY_TIMEOUT_SECS,
+  DEFAULT_WRITE_TIMEOUT_SECS,
+  frontendDeadlineForConnection,
+  frontendDeadlineForStatement,
+  frontendQueryTimeoutDelayMs,
+  frontendQueryTimeoutSecsForSql,
+  queryTimeoutSecsForConcurrentIndex,
+  queryTimeoutSecsForConnection,
+  statementOutlivesReadTimeoutBudget,
+  statementScopeForSql,
+  writeTimeoutSecsForConnection,
+} from "@/lib/sql/queryTimeout";
 
 describe("queryTimeout", () => {
   it("gives CREATE INDEX CONCURRENTLY a dedicated long budget instead of the 60s default", () => {
@@ -29,13 +41,74 @@ describe("queryTimeout", () => {
     const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
   FUNCTION get_version RETURN VARCHAR2;
 END pkg_utils;`;
-    expect(frontendQueryTimeoutSecsForSql(`${packageSpec}\n/\nSELECT 1;`, "opengauss", 30)).toBe(60);
+    // The package body is DDL, so it now runs without a read deadline.
+    expect(frontendQueryTimeoutSecsForSql(`${packageSpec}\n/\nSELECT 1;`, "opengauss", 30)).toBe(0);
+    expect(statementOutlivesReadTimeoutBudget(`${packageSpec}\n/\nSELECT 1;`, "opengauss")).toBe(true);
   });
 
-  it("keeps the frontend guard for non-row PostgreSQL statements", () => {
-    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(30);
-    expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(30);
-    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET note = 'ready' /* RETURNING */", "postgres", 30)).toBe(30);
+  it("never puts a read deadline on DDL or writes", () => {
+    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(0);
+    expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(0);
+    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET note = 'ready' /* RETURNING */", "postgres", 30)).toBe(0);
+  });
+
+  it("classifies schema changes, writes and reads", () => {
+    expect(statementScopeForSql("SELECT 1", "mysql")).toBe("read");
+    expect(statementScopeForSql("/* c */ INSERT INTO t VALUES (1)", "mysql")).toBe("write");
+    expect(statementScopeForSql("ALTER TABLE t ADD COLUMN c INT", "mysql")).toBe("schema-change");
+    expect(statementScopeForSql("-- migration\nTRUNCATE TABLE t", "mysql")).toBe("schema-change");
+    expect(statementOutlivesReadTimeoutBudget("SELECT 1; CREATE TABLE t (id INT)", "mysql")).toBe(true);
+    expect(statementOutlivesReadTimeoutBudget("SELECT 1", "mysql")).toBe(false);
+  });
+
+  it("recognises production partition DDL without a parser", () => {
+    const createPartitioned = `CREATE TABLE events_2024 (
+  id BIGINT NOT NULL,
+  created_at DATETIME NOT NULL
+) PARTITION BY RANGE (TO_DAYS(created_at)) (
+  PARTITION p0 VALUES LESS THAN (TO_DAYS('2024-02-01'))
+);`;
+    expect(statementScopeForSql(createPartitioned, "mysql")).toBe("schema-change");
+    expect(statementScopeForSql("ALTER TABLE events ADD PARTITION (PARTITION p3 VALUES LESS THAN (MAXVALUE))", "mysql")).toBe("schema-change");
+  });
+
+  it("never puts a deadline on schema changes, even with a write limit", () => {
+    expect(frontendDeadlineForStatement("CREATE TABLE t (id INT)", "mysql", 60, 0)).toEqual({ afterSecs: 0, cancelOnTimeout: false });
+    expect(frontendDeadlineForStatement("ALTER TABLE t ADD PARTITION (PARTITION p9 VALUES LESS THAN (10))", "mysql", 60, 5)).toEqual({
+      afterSecs: 0,
+      cancelOnTimeout: false,
+    });
+  });
+
+  it("leaves writes unbounded by default and never cancels them", () => {
+    expect(frontendDeadlineForStatement("INSERT INTO t SELECT * FROM s", "mysql", 60, 0)).toEqual({ afterSecs: 0, cancelOnTimeout: false });
+    expect(frontendDeadlineForStatement("INSERT INTO t SELECT * FROM s", "mysql", 60, 5)).toEqual({ afterSecs: 5, cancelOnTimeout: false });
+  });
+
+  it("keeps the cancellable read deadline", () => {
+    expect(frontendDeadlineForStatement("SELECT * FROM t", "mysql", 60, 5)).toEqual({ afterSecs: 60, cancelOnTimeout: true });
+    expect(frontendDeadlineForStatement("SELECT SLEEP(30)", "mysql", 0, 5)).toEqual({ afterSecs: 0, cancelOnTimeout: false });
+  });
+
+  it("reads the write limit from the connection settings", () => {
+    expect(writeTimeoutSecsForConnection({ write_timeout_secs: undefined })).toBe(DEFAULT_WRITE_TIMEOUT_SECS);
+    expect(writeTimeoutSecsForConnection({ write_timeout_secs: 15 })).toBe(15);
+    expect(writeTimeoutSecsForConnection({ write_timeout_secs: -1 })).toBe(DEFAULT_WRITE_TIMEOUT_SECS);
+  });
+
+  it("derives the deadline from a connection", () => {
+    expect(frontendDeadlineForConnection("SELECT 1", "mysql", { query_timeout_secs: 45, write_timeout_secs: 0 }, 60)).toEqual({
+      afterSecs: 45,
+      cancelOnTimeout: true,
+    });
+    expect(frontendDeadlineForConnection("INSERT INTO t VALUES (1)", "mysql", { query_timeout_secs: 45, write_timeout_secs: 10 }, 60)).toEqual({
+      afterSecs: 10,
+      cancelOnTimeout: false,
+    });
+    expect(frontendDeadlineForConnection("DROP TABLE t", "mysql", { query_timeout_secs: 45, write_timeout_secs: 10 }, 60)).toEqual({
+      afterSecs: 0,
+      cancelOnTimeout: false,
+    });
   });
 
   it("keeps the existing frontend guard for other database types", () => {

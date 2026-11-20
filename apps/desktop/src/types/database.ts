@@ -178,6 +178,8 @@ export interface ConnectionConfig {
   connect_timeout_secs?: number;
   connect_timeout_inherit?: boolean;
   query_timeout_secs?: number;
+  /** Timeout for data writes. 0 (default) means unlimited; schema changes ignore it. */
+  write_timeout_secs?: number;
   query_timeout_inherit?: boolean;
   idle_timeout_secs?: number;
   /** Seconds a manual transaction may sit idle before DBX rolls it back. */

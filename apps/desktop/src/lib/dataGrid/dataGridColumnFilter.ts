@@ -688,7 +688,7 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     if (value === null) return null;
     const mapped = parseLikePattern(value, mode === "not-like");
     if (!mapped) return null;
-    return { columnName, mode: mapped.mode, rawValue: mapped.rawValue };
+    return { columnName, mode: mapped.mode, rawValue: mapped.rawValue, rawEndValue: "" };
   }
 
   const value = parseWhereLiteral(rest);

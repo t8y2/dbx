@@ -1,6 +1,25 @@
 import { appendFlatTreeRenderKey, type FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode } from "@/types/database";
 
+export function hideSimpleSidebarIndexes(nodes: TreeNode[]): TreeNode[] {
+  let changed = false;
+  const visible: TreeNode[] = [];
+  for (const node of nodes) {
+    if ((node.type === "index" && node.objectScope === "schema") || node.loadMore?.objectType === "INDEX") {
+      changed = true;
+      continue;
+    }
+    const children = node.children?.length ? hideSimpleSidebarIndexes(node.children) : node.children;
+    if (children !== node.children) {
+      changed = true;
+      visible.push({ ...node, children });
+    } else {
+      visible.push(node);
+    }
+  }
+  return changed ? visible : nodes;
+}
+
 export function filterConnectionIndexes(nodes: readonly TreeNode[], connectionIds: ReadonlySet<string>, queries: Readonly<Record<string, string>>): TreeNode[] {
   return nodes.map((node) => {
     if (node.type === "connection-group" && node.children?.length) {

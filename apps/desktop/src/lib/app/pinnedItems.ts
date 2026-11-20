@@ -16,7 +16,18 @@ export type PinnedTreeNodeIdentity = {
 };
 
 const NATURAL_TREE_NODE_ORDER = Symbol("naturalTreeNodeOrder");
-type OrderedTreeNode = TreeNode & { [NATURAL_TREE_NODE_ORDER]?: number };
+const EXPLICIT_TREE_LAYOUT_ORDER = Symbol("explicitTreeLayoutOrder");
+type OrderedTreeNode = TreeNode & { [NATURAL_TREE_NODE_ORDER]?: number; [EXPLICIT_TREE_LAYOUT_ORDER]?: boolean };
+
+/** Display-only: survives proxy/spread operations but never enters metadata JSON. */
+export function markExplicitTreeLayoutOrder(nodes: TreeNode[], enabled: boolean): TreeNode[] {
+  for (const node of nodes) (node as OrderedTreeNode)[EXPLICIT_TREE_LAYOUT_ORDER] = enabled;
+  return nodes;
+}
+
+export function hasExplicitTreeLayoutOrder(nodes: readonly TreeNode[]): boolean {
+  return nodes.some((node) => (node as OrderedTreeNode)[EXPLICIT_TREE_LAYOUT_ORDER] === true);
+}
 
 function naturalTreeNodeOrder(node: TreeNode): number | undefined {
   return (node as OrderedTreeNode)[NATURAL_TREE_NODE_ORDER];
@@ -267,6 +278,9 @@ function rememberNaturalTreeNodeOrder(nodes: readonly TreeNode[]): void {
 }
 
 export function orderPinnedTreeNodes(nodes: TreeNode[], pinnedOrder: readonly string[] = [], isFixedPriority: FixedTreeNodePriority = () => false): TreeNode[] {
+  // As inside virtual folders, explicit database layout order takes precedence
+  // over pin presentation. Pin flags are still synchronized by the caller.
+  if (hasExplicitTreeLayoutOrder(nodes)) return nodes;
   rememberNaturalTreeNodeOrder(nodes);
   const virtualGroups: TreeNode[] = [];
   const fixed: TreeNode[] = [];

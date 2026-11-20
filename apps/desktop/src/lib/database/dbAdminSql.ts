@@ -61,6 +61,10 @@ export interface VacuumTableSqlOptions {
   tableName: string;
   full?: boolean;
   analyze?: boolean;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface MysqlAutoIncrementSqlOptions {
@@ -79,16 +83,28 @@ export interface DropTableChildObjectSqlOptions {
   schema?: string | null;
   tableName: string;
   name: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface DatabaseNameSqlOptions {
   databaseType?: DatabaseType;
   name: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface SchemaNameSqlOptions {
   databaseType?: DatabaseType;
   name: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface SchemaCommentSqlOptions extends SchemaNameSqlOptions {
@@ -103,6 +119,10 @@ export interface DatabasePropertyEditSqlOptions {
   charset?: string;
   collation?: string;
   comment?: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface DuplicateTableStructureSqlOptions {

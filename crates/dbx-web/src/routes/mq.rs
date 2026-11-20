@@ -1383,6 +1383,25 @@ pub async fn get_cluster_info(
     Ok(Json(result))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrokerConfigReq {
+    connection_id: String,
+    broker_id: i32,
+}
+
+pub async fn get_broker_config(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<BrokerConfigReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    dbx_core::mq::service::mq_get_broker_config_core(&state.app, &req.connection_id, req.broker_id)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
 pub async fn get_topic_route(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,

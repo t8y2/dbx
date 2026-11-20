@@ -45,7 +45,7 @@ export interface DatabaseStructureSearchOptions {
   limit?: number;
   executionId: string;
   shouldAbort?: () => boolean;
-  listTables: (schema?: string) => Promise<Array<{ name: string; table_type: string }>>;
+  listTables: (schema?: string) => Promise<Array<{ name: string; table_type: string; comment?: string | null }>>;
   getColumns: (schema: string, tableName: string) => Promise<ColumnInfo[]>;
   executeQuery: (sql: string, executionId: string) => Promise<{ columns: string[]; rows: unknown[][]; execution_error?: true }>;
 }
@@ -191,7 +191,7 @@ export async function runSqlCatalogStructureSearch(options: DatabaseStructureSea
   return mapStructureSearchRows(result.columns, result.rows, options.term).map((hit) => (options.catalog ? { ...hit, catalog: options.catalog } : hit));
 }
 
-async function runDocumentStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
+export async function runObjectMetadataStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
   const query = cleanTerm(options.term);
   if (!query || options.shouldAbort?.()) return [];
   const limit = Math.min(5000, Math.max(1, options.limit ?? 200));
@@ -201,6 +201,10 @@ async function runDocumentStructureSearch(options: DatabaseStructureSearchOption
     if (options.shouldAbort?.()) return hits;
     if (hits.length >= limit) break;
     const schema = options.schema || options.database;
+    if (table.comment && termMatches(table.comment, query)) {
+      hits.push({ schema: options.schema, tableName: table.name, tableType: table.table_type, tableComment: table.comment, matchedIn: ["tableComment"] });
+      if (hits.length >= limit) break;
+    }
     let columns: ColumnInfo[] = [];
     try {
       columns = await options.getColumns(schema, table.name);
@@ -232,7 +236,7 @@ export async function runDatabaseStructureSearch(options: DatabaseStructureSearc
     return runSqlCatalogStructureSearch(options);
   }
   if (usesDocumentStructureSearch(options.databaseType)) {
-    return runDocumentStructureSearch(options);
+    return runObjectMetadataStructureSearch(options);
   }
   return [];
 }

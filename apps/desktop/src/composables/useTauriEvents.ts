@@ -196,7 +196,14 @@ export function useTauriEvents(deps: {
         );
 
         track(
-          listen("dbx-close-active-tab", () => {
+          listen("dbx-close-active-tab", async () => {
+            const { getCurrentWindow } = await import("@tauri-apps/api/window");
+            if (
+              !(await getCurrentWindow()
+                .isFocused()
+                .catch(() => false))
+            )
+              return;
             deps.closeActiveSurface();
           }),
         );

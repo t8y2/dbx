@@ -40,13 +40,13 @@ describe("queryStore app close unsaved drafts", () => {
     return tabId;
   }
 
-  it("skips the quit prompt and keeps unsaved drafts by default", async () => {
+  it("keeps the app-close draft policy separate from forced window-close confirmation", async () => {
     const { queryStore } = await createStoreWithDirtyQueryTab();
 
-    const confirmed = queryStore.requestAppCloseConfirmation();
+    const confirmed = queryStore.requestWindowCloseConfirmation();
 
-    expect(confirmed).toBe(false);
-    expect(queryStore.showCloseConfirm).toBe(false);
+    expect(confirmed).toBe(true);
+    expect(queryStore.showCloseConfirm).toBe(true);
     expect(queryStore.tabs[0].sql).toBe("select 1;");
     expect(queryStore.isTabDirty(queryStore.tabs[0])).toBe(true);
     expect(queryStore.requiresAppCloseDraftPersist).toBe(true);
@@ -98,6 +98,45 @@ describe("queryStore app close unsaved drafts", () => {
     expect(queryStore.showCloseConfirm).toBe(true);
     expect(queryStore.closeConfirmContext).toBe("tab");
     expect(queryStore.tabs[0].sql).toBe("select 1;");
+  });
+
+  it("always confirms dirty SQL before closing an individual workspace window", async () => {
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().updateEditorSettings({
+      confirmUnsavedSqlClose: false,
+      appCloseUnsavedTabsMode: "keep-drafts",
+    });
+    const { queryStore, tabId } = await createStoreWithDirtyQueryTab();
+
+    expect(queryStore.requestWindowCloseConfirmation()).toBe(true);
+    expect(queryStore.showCloseConfirm).toBe(true);
+    expect(queryStore.closeConfirmDirtyTabIds).toEqual([tabId]);
+  });
+
+  it("confirms a scratch query that has SQL but no saved backing", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("conn-1", "db", undefined, "query", undefined, "select 1;");
+
+    expect(queryStore.isTabDirty(queryStore.tabs[0])).toBe(false);
+    expect(queryStore.isTabUnsavedForWindowClose(queryStore.tabs[0])).toBe(true);
+    expect(queryStore.hasUnsavedWindowTabs).toBe(true);
+    expect(queryStore.requestWindowCloseConfirmation()).toBe(true);
+    expect(queryStore.closeConfirmDirtyTabIds).toEqual([tabId]);
+  });
+
+  it("does not re-confirm a scratch query after discarding it for a workspace-window close", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    queryStore.createTab("conn-1", "db", undefined, "query", undefined, "select 1;");
+
+    expect(queryStore.requestWindowCloseConfirmation()).toBe(true);
+    queryStore.forceClosePendingTab();
+
+    expect(queryStore.tabs[0].sql).toBe("");
+    expect(queryStore.isTabUnsavedForWindowClose(queryStore.tabs[0])).toBe(false);
+    expect(queryStore.hasUnsavedWindowTabs).toBe(false);
+    expect(queryStore.requestWindowCloseConfirmation()).toBe(false);
   });
 
   it("still protects a dirty structure tab during app close in keep-drafts mode", async () => {

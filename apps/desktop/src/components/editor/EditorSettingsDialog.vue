@@ -144,6 +144,9 @@ import {
   SIDEBAR_DENSITIES,
   isSidebarDensity,
   type SidebarDensity,
+  SIDEBAR_CONNECTION_ICON_STYLES,
+  isSidebarConnectionIconStyle,
+  type SidebarConnectionIconStyle,
 } from "@/stores/settingsStore";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
@@ -244,6 +247,7 @@ import {
   type SyncSnapshotCatalog,
   type WebDavConfig,
 } from "@/lib/backend/api";
+import type { DesktopSettings } from "@/lib/backend/tauri";
 import {
   MAX_SNIPPET_AUTO_UPLOAD_INTERVAL_MINUTES,
   normalizedSnippetAutoUploadInterval,
@@ -847,6 +851,7 @@ const editWelcomePageMode = ref<WelcomePageMode>(settingsStore.editorSettings.we
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editWebLogoPosition = ref<WebLogoPosition>(settingsStore.editorSettings.webLogoPosition);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
+const editCrossWindowTabDragPreviewEnabled = ref(settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
 const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlacement);
 const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
 const editColorizeConnectionTabsScope = ref<ConnectionTabColorScope>(settingsStore.editorSettings.colorizeConnectionTabsScope);
@@ -1017,6 +1022,7 @@ watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
 const editSidebarColumnDoubleClickAction = ref(settingsStore.editorSettings.sidebarColumnDoubleClickAction);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
+const editSidebarSimpleHideIndexes = ref(settingsStore.editorSettings.sidebarSimpleHideIndexes);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
 const editRoutineSourceOpenMode = ref(settingsStore.editorSettings.routineSourceOpenMode);
@@ -1080,6 +1086,7 @@ const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTool
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editSidebarDensity = ref<SidebarDensity>(settingsStore.editorSettings.sidebarDensity);
+const editSidebarConnectionIconStyle = ref<SidebarConnectionIconStyle>(settingsStore.editorSettings.sidebarConnectionIconStyle);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
 const editPreferredExportPath = ref(settingsStore.editorSettings.preferredExportPath);
 const editDamengClientBinDir = ref(settingsStore.editorSettings.damengClientBinDir);
@@ -1380,6 +1387,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     appLayout: editAppLayout.value,
     webLogoPosition: editWebLogoPosition.value,
     tabLayout: editTabLayout.value,
+    crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled.value,
     tabPlacement: editTabPlacement.value,
     colorizeConnectionTabs: editColorizeConnectionTabs.value,
     colorizeConnectionTabsScope: editColorizeConnectionTabsScope.value,
@@ -1441,6 +1449,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarActivation: editSidebarActivation.value,
     sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
+    sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
     sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly.value,
@@ -1482,6 +1491,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
     sidebarDensity: editSidebarDensity.value,
+    sidebarConnectionIconStyle: editSidebarConnectionIconStyle.value,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
     sidebarCopyTableNameSeparator: editSidebarCopyTableNameSeparator.value,
     sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema.value,
@@ -2103,6 +2113,7 @@ function syncEditorSettingsDraftFromStore() {
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editWebLogoPosition.value = settingsStore.editorSettings.webLogoPosition;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
+  editCrossWindowTabDragPreviewEnabled.value = settingsStore.editorSettings.crossWindowTabDragPreviewEnabled;
   editTabPlacement.value = settingsStore.editorSettings.tabPlacement;
   editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
   editColorizeConnectionTabsScope.value = settingsStore.editorSettings.colorizeConnectionTabsScope;
@@ -2165,6 +2176,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
   editSidebarColumnDoubleClickAction.value = settingsStore.editorSettings.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
+  editSidebarSimpleHideIndexes.value = settingsStore.editorSettings.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly;
@@ -2210,6 +2222,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editSidebarDensity.value = settingsStore.editorSettings.sidebarDensity;
+  editSidebarConnectionIconStyle.value = settingsStore.editorSettings.sidebarConnectionIconStyle;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
   editPreferredExportPath.value = settingsStore.editorSettings.preferredExportPath;
   editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
@@ -2296,6 +2309,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   appLayout: editAppLayout,
   webLogoPosition: editWebLogoPosition,
   tabLayout: editTabLayout,
+  crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled,
   tabPlacement: editTabPlacement,
   colorizeConnectionTabs: editColorizeConnectionTabs,
   colorizeConnectionTabsScope: editColorizeConnectionTabsScope,
@@ -2355,6 +2369,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarActivation: editSidebarActivation,
   sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction,
   sidebarObjectDisplay: editSidebarObjectDisplay,
+  sidebarSimpleHideIndexes: editSidebarSimpleHideIndexes,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
   sidebarSearchOpenedDatabasesOnly: editSidebarSearchOpenedDatabasesOnly,
@@ -2396,6 +2411,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarIndent: editSidebarIndent,
   sidebarFontSize: editSidebarFontSize,
   sidebarDensity: editSidebarDensity,
+  sidebarConnectionIconStyle: editSidebarConnectionIconStyle,
   sidebarHiddenTablePrefixes: editSidebarHiddenTablePrefixes,
   sidebarCopyTableNameSeparator: editSidebarCopyTableNameSeparator,
   sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema,
@@ -2956,9 +2972,11 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCustomThemes.value = [...DEFAULT_EDITOR_SETTINGS.customThemes];
     editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
     editWelcomePageMode.value = DEFAULT_EDITOR_SETTINGS.welcomePageMode;
+    editSidebarConnectionIconStyle.value = DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
     editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
+    editCrossWindowTabDragPreviewEnabled.value = DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled;
     editTabPlacement.value = DEFAULT_EDITOR_SETTINGS.tabPlacement;
     editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
     editColorizeConnectionTabsScope.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabsScope;
@@ -2979,6 +2997,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+    editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
     editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
@@ -3221,6 +3240,7 @@ function resetAllDefaults() {
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
+  editSidebarSimpleHideIndexes.value = DEFAULT_EDITOR_SETTINGS.sidebarSimpleHideIndexes;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
   editSidebarSearchOpenedDatabasesOnly.value = DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly;
@@ -3260,6 +3280,7 @@ function resetAllDefaults() {
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
   editSidebarDensity.value = DEFAULT_EDITOR_SETTINGS.sidebarDensity;
+  editSidebarConnectionIconStyle.value = DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
   editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
   editSidebarCopyTableNameSeparator.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameSeparator;
   editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
@@ -3986,6 +4007,7 @@ const settingsSearchActiveIndex = ref(0);
 const settingsSearchInputContainerRef = ref<HTMLElement | null>(null);
 const highlightedSettingsSearchTargetId = ref("");
 let highlightedSettingsSearchElement: HTMLElement | null = null;
+let highlightedSettingsSearchOriginalClasses: ReadonlySet<string> | null = null;
 let pendingSettingsSearchResult: SettingsSearchEntry | null = null;
 const pendingSettingsSearchNavigation = shallowRef<{ result: SettingsSearchEntry; delivered: boolean } | null>(null);
 let settingsSearchHighlightTimer: ReturnType<typeof window.setTimeout> | null = null;
@@ -4028,7 +4050,15 @@ function clearSettingsSearchHighlight() {
     highlightedSettingsSearchElement.removeEventListener("animationend", settingsSearchHighlightAnimationHandler);
   }
   settingsSearchHighlightAnimationHandler = null;
-  highlightedSettingsSearchElement?.classList.remove(...settingsSearchHighlightClasses);
+  // Only strip classes the highlight itself introduced. Highlight targets are
+  // picked (see findSettingsSearchHighlightTarget) partly because they already
+  // carry classes from this list such as rounded-md; removing them blindly
+  // would delete the element's own styling and leave a square-cornered border
+  // behind after the highlight is gone.
+  for (const highlightClass of settingsSearchHighlightClasses) {
+    if (!highlightedSettingsSearchOriginalClasses?.has(highlightClass)) highlightedSettingsSearchElement?.classList.remove(highlightClass);
+  }
+  highlightedSettingsSearchOriginalClasses = null;
   highlightedSettingsSearchElement = null;
   highlightedSettingsSearchTargetId.value = "";
 }
@@ -4140,6 +4170,9 @@ function highlightSettingsSearchTarget(result: SettingsSearchEntry, searchRoot: 
   if (target === searchRoot) {
     highlightedSettingsSearchTargetId.value = result.targetId;
   }
+  // Remember the classes the target already owned so cleanup can remove only
+  // what the highlight added, never the element's original styling.
+  highlightedSettingsSearchOriginalClasses = new Set(target.classList);
   target.classList.add(...settingsSearchHighlightClasses);
   highlightedSettingsSearchElement = target;
 
@@ -6222,6 +6255,11 @@ async function chooseLocalBackupImport() {
   });
 }
 
+async function applySyncedDesktopSettings(settings: DesktopSettings) {
+  await settingsStore.updateDesktopSettings(settings);
+  if (settings.app_theme_mode) setThemeMode(settings.app_theme_mode, { persist: false });
+}
+
 async function confirmSyncSelection(selection: SyncSelection) {
   if (syncMethodTab.value === "local") {
     await nextTick();
@@ -6237,7 +6275,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
 
       const result = await localBackupImport(localBackupPath.value, selection.includeSecrets ? localBackupSecretsPassphrase.value : undefined, selection.includeSecrets, selection);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await applySyncedDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
       await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
@@ -6270,7 +6308,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
       const result = await snippetSyncDownload(currentSnippetConfig(), snippetPassphrase.value, selection.includeSecrets, selection.includeSecrets ? snippetSecretsPassphrase.value : undefined, selection);
       persistSnippetRemoteContentHash(result.summary.snippetId, result.summary.remoteContentHash);
       if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-      await settingsStore.updateDesktopSettings(result.desktopSettings);
+      await applySyncedDesktopSettings(result.desktopSettings);
       await connectionStore.initFromDisk();
       await savedSqlStore.reloadFromStorage();
       await tunnelProfileStore.refresh();
@@ -6302,7 +6340,7 @@ async function confirmSyncSelection(selection: SyncSelection) {
     const config = currentWebDavConfig();
     const result = await webdavSyncDownload(config, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
-    await settingsStore.updateDesktopSettings(result.desktopSettings);
+    await applySyncedDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.reloadFromStorage();
     await tunnelProfileStore.refresh();
@@ -9490,6 +9528,14 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="min-w-0 space-y-1">
+                  <Label for="cross-window-tab-drag-preview">{{ t("settings.crossWindowTabDragPreview") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.crossWindowTabDragPreviewDescription") }}</p>
+                </div>
+                <Switch id="cross-window-tab-drag-preview" v-model="editCrossWindowTabDragPreviewEnabled" />
+              </div>
+
               <div class="settings-item rounded-md border bg-muted/20 px-3 py-2">
                 <div :class="editColorizeConnectionTabs ? 'grid gap-4 md:grid-cols-2' : ''">
                   <div class="flex min-w-0 items-start justify-between gap-4">
@@ -9689,6 +9735,32 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+              </div>
+
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-connection-icon-style">{{ t("settings.sidebarConnectionIconStyle") }}</Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.sidebarConnectionIconStyleDescription") }}
+                  </p>
+                </div>
+                <Select
+                  :model-value="editSidebarConnectionIconStyle"
+                  @update:model-value="
+                    (value) => {
+                      if (isSidebarConnectionIconStyle(value)) editSidebarConnectionIconStyle = value;
+                    }
+                  "
+                >
+                  <SelectTrigger id="sidebar-connection-icon-style" class="h-8 w-36 shrink-0 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="end">
+                    <SelectItem v-for="style in SIDEBAR_CONNECTION_ICON_STYLES" :key="style" :value="style">
+                      {{ t(`settings.sidebarConnectionIconStyle_${style}`) }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               <div v-if="!isWeb" class="settings-appearance-group" data-background-image-settings>
@@ -9943,6 +10015,10 @@ onUnmounted(() => {
                     </div>
                   </Button>
                 </div>
+              </div>
+              <div v-if="editSidebarObjectDisplay === 'simple'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <Label for="sidebar-simple-hide-indexes">{{ t("settings.sidebarSimpleHideIndexes") }}</Label>
+                <Switch id="sidebar-simple-hide-indexes" v-model="editSidebarSimpleHideIndexes" />
               </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">

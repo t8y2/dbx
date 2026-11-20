@@ -186,6 +186,43 @@ final class NativeJobSessionTest {
         assertEquals(1, PHYSICAL.size());
     }
 
+    @Test
+    void connectionValidationLeavesAConnectionOwnedByANativeJobUntouched() throws Exception {
+        for (String session : new String[]{null, "owned"}) {
+            openLogical(session);
+            JsonNode opened = result(call("openNativeJobSession", params(session).put("operationId", "operation")));
+            Physical physical = PHYSICAL.getLast();
+            assertTrue(result(call("validateConnection", params(session))).path("valid").asBoolean());
+            assertEquals(0, physical.validations);
+            assertEquals(1, query(session, opened, "SELECT 1").path("rows").path(0).path(0).asInt());
+            assertEquals("closed", close(session, opened).path("phase").asText());
+        }
+    }
+
+    @Test
+    void connectionValidationProbesOnlyWhileNoCursorOrManualTransactionIsOpen() throws Exception {
+        openLogical("probe");
+        JsonNode page = result(call("executeQueryPage", params("probe")
+            .put("sql", "SELECT X FROM SYSTEM_RANGE(1, 3)").put("pageSize", 1)));
+        String cursor = page.path("session_id").asText();
+        Physical physical = PHYSICAL.getLast();
+        assertTrue(result(call("validateConnection", params("probe"))).path("valid").asBoolean());
+        assertEquals(0, physical.validations);
+        JsonNode next = result(call("fetchQueryPage", params("probe").put("sessionId", cursor).put("pageSize", 1)));
+        assertEquals(2, next.path("rows").path(0).path(0).asInt());
+        result(call("closeQuerySession", params("probe").put("sessionId", cursor)));
+        assertTrue(result(call("validateConnection", params("probe"))).path("valid").asBoolean());
+        assertEquals(1, physical.validations);
+
+        result(call("beginManualTransaction", params("probe")));
+        assertTrue(result(call("validateConnection", params("probe"))).path("valid").asBoolean());
+        assertEquals(1, physical.validations);
+        result(call("rollbackManualTransaction", params("probe")));
+        assertTrue(result(call("validateConnection", params("probe"))).path("valid").asBoolean());
+        assertEquals(2, physical.validations);
+        assertEquals(0, physical.closes);
+    }
+
     private void openLogical(String session) throws Exception {
         if (session == null) return;
         sessions.add(session);
@@ -232,6 +269,7 @@ final class NativeJobSessionTest {
         int commits;
         int rollbacks;
         int closes;
+        int validations;
         final List<String> sql = new ArrayList<>();
     }
 
@@ -247,6 +285,7 @@ final class NativeJobSessionTest {
                     if ("commit".equals(method.getName())) physical.commits++;
                     if ("rollback".equals(method.getName())) physical.rollbacks++;
                     if ("close".equals(method.getName())) physical.closes++;
+                    if ("isValid".equals(method.getName())) physical.validations++;
                     try {
                         Object value = method.invoke(real, arguments);
                         if ("close".equals(method.getName()) && physical.failClose) throw new SQLException("close acknowledgement lost", "08006");

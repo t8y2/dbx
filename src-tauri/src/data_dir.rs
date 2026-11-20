@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "windows")]
@@ -21,6 +22,31 @@ pub struct DataDirResolution {
 }
 
 impl DataDirResolution {
+    /// Resolve aliases before deriving the lock so two paths to one database
+    /// cannot accidentally start separate writers.
+    pub fn prepare(&mut self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.data_dir)?;
+        self.data_dir = std::fs::canonicalize(&self.data_dir)?;
+        Ok(())
+    }
+
+    pub fn single_instance_secret(&self) -> String {
+        let path = self.data_dir.as_os_str();
+        #[cfg(target_os = "windows")]
+        let path_bytes = {
+            use std::os::windows::ffi::OsStrExt;
+            path.encode_wide()
+                .map(|unit| if (65..=90).contains(&unit) { unit + 32 } else { unit })
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let path_bytes = path.as_encoded_bytes().to_vec();
+        // 128 bits keeps the macOS Unix socket below its path-length limit.
+        let digest = Sha256::digest(path_bytes);
+        digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     pub fn uses_custom_data_dir(&self) -> bool {
         matches!(self.mode, DataDirMode::EnvOverride | DataDirMode::Portable { .. })
     }
@@ -133,6 +159,62 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{alternative_data_dir, resolve_data_dir_from_inputs, DataDirMode};
+
+    #[test]
+    fn profiles_have_stable_distinct_private_instance_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut first = resolve_data_dir_from_inputs(
+            temp.path().join("default"),
+            None,
+            false,
+            false,
+            Some(temp.path().join("first")),
+        );
+        let mut second = resolve_data_dir_from_inputs(
+            temp.path().join("default"),
+            None,
+            false,
+            false,
+            Some(temp.path().join("second")),
+        );
+        first.prepare().unwrap();
+        second.prepare().unwrap();
+        assert_ne!(first.single_instance_secret(), second.single_instance_secret());
+        assert_eq!(first.single_instance_secret(), first.clone().single_instance_secret());
+        assert_eq!(first.single_instance_secret().len(), 32);
+        assert!(first.single_instance_secret().bytes().all(|value| value.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn canonical_directory_aliases_share_one_instance_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut first = resolve_data_dir_from_inputs(temp.path().join("profile"), None, false, false, None);
+        first.prepare().unwrap();
+        let mut alias = resolve_data_dir_from_inputs(temp.path().join("profile").join("."), None, false, false, None);
+        alias.prepare().unwrap();
+        assert_eq!(first.data_dir, alias.data_dir);
+        assert_eq!(first.single_instance_secret(), alias.single_instance_secret());
+    }
+
+    #[test]
+    fn prepare_fails_closed_when_the_profile_is_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("profile");
+        std::fs::write(&file, b"not a directory").unwrap();
+        let mut resolution = resolve_data_dir_from_inputs(file, None, false, false, None);
+        assert!(resolution.prepare().is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_ascii_case_aliases_have_one_instance_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut first = resolve_data_dir_from_inputs(temp.path().join("Profile"), None, false, false, None);
+        let mut alias = resolve_data_dir_from_inputs(temp.path().join("PROFILE"), None, false, false, None);
+        first.prepare().unwrap();
+        alias.prepare().unwrap();
+        assert_eq!(first.single_instance_secret(), alias.single_instance_secret());
+    }
 
     #[test]
     fn uses_portable_data_dir_when_marker_exists_without_installer_marker() {

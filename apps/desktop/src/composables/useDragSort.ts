@@ -2,6 +2,14 @@ import { reactive, readonly } from "vue";
 
 export type DropPosition = "before" | "after" | "inside";
 
+/** Shared row hit zones for connection and database-folder dragging. */
+export function dragSortDropPosition(clientY: number, rect: Pick<DOMRect, "top" | "height">, acceptsInside: boolean): DropPosition {
+  const y = clientY - rect.top;
+  const third = rect.height / 3;
+  if (acceptsInside && y > third && y < rect.height - third) return "inside";
+  return y < rect.height / 2 ? "before" : "after";
+}
+
 interface DragState {
   active: boolean;
   draggedId: string | null;
@@ -312,16 +320,7 @@ export function useDragSort(onDrop: (draggedId: string, targetId: string, positi
 
     const el = event.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
-    const y = event.clientY - rect.top;
-    const third = rect.height / 3;
-
-    if (nodeType === "connection-group" && y > third && y < rect.height - third) {
-      state.dropPosition = "inside";
-    } else if (y < rect.height / 2) {
-      state.dropPosition = "before";
-    } else {
-      state.dropPosition = "after";
-    }
+    state.dropPosition = dragSortDropPosition(event.clientY, rect, nodeType === "connection-group");
   }
 
   function clearTarget(nodeId: string) {

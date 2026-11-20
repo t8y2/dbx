@@ -82,6 +82,19 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor document and viewport ownership", () => {
+  it("does not let delayed viewport restoration override a bookmark reveal", async () => {
+    const { state, props, currentView, emit } = createHarness({ modelValue: "one\ntwo\nthree" });
+    state.restoreEditorViewport({ scrollTop: 500, scrollLeft: 10 });
+    props.revealRequest = { id: 1, line: 3, column: 1 };
+    state.performEditorReveal();
+    currentView.scrollDOM.scrollTop = 42;
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(currentView.state.selection.main.head).toBe(8);
+    expect(currentView.scrollDOM.scrollTop).toBe(42);
+    expect(emit).toHaveBeenCalledWith("editorRevealConsumed");
+  });
+
   it("isolates undo on new tabs and restores each cached tab's own history", async () => {
     const { currentView, activate, append, callbacks } = createHarness();
     await append(" -- a");

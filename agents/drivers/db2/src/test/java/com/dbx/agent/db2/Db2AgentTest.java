@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.Blob;
 import java.sql.PreparedStatement;
@@ -30,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
@@ -52,6 +54,25 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
         params.setUrl_params("sslConnection=true");
 
         assertEquals("jdbc:db2://db.example.com:50000/SAMPLE:sslConnection=true;", Db2Agent.buildUrl(params));
+    }
+
+    @Test
+    void formatsDecimalResultsWithoutExponentsOrPrecisionLoss() {
+        Db2Agent agent = new Db2Agent();
+        assertEquals("0.0000000000", agent.resultValue(decimalResult("0E-10"), 1, Types.DECIMAL));
+        assertEquals("-0.0000000001", agent.resultValue(decimalResult("-1E-10"), 1, Types.NUMERIC));
+        assertEquals("123456789012345678901.1234567890", agent.resultValue(
+            decimalResult("123456789012345678901.1234567890"), 1, Types.DECIMAL));
+        assertNull(agent.resultValue(decimalResult(null), 1, Types.DECIMAL));
+    }
+
+    private static ResultSet decimalResult(String text) {
+        BigDecimal value = text == null ? null : new BigDecimal(text);
+        return proxy(ResultSet.class, (method, args) -> switch (method.getName()) {
+            case "getObject", "getBigDecimal" -> value;
+            case "wasNull" -> value == null;
+            default -> throw new AssertionError("Unexpected ResultSet method: " + method.getName());
+        });
     }
 
     @Test

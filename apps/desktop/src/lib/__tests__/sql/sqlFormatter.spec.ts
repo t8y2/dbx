@@ -989,9 +989,9 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
         "      PARTITION p202002",
         "    VALUES",
         '      [("2020-02-01"), ("2020-03-01"))',
-        '  ) DISTRIBUTED BY HASH (`user_id`) BUCKETS 10 PROPERTIES (',
+        "  ) DISTRIBUTED BY HASH (`user_id`) BUCKETS 10 PROPERTIES (",
         '    "replication_allocation" = "tag.location.default: 1"',
-        '  );',
+        "  );",
       ),
     );
   });

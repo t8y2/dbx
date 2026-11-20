@@ -6185,7 +6185,14 @@ fn transaction_failure_result(session_id: &str, failure: TransactionFailure) -> 
 }
 
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
+    let launch_restriction = if code == "MCP_READ_ONLY" && crate::backend::legacy_mcp_allow_writes() == Some(false) {
+        "This MCP process is forced read-only by the DBX_MCP_ALLOW_WRITES launch setting. \
+         It takes precedence over permissions saved in DBX Settings → MCP. \
+         Check the MCP client's launch configuration.\n"
+    } else {
+        ""
+    };
+    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {launch_restriction}{}", message.into()))])
 }
 
 fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {

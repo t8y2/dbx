@@ -5989,7 +5989,11 @@ export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersi
   throw new Error("In-app update downloads are only available in the desktop app.");
 }
 
-export async function cancelUpdateDownload(): Promise<void> {}
+export async function cancelUpdateDownload(_attemptId: string): Promise<void> {}
+
+export async function getUpdateDownloadState(): Promise<import("./tauri").UpdateDownloadState> {
+  return { state: "idle" };
+}
 
 export async function getDownloadedUpdate(): Promise<DownloadedUpdate | null> {
   return null;

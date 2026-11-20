@@ -3718,6 +3718,8 @@ export interface UpdateDownloadProgress {
   total: number | null;
 }
 
+export type UpdateDownloadState = { state: "idle" | "installing" } | { state: "downloading"; attempt_id: string; version: string; progress: UpdateDownloadProgress | null } | { state: "ready"; update: DownloadedUpdate };
+
 export interface McpServerStatus {
   installed: boolean;
   installation_source: "native" | "homebrew" | "npm" | null;
@@ -3792,8 +3794,12 @@ export async function downloadUpdate(source: UpdateDownloadSource, latestVersion
   return invoke("download_update", { source, channel, latestVersion, attemptId, releaseNotes, releaseTag });
 }
 
-export async function cancelUpdateDownload(): Promise<void> {
-  return invoke("cancel_update_download");
+export async function cancelUpdateDownload(attemptId: string): Promise<void> {
+  return invoke("cancel_update_download", { attemptId });
+}
+
+export async function getUpdateDownloadState(): Promise<UpdateDownloadState> {
+  return invoke("get_update_download_state");
 }
 
 export async function getDownloadedUpdate(): Promise<DownloadedUpdate | null> {

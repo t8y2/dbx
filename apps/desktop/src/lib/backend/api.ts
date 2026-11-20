@@ -1050,6 +1050,7 @@ export const fetchChangelogRelease = forward("fetchChangelogRelease");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadUpdate = forward("downloadUpdate");
 export const cancelUpdateDownload = forward("cancelUpdateDownload");
+export const getUpdateDownloadState = forward("getUpdateDownloadState");
 export const getDownloadedUpdate = forward("getDownloadedUpdate");
 export const discardDownloadedUpdate = forward("discardDownloadedUpdate");
 export const installDownloadedUpdate = forward("installDownloadedUpdate");

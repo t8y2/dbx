@@ -3652,10 +3652,8 @@ export default withEnglishFallback({
     builtinProviders: "Obsługa wbudowana",
     partnerProviders: "Sponsorzy premium",
     hualongSponsored: "1 $ darmowego kredytu",
-    aicodemirrorSponsored: "8 ¥ darmowego kredytu",
     hualongDescription:
       "    Oficjalny przekaźnik modeli dla zaawansowanych programistów AI! W 100% autentyczne serie Codex i Claude z weryfikowalnym rozliczaniem na poziomie tokenów, umowami korporacyjnymi i fakturami.\n Zarejestruj się z kodem promocyjnym DBX&HUALONG, aby otrzymać 1 $ darmowego kredytu!",
-    aicodemirrorDescription: "    AICodeMirror zapewnia współbieżność klasy enterprise, szybkie fakturowanie i dedykowane wsparcie 7×24; nowi użytkownicy otrzymują 8 ¥ darmowego kredytu oraz 20% zniżki na pierwsze doładowanie.",
     astraflowDescription: "AstraFlow firmy UCloud udostępnia ponad 200 popularnych modeli AI za pomocą jednego klucza API zgodnego z OpenAI API.",
     astraflowSponsored: "¥50 bezpłatnych środków",
     hiapiSponsored: "200 darmowych kredytów",

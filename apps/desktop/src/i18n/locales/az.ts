@@ -3280,10 +3280,8 @@ export default withEnglishFallback({
     builtinProviders: "Daxili dəstək",
     partnerProviders: "Premium sponsorlar",
     hualongSponsored: "$1 pulsuz kredit",
-    aicodemirrorSponsored: "¥8 pulsuz kredit",
     hualongDescription:
       "🐉 AI ilə intensiv işləyən tərtibatçılar üçün rəsmi mənbəli model vasitəçisi! Yoxlanıla bilən token səviyyəli hesablaşma, müəssisə müqavilələri və hesab-fakturalarla 100% orijinal Codex və Claude seriyaları.\n🎉$1 pulsuz kredit üçün DBX&HUALONG promo kodu ilə qeydiyyatdan keçin!",
-    aicodemirrorDescription: "⚡ AICodeMirror korporativ səviyyəli yüksək paralellik, sürətli faktura və 7×24 xüsusi dəstək təklif edir; yeni istifadəçilər ¥8 pulsuz kredit və ilk dolduruşda 20% endirim qazanır.",
     astraflowDescription: "UCloud-un AstraFlow platforması bir API açarı ilə 200-dən çox populyar süni intellekt modelinə çıxış verir və OpenAI API ilə uyğundur.\n🎁 ¥50 pulsuz kredit, [indi əldə edin](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
     astraflowSponsored: "¥50 pulsuz kredit",
     packyapiSponsored: "$1 pulsuz kredit",

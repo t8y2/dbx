@@ -4322,10 +4322,8 @@ export default withEnglishFallback({
     builtinProviders: "Встроенная поддержка",
     partnerProviders: "Премиум-спонсоры",
     hualongSponsored: "$1 бесплатного кредита",
-    aicodemirrorSponsored: "8 юаней бесплатного кредита",
     hualongDescription:
       "🐉 Официальный ретранслятор моделей для активных ИИ-разработчиков! 100% подлинные модели серий Codex и Claude с проверяемой токен-биллинговой детализацией, корпоративными контрактами и выставлением счетов.\n🎉Зарегистрируйтесь с промокодом DBX&HUALONG и получите $1 бесплатного кредита!",
-    aicodemirrorDescription: "⚡ AICodeMirror — корпоративная масштабируемость, быстрые счета и поддержка 7×24; новые пользователи получают 8 юаней бесплатного кредита и скидку 20% на первое пополнение.",
     astraflowDescription: "AstraFlow от UCloud предоставляет доступ к более чем 200 популярным моделям ИИ с одним API-ключом и совместим с API OpenAI.\n🎁 50 юаней бесплатного кредита — [получить сейчас](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
     astraflowSponsored: "50 юаней бесплатного кредита",
     packyapiSponsored: "$1 бесплатного кредита",

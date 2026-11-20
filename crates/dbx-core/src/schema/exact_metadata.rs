@@ -317,7 +317,7 @@ pub async fn comment(
         &sql,
         Some(database),
         None,
-        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+        QueryExecutionOptions { skip_server_output: true, max_rows: Some(1), ..Default::default() },
     );
     let result = request(state, connection_id, database, schema, None, AgentMethod::ExecuteQuery, params).await?;
     single_table_comment_from_query_result(result)

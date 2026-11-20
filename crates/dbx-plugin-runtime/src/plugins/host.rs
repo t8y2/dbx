@@ -1229,6 +1229,10 @@ mod tests {
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
+    // The unix-only observation fan-out test below bounds its waits; Windows
+    // builds skip that test, so the import is unused there.
+    #[cfg(unix)]
+    use std::time::Duration;
 
     #[tokio::test]
     async fn uninstall_plugin_holds_one_update_lease_across_the_runtime_and_the_store() {

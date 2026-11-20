@@ -111,6 +111,9 @@ import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectName
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import {
   hasTableTreeLoadMore,
+  isDatabaseVGroupMember,
+  resolveDatabaseVGroupScope,
+  vgroupMemberName,
   hasTableVGroupEntries,
   isTableVGroupContainerNode,
   isTableVGroupGroupableRowType,
@@ -3221,6 +3224,7 @@ function dropTableChildObjectSqlOptionsForNode(node: TreeNode): DropTableChildOb
     schema: node.schema,
     tableName: node.tableName,
     name,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   };
 }
 
@@ -4356,6 +4360,7 @@ async function refreshRenameObjectPreviewSql() {
         databaseType: currentDatabaseType(),
         oldName: node.label,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
     } catch {
@@ -4426,6 +4431,7 @@ async function refreshRenameObjectPreviewSql() {
       schema: node.schema,
       oldName: node.label,
       newName,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
   } catch (error) {
@@ -4697,6 +4703,7 @@ async function confirmRenameObject() {
         oldName: node.label,
         newName,
         terminateConnections: activeConnections > 0,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
         database: maintenanceDatabase,
@@ -4707,9 +4714,11 @@ async function confirmRenameObject() {
       renameApplied = true;
       toast(t("contextMenu.renameObjectSuccess", { oldName: node.label, newName }), 3000);
       showRenameObjectDialog.value = false;
+      const previousDatabaseNode = { ...node };
       const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
       liveNode.label = newName;
       liveNode.database = newName;
+      connectionStore.updateDatabaseVGroupMember(previousDatabaseNode, newName);
       const renamedNode: TreeNode = { ...liveNode, label: newName, database: newName };
       connectionStore.replacePinnedTreeNode(liveNode, renamedNode);
       void connectionStore.refreshTreeNode(liveNode);
@@ -4798,6 +4807,7 @@ async function confirmRenameObject() {
         name: node.objectName || node.label,
         newName,
         source: source.source,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       const executed = await executeTreeNodeSqlWithProductionGuard(node, statements.join(";\n"), {
         database: node.database,
@@ -4815,6 +4825,7 @@ async function confirmRenameObject() {
         schema: node.schema,
         oldName: node.label,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
         database: node.database,
@@ -5449,6 +5460,7 @@ async function refreshDropDatabasePreviewSql() {
   dropDatabasePreviewSql.value = await buildDropDatabaseSql({
     databaseType: currentDatabaseType(),
     name: node.label,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   }).catch(() => "");
 }
 
@@ -5458,6 +5470,7 @@ async function refreshDropSchemaPreviewSql() {
   dropSchemaPreviewSql.value = await buildDropSchemaSql({
     databaseType: currentDatabaseType(),
     name: node.label,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   }).catch(() => "");
 }
 
@@ -5488,6 +5501,7 @@ function databasePropertyEditOptions() {
     driverProfile: activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId)?.driver_profile : undefined,
     target: "database" as const,
     name: databasePropertyName(),
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(activeNode.value.connectionId),
   };
   if (canEditDatabaseCharsetCollation.value) {
     return {
@@ -5572,6 +5586,7 @@ async function confirmEditDatabaseProperties() {
       driverProfile: config?.driver_profile,
       target: "database" as const,
       name: node.database || node.label,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
     const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
     if (!options) return;
@@ -5602,6 +5617,7 @@ async function refreshSchemaCommentPreviewSql() {
     target: "schema",
     name: node.schema || node.label,
     comment: schemaCommentText.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   }).catch(() => "");
 }
 
@@ -5647,6 +5663,7 @@ async function confirmEditSchemaComment() {
       target: "schema",
       name: node.schema || node.label,
       comment: schemaCommentText.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
@@ -5997,6 +6014,7 @@ async function confirmCreateDatabase() {
       name,
       charset: createDatabaseCharset.value,
       collation: createDatabaseCollation.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     const provider = resolveDatabaseUserAdminProviderForConnection(config);
     const plan: AuthorizationPlan = provider
@@ -6124,9 +6142,11 @@ async function confirmDropDatabase() {
       (await buildDropDatabaseSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       }));
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     if (!executed) return;
+    connectionStore.updateDatabaseVGroupMember(node);
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
     try {
       await connectionStore.loadDatabases(connectionId, { force: true });
@@ -6167,6 +6187,7 @@ async function confirmCreateSchema() {
     const sql = await buildCreateSchemaSql({
       databaseType: effectiveDatabaseTypeForConnection(config),
       name,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: targetDatabase || "" });
     toast(t("contextMenu.createSchemaSuccess", { name }), 3000);
@@ -6208,6 +6229,7 @@ async function confirmDropSchema() {
       (await buildDropSchemaSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       }));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: dropExecutionSchema });
     toast(t("contextMenu.dropSchemaSuccess", { name: node.label }), 3000);
@@ -9020,9 +9042,12 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
 }
 
 function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
-  const layout = connectionStore.tableVGroupLayoutFor(node);
-  const targets = selectedTableVGroupMoveTargets(node, selectedTreeNodesInVisibleOrder());
-  const targetNames = targets.map((target) => target.label);
+  const databaseScope = resolveDatabaseVGroupScope(connectionStore.treeNodes, node);
+  const scopeNode = databaseScope ? { ...node, ...databaseScope } : node;
+  const layout = connectionStore.tableVGroupLayoutFor(scopeNode);
+  // Database selection remains single-row; don't reinterpret table selection as a database batch.
+  const targets = databaseScope ? [node] : selectedTableVGroupMoveTargets(node, selectedTreeNodesInVisibleOrder());
+  const targetNames = targets.map((target) => vgroupMemberName(target, databaseScope?.objectType));
   const targetRowType = targets[0]?.type;
   const targetsInGroup = (groupId: string) => targetNames.every((name) => tableVGroupPathForTable(layout, name, targetRowType).includes(groupId));
   const items: ContextMenuItem[] = tableVGroupDestinationRows(layout).map((row) => ({
@@ -9030,14 +9055,14 @@ function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
     title: row.path.join(" / "),
     disabled: targetNames.length > 0 && targetsInGroup(row.id),
     action: () => {
-      for (const name of targetNames) connectionStore.moveTableToVGroup(node, name, row.id, targetRowType);
+      for (const name of targetNames) connectionStore.moveTableToVGroup(scopeNode, name, row.id, targetRowType);
     },
   }));
   if (targetNames.some((name) => tableVGroupPathForTable(layout, name, targetRowType).length > 0)) {
     items.push({
       label: t("tableVGroup.removeFromGroup"),
       action: () => {
-        for (const name of targetNames) connectionStore.moveTableToVGroup(node, name, null, targetRowType);
+        for (const name of targetNames) connectionStore.moveTableToVGroup(scopeNode, name, null, targetRowType);
       },
     });
   }
@@ -9045,7 +9070,7 @@ function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
   items.push({
     label: t("tableVGroup.moveToNewGroup"),
     action: () => {
-      tableVGroupDialogScope.value = node;
+      tableVGroupDialogScope.value = scopeNode;
       tableVGroupDialogParentGroupId.value = null;
       tableVGroupDialogTableNames.value = targetNames;
       tableVGroupName.value = "";
@@ -9121,6 +9146,36 @@ function treeItemMenuItems(): ContextMenuItem[] {
   const autoIncrementMenuLabel = (singleLabel: string) => (batchAutoIncrementCount > 1 ? batchMysqlAutoIncrementMenuLabel() : singleLabel);
   const autoIncrementMenuAction = (singleAction: () => void) => (batchAutoIncrementCount > 1 ? requestBatchMysqlAutoIncrement : singleAction);
 
+  const databaseGroupItems: ContextMenuItem[] = [];
+  const databaseGroupScope = resolveDatabaseVGroupScope(connectionStore.treeNodes, node, connectionStore.tableVGroupLayouts);
+  if (databaseGroupScope && node.type !== "table-vgroup") {
+    if (isDatabaseVGroupMember(node)) {
+      databaseGroupItems.push({ sidebarActionId: "databaseVGroup.moveToGroup", label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: buildTableVGroupMoveMenuItems(node) });
+    } else {
+      const scopeNode = { ...node, ...databaseGroupScope };
+      databaseGroupItems.push({ sidebarActionId: "databaseVGroup.createGroup", label: t("connectionGroup.createGroup"), icon: FolderPlus, action: () => openCreateTableVGroupDialog(scopeNode) });
+      const layout = connectionStore.tableVGroupLayoutFor(databaseGroupScope);
+      if (hasTableVGroupEntries(layout)) {
+        const enabled = tableVGroupsEnabled(layout);
+        databaseGroupItems.push({ sidebarActionId: "databaseVGroup.toggleGroups", label: t(enabled ? "tableVGroup.disableGroups" : "tableVGroup.enableGroups"), icon: FolderInput, action: () => connectionStore.setTableVGroupsEnabled(databaseGroupScope, !enabled) });
+      }
+    }
+  }
+
+  // Keep navigation/query actions first in full menus. Grouped menus still
+  // classify these entries by their stable action IDs under Organize.
+  const withDatabaseGroupItems = () => {
+    if (!databaseGroupItems.length) return items;
+    const refreshIndex = items.findIndex((item) => item.action === refresh);
+    const dangerIndex = items.findIndex((item) => item.variant === "destructive");
+    const index = refreshIndex >= 0 ? refreshIndex : dangerIndex >= 0 ? dangerIndex : items.length;
+    const entries: ContextMenuItem[] = [...databaseGroupItems];
+    if (index > 0 && !items[index - 1].separator) entries.unshift({ label: "", separator: true });
+    if (index < items.length && !items[index].separator) entries.push({ label: "", separator: true });
+    items.splice(index, 0, ...entries);
+    return items;
+  };
+
   // 1. Pin toggle
   if (canPin.value) {
     items.push({
@@ -9145,7 +9200,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     autoIncrementMenuAction,
   };
   for (const factory of sidebarMenuFactories) {
-    if (factory(factoryContext)) return items;
+    if (factory(factoryContext)) return withDatabaseGroupItems();
   }
 
   // 10. Universal Copy Name (for all types except connection)
@@ -9154,7 +9209,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
   }
 
-  return items;
+  return withDatabaseGroupItems();
 }
 
 function activateSidebarPluginContextMenuItem(pluginId: string, contribution: PluginContextMenuContribution, invocation: PluginContextMenuInvocation) {

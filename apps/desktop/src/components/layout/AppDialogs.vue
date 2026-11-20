@@ -35,7 +35,8 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useReadOnlyUnlockStore, WRITE_UNLOCK_FIVE_MINUTES_SECS, WRITE_UNLOCK_ONE_MINUTE_SECS, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import { useMountedOnce } from "@/composables/useMountedOnce";
-import type { ConnectionDeepLinkDraft, ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import type { ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
@@ -45,7 +46,7 @@ import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 const props = defineProps<{
   showConnectionDialog: boolean;
   connectionPrefill?: ConnectionDeepLinkDraft | null;
-  connectionUpdate?: ConnectionDeepLinkUpdate | null;
+  connectionUpdate?: ConnectionEditPrefill | null;
   connectionPluginProvider?: PluginCenterFocus | null;
   connectionInitialTab?: ConfigTab;
   showDangerDialog: boolean;

@@ -100,7 +100,8 @@ import {
   supportsIdleTimeout,
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionEditPrefill, resolveConnectionEditPrefill, type ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
 import {
   connectionDeepLinkServiceHydrationValue,
   parseConnectionDeepLink,
@@ -351,7 +352,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
-  updatePrefill?: ConnectionDeepLinkUpdate | null;
+  updatePrefill?: ConnectionEditPrefill | null;
   pluginProvider?: PluginCenterFocus | null;
   initialTab?: ConfigTab;
 }>();
@@ -3291,7 +3292,7 @@ function switchGbaseProfile(profile: GbaseProfile) {
 }
 
 let applyingConnectionUpdate = false;
-let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
+let appliedConnectionUpdate: ConnectionEditPrefill | null = null;
 
 /**
  * 免确认保存的去重键。必须早于下面这个 `immediate` watcher 声明——更新链接的
@@ -3325,7 +3326,7 @@ watch(
     // flag the update as applied when the prefill really targeted this
     // connection, so an ID mismatch cannot freeze port-flag recomputation.
     const connectionUpdate = savedConfig && props.updatePrefill?.connectionId === savedConfig.id ? props.updatePrefill : null;
-    const config = connectionUpdate && savedConfig ? applyConnectionDeepLinkUpdate(savedConfig, connectionUpdate) : savedConfig;
+    const config = connectionUpdate && savedConfig ? applyConnectionEditPrefill(savedConfig, connectionUpdate) : savedConfig;
     resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
@@ -3494,9 +3495,9 @@ watch(
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
-      if (props.updatePrefill) {
+      if (connectionUpdate) {
         finishApplyingConnectionUpdate();
-        submitUpdateIfAutoConfirmed(props.updatePrefill);
+        if (connectionUpdate.source !== "plugin") submitUpdateIfAutoConfirmed(connectionUpdate);
       }
       // Form/profile watchers normalize derived fields in this flush. Capture
       // the saved baseline afterwards so those initial changes are not treated
@@ -7120,8 +7121,8 @@ function validateConnectionUpdateTarget() {
   const update = props.updatePrefill ?? appliedConnectionUpdate;
   if (!update) return;
   const target = store.getConfig(update.connectionId);
-  resolveConnectionDeepLinkUpdate(update, target ? [target] : [], false);
-  if (editingId.value !== update.connectionId) throw new Error("The connection specified by the update link is no longer being edited.");
+  resolveConnectionEditPrefill(update, target ? [target] : [], false);
+  if (editingId.value !== update.connectionId) throw new Error("The target connection is no longer being edited.");
 }
 
 async function save(options: SaveConnectionOptions = {}): Promise<boolean> {

@@ -2,7 +2,7 @@ import { sqlBlockCommentEnd } from "./sqlBlockComments";
 import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 import type { SqlParameterOptions, SqlStatementSyntaxDialect } from "@/lib/sql/sqlParameters";
-import { executableStatementRanges, startsLineComment, statementParsingDatabaseType, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, mysqlDelimiterAt, mysqlDelimiterPrefixAt, startsLineComment, statementParsingDatabaseType, type MysqlDelimiterCommand, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
@@ -13,6 +13,7 @@ export interface ExecutableStatementRangeCache {
   byStart: Map<number, SqlTextRange>;
   byExecutableLineStart: Map<number, SqlTextRange>;
   ranges: SqlTextRange[];
+  mysqlDelimiterCommands: MysqlDelimiterCommand[];
 }
 
 /**
@@ -78,7 +79,8 @@ export function executableStatementRangeCacheForDoc(
   const byStart = new Map<number, SqlTextRange>();
   const byExecutableLineStart = new Map<number, SqlTextRange>();
   const sql = doc.toString();
-  const ranges = parse(sql, databaseType, parameterOptions);
+  const mysqlDelimiterCommands: MysqlDelimiterCommand[] = [];
+  const ranges = parse === executableStatementRanges ? executableStatementRanges(sql, databaseType, parameterOptions, mysqlDelimiterCommands) : parse(sql, databaseType, parameterOptions);
   let currentLine = doc.lines > 0 ? doc.line(1) : null;
   for (const range of ranges) {
     byStart.set(range.from, range);
@@ -93,7 +95,25 @@ export function executableStatementRangeCacheForDoc(
       byExecutableLineStart.set(doc.lineAt(executableStart).from, range);
     }
   }
-  return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges };
+  return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges, mysqlDelimiterCommands };
+}
+
+export function executableScriptFromStatement(cache: ExecutableStatementRangeCache, startIndex: number, position: number): SqlTextRange | null {
+  const remaining = cache.ranges.slice(startIndex);
+  const first = remaining[0];
+  if (!first) return null;
+
+  const line = cache.doc.lineAt(position);
+  const clickedDirective = cache.mysqlDelimiterCommands.some((command) => command.from >= line.from && command.to <= line.to && command.to <= first.from);
+  let from = clickedDirective ? line.from : first.from;
+  const prefix = clickedDirective ? "" : mysqlDelimiterPrefixAt(cache.mysqlDelimiterCommands, first.from);
+  const sql = prefix + cache.doc.sliceString(from);
+  // Place the synthetic directive before the suffix so each executable
+  // statement still maps to its original editor offset.
+  from -= prefix.length;
+  const ranges = executableStatementRanges(sql, cache.databaseType, cache.parameterOptions);
+  if (ranges.length !== remaining.length || ranges.some((range, index) => from + range.from !== remaining[index].from || from + range.to !== remaining[index].to)) return null;
+  return { sql, from, to: cache.doc.length };
 }
 
 function executableStartAfterLeadingComments(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
@@ -154,7 +174,8 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
 
     const next = cache.ranges[index + 1];
     if (pos > range.to && (!next || pos < next.from)) {
-      if (cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos)) return range;
+      const delimiter = mysqlDelimiterAt(cache.mysqlDelimiterCommands, range.from);
+      if (cursorBelongsToTrailingStatementDelimiter(cache.doc, range.to, pos, delimiter)) return range;
       if (isCursorOnRangeEndLine(cache.doc, pos, range.to)) return range;
     }
   }

@@ -417,7 +417,7 @@ import { useDataGridCellDetailEdit } from "@/composables/useDataGridCellDetailEd
 import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_DEFAULT, useSettingsStore } from "@/stores/settingsStore";
 import { databaseSortSupportedForDatabase, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn, type DataGridSortDirection, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { resolveGridFocusRestoreTarget, shouldRestoreDataGridFocusAfterEditCommit } from "@/lib/dataGrid/dataGridFocusRestore";
 import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
@@ -537,6 +537,8 @@ const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.data
 const cellDetailDialogDefault = computed(() => settingsStore.editorSettings.dataGridCellDetailDialogDefault);
 const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.dataGridCrosshairHighlight);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+// The DOM rows use a 1.2 line height, eight pixels of padding and a border.
+const gridRowHeight = computed(() => Math.max(CANVAS_DATA_GRID_ROW_HEIGHT, Math.ceil(tableFontSize.value * 1.2) + 9));
 const rowNumberWidth = ref(DATA_GRID_ROW_NUM_WIDTH);
 const largeValueResolutionVersion = ref(0);
 // Direct table browsing uses a byte-budgeted preview. Keep that fast path, but
@@ -3025,6 +3027,7 @@ const { initColumnWidths, growColumnWidthsToFitSamples, onResizeStart, autoFitCo
   columnStructureSignature,
   measureHeaderText: measureColumnHeaderText,
   headerMeasurementKey: columnHeaderMeasurementKey,
+  valueWidthScale: computed(() => tableFontSize.value / TABLE_FONT_SIZE_DEFAULT),
   rowNumberWidth,
   viewportWidth: gridViewportWidth,
   displayValue: columnWidthDisplayValue,
@@ -3037,6 +3040,7 @@ const gridStyle = computed(() => ({
   [EDITOR_FONT_FAMILY_CSS_VAR]: settingsStore.editorSettings.fontFamily,
   "--dbx-data-grid-font-family": tableFontFamily.value,
   "--dbx-table-font-size": `${tableFontSize.value}px`,
+  "--dbx-table-row-height": `${gridRowHeight.value}px`,
   ...(settingsStore.editorSettings.dataGridCrosshairRowBg?.trim() ? { "--data-grid-cell-crosshair-row-bg": settingsStore.editorSettings.dataGridCrosshairRowBg.trim() } : {}),
   ...(settingsStore.editorSettings.dataGridCrosshairColBg?.trim() ? { "--data-grid-cell-crosshair-col-bg": settingsStore.editorSettings.dataGridCrosshairColBg.trim() } : {}),
 }));
@@ -4339,7 +4343,7 @@ function selectAndRevealLastLoadedRow() {
       return;
     }
 
-    const rowHeight = useCanvasGridRows.value ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+    const rowHeight = gridRowHeight.value;
     const expectedRowBottom = (rowIndex + 1) * rowHeight;
     let remainingFrames = 12;
     const revealWhenReady = () => {
@@ -5867,6 +5871,7 @@ async function requestDropColumns() {
           schema: target.schema || undefined,
           tableName: target.tableName,
           name,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
         }),
       ),
     );
@@ -6500,7 +6505,7 @@ function scrollToCurrentMatch() {
   if (useCanvasGridRows.value) {
     const scroller = canvasScrollerElement();
     if (!scroller) return;
-    const targetTop = Math.max(0, match.displayRow * CANVAS_DATA_GRID_ROW_HEIGHT - (scroller.clientHeight - CANVAS_DATA_GRID_ROW_HEIGHT) / 2);
+    const targetTop = Math.max(0, match.displayRow * gridRowHeight.value - (scroller.clientHeight - gridRowHeight.value) / 2);
     scroller.scrollTop = canvasDomScrollTop(targetTop, scroller.clientHeight);
     syncCanvasViewport();
     return;
@@ -6579,8 +6584,13 @@ const largeValueRuntimeInstance = useDataGridLargeValues({
   renderedGridColumns,
   showTranspose,
   displayRowCount,
+  rowHeight: gridRowHeight,
   gridScrollerElement,
-  getScrollTop: () => (useCanvasGridRows.value ? canvasScrollTop.value : (gridScrollerElement()?.scrollTop ?? 0)),
+  getScrollTop: () => {
+    if (!useCanvasGridRows.value) return gridScrollerElement()?.scrollTop ?? 0;
+    const scroller = canvasScrollerElement();
+    return scroller ? canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight) : canvasScrollTop.value;
+  },
   displayItemAt,
   getRowItem,
   tableColumnForGridColumn,
@@ -6886,7 +6896,7 @@ function captureViewportAnchorForRefresh(): { row?: PersistedDataGridSelection; 
   // under a DESC sort), pushing the new rows above the visible area (#8339).
   const currentScrollTop = useCanvasGridRows.value ? canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight) : scroller.scrollTop;
   if (currentScrollTop <= 0) return null;
-  const rowHeight = useCanvasGridRows.value ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+  const rowHeight = gridRowHeight.value;
   const fallbackDisplayIndex = Math.max(0, Math.min(displayItems.value.length - 1, Math.floor(currentScrollTop / rowHeight)));
   const item = displayItems.value[fallbackDisplayIndex];
   return {
@@ -6916,7 +6926,7 @@ function restoreViewportAnchorAfterRefresh(anchor: { row?: PersistedDataGridSele
       const canvasMode = useCanvasGridRows.value;
       const scroller = canvasMode ? canvasScrollerElement() : gridScrollerElement();
       if (!scroller) return;
-      const rowHeight = canvasMode ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+      const rowHeight = gridRowHeight.value;
       const virtualTargetTop = displayRowIndex * rowHeight + anchor.offsetWithinRow;
       const nextScrollTop = canvasMode ? canvasDomScrollTop(virtualTargetTop, scroller.clientHeight) : Math.max(0, Math.min(virtualTargetTop, scroller.scrollHeight - scroller.clientHeight));
       const virtualScroller = scrollerRef.value;
@@ -7414,8 +7424,8 @@ const domSelectionDragOverlayStyle = computed((): CSSProperties | undefined => {
   const endFrozen = endCol < frozenColumnCount.value;
   const left = rowNumberWidth.value + (renderedColumnOffsets.value[startCol] ?? 0) - (startFrozen ? 0 : gridHorizontalScrollLeft.value);
   const right = rowNumberWidth.value + (renderedColumnOffsets.value[endCol] ?? 0) + (renderedColumnWidths.value[endCol] ?? 0) - (endFrozen ? 0 : gridHorizontalScrollLeft.value);
-  const top = range.startRow * CANVAS_DATA_GRID_ROW_HEIGHT - domGridScrollTop.value;
-  const bottom = (range.endRow + 1) * CANVAS_DATA_GRID_ROW_HEIGHT - domGridScrollTop.value;
+  const top = range.startRow * gridRowHeight.value - domGridScrollTop.value;
+  const bottom = (range.endRow + 1) * gridRowHeight.value - domGridScrollTop.value;
   const viewportWidth = gridViewportWidth.value;
   const scroller = gridScrollerElement();
   const viewportHeight = scroller?.clientHeight ?? 0;
@@ -8853,13 +8863,13 @@ const canvasMeasuredDevicePixelSize = ref<CanvasDevicePixelSize | null>(null);
 // devicePixelRatio already includes WebView zoom on all supported platforms.
 const canvasBackingPixelRatio = computed(() => resolveCanvasDataGridPixelRatio({ devicePixelRatio: canvasDevicePixelRatio.value, uiScale: settingsStore.editorSettings.uiScale, platform: getPlatform() }));
 const useCanvasGridRows = computed(() => dataGridRenderMode.value === "canvas");
-const canvasContentHeight = computed(() => canvasDataGridContentHeight(displayRowCount.value));
+const canvasContentHeight = computed(() => canvasDataGridContentHeight(displayRowCount.value, gridRowHeight.value));
 
 function canvasVirtualScrollTop(domScrollTop: number, viewportHeight = canvasViewportHeight.value): number {
   return canvasDataGridVirtualScrollTop({
     scrollTop: domScrollTop,
     rowCount: displayRowCount.value,
-    rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+    rowHeight: gridRowHeight.value,
     viewportHeight,
   });
 }
@@ -8868,7 +8878,7 @@ function canvasDomScrollTop(virtualScrollTop: number, viewportHeight = canvasVie
   return canvasDataGridDomScrollTop({
     virtualScrollTop,
     rowCount: displayRowCount.value,
-    rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+    rowHeight: gridRowHeight.value,
     viewportHeight,
   });
 }
@@ -8944,7 +8954,7 @@ function dataGridCellFromClientPoint(clientX: number, clientY: number): { rowInd
 
   if (useCanvasGridRows.value) {
     const virtualScrollTop = canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight);
-    const rowIndex = Math.floor((virtualScrollTop + clampedY - rect.top) / CANVAS_DATA_GRID_ROW_HEIGHT);
+    const rowIndex = Math.floor((virtualScrollTop + clampedY - rect.top) / gridRowHeight.value);
     const visibleColIdx = canvasColumnAt(scroller.scrollLeft + clampedX - rect.left - rowNumberWidth.value);
     if (rowIndex < 0 || rowIndex >= displayRowCount.value || visibleColIdx < 0) return null;
     const item = displayItemAt(rowIndex);
@@ -8968,7 +8978,7 @@ function dataGridRowFromClientPoint(_clientX: number, clientY: number): number |
 
   if (useCanvasGridRows.value) {
     const virtualScrollTop = canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight);
-    const rowIndex = Math.floor((virtualScrollTop + clampedY - rect.top) / CANVAS_DATA_GRID_ROW_HEIGHT);
+    const rowIndex = Math.floor((virtualScrollTop + clampedY - rect.top) / gridRowHeight.value);
     const item = displayItemAt(rowIndex);
     return item?.displayIndex ?? null;
   }
@@ -9001,6 +9011,10 @@ function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
   if (isPanelResizing.value) return;
   syncCanvasViewportRaw(entries);
 }
+
+watch(gridRowHeight, () => {
+  if (useCanvasGridRows.value) syncCanvasViewport();
+});
 
 // During divider drags the ResizeObserver would fire every frame; re-measure
 // and redraw the canvas on a fixed step instead (same cadence as the SQL
@@ -9128,7 +9142,7 @@ function canvasHitTest(event: MouseEvent): { rowIndex: number; visibleColIdx: nu
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
   const virtualScrollTop = canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight);
-  const rowIndex = Math.floor((virtualScrollTop + y) / CANVAS_DATA_GRID_ROW_HEIGHT);
+  const rowIndex = Math.floor((virtualScrollTop + y) / gridRowHeight.value);
   if (rowIndex < 0 || rowIndex >= displayRowCount.value) return null;
   if (x < rowNumberWidth.value) return { rowIndex, visibleColIdx: -1, rowNumber: true };
   // 冻结列区域不受 scrollLeft 影响，需要特殊处理
@@ -9202,7 +9216,7 @@ function onCanvasWheel(event: WheelEvent) {
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
-    lineSize: CANVAS_DATA_GRID_ROW_HEIGHT,
+    lineSize: gridRowHeight.value,
     metrics: scroller,
     accelerationFactor: CANVAS_MOUSE_WHEEL_SCROLL_MULTIPLIER,
   });
@@ -9226,7 +9240,7 @@ function onDomGridWheel(event: WheelEvent) {
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
-    lineSize: CANVAS_DATA_GRID_ROW_HEIGHT,
+    lineSize: gridRowHeight.value,
     metrics: scroller,
   });
   if (!wheelScroll.moved) return;
@@ -9450,9 +9464,9 @@ function canvasCellViewportRect(rowIndex: number, visibleColIdx: number) {
   const left = rowNumberWidth.value + (renderedColumnOffsets.value[visibleColIdx] ?? 0) - (isFrozen ? 0 : gridHorizontalScrollLeft.value);
   return {
     left,
-    top: rowIndex * CANVAS_DATA_GRID_ROW_HEIGHT - canvasScrollTop.value,
+    top: rowIndex * gridRowHeight.value - canvasScrollTop.value,
     width: colWidth,
-    height: CANVAS_DATA_GRID_ROW_HEIGHT,
+    height: gridRowHeight.value,
   };
 }
 
@@ -9644,6 +9658,7 @@ function drawCanvasGrid() {
     isDark: isDark.value,
     styleKey: canvasRenderStyleKey.value,
     rowCount: displayRowCount.value,
+    rowHeight: gridRowHeight.value,
     rowAt: displayItemAt,
     renderedColumnWidths: renderedColumnWidths.value,
     renderedColumnOffsets: renderedColumnOffsets.value,
@@ -11642,8 +11657,6 @@ function currentSelectedCellPosition() {
   return { rowIndex: range.startRow, colIndex: range.startCol };
 }
 
-const DOM_DATA_GRID_ROW_HEIGHT = 26;
-
 function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number) {
   if (isTransposeMode.value) {
     nextTick(() => {
@@ -11712,12 +11725,12 @@ function scrollCanvasRowIntoView(rowIndex: number, block: DataGridScrollAlignmen
   const scroller = canvasScrollerElement();
   if (!scroller) return;
   const currentVirtualScrollTop = canvasVirtualScrollTop(scroller.scrollTop, scroller.clientHeight);
-  const maxVirtualScrollTop = Math.max(0, displayRowCount.value * CANVAS_DATA_GRID_ROW_HEIGHT - scroller.clientHeight);
+  const maxVirtualScrollTop = Math.max(0, displayRowCount.value * gridRowHeight.value - scroller.clientHeight);
   const targetVirtualScrollTop =
     previousPageRowIndex === undefined
       ? dataGridRowScrollTop({
           rowIndex: target,
-          rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+          rowHeight: gridRowHeight.value,
           viewportHeight: scroller.clientHeight,
           currentScrollTop: currentVirtualScrollTop,
           alignment: block,
@@ -11725,7 +11738,7 @@ function scrollCanvasRowIntoView(rowIndex: number, block: DataGridScrollAlignmen
       : dataGridPageScrollTop({
           previousRowIndex: previousPageRowIndex,
           rowIndex: target,
-          rowHeight: CANVAS_DATA_GRID_ROW_HEIGHT,
+          rowHeight: gridRowHeight.value,
           currentScrollTop: currentVirtualScrollTop,
           maximumScrollTop: maxVirtualScrollTop,
         });
@@ -11741,7 +11754,7 @@ function scrollDomRowIntoView(rowIndex: number, block: DataGridScrollAlignment, 
     previousPageRowIndex === undefined
       ? dataGridRowScrollTop({
           rowIndex: target,
-          rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
+          rowHeight: gridRowHeight.value,
           viewportHeight: scroller.clientHeight,
           currentScrollTop: scroller.scrollTop,
           alignment: block,
@@ -11749,7 +11762,7 @@ function scrollDomRowIntoView(rowIndex: number, block: DataGridScrollAlignment, 
       : dataGridPageScrollTop({
           previousRowIndex: previousPageRowIndex,
           rowIndex: target,
-          rowHeight: DOM_DATA_GRID_ROW_HEIGHT,
+          rowHeight: gridRowHeight.value,
           currentScrollTop: scroller.scrollTop,
           maximumScrollTop: scroller.scrollHeight - scroller.clientHeight,
         });
@@ -11882,7 +11895,7 @@ function gridPageRowCount(): number {
   const canvasMode = useCanvasGridRows.value;
   const scroller = canvasMode ? canvasScrollerElement() : gridScrollerElement();
   if (!scroller) return 1;
-  const rowHeight = canvasMode ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
+  const rowHeight = gridRowHeight.value;
   if (rowHeight <= 0) return 1;
   return Math.max(1, Math.floor(scroller.clientHeight / rowHeight));
 }
@@ -12839,7 +12852,7 @@ const transposeRows = computed(() => {
 });
 const transposeReserveTypeLine = computed(() => showTransposeFieldMetadata.value && showColumnTypesInHeader.value && transposeRows.value.some((row) => row.type));
 const transposeReserveCommentLine = computed(() => showTransposeFieldMetadata.value && showTransposeColumnComments.value && transposeRows.value.some((row) => row.comment));
-const transposeRowHeight = computed(() => 30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0));
+const transposeRowHeight = computed(() => gridRowHeight.value + 4 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0));
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeInfoWidthOverride = ref<number | null>(null);
 const transposeInfoWidth = computed(() => (transposeMetadataInInfoColumn.value ? (transposeInfoWidthOverride.value ?? defaultTransposeInfoWidth(columnWidthDensity.value)) : 0));
@@ -13708,7 +13721,7 @@ const CELL_DETAIL_PANEL_MAX_HEIGHT = 520;
 const CELL_DETAIL_TABLE_HEADER_HEIGHT = 28;
 const CELL_DETAIL_TABLE_MIN_VISIBLE_ROWS = 1.5;
 const CELL_DETAIL_TABLE_HORIZONTAL_SCROLLBAR_HEIGHT = 10;
-const CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT = Math.ceil(CELL_DETAIL_TABLE_HEADER_HEIGHT + CANVAS_DATA_GRID_ROW_HEIGHT * CELL_DETAIL_TABLE_MIN_VISIBLE_ROWS + CELL_DETAIL_TABLE_HORIZONTAL_SCROLLBAR_HEIGHT);
+const cellDetailTableMinVisibleHeight = computed(() => Math.ceil(CELL_DETAIL_TABLE_HEADER_HEIGHT + gridRowHeight.value * CELL_DETAIL_TABLE_MIN_VISIBLE_ROWS + CELL_DETAIL_TABLE_HORIZONTAL_SCROLLBAR_HEIGHT));
 const DRAWER_MAX_WIDTH = 900;
 const MONGO_JSON_PREVIEW_DEFAULT_WIDTH = 420;
 function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.value): number {
@@ -13954,7 +13967,7 @@ const contentGridStyle = computed(() => {
   if (cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value) {
     return {
       gridTemplateColumns: `minmax(0, 1fr) ${columnLookupTrack} ${tableInfoTrack}`,
-      gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
+      gridTemplateRows: `minmax(${cellDetailTableMinVisibleHeight.value}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${cellDetailTableMinVisibleHeight.value}px)))`,
     };
   }
 
@@ -14596,7 +14609,9 @@ function copyDdl() {
 
 function openTableStructureEditor(initialTab: TableInfoTab = "columns"): boolean {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return false;
-  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, initialTab === "relations" ? "columns" : initialTab, undefined, props.tableMeta.catalog, (props.tableMeta.tableType || "").toUpperCase() === "VIEW" ? "view" : "table");
+  const metaTableType = (props.tableMeta.tableType || "").toUpperCase();
+  const tableType = metaTableType === "MATERIALIZED_VIEW" ? "materialized_view" : metaTableType === "VIEW" ? "view" : "table";
+  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, initialTab === "relations" ? "columns" : initialTab, undefined, props.tableMeta.catalog, tableType);
   return true;
 }
 
@@ -17233,7 +17248,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                       'has-horizontal-scrollbar': hasGridHorizontalOverflow,
                     }"
                     :items="displayItems"
-                    :item-size="DOM_DATA_GRID_ROW_HEIGHT"
+                    :item-size="gridRowHeight"
                     :buffer="600"
                     :skip-hover="true"
                     key-field="id"
@@ -17242,7 +17257,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   >
                     <template #default="{ item }">
                       <div
-                        class="data-grid-row flex border-b border-border h-6.5 w-(--total-w)"
+                        class="data-grid-row flex border-b border-border h-(--dbx-table-row-height) w-(--total-w)"
                         :class="{
                           'data-grid-row--deleted opacity-70': item.isDeleted,
                           'data-grid-row--new': item.isNew && !isRowActive(item.displayIndex),
@@ -18453,6 +18468,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 }
 
 .data-grid-row {
+  line-height: 1.2;
   background-color: var(--data-grid-cell-bg);
 }
 

@@ -1,9 +1,11 @@
 import type { Extension } from "@codemirror/state";
 import type { EditorTheme, CustomThemeColors } from "@/stores/settingsStore";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/app/appFonts";
-import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, type AppThemePalette } from "@/lib/app/appTheme";
+import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
+
+export { editorThemeAppearanceFor } from "@/lib/editor/editorThemeSettings";
 
 // @codemirror/lang-sql tags dialect builtin-list words (COUNT, DATE_FORMAT, ...) as
 // standard(name) — not standard(variableName), which is a *child* tag of name and so never
@@ -761,18 +763,6 @@ export function resolveEditorTheme(theme: EditorTheme, appAppearance: AppThemeAp
     }
   }
   return theme;
-}
-
-/**
- * Effective appearance for the "Follow app theme" editor: with the custom UI
- * palette the mode's light/dark flag is replaced by the custom background's
- * luminance, keeping tokens, selection, cursor, search matches and diagnostics
- * readable on arbitrarily dark/light custom backgrounds. Other palettes keep
- * the previous appearance unchanged.
- */
-export function editorThemeAppearanceFor(appAppearance: AppThemeAppearance, appPalette: AppThemePalette, customUiColors?: AppCustomUiColors): AppThemeAppearance {
-  if (appPalette === "custom" && customUiColors) return customUiAppearance(customUiColors);
-  return appAppearance;
 }
 
 /**

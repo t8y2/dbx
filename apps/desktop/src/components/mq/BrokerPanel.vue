@@ -6,6 +6,9 @@ import { useI18n } from "vue-i18n";
 import type { ClusterInfo, MqAdminConfig, MqSystemKind } from "@/types/mq";
 import { mqGetClusterInfo } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { Settings2 } from "@lucide/vue";
+import { Button } from "@/components/ui/button";
+import KafkaBrokerConfigDialog from "./KafkaBrokerConfigDialog.vue";
 
 interface Props {
   connectionId: string;
@@ -18,6 +21,16 @@ const { t } = useI18n();
 const connectionStore = useConnectionStore();
 
 const isRocketMqCluster = computed(() => props.mqSystemKind === "rocketmq");
+const isKafkaCluster = computed(() => props.mqSystemKind === "kafka");
+const configBrokerId = ref<number | null>(null);
+watch(
+  () => [props.connectionId, props.mqSystemKind],
+  () => {
+    configBrokerId.value = null;
+    clusterInfo.value = undefined;
+    void loadClusterInfo();
+  },
+);
 const rocketmqNamesrvAddr = computed(() => {
   if (!isRocketMqCluster.value) return undefined;
   const config = connectionStore.getConfig(props.connectionId);
@@ -41,16 +54,20 @@ function isDocumentHidden(): boolean {
 
 async function loadClusterInfo(options: { skipWhenHidden?: boolean } = {}) {
   if (options.skipWhenHidden && isDocumentHidden()) return;
+  const connectionId = props.connectionId;
+  const request = ++clusterRequest;
   loading.value = true;
   error.value = undefined;
   try {
-    clusterInfo.value = await mqGetClusterInfo(props.connectionId);
+    const result = await mqGetClusterInfo(connectionId);
+    if (request === clusterRequest) clusterInfo.value = result;
   } catch (e: unknown) {
-    error.value = formatError(e);
+    if (request === clusterRequest) error.value = formatError(e);
   } finally {
-    loading.value = false;
+    if (request === clusterRequest) loading.value = false;
   }
 }
+let clusterRequest = 0;
 
 function refreshNow() {
   void loadClusterInfo();
@@ -187,6 +204,7 @@ onUnmounted(() => {
                 <th>{{ t("mqBroker.port") }}</th>
                 <th v-if="!isRocketMqCluster">{{ t("mqBroker.rack") }}</th>
                 <th>{{ t("mqBroker.role") }}</th>
+                <th v-if="isKafkaCluster">{{ t("mqBroker.configuration") }}</th>
               </tr>
             </thead>
             <tbody>
@@ -203,6 +221,9 @@ onUnmounted(() => {
                   <span v-else-if="broker.id === clusterInfo.controllerId" class="role-badge controller">{{ t("mqBroker.roleController") }}</span>
                   <span v-else class="role-badge follower">{{ t("mqBroker.roleFollower") }}</span>
                 </td>
+                <td v-if="isKafkaCluster">
+                  <Button variant="ghost" size="icon" :aria-label="t('mqBroker.configuration') + ' ' + broker.id" :title="t('mqBroker.configuration')" @click="configBrokerId = broker.id"><Settings2 class="h-4 w-4" /></Button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -210,6 +231,7 @@ onUnmounted(() => {
         <div v-else class="empty-state">{{ t("mqBroker.noBrokerNodes") }}</div>
       </div>
     </div>
+    <KafkaBrokerConfigDialog v-if="isKafkaCluster" :connection-id="connectionId" :broker-id="configBrokerId" @close="configBrokerId = null" />
   </div>
 </template>
 

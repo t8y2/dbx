@@ -37,6 +37,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { createPluginAiCompletion, type PluginAiConfirmDecision, type PluginAiPromptPreview } from "@/lib/plugins/pluginAiCompletion";
 import { useQueryStore } from "@/stores/queryStore";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
+import { PLUGIN_CONNECTION_EDITOR } from "@/lib/connection/pluginConnectionEdit";
 
 const props = withDefaults(
   defineProps<{
@@ -63,6 +64,7 @@ const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const urlDialog = ref<InstanceType<typeof PluginOpenUrlDialog>>();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+const connectionEditor = inject(PLUGIN_CONNECTION_EDITOR, undefined);
 // Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
 // sandbox document (and must not reuse a doc cached under the other setting).
 const graphicsEngineEnabled = computed(() => isPluginGraphicsEngineEnabled(settingsStore.editorSettings.pluginGraphicsEngineIds, props.plugin.manifest.id));
@@ -551,6 +553,7 @@ function createBridge() {
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
       openAiConversation,
+      connectionEditor,
       ...(isTauriRuntime() ? aiCompletion : {}),
       setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),

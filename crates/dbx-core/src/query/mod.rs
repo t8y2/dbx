@@ -1366,11 +1366,16 @@ pub struct QueryExecutionOptions {
     /// INVALID. Imports and transfers leave this off, because forward references
     /// legitimately stay invalid until their dependencies exist.
     pub report_compilation_errors: bool,
-    /// Marks one of DBX's own dictionary reads (never SQL a user typed). The Oracle
-    /// agent then skips DBMS_OUTPUT capture and may reuse the session's schema, which
-    /// removes three of four round trips per metadata query on a high-latency link. The
-    /// agent honours it only for plain SELECT/WITH statements, so DDL, DML and PL/SQL
-    /// always keep the full path even if this is set by mistake.
+    /// Marks a statement DBX issues on its own (never SQL a user typed) whose DBMS_OUTPUT
+    /// nobody reads. The Oracle agent honours it for two shapes only:
+    /// - plain SELECT/WITH dictionary reads: no DBMS_OUTPUT capture, and the session's
+    ///   schema may be reused, which removes three of four round trips per metadata query
+    ///   on a high-latency link;
+    /// - routine definitions (CREATE [OR REPLACE] PROCEDURE/FUNCTION/PACKAGE [BODY]/
+    ///   TRIGGER/TYPE [BODY]): no DBMS_OUTPUT capture only; the schema is still switched
+    ///   and compilation errors are still read back on the same session.
+    ///
+    /// DML, other DDL and PL/SQL blocks always keep the full path even if this is set.
     pub skip_server_output: bool,
 }
 

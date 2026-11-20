@@ -1366,6 +1366,12 @@ pub struct QueryExecutionOptions {
     /// INVALID. Imports and transfers leave this off, because forward references
     /// legitimately stay invalid until their dependencies exist.
     pub report_compilation_errors: bool,
+    /// Marks one of DBX's own dictionary reads (never SQL a user typed). The Oracle
+    /// agent then skips DBMS_OUTPUT capture and may reuse the session's schema, which
+    /// removes three of four round trips per metadata query on a high-latency link. The
+    /// agent honours it only for plain SELECT/WITH statements, so DDL, DML and PL/SQL
+    /// always keep the full path even if this is set by mistake.
+    pub skip_server_output: bool,
 }
 
 /// How one statement's runtime is bounded.
@@ -1689,6 +1695,9 @@ pub fn agent_execute_query_params(
     }
     if options.report_compilation_errors {
         params["reportCompilationErrors"] = serde_json::json!(true);
+    }
+    if options.skip_server_output {
+        params["skipServerOutput"] = serde_json::json!(true);
     }
     params
 }
@@ -13392,6 +13401,22 @@ done
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+    }
+
+    #[test]
+    fn agent_execute_query_params_mark_only_flagged_metadata_reads() {
+        // The Oracle agent skips DBMS_OUTPUT capture and may reuse the session schema only
+        // for flagged reads, so ordinary queries must never carry the flag.
+        let plain =
+            agent_execute_query_params("SELECT 1 FROM DUAL", None, Some("APP"), QueryExecutionOptions::default());
+        assert!(plain.get("skipServerOutput").is_none());
+        let metadata = agent_execute_query_params(
+            "SELECT OWNER FROM ALL_OBJECTS",
+            None,
+            Some("APP"),
+            QueryExecutionOptions { skip_server_output: true, ..Default::default() },
+        );
+        assert_eq!(metadata["skipServerOutput"], serde_json::json!(true));
     }
 
     #[test]

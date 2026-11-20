@@ -1926,7 +1926,11 @@ impl OracleMetadataQuery<'_> {
                             sql,
                             if database.is_empty() { None } else { Some(*database) },
                             schema,
-                            QueryExecutionOptions { max_rows: Some(max_rows), ..Default::default() },
+                            QueryExecutionOptions {
+                                skip_server_output: true,
+                                max_rows: Some(max_rows),
+                                ..Default::default()
+                            },
                         ),
                         *timeout_duration,
                     )
@@ -2416,7 +2420,11 @@ async fn oracle_table_comments_for_names(
                     &sql,
                     if database.is_empty() { None } else { Some(database) },
                     if schema.is_empty() { None } else { Some(schema) },
-                    QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+                    QueryExecutionOptions {
+                        skip_server_output: true,
+                        max_rows: Some(chunk.len()),
+                        ..Default::default()
+                    },
                 ),
                 timeout_duration,
             )
@@ -2514,7 +2522,7 @@ async fn load_oracle_exact_table_comments_for_objects(
             &sql,
             (!database.is_empty()).then_some(database),
             None,
-            QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+            QueryExecutionOptions { skip_server_output: true, max_rows: Some(chunk.len()), ..Default::default() },
         );
         match client.execute_query_with_timeout::<db::QueryResult>(params, timeout_duration).await {
             Ok(result) => comments.extend(table_comments_from_query_result(result)),
@@ -2726,7 +2734,7 @@ async fn agent_object_statistics_query(
                 sql,
                 if database.is_empty() { None } else { Some(database) },
                 if schema.is_empty() { None } else { Some(schema) },
-                QueryExecutionOptions { max_rows: Some(10_000), ..Default::default() },
+                QueryExecutionOptions { skip_server_output: true, max_rows: Some(10_000), ..Default::default() },
             ),
             timeout_duration,
         )
@@ -14224,7 +14232,7 @@ async fn oracle_agent_list_objects(
             &page_sql,
             (!database.is_empty()).then_some(database),
             None,
-            QueryExecutionOptions { max_rows: Some(page_size), ..Default::default() },
+            QueryExecutionOptions { skip_server_output: true, max_rows: Some(page_size), ..Default::default() },
         );
         let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;
         if (result.truncated || result.has_more) && result.rows.is_empty() {
@@ -14274,7 +14282,7 @@ async fn oracle_agent_object_source(
         &sql,
         if database.is_empty() { None } else { Some(database) },
         if schema.is_empty() { None } else { Some(schema) },
-        QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
+        QueryExecutionOptions { skip_server_output: true, max_rows: Some(1), ..Default::default() },
     );
     let mut client = client.lock().await;
     let result: db::QueryResult = client.execute_query_with_timeout(params, timeout_duration).await?;

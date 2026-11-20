@@ -6263,6 +6263,16 @@ export default withEnglishFallback({
     showPackageMembers: "Expandir miembros del paquete",
     packageFunctionAtLine: "Función {name}, línea {line}",
     packageProcedureAtLine: "Procedimiento {name}, línea {line}",
+    compileErrorsTitle: "Errores de compilación ({count})",
+    compileErrorGoTo: "Ir a la línea {line}, columna {column}",
+    compileErrorFixWithAi: "Corregir con IA",
+    compileErrorCopy: "Copiar mensaje de error",
+    sourceSaveStage: {
+      validating: "Validando el código fuente",
+      preparing: "Preparando guardado",
+      executing: "Enviando DDL",
+      verifying: "Leyendo para verificar",
+    },
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabla",

@@ -7087,6 +7087,16 @@ export default withEnglishFallback({
     showPackageMembers: "ขยายสมาชิกแพ็กเกจ",
     packageFunctionAtLine: "ฟังก์ชัน {name} บรรทัดที่ {line}",
     packageProcedureAtLine: "โพรซีเดอร์ {name} บรรทัดที่ {line}",
+    compileErrorsTitle: "ข้อผิดพลาดในการคอมไพล์ ({count})",
+    compileErrorGoTo: "ไปที่บรรทัด {line} คอลัมน์ {column}",
+    compileErrorFixWithAi: "แก้ไขด้วย AI",
+    compileErrorCopy: "คัดลอกข้อความข้อผิดพลาด",
+    sourceSaveStage: {
+      validating: "กำลังตรวจสอบซอร์สโค้ด",
+      preparing: "กำลังเตรียมบันทึก",
+      executing: "กำลังส่ง DDL",
+      verifying: "กำลังอ่านกลับเพื่อตรวจสอบ",
+    },
   },
   postgresForeignTable: {
     tableKind: "ประเภทตาราง",

@@ -712,6 +712,13 @@ mod tests {
     }
 
     #[test]
+    fn split_sql_statements_keeps_trigger_with_quoted_end_identifier_together() {
+        let trigger =
+            "CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO [END] VALUES (1); DELETE FROM `BEGIN`; END;";
+        assert_eq!(split_sql_statements(&format!("{trigger} SELECT 1;")), vec![trigger, "SELECT 1"]);
+    }
+
+    #[test]
     fn value_as_string_converts_types() {
         assert_eq!(value_as_string(Some(&serde_json::json!("hello"))), Some("hello".to_string()));
         assert_eq!(value_as_string(Some(&serde_json::json!(42))), Some("42".to_string()));

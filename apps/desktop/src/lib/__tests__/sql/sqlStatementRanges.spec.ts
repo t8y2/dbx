@@ -1098,6 +1098,11 @@ END;`;
     expect(rangeSqlTexts(splitSqlStatementRanges("CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END; SELECT 1;", "sqlite"))).toEqual(["CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END;", "SELECT 1"]);
   });
 
+  it.each(["[END]", "`END`", '"END"', "[BEGIN]", "`BEGIN`"])("keeps a SQLite trigger together when a quoted identifier is %s", (name) => {
+    const trigger = `CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO ${name} VALUES (1); DELETE FROM b; END;`;
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${trigger} SELECT 1;`, "sqlite"))).toEqual([trigger, "SELECT 1"]);
+  });
+
   it("keeps Firebird CREATE OR ALTER TRIGGER blocks together (#12407)", () => {
     const trigger = `CREATE OR ALTER TRIGGER "WL_FYD_TP_AU" FOR "WL_FYD" ACTIVE
 AFTER UPDATE

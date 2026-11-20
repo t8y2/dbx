@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::OracleDialect;
+use sqlparser::dialect::{Dialect, OracleDialect, SQLiteDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -4263,7 +4263,12 @@ fn starts_with_sqlite_trigger_block(sql: &str) -> bool {
 }
 
 fn sqlite_trigger_block_is_complete(sql: &str) -> bool {
-    starts_with_sqlite_trigger_block(sql) && begin_end_block_is_closed(&oracle_plsql_tokens(sql))
+    // SQLite also quotes identifiers with `[...]` and backticks, which the Oracle
+    // tokenizer reads as words: `INSERT INTO [END]` must not close the body.
+    starts_with_sqlite_trigger_block(sql)
+        && begin_end_block_is_closed(
+            &plsql_tokens_for_dialect(&SQLiteDialect {}, sql).unwrap_or_else(|| oracle_plsql_tokens(sql)),
+        )
 }
 
 /// The BEGIN/END scope walk behind [`OraclePlSqlBlock::is_complete`], kept resumable so
@@ -4756,22 +4761,22 @@ fn push_other_token(tokens: &mut Vec<OraclePlSqlToken>) {
 }
 
 fn oracle_plsql_tokens(sql: &str) -> Vec<OraclePlSqlToken> {
-    let dialect = OracleDialect {};
-    if let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() {
-        let mut out = Vec::new();
-        for token in tokens {
-            if let Some(mapped) = OraclePlSqlToken::from_sqlparser_token(token) {
-                if mapped == OraclePlSqlToken::Other {
-                    push_other_token(&mut out);
-                } else {
-                    out.push(mapped);
-                }
+    plsql_tokens_for_dialect(&OracleDialect {}, sql).unwrap_or_else(|| oracle_plsql_tokens_fallback(sql))
+}
+
+fn plsql_tokens_for_dialect(dialect: &dyn Dialect, sql: &str) -> Option<Vec<OraclePlSqlToken>> {
+    let tokens = Tokenizer::new(dialect, sql).tokenize().ok()?;
+    let mut out = Vec::new();
+    for token in tokens {
+        if let Some(mapped) = OraclePlSqlToken::from_sqlparser_token(token) {
+            if mapped == OraclePlSqlToken::Other {
+                push_other_token(&mut out);
+            } else {
+                out.push(mapped);
             }
         }
-        return out;
     }
-
-    oracle_plsql_tokens_fallback(sql)
+    Some(out)
 }
 
 fn oracle_plsql_tokens_fallback(sql: &str) -> Vec<OraclePlSqlToken> {
@@ -6755,6 +6760,20 @@ SELECT 2 FROM RDB$DATABASE;";
         );
         let cursor = sql.find("UPDATE stats").unwrap();
         assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Sqlite), trigger);
+    }
+
+    #[test]
+    fn sqlite_split_keeps_trigger_with_quoted_begin_end_identifiers_together() {
+        for name in ["[END]", "`END`", "\"END\"", "[BEGIN]", "`BEGIN`"] {
+            let trigger =
+                format!("CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO {name} VALUES (1); DELETE FROM b; END;");
+            let sql = format!("{trigger} SELECT 1;");
+            assert_eq!(
+                split_sql_statements_for_database(&sql, DatabaseType::Sqlite),
+                vec![trigger.as_str(), "SELECT 1"],
+                "{name}"
+            );
+        }
     }
 
     #[test]

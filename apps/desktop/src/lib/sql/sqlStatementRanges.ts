@@ -2617,12 +2617,15 @@ function startsWithSqliteTriggerBlock(sql: string): boolean {
 }
 
 function sqliteTriggerBlockIsComplete(sql: string): boolean {
-  return startsWithSqliteTriggerBlock(sql) && beginEndBlockIsClosed(sql);
+  return startsWithSqliteTriggerBlock(sql) && beginEndBlockIsClosed(sql, true);
 }
 
-/** Whether a `BEGIN ... END` body (with `CASE ... END` inside it) has closed and the statement ends with `;`. */
-function beginEndBlockIsClosed(sql: string): boolean {
-  const tokens = oraclePlSqlTokens(sql);
+/**
+ * Whether a `BEGIN ... END` body (with `CASE ... END` inside it) has closed and the statement ends with `;`.
+ * `sqliteQuotes` also skips SQLite's `[...]` and backtick identifiers, so `INSERT INTO [END]` does not close it.
+ */
+function beginEndBlockIsClosed(sql: string, sqliteQuotes = false): boolean {
+  const tokens = oraclePlSqlTokens(sql, sqliteQuotes);
   let blockDepth = 0;
   let caseDepth = 0;
   let sawBegin = false;
@@ -2776,7 +2779,7 @@ function oraclePlSqlWordValues(tokens: readonly OraclePlSqlToken[]): string[] {
   return tokens.filter((token) => token.kind === "word").map((token) => token.value);
 }
 
-function oraclePlSqlTokens(sql: string): OraclePlSqlToken[] {
+function oraclePlSqlTokens(sql: string, sqliteQuotes = false): OraclePlSqlToken[] {
   const tokens: OraclePlSqlToken[] = [];
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let i = 0;
@@ -2835,6 +2838,17 @@ function oraclePlSqlTokens(sql: string): OraclePlSqlToken[] {
     }
     if (ch === '"') {
       state = "double";
+      i += 1;
+      continue;
+    }
+    if (sqliteQuotes && ch === "[") {
+      const close = sql.indexOf("]", i + 1);
+      i = close === -1 ? sql.length : close + 1;
+      continue;
+    }
+    if (sqliteQuotes && ch === "`") {
+      i += 1;
+      while (i < sql.length && (sql[i] !== "`" || sql[i + 1] === "`")) i += sql[i] === "`" ? 2 : 1;
       i += 1;
       continue;
     }

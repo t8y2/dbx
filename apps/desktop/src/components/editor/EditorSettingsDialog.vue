@@ -4007,6 +4007,7 @@ const settingsSearchActiveIndex = ref(0);
 const settingsSearchInputContainerRef = ref<HTMLElement | null>(null);
 const highlightedSettingsSearchTargetId = ref("");
 let highlightedSettingsSearchElement: HTMLElement | null = null;
+let highlightedSettingsSearchOriginalClasses: ReadonlySet<string> | null = null;
 let pendingSettingsSearchResult: SettingsSearchEntry | null = null;
 const pendingSettingsSearchNavigation = shallowRef<{ result: SettingsSearchEntry; delivered: boolean } | null>(null);
 let settingsSearchHighlightTimer: ReturnType<typeof window.setTimeout> | null = null;
@@ -4049,7 +4050,15 @@ function clearSettingsSearchHighlight() {
     highlightedSettingsSearchElement.removeEventListener("animationend", settingsSearchHighlightAnimationHandler);
   }
   settingsSearchHighlightAnimationHandler = null;
-  highlightedSettingsSearchElement?.classList.remove(...settingsSearchHighlightClasses);
+  // Only strip classes the highlight itself introduced. Highlight targets are
+  // picked (see findSettingsSearchHighlightTarget) partly because they already
+  // carry classes from this list such as rounded-md; removing them blindly
+  // would delete the element's own styling and leave a square-cornered border
+  // behind after the highlight is gone.
+  for (const highlightClass of settingsSearchHighlightClasses) {
+    if (!highlightedSettingsSearchOriginalClasses?.has(highlightClass)) highlightedSettingsSearchElement?.classList.remove(highlightClass);
+  }
+  highlightedSettingsSearchOriginalClasses = null;
   highlightedSettingsSearchElement = null;
   highlightedSettingsSearchTargetId.value = "";
 }
@@ -4161,6 +4170,9 @@ function highlightSettingsSearchTarget(result: SettingsSearchEntry, searchRoot: 
   if (target === searchRoot) {
     highlightedSettingsSearchTargetId.value = result.targetId;
   }
+  // Remember the classes the target already owned so cleanup can remove only
+  // what the highlight added, never the element's original styling.
+  highlightedSettingsSearchOriginalClasses = new Set(target.classList);
   target.classList.add(...settingsSearchHighlightClasses);
   highlightedSettingsSearchElement = target;
 

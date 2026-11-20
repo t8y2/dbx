@@ -1034,6 +1034,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        table_type: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
         primary_key_name: None,

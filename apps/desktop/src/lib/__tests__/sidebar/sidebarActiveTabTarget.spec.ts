@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { activeTabSidebarTarget, matchesTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
-import { findLoadedTableTargetForCandidate, queryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
+import { findLoadedTableTargetForCandidate, normalizeLocateCandidate, queryCursorTableCandidate, resolveConnectionRootLocateSchema, resolveLoadedLocateTarget } from "@/lib/sql/queryCursorTableTarget";
 import type { QueryTab, TreeNode } from "@/types/database";
 
 describe("sidebar active-tab targets", () => {
@@ -96,6 +96,60 @@ describe("table locate candidates", () => {
   it("accepts the database as the effective schema for schema-less table nodes", () => {
     const target = findLoadedTableTargetForCandidate([{ type: "table", connectionId: "conn", database: "db", label: "orders" } as TreeNode], { connectionId: "conn", database: "db", schema: "db", tableName: "orders" });
     expect(target?.type).toBe("table");
+  });
+
+  it("remaps Oracle cursor locate candidates from service name to the target or login schema (#15212)", () => {
+    const oracleConfig = { db_type: "oracle" as const, username: "scott" };
+    const tree: TreeNode[] = [
+      {
+        id: "conn:HR:HR",
+        label: "HR",
+        type: "schema",
+        connectionId: "conn",
+        database: "HR",
+        schema: "HR",
+        children: [{ id: "conn:HR:HR:EMP", label: "EMP", type: "table", connectionId: "conn", database: "HR", schema: "HR" }],
+      },
+      {
+        id: "conn:SCOTT:SCOTT",
+        label: "SCOTT",
+        type: "schema",
+        connectionId: "conn",
+        database: "SCOTT",
+        schema: "SCOTT",
+        children: [],
+      },
+    ];
+
+    const qualified = queryCursorTableCandidate({ mode: "query", connectionId: "conn", database: "ORCL", sql: "SELECT * FROM hr.emp" } as QueryTab, "oracle")!;
+    const normalizedQualified = normalizeLocateCandidate(qualified, tree, oracleConfig);
+    expect(normalizedQualified).toEqual({ connectionId: "conn", database: "HR", schema: "HR", tableName: "EMP" });
+    expect(resolveLoadedLocateTarget(tree, { type: "query-context", connectionId: "conn", database: "HR", schema: "HR" }, normalizedQualified, oracleConfig)).toEqual({
+      type: "table",
+      connectionId: "conn",
+      database: "HR",
+      schema: "HR",
+      tableName: "EMP",
+    });
+
+    // Unqualified table already expanded under HR is found even when tab.database is ORCL and login user is SCOTT.
+    const unqualifiedLoaded = queryCursorTableCandidate({ mode: "query", connectionId: "conn", database: "ORCL", sql: "SELECT * FROM emp" } as QueryTab, "oracle")!;
+    expect(normalizeLocateCandidate(unqualifiedLoaded, tree, oracleConfig)).toEqual({
+      connectionId: "conn",
+      database: "HR",
+      schema: "HR",
+      tableName: "EMP",
+    });
+
+    // Unqualified unloaded table falls back to login schema instead of service name ORCL.
+    const unloaded = queryCursorTableCandidate({ mode: "query", connectionId: "conn", database: "ORCL", sql: "SELECT * FROM dept" } as QueryTab, "oracle")!;
+    expect(normalizeLocateCandidate(unloaded, tree, oracleConfig)).toEqual({
+      connectionId: "conn",
+      database: "SCOTT",
+      schema: "SCOTT",
+      tableName: "DEPT",
+    });
+    expect(resolveConnectionRootLocateSchema(tree, "conn", "ORCL", oracleConfig)).toBe("SCOTT");
   });
 });
 

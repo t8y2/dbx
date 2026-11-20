@@ -625,6 +625,27 @@ describe("QueryEditor SQL Server completion Space keymap", () => {
     expect(view.dispatch).toHaveBeenCalledWith({ selection: { anchor: 5 }, scrollIntoView: true });
   });
 
+  it("still moves over an existing tab instead of duplicating it", () => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", acceptCompletion: () => true });
+    const view = createView("FROM\tSELECT 1", 4);
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(view.dispatch).toHaveBeenCalledWith({ selection: { anchor: 5 }, scrollIntoView: true });
+  });
+
+  it.each(["\n", "\r"])("inserts the typed space before a newline/return instead of jumping past it (#15241)", (nextCharacter) => {
+    const harness = createHarness({ databaseType: "sqlserver", completionStatus: () => "active", selectedCompletion: () => ({ type: "keyword", label: "INSERT" }), acceptCompletion: () => true });
+    const view = createView(`INSERT${nextCharacter}SELECT 1`, 6);
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 6, insert: " " },
+      selection: { anchor: 7 },
+      scrollIntoView: true,
+    });
+    expect(view.dispatch).not.toHaveBeenCalledWith({ selection: { anchor: 7 }, scrollIntoView: true });
+  });
+
   it.each([
     { databaseType: "postgresql", status: "active", completionType: "column" },
     { databaseType: "sqlserver", status: "pending", completionType: "column" },

@@ -107,6 +107,7 @@ const emit = defineEmits<{
   "toggle-history": [];
   "toggle-sql-library": [];
   "toggle-sql-file-panel": [];
+  "open-bookmarks": [];
   "open-github": [];
   "open-settings": [];
   "open-driver-store": [];
@@ -741,6 +742,7 @@ function toolbarMenuItemKey(item: ToolbarMenuItem): string {
 
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
+  items.push({ value: "bookmarks", label: t("editor.bookmarks.workspaceTitle"), icon: BookMarked, action: () => emit("open-bookmarks"), disabled: false });
 
   if (props.hasClosedTabs && toolbarItems.value.recentClosedTabs) {
     items.push({

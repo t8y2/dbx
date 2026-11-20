@@ -43,6 +43,7 @@ export interface UseDataGridColumnResizeOptions {
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
+  valueWidthScale?: ComputedRef<number>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
   viewportWidth?: Ref<number> | ComputedRef<number>;
   displayValue?: (value: CellValue, columnIndex: number) => CellValue;
@@ -90,6 +91,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       density: density.value,
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       headerTextWidth: measureHeaderText?.(colName),
+      valueWidthScale: options.valueWidthScale?.value,
       hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
   }
@@ -246,6 +248,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       includeValues: true,
       headerTextWidth: measureHeaderText?.(colName),
+      valueWidthScale: options.valueWidthScale?.value,
       hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
   }

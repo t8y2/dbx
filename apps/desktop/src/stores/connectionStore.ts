@@ -131,6 +131,7 @@ import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } fr
 import * as api from "@/lib/backend/api";
 import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { shouldStartSidebarLayoutAutoSync } from "@/lib/sidebar/sidebarLayoutAutoSync";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -8450,7 +8451,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
         if (simpleObjectDisplay) {
           const schemaParents = target.schema
-            ? [findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`)]
+            ? [
+                findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`) ??
+                  findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database) && sameSidebarObjectName(node.schema || node.label, target.schema))[0],
+              ]
             : findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database));
           const parents = schemaParents.filter((node): node is TreeNode => !!node);
           if (!parents.length) {
@@ -9516,7 +9520,8 @@ export const useConnectionStore = defineStore("connection", () => {
       const identifiers = damengCompletionColumnIdentifiers(config, table, schema, context);
       return `${connectionId}:${database}:${catalog ?? ""}:${identifiers.schema ?? ""}:${identifiers.table}`;
     }
-    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
+    const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+    if (effectiveDbType === "oracle" || effectiveDbType === "oceanbase-oracle") {
       const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
       const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
       return `${connectionId}:${database}:${catalog ?? ""}:${normalizedSchema}:${normalizedTable}`;
@@ -11389,11 +11394,13 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  /** Watch for layout changes made outside the app. The interval only runs while
-   *  the window is visible, and a focus change syncs immediately, so a hidden
-   *  window or the web build does not poll in the background forever. */
+  /** Watch for layout changes made outside the app (Desktop MCP / CLI / another
+   *  window). The interval only runs while the window is visible, and a focus
+   *  change syncs immediately, so a hidden window does not poll forever. Web
+   *  skips auto-sync so shared Docker layouts do not overwrite each browser's
+   *  connection-group collapse state; use the sidebar refresh action instead. */
   function startSidebarLayoutSync(intervalMs = 1500) {
-    if (import.meta.env.MODE === "test") return;
+    if (!shouldStartSidebarLayoutAutoSync()) return;
     if (sidebarLayoutSyncTimer) return;
     const tick = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;

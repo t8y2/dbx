@@ -969,6 +969,9 @@ const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [
   () => objectFilter.value,
   () => canCreateSchemaIndex.value,
   () => oracleInvalidObjectsSupported.value,
+  // The paste-table button is driven by the clipboard, which can change from
+  // another object browser's tab without resizing this row.
+  () => connectionStore.treeClipboard,
   () => settingsStore.editorSettings.objectBrowserViewMode,
 ]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
@@ -2607,6 +2610,7 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
             schema,
             name: row.name,
             source: result.source,
+            identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
           }),
           metadataLoadBudgetMs(props.connection.query_timeout_secs),
         )
@@ -3041,6 +3045,7 @@ async function refreshRenamePreviewSql() {
       schema: row.schema || selectedSchema.value,
       oldName: row.name,
       newName,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
     });
     if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = sql;
   } catch (error) {
@@ -3190,6 +3195,7 @@ async function confirmRename() {
         name: row.name,
         newName,
         source: source.source,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
         for (const sql of statements) {
@@ -3205,6 +3211,7 @@ async function confirmRename() {
         schema,
         oldName: row.name,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => {
         tableRenameFreeze?.markDispatched();
@@ -5200,6 +5207,7 @@ async function refreshVacuumPreviewSql() {
     tableName: row.name,
     full: vacuumTableFull.value,
     analyze: vacuumTableAnalyze.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   }).catch(() => "");
 }
 
@@ -5226,6 +5234,7 @@ async function confirmVacuumTable() {
         tableName: row.name,
         full: vacuumTableFull.value,
         analyze: vacuumTableAnalyze.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       }));
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, row.schema || selectedSchema.value));
     if (!executed) return;
@@ -5378,6 +5387,7 @@ async function saveSource() {
       schema,
       name: row.name,
       source: sourceDraft.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
     });
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: row.type as ObjectSourceKind, name: row.name });
     const preparedSave = save;
@@ -6631,7 +6641,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   />
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div v-if="!isEventEditor" ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>
       <Button v-if="oracleInvalidObjectsSupported" variant="ghost" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="setOracleInvalidObjectsOpen(true)">{{ t("processList.oracleInvalidObjects.title") }}</Button>

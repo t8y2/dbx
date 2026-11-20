@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -29,6 +30,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLClientInfoException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLSyntaxErrorException;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
@@ -39,6 +41,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -7742,5 +7745,217 @@ final class DbxJdbcPluginTest {
         assertEquals("SELECT 1 FROM DUAL", DbxJdbcPlugin.trimStatementSql("SELECT 1 FROM DUAL;", true));
         assertEquals("BEGIN\n  NULL;\nEND IF", DbxJdbcPlugin.trimStatementSql("BEGIN\n  NULL;\nEND IF;", true));
         assertEquals("BEGIN\n  NULL;\nEND", DbxJdbcPlugin.trimStatementSql("BEGIN\n  NULL;\nEND;", false));
+    }
+
+    @Test
+    void validateConnectionReportsWhyAConnectionIsUnusableAndReleasesIt() throws Exception {
+        boolean[] valid = { true };
+        boolean[] closedByServer = { false };
+        int[] closeCalls = { 0 };
+        ValidationDriver driver = new ValidationDriver(Set.of("jdbc:dbx-validate:test"), () -> {
+            boolean[] closed = { false };
+            return (proxy, method, args) -> switch (method.getName()) {
+                case "isClosed" -> closed[0] || closedByServer[0];
+                case "isValid" -> valid[0];
+                case "getAutoCommit" -> true;
+                case "close" -> {
+                    closed[0] = true;
+                    closeCalls[0]++;
+                    yield null;
+                }
+                default -> defaultValue(method.getReturnType());
+            };
+        });
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-validate:test\"}";
+        try {
+            connectForValidation(connection);
+            for (String method : List.of("validateConnection", "validate_connection")) {
+                JsonNode alive = request(method, "{\"connection\":" + connection + ",\"timeoutSecs\":3}");
+                assertFalse(alive.has("error"), alive.toString());
+                assertTrue(alive.path("result").path("valid").asBoolean());
+            }
+
+            valid[0] = false;
+            JsonNode rejected = validationVerdict(connection);
+            assertFalse(rejected.path("valid").asBoolean(true));
+            assertEquals("JDBC connection is not valid", rejected.path("reason").asText());
+            assertEquals(1, closeCalls[0]);
+            assertEquals("JDBC connection is not open", validationVerdict(connection).path("reason").asText());
+
+            valid[0] = true;
+            connectForValidation(connection);
+            assertEquals(2, driver.opens);
+            closedByServer[0] = true;
+            assertEquals("JDBC connection is closed", validationVerdict(connection).path("reason").asText());
+        } finally {
+            closedByServer[0] = false;
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void validateConnectionProbesWithDialectSqlWhenTheDriverCannotAnswerIsValid() throws Exception {
+        Throwable[] isValidFailure = { new UnsupportedOperationException("isValid unsupported") };
+        SQLException[] probeFailure = { null };
+        List<String> executedSql = new ArrayList<>();
+        int[] closeCalls = { 0 };
+        java.util.Map<String, String> probeSqlByUrl = new java.util.LinkedHashMap<>();
+        probeSqlByUrl.put("jdbc:dm://validate-fallback", "SELECT 1 FROM DUAL");
+        probeSqlByUrl.put("jdbc:db2://validate-fallback", "SELECT 1 FROM SYSIBM.SYSDUMMY1");
+        probeSqlByUrl.put("jdbc:sqlserver://validate-fallback", "SELECT 1");
+        ValidationDriver driver = new ValidationDriver(probeSqlByUrl.keySet(), () -> {
+            boolean[] closed = { false };
+            Statement statement = (Statement) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Statement.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "execute" -> {
+                        executedSql.add(String.valueOf(args[0]));
+                        if (probeFailure[0] != null) {
+                            throw probeFailure[0];
+                        }
+                        yield true;
+                    }
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+            return (proxy, method, args) -> switch (method.getName()) {
+                case "isClosed" -> closed[0];
+                case "isValid" -> throw isValidFailure[0];
+                case "createStatement" -> statement;
+                case "getAutoCommit" -> true;
+                case "close" -> {
+                    closed[0] = true;
+                    closeCalls[0]++;
+                    yield null;
+                }
+                default -> defaultValue(method.getReturnType());
+            };
+        });
+        DriverManager.registerDriver(driver);
+        String connection = "";
+        try {
+            for (java.util.Map.Entry<String, String> dialect : probeSqlByUrl.entrySet()) {
+                connection = "{\"connection_string\":\"" + dialect.getKey() + "\"}";
+                connectForValidation(connection);
+                assertTrue(validationVerdict(connection).path("valid").asBoolean());
+                assertEquals(List.of(dialect.getValue()), executedSql);
+                executedSql.clear();
+            }
+
+            for (Throwable unsupported : List.of(
+                new SQLFeatureNotSupportedException("Method not supported"),
+                new AbstractMethodError("isValid")
+            )) {
+                isValidFailure[0] = unsupported;
+                assertTrue(validationVerdict(connection).path("valid").asBoolean());
+                assertEquals(List.of("SELECT 1"), executedSql);
+                executedSql.clear();
+            }
+
+            int closesBeforeRejectedProbe = closeCalls[0];
+            probeFailure[0] = new SQLSyntaxErrorException("Incorrect syntax near '1'", "42000");
+            assertTrue(validationVerdict(connection).path("valid").asBoolean());
+            assertEquals(closesBeforeRejectedProbe, closeCalls[0]);
+
+            probeFailure[0] = new SQLException("Connection reset", "08S01");
+            JsonNode lost = validationVerdict(connection);
+            assertFalse(lost.path("valid").asBoolean(true));
+            assertEquals("JDBC connection is not valid", lost.path("reason").asText());
+            assertEquals(closesBeforeRejectedProbe + 1, closeCalls[0]);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void validateConnectionDoesNotGuessProbeSqlForUnknownDialects() throws Exception {
+        int[] statements = { 0 };
+        ValidationDriver driver = new ValidationDriver(Set.of("jdbc:dbx-unknown:test"), () ->
+            (proxy, method, args) -> switch (method.getName()) {
+                case "isClosed" -> false;
+                case "isValid" -> throw new UnsupportedOperationException("isValid unsupported");
+                case "createStatement" -> {
+                    statements[0]++;
+                    throw new SQLException("unexpected probe");
+                }
+                case "getAutoCommit" -> true;
+                default -> defaultValue(method.getReturnType());
+            });
+        DriverManager.registerDriver(driver);
+        String connection = "{\"connection_string\":\"jdbc:dbx-unknown:test\"}";
+        try {
+            connectForValidation(connection);
+            assertTrue(validationVerdict(connection).path("valid").asBoolean());
+            assertEquals(0, statements[0]);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    private static void connectForValidation(String connection) throws Exception {
+        JsonNode connected = request("connect", "{\"connection\":" + connection + "}");
+        assertFalse(connected.has("error"), connected.toString());
+    }
+
+    private static JsonNode validationVerdict(String connection) throws Exception {
+        JsonNode response = request("validateConnection", "{\"connection\":" + connection + ",\"timeoutSecs\":3}");
+        assertFalse(response.has("error"), response.toString());
+        return response.path("result");
+    }
+
+    private static final class ValidationDriver implements Driver {
+        private final Set<String> urls;
+        private final Supplier<InvocationHandler> connections;
+        private int opens;
+
+        private ValidationDriver(Set<String> urls, Supplier<InvocationHandler> connections) {
+            this.urls = urls;
+            this.connections = connections;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            opens++;
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                connections.get()
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return urls.contains(url);
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
     }
 }

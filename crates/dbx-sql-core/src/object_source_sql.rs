@@ -771,13 +771,13 @@ fn validate_oracle_object_source(
             token_word_is(token, keyword)
         }
     };
-    let identifier_is = |token: &Token, expected: &str| {
-        if is_type {
-            matches!(token, Token::Word(word) if if word.quote_style.is_some() { word.value == expected } else { word.value.to_ascii_uppercase() == expected })
-        } else {
-            oracle_identifier_matches(token, expected)
-        }
-    };
+    // The declaration position fixes the role of these tokens: whatever follows
+    // `PACKAGE BODY` (or the owner's period) is the object name. Oracle accepts most
+    // words sqlparser lists as keywords as unquoted names (TRY, DATA, STATUS, ...), so
+    // rejecting keyword-shaped words here refused to read back or save such objects.
+    // An unquoted name still has to equal the expected one case-insensitively, and a
+    // quoted one exactly, so no other object can pass.
+    let identifier_is = |token: &Token, expected: &str| matches!(token, Token::Word(word) if if word.quote_style.is_some() { word.value == expected } else { word.value.to_ascii_uppercase() == expected });
     let initial_tokens =
         Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
     let first_significant = initial_tokens.iter().find(|token| !matches!(token.token, Token::Whitespace(_)));
@@ -1088,10 +1088,6 @@ pub fn build_oracle_type_management_trigger_source(
     sql.replace_range(start..end, &replacement);
     input.source = sql;
     build_oracle_type_management_source(input)
-}
-
-fn oracle_identifier_matches(token: &Token, expected: &str) -> bool {
-    matches!(token, Token::Word(word) if identifier_matches(word, expected))
 }
 
 fn unquoted_keyword_is(token: &Token, expected: &str) -> bool {
@@ -2508,6 +2504,71 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oracle_objects_named_like_sqlparser_keywords_validate_and_save() {
+        // TRY, DATA and STATUS are keywords to sqlparser but ordinary unquoted Oracle names;
+        // packages called like that could not be read back or saved at all.
+        let validate = |kind: ObjectSourceKind, name: &str, source: &str| {
+            validate_oracle_executable_object_source(OracleObjectSourceValidationInput {
+                database_type: DatabaseType::Oracle,
+                object_type: kind,
+                schema: Some("SCOTT".into()),
+                name: name.into(),
+                source: source.into(),
+            })
+        };
+        for name in ["try", "data", "status"] {
+            let upper = name.to_uppercase();
+            let spec = format!(
+                "PACKAGE {name} IS
+  PROCEDURE RUN(IRET OUT VARCHAR2);
+end {name};
+"
+            );
+            let body = format!(
+                "PACKAGE BODY {name} IS
+  PROCEDURE RUN(IRET OUT VARCHAR2) IS
+  BEGIN
+    IRET := '1';
+  END;
+end {name};
+"
+            );
+            assert_eq!(validate(ObjectSourceKind::Package, &upper, &spec), Ok(()), "{name} spec");
+            assert_eq!(validate(ObjectSourceKind::PackageBody, &upper, &body), Ok(()), "{name} body");
+            let prepared = prepare_oracle_routine_definition(OracleRoutineDefinitionInput {
+                database_type: DatabaseType::Oracle,
+                object_type: ObjectSourceKind::PackageBody,
+                source_owner: "SCOTT".into(),
+                target_owner: "SCOTT".into(),
+                name: upper.clone(),
+                source: format!("CREATE OR REPLACE {body}"),
+                replace: true,
+            })
+            .unwrap();
+            assert!(prepared.contains(&format!("PACKAGE BODY \"SCOTT\".\"{upper}\" IS")), "{prepared}");
+        }
+
+        // The name still has to be the selected object: another name, a quoted name that
+        // differs in case, or another owner are all refused.
+        let body = "PACKAGE BODY try IS
+  PROCEDURE RUN IS BEGIN NULL; END;
+end try;
+";
+        assert!(validate(ObjectSourceKind::PackageBody, "TRX", body).is_err());
+        let quoted = "PACKAGE BODY \"try\" IS
+  PROCEDURE RUN IS BEGIN NULL; END;
+end \"try\";
+";
+        assert!(validate(ObjectSourceKind::PackageBody, "TRY", quoted).is_err());
+        assert_eq!(validate(ObjectSourceKind::PackageBody, "try", quoted), Ok(()));
+        let owned = "PACKAGE BODY data.try IS
+  PROCEDURE RUN IS BEGIN NULL; END;
+end try;
+";
+        assert!(validate(ObjectSourceKind::PackageBody, "TRY", owned).is_err(), "owner DATA is not SCOTT");
+    }
 
     /// The original per-call scan, kept as the reference the locator must match exactly.
     fn reference_location_to_byte_offset(source: &str, location: sqlparser::tokenizer::Location) -> Option<usize> {

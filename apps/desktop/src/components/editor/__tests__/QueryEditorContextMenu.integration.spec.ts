@@ -139,11 +139,11 @@ describe("QueryEditor extracted context menu", () => {
     expect([...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].some((entry) => entry.textContent?.includes("editor.contextMenu.executeScriptFromHere"))).toBe(false);
     button("common.more").click();
     await nextTick();
-    const labels = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].map((entry) => entry.textContent ?? "");
-    const executeScriptIndex = labels.findIndex((label) => label.includes("editor.contextMenu.executeScriptFromHere"));
-    const executeAllIndex = labels.findIndex((label) => label.includes("toolbar.executeAllSql"));
-    expect(executeScriptIndex).toBeGreaterThanOrEqual(0);
-    expect(executeAllIndex).toBe(executeScriptIndex + 1);
+    const menus = document.querySelectorAll<HTMLElement>("[data-dbx-context-menu]");
+    const submenu = menus[menus.length - 1]!;
+    const labels = [...submenu.querySelectorAll<HTMLButtonElement>("button")].map((entry) => entry.textContent ?? "");
+    expect(labels[labels.length - 2]).toBe("editor.contextMenu.executeScriptFromHere");
+    expect(labels[labels.length - 1]).toContain("toolbar.executeAllSql");
     button("editor.contextMenu.executeScriptFromHere").click();
     expect(actions.executeScriptFromContextPosition).toHaveBeenCalledExactlyOnceWith();
   });

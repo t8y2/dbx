@@ -3816,6 +3816,12 @@ fn keeps_oracle_style_block_together(options: SqlParsingOptions, statement_head:
 /// TRY BEGIN CATCH ... END CATCH` counts as one). `BEGIN TRAN[SACTION]` and
 /// friends have no matching `END` and stay split per statement. Only meaningful
 /// when the profile keeps such batches (`keeps_sqlserver_control_flow_batches`).
+///
+/// A module batch (`CREATE`/`ALTER PROCEDURE|PROC|FUNCTION|TRIGGER|VIEW ...
+/// AS BEGIN ... END`, #15087) takes the same path: its body semicolons are
+/// syntax, and the batch ends where the block stack closes — so a final `END`
+/// without its own `;` still does not swallow the next statement. A native SQL
+/// Server connection uses this plain splitter; only agent pools split on `GO`.
 fn keeps_sqlserver_control_flow_batch(options: SqlParsingOptions, statement_head: &str) -> bool {
     if !options.profile.keeps_sqlserver_control_flow_batches {
         return false;
@@ -3827,7 +3833,37 @@ fn keeps_sqlserver_control_flow_batch(options: SqlParsingOptions, statement_head
     if first.is_word("IF") || first.is_word("WHILE") {
         return true;
     }
-    first.is_word("BEGIN") && sqlserver_begins_block(&tokens, 0)
+    if first.is_word("BEGIN") && sqlserver_begins_block(&tokens, 0) {
+        return true;
+    }
+    keeps_sqlserver_module_batch(options, statement_head)
+}
+
+/// Whether the buffered statement is a T-SQL module batch (`CREATE`/`ALTER
+/// PROCEDURE|PROC|FUNCTION|TRIGGER|VIEW ... AS BEGIN ... END`) whose body has
+/// already opened a `BEGIN` block, so its inner semicolons are body syntax and
+/// not statement boundaries. A native SQL Server connection splits scripts with
+/// the plain statement splitter (only agent pools split on `GO`), so without
+/// this a routine body is cut at its first inner `;` and the server rejects the
+/// fragments (#15087).
+///
+/// Modules whose body has no `BEGIN` block keep the historical per-semicolon
+/// split: there is no block nesting that could tell body semicolons apart from
+/// statement boundaries, and a `CREATE VIEW ... AS SELECT` must not swallow the
+/// statements that follow it.
+fn keeps_sqlserver_module_batch(options: SqlParsingOptions, statement_head: &str) -> bool {
+    options.profile.keeps_sqlserver_module_batch_at_cursor
+        && starts_with_sqlserver_module_ddl(statement_head)
+        && sqlserver_module_batch_opens_begin_block(statement_head)
+}
+
+/// Whether the module batch's head has opened a `BEGIN` block body. This stays
+/// true after the block closes, so the batch is still recognised at its final
+/// `END` (where `sqlserver_control_flow_open_blocks` is back to zero) and the
+/// boundary scanner can end it there instead of waiting for the next `;`.
+fn sqlserver_module_batch_opens_begin_block(statement_head: &str) -> bool {
+    let tokens = sqlserver_top_level_tokens(statement_head);
+    tokens.iter().enumerate().any(|(index, token)| token.is_word("BEGIN") && sqlserver_begins_block(&tokens, index))
 }
 
 /// Top-level `BEGIN`/`CASE` blocks the T-SQL statement has left open at its
@@ -8624,6 +8660,118 @@ END";
         assert_eq!(
             split_sql_statements_for_database(sql, DatabaseType::SqlServer),
             vec!["IF @x = 1 BEGIN SELECT CASE WHEN 1 = 1 THEN 'a' ELSE 'b' END AS v; END", "SELECT 999",]
+        );
+    }
+
+    // #15087: a native SQL Server connection splits scripts with the plain
+    // statement splitter (only agent pools split on `GO`), so a module batch has
+    // to survive its inner semicolons or the server rejects the fragments.
+    #[test]
+    fn sqlserver_statement_splitter_keeps_procedure_batch_with_inner_semicolons() {
+        let sql = "CREATE PROCEDURE dbo.p @a INT\nAS\nBEGIN\n    SET NOCOUNT ON;\n    IF @a > 0\n    BEGIN\n        SELECT 1;\n    END\n    ELSE\n    BEGIN\n        SELECT 0;\n    END\nEND;";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::SqlServer), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ends_procedure_batch_before_next_statement() {
+        let procedure = "CREATE PROCEDURE dbo.p\nAS\nBEGIN\n    SELECT 1;\nEND";
+        let sql = format!("{procedure};\nSELECT 999;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::SqlServer),
+            vec![format!("{procedure};"), "SELECT 999".to_string()]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_function_and_trigger_batches() {
+        let function = "CREATE FUNCTION dbo.f(@a INT)\nRETURNS INT\nAS\nBEGIN\n    DECLARE @r INT;\n    SET @r = @a + 1;\n    RETURN @r;\nEND;";
+        let trigger = "CREATE TRIGGER dbo.trg ON dbo.t AFTER INSERT\nAS\nBEGIN\n    SET NOCOUNT ON;\n    UPDATE dbo.t SET x = 1;\nEND;";
+
+        for body in [function, trigger] {
+            assert_eq!(
+                split_sql_statements_for_database(body, DatabaseType::SqlServer),
+                vec![body.to_string()],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_does_not_swallow_statements_after_a_view() {
+        let sql = "CREATE VIEW dbo.v AS SELECT 1 AS x;\nSELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["CREATE VIEW dbo.v AS SELECT 1 AS x", "SELECT 999"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ends_a_batch_without_its_own_semicolon() {
+        // T-SQL semicolons are optional after the closing `END`: the batch still
+        // ends there instead of swallowing the statement that follows (#15087).
+        let sql = "CREATE PROCEDURE p\nAS\nBEGIN\n    SELECT 1;\nEND\nSELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["CREATE PROCEDURE p\nAS\nBEGIN\n    SELECT 1;\nEND", "SELECT 999"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_back_to_back_procedures_separate() {
+        let sql = "CREATE PROCEDURE a AS BEGIN SELECT 1; END\nCREATE PROCEDURE b AS BEGIN SELECT 2; END;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["CREATE PROCEDURE a AS BEGIN SELECT 1; END", "CREATE PROCEDURE b AS BEGIN SELECT 2; END;"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_ignores_semicolons_in_strings_and_comments() {
+        let sql =
+            "CREATE OR ALTER PROCEDURE [dbo].[p]\nAS\nBEGIN\n    PRINT 'a;b;c';\n    /* a; b; */\n    SELECT 1;\nEND;";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::SqlServer), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_try_catch_and_loop_batches_whole() {
+        let try_catch = "CREATE PROCEDURE p\nAS\nBEGIN\n    BEGIN TRY\n        SELECT 1;\n    END TRY\n    BEGIN CATCH\n        SELECT 2;\n    END CATCH\nEND;";
+        let looping = "CREATE PROCEDURE q\nAS\nBEGIN\n    WHILE 1 = 1\n    BEGIN\n        SELECT 1;\n    END\nEND;";
+
+        for body in [try_catch, looping] {
+            assert_eq!(
+                split_sql_statements_for_database(body, DatabaseType::SqlServer),
+                vec![body.to_string()],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_keeps_the_historical_split_without_a_begin_body() {
+        // Documented tradeoff: a module without a BEGIN body has no block
+        // nesting, so it keeps the per-statement split rather than swallowing
+        // whatever follows it.
+        let sql = "CREATE PROCEDURE p\nAS\n  SELECT 1;\nSELECT 2;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["CREATE PROCEDURE p\nAS\n  SELECT 1", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_statement_splitter_splits_a_same_line_statement_after_a_batch() {
+        let sql = "CREATE PROCEDURE p AS BEGIN SELECT 1; END; SELECT 999;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::SqlServer),
+            vec!["CREATE PROCEDURE p AS BEGIN SELECT 1; END;", "SELECT 999"]
         );
     }
 

@@ -4,6 +4,11 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 
+vi.mock("@/lib/backend/browserAppStateStorage", () => ({
+  loadBrowserAppState: vi.fn(async () => null),
+  saveBrowserAppState: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/components/ui/popover", async () => {
   const { defineComponent, h } = await import("vue");
   const passthrough = defineComponent({

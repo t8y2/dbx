@@ -3,7 +3,7 @@ import type { ColumnInfo } from "@/types/database";
 import type { DiagramPosition, DiagramTable } from "./erDiagram";
 import { isLiveTable, needsDiagramSync } from "./erDiagram";
 import type { DiagramLayer } from "@/types/diagram";
-import { diagramIdentityKey } from "./diagramMetadataLoader";
+import { diagramIdentityKey, normalizedDiagramRoots, type DiagramTableIdentity, type FocusedDiagramLoadRequest } from "./diagramMetadataLoader";
 
 export interface LiveTablePatch {
   tableName: string;
@@ -48,6 +48,21 @@ function parseJson<T>(raw: string | null, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+export function focusedTableSelectionKey(request: FocusedDiagramLoadRequest, schemas: string[]): string {
+  const { connectionId, database, catalog, roots } = request;
+  return `dbx:diagram:focused-selection:v1:${JSON.stringify([connectionId, database, catalog ?? "", [...schemas].sort(), normalizedDiagramRoots(roots).map(diagramIdentityKey)])}`;
+}
+
+export function loadFocusedTableSelection(key: string): DiagramTableIdentity[] {
+  const stored = parseJson<unknown>(safeLocalStorageGet(key), []);
+  if (!Array.isArray(stored)) return [];
+  return normalizedDiagramRoots(stored.filter((table): table is DiagramTableIdentity => typeof table?.schema === "string" && typeof table?.name === "string"));
+}
+
+export function saveFocusedTableSelection(key: string, tables: DiagramTableIdentity[]): void {
+  safeLocalStorageSet(key, JSON.stringify(normalizedDiagramRoots(tables)));
 }
 
 export function loadDraftTables(connectionId: string, database: string, schema: string): DiagramTable[] {
@@ -161,11 +176,11 @@ function liveTablePatches(tables: DiagramTable[]): LiveTablePatch[] {
 }
 
 /** Persist only edits since the last applied snapshot, never the absent part of a focused schema. */
-export function saveFocusedDiagramState(tables: DiagramTable[], previousTables: DiagramTable[], positions: Record<string, DiagramPosition>, layers: DiagramLayer[], connectionId: string, database: string, schema: string, legacySchema = schema): void {
+export function saveFocusedDiagramState(tables: DiagramTable[], previousTables: DiagramTable[], positions: Record<string, DiagramPosition>, layers: DiagramLayer[], connectionId: string, database: string, schema: string, legacySchema = schema, membershipOnly = new Set<string>()): void {
   if (!connectionId || !database) return;
   const previous = new Map(previousTables.map((table) => [diagramIdentityKey(table), table]));
   const current = new Map(tables.map((table) => [diagramIdentityKey(table), table]));
-  const changed = new Set([...previous.keys(), ...current.keys()].filter((key) => JSON.stringify(previous.get(key)) !== JSON.stringify(current.get(key))));
+  const changed = new Set([...previous.keys(), ...current.keys()].filter((key) => !membershipOnly.has(key) && JSON.stringify(previous.get(key)) !== JSON.stringify(current.get(key))));
   if (changed.size) {
     const drafts = loadDraftTables(connectionId, database, schema).filter((table) => !changed.has(diagramIdentityKey(table)));
     saveDraftTables([...drafts, ...tables.filter((table) => changed.has(diagramIdentityKey(table)))], connectionId, database, schema);

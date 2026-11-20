@@ -99,6 +99,7 @@ import { selectLineEndsDefaultShortcut, shortcutToCodeMirrorKey } from "@/lib/ed
 import { selectLineEnds } from "@/lib/editor/selectLineEnds";
 import { useSettingsStore, type StructureEditorDensity } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
+import { editorThemeAppearanceFor, resolveEditorThemeColors } from "@/lib/editor/editorThemeSettings";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
@@ -149,14 +150,14 @@ import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation
 import { PARTITION_TREE_INDENT_PX, flattenPgPartitionNodes, pgPartitionBoundText, pgPartitionKindLabelKey, pgPartitionNodeBoundText, pgPartitionRowHint, splitPgPartitionBoundValues, visiblePgPartitionRows, type PgPartitionTreeRow } from "@/lib/table/pgPartitionPresentation";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
-import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, localTableColumnDatabaseOrder, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { sortStructureIndexesByColumns, type StructureIndexColumnSort } from "@/lib/table/structureIndexSort";
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, ObjectSourceKind, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -224,7 +225,7 @@ import { EditorView } from "@codemirror/view";
 
 const ObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 const { t } = useI18n();
-const { isDark, themePalette } = useTheme();
+const { isDark, themePalette, activeCustomUiColors } = useTheme();
 const store = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
 const queryStore = useQueryStore();
@@ -279,8 +280,8 @@ const props = defineProps<{
   catalog?: string;
   schema?: string;
   tableName: string;
-  /** `view` loads `CREATE OR REPLACE VIEW` instead of table DDL. */
-  tableType?: "table" | "view";
+  /** `view` and `materialized_view` load view-specific metadata instead of table DDL. */
+  tableType?: "table" | "view" | "materialized_view";
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
@@ -475,7 +476,8 @@ async function initDdlEditor(content: string) {
   if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
 
   const editorSettings = settingsStore.editorSettings;
-  const themeExt = await loadEditorTheme(editorSettings.theme, isDark.value ? "dark" : "light", undefined, themePalette.value);
+  const appAppearance = editorThemeAppearanceFor(isDark.value ? "dark" : "light", themePalette.value, themePalette.value === "custom" ? activeCustomUiColors.value : undefined);
+  const themeExt = await loadEditorTheme(editorSettings.theme, appAppearance, resolveEditorThemeColors(editorSettings), themePalette.value);
   if (requestId !== ddlEditorInitRequestId || activeTab.value !== "ddl" || loading.value || ddlLoading.value || ddlEditorContainer.value !== container) return;
 
   const fontExt = editorFontTheme(EditorView, editorSettings.fontSize, editorSettings.fontFamily, { fixedHeight: true, scrollable: true });
@@ -563,7 +565,7 @@ type StructureDdlRequest = {
   schema: string;
   tableName: string;
   catalog?: string;
-  objectType?: "VIEW";
+  objectType?: ObjectSourceKind;
   exactIdentity?: boolean;
 };
 
@@ -575,7 +577,7 @@ function ddlRequest(): StructureDdlRequest {
     schema: metadataSchema.value,
     tableName: props.tableName,
     catalog: props.catalog,
-    objectType: props.tableType === "view" ? "VIEW" : undefined,
+    objectType: props.tableType === "view" ? "VIEW" : props.tableType === "materialized_view" ? "MATERIALIZED_VIEW" : undefined,
     ...(props.exactIdentity ? { exactIdentity: true } : {}),
   };
 }
@@ -620,6 +622,9 @@ async function fetchDdl(force = false, options?: { preserveDraft?: boolean }) {
   }
 }
 const errorMessage = ref("");
+// A failed column read stays unloaded. Keep its error separate from preview
+// errors so automatic tab loading waits for an explicit metadata refresh.
+const columnsMetadataReadError = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 // Keep the index write gate independent of display errors, which unrelated
 // facet loads and silent refreshes may clear or suppress.
@@ -1477,7 +1482,8 @@ const structureDensityStyle = computed(() => {
     "--structure-line-height": String(metric.lineHeight),
   };
 });
-const structureControlClass = "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
+const structureControlClass =
+  "structure-grid-control h-[var(--structure-control-height)] min-w-0 rounded-[6px] px-[var(--structure-control-px)] py-0 text-[length:var(--structure-font-size)] md:text-[length:var(--structure-font-size)] leading-[var(--structure-control-height)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25";
 const structureMonoControlClass = `${structureControlClass} font-mono`;
 const structureToolbarButtonClass = "h-[var(--structure-control-height)] gap-1 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]";
 const structureIconButtonClass = "h-[var(--structure-control-height)] w-[var(--structure-control-height)]";
@@ -3472,12 +3478,13 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
         metadata?.parent && (metadata.scope === "TABLE" || metadata.scope === "VIEW")
           ? { owner: metadata.owner, parentType: metadata.scope }
           : !trigger.original && oracleTriggerReadOptions(databaseType.value) && metadataSchema.value
-            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" ? ("VIEW" as const) : ("TABLE" as const) })
+            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" || props.tableType === "materialized_view" ? ("VIEW" as const) : ("TABLE" as const) })
             : undefined;
       return { ...trigger, oracleExact };
     }),
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
+    tableType: isCreateMode.value ? undefined : props.tableType,
     mysqlAutoIncrementValue: isCreateMode.value && canEditMysqlAutoIncrement.value ? mysqlAutoIncrementValue.value || undefined : undefined,
     mysqlEngine: mysqlTableEngineSqlOption({ value: mysqlTableEngine.value, originalValue: originalMysqlTableEngine.value }, isCreateMode.value, supportsMysqlEngine.value && !mysqlTableEngineLoading.value && !mysqlTableEngineLoadError.value),
     transwarpCreate: isCreateMode.value && databaseType.value === "transwarp" ? buildInceptorCreateOptions(physicalOptions.value, columns.value) : undefined,
@@ -3831,7 +3838,7 @@ async function refreshSqlPreview() {
           owner: metadataSchema.value!,
           tableName: isCreateMode.value ? foldCreatedTableName(newTableName.value, databaseType.value) : props.tableName!,
           executionSchema: props.schema || metadataSchema.value!,
-          parentType: props.tableType === "view" ? "VIEW" : "TABLE",
+          parentType: props.tableType === "view" || props.tableType === "materialized_view" ? "VIEW" : "TABLE",
           databaseType: databaseType.value as "oracle" | "oceanbase-oracle" | "dameng",
           newTable: isCreateMode.value,
         },
@@ -3891,6 +3898,7 @@ function clearDraft() {
 }
 
 function resetState() {
+  columnsMetadataReadError.value = "";
   triggerStructurePlan.value = undefined;
   triggerStructureRecovery.value = undefined;
   invalidateDraftHydration();
@@ -4257,6 +4265,7 @@ async function loadStructure(
   const oracleIndexContext = !isCreateMode.value && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
   const needsOracleIndexBaseline = oracleIndexContext && scope.indexes;
   const effectiveScope = withRequiredPostgresPrimaryKeyMetadata(needsOracleIndexBaseline || (props.exactIdentity && scope.indexes) ? { ...scope, columns: true, indexes: true } : scope);
+  if (effectiveScope.columns) columnsMetadataReadError.value = "";
   if (oracleIndexContext && (scope.columns || scope.indexes)) invalidateOracleIndexReady();
   let loadEpoch = oracleIndexEpoch.value;
   const requestId = ++structureLoadRequestId;
@@ -4297,10 +4306,15 @@ async function loadStructure(
         : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false, isForeign: false } });
     const columnsLoad = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => getStructureColumns(metadataRequest), { force: forceMetadata }) : undefined;
     const columnsPromise = columnsLoad
-      ? columnsLoad.then((result) => {
-          columnsServedFromCache = result.cacheStatus !== "remote";
-          return result.value;
-        })
+      ? columnsLoad
+          .then((result) => {
+            columnsServedFromCache = result.cacheStatus !== "remote";
+            return result.value;
+          })
+          .catch((error) => {
+            if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) columnsMetadataReadError.value = error instanceof Error ? error.message || String(error) : String(error);
+            throw error;
+          })
       : Promise.resolve(undefined);
     const indexesPromise = effectiveScope.indexes
       ? tableMetadataCapabilities.value.indexes
@@ -4596,7 +4610,15 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
     const [columnsResult, commentResult] = await Promise.allSettled([columnsPromise, commentPromise] as const);
     // A newer load or revalidation supersedes this one.
     if (!isCurrent()) return;
-    if (columnsResult.status === "rejected") console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+    if (columnsResult.status === "rejected") {
+      console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+      if (columns.value.length === 0) {
+        const error = columnsResult.reason;
+        columnsMetadataReadError.value = error instanceof Error ? error.message || String(error) : String(error);
+        errorMessage.value = columnsMetadataReadError.value;
+        loadedMetadataFacets.delete("columns");
+      }
+    }
     if (commentResult.status === "rejected") console.warn("[DBX][structure-editor:comment-metadata-revalidation-failed]", commentResult.reason);
 
     let applied = false;
@@ -5154,9 +5176,11 @@ const hasLocalColumnOrderChange = computed(() => {
 
 function applyStoredLocalColumnOrder(items: EditableStructureColumn[]): EditableStructureColumn[] {
   if (!usesLocalTableColumnOrder.value) return items;
-  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey());
-  if (!orderedKeys.length) return items;
   const columnKeys = uniqueDataGridColumnOrderKeys(items.map((column) => column.name));
+  // `items` arrive in database order, so a table rebuilt with a new column
+  // order discards the arrangement saved against the old one.
+  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey(), columnKeys);
+  if (!orderedKeys.length) return items;
   const indexes = orderedColumnIndexes({
     availableIndexes: items.map((_, index) => index),
     columnKeys,
@@ -5169,7 +5193,7 @@ function persistLocalColumnOrder(showNotice = true) {
   if (!usesLocalTableColumnOrder.value) return;
   const scopeKey = localTableColumnOrderScopeKey();
   if (hasLocalColumnOrderChange.value) {
-    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value));
+    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value), localColumnOrderKeys(localTableColumnDatabaseOrder(columns.value)));
   } else {
     removeTableDataGridColumnOrder(scopeKey);
   }
@@ -7862,8 +7886,11 @@ onMounted(() => {
   if (props.draft?.initialized) {
     // A clean persisted editor snapshot is not a live schema cache. After an
     // MCP DDL, restoring its loaded-facet flags would otherwise bypass the
-    // invalidated backend cache entirely. Legacy/dirty drafts remain intact.
-    const revalidateRestoredColumns = props.draft.dirty === false && !isCreateMode.value && loadedMetadataFacets.has("columns") && !(databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl);
+    // invalidated backend cache entirely. Empty legacy snapshots can also
+    // wrongly claim that columns were loaded; recheck those when no edits need
+    // preserving. Other legacy/dirty drafts remain intact.
+    const emptyLegacyColumns = props.draft.dirty === undefined && columns.value.length === 0 && !hasPendingStructureChanges() && !ddlDirty.value;
+    const revalidateRestoredColumns = (props.draft.dirty === false || emptyLegacyColumns) && !isCreateMode.value && loadedMetadataFacets.has("columns") && !(databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl);
     const restoredIdentity = draftTargetIdentity();
     void hydrateRestoredDraftFromDatabase().then((completed) => {
       if (completed) return initializeRestoredDraftMetadata(restoredIdentity, revalidateRestoredColumns);
@@ -8238,6 +8265,10 @@ async function loadActiveTableStructureMetadataIfNeeded() {
   }
   if (loading.value || secondaryMetadataLoading.value) return;
   const scope = withRequiredPostgresPrimaryKeyMetadata(unloadedTableStructureRefreshScope(activeTab.value, loadedMetadataFacets));
+  if (scope.columns && columnsMetadataReadError.value) {
+    errorMessage.value = columnsMetadataReadError.value;
+    return;
+  }
   // A rejected facet is still unloaded, but retrying it whenever loading
   // clears would loop indefinitely. The toolbar performs an explicit retry.
   if (indexMetadataReadError.value) scope.indexes = false;
@@ -10624,6 +10655,8 @@ watch(
   max-height: var(--structure-control-height);
   padding-top: 0;
   padding-bottom: 0;
+  font-size: var(--structure-font-size);
+  line-height: var(--structure-control-height);
   border-color: transparent;
   border-radius: 0;
   background-color: transparent;
@@ -10636,6 +10669,8 @@ watch(
   max-height: var(--structure-control-height);
   padding-top: 0;
   padding-bottom: 0;
+  font-size: var(--structure-font-size);
+  line-height: var(--structure-control-height);
 }
 
 .structure-edit-grid > tbody > tr > td:hover,

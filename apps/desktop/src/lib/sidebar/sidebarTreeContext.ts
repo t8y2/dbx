@@ -7,6 +7,8 @@ export interface SidebarTreeContext {
   getVisibleNodeIndex: (id: string) => number;
   getProjectedConnectionIds?: () => ReadonlySet<string> | null;
   isSearchProjectionActive?: () => boolean;
+  retainSearchDetailTable?: (node: TreeNode) => void;
+  findSearchDetailNode?: (node: TreeNode) => TreeNode | null;
   removeVerifiedTriggerNode?: (node: TreeNode) => void;
   getTreeLoadSearchOptions?: (node: TreeNode) => { searchFilter: string; allowGlobalSearchMismatch: true; expectedSidebarSearchQuery: string } | undefined;
   setTableSearchQuery?: (parentNodeId: string, query: string, local: boolean) => void;

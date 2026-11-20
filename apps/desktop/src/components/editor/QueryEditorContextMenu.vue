@@ -58,12 +58,15 @@ export interface QueryEditorContextMenuState {
   canExplain?: boolean;
   hasContent?: boolean;
   canDebugPlSql?: boolean;
+  showExecuteScriptFromHere?: boolean;
+  canExecuteScriptFromHere?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
   debugPlSqlFromContextMenu?: () => void;
   executeFromContextMenu: () => void;
   executeAllFromContextMenu?: () => void;
+  executeScriptFromContextPosition?: () => void;
   executeInNewResultTabFromContextMenu: () => void;
   explainFromContextMenu?: () => void;
   requestPreviewChanges: (sql?: string) => void;
@@ -189,6 +192,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
                 },
               ]
             : []),
+          ...(state.showExecuteScriptFromHere && actions.executeScriptFromContextPosition ? [{ label: t("editor.contextMenu.executeScriptFromHere"), action: actions.executeScriptFromContextPosition, disabled: !state.canExecuteScriptFromHere, icon: FastForward }] : []),
           ...(state.canDebugPlSql && actions.debugPlSqlFromContextMenu ? [{ sidebarActionId: "plDebug.start.title", label: t("plDebug.start.title"), action: actions.debugPlSqlFromContextMenu, icon: Play }] : []),
           {
             sidebarActionId: "settings.shortcutExecuteSqlInNewResultTab",

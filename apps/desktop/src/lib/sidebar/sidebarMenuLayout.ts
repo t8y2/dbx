@@ -21,10 +21,10 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 }
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
-  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.editConnection", "contextMenu.refreshChildren"],
+  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.createDatabase", "contextMenu.editConnection", "contextMenu.refreshChildren"],
   // Closing a database hides itself once the database is already closed, so it leads the database menu
   // and "browse objects" stays first for databases that cannot be closed.
-  database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
+  database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.createDatabase", "contextMenu.refreshChildren"],
   schema: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   table: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editStructure", "contextMenu.newQuery", "contextMenu.refreshChildren"],
   view: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editView", "contextMenu.newQuery", "contextMenu.refreshChildren"],
@@ -73,12 +73,15 @@ export function reorderSidebarMenuEntries(savedOrder: readonly string[], visible
 
 const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
   data: ["contextMenu.importData", "contextMenu.exportData", "contextMenu.exportDatabase", "contextMenu.exportAllDatabases", "transfer.dataTransfer", "dataCompare.title", "contextMenu.backupSqliteDatabase", "contextMenu.restoreSqliteDatabase", "databaseBackup.title", "databaseSearch.open"],
-  sql: ["contextMenu.generateSql", "contextMenu.sqlHistory", "contextMenu.addToAi", "modelGeneration.title", "sqlFile.title"],
+  sql: ["contextMenu.generateSql", "contextMenu.copyGeneratedSql", "contextMenu.sqlHistory", "contextMenu.addToAi", "modelGeneration.title", "sqlFile.title"],
   structure: [
     "contextMenu.editObject",
     "contextMenu.viewDdl",
     "contextMenu.viewSource",
     "contextMenu.viewDependencies",
+    "oracleSecurity.tableGrants",
+    "tree.aggregateFunctions",
+    "contextMenu.viewPostgresRowLevelSecurity",
     "contextMenu.exportStructure",
     "contextMenu.duplicateStructure",
     "contextMenu.renameObject",
@@ -106,6 +109,9 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "connection.disconnectAndForgetPassword",
     "contextMenu.revealDatabaseFile",
     "contextMenu.changeOpenMode",
+    "databaseVGroup.createGroup",
+    "databaseVGroup.moveToGroup",
+    "databaseVGroup.toggleGroups",
     "tableVGroup.moveToGroup",
     "tableVGroup.removeFromGroup",
     "tableVGroup.moveToNewGroup",

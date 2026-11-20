@@ -12,6 +12,8 @@ import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vue";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
+import { useTableInfoHeaderLayout } from "@/composables/useTableInfoHeaderLayout";
 
 import { computed, createApp, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, shallowRef, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -37,6 +39,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  FilePlus2,
   FileText,
   Info,
   GripVertical,
@@ -67,7 +70,6 @@ import {
   Table,
   Table2,
   TableProperties,
-  TerminalSquare,
   Trash2,
   WrapText,
   X,
@@ -130,8 +132,10 @@ import {
   buildEmptyTableSql,
   buildTruncateTableSql,
   buildVacuumTableSql,
+  kingbaseDuplicateStructureTransaction,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
+  tableAdminSqlOptionsForRow,
   type TableAdminSqlOptions,
 } from "@/lib/database/dbAdminSql";
 import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
@@ -192,6 +196,7 @@ import {
   type TableClipboardContext,
 } from "@/lib/table/tableClipboard";
 import { buildSingleDdlExportFileContent } from "@/lib/export/ddlExport";
+import { exportOracleObjectDdl, supportsOracleObjectExport } from "@/lib/export/oracleObjectExport";
 import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
@@ -228,6 +233,7 @@ import {
   buildObjectBrowserRows,
   buildMongoObjectBrowserRows,
   countObjectBrowserRowsByFilter,
+  formatObjectBrowserAutoIncrement,
   formatObjectBrowserBytes,
   formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
@@ -272,7 +278,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "engine" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "engine" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -346,6 +352,7 @@ function refreshCreatedTrigger() {
 }
 const oracleInvalidObjectsOpen = ref(false);
 const invalidTriggerContext = shallowRef<{ target: Readonly<OracleTriggerTarget>; expectedObjectId?: string; originRevision: number }>();
+const invalidCompileFocus = shallowRef<{ schema: string; name: string; type: "PROCEDURE" | "FUNCTION" | "VIEW" }>();
 let invalidObjectsDialogGeneration = 0;
 let invalidObjectSourceRequestGeneration = 0;
 let objectBrowserUnmounted = false;
@@ -406,6 +413,8 @@ const eventEditorKey = computed(() =>
   }),
 );
 // Table info panel state
+const { tableInfoHeaderRef, tableInfoActionLabelsCompact, observeTableInfoHeader, disconnectTableInfoHeader } = useTableInfoHeaderLayout();
+void tableInfoHeaderRef;
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableOverviewStats = ref<ObjectStatistics | null>(null);
 const tableOverviewComment = ref<string | null>(null);
@@ -448,6 +457,20 @@ const selectedTableInfoColumns = ref<string[]>([]);
 watch(tableInfoSearchQuery, () => {
   selectedTableInfoColumns.value = [];
 });
+
+watch(
+  () => [sidePanelMode.value === "table-info", tableInfoTab.value, sidePanelRow.value?.name],
+  async ([shown]) => {
+    if (!shown) {
+      disconnectTableInfoHeader();
+      return;
+    }
+    await nextTick();
+    observeTableInfoHeader();
+  },
+  { immediate: true, flush: "post" },
+);
+
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
 const tableInfoDdlMatchCount = ref(0);
 const tableInfoDdlMatchIndex = ref(0);
@@ -492,6 +515,9 @@ const supportsExactTriggerDiscovery = computed(() => !!oracleTriggerObjectReadOp
 const supportsSchemaIndexes = computed(() => supportsSchemaIndexManagement(effectiveDatabaseType.value));
 const exactIndexList = computed(() => supportsSchemaIndexes.value && objectFilter.value === "indexes");
 const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle" || exactIndexList.value || (objectFilter.value === "triggers" && supportsExactTriggerDiscovery.value));
+// Search all loaded Oracle object kinds when Tables is only the browsing default.
+const searchAllOracleObjectKinds = computed(() => effectiveDatabaseType.value === "oracle" && !usesServerObjectPaging.value && objectFilter.value === "tables" && !userHasSelectedFilter.value && !props.selectedObjectFilter && !props.initialObjectFilter);
+const displayedObjectFilter = computed<ObjectFilter>(() => (searchAllOracleObjectKinds.value && search.value.trim() ? "all" : objectFilter.value));
 const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
 const OBJECT_COPY_PAGE_SIZE = 1_000;
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
@@ -499,7 +525,28 @@ const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && p
 function setOracleInvalidObjectsOpen(open: boolean) {
   if (oracleInvalidObjectsOpen.value !== open) invalidObjectsDialogGeneration++;
   oracleInvalidObjectsOpen.value = open;
-  if (!open) invalidTriggerContext.value = undefined;
+  if (!open) {
+    invalidTriggerContext.value = undefined;
+    invalidCompileFocus.value = undefined;
+  }
+}
+
+function oracleObjectCompileMenuItem(row: ObjectBrowserRow): ContextMenuItem[] {
+  if (effectiveDatabaseType.value !== "oracle" || row.valid !== false || (row.type !== "PROCEDURE" && row.type !== "FUNCTION" && row.type !== "VIEW")) return [];
+  const schema = row.schema || selectedSchema.value;
+  if (!schema) return [];
+  const focus = { schema, name: row.name, type: row.type } as const;
+  return [
+    {
+      sidebarActionId: "contextMenu.compileObject",
+      label: t("contextMenu.compileObject"),
+      icon: Wrench,
+      action: () => {
+        invalidCompileFocus.value = focus;
+        setOracleInvalidObjectsOpen(true);
+      },
+    },
+  ];
 }
 
 function openBrowserTriggerDiagnostics() {
@@ -529,7 +576,16 @@ const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value 
 const showMysqlTableEngineColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 // 表级元数据（引擎、字符集、排序规则）只在原生 MySQL 连接上可改，与后端 DDL 构造器一致。
 const canChangeMysqlTableMetadata = computed(() => showMysqlTableCharsetColumns.value && supportsMysqlTableEngine(props.connection));
-const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
+// Only the native MySQL statistics read returns AUTO_INCREMENT (same query and gate as the collation).
+const showMysqlAutoIncrementColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
+const isTiDb = computed(() => {
+  const connection = props.connection;
+  return effectiveDatabaseType.value === "mysql" && [connection.driver_profile, connection.database_info?.productName, connection.database_info?.productVersion].some((value) => /\btidb\b/i.test(value ?? ""));
+});
+const objectRowsLabel = computed(() => {
+  if (isVictoriaMetrics.value) return t("objects.series");
+  return t(isTiDb.value ? "grid.tableInfoEstimatedRows" : "objects.rows");
+});
 
 function toggleTableDdlWordWrap() {
   settingsStore.updateEditorSettings({
@@ -687,6 +743,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   estimatedRows: 110,
   totalBytes: 100,
   engine: 110,
+  autoIncrement: 130,
   characterSet: 120,
   collation: 220,
   created_at: 150,
@@ -701,20 +758,22 @@ const availableObjectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
   ...(showMysqlTableEngineColumn.value ? [{ key: "engine" as const, label: t("grid.tableInfoEngine") }] : []),
+  ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
+  { key: "comment" as const, label: t("objects.comment") },
+  ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
+  ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
+  ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
+  ...(showMysqlAutoIncrementColumn.value ? [{ key: "autoIncrement" as const, label: t("grid.tableInfoAutoIncrement") }] : []),
   ...(showMysqlTableCharsetColumns.value
     ? [
         { key: "characterSet" as const, label: t("structureEditor.characterSet") },
         { key: "collation" as const, label: t("structureEditor.collation") },
       ]
     : []),
-  ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
-  ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
-  ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
-  ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
-  { key: "comment" as const, label: t("objects.comment") },
 ]);
 const objectColumnDefinitions = computed(() => {
   const ranks = new Map(objectColumnOrder.value.map((key, index) => [key, index]));
+  // Newly available columns follow saved columns in their built-in relative order.
   return [...availableObjectColumnDefinitions.value].sort((left, right) => (ranks.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(right.key) ?? Number.MAX_SAFE_INTEGER));
 });
 
@@ -747,6 +806,17 @@ function cancelObjectColumnDrag(): void {
   objectColumnDrag.value = undefined;
   objectColumnDropTarget.value = undefined;
   if (drag?.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+}
+
+function resetObjectColumnOrder(): void {
+  cancelObjectColumnDrag();
+  objectColumnOrder.value = [];
+  try {
+    localStorage.removeItem(objectColumnOrderStorageKey.value);
+  } catch {
+    // The current session can still use the default order without persistent storage.
+  }
+  nextTick(() => syncObjectListHeaderScroll());
 }
 
 function startObjectColumnDrag(event: PointerEvent, key: ObjectBrowserColumnKey): void {
@@ -945,6 +1015,7 @@ type ObjectBrowserScroller =
 const listScrollerRef = ref<ObjectBrowserScroller | null>(null);
 const gridScrollerRef = ref<ObjectBrowserScroller | null>(null);
 const objectListHeaderRef = ref<HTMLElement | null>(null);
+const objectListScrollbarWidth = ref(0);
 let viewportFrame = 0;
 let restoreViewportFrame = 0;
 
@@ -1046,8 +1117,21 @@ watch(
     if (!el) return;
     el.addEventListener("scroll", onObjectsScroll, { passive: true });
     restoreObjectBrowserViewport();
-    nextTick(() => syncObjectListHeaderScroll());
-    onCleanup(() => el.removeEventListener("scroll", onObjectsScroll));
+    let resizeObserver: ResizeObserver | undefined;
+    if (isListView.value) {
+      const syncHeader = () => {
+        // The header and rows need the same visible width for the last column to align.
+        objectListScrollbarWidth.value = scrollbarGutterWidth(el);
+        nextTick(syncObjectListHeaderScroll);
+      };
+      syncHeader();
+      resizeObserver = new ResizeObserver(syncHeader);
+      resizeObserver.observe(el);
+    }
+    onCleanup(() => {
+      el.removeEventListener("scroll", onObjectsScroll);
+      resizeObserver?.disconnect();
+    });
   },
   { flush: "post" },
 );
@@ -1073,8 +1157,9 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 // filtered results bear no relation to the previous scroll position.
 watch(
   search,
-  (value) => {
+  (value, previousValue) => {
     scrollObjectsToTop();
+    if (searchAllOracleObjectKinds.value && Boolean(value.trim()) !== Boolean(previousValue.trim())) clearTableSelection();
     emit("searchChange", value);
     if (usesServerObjectPaging.value) {
       clearTimeout(objectSearchTimer);
@@ -1310,17 +1395,7 @@ function toggleSort(key: ObjectBrowserSortKey) {
   sortDirection.value = initialObjectBrowserSortDirection(key);
 }
 
-const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
-  const options: ObjectBrowserSortKey[] = ["name", "type"];
-  if (showMysqlTableEngineColumn.value) options.push("engine");
-  if (showMysqlTableCharsetColumns.value) options.push("characterSet", "collation");
-  if (showObjectRowStats.value) options.push("estimatedRows");
-  if (showObjectSizeStats.value) options.push("totalBytes");
-  if (hasCreatedAt.value) options.push("created_at");
-  if (hasUpdatedAt.value) options.push("updated_at");
-  options.push("comment");
-  return options;
-});
+const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => objectColumnDefinitions.value.map((column) => column.key));
 
 watch(sortKeyOptions, (options) => {
   if (!options.includes(sortKey.value)) {
@@ -1337,6 +1412,7 @@ function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "collation") return t("structureEditor.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
   if (key === "totalBytes") return t("objects.size");
+  if (key === "autoIncrement") return t("grid.tableInfoAutoIncrement");
   if (key === "created_at") return t("objects.createdAt");
   if (key === "updated_at") return t("objects.updatedAt");
   if (key === "comment") return t("objects.comment");
@@ -1406,7 +1482,7 @@ function rowMatchesFilter(row: ObjectBrowserRow, filter: ObjectFilter) {
 }
 
 function rowMatchesObjectFilter(row: ObjectBrowserRow) {
-  return rowMatchesFilter(row, objectFilter.value);
+  return rowMatchesFilter(row, displayedObjectFilter.value);
 }
 
 function objectBrowserPinnedTreeNodeContext() {
@@ -2543,6 +2619,7 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
             schema,
             name: row.name,
             source: result.source,
+            identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
           }),
           metadataLoadBudgetMs(props.connection.query_timeout_secs),
         )
@@ -2616,10 +2693,10 @@ async function onEventSaved(savedName: string) {
   toast(t("objects.sourceSaved"));
 }
 
-async function openNewQuery(row: ObjectBrowserRow) {
+async function openNewQuery(row: ObjectBrowserRow, forceNew = false) {
   flushObjectBrowserViewport();
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog, { forceNew });
   queryStore.updateSql(
     tabId,
     await buildTableSelectSql({
@@ -2977,6 +3054,7 @@ async function refreshRenamePreviewSql() {
       schema: row.schema || selectedSchema.value,
       oldName: row.name,
       newName,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
     });
     if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = sql;
   } catch (error) {
@@ -3126,6 +3204,7 @@ async function confirmRename() {
         name: row.name,
         newName,
         source: source.source,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
         for (const sql of statements) {
@@ -3141,6 +3220,7 @@ async function confirmRename() {
         schema,
         oldName: row.name,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => {
         tableRenameFreeze?.markDispatched();
@@ -4427,24 +4507,31 @@ function requestCopyAsNewTable(row: ObjectBrowserRow) {
 }
 
 function captureTableCopyContext() {
+  const databaseType = effectiveDatabaseType.value;
   return {
     connection: { ...props.connection },
     database: props.database,
     catalog: props.catalog,
     schema: selectedSchema.value,
-    databaseType: effectiveDatabaseType.value,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+    databaseType,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id, databaseType === "kingbase" ? props.database : undefined),
   };
 }
 
 type TableCopyContext = ReturnType<typeof captureTableCopyContext>;
+
+async function ensureTableCopyIdentifierQuote(context: TableCopyContext) {
+  if (context.databaseType === "kingbase") {
+    context.identifierQuote = await connectionStore.ensureConnectionIdentifierQuote(context.connection.id, context.database);
+  }
+}
 
 function reloadTableCopyContext(context: TableCopyContext) {
   if (props.connection.id === context.connection.id && props.database === context.database && props.catalog === context.catalog && selectedSchema.value === context.schema) return reload();
   return Promise.resolve();
 }
 
-async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, sourceColumns?: ColumnInfo[]) {
+async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName: string, targetName: string, schema: string | undefined, tableComment?: string | null, copyData = false) {
   return buildSharedDuplicateTableStructurePlan({
     connectionId: context.connection.id,
     database: context.database,
@@ -4454,13 +4541,26 @@ async function buildDuplicateStructurePlan(context: TableCopyContext, sourceName
     sourceName,
     targetName,
     tableComment,
-    sourceColumns,
+    copyData,
     identifierQuote: context.identifierQuote,
   });
 }
 
+function duplicateStructureSuccessMessage(name: string, plan: DuplicateTableStructurePlan) {
+  const success = t("contextMenu.duplicateStructureSuccess", { name });
+  return plan.commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success;
+}
+
 function executeDuplicateStructurePlan(context: TableCopyContext, plan: DuplicateTableStructurePlan, schema: string | undefined) {
   if (plan.oceanbaseClone) return executeOceanbaseTableClone(plan.oceanbaseClone, (sql) => api.executeQuery(context.connection.id, context.database, sql, plan.oceanbaseClone!.targetSchema));
+  const executeTransaction = kingbaseDuplicateStructureTransaction(plan, {
+    connectionId: context.connection.id,
+    database: context.database,
+    databaseType: context.databaseType,
+    schema,
+    catalog: context.catalog,
+  });
+  if (executeTransaction) return executeTransaction();
   return plan.executeAsScript ? api.executeScript(context.connection.id, context.database, plan.sql, schema) : api.executeQuery(context.connection.id, context.database, plan.sql, schema);
 }
 
@@ -4476,11 +4576,12 @@ async function confirmDuplicateStructureImpl() {
   showDuplicateDialog.value = false;
   try {
     const schema = row.schema || context.schema;
+    await ensureTableCopyIdentifierQuote(context);
     const plan = await buildDuplicateStructurePlan(context, row.name, newName, schema, row.comment);
     if (!(await cloneDialog.request([{ plan, scope: [context.connection.id, context.database, context.catalog || ""] }]))) return;
     const executed = await executeObjectBrowserSqlWithProductionGuard(plan.sql, () => executeDuplicateStructurePlan(context, plan, schema), context);
     if (!executed) return;
-    toast(t("contextMenu.duplicateStructureSuccess", { name: newName }));
+    toast(duplicateStructureSuccessMessage(newName, plan), plan.commentMetadataIncomplete ? 5000 : 2000);
     await reloadTableCopyContext(context);
     await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, schema);
   } catch (e: any) {
@@ -4545,6 +4646,7 @@ function objectBrowserTableCopyColumns() {
           if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
           if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
           if (key === "engine") return row.engine ?? "";
+          if (key === "autoIncrement") return formatObjectBrowserAutoIncrement(row.autoIncrement);
           if (key === "characterSet") return row.characterSet ?? "";
           if (key === "collation") return row.collation ?? "";
           if (key === "created_at") return formatObjectBrowserTimestamp(row.created_at);
@@ -4843,6 +4945,7 @@ async function confirmPasteTableImpl() {
   const mode = pasteTableMode.value;
   const copyData = pasteTableModeCopiesData(mode) && pasteTableDataCopySupported.value;
   showPasteDialog.value = false;
+  await ensureTableCopyIdentifierQuote(context);
   if (context.databaseType === "mysql") {
     const copies = entries.map((entry) => ({ ...entry, connection: context.connection, database: context.database, catalog: context.catalog, schema: entry.schema || context.schema, identifierQuote: context.identifierQuote }));
     const completed = await useTableCopyTaskStore().run(copies, mode);
@@ -4860,6 +4963,7 @@ async function confirmPasteTableImpl() {
   let firstPasteError: unknown;
   let pasteCancelled = false;
   let hasMutatedTable = false;
+  let commentMetadataIncomplete = false;
   const preparedClones = new Map<(typeof entries)[number], DuplicateTableStructurePlan>();
   if (context.databaseType === "oceanbase-oracle" && mode !== "data-only") {
     try {
@@ -4882,7 +4986,7 @@ async function confirmPasteTableImpl() {
     try {
       let sourceColumns: ColumnInfo[] | undefined;
       if (mode === "structure-and-data" || mode === "structure-only") {
-        const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, sourceColumns));
+        const plan = preparedClones.get(entry) || (await buildDuplicateStructurePlan(context, entry.sourceName, targetName, schema, entry.tableComment, copyData));
         sourceColumns = plan.sourceColumns;
         if (plan.oceanbaseClone) {
           targetName = plan.oceanbaseClone.targetName;
@@ -4894,6 +4998,7 @@ async function confirmPasteTableImpl() {
           break;
         }
         hasMutatedTable = true;
+        commentMetadataIncomplete ||= !!plan.commentMetadataIncomplete;
         completedClone = plan.oceanbaseClone;
       }
       if (copyData) {
@@ -4951,7 +5056,8 @@ async function confirmPasteTableImpl() {
       try {
         await reloadTableCopyContext(context);
         await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, context.schema);
-        toast(t("contextMenu.pasteTableCancelledAfterPartial"), 5000);
+        const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+        toast(`${t("contextMenu.pasteTableCancelledAfterPartial")}${warning}`, 5000);
       } catch (e: any) {
         toast(t("contextMenu.pasteTableRefreshFailed", { message: translateBackendError(t, e) }), 5000);
       }
@@ -4963,24 +5069,25 @@ async function confirmPasteTableImpl() {
     if (shouldConsumeTableClipboard && connectionStore.treeClipboard === clipboardAtPasteStart) {
       connectionStore.treeClipboard = null;
     }
-    toast(t("contextMenu.batchPasteSuccess", { count: successCount }), 3000);
+    const success = t("contextMenu.batchPasteSuccess", { count: successCount });
+    toast(commentMetadataIncomplete ? `${success}\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : success, commentMetadataIncomplete ? 5000 : 3000);
   } else {
-    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}`, 5000);
+    const warning = commentMetadataIncomplete ? `\n${t("contextMenu.duplicateStructureCommentsUnavailable")}` : "";
+    toast(`${t("contextMenu.batchPastePartialFail", { success: pasteFeedback.successCount, failed: pasteFeedback.failedCount })}\n${t("contextMenu.tableOperationFailed", { message: translateBackendError(t, pasteFeedback.firstError) })}${warning}`, 5000);
   }
   await reloadTableCopyContext(context);
   await connectionStore.refreshObjectListTreeNode(context.connection.id, context.database, context.schema);
 }
 
 function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boolean }): TableAdminSqlOptions {
-  const result: TableAdminSqlOptions = {
+  return tableAdminSqlOptionsForRow({
+    row,
     databaseType: effectiveDatabaseType.value,
     schema: connectionTableSqlSchema(props.connection, row.schema || selectedSchema.value),
-    tableName: row.name,
     // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
-  };
-  if (options?.cascade) result.cascade = true;
-  return result;
+    cascade: options?.cascade,
+  });
 }
 
 /**
@@ -5110,6 +5217,7 @@ async function refreshVacuumPreviewSql() {
     tableName: row.name,
     full: vacuumTableFull.value,
     analyze: vacuumTableAnalyze.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   }).catch(() => "");
 }
 
@@ -5136,6 +5244,7 @@ async function confirmVacuumTable() {
         tableName: row.name,
         full: vacuumTableFull.value,
         analyze: vacuumTableAnalyze.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       }));
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, row.schema || selectedSchema.value));
     if (!executed) return;
@@ -5288,6 +5397,7 @@ async function saveSource() {
       schema,
       name: row.name,
       source: sourceDraft.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
     });
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: row.type as ObjectSourceKind, name: row.name });
     const preparedSave = save;
@@ -5623,7 +5733,10 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
     // MySQL 的旧缓存可能尚未合并表排序规则/存储引擎，即使仍新鲜也要补读一次。
-    const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || (showMysqlTableEngineColumn.value && row.engine === undefined)));
+    // Backfill MySQL scaffolds cached before all table metadata was merged,
+    // even while fresh. Null timestamps are known to be unavailable.
+    const missingMysqlTableMetadata =
+      showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || (showMysqlTableEngineColumn.value && row.engine === undefined) || row.autoIncrement === undefined || row.created_at === undefined || row.updated_at === undefined));
     const statistics = cached.stale || missingMysqlTableMetadata ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
     // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
@@ -5917,7 +6030,9 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
-      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, engine: stat.engine?.trim() || null } : {}),
+      created_at: stat.created_at ?? row.created_at ?? null,
+      updated_at: stat.updated_at ?? row.updated_at ?? null,
+      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, engine: stat.engine?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });
   cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
@@ -6189,7 +6304,7 @@ function filterLabel(filter: ObjectFilter) {
 }
 
 function selectObjectFilter(filter: ObjectFilter) {
-  if (filter === objectFilter.value) return;
+  if (filter === objectFilter.value && filter === displayedObjectFilter.value) return;
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
@@ -6387,7 +6502,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   if (isVictoriaMetrics.value) {
     return [
       { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery },
       ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
       { label: "", separator: true },
       exportDataSubmenu(item),
@@ -6435,7 +6550,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     },
     ...(canOpenStructureEditor.value ? [{ sidebarActionId: "contextMenu.editStructure", label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ sidebarActionId: "contextMenu.renameObject", label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
-    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery },
     ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
     ...(canOpenDiagram.value ? [{ sidebarActionId: "diagram.open", label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     ...(canOpenTableImport.value ? [{ sidebarActionId: "contextMenu.importData", label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
@@ -6468,6 +6583,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     { sidebarActionId: "contextMenu.editView", label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
     { sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
+    ...oracleObjectCompileMenuItem(item),
     ...(effectiveDatabaseType.value === "dameng" && item.type === "VIEW" && buildDamengCompileViewSql({ schema: item.schema || selectedSchema.value, name: item.name })
       ? [{ sidebarActionId: "contextMenu.compileObject", label: t("contextMenu.compileObject"), action: () => compileDamengView(item), icon: Wrench }]
       : []),
@@ -6478,7 +6594,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       icon: ScrollText,
     },
     ...(canRename(item) ? [{ sidebarActionId: "contextMenu.renameObject", label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
-    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: FilePlus2, shortcut: settingsStore.editorSettings.shortcuts.newQuery },
     ...(canOpenDiagram.value ? [{ sidebarActionId: "diagram.open", label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     { label: "", separator: true },
     exportDataSubmenu(item),
@@ -6500,6 +6616,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
+    ...oracleObjectCompileMenuItem(item),
     ...(supportsPlDebugRoutine(effectiveDatabaseType.value)
       ? [
           {
@@ -6636,6 +6753,21 @@ function getObjectBrowserActionMenuItems(item: ObjectBrowserRow): ContextMenuIte
 
 function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   const items = getObjectBrowserActionMenuItems(item);
+  const objectType = item.type;
+  if (supportsOracleObjectExport(effectiveDatabaseType.value, objectType)) {
+    items.push({
+      label: t("contextMenu.exportObjectDdl"),
+      icon: FileCode,
+      action: async () => {
+        try {
+          const saved = await exportOracleObjectDdl({ connectionId: props.connection.id, database: props.database, schema: item.schema || selectedSchema.value || props.database, catalog: props.catalog, name: item.name, objectType, signature: item.signature ?? undefined });
+          if (saved === "saved") toast(t("grid.exported"));
+        } catch (error) {
+          toast(t("grid.exportFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+        }
+      },
+    });
+  }
   if (item.type === "TABLE" || item.type === "VIEW" || item.type === "MATERIALIZED_VIEW") {
     items.push(
       { label: "", separator: true },
@@ -6688,7 +6820,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :open="oracleInvalidObjectsOpen && (!invalidTriggerContext || sidePanelGuard.isFresh(invalidTriggerContext.originRevision))"
     :connection="connection"
     :database="database"
-    :schema="selectedSchema || database"
+    :schema="invalidCompileFocus?.schema || selectedSchema || database"
+    :focus-object="invalidCompileFocus"
     :trigger-context="invalidTriggerContext"
     @update:open="setOracleInvalidObjectsOpen"
     @open-source="openInvalidObjectSource"
@@ -6728,7 +6861,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             :key="filter"
             type="button"
             class="h-6 shrink-0 whitespace-nowrap rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }"
+            :class="{ 'bg-background text-foreground shadow-sm': displayedObjectFilter === filter }"
             @click="selectObjectFilter(filter)"
           >
             {{ filterLabel(filter) }}
@@ -6888,7 +7021,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel !== false" @select.prevent @update:model-value="toggleAutoOpenDetailPanel()">{{ t("objects.autoOpenDetailPanel") }}</DropdownMenuCheckboxItem>
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
-          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }} </DropdownMenuCheckboxItem>
+          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="displayedObjectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }} </DropdownMenuCheckboxItem>
         </template>
         <template v-else-if="singleKindFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
@@ -6939,213 +7072,237 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     <div v-else class="flex min-h-0 min-w-0 flex-1" :class="{ 'event-editor-layout': isEventEditor }">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div ref="objectListHeaderRef" class="relative h-7 shrink-0 overflow-hidden">
-            <div class="grid h-7 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
-              <template v-for="columnKey in objectBrowserColumns" :key="columnKey">
-                <div v-if="columnKey === 'select'" class="relative flex min-w-0 items-center">
-                  <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
-                    <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-                    <Square v-else class="h-3.5 w-3.5" />
-                  </button>
-                  <div
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('select', $event)"
-                    @dblclick="resetObjectColumnWidth('select', 34, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'name'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
-                    <span class="truncate">{{ t("objects.name") }}</span>
-                    <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('name')"
-                    data-object-column-resize="name"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('name', $event)"
-                    @dblclick="resetObjectColumnWidth('name', 260, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'type'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
-                    <span class="truncate">{{ t("objects.type") }}</span>
-                    <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('type')"
-                    data-object-column-resize="type"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('type', $event)"
-                    @dblclick="resetObjectColumnWidth('type', 110, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'engine'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('engine')">
-                    <span class="truncate">{{ t("grid.tableInfoEngine") }}</span>
-                    <component :is="sortIconFor('engine')" v-if="sortIconFor('engine')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('engine')"
-                    data-object-column-resize="engine"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('engine', $event)"
-                    @dblclick="resetObjectColumnWidth('engine', 110, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'characterSet'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
-                    <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
-                    <component :is="sortIconFor('characterSet')" v-if="sortIconFor('characterSet')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('characterSet')"
-                    data-object-column-resize="characterSet"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('characterSet', $event)"
-                    @dblclick="resetObjectColumnWidth('characterSet', 120, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'collation'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
-                    <span class="truncate">{{ t("structureEditor.collation") }}</span>
-                    <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('collation')"
-                    data-object-column-resize="collation"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('collation', $event)"
-                    @dblclick="resetObjectColumnWidth('collation', 220, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'estimatedRows'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-                    <span class="truncate">{{ objectRowsLabel }}</span>
-                    <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('estimatedRows')"
-                    data-object-column-resize="estimatedRows"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
-                    @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'totalBytes'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-                    <span class="truncate">{{ t("objects.size") }}</span>
-                    <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('totalBytes')"
-                    data-object-column-resize="totalBytes"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
-                    @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'created_at'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
-                    <span class="truncate">{{ t("objects.createdAt") }}</span>
-                    <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('created_at')"
-                    data-object-column-resize="created_at"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('created_at', $event)"
-                    @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'updated_at'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
-                    <span class="truncate">{{ t("objects.updatedAt") }}</span>
-                    <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('updated_at')"
-                    data-object-column-resize="updated_at"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('updated_at', $event)"
-                    @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-                <div v-if="columnKey === 'comment'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
-                    <span class="truncate">{{ t("objects.comment") }}</span>
-                    <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('comment')"
-                    data-object-column-resize="comment"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('comment', $event)"
-                    @dblclick="resetObjectColumnWidth('comment', 260, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
-                  </div>
-                </div>
-              </template>
-            </div>
-            <Popover v-model:open="objectColumnConfigOpen">
-              <PopoverTrigger as-child>
-                <button type="button" class="absolute right-1 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
-                  <Settings2 class="h-3.5 w-3.5" />
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="end" class="w-64 p-1">
-                <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
-                <div ref="objectColumnListRef">
-                  <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
-                    <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
-                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
-                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
-                      <span class="truncate">{{ column.label }}</span>
+          <div class="flex h-7 shrink-0 border-b bg-muted/40">
+            <div ref="objectListHeaderRef" class="min-w-0 flex-1 overflow-hidden" :style="{ marginRight: `${objectListScrollbarWidth}px` }">
+              <div class="grid h-full items-center gap-3 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
+                <template v-for="columnKey in objectBrowserColumns" :key="columnKey">
+                  <div v-if="columnKey === 'select'" class="relative flex min-w-0 items-center">
+                    <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+                      <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+                      <Square v-else class="h-3.5 w-3.5" />
                     </button>
-                    <button
-                      type="button"
-                      class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
-                      :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
-                      :title="t('objects.columnReorder', { column: column.label })"
-                      :aria-label="t('objects.columnReorder', { column: column.label })"
-                      @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
-                      @pointermove.stop="updateObjectColumnDrag"
-                      @pointerup.stop.prevent="finishObjectColumnDrag"
-                      @pointercancel="cancelObjectColumnDrag"
-                      @lostpointercapture="cancelObjectColumnDrag"
-                      @keydown.esc="cancelObjectColumnDrag"
-                      @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
-                      @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
-                      @click.stop
+                    <div
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('select', $event)"
+                      @dblclick="resetObjectColumnWidth('select', 34, $event)"
                     >
-                      <GripVertical class="h-3.5 w-3.5" />
-                    </button>
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-              </PopoverContent>
-            </Popover>
+                  <div v-if="columnKey === 'name'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
+                      <span class="truncate">{{ t("objects.name") }}</span>
+                      <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('name')"
+                      data-object-column-resize="name"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('name', $event)"
+                      @dblclick="resetObjectColumnWidth('name', 260, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'type'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
+                      <span class="truncate">{{ t("objects.type") }}</span>
+                      <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('type')"
+                      data-object-column-resize="type"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('type', $event)"
+                      @dblclick="resetObjectColumnWidth('type', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'engine'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('engine')">
+                      <span class="truncate">{{ t("grid.tableInfoEngine") }}</span>
+                      <component :is="sortIconFor('engine')" v-if="sortIconFor('engine')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('engine')"
+                      data-object-column-resize="engine"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('engine', $event)"
+                      @dblclick="resetObjectColumnWidth('engine', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'characterSet'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
+                      <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
+                      <component :is="sortIconFor('characterSet')" v-if="sortIconFor('characterSet')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('characterSet')"
+                      data-object-column-resize="characterSet"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('characterSet', $event)"
+                      @dblclick="resetObjectColumnWidth('characterSet', 120, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'collation'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
+                      <span class="truncate">{{ t("structureEditor.collation") }}</span>
+                      <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('collation')"
+                      data-object-column-resize="collation"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('collation', $event)"
+                      @dblclick="resetObjectColumnWidth('collation', 220, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'estimatedRows'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                      <span class="truncate">{{ objectRowsLabel }}</span>
+                      <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('estimatedRows')"
+                      data-object-column-resize="estimatedRows"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+                      @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'totalBytes'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                      <span class="truncate">{{ t("objects.size") }}</span>
+                      <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('totalBytes')"
+                      data-object-column-resize="totalBytes"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+                      @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'autoIncrement'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('autoIncrement')">
+                      <span class="truncate">{{ t("grid.tableInfoAutoIncrement") }}</span>
+                      <component :is="sortIconFor('autoIncrement')" v-if="sortIconFor('autoIncrement')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('autoIncrement')"
+                      data-object-column-resize="autoIncrement"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('autoIncrement', $event)"
+                      @dblclick="resetObjectColumnWidth('autoIncrement', 130, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'created_at'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
+                      <span class="truncate">{{ t("objects.createdAt") }}</span>
+                      <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('created_at')"
+                      data-object-column-resize="created_at"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('created_at', $event)"
+                      @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'updated_at'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
+                      <span class="truncate">{{ t("objects.updatedAt") }}</span>
+                      <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('updated_at')"
+                      data-object-column-resize="updated_at"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+                      @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                  <div v-if="columnKey === 'comment'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
+                      <span class="truncate">{{ t("objects.comment") }}</span>
+                      <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('comment')"
+                      data-object-column-resize="comment"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('comment', $event)"
+                      @dblclick="resetObjectColumnWidth('comment', 260, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <div class="flex w-8 shrink-0 items-center justify-center border-l">
+              <Popover v-if="filteredRows.length > 0" v-model:open="objectColumnConfigOpen">
+                <PopoverTrigger as-child>
+                  <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
+                    <Settings2 class="h-3.5 w-3.5" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-64 p-1">
+                  <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
+                  <div ref="objectColumnListRef">
+                    <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
+                      <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
+                      <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
+                        <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
+                        <span class="truncate">{{ column.label }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
+                        :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
+                        :title="t('objects.columnReorder', { column: column.label })"
+                        :aria-label="t('objects.columnReorder', { column: column.label })"
+                        @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
+                        @pointermove.stop="updateObjectColumnDrag"
+                        @pointerup.stop.prevent="finishObjectColumnDrag"
+                        @pointercancel="cancelObjectColumnDrag"
+                        @lostpointercapture="cancelObjectColumnDrag"
+                        @keydown.esc="cancelObjectColumnDrag"
+                        @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
+                        @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
+                        @click.stop
+                      >
+                        <GripVertical class="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div class="mt-1 flex justify-end border-t pt-1">
+                    <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="objectColumnOrder.length === 0" @click="resetObjectColumnOrder">
+                      {{ t("grid.resetColumnOrder") }}
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            </div>
           </div>
-          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ '--dbx-object-grid-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller mr-8 min-h-0 flex-1" :style="{ '--dbx-object-grid-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
               <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                 <div
@@ -7297,6 +7454,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <div v-if="columnKey === 'totalBytes'" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
                       {{ formatObjectBrowserBytes(item.totalBytes) }}
                     </div>
+                    <div v-if="columnKey === 'autoIncrement'" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserAutoIncrement(item.autoIncrement)">
+                      {{ formatObjectBrowserAutoIncrement(item.autoIncrement) }}
+                    </div>
                     <div v-if="columnKey === 'created_at'" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
                       {{ formatObjectBrowserTimestamp(item.created_at) }}
                     </div>
@@ -7342,9 +7502,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
-                      <span v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
-                        formatObjectBrowserCount(item.estimatedRows)
-                      }}</span>
+                      <span
+                        v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0"
+                        class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary"
+                        :title="isTiDb ? t('objects.statisticsHint') : undefined"
+                      >
+                        {{ formatObjectBrowserCount(item.estimatedRows) }}
+                      </span>
                       <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
                         formatObjectBrowserBytes(item.totalBytes)
                       }}</span>
@@ -7402,9 +7566,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
         <!-- Table info mode -->
         <template v-if="sidePanelMode === 'table-info'">
-          <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
-            <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
-            <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
+          <div ref="tableInfoHeaderRef" class="table-info-header flex min-w-0 items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9 overflow-hidden" :class="{ 'table-info-header--compact': tableInfoActionLabelsCompact }">
+            <TableProperties class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+            <span class="table-info-title min-w-0 flex-1 truncate text-xs font-medium">{{ sidePanelRow?.name }}</span>
+            <Button
+              v-if="sidePanelRow && effectiveDatabaseType !== 'nebula' && (sidePanelRow.type === 'TABLE' || sidePanelRow.type === 'VIEW' || sidePanelRow.type === 'MATERIALIZED_VIEW')"
+              variant="ghost"
+              size="sm"
+              class="table-info-action-button h-6 px-2 text-xs"
+              :title="t('contextMenu.newQuery')"
+              :aria-label="t('contextMenu.newQuery')"
+              @click="openNewQuery(sidePanelRow, true)"
+            >
+              <FilePlus2 class="w-3 h-3" />
+              <span class="table-info-action-label">{{ t("contextMenu.newQuery") }}</span>
+            </Button>
             <div v-if="tableInfoTab === 'ddl' && tableMetadataCapabilities.ddl" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
               <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :disabled="tableDdlLoading || !tableDdlLoaded" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyTableDdl">
                 <Copy class="w-3 h-3" />
@@ -8242,10 +8418,6 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
   outline: 1px solid var(--ddl-current-search-border);
 }
 
-.object-browser-side-panel {
-  container-type: inline-size;
-}
-
 .event-editor-layout > :first-child {
   display: none;
 }
@@ -8275,16 +8447,14 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
     opacity 120ms ease;
 }
 
-@container (max-width: 360px) {
-  .table-info-action-button {
-    width: 1.5rem;
-    max-width: 1.5rem;
-    padding-inline: 0;
-  }
+.table-info-header--compact .table-info-action-button {
+  width: 1.5rem;
+  max-width: 1.5rem;
+  padding-inline: 0;
+}
 
-  .table-info-action-label {
-    max-width: 0;
-    opacity: 0;
-  }
+.table-info-header--compact .table-info-action-label {
+  max-width: 0;
+  opacity: 0;
 }
 </style>

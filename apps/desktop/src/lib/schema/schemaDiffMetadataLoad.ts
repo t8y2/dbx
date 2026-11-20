@@ -49,6 +49,31 @@ export function shouldFetchSchemaDiffDdl(isView: boolean, options: Pick<SchemaDi
   return isView ? options.views : options.tables;
 }
 
+export function schemaDiffDefersTableDdl(dbType: string | null | undefined): boolean {
+  return (dbType || "").toLowerCase() === "sqlserver";
+}
+
+/**
+ * Tables whose DDL a SQL Server compare can leave out of the eager load.
+ *
+ * Building one table's DDL on SQL Server re-reads its columns, indexes and
+ * foreign keys and adds the comment: four more serial round trips on top of the
+ * four the compare already spent on that table. A base table present on both
+ * sides is compared from that structured metadata alone, so its DDL only feeds
+ * the preview panel, and SchemaDiffDialog loads it there on selection.
+ *
+ * Added and removed tables still need DDL to generate deploy SQL, and views are
+ * compared by their DDL text. Explicit mappings can pair a table with a
+ * differently named one, leaving a same-named table unmatched, so they disable
+ * the deferral.
+ */
+export function schemaDiffDeferredDdlTables(dbType: string | null | undefined, sourceTables: readonly TableInfo[], targetTables: readonly TableInfo[], tableMappings?: readonly unknown[]): ReadonlySet<string> {
+  if (!schemaDiffDefersTableDdl(dbType) || tableMappings?.length) return new Set();
+  const baseTableNames = (tables: readonly TableInfo[]) => tables.filter((table) => !isSchemaDiffView(table)).map((table) => table.name);
+  const targetNames = new Set(baseTableNames(targetTables));
+  return new Set(baseTableNames(sourceTables).filter((name) => targetNames.has(name)));
+}
+
 export interface SchemaDiffMetadataLoadPlan {
   columns: boolean;
   indexes: boolean;
@@ -229,6 +254,8 @@ export interface SchemaDetailLoadContext {
   schema: string;
   dbType: string;
   options: SchemaDiffCompareOptions;
+  /** Tables to load without DDL; see `schemaDiffDeferredDdlTables`. */
+  deferredDdlTables?: ReadonlySet<string>;
   signal?: AbortSignal;
   onProgress?: (progress: SchemaDiffMetadataProgress) => void;
 }
@@ -274,7 +301,7 @@ export async function loadSchemaDetails(tables: TableInfo[], context: SchemaDeta
       context.signal?.throwIfAborted();
       const objectType = isViewOrMaterializedView(table.table_type);
       const loadPlan = schemaDiffMetadataLoadPlan(isSchemaDiffView(table), context.options);
-      const ddlPromise = loadPlan.ddl ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
+      const ddlPromise = loadPlan.ddl && !context.deferredDdlTables?.has(table.name) ? runMetadataQuery(() => api.getTableDdl(context.connectionId, context.database, context.schema, table.name, objectType)) : Promise.resolve("");
       const [columns, indexes, foreignKeys, triggers, ddl] = await Promise.all([
         loadPlan.columns ? runMetadataQuery(() => api.getColumns(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),
         loadPlan.indexes ? runMetadataQuery(() => api.listIndexes(context.connectionId, context.database, context.schema, table.name)) : Promise.resolve([]),

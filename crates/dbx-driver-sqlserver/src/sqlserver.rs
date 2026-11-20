@@ -2780,10 +2780,16 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         && object_kinds.iter().any(crate::types::CompletionAssistantObjectKind::is_table_like)
     {
         let object_like = sqlserver_completion_object_search_clause(request, &like_pattern);
+        // NOTE: Any session that creates a temp table inside an open transaction
+        // keeps its tempdb catalog rows locked until it commits. A READ COMMITTED
+        // scan of `tempdb.sys.all_objects` waits on those rows with no timeout,
+        // holding the only SQL Server metadata connection, so every later
+        // metadata request fails with the pool-busy error. Completion only needs
+        // candidate names, so dirty catalog reads are acceptable here.
         queries.push(format!(
             "SELECT TOP ({limit}) o.name, s.name AS schema_name, 'TABLE' AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type \
-             FROM tempdb.sys.all_objects o \
-             JOIN tempdb.sys.schemas s ON s.schema_id = o.schema_id \
+             FROM tempdb.sys.all_objects o WITH (NOLOCK) \
+             JOIN tempdb.sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id \
              WHERE o.type = 'U' {object_like}"
         ));
         return format!("SELECT * FROM ({}) AS dbx_completion ORDER BY name", queries.remove(0));
@@ -2843,7 +2849,17 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         ));
     }
     if object_kinds.iter().any(|kind| matches!(kind, crate::types::CompletionAssistantObjectKind::Column)) {
-        let column_like = like_clause.replace("name_expr", "c.name");
+        // The shared object-search clause matches `o.name`/`ep.value`, which do
+        // not exist in the sys.columns query, so the column branch builds its
+        // own predicate and repeats the comment match against MS_Description
+        // when the caller asked for comment search (#15007).
+        let column_like = if like_pattern == "%" {
+            String::new()
+        } else if request.search_in_comments {
+            format!(" AND (LOWER(c.name) LIKE LOWER('{like_pattern}') ESCAPE '\\' OR LOWER(COALESCE(ep.value, '')) LIKE LOWER('{like_pattern}') ESCAPE '\\') ")
+        } else {
+            format!(" AND LOWER(c.name) LIKE LOWER('{like_pattern}') ESCAPE '\\' ")
+        };
         let parent_table_filter = request
             .parent_name
             .as_deref()
@@ -2852,10 +2868,11 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
             .unwrap_or_default();
         let object_visibility = sqlserver_visible_object_predicate();
         queries.push(format!(
-            "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
+            "SELECT TOP ({limit}) c.name, s.name AS schema_name, 'COLUMN' AS object_type, s.name AS parent_schema, o.name AS parent_name, ep.value AS object_comment, TYPE_NAME(c.user_type_id) AS data_type \
              FROM sys.columns c \
              JOIN sys.objects o ON o.object_id = c.object_id \
              JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep \
              WHERE o.type IN ('U','V') AND {object_visibility} {schema_filter} {parent_table_filter} {column_like} ORDER BY c.column_id"
         ));
     }
@@ -3142,7 +3159,63 @@ pub async fn list_object_statistics(
 }
 
 pub async fn get_columns(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    Ok(get_column_metadata(client, schema, table).await?.into_iter().map(|metadata| metadata.column).collect())
+    let mut metadata = get_column_metadata(client, schema, table).await?;
+    // A synonym has no columns of its own. The synonym lookup only runs when the
+    // name has no columns, so ordinary tables and views pay no extra round trip.
+    if metadata.is_empty() {
+        if let Some(target) = resolve_synonym_target(client, schema, table).await? {
+            metadata = get_column_metadata(client, &target.schema, &target.name).await?;
+        }
+    }
+    Ok(metadata.into_iter().map(|metadata| metadata.column).collect())
+}
+
+/// The table or view a synonym stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlServerSynonymTarget {
+    pub schema: String,
+    pub name: String,
+    pub is_view: bool,
+}
+
+fn sqlserver_synonym_target_sql() -> &'static str {
+    // Only a base object in the current database can be read with the local catalog
+    // views, so synonyms that name another database or a linked server resolve to nothing.
+    "SELECT OBJECT_SCHEMA_NAME(o.object_id) AS target_schema, o.name AS target_name, o.type AS target_type \
+     FROM sys.synonyms sn \
+     JOIN sys.schemas s ON s.schema_id = sn.schema_id \
+     JOIN sys.objects o ON o.object_id = OBJECT_ID(sn.base_object_name) \
+     WHERE s.name = COALESCE(NULLIF(@P1, N''), SCHEMA_NAME()) \
+       AND sn.name = @P2 \
+       AND PARSENAME(sn.base_object_name, 4) IS NULL \
+       AND (PARSENAME(sn.base_object_name, 3) IS NULL OR PARSENAME(sn.base_object_name, 3) = DB_NAME()) \
+       AND o.type IN ('U', 'V')"
+}
+
+/// Resolves `schema.name` to the table or view behind it when it is a synonym.
+///
+/// Returns `None` for a name that is not a synonym, and for a synonym whose base object is
+/// missing, is not a table or view, or lives in another database or on a linked server.
+pub async fn resolve_synonym_target(
+    client: &mut SqlServerClient,
+    schema: &str,
+    name: &str,
+) -> Result<Option<SqlServerSynonymTarget>, String> {
+    let schema = schema.trim();
+    let rows = client
+        .query(sqlserver_synonym_target_sql(), &[&schema, &name])
+        .await
+        .map_err(|error| error.to_string())?
+        .into_first_result()
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let (Some(schema), Some(name)) = (row.get::<&str, _>(0), row.get::<&str, _>(1)) else { return Ok(None) };
+    Ok(Some(SqlServerSynonymTarget {
+        schema: schema.to_string(),
+        name: name.to_string(),
+        is_view: row.get::<&str, _>(2).is_some_and(|object_type| object_type.trim() == "V"),
+    }))
 }
 
 pub async fn get_column_metadata(
@@ -4694,11 +4767,11 @@ mod tests {
         sqlserver_probe_explicit_alias, sqlserver_query_messages, sqlserver_query_transport_for_engine_edition,
         sqlserver_query_transport_for_request, sqlserver_referential_action, sqlserver_schema_name_predicate,
         sqlserver_spatial_marker, sqlserver_split_name_list, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_temporal_metadata_sql,
-        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
-        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_synonym_target_sql, sqlserver_table_comment_sql, sqlserver_table_objects_sql,
+        sqlserver_temporal_metadata_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
+        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -6041,6 +6114,19 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_synonym_target_sql_reads_only_local_tables_and_views() {
+        let sql = sqlserver_synonym_target_sql();
+
+        assert!(sql.contains("FROM sys.synonyms sn"));
+        assert!(sql.contains("OBJECT_ID(sn.base_object_name)"));
+        assert!(sql.contains("COALESCE(NULLIF(@P1, N''), SCHEMA_NAME())"));
+        assert!(sql.contains("sn.name = @P2"));
+        assert!(sql.contains("PARSENAME(sn.base_object_name, 4) IS NULL"));
+        assert!(sql.contains("PARSENAME(sn.base_object_name, 3) = DB_NAME()"));
+        assert!(sql.contains("o.type IN ('U', 'V')"));
+    }
+
+    #[test]
     fn sqlserver_columns_sql_reads_computed_column_definitions() {
         let sql = sqlserver_columns_sql("dbo", "orders");
 
@@ -6430,9 +6516,37 @@ mod tests {
         assert!(sql.contains("FROM sys.columns c"));
         assert!(sql.contains("o.name = 'Users'"));
         assert!(sql.contains("LOWER(c.name) LIKE LOWER('%id%') ESCAPE '\\'"));
-        assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS object_comment"));
+        assert!(sql.contains("ep.value AS object_comment"));
+        assert!(sql.contains("ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id"));
+        assert!(sql.contains("ep.name = N'MS_Description'"));
         assert!(sql.contains("ORDER BY c.column_id"));
         assert!(!sql.contains("AS dbx_completion ORDER BY name"));
+    }
+
+    #[test]
+    fn sqlserver_completion_assistant_column_search_can_match_comments() {
+        let request = CompletionAssistantRequest {
+            connection_id: "c1".to_string(),
+            database: "app".to_string(),
+            schema: Some("dbo".to_string()),
+            object_kinds: vec![CompletionAssistantObjectKind::Column],
+            mask: "order".to_string(),
+            case_sensitive: false,
+            global_search: false,
+            max_results: Some(50),
+            search_in_comments: true,
+            search_in_definitions: false,
+            parent_schema: Some("dbo".to_string()),
+            parent_name: Some("Users".to_string()),
+            match_mode: Some(CompletionAssistantMatchMode::Contains),
+        };
+
+        let sql = sqlserver_completion_assistant_sql(&request, 50);
+
+        // The comment predicate references the OUTER APPLY alias, so it must be
+        // valid inside the column query too (it previously had no ep source).
+        assert!(sql.contains("LOWER(COALESCE(ep.value, '')) LIKE LOWER('%order%') ESCAPE '\\'"));
+        assert!(sql.contains("OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep"));
     }
 
     #[test]
@@ -6480,7 +6594,8 @@ mod tests {
 
         let sql = sqlserver_completion_assistant_sql(&request, 100);
 
-        assert!(sql.contains("FROM tempdb.sys.all_objects o"));
+        assert!(sql.contains("FROM tempdb.sys.all_objects o WITH (NOLOCK)"));
+        assert!(sql.contains("JOIN tempdb.sys.schemas s WITH (NOLOCK)"));
         assert!(sql.contains("o.type = 'U'"));
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('#Temp%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(128)) AS parent_schema"));

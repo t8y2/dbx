@@ -1,4 +1,5 @@
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import type { AppThemeMode } from "@/lib/app/appTheme";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
@@ -389,6 +390,7 @@ export interface DriverRuntimeSummary {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  app_theme_mode?: AppThemeMode;
   linux_floating_frame_enabled?: boolean;
   icon_theme: "default" | "black";
   quit_on_close: boolean;
@@ -646,6 +648,9 @@ export interface SortedQuerySqlOptions {
   column: string;
   direction: QuerySortDirection;
   tieBreakerColumnIndexes?: number[];
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+  identifierQuote?: string;
 }
 
 export interface QuerySqlBuildResult {
@@ -1133,8 +1138,8 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
-  return invoke("save_editor_settings", { settings });
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  return invoke("save_editor_settings", { settings, ...(patch ? { patch } : {}) });
 }
 
 export interface GlobalSearchSettings {
@@ -1215,8 +1220,12 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   return invoke("save_transfer_task_library", { library });
 }
 
-export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
-  return invoke("complete_app_close", { action });
+export async function completeAppClose(action: "quit" | "hide", quitRequestId?: string): Promise<void> {
+  return invoke("complete_app_close", { action, ...(quitRequestId ? { quitRequestId } : {}) });
+}
+
+export async function completeWindowClose(): Promise<void> {
+  return invoke("complete_window_close");
 }
 
 export async function requestAppClose(): Promise<void> {
@@ -1473,6 +1482,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string, includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -1537,6 +1548,8 @@ export interface GlobalSearchRequest {
    * (Quick Open behavior).
    */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -1550,8 +1563,22 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
   return invoke("global_search", { request });
+}
+
+export async function cancelGlobalSearch(searchId: string): Promise<void> {
+  return invoke("cancel_global_search", { searchId });
 }
 
 // --- AI Conversations ---
@@ -2554,12 +2581,13 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return invoke("build_rename_object_sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return invoke("build_rename_database_sql", {
     databaseType: options.databaseType,
     oldName: options.oldName,
     newName: options.newName,
     terminateConnections: options.terminateConnections,
+    identifierQuote: options.identifierQuote,
   });
 }
 
@@ -2660,6 +2688,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
 
 export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return invoke("build_editable_object_source", { input });
+}
+
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return invoke("build_oracle_object_export_sql", { input });
 }
 
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
@@ -6752,6 +6784,19 @@ export interface DatabaseExportRequest {
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
+  /**
+   * Cap each exported table at this many data rows (#14750). `undefined` keeps
+   * the unlimited behavior; the backend rejects zero.
+   */
+  rowLimitPerTable?: number;
+  /**
+   * Sort column the per-table cap takes the first/last N rows by (review on
+   * #14799). `undefined`/empty keeps the export's existing read order; the
+   * backend falls back per table with a dump comment when the column is absent.
+   */
+  rowLimitSortColumn?: string;
+  /** `true` takes the newest rows by `rowLimitSortColumn`; only sent with a column. */
+  rowLimitSortDescending?: boolean;
 }
 
 export interface DatabaseBackupSnapshot {

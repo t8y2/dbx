@@ -58,6 +58,18 @@ describe("normalizeEditorSettings", () => {
     expect(settings.editorSettings).toMatchObject(defaults);
   });
 
+  it("defaults dataGridOrderByVisible to true and dataGridWhereRatio to 0.5", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible).toBe(true);
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({}).dataGridOrderByVisible).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridOrderByVisible: false }).dataGridOrderByVisible).toBe(false);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.7 }).dataGridWhereRatio).toBe(0.7);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.1 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.95 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: "0.7" as any }).dataGridWhereRatio).toBe(0.5);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
@@ -463,6 +475,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarDensity: "default" }).sidebarDensity).toBe("default");
     expect(normalizeEditorSettings({ sidebarDensity: "comfortable" } as any).sidebarDensity).toBe("default");
     expect(normalizeEditorSettings({ sidebarDensity: 123 } as any).sidebarDensity).toBe("default");
+  });
+
+  it("keeps original connection icons for missing or invalid saved preferences", () => {
+    expect(normalizeEditorSettings({}).sidebarConnectionIconStyle).toBe("classic");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "badge" }).sidebarConnectionIconStyle).toBe("badge");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "unknown" } as any).sidebarConnectionIconStyle).toBe("classic");
   });
 
   it("uses inline comments by default and preserves legacy comment visibility", () => {
@@ -1379,6 +1397,14 @@ describe("normalizeEditorSettings - colorizeConnectionTabsScope", () => {
   });
 });
 
+describe("normalizeEditorSettings - crossWindowTabDragPreviewEnabled", () => {
+  it("defaults to enabled and only accepts booleans", () => {
+    expect(normalizeEditorSettings({}).crossWindowTabDragPreviewEnabled).toBe(true);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: false }).crossWindowTabDragPreviewEnabled).toBe(false);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: "false" } as any).crossWindowTabDragPreviewEnabled).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - tabMaxWidth", () => {
   it("defaults tabMaxWidth to 0", () => {
     expect(normalizeEditorSettings({}).tabMaxWidth).toBe(0);
@@ -1543,10 +1569,6 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],

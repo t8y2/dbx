@@ -35,6 +35,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "showConnectionGroupPath",
   "autoAliasTables",
+  "qualifyColumnCompletions",
   "batchColumnSelectionIncludeComments",
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
@@ -60,6 +61,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "aiSqlApplyTargetMode",
   "welcomePageMode",
   "appLayout",
+  "crossWindowTabDragPreviewEnabled",
   "webLogoPosition",
   "tabLayout",
   "tabPlacement",
@@ -89,6 +91,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridToolbarLayout",
   "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
+  "dataGridOrderByVisible",
+  "dataGridWhereRatio",
   "defaultAutoKeepResults",
   "pinResultTabOnClick",
   "multiStatementDefaultView",
@@ -119,7 +123,9 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "shortcuts",
   "sqlFormatter",
   "sidebarActivation",
+  "sidebarColumnDoubleClickAction",
   "sidebarObjectDisplay",
+  "sidebarSimpleHideIndexes",
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",
   "sidebarSearchOpenedDatabasesOnly",
@@ -161,6 +167,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarDensity",
+  "sidebarConnectionIconStyle",
   "sidebarHiddenTablePrefixes",
   "sidebarCopyTableNameSeparator",
   "sidebarCopyTableNameIncludeSchema",
@@ -184,6 +191,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "updateDownloadSource",
   "updateChannel",
   "toolbarItems",
+  "toolbarItemOrder",
   "snippets",
   "sqlShortcuts",
   "sqlVariableSubstitutionEnabled",
@@ -202,6 +210,17 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];
 export type EditorSettingsDraft = Pick<EditorSettings, EditorSettingsDraftKey>;
+
+/**
+ * Settings imported from a transfer file may contain a partial toolbar object:
+ * older files predate some toolbar switches, and Web files intentionally omit
+ * desktop-only entries. Those missing nested keys must stay untouched in the
+ * current draft instead of being filled with defaults during import.
+ */
+export type EditorSettingsImportPatch = Omit<Partial<EditorSettings>, "toolbarItems" | "toolbarItemOrder"> & {
+  toolbarItems?: Partial<EditorSettings["toolbarItems"]>;
+  toolbarItemOrder?: EditorSettings["toolbarItemOrder"];
+};
 
 function cloneDraftValue<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
@@ -259,7 +278,7 @@ export function editorSettingsDraftFromSettings(settings: EditorSettings): Edito
  * `settings`. Used for partial updates (e.g. settings import) where keys the
  * input does not contain must leave the target state untouched.
  */
-export function editorSettingsDraftPatchFromSettings(settings: Partial<EditorSettings>): Partial<EditorSettingsDraft> {
+export function editorSettingsDraftPatchFromSettings(settings: EditorSettingsImportPatch): Partial<EditorSettingsDraft> {
   const patch: Partial<EditorSettingsDraft> = {};
   for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
     if (!(key in settings)) continue;

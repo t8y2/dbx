@@ -51,6 +51,11 @@ export function buildTableSelectTemplate(options: TableSqlTemplateOptions): stri
   return `${selectKw} ${selectColumns.join(", ")}\n${fromKw} ${tableName};`;
 }
 
+export function buildColumnSelectTemplate(options: TableSqlTemplateOptions, columnName: string): string {
+  const lower = options.keywordCase === "lower";
+  return `${lower ? "select" : "SELECT"} *\n${lower ? "from" : "FROM"} ${templateTableName(options)}\n${lower ? "where" : "WHERE"} ${templateIdentifier(options, columnName)} = '';`;
+}
+
 export function buildTableInsertTemplate(options: TableSqlTemplateOptions): string {
   const strategy = options.databaseType ? insertTemplateStrategies[options.databaseType] : undefined;
   return (strategy ?? buildDefaultInsertTemplate)(options);

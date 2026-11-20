@@ -1144,6 +1144,7 @@ export interface GlobalSearchSettings {
   extensions: string[];
   matchMode?: "precise" | "enhanced";
   showQuickFilters?: boolean;
+  itemTypes?: Record<string, boolean>;
 }
 
 export function loadGlobalSearchSettings(): Promise<GlobalSearchSettings | null> {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, ref, watch, nextTick } from "vue";
+import { computed, defineAsyncComponent, ref, shallowRef, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
-import { Cable, Command, Database, FileCode, FileText, FolderPlus, Layers3, Search, Server, SlidersHorizontal, Table2, Terminal, X } from "@lucide/vue";
+import { ArrowLeft, Cable, Command, Database, FileCode, FileText, FolderPlus, Info, Layers3, Search, Server, SlidersHorizontal, Table2, Terminal, X } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import GlobalSearchCategoryBar from "./GlobalSearchCategoryBar.vue";
@@ -20,12 +20,15 @@ import {
   getGlobalSearchMatchMode,
   getGlobalSearchRoots,
   getGlobalSearchShowQuickFilters,
+  getGlobalSearchItemTypes,
+  saveGlobalSearchItemTypes,
   saveGlobalSearchMatchMode,
   saveGlobalSearchRoots,
   getGlobalSearchExtensions,
   saveGlobalSearchExtensions,
   saveGlobalSearchShowQuickFilters,
   globalSearchSettingsVersion,
+  type GlobalSearchItemType,
   type GlobalSearchMatchMode,
 } from "@/lib/globalSearch/globalSearchSettings";
 import { isQuickOpenMetadataIndexSupported } from "@/lib/quickOpen/quickOpenIndex";
@@ -53,11 +56,12 @@ const matchMode = ref<GlobalSearchMatchMode>(getGlobalSearchMatchMode());
 const showQuickFilters = ref(getGlobalSearchShowQuickFilters());
 const {
   searchQuery,
-  matchingItems,
-  filteredItems,
+  displayedSearchQuery,
+  displayedMatchingItems,
+  displayedFilteredItems,
+  displayedSelectedItem,
   homeItems,
   selectedIndex,
-  selectedItem,
   selectNext,
   selectPrevious,
   setQuery,
@@ -75,6 +79,7 @@ const {
   scopeConnectionIds,
   scopeActive,
   setScopeConnectionIds,
+  refreshDisplayedResults,
   metadataIndexStatuses,
   refreshMetadataIndexStatuses,
   rebuildMetadataIndex,
@@ -83,6 +88,7 @@ const {
 } = useQuickOpen({ extraItems: pluginPalette.items, category: activeCategory, enabled: computed(() => props.open), matchMode });
 const previewEditing = ref(false);
 const pinnedPreviewItem = ref<QuickOpenItem | null>(null);
+const enabledSearchItemTypes = shallowRef(getGlobalSearchItemTypes());
 
 const categoryDefinitions: Array<{ id: SearchCategory; label: string; icon: typeof Server }> = [
   { id: "all", label: "quickOpen.categoryAll", icon: Layers3 },
@@ -95,38 +101,58 @@ const categoryDefinitions: Array<{ id: SearchCategory; label: string; icon: type
   { id: "commands", label: "quickOpen.categoryCommands", icon: Terminal },
 ];
 
+const visibleCategoryDefinitions = computed(() => {
+  const enabled = enabledSearchItemTypes.value;
+  const has = (...types: GlobalSearchItemType[]) => types.some((type) => enabled[type] !== false);
+  return categoryDefinitions.filter((category) => {
+    if (category.id === "all") return true;
+    if (category.id === "connections") return has("connection");
+    if (category.id === "databases") return has("database", "schema");
+    if (category.id === "objects") return has("table", "view", "routine");
+    if (category.id === "fields") return has("column");
+    if (category.id === "files") return has("file");
+    if (category.id === "content") return has("content");
+    return has("command");
+  });
+});
+
+watch(visibleCategoryDefinitions, (categories) => {
+  if (!categories.some((category) => category.id === activeCategory.value)) activeCategory.value = "all";
+});
+
 const categoryCounts = computed(() => {
   const counts = Object.fromEntries(categoryDefinitions.map(({ id }) => [id, 0])) as Record<SearchCategory, number>;
-  counts.all = matchingItems.value.length;
-  for (const item of matchingItems.value) counts[itemCategory(item)] += 1;
+  counts.all = displayedMatchingItems.value.length;
+  for (const item of displayedMatchingItems.value) counts[itemCategory(item)] += 1;
   counts.content = contentMatchCount.value;
   return counts;
 });
 
-const visibleItems = filteredItems;
-const isHomeView = computed(() => !contentMode.value && !searchQuery.value.trim() && activeCategory.value === "all");
+const visibleItems = displayedFilteredItems;
+const isHomeView = computed(() => !contentMode.value && !displayedSearchQuery.value.trim() && activeCategory.value === "all");
 const homeSelectedId = ref<string | null>(null);
 const displayItems = computed(() => (isHomeView.value ? homeItems.value : visibleItems.value));
 const selectedDisplayItem = computed(() => {
   if (isHomeView.value) return displayItems.value.find((item) => item.id === homeSelectedId.value) || displayItems.value[0] || null;
-  if (activeCategory.value === "all") return selectedItem.value;
-  return visibleItems.value.find((item) => item.id === selectedItem.value?.id) || visibleItems.value[0] || null;
+  if (activeCategory.value === "all") return displayedSelectedItem.value;
+  return visibleItems.value.find((item) => item.id === displayedSelectedItem.value?.id) || visibleItems.value[0] || null;
 });
 
 function selectCategoryFromBar(category: string): void {
-  if (categoryDefinitions.some((definition) => definition.id === category)) selectCategory(category as SearchCategory);
+  if (visibleCategoryDefinitions.value.some((definition) => definition.id === category)) selectCategory(category as SearchCategory);
 }
 
 function selectCategory(category: SearchCategory): void {
   if (!canLeavePreview()) return;
+  refreshDisplayedResults();
   activeCategory.value = category;
   if (category === "content") {
     setContentMode(true, category);
     return;
   }
   if (contentMode.value) setContentMode(false, category);
-  const first = category === "all" ? filteredItems.value[0] : filteredItems.value.find((item) => itemCategory(item) === category);
-  selectedIndex.value = first ? filteredItems.value.findIndex((item) => item.id === first.id) : 0;
+  const first = category === "all" ? visibleItems.value[0] : visibleItems.value.find((item) => itemCategory(item) === category);
+  selectedIndex.value = first ? visibleItems.value.findIndex((item) => item.id === first.id) : 0;
 }
 
 function navigateVisible(direction: -1 | 1): void {
@@ -136,7 +162,7 @@ function navigateVisible(direction: -1 | 1): void {
   const current = items.findIndex((item) => item.id === selectedId);
   const next = current < 0 ? (direction > 0 ? 0 : items.length - 1) : Math.max(0, Math.min(items.length - 1, current + direction));
   if (isHomeView.value) homeSelectedId.value = items[next]!.id;
-  const globalIndex = filteredItems.value.findIndex((item) => item.id === items[next]!.id);
+  const globalIndex = visibleItems.value.findIndex((item) => item.id === items[next]!.id);
   if (globalIndex >= 0) selectedIndex.value = globalIndex;
 }
 
@@ -161,6 +187,7 @@ function canLeavePreview(): boolean {
 
 function setContentMode(value: boolean, category?: SearchCategory): void {
   if (!canLeavePreview()) return;
+  if (value && enabledSearchItemTypes.value.content === false) return;
   activeCategory.value = category ?? (value ? "content" : "all");
   setSearchContentMode(value);
 }
@@ -173,16 +200,61 @@ const secondaryActionShortcut = computed(() => formatShortcutDisplay("Mod+Enter"
 watch(globalSearchSettingsVersion, () => {
   matchMode.value = getGlobalSearchMatchMode();
   showQuickFilters.value = getGlobalSearchShowQuickFilters();
+  enabledSearchItemTypes.value = getGlobalSearchItemTypes();
+  if (contentMode.value && enabledSearchItemTypes.value.content === false) {
+    activeCategory.value = "all";
+    setSearchContentMode(false);
+  }
   refreshSearchSettings();
 });
 
 // Search settings panel state (extra search roots and file extensions).
+type SearchSettingsSection = "behavior" | "items" | "indexes" | "files";
+
 const searchSettingsOpen = ref(false);
+const indexBuildInfoOpen = ref(false);
+const settingsSection = ref<SearchSettingsSection>("behavior");
+const settingsContentRef = ref<HTMLElement | null>(null);
 const indexBusyConnection = ref<string | null>(null);
+const indexConnectionFilter = ref("");
 const indexableConnections = computed(() => scopeConnections.value.filter((connection) => isQuickOpenMetadataIndexSupported(connection.db_type)));
+const filteredIndexableConnections = computed(() => {
+  const query = indexConnectionFilter.value.trim().toLocaleLowerCase();
+  if (!query) return indexableConnections.value;
+  return indexableConnections.value.filter((connection) => connection.name.toLocaleLowerCase().includes(query));
+});
+const indexProgressSummary = computed(() => {
+  let ready = 0;
+  let building = 0;
+  let failed = 0;
+  let itemCount = 0;
+  for (const connection of indexableConnections.value) {
+    const status = metadataIndexStatuses.value[connection.id];
+    if (status?.state === "ready") ready += 1;
+    if (status?.state === "building") building += 1;
+    if (status?.state === "failed" || status?.state === "partial") failed += 1;
+    itemCount += status?.itemCount ?? 0;
+  }
+  const total = indexableConnections.value.length;
+  const processed = ready + failed;
+  return { total, ready, building, failed, processed, itemCount, percent: total === 0 ? 0 : Math.round((processed / total) * 100) };
+});
 const searchRoots = ref<string[]>([]);
 const extensionsInput = ref("");
+const searchItemTypeDefinitions: Array<{ id: GlobalSearchItemType; label: string; description: string }> = [
+  { id: "connection", label: "quickOpen.itemTypeConnections", description: "quickOpen.itemTypeConnectionsHint" },
+  { id: "database", label: "quickOpen.itemTypeDatabases", description: "quickOpen.itemTypeDatabasesHint" },
+  { id: "schema", label: "quickOpen.itemTypeSchemas", description: "quickOpen.itemTypeSchemasHint" },
+  { id: "table", label: "quickOpen.itemTypeTables", description: "quickOpen.itemTypeTablesHint" },
+  { id: "view", label: "quickOpen.itemTypeViews", description: "quickOpen.itemTypeViewsHint" },
+  { id: "routine", label: "quickOpen.itemTypeRoutines", description: "quickOpen.itemTypeRoutinesHint" },
+  { id: "column", label: "quickOpen.itemTypeColumns", description: "quickOpen.itemTypeColumnsHint" },
+  { id: "file", label: "quickOpen.itemTypeFiles", description: "quickOpen.itemTypeFilesHint" },
+  { id: "content", label: "quickOpen.itemTypeContent", description: "quickOpen.itemTypeContentHint" },
+  { id: "command", label: "quickOpen.itemTypeCommands", description: "quickOpen.itemTypeCommandsHint" },
+];
 const parsedSearchQuery = computed(() => parseQuickSearchQuery(searchQuery.value));
+const displayedParsedSearchQuery = computed(() => parseQuickSearchQuery(displayedSearchQuery.value));
 const activeSearchFilters = computed(() => Object.entries(parsedSearchQuery.value.filters).filter(([, value]) => Boolean(value)) as Array<[string, string]>);
 
 // Connection scope: empty selection = all connections.
@@ -201,6 +273,32 @@ const scopeSelection = computed<string>({
 function refreshSearchSettings(): void {
   searchRoots.value = getGlobalSearchRoots();
   extensionsInput.value = getGlobalSearchExtensions().join(", ");
+  enabledSearchItemTypes.value = getGlobalSearchItemTypes();
+}
+
+function selectSettingsSection(section: SearchSettingsSection): void {
+  settingsSection.value = section;
+  nextTick(() => {
+    const container = settingsContentRef.value;
+    const target = container?.querySelector<HTMLElement>(`#settings-${section}`);
+    if (!container || !target) return;
+    const targetTop = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop - 16;
+    container.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+  });
+}
+
+function updateSettingsSectionFromScroll(): void {
+  const container = settingsContentRef.value;
+  if (!container) return;
+  const sections = [...container.querySelectorAll<HTMLElement>("[id^='settings-']")];
+  const visibleSections = sections.filter((section) => section.offsetTop <= container.scrollTop + 32);
+  const current = visibleSections[visibleSections.length - 1];
+  if (current) settingsSection.value = current.id.replace("settings-", "") as SearchSettingsSection;
+}
+
+function updateSearchItemType(type: GlobalSearchItemType, enabled: boolean): void {
+  enabledSearchItemTypes.value = { ...enabledSearchItemTypes.value, [type]: enabled };
+  saveGlobalSearchItemTypes(enabledSearchItemTypes.value);
 }
 
 async function addSearchDirectory(): Promise<void> {
@@ -243,7 +341,7 @@ function updateQuickFilterVisibility(value: boolean): void {
 
 function indexStatusLabel(connectionId: string): string {
   const state = metadataIndexStatuses.value[connectionId]?.state ?? "not-built";
-  return t(`quickOpen.index${state === "not-built" ? "NotBuilt" : state === "building" ? "Building" : state === "ready" ? "Ready" : "Failed"}`);
+  return t(`quickOpen.index${state === "not-built" ? "NotBuilt" : state === "building" ? "Building" : state === "ready" ? "Ready" : state === "partial" ? "Partial" : "Failed"}`);
 }
 
 function indexStatusTime(connectionId: string): string {
@@ -320,7 +418,8 @@ function handleWorkspaceKeyDown(e: KeyboardEvent): void {
   if ((e.metaKey || e.ctrlKey) && /^[1-8]$/.test(e.key)) {
     e.preventDefault();
     e.stopPropagation();
-    selectCategory(categoryDefinitions[Number(e.key) - 1]!.id);
+    const category = visibleCategoryDefinitions.value[Number(e.key) - 1];
+    if (category) selectCategory(category.id);
   }
 }
 
@@ -328,7 +427,8 @@ function handleKeyDown(e: KeyboardEvent): void {
   if (previewEditing.value) return;
   if ((e.metaKey || e.ctrlKey) && /^[1-8]$/.test(e.key)) {
     e.preventDefault();
-    selectCategory(categoryDefinitions[Number(e.key) - 1]!.id);
+    const category = visibleCategoryDefinitions.value[Number(e.key) - 1];
+    if (category) selectCategory(category.id);
     return;
   }
   if (e.key === "ArrowDown") {
@@ -380,7 +480,7 @@ function handleSelect(item: QuickOpenItem): void {
 }
 
 function getHighlightedLabel(item: any): (string | { text: string; highlight: boolean })[] {
-  if (!searchQuery.value.trim() || !item.matchIndices) {
+  if (!displayedSearchQuery.value.trim() || !item.matchIndices) {
     return [item.label];
   }
 
@@ -538,7 +638,7 @@ function getResultCategoryLabel(category: "objects" | "files" | "commands"): str
 }
 
 function getResultCategoryCount(category: "objects" | "files" | "commands"): number {
-  return filteredItems.value.filter((item) => getResultCategory(item) === category).length;
+  return visibleItems.value.filter((item) => getResultCategory(item) === category).length;
 }
 
 watch(
@@ -553,14 +653,14 @@ watch(
       return;
     }
     if (!homeSelectedId.value || !homeItems.value.some((item) => item.id === homeSelectedId.value)) homeSelectedId.value = homeItems.value[0]!.id;
-    const index = filteredItems.value.findIndex((item) => item.id === homeSelectedId.value);
+    const index = visibleItems.value.findIndex((item) => item.id === homeSelectedId.value);
     if (index >= 0) selectedIndex.value = index;
   },
   { immediate: true },
 );
 
 watch(
-  parsedSearchQuery,
+  displayedParsedSearchQuery,
   (parsed) => {
     const kind = parsed.filters.kind;
     const categoryByKind: Record<string, SearchCategory> = {
@@ -641,10 +741,10 @@ watch(selectedIndex, async () => {
 
 <template>
   <Dialog :open="dialogOpen" @update:open="dialogOpen = $event">
-    <DialogContent class="max-w-6xl p-0 gap-0 rounded-xl overflow-hidden">
+    <DialogContent :class="['max-w-6xl p-0 gap-0 rounded-xl overflow-hidden', searchSettingsOpen ? 'max-h-[min(800px,calc(var(--dbx-viewport-height)-6rem))]' : 'max-h-[calc(var(--dbx-viewport-height)-2rem)]']">
       <div class="flex max-h-[calc(var(--dbx-viewport-height)-2rem)] min-h-0 flex-col bg-background" @keydown.capture="handleWorkspaceKeyDown">
         <!-- Search Input -->
-        <div class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">
+        <div v-if="!searchSettingsOpen" class="flex shrink-0 items-center gap-3 px-4 pr-12 py-3 border-b">
           <Command class="h-5 w-5 text-muted-foreground" />
           <Input
             ref="inputRef"
@@ -661,7 +761,14 @@ watch(selectedIndex, async () => {
               <button :disabled="previewEditing" class="flex h-7 w-7 items-center justify-center rounded disabled:opacity-50" :class="contentMode ? 'hover:bg-muted-foreground/10' : 'bg-background text-foreground shadow-sm'" :title="t('quickOpen.modeObjects')" @click="setContentMode(false)">
                 <FileCode class="h-4 w-4" />
               </button>
-              <button :disabled="previewEditing" class="flex h-7 w-7 items-center justify-center rounded disabled:opacity-50" :class="contentMode ? 'bg-background text-foreground shadow-sm' : 'hover:bg-muted-foreground/10'" :title="t('quickOpen.modeContent')" @click="setContentMode(true)">
+              <button
+                v-if="enabledSearchItemTypes.content !== false"
+                :disabled="previewEditing"
+                class="flex h-7 w-7 items-center justify-center rounded disabled:opacity-50"
+                :class="contentMode ? 'bg-background text-foreground shadow-sm' : 'hover:bg-muted-foreground/10'"
+                :title="t('quickOpen.modeContent')"
+                @click="setContentMode(true)"
+              >
                 <Search class="h-4 w-4" />
               </button>
             </div>
@@ -677,185 +784,312 @@ watch(selectedIndex, async () => {
             </button>
           </div>
         </div>
-
-        <div v-if="!contentMode && (activeSearchFilters.length > 0 || !searchQuery.trim())" class="flex shrink-0 flex-wrap items-center gap-1.5 border-b px-4 py-2 text-xs">
-          <span v-if="activeSearchFilters.length > 0" class="mr-1 text-muted-foreground">{{ t("quickOpen.filterLabel") }}</span>
-          <span v-for="[key, value] in activeSearchFilters" :key="key" class="rounded-full bg-muted px-2 py-0.5 text-foreground"> {{ key }}:{{ value }} </span>
-          <span v-if="activeSearchFilters.length === 0" class="text-muted-foreground">{{ t("quickOpen.syntaxHint") }}</span>
+        <div v-else class="flex shrink-0 items-center gap-3 border-b bg-background px-6 py-4 pr-14">
+          <button type="button" class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.back')" @click="searchSettingsOpen = false">
+            <ArrowLeft class="h-4 w-4" />
+          </button>
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <SlidersHorizontal class="h-4 w-4 text-muted-foreground" />
+              <span>{{ t("quickOpen.searchSettings") }}</span>
+            </div>
+            <p class="mt-0.5 text-xs text-muted-foreground">{{ t("quickOpen.searchSettingsHint") }}</p>
+          </div>
         </div>
 
-        <!-- Category navigation: the main entry point for the search workspace. -->
-        <GlobalSearchCategoryBar :categories="categoryDefinitions" :active="activeCategory" :counts="{ ...categoryCounts, content: contentMatchCount }" @select="selectCategoryFromBar" />
+        <template v-if="searchSettingsOpen">
+          <div class="flex min-h-0 flex-1 flex-col bg-muted/20">
+            <div class="grid min-h-0 flex-1 lg:grid-cols-[190px_minmax(0,1fr)]">
+              <nav class="border-b bg-background p-3 lg:border-r lg:border-b-0" :aria-label="t('quickOpen.settingsNavigation')">
+                <div class="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{{ t("quickOpen.settingsNavigation") }}</div>
+                <div class="grid grid-cols-2 gap-1 lg:grid-cols-1">
+                  <button
+                    v-for="item in [
+                      { id: 'behavior', label: 'quickOpen.settingsBehavior' },
+                      { id: 'items', label: 'quickOpen.settingsItems' },
+                      { id: 'indexes', label: 'quickOpen.settingsIndexes' },
+                      { id: 'files', label: 'quickOpen.settingsFiles' },
+                    ]"
+                    :key="item.id"
+                    type="button"
+                    class="rounded-md px-3 py-2 text-left text-xs font-medium"
+                    :class="settingsSection === item.id ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'"
+                    @click="selectSettingsSection(item.id as SearchSettingsSection)"
+                  >
+                    {{ t(item.label) }}
+                  </button>
+                </div>
+              </nav>
+              <div ref="settingsContentRef" data-settings-content class="min-h-0 overflow-y-auto px-6 py-6" @scroll="updateSettingsSectionFromScroll">
+                <div class="mx-auto max-w-3xl space-y-5">
+                  <section id="settings-behavior" class="scroll-mt-5 rounded-xl border bg-background p-5 shadow-sm">
+                    <div class="mb-4 flex items-start justify-between gap-4">
+                      <div>
+                        <h2 class="text-sm font-semibold text-foreground">{{ t("quickOpen.matchMode") }}</h2>
+                        <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("quickOpen.matchModeHint") }}</p>
+                      </div>
+                      <div class="rounded-lg bg-muted p-1">
+                        <button type="button" class="rounded-md px-3 py-1.5 text-xs font-medium" :class="matchMode === 'precise' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="updateMatchMode('precise')">
+                          {{ t("quickOpen.matchModePrecise") }}
+                        </button>
+                        <button type="button" class="rounded-md px-3 py-1.5 text-xs font-medium" :class="matchMode === 'enhanced' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" @click="updateMatchMode('enhanced')">
+                          {{ t("quickOpen.matchModeEnhanced") }}
+                        </button>
+                      </div>
+                    </div>
+                    <label class="flex cursor-pointer items-center justify-between gap-4 rounded-lg border px-3 py-3 text-xs text-foreground hover:bg-muted/50">
+                      <span>
+                        <span class="block font-medium">{{ t("quickOpen.showQuickFilters") }}</span>
+                        <span class="mt-0.5 block text-[11px] text-muted-foreground">{{ t("quickOpen.showQuickFiltersHint") }}</span>
+                      </span>
+                      <input type="checkbox" :checked="showQuickFilters" @change="updateQuickFilterVisibility(($event.target as HTMLInputElement).checked)" />
+                    </label>
+                  </section>
 
-        <!-- Search settings panel -->
-        <div v-if="searchSettingsOpen" class="max-h-[38vh] shrink-0 space-y-4 overflow-y-auto border-b bg-muted/30 px-4 py-3 text-sm">
-          <div class="space-y-2">
-            <div class="text-xs font-medium text-foreground">{{ t("quickOpen.matchMode") }}</div>
-            <div class="flex flex-wrap gap-2">
-              <button type="button" class="rounded-md border px-2.5 py-1.5 text-xs" :class="matchMode === 'precise' ? 'border-foreground bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:bg-muted'" @click="updateMatchMode('precise')">
-                {{ t("quickOpen.matchModePrecise") }}
-              </button>
-              <button type="button" class="rounded-md border px-2.5 py-1.5 text-xs" :class="matchMode === 'enhanced' ? 'border-foreground bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:bg-muted'" @click="updateMatchMode('enhanced')">
-                {{ t("quickOpen.matchModeEnhanced") }}
-              </button>
-            </div>
-            <p class="text-xs text-muted-foreground">{{ t("quickOpen.matchModeHint") }}</p>
-          </div>
-          <label class="flex items-center gap-2 text-xs text-foreground">
-            <input type="checkbox" :checked="showQuickFilters" @change="updateQuickFilterVisibility(($event.target as HTMLInputElement).checked)" />
-            <span>{{ t("quickOpen.showQuickFilters") }}</span>
-          </label>
-          <div class="space-y-2 border-t pt-3">
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-xs font-medium text-foreground">{{ t("quickOpen.indexManagement") }}</span>
-              <button type="button" class="rounded px-2 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50" :disabled="!!indexBusyConnection || indexableConnections.length === 0" @click="runAllIndexBuild">{{ t("quickOpen.indexBuildAll") }}</button>
-            </div>
-            <div v-if="indexableConnections.length === 0" class="text-xs text-muted-foreground">{{ t("quickOpen.indexUnsupported") }}</div>
-            <div v-for="connection in indexableConnections" :key="connection.id" class="flex items-center gap-2 rounded-md bg-background px-2.5 py-2 text-xs">
-              <div class="min-w-0 flex-1">
-                <div class="truncate text-foreground">{{ connection.name }}</div>
-                <div class="text-[11px] text-muted-foreground">
-                  {{ indexStatusLabel(connection.id) }}<span v-if="metadataIndexStatuses[connection.id]?.itemCount"> · {{ t("quickOpen.indexItems", { count: metadataIndexStatuses[connection.id]?.itemCount }) }}</span
-                  ><span v-if="indexStatusTime(connection.id)"> · {{ t("quickOpen.indexLastBuilt", { time: indexStatusTime(connection.id) }) }}</span>
+                  <section id="settings-items" class="scroll-mt-5 rounded-xl border bg-background p-5 shadow-sm">
+                    <div class="mb-4">
+                      <h2 class="text-sm font-semibold text-foreground">{{ t("quickOpen.searchItemTypes") }}</h2>
+                      <p class="mt-1 text-xs text-muted-foreground">{{ t("quickOpen.searchItemTypesHint") }}</p>
+                    </div>
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      <label v-for="item in searchItemTypeDefinitions" :key="item.id" class="flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 hover:bg-muted/40">
+                        <input class="mt-0.5" type="checkbox" :checked="enabledSearchItemTypes[item.id]" @change="updateSearchItemType(item.id, ($event.target as HTMLInputElement).checked)" />
+                        <span class="min-w-0">
+                          <span class="block text-xs font-medium text-foreground">{{ t(item.label) }}</span>
+                          <span class="mt-0.5 block text-[11px] leading-4 text-muted-foreground">{{ t(item.description) }}</span>
+                        </span>
+                      </label>
+                    </div>
+                  </section>
+
+                  <section id="settings-indexes" class="scroll-mt-5 rounded-xl border bg-background p-5 shadow-sm">
+                    <div class="mb-4 flex items-start justify-between gap-4">
+                      <div>
+                        <div class="flex items-center gap-2">
+                          <h2 class="text-sm font-semibold text-foreground">{{ t("quickOpen.indexManagement") }}</h2>
+                          <button
+                            type="button"
+                            class="flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                            :aria-label="t('quickOpen.indexBuildInfoTitle')"
+                            :aria-expanded="indexBuildInfoOpen"
+                            :title="t('quickOpen.indexBuildInfoTitle')"
+                            @click="indexBuildInfoOpen = !indexBuildInfoOpen"
+                          >
+                            <Info class="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <p class="mt-1 text-xs text-muted-foreground">{{ t("quickOpen.indexManagementHint") }}</p>
+                      </div>
+                      <button type="button" class="shrink-0 rounded-md bg-foreground px-3 py-2 text-xs font-medium text-background hover:opacity-90 disabled:opacity-50" :disabled="!!indexBusyConnection || indexableConnections.length === 0" @click="runAllIndexBuild">
+                        {{ t("quickOpen.indexBuildAll") }}
+                      </button>
+                    </div>
+                    <div v-if="indexBuildInfoOpen" class="mb-4 rounded-lg border bg-muted/30 px-3 py-3 text-xs leading-5 text-muted-foreground">
+                      <div class="font-medium text-foreground">{{ t("quickOpen.indexBuildInfoTitle") }}</div>
+                      <p class="mt-1">{{ t("quickOpen.indexBuildInfoDescription") }}</p>
+                    </div>
+                    <div v-if="indexableConnections.length > 0" class="mb-4 rounded-lg border bg-muted/20 px-3 py-3">
+                      <div class="flex items-start justify-between gap-4">
+                        <div>
+                          <div class="text-xs font-semibold text-foreground">{{ t("quickOpen.indexProgressTitle") }}</div>
+                          <div class="mt-1 text-[11px] text-muted-foreground">{{ t("quickOpen.indexProgressConnections", { completed: indexProgressSummary.processed, total: indexProgressSummary.total }) }}</div>
+                        </div>
+                        <div class="text-right">
+                          <div class="text-sm font-semibold text-foreground">{{ indexProgressSummary.itemCount }}</div>
+                          <div class="text-[11px] text-muted-foreground">{{ t("quickOpen.indexProgressItems") }}</div>
+                        </div>
+                      </div>
+                      <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div class="h-full rounded-full bg-foreground transition-[width] duration-300" :style="{ width: `${indexProgressSummary.percent}%` }" />
+                      </div>
+                      <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                        <span v-if="indexProgressSummary.building > 0">{{ t("quickOpen.indexProgressBuilding", { count: indexProgressSummary.building }) }}</span>
+                        <span v-if="indexProgressSummary.failed > 0" class="text-destructive">{{ t("quickOpen.indexProgressFailed", { count: indexProgressSummary.failed }) }}</span>
+                        <span v-if="indexProgressSummary.building === 0 && indexProgressSummary.failed === 0">{{ t("quickOpen.indexProgressReady", { count: indexProgressSummary.ready }) }}</span>
+                      </div>
+                    </div>
+                    <div v-if="indexableConnections.length === 0" class="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">{{ t("quickOpen.indexUnsupported") }}</div>
+                    <div v-else class="space-y-2">
+                      <Input v-model="indexConnectionFilter" type="search" class="h-9" :placeholder="t('quickOpen.indexConnectionPlaceholder')" />
+                      <div v-if="filteredIndexableConnections.length === 0" class="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">{{ t("quickOpen.indexConnectionNoMatch") }}</div>
+                      <div v-else class="max-h-72 space-y-2 overflow-y-auto pr-1">
+                        <div v-for="connection in filteredIndexableConnections" :key="connection.id" class="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-3">
+                          <div class="min-w-[180px] flex-1">
+                            <div class="truncate text-sm font-medium text-foreground">{{ connection.name }}</div>
+                            <div class="mt-1 text-[11px] text-muted-foreground">
+                              {{ indexStatusLabel(connection.id) }}<span v-if="metadataIndexStatuses[connection.id]?.itemCount"> · {{ t("quickOpen.indexItems", { count: metadataIndexStatuses[connection.id]?.itemCount }) }}</span
+                              ><span v-if="indexStatusTime(connection.id)"> · {{ t("quickOpen.indexLastBuilt", { time: indexStatusTime(connection.id) }) }}</span>
+                            </div>
+                          </div>
+                          <div class="flex items-center gap-1.5">
+                            <button type="button" class="rounded-md border px-2.5 py-1.5 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50" :disabled="!!indexBusyConnection" @click="runIndexBuild(connection.id)">
+                              {{ metadataIndexStatuses[connection.id]?.state === "ready" ? t("quickOpen.indexRebuild") : t("quickOpen.indexBuild") }}
+                            </button>
+                            <button
+                              v-if="metadataIndexStatuses[connection.id]?.state === 'ready'"
+                              type="button"
+                              class="rounded-md px-2.5 py-1.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                              :disabled="!!indexBusyConnection"
+                              @click="runIndexClear(connection.id)"
+                            >
+                              {{ t("quickOpen.indexClear") }}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section id="settings-files" class="scroll-mt-5 rounded-xl border bg-background p-5 shadow-sm">
+                    <div class="mb-4">
+                      <h2 class="text-sm font-semibold text-foreground">{{ t("quickOpen.fileSearchSettings") }}</h2>
+                      <p class="mt-1 text-xs text-muted-foreground">{{ t("quickOpen.fileSearchSettingsHint") }}</p>
+                    </div>
+                    <div class="space-y-4">
+                      <div>
+                        <div class="mb-2 flex items-center justify-between gap-3">
+                          <span class="text-xs font-medium text-foreground">{{ t("quickOpen.searchRoots") }}</span>
+                          <button class="flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted" @click="addSearchDirectory"><FolderPlus class="h-3.5 w-3.5" /> {{ t("quickOpen.addDirectory") }}</button>
+                        </div>
+                        <div v-if="searchRoots.length === 0" class="rounded-lg border border-dashed px-4 py-4 text-xs text-muted-foreground">{{ t("quickOpen.noRootsConfigured") }}</div>
+                        <div v-else class="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto rounded-lg border p-2">
+                          <span v-for="root in searchRoots" :key="root" class="group flex max-w-full items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs">
+                            <span class="max-w-[280px] truncate" :title="root">{{ root }}</span>
+                            <button class="text-muted-foreground hover:text-foreground" :title="t('quickOpen.removePath')" @click="removeSearchRoot(root)">
+                              <X class="h-3 w-3" />
+                            </button>
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <label class="mb-2 block text-xs font-medium text-foreground">{{ t("quickOpen.searchExtensions") }}</label>
+                        <div class="flex items-center gap-2">
+                          <Input v-model="extensionsInput" type="text" class="h-9 flex-1" :placeholder="t('quickOpen.extensionsPlaceholder')" />
+                          <button class="rounded-md bg-foreground px-3 py-2 text-xs font-medium text-background hover:opacity-90" @click="saveExtensions">{{ t("quickOpen.apply") }}</button>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
                 </div>
               </div>
-              <button type="button" class="rounded px-2 py-1 text-[11px] text-foreground hover:bg-muted disabled:opacity-50" :disabled="!!indexBusyConnection" @click="runIndexBuild(connection.id)">
-                {{ metadataIndexStatuses[connection.id]?.state === "ready" ? t("quickOpen.indexRebuild") : t("quickOpen.indexBuild") }}
-              </button>
-              <button v-if="metadataIndexStatuses[connection.id]?.state === 'ready'" type="button" class="rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50" :disabled="!!indexBusyConnection" @click="runIndexClear(connection.id)">
-                {{ t("quickOpen.indexClear") }}
-              </button>
             </div>
           </div>
-          <div>
-            <div class="mb-1.5 flex items-center justify-between">
-              <span class="text-xs text-muted-foreground">{{ t("quickOpen.searchRoots") }}</span>
-              <button class="flex items-center gap-1 rounded px-2 py-1 text-xs text-foreground hover:bg-muted" @click="addSearchDirectory"><FolderPlus class="h-3.5 w-3.5" /> {{ t("quickOpen.addDirectory") }}</button>
-            </div>
-            <div v-if="searchRoots.length === 0" class="text-xs text-muted-foreground">
-              {{ t("quickOpen.noRootsConfigured") }}
-            </div>
-            <div v-else class="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto">
-              <span v-for="root in searchRoots" :key="root" class="group flex max-w-full items-center gap-1 rounded bg-background px-2 py-1 text-xs">
-                <span class="max-w-[280px] truncate" :title="root">{{ root }}</span>
-                <button class="text-muted-foreground hover:text-foreground" :title="t('quickOpen.removePath')" @click="removeSearchRoot(root)">
-                  <X class="h-3 w-3" />
-                </button>
-              </span>
-            </div>
+        </template>
+        <template v-else>
+          <div v-if="!contentMode && (activeSearchFilters.length > 0 || !searchQuery.trim())" class="flex shrink-0 flex-wrap items-center gap-1.5 border-b px-4 py-2 text-xs">
+            <span v-if="activeSearchFilters.length > 0" class="mr-1 text-muted-foreground">{{ t("quickOpen.filterLabel") }}</span>
+            <span v-for="[key, value] in activeSearchFilters" :key="key" class="rounded-full bg-muted px-2 py-0.5 text-foreground"> {{ key }}:{{ value }} </span>
+            <span v-if="activeSearchFilters.length === 0" class="text-muted-foreground">{{ t("quickOpen.syntaxHint") }}</span>
           </div>
-          <div>
-            <span class="text-xs text-muted-foreground">{{ t("quickOpen.searchExtensions") }}</span>
-            <div class="mt-1 flex items-center gap-2">
-              <Input v-model="extensionsInput" type="text" class="h-8 flex-1" :placeholder="t('quickOpen.extensionsPlaceholder')" />
-              <button class="rounded px-3 py-1.5 text-xs text-foreground hover:bg-muted" @click="saveExtensions">{{ t("quickOpen.apply") }}</button>
-            </div>
-          </div>
-        </div>
 
-        <!-- Three-column search workspace. Each pane owns its presentation and emits session actions. -->
-        <div class="grid min-h-0 flex-1 overflow-y-auto md:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[190px_minmax(0,1fr)_290px]">
-          <GlobalSearchScopeRail
-            :content-mode="contentMode"
-            :show-quick-filters="showQuickFilters"
-            :preview-editing="previewEditing"
-            :scope-selection="scopeSelection"
-            :scope-all-value="SCOPE_ALL_VALUE"
-            :connections="scopeConnections"
-            :connected-ids="connectionStore.connectedIds"
-            @update:scope-selection="scopeSelection = $event"
-            @token="appendSearchToken"
-          />
-          <div ref="listRef" class="min-h-0">
-            <GlobalSearchHome
-              v-if="!contentMode && !searchQuery.trim() && activeCategory === 'all'"
-              :items="displayItems"
-              :selected-id="selectedDisplayItem?.id"
-              @open="handleSelect"
-              @hover="
-                (item) => {
-                  homeSelectedId = item.id;
-                  selectedIndex = filteredItems.findIndex((candidate) => candidate.id === item.id);
-                }
-              "
-              @token="appendSearchToken"
-              @content="selectCategory('content')"
-            />
-            <GlobalSearchResultList
-              v-else
+          <!-- Category navigation: the main entry point for the search workspace. -->
+          <GlobalSearchCategoryBar :categories="visibleCategoryDefinitions" :active="activeCategory" :counts="{ ...categoryCounts, content: contentMatchCount }" @select="selectCategoryFromBar" />
+
+          <!-- Three-column search workspace. Each pane owns its presentation and emits session actions. -->
+          <div class="grid min-h-0 flex-1 overflow-y-auto md:grid-cols-[190px_minmax(0,1fr)] lg:grid-cols-[190px_minmax(0,1fr)_290px]">
+            <GlobalSearchScopeRail
               :content-mode="contentMode"
-              :content-searching="contentSearching"
-              :content-search-error="contentSearchError"
-              :content-groups="contentGroups"
-              :selected-index="selectedIndex"
-              :search-query="searchQuery"
-              :items="displayItems"
-              :selected-id="selectedDisplayItem?.id"
-              :get-highlighted-line-parts="getHighlightedLineParts"
-              :get-highlighted-label="getHighlightedLabel"
-              :get-item-icon="getItemIcon"
-              :get-result-category="getResultCategory"
-              :get-result-category-label="getResultCategoryLabel"
-              :get-result-category-count="getResultCategoryCount"
-              :get-source-label="getSourceLabel"
-              :get-type-badge="getTypeBadge"
-              :get-result-context="getResultContext"
-              @open="handleSelect"
-              @hover="
-                (item) => {
-                  selectedIndex = filteredItems.findIndex((candidate) => candidate.id === item.id);
-                }
-              "
-              @content-hover="(index) => !previewEditing && (selectedIndex = index)"
-              @retry-content-search="retryContentSearch"
+              :show-quick-filters="showQuickFilters"
+              :preview-editing="previewEditing"
+              :scope-selection="scopeSelection"
+              :scope-all-value="SCOPE_ALL_VALUE"
+              :connections="scopeConnections"
+              :connected-ids="connectionStore.connectedIds"
+              @update:scope-selection="scopeSelection = $event"
+              @token="appendSearchToken"
             />
-          </div>
-          <aside class="min-h-0 border-t bg-muted/10 p-4 md:col-span-2 lg:col-span-1 lg:overflow-y-auto lg:border-l lg:border-t-0" :class="previewItem && (previewEditing || (contentMode && !contentSearching)) ? 'block' : 'hidden lg:block'">
-            <QuickOpenFilePreview v-if="previewItem && (previewEditing || (contentMode && !contentSearching))" :item="previewItem" class="h-[300px] lg:h-full" @editing="handlePreviewEditing" @navigate="handlePreviewNavigate" @open="openPreviewMatch" @close="dialogOpen = false" />
-            <GlobalSearchPreview
-              v-else-if="selectedDisplayItem"
-              :item="selectedDisplayItem"
-              :type-badge="getTypeBadge"
-              :source-label="getSourceLabel"
-              :context="getResultContext"
-              :primary-action="getPrimaryAction"
-              :secondary-action="getSecondaryAction"
-              :secondary-shortcut="secondaryActionShortcut"
-              :primary-action-hint="getPrimaryActionHint"
-              @open="handleSelect(selectedDisplayItem!)"
-              @secondary="handleSecondaryAction(selectedDisplayItem!)"
-            />
-            <div v-else class="flex h-full min-h-[260px] flex-col items-center justify-center text-center text-xs text-muted-foreground">
-              <Server class="mb-3 h-8 w-8 opacity-30" />
-              <p>{{ t("quickOpen.previewEmptyTitle") }}</p>
-              <p class="mt-1 opacity-70">{{ t("quickOpen.previewEmptyHint") }}</p>
+            <div ref="listRef" class="min-h-0">
+              <GlobalSearchHome
+                v-if="isHomeView"
+                :items="displayItems"
+                :selected-id="selectedDisplayItem?.id"
+                :show-content-search="enabledSearchItemTypes.content !== false"
+                @open="handleSelect"
+                @hover="
+                  (item) => {
+                    homeSelectedId = item.id;
+                    selectedIndex = visibleItems.findIndex((candidate) => candidate.id === item.id);
+                  }
+                "
+                @token="appendSearchToken"
+                @content="selectCategory('content')"
+              />
+              <GlobalSearchResultList
+                v-else
+                :content-mode="contentMode"
+                :content-searching="contentSearching"
+                :content-search-error="contentSearchError"
+                :content-groups="contentGroups"
+                :selected-index="selectedIndex"
+                :search-query="displayedSearchQuery"
+                :items="displayItems"
+                :selected-id="selectedDisplayItem?.id"
+                :get-highlighted-line-parts="getHighlightedLineParts"
+                :get-highlighted-label="getHighlightedLabel"
+                :get-item-icon="getItemIcon"
+                :get-result-category="getResultCategory"
+                :get-result-category-label="getResultCategoryLabel"
+                :get-result-category-count="getResultCategoryCount"
+                :get-source-label="getSourceLabel"
+                :get-type-badge="getTypeBadge"
+                :get-result-context="getResultContext"
+                @open="handleSelect"
+                @hover="
+                  (item) => {
+                    selectedIndex = visibleItems.findIndex((candidate) => candidate.id === item.id);
+                  }
+                "
+                @content-hover="(index) => !previewEditing && (selectedIndex = index)"
+                @retry-content-search="retryContentSearch"
+              />
             </div>
-          </aside>
-        </div>
+            <aside class="min-h-0 border-t bg-muted/10 p-4 md:col-span-2 lg:col-span-1 lg:overflow-y-auto lg:border-l lg:border-t-0" :class="previewItem && (previewEditing || (contentMode && !contentSearching)) ? 'block' : 'hidden lg:block'">
+              <QuickOpenFilePreview v-if="previewItem && (previewEditing || (contentMode && !contentSearching))" :item="previewItem" class="h-[300px] lg:h-full" @editing="handlePreviewEditing" @navigate="handlePreviewNavigate" @open="openPreviewMatch" @close="dialogOpen = false" />
+              <GlobalSearchPreview
+                v-else-if="selectedDisplayItem"
+                :item="selectedDisplayItem"
+                :type-badge="getTypeBadge"
+                :source-label="getSourceLabel"
+                :context="getResultContext"
+                :primary-action="getPrimaryAction"
+                :secondary-action="getSecondaryAction"
+                :secondary-shortcut="secondaryActionShortcut"
+                :primary-action-hint="getPrimaryActionHint"
+                @open="handleSelect(selectedDisplayItem!)"
+                @secondary="handleSecondaryAction(selectedDisplayItem!)"
+              />
+              <div v-else class="flex h-full min-h-[260px] flex-col items-center justify-center text-center text-xs text-muted-foreground">
+                <Server class="mb-3 h-8 w-8 opacity-30" />
+                <p>{{ t("quickOpen.previewEmptyTitle") }}</p>
+                <p class="mt-1 opacity-70">{{ t("quickOpen.previewEmptyHint") }}</p>
+              </div>
+            </aside>
+          </div>
 
-        <div v-if="previewItem && !previewEditing && !contentMode" class="border-t bg-muted/10 px-4 py-3 lg:hidden">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <div class="text-xs font-semibold text-foreground">{{ previewItem.label }}</div>
-              <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ getResultContext(previewItem) || previewItem.description }}</div>
+          <div v-if="previewItem && !previewEditing && !contentMode" class="border-t bg-muted/10 px-4 py-3 lg:hidden">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-xs font-semibold text-foreground">{{ previewItem.label }}</div>
+                <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ getResultContext(previewItem) || previewItem.description }}</div>
+              </div>
+              <button class="shrink-0 rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background" @click="handleSelect(previewItem)">{{ getPrimaryAction(previewItem) }}</button>
             </div>
-            <button class="shrink-0 rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background" @click="handleSelect(previewItem)">{{ getPrimaryAction(previewItem) }}</button>
           </div>
-        </div>
 
-        <!-- Footer -->
-        <div class="shrink-0 flex flex-wrap justify-between gap-2 px-4 py-2 border-t text-xs text-muted-foreground">
-          <div>{{ contentMode ? contentMatchCount : displayItems.length }} {{ t("quickOpen.results") }}</div>
-          <div v-if="previewEditing" role="status">{{ t("quickOpen.finishEditing") }}</div>
-          <div v-else class="flex gap-4">
-            <span><kbd class="px-2 py-1 rounded bg-muted">↑↓</kbd> {{ t("quickOpen.navigate") }}</span>
-            <span><kbd class="px-2 py-1 rounded bg-muted">⏎</kbd> {{ t("quickOpen.select") }}</span>
-            <span><kbd class="px-2 py-1 rounded bg-muted">ESC</kbd> {{ t("quickOpen.close") }}</span>
-            <span class="hidden sm:inline"
-              ><kbd class="px-2 py-1 rounded bg-muted">{{ globalSearchShortcut }}</kbd> {{ t("quickOpen.globalSearchHint") }}</span
-            >
+          <!-- Footer -->
+          <div v-if="!searchSettingsOpen" class="shrink-0 flex flex-wrap justify-between gap-2 px-4 py-2 border-t text-xs text-muted-foreground">
+            <div>{{ contentMode ? contentMatchCount : displayItems.length }} {{ t("quickOpen.results") }}</div>
+            <div v-if="previewEditing" role="status">{{ t("quickOpen.finishEditing") }}</div>
+            <div v-else class="flex gap-4">
+              <span><kbd class="px-2 py-1 rounded bg-muted">↑↓</kbd> {{ t("quickOpen.navigate") }}</span>
+              <span><kbd class="px-2 py-1 rounded bg-muted">⏎</kbd> {{ t("quickOpen.select") }}</span>
+              <span><kbd class="px-2 py-1 rounded bg-muted">ESC</kbd> {{ t("quickOpen.close") }}</span>
+              <span class="hidden sm:inline"
+                ><kbd class="px-2 py-1 rounded bg-muted">{{ globalSearchShortcut }}</kbd> {{ t("quickOpen.globalSearchHint") }}</span
+              >
+            </div>
           </div>
-        </div>
+        </template>
       </div>
     </DialogContent>
   </Dialog>

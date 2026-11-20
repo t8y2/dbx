@@ -7,10 +7,15 @@ const ROOTS_STORAGE_KEY = "dbx-global-search-roots";
 const EXTENSIONS_STORAGE_KEY = "dbx-global-search-extensions";
 const MATCH_MODE_STORAGE_KEY = "dbx-global-search-match-mode";
 const SHOW_QUICK_FILTERS_STORAGE_KEY = "dbx-global-search-show-quick-filters";
+const SEARCH_ITEM_TYPES_STORAGE_KEY = "dbx-global-search-item-types";
 export const DEFAULT_GLOBAL_SEARCH_EXTENSIONS = ["sql"];
 export type GlobalSearchMatchMode = "precise" | "enhanced";
 export const DEFAULT_GLOBAL_SEARCH_MATCH_MODE: GlobalSearchMatchMode = "precise";
 export const DEFAULT_GLOBAL_SEARCH_SHOW_QUICK_FILTERS = true;
+export const GLOBAL_SEARCH_ITEM_TYPES = ["connection", "database", "schema", "table", "view", "routine", "column", "file", "content", "command"] as const;
+export type GlobalSearchItemType = "connection" | "database" | "schema" | "table" | "view" | "routine" | "column" | "file" | "content" | "command";
+export type GlobalSearchItemTypes = Record<string, boolean>;
+export const DEFAULT_GLOBAL_SEARCH_ITEM_TYPES: GlobalSearchItemTypes = Object.fromEntries(GLOBAL_SEARCH_ITEM_TYPES.map((type) => [type, true])) as GlobalSearchItemTypes;
 
 /**
  * Shared reactive version counter — bumped whenever global-search settings change.
@@ -83,13 +88,26 @@ export function getGlobalSearchShowQuickFilters(): boolean {
   return raw == null ? DEFAULT_GLOBAL_SEARCH_SHOW_QUICK_FILTERS : raw !== "false";
 }
 
-function globalSearchSettingsPayload(): { roots: string[]; extensions: string[]; matchMode?: GlobalSearchMatchMode; showQuickFilters?: boolean } {
-  const payload: { roots: string[]; extensions: string[]; matchMode?: GlobalSearchMatchMode; showQuickFilters?: boolean } = {
+export function getGlobalSearchItemTypes(): GlobalSearchItemTypes {
+  try {
+    const raw = safeLocalStorageGet(SEARCH_ITEM_TYPES_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_GLOBAL_SEARCH_ITEM_TYPES };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(GLOBAL_SEARCH_ITEM_TYPES.map((type) => [type, parsed[type] !== false])) as GlobalSearchItemTypes;
+  } catch {
+    return { ...DEFAULT_GLOBAL_SEARCH_ITEM_TYPES };
+  }
+}
+
+function globalSearchSettingsPayload(): { roots: string[]; extensions: string[]; matchMode?: GlobalSearchMatchMode; showQuickFilters?: boolean; itemTypes?: GlobalSearchItemTypes } {
+  const payload: { roots: string[]; extensions: string[]; matchMode?: GlobalSearchMatchMode; showQuickFilters?: boolean; itemTypes?: GlobalSearchItemTypes } = {
     roots: getGlobalSearchRoots(),
     extensions: getGlobalSearchExtensions(),
   };
   if (getGlobalSearchMatchMode() !== DEFAULT_GLOBAL_SEARCH_MATCH_MODE) payload.matchMode = getGlobalSearchMatchMode();
   if (getGlobalSearchShowQuickFilters() !== DEFAULT_GLOBAL_SEARCH_SHOW_QUICK_FILTERS) payload.showQuickFilters = getGlobalSearchShowQuickFilters();
+  const itemTypes = getGlobalSearchItemTypes();
+  if (GLOBAL_SEARCH_ITEM_TYPES.some((type) => itemTypes[type] !== DEFAULT_GLOBAL_SEARCH_ITEM_TYPES[type])) payload.itemTypes = itemTypes;
   return payload;
 }
 
@@ -119,6 +137,14 @@ export function saveGlobalSearchMatchMode(mode: GlobalSearchMatchMode): void {
 
 export function saveGlobalSearchShowQuickFilters(show: boolean): void {
   safeLocalStorageSet(SHOW_QUICK_FILTERS_STORAGE_KEY, show ? "true" : "false");
+  globalSearchSettingsVersion.value++;
+  void persistGlobalSearchSettings();
+}
+
+export function saveGlobalSearchItemTypes(itemTypes: Partial<GlobalSearchItemTypes>): void {
+  const current = getGlobalSearchItemTypes();
+  const next = Object.fromEntries(GLOBAL_SEARCH_ITEM_TYPES.map((type) => [type, itemTypes[type] ?? current[type]])) as GlobalSearchItemTypes;
+  safeLocalStorageSet(SEARCH_ITEM_TYPES_STORAGE_KEY, JSON.stringify(next));
   globalSearchSettingsVersion.value++;
   void persistGlobalSearchSettings();
 }
@@ -161,6 +187,11 @@ export async function initializeGlobalSearchSettings(): Promise<void> {
     }
     if (typeof disk.showQuickFilters === "boolean") {
       safeLocalStorageSet(SHOW_QUICK_FILTERS_STORAGE_KEY, disk.showQuickFilters ? "true" : "false");
+      hydrated = true;
+    }
+    if (disk.itemTypes && typeof disk.itemTypes === "object") {
+      const itemTypes = Object.fromEntries(GLOBAL_SEARCH_ITEM_TYPES.map((type) => [type, (disk.itemTypes as Record<string, unknown>)[type] !== false])) as GlobalSearchItemTypes;
+      safeLocalStorageSet(SEARCH_ITEM_TYPES_STORAGE_KEY, JSON.stringify(itemTypes));
       hydrated = true;
     }
     if (hydrated) {

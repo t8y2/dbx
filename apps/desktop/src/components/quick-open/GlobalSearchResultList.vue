@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
+import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { FileCode, FileText } from "@lucide/vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { useI18n } from "vue-i18n";
@@ -38,15 +41,30 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-const contentRows = () => {
-  const rows: Array<{ isHeader: boolean; header?: string; filePath?: string; count?: number; item?: QuickOpenItem; flatIndex: number }> = [];
+type ContentRow = { isHeader: boolean; id: string; header?: string; filePath?: string; count?: number; item?: QuickOpenItem; flatIndex: number };
+type ResultRow = { isHeader: true; id: string; category: ResultCategory; count: number } | { isHeader: false; id: string; item: QuickOpenItem; itemIndex: number };
+
+const contentRows = computed<ContentRow[]>(() => {
+  const rows: ContentRow[] = [];
   let flatIndex = 0;
   for (const group of props.contentGroups) {
-    rows.push({ isHeader: true, header: group.header, filePath: group.filePath, count: group.matches.length, flatIndex: -1 });
-    for (const match of group.matches) rows.push({ isHeader: false, filePath: group.filePath, item: match, flatIndex: flatIndex++ });
+    rows.push({ isHeader: true, id: `h-${group.filePath}`, header: group.header, filePath: group.filePath, count: group.matches.length, flatIndex: -1 });
+    for (const match of group.matches) rows.push({ isHeader: false, id: match.id, filePath: group.filePath, item: match, flatIndex: flatIndex++ });
   }
   return rows;
-};
+});
+
+const resultRows = computed<ResultRow[]>(() => {
+  const rows: ResultRow[] = [];
+  for (const [itemIndex, item] of props.items.entries()) {
+    const category = props.getResultCategory(item);
+    if (itemIndex === 0 || props.getResultCategory(props.items[itemIndex - 1]!) !== category) {
+      rows.push({ isHeader: true, id: `category-${category}`, category, count: props.getResultCategoryCount(category) });
+    }
+    rows.push({ isHeader: false, id: item.id, item, itemIndex });
+  }
+  return rows;
+});
 </script>
 
 <template>
@@ -59,12 +77,44 @@ const contentRows = () => {
           <p class="max-w-full whitespace-pre-wrap break-words text-xs text-muted-foreground">{{ props.contentSearchError }}</p>
           <button type="button" class="rounded-md border px-3 py-1.5 text-xs text-foreground hover:bg-muted" @click="emit('retryContentSearch')">{{ t("common.retry") }}</button>
         </div>
-        <div v-if="contentRows().length === 0 && !props.contentSearchError" class="px-4 py-8 text-center text-muted-foreground">
+        <div v-if="contentRows.length === 0 && !props.contentSearchError" class="px-4 py-8 text-center text-muted-foreground">
           <p v-if="!props.searchQuery.trim()">{{ t("quickOpen.emptyPlaceholder") }}</p>
           <p v-else>{{ t("quickOpen.noResults") }}</p>
         </div>
+        <DynamicScroller v-if="contentRows.length > 100" :items="contentRows" :min-item-size="32" :buffer="400" :skip-hover="true" key-field="id" class="divide-y">
+          <template #default="{ item: row, active, index }">
+            <DynamicScrollerItem :item="row" :active="active" :data-index="index" :size-dependencies="[row.isHeader, row.id]">
+              <div v-if="row.isHeader" class="flex items-center justify-between gap-3 bg-muted/50 px-4 py-1.5">
+                <div class="flex min-w-0 items-center gap-2">
+                  <FileCode class="h-4 w-4 shrink-0 text-muted-foreground" /><span class="truncate text-xs font-semibold text-foreground">{{ row.header }}</span>
+                </div>
+                <span class="whitespace-nowrap text-xs text-muted-foreground">{{ row.count }}</span>
+              </div>
+              <div v-else class="cursor-pointer px-4 py-1.5" :data-selected="row.flatIndex === props.selectedIndex" :class="row.flatIndex === props.selectedIndex ? 'bg-accent' : 'hover:bg-muted'" @click="emit('open', row.item!)" @mouseenter="emit('contentHover', row.flatIndex)">
+                <div v-if="row.item!.line === 0" class="flex min-w-0 items-center gap-2">
+                  <FileText class="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span class="truncate font-mono text-xs"
+                    ><template v-for="(part, i) in props.getHighlightedLineParts(row.item!)" :key="i"
+                      ><span v-if="part.highlight" class="rounded-[0.1875rem] bg-yellow-200 px-0.5 font-semibold text-foreground dark:bg-yellow-800">{{ part.text }}</span
+                      ><span v-else>{{ part.text }}</span></template
+                    ></span
+                  >
+                </div>
+                <div v-else class="flex min-w-0 items-center gap-2">
+                  <span class="shrink-0 font-mono text-xs text-muted-foreground">{{ row.item!.line }}</span>
+                  <span class="truncate font-mono text-xs"
+                    ><template v-for="(part, i) in props.getHighlightedLineParts(row.item!)" :key="i"
+                      ><span v-if="part.highlight" class="rounded-[0.1875rem] bg-yellow-200 px-0.5 font-semibold text-foreground dark:bg-yellow-800">{{ part.text }}</span
+                      ><span v-else>{{ part.text }}</span></template
+                    ></span
+                  >
+                </div>
+              </div>
+            </DynamicScrollerItem>
+          </template>
+        </DynamicScroller>
         <div v-else class="divide-y">
-          <template v-for="row in contentRows()" :key="row.isHeader ? `h-${row.filePath}` : row.item!.id">
+          <template v-for="row in contentRows" :key="row.id">
             <div v-if="row.isHeader" class="flex items-center justify-between gap-3 bg-muted/50 px-4 py-1.5">
               <div class="flex min-w-0 items-center gap-2">
                 <FileCode class="h-4 w-4 shrink-0 text-muted-foreground" /><span class="truncate text-xs font-semibold text-foreground">{{ row.header }}</span>
@@ -101,29 +151,29 @@ const contentRows = () => {
       <p v-else>{{ t("quickOpen.noResults") }}</p>
     </div>
     <div v-else class="divide-y">
-      <template v-for="(item, index) in props.items" :key="item.id">
-        <div v-if="index === 0 || props.getResultCategory(props.items[index - 1]!) !== props.getResultCategory(item)" class="flex items-center justify-between border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          <span>{{ props.getResultCategoryLabel(props.getResultCategory(item)) }}</span
-          ><span>{{ props.getResultCategoryCount(props.getResultCategory(item)) }}</span>
+      <template v-for="row in resultRows" :key="row.id">
+        <div v-if="row.isHeader" class="flex items-center justify-between border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <span>{{ props.getResultCategoryLabel(row.category) }}</span
+          ><span>{{ row.count }}</span>
         </div>
-        <div :data-selected="item.id === props.selectedId" :class="['cursor-pointer px-4 py-2', item.id === props.selectedId ? 'bg-accent' : 'hover:bg-muted']" @click="emit('open', item)" @mouseenter="emit('hover', item)">
+        <div v-else :data-selected="row.item.id === props.selectedId" :class="['cursor-pointer px-4 py-2', row.item.id === props.selectedId ? 'bg-accent' : 'hover:bg-muted']" @click="emit('open', row.item)" @mouseenter="emit('hover', row.item)">
           <div class="flex items-center justify-between gap-3">
             <div class="flex min-w-0 flex-1 items-center gap-2">
-              <PluginIcon v-if="item.type === 'plugin_workbench' && item.pluginId" :plugin-id="item.pluginId" :icon="item.pluginIcon" :contribution-id="item.contributionId" class="h-4 w-4 shrink-0" />
-              <component v-if="props.getItemIcon(item.type)" :is="props.getItemIcon(item.type)" class="h-4 w-4 shrink-0 text-muted-foreground" />
+              <PluginIcon v-if="row.item.type === 'plugin_workbench' && row.item.pluginId" :plugin-id="row.item.pluginId" :icon="row.item.pluginIcon" :contribution-id="row.item.contributionId" class="h-4 w-4 shrink-0" />
+              <component v-if="props.getItemIcon(row.item.type)" :is="props.getItemIcon(row.item.type)" class="h-4 w-4 shrink-0 text-muted-foreground" />
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm font-medium">
-                  <template v-for="(part, i) in props.getHighlightedLabel(item)" :key="i"
+                  <template v-for="(part, i) in props.getHighlightedLabel(row.item)" :key="i"
                     ><span v-if="typeof part === 'object'" :class="{ 'bg-yellow-200 font-semibold dark:bg-yellow-800': part.highlight }">{{ part.text }}</span
                     ><span v-else>{{ part }}</span></template
                   >
                 </div>
-                <div v-if="item.description || props.getResultContext(item)" class="truncate text-xs text-muted-foreground">{{ item.description || props.getResultContext(item) }}</div>
+                <div v-if="row.item.description || props.getResultContext(row.item)" class="truncate text-xs text-muted-foreground">{{ row.item.description || props.getResultContext(row.item) }}</div>
               </div>
             </div>
             <div class="flex shrink-0 items-center gap-1">
-              <div class="whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{{ props.getSourceLabel(item) }}</div>
-              <div class="whitespace-nowrap rounded bg-muted px-2 py-1 text-xs text-muted-foreground">{{ props.getTypeBadge(item) }}</div>
+              <div class="whitespace-nowrap rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{{ props.getSourceLabel(row.item) }}</div>
+              <div class="whitespace-nowrap rounded bg-muted px-2 py-1 text-xs text-muted-foreground">{{ props.getTypeBadge(row.item) }}</div>
             </div>
           </div>
         </div>

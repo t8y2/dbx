@@ -38,6 +38,8 @@ const {
   getGlobalSearchMatchMode,
   getGlobalSearchRoots,
   getGlobalSearchShowQuickFilters,
+  getGlobalSearchItemTypes,
+  saveGlobalSearchItemTypes,
   saveGlobalSearchExtensions,
   saveGlobalSearchMatchMode,
   saveGlobalSearchRoots,
@@ -77,6 +79,12 @@ describe("globalSearchSettings", () => {
   it("defaults to precise matching and visible quick filters", () => {
     expect(getGlobalSearchMatchMode()).toBe(DEFAULT_GLOBAL_SEARCH_MATCH_MODE);
     expect(getGlobalSearchShowQuickFilters()).toBe(true);
+  });
+
+  it("persists disabled search item types", async () => {
+    saveGlobalSearchItemTypes({ table: false, column: false });
+    expect(getGlobalSearchItemTypes()).toMatchObject({ table: false, column: false, database: true });
+    await vi.waitFor(() => expect(mocks.save).toHaveBeenLastCalledWith(expect.objectContaining({ itemTypes: expect.objectContaining({ table: false, column: false }) })));
   });
 
   it("persists enhanced matching and hidden quick filters", async () => {

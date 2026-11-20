@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   pluginOpen: vi.fn(),
   matchMode: "precise" as "precise" | "enhanced",
   showQuickFilters: true,
+  itemTypes: { connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: true, content: true, command: true },
   saveMatchMode: vi.fn(),
   saveShowQuickFilters: vi.fn(),
   ensureConnected: vi.fn(),
@@ -68,11 +69,13 @@ vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
     getGlobalSearchExtensions: () => ["sql"],
     getGlobalSearchMatchMode: () => mocks.matchMode,
     getGlobalSearchShowQuickFilters: () => mocks.showQuickFilters,
+    getGlobalSearchItemTypes: () => mocks.itemTypes,
     globalSearchSettingsVersion: ref(0),
     saveGlobalSearchRoots: vi.fn(),
     saveGlobalSearchExtensions: vi.fn(),
     saveGlobalSearchMatchMode: mocks.saveMatchMode,
     saveGlobalSearchShowQuickFilters: mocks.saveShowQuickFilters,
+    saveGlobalSearchItemTypes: vi.fn(),
   };
 });
 vi.mock("@/lib/backend/api", () => ({
@@ -160,6 +163,7 @@ beforeEach(() => {
   mocks.toast.mockReset();
   mocks.matchMode = "precise";
   mocks.showQuickFilters = true;
+  mocks.itemTypes = { connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: true, content: true, command: true };
   mocks.saveMatchMode.mockReset();
   mocks.saveShowQuickFilters.mockReset();
   vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
@@ -203,11 +207,19 @@ describe("global search controls", () => {
     await nextTick();
     host.querySelector<HTMLButtonElement>('[title="Search settings"]')!.click();
     await nextTick();
+    expect(host.textContent).toContain("Overall progress");
+    expect(host.textContent).toContain("Indexed items");
+    const infoButton = host.querySelector<HTMLButtonElement>('button[title="How indexing works"]');
+    expect(infoButton).toBeDefined();
+    infoButton!.click();
+    await nextTick();
+    expect(host.textContent).toContain("Build all indexes attempts to connect to every supported database");
     const buildButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Build index");
     expect(buildButton).toBeDefined();
     buildButton!.click();
-    await vi.waitFor(() => expect(mocks.loadDatabases).toHaveBeenCalledWith(connection.id, { force: true, connectedOnly: true }));
-    expect(mocks.saveSchemaCache).toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.saveSchemaCache).toHaveBeenCalled());
+    expect(mocks.loadDatabases).not.toHaveBeenCalled();
+    expect(mocks.loadTreeNodeChildren).not.toHaveBeenCalled();
   });
 
   it("supports matching mode and hiding quick filters from search settings", async () => {
@@ -330,6 +342,49 @@ describe("empty-query search home", () => {
     expect(selected).toEqual(expect.objectContaining({ type: "materialized_view", label: "daily_sales" }));
     expect(selected?.searchScope).toBeUndefined();
   });
+
+  it("shows results when switching categories from the empty-query home", async () => {
+    mocks.connections = [{ id: "conn1", name: "Production", db_type: "postgres" }];
+    mocks.treeNodes = [{ id: "table1", connectionId: "conn1", type: "table", database: "app", label: "users", children: [] }];
+
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const props = reactive({ open: false, onSelect: mocks.select, "onUpdate:open": mocks.updateOpen });
+    app = createApp({ render: () => h(QuickOpenDialog, props) });
+    app.use(i18n);
+    app.mount(host);
+    props.open = true;
+    await nextTick();
+    await nextTick();
+
+    const objects = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim().startsWith(i18n.global.t("quickOpen.categoryObjects")));
+    expect(objects).toBeDefined();
+    objects!.click();
+    await nextTick();
+
+    expect(host.querySelector('[data-selected="true"]')?.textContent).toContain("users");
+  });
+
+  it("switches categories immediately for a large empty-query result set", async () => {
+    mocks.connections = [{ id: "conn1", name: "Production", db_type: "postgres" }];
+    mocks.treeNodes = Array.from({ length: 501 }, (_, index) => ({ id: `table-${index}`, connectionId: "conn1", type: "table", database: "app", label: `users_${index}`, children: [] }));
+
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const props = reactive({ open: false, onSelect: mocks.select, "onUpdate:open": mocks.updateOpen });
+    app = createApp({ render: () => h(QuickOpenDialog, props) });
+    app.use(i18n);
+    app.mount(host);
+    props.open = true;
+    await nextTick();
+
+    const objects = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim().startsWith(i18n.global.t("quickOpen.categoryObjects")));
+    expect(objects).toBeDefined();
+    objects!.click();
+    await nextTick();
+
+    expect(host.querySelector('[data-selected="true"]')?.textContent).toContain("users_0");
+  });
 });
 
 describe("search categories and connection scope", () => {
@@ -367,6 +422,51 @@ describe("search categories and connection scope", () => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
       expect(mocks.select).toHaveBeenLastCalledWith(expect.objectContaining({ type: "column", label: "needle" }));
     }
+  });
+
+  it("hides disabled file categories and content mode", async () => {
+    mocks.itemTypes = { connection: true, database: true, schema: true, table: true, view: true, routine: true, column: true, file: false, content: false, command: true };
+    const input = await mountObjects();
+    expect([...host.querySelectorAll("button")].some((button) => button.textContent?.includes(i18n.global.t("quickOpen.categoryFiles")))).toBe(false);
+    expect(host.querySelector(`button[title="${i18n.global.t("quickOpen.modeContent")}"]`)).toBeNull();
+    expect(input).toBeTruthy();
+  });
+
+  it("opens search settings as a standalone view", async () => {
+    mocks.connections = [{ id: "conn1", name: "Production", db_type: "postgres" }];
+    mocks.treeNodes = [{ id: "target", connectionId: "conn1", type: "table", database: "app", label: "needle" }];
+    const input = await mountObjects();
+    expect(host.textContent).toContain(i18n.global.t("quickOpen.homeSearchObjects"));
+
+    const settingsButton = host.querySelector<HTMLButtonElement>(`button[title="${i18n.global.t("quickOpen.searchSettings")}"]`)!;
+    settingsButton.click();
+    await nextTick();
+
+    expect(host.textContent).toContain(i18n.global.t("quickOpen.searchSettings"));
+    expect(host.textContent).not.toContain(i18n.global.t("quickOpen.homeSearchObjects"));
+    expect(host.querySelector(`[title="${i18n.global.t("quickOpen.searchSettings")}"]`)).toBeNull();
+
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("common.back")}"]`)!.click();
+    await nextTick();
+    expect(host.textContent).toContain(i18n.global.t("quickOpen.homeSearchObjects"));
+    expect(input.value).toBe("");
+  });
+
+  it("keeps the settings header visible while navigating sections", async () => {
+    const input = await mountObjects();
+    host.querySelector<HTMLButtonElement>(`button[title="${i18n.global.t("quickOpen.searchSettings")}"]`)!.click();
+    await nextTick();
+
+    const content = host.querySelector<HTMLElement>("[data-settings-content]")!;
+    const scrollTo = vi.spyOn(content, "scrollTo").mockImplementation(() => {});
+    const indexesButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("quickOpen.settingsIndexes"))!;
+    indexesButton.click();
+    await nextTick();
+
+    expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ behavior: "smooth" }));
+    expect(host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("common.back")}"]`)).not.toBeNull();
+    expect(host.textContent).toContain(i18n.global.t("quickOpen.searchSettings"));
+    expect(input).toBeTruthy();
   });
 
   it.each(["table", "view", "materialized_view", "function", "schema"])("finds %s from the home database objects entry", async (type) => {

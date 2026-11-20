@@ -32,7 +32,7 @@ export function isQuickOpenMetadataIndexSupported(dbType: string): boolean {
   return !QUICK_OPEN_METADATA_INDEX_UNSUPPORTED_TYPES.has(dbType);
 }
 
-export type QuickOpenIndexState = "not-built" | "ready" | "building" | "failed";
+export type QuickOpenIndexState = "not-built" | "ready" | "building" | "partial" | "failed";
 
 export interface QuickOpenIndexStatus {
   connectionId: string;
@@ -47,11 +47,12 @@ export function quickOpenIndexStatus(connectionId: string, payload: unknown, now
   return cache && cache.connectionId === connectionId ? quickOpenIndexStatusFromCache(connectionId, cache) : { connectionId, state: "not-built", itemCount: 0 };
 }
 
-export function quickOpenIndexStatusFromCache(connectionId: string, cache: Pick<QuickOpenMetadataCache, "items" | "capturedAt">): QuickOpenIndexStatus {
+export function quickOpenIndexStatusFromCache(connectionId: string, cache: Pick<QuickOpenMetadataCache, "items" | "capturedAt" | "state" | "error">): QuickOpenIndexStatus {
   return {
     connectionId,
-    state: "ready",
+    state: cache.state ?? "ready",
     itemCount: cache.items.length,
     capturedAt: cache.capturedAt,
+    ...(cache.error ? { error: cache.error } : {}),
   };
 }

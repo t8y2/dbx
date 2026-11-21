@@ -4,11 +4,15 @@ import type { JdbcDriverInfo, JdbcMavenBundleInfo, JdbcPluginStatus } from "@/ty
 export type ManagedJdbcBundleDefinition = {
   coordinate: string;
   repositories: readonly string[];
+  compatibilityRuntimeId?: string;
+  requiredArtifactNames?: readonly string[];
 };
 
 export type ManagedJdbcDriverDefinition = {
   id: string;
   label: string;
+  labelKey?: string;
+  requiredPluginCapabilities?: readonly string[];
   version: string;
   jre: string;
   bundles: readonly ManagedJdbcBundleDefinition[];
@@ -17,6 +21,7 @@ export type ManagedJdbcDriverDefinition = {
 export type ManagedJdbcDriverApi = {
   installJdbcPlugin: () => Promise<JdbcPluginStatus>;
   installJdbcDriverFromMaven: (coordinate: string, repositories?: string[]) => Promise<JdbcDriverInfo[]>;
+  installJdbcCompatibilityRuntime?: (id: string) => Promise<JdbcDriverInfo[]>;
   listJdbcMavenBundles: () => Promise<JdbcMavenBundleInfo[]>;
   deleteJdbcMavenBundle: (bundleId: string) => Promise<JdbcDriverInfo[]>;
 };
@@ -49,13 +54,25 @@ export function createManagedJdbcDriverRegistry(definitions: readonly ManagedJdb
   return { definitions: [...definitions], byId };
 }
 
+export function jdbcBundleHasArtifacts(bundle: JdbcMavenBundleInfo | undefined, requiredArtifactNames: readonly string[] = []): boolean {
+  if (!bundle) return false;
+  if (requiredArtifactNames.length === 0) return true;
+  if (bundle.artifacts.length === 0 || bundle.artifacts.some((artifact) => !artifact.path)) return false;
+  return requiredArtifactNames.every((name) => bundle.artifacts.some((artifact) => artifact.file_name === name));
+}
+
 export function managedJdbcDriverBundles(definition: ManagedJdbcDriverDefinition, bundles: readonly JdbcMavenBundleInfo[]): JdbcMavenBundleInfo[] {
   const bundleByCoordinate = new Map(bundles.map((bundle) => [bundle.coordinate, bundle]));
-  return definition.bundles.map(({ coordinate }) => bundleByCoordinate.get(coordinate)).filter((bundle): bundle is JdbcMavenBundleInfo => Boolean(bundle));
+  return definition.bundles
+    .map(({ coordinate, requiredArtifactNames }) => {
+      const bundle = bundleByCoordinate.get(coordinate);
+      return jdbcBundleHasArtifacts(bundle, requiredArtifactNames) ? bundle : undefined;
+    })
+    .filter((bundle): bundle is JdbcMavenBundleInfo => Boolean(bundle));
 }
 
 export function missingManagedJdbcDriverBundles(definition: ManagedJdbcDriverDefinition, bundles: readonly JdbcMavenBundleInfo[]): ManagedJdbcBundleDefinition[] {
-  const installedCoordinates = new Set(bundles.map((bundle) => bundle.coordinate));
+  const installedCoordinates = new Set(managedJdbcDriverBundles(definition, bundles).map((bundle) => bundle.coordinate));
   return definition.bundles.filter(({ coordinate }) => !installedCoordinates.has(coordinate));
 }
 
@@ -66,9 +83,32 @@ export function managedJdbcDriverPaths(definition: ManagedJdbcDriverDefinition, 
   return requiredBundles.flatMap((bundle) => (bundle?.artifacts ?? []).map((artifact) => artifact.path).filter(Boolean));
 }
 
-export function managedJdbcDriverRow(definition: ManagedJdbcDriverDefinition, bundles: readonly JdbcMavenBundleInfo[], pluginStatus?: Pick<JdbcPluginStatus, "installed" | "compatible"> | null): AgentDriverInfo {
+export function managedJdbcPluginReady(definition: ManagedJdbcDriverDefinition, status?: Pick<JdbcPluginStatus, "installed" | "compatible" | "capabilities"> | null): boolean {
+  return status?.installed === true && status.compatible && (definition.requiredPluginCapabilities ?? []).every((capability) => (status.capabilities ?? []).includes(capability));
+}
+
+export class ManagedJdbcPluginCapabilityError extends Error {
+  constructor() {
+    super("Update the JDBC plugin to a release with external classpath isolation before installing this compatibility runtime.");
+    this.name = "ManagedJdbcPluginCapabilityError";
+  }
+}
+
+export async function importManagedJdbcCompatibilityRuntime(
+  definition: ManagedJdbcDriverDefinition,
+  status: Pick<JdbcPluginStatus, "installed" | "compatible" | "capabilities"> | null | undefined,
+  file: string | File,
+  api: { installJdbcCompatibilityRuntimeFromFile: (id: string, file: string | File) => Promise<JdbcDriverInfo[]> },
+): Promise<JdbcDriverInfo[]> {
+  if (!managedJdbcPluginReady(definition, status)) throw new ManagedJdbcPluginCapabilityError();
+  const id = definition.bundles.find((bundle) => bundle.compatibilityRuntimeId)?.compatibilityRuntimeId;
+  if (!id) throw new Error("Compatibility runtime import is unavailable");
+  return api.installJdbcCompatibilityRuntimeFromFile(id, file);
+}
+
+export function managedJdbcDriverRow(definition: ManagedJdbcDriverDefinition, bundles: readonly JdbcMavenBundleInfo[], pluginStatus?: Pick<JdbcPluginStatus, "installed" | "compatible" | "capabilities"> | null): AgentDriverInfo {
   const installedBundles = managedJdbcDriverBundles(definition, bundles);
-  const pluginReady = pluginStatus?.installed === true && pluginStatus.compatible;
+  const pluginReady = managedJdbcPluginReady(definition, pluginStatus);
   const installed = pluginReady && installedBundles.length === definition.bundles.length;
   return {
     db_type: definition.id,
@@ -84,17 +124,30 @@ export function managedJdbcDriverRow(definition: ManagedJdbcDriverDefinition, bu
   };
 }
 
-export async function installManagedJdbcDriver(definition: ManagedJdbcDriverDefinition, currentBundles: readonly JdbcMavenBundleInfo[], currentPluginStatus: Pick<JdbcPluginStatus, "installed" | "compatible"> | null | undefined, api: ManagedJdbcDriverApi): Promise<ManagedJdbcDriverMutationResult> {
+export async function installManagedJdbcDriver(
+  definition: ManagedJdbcDriverDefinition,
+  currentBundles: readonly JdbcMavenBundleInfo[],
+  currentPluginStatus: Pick<JdbcPluginStatus, "installed" | "compatible" | "capabilities"> | null | undefined,
+  api: ManagedJdbcDriverApi,
+): Promise<ManagedJdbcDriverMutationResult> {
   let pluginStatus: JdbcPluginStatus | undefined;
-  if (!currentPluginStatus?.installed || !currentPluginStatus.compatible) {
+  if (!managedJdbcPluginReady(definition, currentPluginStatus)) {
     pluginStatus = await api.installJdbcPlugin();
+  }
+  if (definition.requiredPluginCapabilities?.length && !managedJdbcPluginReady(definition, pluginStatus ?? currentPluginStatus)) {
+    throw new ManagedJdbcPluginCapabilityError();
   }
 
   let bundles = [...currentBundles];
   let drivers: JdbcDriverInfo[] | undefined;
   for (const bundle of definition.bundles) {
-    if (bundles.some(({ coordinate }) => coordinate === bundle.coordinate)) continue;
-    drivers = await api.installJdbcDriverFromMaven(bundle.coordinate, [...bundle.repositories]);
+    if (bundles.some((installed) => installed.coordinate === bundle.coordinate && jdbcBundleHasArtifacts(installed, bundle.requiredArtifactNames))) continue;
+    if (bundle.compatibilityRuntimeId) {
+      if (!api.installJdbcCompatibilityRuntime) throw new Error("Compatibility runtime installation is unavailable");
+      drivers = await api.installJdbcCompatibilityRuntime(bundle.compatibilityRuntimeId);
+    } else {
+      drivers = await api.installJdbcDriverFromMaven(bundle.coordinate, [...bundle.repositories]);
+    }
     bundles = await api.listJdbcMavenBundles();
   }
   return { drivers, bundles, pluginStatus };
@@ -102,7 +155,7 @@ export async function installManagedJdbcDriver(definition: ManagedJdbcDriverDefi
 
 export async function uninstallManagedJdbcDriver(definition: ManagedJdbcDriverDefinition, currentBundles: readonly JdbcMavenBundleInfo[], api: ManagedJdbcDriverApi): Promise<ManagedJdbcDriverMutationResult> {
   let drivers: JdbcDriverInfo[] | undefined;
-  for (const bundle of managedJdbcDriverBundles(definition, currentBundles)) {
+  for (const bundle of currentBundles.filter((installed) => definition.bundles.some(({ coordinate }) => coordinate === installed.coordinate))) {
     drivers = await api.deleteJdbcMavenBundle(bundle.id);
   }
   const bundles = await api.listJdbcMavenBundles();

@@ -2,6 +2,7 @@
 
 import { createApp, nextTick } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
+import { PHOENIX_COMPATIBILITY_RUNTIME_ID } from "@/lib/database/phoenixCompatibilityRuntime";
 import DatabaseIcon from "./DatabaseIcon.vue";
 
 describe("DatabaseIcon", () => {
@@ -20,10 +21,10 @@ describe("DatabaseIcon", () => {
     app.unmount();
   });
 
-  it("uses the Apache Phoenix asset for the Phoenix JDBC profile", async () => {
+  it.each(["phoenix", PHOENIX_COMPATIBILITY_RUNTIME_ID])("uses the Apache Phoenix asset for the %s JDBC profile", async (dbType) => {
     const container = document.createElement("div");
     document.body.appendChild(container);
-    const app = createApp(DatabaseIcon, { dbType: "phoenix" });
+    const app = createApp(DatabaseIcon, { dbType });
     app.mount(container);
     await nextTick();
 

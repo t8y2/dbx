@@ -616,6 +616,23 @@ pub async fn install_jdbc_driver_from_maven(
 }
 
 #[tauri::command]
+pub async fn install_jdbc_compatibility_runtime(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+) -> Result<Vec<JdbcDriverInfo>, String> {
+    jdbc::install_jdbc_compatibility_runtime(state.plugins.root_dir(), &id).await
+}
+
+#[tauri::command]
+pub async fn install_jdbc_compatibility_runtime_from_file(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    file_path: String,
+) -> Result<Vec<JdbcDriverInfo>, String> {
+    jdbc::install_jdbc_compatibility_runtime_from_file(state.plugins.root_dir(), &id, &file_path).await
+}
+
+#[tauri::command]
 pub async fn install_prestosql_jdbc_driver(state: State<'_, Arc<AppState>>) -> Result<Vec<JdbcDriverInfo>, String> {
     jdbc::install_prestosql_jdbc_driver(state.plugins.root_dir()).await
 }

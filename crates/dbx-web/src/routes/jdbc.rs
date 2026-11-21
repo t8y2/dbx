@@ -8,6 +8,7 @@ use dbx_core::jdbc::{
     self, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, JdbcMavenInstallRequest, JdbcPluginStatus,
 };
 use dbx_core::plugins::PluginRuntimeEnv;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 
 use crate::error::AppError;
@@ -60,6 +61,86 @@ pub async fn install_jdbc_driver_from_maven(
     ))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JdbcCompatibilityInstallRequest {
+    pub id: String,
+}
+
+pub async fn install_jdbc_compatibility_runtime(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<JdbcCompatibilityInstallRequest>,
+) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
+    Ok(Json(
+        jdbc::install_jdbc_compatibility_runtime(state.app.plugins.root_dir(), &request.id)
+            .await
+            .map_err(AppError::internal)?,
+    ))
+}
+
+pub async fn install_jdbc_compatibility_runtime_file(
+    State(state): State<Arc<WebState>>,
+    mut multipart: Multipart,
+) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
+    // Per-request upload directory is removed on every error/cancellation path.
+    let temp = tempfile::Builder::new()
+        .prefix("dbx-compat-upload-")
+        .tempdir()
+        .map_err(|err| AppError::internal(err.to_string()))?;
+    let path = temp.path().join("runtime.zip");
+    let mut id = None;
+    let mut uploaded = false;
+    while let Some(mut field) = multipart.next_field().await.map_err(|err| AppError::bad_request(err.to_string()))? {
+        match field.name() {
+            Some("id") if id.is_none() => {
+                let mut value = Vec::new();
+                while let Some(chunk) = field.chunk().await.map_err(|err| AppError::bad_request(err.to_string()))? {
+                    if value.len() + chunk.len() > 256 {
+                        return Err(AppError::bad_request("Compatibility runtime id is too long"));
+                    }
+                    value.extend_from_slice(&chunk);
+                }
+                id = Some(String::from_utf8(value).map_err(|_| AppError::bad_request("Invalid runtime id"))?);
+            }
+            Some("file") if !uploaded => {
+                safe_upload_file_name(field.file_name(), "runtime.zip", ".zip")?;
+                let mut file =
+                    tokio::fs::File::create(&path).await.map_err(|err| AppError::internal(err.to_string()))?;
+                let mut length = 0_u64;
+                while let Some(chunk) = field.chunk().await.map_err(|err| AppError::bad_request(err.to_string()))? {
+                    length = length
+                        .checked_add(chunk.len() as u64)
+                        .ok_or_else(|| AppError::bad_request("Upload size overflow"))?;
+                    if length > jdbc::JDBC_COMPATIBILITY_MAX_PACKAGE_SIZE {
+                        return Err(AppError::bad_request("Compatibility package is too large"));
+                    }
+                    file.write_all(&chunk).await.map_err(|err| AppError::internal(err.to_string()))?;
+                }
+                file.flush().await.map_err(|err| AppError::internal(err.to_string()))?;
+                uploaded = true;
+            }
+            _ => return Err(AppError::bad_request("Unexpected or duplicate compatibility upload field")),
+        }
+    }
+    if !uploaded {
+        return Err(AppError::bad_request("No compatibility ZIP uploaded"));
+    }
+    let id = id.ok_or_else(|| AppError::bad_request("Compatibility runtime id is required"))?;
+    let root = state.app.plugins.root_dir().to_path_buf();
+    // Once verification/commit starts, keep upload ownership with that operation:
+    // cancelling HTTP must not unlink a file still open in the blocking worker
+    // (in particular on Windows), or race its initial open.
+    let drivers = tokio::spawn(async move {
+        let result = jdbc::install_jdbc_compatibility_runtime_from_file(&root, &id, &path.to_string_lossy()).await;
+        drop(temp);
+        result
+    })
+    .await
+    .map_err(|err| AppError::internal(err.to_string()))?
+    .map_err(AppError::internal)?;
+    Ok(Json(drivers))
+}
+
 pub async fn install_prestosql_jdbc_driver(
     State(state): State<Arc<WebState>>,
 ) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
@@ -100,18 +181,26 @@ pub async fn delete_jdbc_driver(
     if name.contains("..") || name.contains('/') || name.contains('\\') {
         return Err(AppError::bad_request("Invalid driver name"));
     }
-    let root = state.app.plugins.root_dir();
+    let root = state.app.plugins.root_dir().to_path_buf();
     let driver_path = root.join("jdbc").join("drivers").join(&name);
     let path_str = driver_path.to_string_lossy().to_string();
-    Ok(Json(jdbc::delete_jdbc_driver(root, &path_str).map_err(AppError::internal)?))
+    let drivers = tokio::task::spawn_blocking(move || jdbc::delete_jdbc_driver(&root, &path_str))
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?
+        .map_err(AppError::internal)?;
+    Ok(Json(drivers))
 }
 
 pub async fn delete_jdbc_maven_bundle(
     State(state): State<Arc<WebState>>,
     Path(bundle_id): Path<String>,
 ) -> Result<Json<Vec<JdbcDriverInfo>>, AppError> {
-    let root = state.app.plugins.root_dir();
-    Ok(Json(jdbc::delete_jdbc_maven_bundle(root, &bundle_id).map_err(AppError::internal)?))
+    let root = state.app.plugins.root_dir().to_path_buf();
+    let drivers = tokio::task::spawn_blocking(move || jdbc::delete_jdbc_maven_bundle(&root, &bundle_id))
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?
+        .map_err(AppError::internal)?;
+    Ok(Json(drivers))
 }
 
 pub async fn delete_jdbc_local_bundle(

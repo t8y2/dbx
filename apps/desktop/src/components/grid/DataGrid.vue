@@ -6723,6 +6723,7 @@ const {
   selectionAnchor,
   selectedCells,
   selectedCellKeys,
+  firstSelectedCellPosition,
   selectedCellMatrix,
   selectedCellCount,
   hasCellSelection,
@@ -11174,7 +11175,7 @@ async function replaceGridMatches(currentOnly = false) {
   }
 }
 
-function fillSelectionWithValue(value: string | null, options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean } = {}): boolean {
+function fillSelectionWithValue(value: string | null, options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean; skipCell?: CellPosition } = {}): boolean {
   const range = selectedRange.value;
   let applied = false;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
@@ -11186,6 +11187,7 @@ function fillSelectionWithValue(value: string | null, options: { preserveEmptySt
         const rowIndex = Number(rStr);
         const visibleCol = Number(cStr);
         if (Number.isNaN(rowIndex) || Number.isNaN(visibleCol)) continue;
+        if (options.skipCell?.rowIndex === rowIndex && options.skipCell.colIndex === visibleCol) continue;
         const item = displayItemAt(rowIndex);
         if (!item) continue;
         if (cellIsSelected(rowIndex, visibleCol)) applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue, options) || applied;
@@ -11198,6 +11200,7 @@ function fillSelectionWithValue(value: string | null, options: { preserveEmptySt
         const item = displayItemAt(rowIndex);
         if (!item) continue;
         for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+          if (options.skipCell?.rowIndex === rowIndex && options.skipCell.colIndex === visibleCol) continue;
           if (cellIsSelected(rowIndex, visibleCol)) applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue, options) || applied;
         }
       }
@@ -11944,6 +11947,25 @@ function selectedOrCurrentRowIds(): number[] {
   return item ? [item.id] : [];
 }
 
+function fillFromFirstSelectedCell(): boolean {
+  if (hasRowSelection.value || hasColumnSelection.value || selectedCellCount.value < 2 || !effectiveEditable.value) return false;
+  // A cell selection must never fall through to cloning its rows.
+  if (isSelectingAll.value || isSaving.value || isTransposeMode.value) return true;
+
+  const source = firstSelectedCellPosition();
+  if (!source) return true;
+  const item = displayItemAt(source.rowIndex);
+  const columnIndex = actualColumnIndex(source.colIndex);
+  if (!item || item.isDraft || item.isDeleted || isLargeValuePreview(item, columnIndex) || isPendingDecode(item, columnIndex)) return true;
+
+  const value = item.data[columnIndex];
+  if (value === undefined) return true;
+  const isNull = gridDetailIsNullValue(value);
+  if (!isNull && isBinaryCellColumnType(allColumnTypes.value[columnIndex])) return true;
+  fillSelectionWithValue(isNull ? null : gridDetailRawValue(value), { preserveEmptyString: true, skipCell: source });
+  return true;
+}
+
 function copyCurrentRow(): boolean {
   if (!canInsertRows.value) return false;
   const rowIds = selectedOrCurrentRowIds().filter((rowId) => !getRowItem(rowId)?.isDraft);
@@ -12248,7 +12270,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     }
     return;
   }
-  if (isCopyCurrentRowShortcut(event, settingsStore.editorSettings.shortcuts) && copyCurrentRow()) {
+  if (isCopyCurrentRowShortcut(event, settingsStore.editorSettings.shortcuts) && (fillFromFirstSelectedCell() || copyCurrentRow())) {
     event.preventDefault();
     return;
   }

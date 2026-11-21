@@ -2787,6 +2787,7 @@ mod tests {
                 schema: None,
                 table_name: "orders".to_string(),
                 name: "idx_orders_status".to_string(),
+                identifier_quote: None,
             })
             .unwrap(),
             "DROP INDEX `idx_orders_status` ON `orders`;"

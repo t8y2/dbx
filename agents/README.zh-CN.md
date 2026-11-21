@@ -83,7 +83,10 @@ Proxy 消息使用官方 Go v5 SDK 的 RPC、签名和协议类型，并为每�
 | `dbx.agent.jdbc.pool.validationTimeoutMillis` | `DBX_AGENT_JDBC_POOL_VALIDATION_TIMEOUT_MILLIS` | `5000` |
 | `dbx.agent.jdbc.pool.idleTimeoutMillis` | `DBX_AGENT_JDBC_POOL_IDLE_TIMEOUT_MILLIS` | `120000` |
 | `dbx.agent.jdbc.pool.maxLifetimeMillis` | `DBX_AGENT_JDBC_POOL_MAX_LIFETIME_MILLIS` | `1800000` |
+| `dbx.agent.jdbc.pool.keepaliveTimeMillis` | `DBX_AGENT_JDBC_POOL_KEEPALIVE_TIME_MILLIS` | `30000` |
 | `dbx.agent.jdbc.pool.retireMillis` | `DBX_AGENT_JDBC_POOL_RETIRE_MILLIS` | `300000` |
+
+`keepaliveTimeMillis` 是 HikariCP 校验空闲连接的间隔，用于避免空闲链路被 NAT 网关或隧道静默回收。设为 `0` 可关闭保活；小于 `30000` 的正数会被提升到 `30000`（HikariCP 的下限），并且该值始终小于 `maxLifetimeMillis`；当 `maxLifetimeMillis` 为 `30000` 时保活会被关闭。
 
 HikariCP 会直接打进启用连接池的 Agent JAR。已经使用 DBX 托管 JRE 21 的安装无需重新安装或替换 JRE。
 如遇特定老驱动兼容问题，可设置 `DBX_AGENT_JDBC_POOL_ENABLED=false`，让该运行时回退到原来的“每个逻辑会话一个连接”行为。

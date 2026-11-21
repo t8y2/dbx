@@ -42,6 +42,10 @@ pub struct EditableObjectSourceSqlInput {
     pub schema: Option<String>,
     pub name: String,
     pub source: String,
+    /// Driver-reported identifier quote (e.g. `` ` `` for GaussDB MySQL-compatible mode).
+    /// When set, quoted names emitted in the editable source honor this character.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +69,9 @@ pub struct RoutineRenameObjectSourceInput {
     pub name: String,
     pub new_name: String,
     pub source: String,
+    /// Driver-reported identifier quote (e.g. `` ` `` for GaussDB MySQL-compatible mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,7 +182,12 @@ pub fn build_routine_rename_object_source_statements(
     let renamed_source = if is_mysql_like(input.database_type) {
         replace_mysql_routine_declaration_name(source, &input.new_name)
     } else {
-        replace_sql_routine_declaration_name(source, input.schema.as_deref(), &input.new_name)
+        replace_sql_routine_declaration_name(
+            source,
+            input.schema.as_deref(),
+            &input.new_name,
+            input.identifier_quote.as_deref(),
+        )
     };
     let Some(renamed_source) = renamed_source else {
         return Err(format!("Cannot rewrite the {:?} name in the object source.", input.object_type));
@@ -194,7 +206,7 @@ pub fn build_routine_rename_object_source_statements(
             format!(
                 "DROP {} {};",
                 object_type_keyword(&input.object_type),
-                postgres_qualified_name(input.schema.as_deref(), &input.name)
+                postgres_qualified_name(input.schema.as_deref(), &input.name, None)
             ),
         ]);
     }
@@ -205,6 +217,7 @@ pub fn build_routine_rename_object_source_statements(
         schema: input.schema,
         name: input.name,
         source: renamed_source,
+        identifier_quote: input.identifier_quote,
     })
 }
 
@@ -588,7 +601,7 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         }
         return Ok(vec![format!(
             "CREATE OR REPLACE VIEW {} AS\n{}",
-            postgres_qualified_name(input.schema.as_deref(), &input.name),
+            postgres_qualified_name(input.schema.as_deref(), &input.name, input.identifier_quote.as_deref()),
             ensure_semicolon(source)
         )]);
     }
@@ -1152,7 +1165,7 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let qualified_name = if use_backtick {
         mysql_qualified_name(input.schema.as_deref(), &input.name)
     } else {
-        postgres_qualified_name(input.schema.as_deref(), &input.name)
+        postgres_qualified_name(input.schema.as_deref(), &input.name, None)
     };
 
     if input.database_type.is_none()
@@ -1166,6 +1179,51 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     }
 
     format!("CREATE VIEW {qualified_name} AS\n{terminated_source}")
+}
+
+pub fn build_oracle_object_export_sql(input: EditableObjectSourceSqlInput) -> Result<String, String> {
+    let source = input.source.trim();
+    if source.is_empty() {
+        return Err("Object source not found".into());
+    }
+    if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        return Err("Object export requires Oracle or OceanBase Oracle".into());
+    }
+    match input.object_type {
+        ObjectSourceKind::Procedure
+        | ObjectSourceKind::Function
+        | ObjectSourceKind::Package
+        | ObjectSourceKind::PackageBody => {
+            let owner = input.schema.filter(|owner| !owner.is_empty()).ok_or("Object export requires a schema")?;
+            let render = |kind, source: &str| {
+                let definition = prepare_oracle_routine_definition(OracleRoutineDefinitionInput {
+                    database_type: input.database_type,
+                    object_type: kind,
+                    source_owner: owner.clone(),
+                    target_owner: owner.clone(),
+                    name: input.name.clone(),
+                    source: source.to_string(),
+                    replace: true,
+                })?;
+                // The routine builder has already validated a single complete unit.
+                Ok::<_, String>(format!("{definition}\n/"))
+            };
+            let result = render(input.object_type.clone(), source);
+            if result.is_err() && input.object_type == ObjectSourceKind::Package {
+                let (spec, body) = split_package_spec_and_body(source);
+                if let Some(body) = body {
+                    return Ok(format!(
+                        "{}\n\n{}",
+                        render(ObjectSourceKind::Package, spec)?,
+                        render(ObjectSourceKind::PackageBody, body)?
+                    ));
+                }
+            }
+            result
+        }
+        ObjectSourceKind::Sequence | ObjectSourceKind::Synonym => Ok(ensure_oracle_ddl_terminated(source)),
+        _ => Err("Unsupported object kind for Oracle source export".into()),
+    }
 }
 
 pub fn build_export_object_source_sql(
@@ -1255,7 +1313,7 @@ fn build_routine_rename_cleanup(input: &EditableObjectSourceSqlInput, source: &s
     Some(format!(
         "DROP {} IF EXISTS {}{};",
         object_type_keyword(&input.object_type),
-        postgres_qualified_name(input.schema.as_deref(), &input.name),
+        postgres_qualified_name(input.schema.as_deref(), &input.name, input.identifier_quote.as_deref()),
         declaration.signature
     ))
 }
@@ -1341,7 +1399,7 @@ fn oceanbase_sequence_edit_sql(input: &EditableObjectSourceSqlInput) -> Result<S
     }
     Ok(format!(
         "ALTER SEQUENCE {}\n  {};",
-        postgres_qualified_name(input.schema.as_deref(), &input.name),
+        postgres_qualified_name(input.schema.as_deref(), &input.name, None),
         options.join("\n  ")
     ))
 }
@@ -1521,7 +1579,7 @@ fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) ->
         return ensure_semicolon(&format!("{}{}", &trimmed[..statement_start], replaced));
     }
 
-    format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(trimmed))
+    format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name, None), ensure_semicolon(trimmed))
 }
 
 fn is_oracle_plsql_script_target(database_type: DatabaseType) -> bool {
@@ -1695,14 +1753,25 @@ fn informix_view_definition(schema: Option<&str>, name: &str, source: &str) -> (
     }
 }
 
-fn postgres_qualified_name(schema: Option<&str>, name: &str) -> String {
+fn postgres_qualified_name(schema: Option<&str>, name: &str, identifier_quote: Option<&str>) -> String {
     schema
         .into_iter()
         .chain(std::iter::once(name))
         .filter(|part| !part.is_empty())
-        .map(quote_postgres_identifier)
+        .map(|part| quote_identifier_part(part, identifier_quote))
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// Quotes a single qualified-name part, honoring a driver-reported backtick
+/// identifier quote (GaussDB MySQL-compatible mode) and otherwise falling back
+/// to the PostgreSQL double quote.
+fn quote_identifier_part(value: &str, identifier_quote: Option<&str>) -> String {
+    if identifier_quote == Some("`") {
+        quote_mysql_identifier(value)
+    } else {
+        quote_postgres_identifier(value)
+    }
 }
 
 fn informix_identifier(name: &str) -> String {
@@ -2052,21 +2121,23 @@ fn sqlserver_qualified_name(schema: Option<&str>, name: &str) -> String {
         .join(".")
 }
 
-fn unquote_postgres_identifier(value: &str) -> String {
+fn split_qualified_routine_name(value: &str) -> Vec<String> {
+    Regex::new(r#""(?:""|[^"])+"|`(?:``|[^`])+`|[A-Za-z_][\w$]*"#)
+        .unwrap()
+        .find_iter(value)
+        .map(|part| unquote_quoted_identifier(part.as_str()))
+        .collect()
+}
+
+fn unquote_quoted_identifier(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
         trimmed[1..trimmed.len() - 1].replace("\"\"", "\"")
+    } else if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() >= 2 {
+        trimmed[1..trimmed.len() - 1].replace("``", "`")
     } else {
         trimmed.to_string()
     }
-}
-
-fn split_qualified_routine_name(value: &str) -> Vec<String> {
-    Regex::new(r#""(?:""|[^"])+"|[A-Za-z_][\w$]*"#)
-        .unwrap()
-        .find_iter(value)
-        .map(|part| unquote_postgres_identifier(part.as_str()))
-        .collect()
 }
 
 fn unquote_mysql_identifier(value: &str) -> String {
@@ -2088,7 +2159,7 @@ fn split_mysql_qualified_routine_name(value: &str) -> Vec<String> {
 
 fn routine_declaration(source: &str) -> Option<RoutineDeclaration> {
     let re = Regex::new(
-        r#"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(FUNCTION|PROCEDURE)\s+((?:"(?:""|[^"])+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|[A-Za-z_][\w$]*))?)\s*(\(.*?\))?"#,
+        r#"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(FUNCTION|PROCEDURE)\s+((?:"(?:""|[^"])+"|`(?:``|[^`])+`|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|`(?:``|[^`])+`|[A-Za-z_][\w$]*))?)\s*(\(.*?\))?"#,
     )
     .unwrap();
     let captures = re.captures(source)?;
@@ -2099,9 +2170,14 @@ fn routine_declaration(source: &str) -> Option<RoutineDeclaration> {
     Some(RoutineDeclaration { kind, name, signature })
 }
 
-fn replace_sql_routine_declaration_name(source: &str, schema: Option<&str>, new_name: &str) -> Option<String> {
+fn replace_sql_routine_declaration_name(
+    source: &str,
+    schema: Option<&str>,
+    new_name: &str,
+    identifier_quote: Option<&str>,
+) -> Option<String> {
     let re = Regex::new(
-        r#"(?is)^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(?:FUNCTION|PROCEDURE)\s+)((?:"(?:""|[^"])+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|[A-Za-z_][\w$]*))?)"#,
+        r#"(?is)^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(?:FUNCTION|PROCEDURE)\s+)((?:"(?:""|[^"])+"|`(?:``|[^`])+`|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"(?:""|[^"])+"|`(?:``|[^`])+`|[A-Za-z_][\w$]*))?)"#,
     )
     .unwrap();
     let captures = re.captures(source)?;
@@ -2112,9 +2188,13 @@ fn replace_sql_routine_declaration_name(source: &str, schema: Option<&str>, new_
     let schema_name =
         schema.or_else(|| existing_parts.first().filter(|_| existing_parts.len() > 1).map(String::as_str));
     let replacement = if let Some(schema_name) = schema_name {
-        format!("{}.{}", quote_postgres_identifier(schema_name), quote_postgres_identifier(new_name))
+        format!(
+            "{}.{}",
+            quote_identifier_part(schema_name, identifier_quote),
+            quote_identifier_part(new_name, identifier_quote)
+        )
     } else {
-        quote_postgres_identifier(new_name)
+        quote_identifier_part(new_name, identifier_quote)
     };
     Some(format!("{}{}{}{}", &source[..full.start()], prefix, replacement, &source[full.end()..]))
 }
@@ -2357,7 +2437,7 @@ fn executable_duckdb_view_ddl(schema: Option<&str>, name: &str, source: &str) ->
         return ensure_semicolon(&existing_view_statement.replace(source, "CREATE OR REPLACE VIEW "));
     }
 
-    format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(source))
+    format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name, None), ensure_semicolon(source))
 }
 
 fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
@@ -2401,6 +2481,7 @@ mod tests {
             schema: Some("APP".into()),
             name: "CALLER_1".into(),
             source: source.into(),
+            identifier_quote: None,
         })
     }
 
@@ -2464,6 +2545,7 @@ mod tests {
             schema: Some("Exact Owner".to_string()),
             name: name.to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         }
     }
 
@@ -2714,6 +2796,7 @@ mod tests {
                 schema: Some("APP".into()),
                 name: "ROOT".into(),
                 source: source.into(),
+                identifier_quote: None,
             })
             .map(|(_, fingerprint)| fingerprint)
         };
@@ -2731,6 +2814,7 @@ mod tests {
             schema: schema.map(str::to_string),
             name: name.to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         }
     }
 
@@ -2811,6 +2895,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "refresh_cache".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         }
     }
 
@@ -2821,6 +2906,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "usp_demo".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         };
 
         assert_eq!(build_editable_object_source(input.clone()), expected);
@@ -2834,6 +2920,7 @@ mod tests {
             schema: Some("gbasedbt".to_string()),
             name: name.to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap()
     }
@@ -2865,6 +2952,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "usp_demo".to_string(),
             source: "CREATE PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(sql, "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
@@ -2878,6 +2966,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "usp_demo".to_string(),
             source: "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(sql, "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
@@ -2891,6 +2980,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "fn_demo".to_string(),
             source: "CREATE FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(sql, "ALTER FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;");
@@ -2904,6 +2994,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "fn_demo".to_string(),
             source: "CREATE OR ALTER FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(sql, "ALTER FUNCTION dbo.fn_demo() RETURNS INT AS BEGIN RETURN 1 END;");
@@ -2959,6 +3050,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "new_view".to_string(),
             source: "CREATE VIEW dbo.new_view AS SELECT * FROM AppInfo".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -2973,6 +3065,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "new_view".to_string(),
             source: "CREATE OR ALTER VIEW dbo.new_view AS SELECT * FROM AppInfo;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -2987,6 +3080,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "new_view".to_string(),
             source: "SELECT\n  *\nFROM AppInfo".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3043,6 +3137,7 @@ mod tests {
             schema: Some("main".to_string()),
             name: "active_orders".to_string(),
             source: "CREATE VIEW active_orders AS SELECT id FROM orders WHERE active".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3057,6 +3152,7 @@ mod tests {
             schema: Some("reporting".to_string()),
             name: "active orders".to_string(),
             source: "SELECT id FROM orders WHERE active".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -3073,6 +3169,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "active users".to_string(),
             source: " SELECT id, name FROM users WHERE active ".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(
@@ -3090,6 +3187,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "active_users".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(sql, format!("{source};"));
@@ -3103,6 +3201,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "active_users".to_string(),
             source: "CREATE VIEW public.active_users AS SELECT id, name FROM users WHERE active = true".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3121,6 +3220,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "active_users".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3135,6 +3235,7 @@ mod tests {
             schema: Some("dbx_issue3895_repro".to_string()),
             name: "edited_view".to_string(),
             source: "SELECT id, label FROM source_rows WHERE id >= 1".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -3151,6 +3252,7 @@ mod tests {
             schema: Some("dbx_issue3895_repro".to_string()),
             name: "edited_view".to_string(),
             source: "CREATE VIEW dbx_issue3895_repro.edited_view AS SELECT id, label FROM source_rows".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3165,6 +3267,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "edited_view".to_string(),
             source: "CREATE FORCE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3179,6 +3282,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "edited_view".to_string(),
             source: "CREATE RECURSIVE FORCE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3193,6 +3297,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "edited_view".to_string(),
             source: "CREATE TEMPORARY RECURSIVE FORCE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3211,6 +3316,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "edited_view".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3225,6 +3331,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "edited_view".to_string(),
             source: "-- keep this note\nCREATE VIEW app.edited_view AS SELECT id FROM source_rows".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3240,6 +3347,7 @@ mod tests {
             name: "edited_view".to_string(),
             source: "/* CREATE VIEW in this comment is ignored */\nCREATE VIEW app.edited_view AS SELECT id FROM source_rows"
                 .to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3258,6 +3366,7 @@ mod tests {
             name: "edited_view".to_string(),
             source: "/* outer /* nested */ comment */\nCREATE FORCE VIEW app.edited_view AS SELECT id FROM source_rows"
                 .to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3277,6 +3386,7 @@ mod tests {
             source:
                 "/* level 1 /* level 2 /* level 3 */ level 2 */ level 1 */\nCREATE VIEW app.edited_view AS SELECT id FROM source_rows"
                     .to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3295,6 +3405,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "edited_view".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3310,6 +3421,7 @@ mod tests {
             schema: Some("public".to_string()),
             name: "active_users".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3325,6 +3437,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 name: "active users".to_string(),
                 source: " SELECT id, name FROM users WHERE active ".to_string(),
+                identifier_quote: None,
             })
             .unwrap();
             assert_eq!(
@@ -3342,6 +3455,7 @@ mod tests {
             schema: Some("DBX_TEST".to_string()),
             name: "V_ACTIVE_USERS".to_string(),
             source: "SELECT id, name FROM users WHERE active = 1".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3369,6 +3483,7 @@ mod tests {
                 schema: Some("SYS".to_string()),
                 name: "DBX_VIEW_SAVE_PROBE".to_string(),
                 source: source.to_string(),
+                identifier_quote: None,
             };
 
             assert_eq!(build_editable_object_source(input.clone()), expected);
@@ -3394,6 +3509,7 @@ mod tests {
                 schema: Some("SYS".to_string()),
                 name: "DBX_VIEW_SAVE_PROBE".to_string(),
                 source: source.to_string(),
+                identifier_quote: None,
             })
             .unwrap();
 
@@ -3409,6 +3525,7 @@ mod tests {
             schema: Some("DBX_TEST".to_string()),
             name: "V_ACTIVE_USERS".to_string(),
             source: "CREATE FORCE EDITIONABLE VIEW DBX_TEST.V_ACTIVE_USERS AS SELECT id FROM users".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3423,6 +3540,7 @@ mod tests {
             schema: Some("DBX_TEST".to_string()),
             name: "V_ACTIVE_USERS".to_string(),
             source: "SELECT id, name FROM users WHERE active = 1".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -3514,6 +3632,7 @@ mod tests {
             schema: Some("gbasedbt".to_string()),
             name: "demo_view".to_string(),
             source: "create view \"gbasedbt\".demo_view as select id from users".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(sql, "CREATE VIEW demo_view as select id from users;");
@@ -3527,6 +3646,7 @@ mod tests {
             schema: Some("gbasedbt".to_string()),
             name: "v_orders".to_string(),
             source: "create view \"gbasedbt\".v_orders as select id from orders".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(sql, "CREATE VIEW v_orders as select id from orders;");
@@ -3633,6 +3753,7 @@ mod tests {
             schema: Some("APP".to_string()),
             name: "ACTIVE_ORDERS".to_string(),
             source: "SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+            identifier_quote: None,
         });
         assert_eq!(
             editable,
@@ -3645,6 +3766,7 @@ mod tests {
             schema: Some("APP".to_string()),
             name: "ACTIVE_ORDERS".to_string(),
             source: "CREATE VIEW \"APP\".\"ACTIVE_ORDERS\" AS SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(
@@ -3658,6 +3780,7 @@ mod tests {
             schema: Some("_SYS_BIC".to_string()),
             name: "pkg/CALC_ORDERS".to_string(),
             source: String::new(),
+            identifier_quote: None,
         });
         assert_eq!(empty_editable, "");
     }
@@ -3689,6 +3812,64 @@ mod tests {
     }
 
     #[test]
+    fn gaussdb_mysql_mode_object_source_uses_connection_backtick_quotes() {
+        // GaussDB in M/B/MYSQL compatibility mode reports a backtick identifier
+        // quote through the connection. The rebuilt DDL must follow it instead of
+        // the PostgreSQL double quote (where `"` is a string literal).
+        let backtick = Some("`".to_string());
+
+        let view = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Gaussdb),
+            schema: Some("audit-schema".to_string()),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
+            identifier_quote: backtick.clone(),
+        });
+        assert_eq!(view, "CREATE OR REPLACE VIEW `audit-schema`.`active_users` AS\nSELECT id FROM users;");
+
+        let executable = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Gaussdb,
+            object_type: ObjectSourceKind::View,
+            schema: Some("audit-schema".to_string()),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
+            identifier_quote: backtick.clone(),
+        })
+        .unwrap();
+        assert_eq!(executable, "CREATE OR REPLACE VIEW `audit-schema`.`active_users` AS\nSELECT id FROM users;");
+
+        let renamed = build_routine_rename_object_source_statements(RoutineRenameObjectSourceInput {
+            database_type: DatabaseType::Gaussdb,
+            object_type: ObjectSourceKind::Function,
+            schema: Some("public".to_string()),
+            name: "refresh_cache".to_string(),
+            new_name: "refresh_cache v2".to_string(),
+            source:
+                "CREATE FUNCTION public.refresh_cache() RETURNS integer AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql"
+                    .to_string(),
+            identifier_quote: backtick.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            renamed,
+            vec![
+                "CREATE FUNCTION `public`.`refresh_cache v2`() RETURNS integer AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql;".to_string(),
+                "DROP FUNCTION IF EXISTS `public`.`refresh_cache`();".to_string(),
+            ]
+        );
+
+        // Without a connection quote, GaussDB falls back to double quotes.
+        let plain = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Gaussdb),
+            schema: Some("audit-schema".to_string()),
+            name: "active_users".to_string(),
+            source: "SELECT id FROM users".to_string(),
+            identifier_quote: None,
+        });
+        assert_eq!(plain, "CREATE OR REPLACE VIEW \"audit-schema\".\"active_users\" AS\nSELECT id FROM users;");
+    }
+
+    #[test]
     fn oracle_package_source_saves_as_single_create_or_replace_statement() {
         let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
             database_type: DatabaseType::Oracle,
@@ -3696,6 +3877,7 @@ mod tests {
             schema: Some("HR".to_string()),
             name: "PAYROLL".to_string(),
             source: "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\nEND PAYROLL;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3773,6 +3955,7 @@ mod tests {
                 schema: Some("public".to_string()),
                 name: "REFRESH_CACHE".to_string(),
                 source: source.to_string(),
+                identifier_quote: None,
             })
             .unwrap();
 
@@ -3830,6 +4013,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "refresh_cache".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         let validation_name = mysql_validation_routine_name("refresh_cache_v2");
@@ -3857,6 +4041,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "refresh_cache".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         let validation_name = mysql_validation_routine_name("refresh_cache");
@@ -3890,6 +4075,7 @@ mod tests {
                 schema: Some("app".to_string()),
                 name: name.to_string(),
                 source: source.to_string(),
+                identifier_quote: None,
             };
 
             let statements = build_executable_object_source_statements(input("refresh_cache")).unwrap();
@@ -3915,6 +4101,7 @@ mod tests {
                 schema: Some("app".to_string()),
                 name: "refresh_cache".to_string(),
                 source: "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END".to_string(),
+                identifier_quote: None,
             },
             "dbx_transfer_check_0123456789abcdef",
         )
@@ -3936,6 +4123,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "active_count".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         let validation_name = mysql_validation_routine_name("active_count");
@@ -3961,6 +4149,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "refresh_cache".to_string(),
             source: "ALTER PROCEDURE `refresh_cache` COMMENT 'refreshes cache'".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -3975,6 +4164,7 @@ mod tests {
             schema: Some("app".to_string()),
             name: "refresh_cache".to_string(),
             source: "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END".to_string(),
+            identifier_quote: None,
         });
 
         assert_eq!(sql, "CREATE PROCEDURE `refresh_cache`() BEGIN SELECT 1; END;");
@@ -3989,6 +4179,7 @@ mod tests {
             schema: Some("shop".to_string()),
             name: "trg_orders".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4010,6 +4201,7 @@ mod tests {
             name: "trg_orders".to_string(),
             source: "CREATE TRIGGER `trg_orders_v2` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()"
                 .to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4032,6 +4224,7 @@ mod tests {
             schema: Some("HR".to_string()),
             name: "TRG_EMP".to_string(),
             source: "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN :new.id := 1; END".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4051,6 +4244,7 @@ mod tests {
             schema: Some("HR".to_string()),
             name: "TRG_EMP".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4066,6 +4260,7 @@ mod tests {
             name: "trg_orders".to_string(),
             source: "CREATE TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()"
                 .to_string(),
+            identifier_quote: None,
         });
         assert_eq!(
             mysql,
@@ -4078,6 +4273,7 @@ mod tests {
             schema: Some("HR".to_string()),
             name: "TRG_EMP".to_string(),
             source: "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END".to_string(),
+            identifier_quote: None,
         });
         assert_eq!(oracle, "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END;");
     }
@@ -4092,6 +4288,7 @@ mod tests {
             schema: Some("dol_test".to_string()),
             name: "new_view".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         };
 
         let editable = build_editable_object_source(input.clone());
@@ -4109,6 +4306,7 @@ mod tests {
             schema: Some("dol_test".to_string()),
             name: "new_view".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4125,6 +4323,7 @@ mod tests {
             schema: Some("dol_test".to_string()),
             name: "new_view".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4143,6 +4342,7 @@ mod tests {
             schema: Some("dol_test".to_string()),
             name: "new_view".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4360,6 +4560,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "v_active_users".to_string(),
             source: "CREATE VIEW dbo.v_active_users AS SELECT id, name FROM users WHERE active = 1;".to_string(),
+            identifier_quote: None,
         });
         assert_eq!(sql, "ALTER VIEW dbo.v_active_users AS SELECT id, name FROM users WHERE active = 1;");
     }
@@ -4372,6 +4573,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "new_view".to_string(),
             source: "SELECT\n  *\nFROM AppInfo".to_string(),
+            identifier_quote: None,
         });
         assert_eq!(sql, "ALTER VIEW [dbo].[new_view] AS\nSELECT\n  *\nFROM AppInfo;");
     }
@@ -4384,6 +4586,7 @@ mod tests {
             schema: Some("dbo".to_string()),
             name: "usp_demo".to_string(),
             source: "CREATE PROCEDURE dbo.usp_demo AS SELECT 1;".to_string(),
+            identifier_quote: None,
         });
         assert_eq!(sql, "ALTER PROCEDURE dbo.usp_demo AS SELECT 1;");
     }
@@ -4399,6 +4602,7 @@ mod tests {
             source:
                 "CREATE OR REPLACE PROCEDURE \"SYSDBA\".\"SP_TAB_BAKSET_REMOVE_BATCH\" AS\nBEGIN\n  SELECT 1;\nEND;"
                     .to_string(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(
@@ -4419,6 +4623,7 @@ mod tests {
             name: "P_OLD".into(),
             new_name: "P_NEW".into(),
             source: "CREATE OR REPLACE PROCEDURE APP.P_OLD AS BEGIN P_OLD; END P_OLD;".into(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4440,6 +4645,7 @@ mod tests {
                 name: "P_OLD".into(),
                 new_name: "P_NEW".into(),
                 source: source.into(),
+                identifier_quote: None,
             });
             assert!(result.is_err(), "accepted unsafe source: {source}");
         }
@@ -4458,6 +4664,7 @@ mod tests {
                 schema: Some("APP".into()),
                 name: "P_OLD".into(),
                 source: source.into(),
+                identifier_quote: None,
             });
             assert!(result.is_err(), "accepted unsafe source: {source}");
         }
@@ -4471,6 +4678,7 @@ mod tests {
             schema: Some("APP".into()),
             name: "P_NEW".into(),
             source: "CREATE PACKAGE APP.P_NEW AS PROCEDURE RUN; END P_NEW;".into(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(valid.len(), 1);
@@ -4486,6 +4694,7 @@ mod tests {
                 schema: Some("APP".into()),
                 name: "P_NEW".into(),
                 source: source.into(),
+                identifier_quote: None,
             });
             assert!(result.is_err(), "accepted unsafe package source: {source}");
         }
@@ -4499,6 +4708,7 @@ mod tests {
             schema: Some("MiXeD".into()),
             name: "Pkg".into(),
             source: source.into(),
+            identifier_quote: None,
         };
 
         assert!(build_executable_object_source_statements(input(
@@ -4565,6 +4775,7 @@ END F_REC;"#
             name: "F_REC".to_string(),
             new_name: "F_REC_2".to_string(),
             source: source.to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4589,6 +4800,7 @@ END "F_REC_2";"#
             name: "F_REC".to_string(),
             new_name: "F_REC_2".to_string(),
             source: "CREATE OR REPLACE PROCEDURE \"F_REC\".\"F_REC\" AS BEGIN F_REC; END F_REC;".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4607,6 +4819,7 @@ END "F_REC_2";"#
             name: "F_REC".to_string(),
             new_name: "F_REC_2".to_string(),
             source: "CREATE FUNCTION APP.F_REC(N NUMBER) RETURN NUMBER AS BEGIN SELECT F_REC INTO N FROM T; RETURN N; END F_REC;".to_string(),
+            identifier_quote: None,
         });
 
         assert!(result.unwrap_err().contains("Cannot safely determine whether F_REC"));
@@ -4622,6 +4835,7 @@ END "F_REC_2";"#
             new_name: "F_REC_2".to_string(),
             source: "CREATE FUNCTION APP.F_REC(N NUMBER) RETURN NUMBER AS BEGIN RETURN F_REC_2(N - 1); END F_REC;"
                 .to_string(),
+            identifier_quote: None,
         });
 
         assert!(result.unwrap_err().contains("could capture an existing reference"));
@@ -4636,6 +4850,7 @@ END "F_REC_2";"#
             name: "F_REC".to_string(),
             new_name: "F_REC_2".to_string(),
             source: "CREATE FUNCTION APP.F_REC(N NUMBER) RETURN NUMBER AS FUNCTION F_REC(X NUMBER) RETURN NUMBER IS BEGIN RETURN X; END F_REC; BEGIN RETURN F_REC(N - 1); END F_REC;".to_string(),
+            identifier_quote: None,
         });
 
         assert!(result.unwrap_err().contains("may shadow self-recursive calls"));
@@ -4650,6 +4865,7 @@ END "F_REC_2";"#
             name: "IF".to_string(),
             new_name: "F_IF".to_string(),
             source: "CREATE FUNCTION APP.\"IF\"(N NUMBER) RETURN NUMBER AS BEGIN IF N = 0 THEN RETURN 0; END IF; RETURN \"IF\"(N - 1); END \"IF\";".to_string(),
+            identifier_quote: None,
         })
         .unwrap();
 
@@ -4779,6 +4995,7 @@ END "F_REC_2";"#
             name: "DBX50_OLD_20261014_8F31".into(),
             new_name: "DBX50_NEW_20261014_8F31".into(),
             source: "CREATE OR REPLACE PROCEDURE SYS.DBX50_OLD_20261014_8F31 IS BEGIN DBX50_OLD_20261014_8F31; EXECUTE IMMEDIATE 'BEGIN DBX50_OLD_20261014_8F31; END;'; END;".into(),
+            identifier_quote: None,
         });
 
         let error = result.unwrap_err();

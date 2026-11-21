@@ -111,6 +111,8 @@ Pulsar、Kafka、RocketMQ 和 RabbitMQ 共用消息队列控制台框架，但�
 
 例如，Pulsar 更强调 Tenant、Namespace 和 Subscription；Kafka 使用 Topic、Consumer Group 和 Broker 视角；RocketMQ 提供消息与轨迹相关入口；RabbitMQ 使用 Virtual Host、Exchange/Queue、连接、Policy 和 Permission 模型。
 
+在 Kafka 的 Broker 面板中，可打开单个 Broker 的配置，搜索生效的配置项并查看值的来源。此操作只读，需要对该 Broker 执行 `DescribeConfigs` 的权限。未实现 `DescribeConfigs` 的旧版 Broker 会显示不支持，权限或连接失败仍会显示错误。敏感值不会返回给界面。
+
 <Callout type="info">消息队列面板根据 Agent 返回的 capability 动态显示。服务端版本、管理 API、账号权限或未配置的管理端口都可能让某些标签页不可用。</Callout>
 
 ## etcd、ZooKeeper、Nacos 与 Consul

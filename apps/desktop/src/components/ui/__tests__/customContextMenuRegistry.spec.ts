@@ -135,4 +135,71 @@ describe("customContextMenuRegistry", () => {
 
     second.dispose();
   });
+
+  it("ignores scroll events from unrelated containers when a trigger target is active", () => {
+    const documentTarget = document;
+    const windowTarget = window;
+    const registry = createContextMenuRegistry(documentTarget, windowTarget);
+    const closeMenu = vi.fn();
+    const registration = registry.register(closeMenu);
+
+    const treeContainer = document.createElement("div");
+    treeContainer.id = "tree-scroll-container";
+    const treeRow = document.createElement("div");
+    treeRow.id = "tree-node";
+    treeContainer.append(treeRow);
+
+    const aiChatContainer = document.createElement("div");
+    aiChatContainer.id = "ai-chat-viewport";
+
+    document.body.append(treeContainer, aiChatContainer);
+
+    registration.activate(treeRow);
+
+    // Unrelated container scroll (like streaming AI tokens) must not dismiss the menu
+    aiChatContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(closeMenu).not.toHaveBeenCalled();
+
+    // Container enclosing the trigger node scrolling must dismiss the menu
+    treeContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(closeMenu).toHaveBeenCalledOnce();
+
+    treeContainer.remove();
+    aiChatContainer.remove();
+    registration.dispose();
+  });
+
+  it("closes when document scrolls or when trigger target is detached", () => {
+    const documentTarget = document;
+    const windowTarget = window;
+    const registry = createContextMenuRegistry(documentTarget, windowTarget);
+    const closeMenu = vi.fn();
+    const registration = registry.register(closeMenu);
+
+    const trigger = document.createElement("button");
+    const container = document.createElement("div");
+    container.append(trigger);
+    const unrelated = document.createElement("div");
+    document.body.append(container, unrelated);
+
+    registration.activate(trigger);
+
+    // Document-level scroll dismisses menu
+    document.dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(closeMenu).toHaveBeenCalledTimes(1);
+
+    // Reactivate menu
+    registration.activate(trigger);
+
+    // Disconnect trigger from DOM
+    trigger.remove();
+
+    // Scroll from unrelated container should now close since trigger target is no longer connected
+    unrelated.dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(closeMenu).toHaveBeenCalledTimes(2);
+
+    container.remove();
+    unrelated.remove();
+    registration.dispose();
+  });
 });

@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { isActiveResultLoading } from "@/lib/sql/queryExecutionState";
+import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { statementExecutionMarkers } from "@/lib/tabs/tabPresentation";
 import { BackendErrorException } from "@/lib/backend/errorUtils";
 import type { QueryResult } from "@/types/database";
@@ -587,6 +588,47 @@ describe("queryStore multi-statement errors", () => {
       { index: 1, error: undefined },
       { index: 2, error: undefined },
     ]);
+  });
+
+  it.each([
+    ["retry", 1, ["success", "success", "success", "success", "success"]],
+    ["skip", 2, ["success", "error", "success", "success", "success"]],
+    ["skip-all", 2, ["success", "error", "error", "success", "success"]],
+  ] as const)("preserves MySQL delimiter boundaries and editor offsets on %s", async (action, startIndex, statuses) => {
+    const statements = ["CREATE PROCEDURE completed() BEGIN SELECT 1; SELECT 2; END", "CREATE PROCEDURE failed() BEGIN SELECT 3; SELECT 4; END", "CREATE PROCEDURE later() BEGIN SELECT 5; SELECT 6; END", "CREATE PROCEDURE last_proc() BEGIN SELECT 7; SELECT 8; END", "SELECT 9"];
+    const delimiterPrefix = "DELIMITER //\n";
+    const suffix =
+      statements
+        .slice(0, -1)
+        .map((statement) => `${statement} //\n`)
+        .join("") + "DELIMITER ;\nSELECT 9;";
+    const editorSql = `SELECT 'before';\n${delimiterPrefix}\n${suffix}`;
+    const ok = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 };
+    const failure = { ...ok, columns: ["Error"], rows: [["routine already exists"]], execution_error: true, error: structuredSqlError("routine already exists") };
+    mocks.executeMultiWithProgress
+      .mockResolvedValueOnce([
+        { ...ok, statement_index: 0 },
+        { ...failure, statement_index: 1 },
+      ])
+      .mockResolvedValueOnce(statuses.slice(startIndex).map((status, statement_index) => ({ ...(status === "error" ? failure : ok), statement_index })));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query", "query", undefined, editorSql);
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+
+    await store.executeTabSql(tabId, delimiterPrefix + suffix, { sourceOffset: editorSql.indexOf(suffix) - delimiterPrefix.length });
+    expect(tab.batchSqlExecution?.items.map((item) => item.status)).toEqual(["success", "error", "skipped", "skipped", "skipped"]);
+    await expect(store.resumeBatchSql(tabId, action)).resolves.toBe(true);
+
+    expect(mocks.executeMultiWithProgress).toHaveBeenCalledTimes(2);
+    const resumedSql = mocks.executeMultiWithProgress.mock.calls[1]?.[2];
+    expect(resumedSql).toBe(delimiterPrefix + suffix.slice(suffix.indexOf(statements[startIndex])));
+    expect(mocks.executeMultiWithProgress.mock.calls[1]?.[5]).toMatchObject({ continueOnError: action === "skip-all" });
+    expect(splitSqlStatementRanges(resumedSql, "mysql").map((range) => range.sql)).toEqual(statements.slice(startIndex));
+    const sourceRanges = statements.map((statement) => ({ from: editorSql.indexOf(statement), to: editorSql.indexOf(statement) + statement.length }));
+    expect(tab.batchSqlExecution?.items).toMatchObject(sourceRanges.map((range, index) => ({ ...range, status: statuses[index] })));
+    expect(tab.results?.map((result) => result.statement_index)).toEqual([0, 1, 2, 3, 4]);
+    expect(tab.results?.map((result) => ({ from: result.sourceFrom, to: result.sourceTo }))).toEqual(sourceRanges);
   });
 
   it("retries against the original execution target after the tab target changes", async () => {

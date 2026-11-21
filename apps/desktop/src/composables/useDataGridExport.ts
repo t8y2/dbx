@@ -27,6 +27,7 @@ import { resolveSqlExportColumnIndexes, sqlExportColumnChoices } from "@/lib/exp
 import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
 import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { uuid } from "@/lib/common/utils";
+import { isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
@@ -47,6 +48,7 @@ import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode"
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { CapturedLegacyLargeValueExport } from "@/lib/dataGrid/legacyLargeValueExport";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 
@@ -134,6 +136,7 @@ export interface UseDataGridExportOptions {
   captureColumnFormatterDisplay?: () => (value: CellValue, columnIndex: number) => string;
   editValue?: (value: CellValue, columnIndex: number) => string;
   hasColumnFormatter?: (columnIndex: number) => boolean;
+  hasBinaryColumnFormatter?: (columnIndex: number) => boolean;
   applyColumnFormattersOnExport?: ComputedRef<boolean>;
   cellClipboardText?: (value: CellValue, columnIndex: number) => string | undefined;
   externalCellValue?: (value: CellValue, columnIndex: number) => CellValue;
@@ -879,6 +882,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function binaryClipboardCellValue(value: CellValue, columnIndex: number): CellValue {
+    const sourceIndex = visibleColumnIndexes.value[columnIndex] ?? columnIndex;
+    if (options.hasBinaryColumnFormatter?.(sourceIndex) && shouldApplyColumnFormatter(sourceIndex)) return value;
     return binaryCellClipboardText(value, columnTypes.value?.[columnIndex], databaseType.value) ?? value;
   }
 
@@ -1105,6 +1110,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     displayValue: options.displayValue,
     editValue: options.editValue,
     hasColumnFormatter: options.hasColumnFormatter,
+    hasBinaryColumnFormatter: options.hasBinaryColumnFormatter,
     applyColumnFormattersOnExport: options.applyColumnFormattersOnExport,
     externalCellValue: (value, columnIndex) => {
       const externalValue = options.externalCellValue?.(value as CellValue, columnIndex);
@@ -1187,18 +1193,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
-  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+  async function readFullExtractorResult(): Promise<QueryResult> {
+    const isSourceCurrent = captureExportConfirmationSource();
+    const readResult = options.captureFullExportResult?.() ?? fullExportResult;
+    const result = await readResult?.();
+    if (!result || !isSourceCurrent() || result.truncated || result.has_more || result.columns.length !== allColumns.value.length || result.columns.some((name, index) => name !== allColumns.value[index])) {
+      throw new Error(t("grid.exportDatabaseIncomplete"));
+    }
+    return { ...result, rows: await materializeExportSnapshot(result, isSourceCurrent) };
+  }
+
+  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, scope: "selection" | "result" = "selection"): Promise<boolean> {
     if (!allowExport(extractor === "csv-with-headers" ? "csv" : extractor)) return false;
     let exported = false;
     await runExclusiveExport(async () => {
       if (!canCopyWithExtractor(extractor, extractorOptions)) return;
       try {
-        const extraction = await extractWithExtractor(extractor, extractorOptions);
+        const result = scope === "result" ? await readFullExtractorResult() : undefined;
+        const extraction = await extractWithExtractor(extractor, extractorOptions, undefined, result);
         if (!extraction) return;
         const extension = extraction.result.fileExtension.replace(/^\.+/, "") || "txt";
-        const baseName = `${exportFileBaseName?.value || tableMeta.value?.tableName || "export"}_selected`;
-        const saved = await saveTextFile(extraction.result.text, exportFileName(baseName, extension, { preferFallback: true }), extension.toUpperCase(), extension, {
-          operation: `selection-extractor-${extractor}`,
+        const baseName = exportFileBaseName?.value || tableMeta.value?.tableName || "export";
+        const saved = await saveTextFile(extraction.result.text, exportFileName(scope === "selection" ? `${baseName}_selected` : baseName, extension, { preferFallback: true }), extension.toUpperCase(), extension, {
+          operation: `${scope}-extractor-${extractor}`,
         });
         if (!saved) return;
         notifyExportSuccess(typeof saved === "string" ? saved : undefined);
@@ -1343,6 +1360,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             return await (native ? api.readLargeValueChunk(request, true) : api.readLargeValueChunk(request));
           } catch (error) {
             nativeUnknown = native && (!(error instanceof SnapshotCompletionError) || error.status === "unknown");
+            if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+              useQueryStore().noteExpiredManualTransaction(request.txnSessionId, error);
+              throw new Error(t("exportProgress.transactionUnavailable"));
+            }
             throw error;
           }
         };
@@ -2129,6 +2150,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             return await api.readLargeValueChunk(request, true);
           } catch (error) {
             unknown ||= !(error instanceof SnapshotCompletionError) || error.status === "unknown";
+            if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+              useQueryStore().noteExpiredManualTransaction(request.txnSessionId, error);
+              throw new Error(t("exportProgress.transactionUnavailable"));
+            }
             throw error;
           }
         };
@@ -2782,6 +2807,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     let request: QueryResultExportRequest | undefined;
     if (mode === "immediate") request = await build();
+    const startExport = async (onProgress: (progress: api.TableExportProgress) => void) => {
+      try {
+        return await (isTauriRuntime() ? api.startQueryResultExport(request!, onProgress, true) : api.startQueryResultExport(request!, onProgress));
+      } catch (error) {
+        if (request?.txnSessionId && isManualTransactionSessionExpired(error)) {
+          useQueryStore().noteExpiredManualTransaction(request.txnSessionId, error);
+          throw new Error(t("exportProgress.transactionUnavailable"));
+        }
+        throw error;
+      }
+    };
     await submitBackendExport({
       exportId,
       tableName: "Query Result",
@@ -2796,7 +2832,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               request = await build();
             }
           : undefined,
-      start: (onProgress) => (isTauriRuntime() ? api.startQueryResultExport(request!, onProgress, true) : api.startQueryResultExport(request!, onProgress)),
+      start: startExport,
       cancel: () => api.cancelQueryResultExport(exportId, request!.executionId),
     });
     return true;

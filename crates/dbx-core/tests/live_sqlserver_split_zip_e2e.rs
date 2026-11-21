@@ -146,6 +146,9 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         snapshot_session_id: None,
         batch_size: 1000,
         split_max_mb: Some(1),
+        row_limit_per_table: None,
+        row_limit_sort_column: None,
+        row_limit_sort_descending: false,
         insert_dialect: Default::default(),
         insert_mode: Default::default(),
     };

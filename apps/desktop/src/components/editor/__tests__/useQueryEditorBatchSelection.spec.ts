@@ -163,6 +163,36 @@ describe("QueryEditor batch selection ownership", () => {
     expect(currentView.state.doc.toString()).toBe("SELECT t.id, -- 编号\n  t.name -- 名称\nFROM users");
   });
 
+  // #11330 / #15190: the repeated qualifier must be the text already in the
+  // document. Re-quoting an Oracle alias (`ap` -> `"ap"`) breaks the statement.
+  it("repeats an unquoted qualifier without adding quotes", () => {
+    const doc = "SELECT ap. FROM orders ap";
+    const from = "SELECT ap.".length;
+    const items: SqlCompletionItem[] = [
+      { label: "ID", apply: "ID", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "ap" },
+      { label: "STATUS", apply: "STATUS", type: "column", batchSelectionMode: "select", batchSelectionQualifier: "ap" },
+    ];
+    const { batch, session, currentView, settingsStore } = createHarness(doc, "select", items, from);
+    settingsStore.editorSettings.batchColumnSelectionIncludeComments = false;
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe("SELECT ap.ID, ap.STATUS FROM orders ap");
+  });
+
+  it("keeps the quotes of a quoted qualifier", () => {
+    const doc = 'SELECT "ap". FROM orders "ap"';
+    const from = 'SELECT "ap".'.length;
+    const items: SqlCompletionItem[] = [
+      { label: "ID", apply: "ID", type: "column", batchSelectionMode: "select", batchSelectionQualifier: '"ap"' },
+      { label: "STATUS", apply: "STATUS", type: "column", batchSelectionMode: "select", batchSelectionQualifier: '"ap"' },
+    ];
+    const { batch, session, currentView, settingsStore } = createHarness(doc, "select", items, from);
+    settingsStore.editorSettings.batchColumnSelectionIncludeComments = false;
+    batch.toggleAllBatchColumnSelection(currentView, session.key);
+    expect(batch.applySelectedBatchColumnSelection(currentView)).toBe(true);
+    expect(currentView.state.doc.toString()).toBe('SELECT "ap".ID, "ap".STATUS FROM orders "ap"');
+  });
+
   it("moves existing trailing comma before comment when inserting commented columns (#11354)", () => {
     const doc = "SELECT\n  t.,\n  other\nFROM users";
     const from = "SELECT\n  t.".length;

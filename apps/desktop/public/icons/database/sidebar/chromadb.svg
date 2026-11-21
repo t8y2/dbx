@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -46 256 256"><!-- Basic adaptation of ../chromadb.svg: preserve original foreground geometry and transparent details. -->
+<defs><mask id="chromadb-mono" x="0.0" y="-46.0" width="256.0" height="256.0" maskUnits="userSpaceOnUse" mask-type="luminance"><path xmlns="http://www.w3.org/2000/svg" d="M0 -46h256v256H0z" fill="none" />
+
+<ellipse xmlns="http://www.w3.org/2000/svg" cx="170.667" cy="81.92" fill="white" rx="85.333" ry="81.92" />
+
+<ellipse xmlns="http://www.w3.org/2000/svg" cx="85.333" cy="81.92" fill="white" rx="85.333" ry="81.92" />
+
+<path xmlns="http://www.w3.org/2000/svg" fill="black" d="M170.667 81.92c0 45.243-38.206 81.92-85.334 81.92V81.92zm-85.334 0C85.333 36.677 123.538 0 170.667 0v81.92z" />
+</mask></defs><rect x="0.0" y="-46.0" width="256.0" height="256.0" fill="white" mask="url(#chromadb-mono)"/></svg>

@@ -14702,7 +14702,9 @@ let foreignKeyRowPreviewGeneration = 0;
 async function loadForeignKeyRowPreview() {
   const generation = ++foreignKeyRowPreviewGeneration;
   const cell = detailCell.value;
-  if (!cell || !props.connectionId) {
+  const connectionId = props.connectionId;
+  const isCurrent = () => generation === foreignKeyRowPreviewGeneration && props.connectionId === connectionId;
+  if (!cell || !connectionId) {
     foreignKeyRowPreview.value = idleForeignKeyRowPreview();
     return;
   }
@@ -14710,18 +14712,18 @@ async function loadForeignKeyRowPreview() {
   let table = "";
   try {
     const target = await foreignKeyReferenceTarget(cell.rowIndex, cell.col);
-    if (generation !== foreignKeyRowPreviewGeneration) return;
+    if (!isCurrent()) return;
     if (!target) {
       foreignKeyRowPreview.value = idleForeignKeyRowPreview();
       return;
     }
     table = [target.schema, target.tableName].filter(Boolean).join(".");
-    const connection = connectionStore.getConfig(props.connectionId);
+    const connection = connectionStore.getConfig(connectionId);
     const sql = await buildTableSelectSql({
       databaseType: resolvedDatabaseType.value,
       driverProfile: connection?.driver_profile,
       serverVersion: connection?.database_info?.productVersion,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       catalog: props.tableMeta?.catalog,
       database: target.database,
       schema: target.schema,
@@ -14730,17 +14732,18 @@ async function loadForeignKeyRowPreview() {
       whereInput: target.whereInput,
       limit: 1,
     });
-    const result = await api.executeQuery(props.connectionId, target.database ?? props.executionDatabase ?? props.database ?? "", sql, target.schema, undefined, { maxRows: 1, fetchSize: 1, pageSize: 1 });
-    if (generation !== foreignKeyRowPreviewGeneration) return;
+    if (!isCurrent()) return;
+    const result = await api.executeQuery(connectionId, target.database ?? props.executionDatabase ?? props.database ?? "", sql, target.schema, undefined, { maxRows: 1, fetchSize: 1, pageSize: 1 });
+    if (!isCurrent()) return;
     foreignKeyRowPreview.value = result.rows.length > 0 ? { status: "ready", table, columns: result.columns, row: result.rows[0], message: "" } : { ...idleForeignKeyRowPreview(), status: "empty", table };
   } catch (error: any) {
-    if (generation !== foreignKeyRowPreviewGeneration) return;
+    if (!isCurrent()) return;
     foreignKeyRowPreview.value = { ...idleForeignKeyRowPreview(), status: "error", table, message: String(error?.message || error) };
   }
 }
 
 watch(
-  () => [activeCellDetailTab.value, detailCell.value?.rowIndex, detailCell.value?.col, props.result] as const,
+  () => [activeCellDetailTab.value, detailCell.value?.rowIndex, detailCell.value?.col, props.result, props.connectionId] as const,
   ([tab]) => {
     if (tab === "foreignKey") void loadForeignKeyRowPreview();
     else foreignKeyRowPreviewGeneration += 1;

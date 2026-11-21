@@ -103,6 +103,7 @@ import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.v
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
+import DataGridCellDetailForeignKey, { type ForeignKeyRowPreviewState } from "@/components/grid/DataGridCellDetailForeignKey.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
@@ -8017,11 +8018,18 @@ watch(columnDetailDialogOpen, (open) => {
   }
 });
 
+// The "referenced row" tab is offered for foreign-key cells; defined before the tab list because a watcher reads that list during setup.
+const foreignKeyRowPreviewAvailable = computed(() => {
+  const cell = detailCell.value;
+  return !!cell && canvasCellForeignKey(cell.rowIndex, cell.col) !== null;
+});
+
 const activeCellDetailTabs = computed(() => {
   const detail = activeCellDetail.value;
   return visibleCellDetailTabs({
     isEditable: !!detail?.isEditable,
     hasBinaryHexViewer: isBinaryCellColumnType(detail?.type),
+    hasForeignKeyPreview: foreignKeyRowPreviewAvailable.value,
   });
 });
 
@@ -14631,10 +14639,11 @@ watch(
   { immediate: true },
 );
 
-async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
+/** Referenced table and the WHERE condition that selects the row a foreign-key cell points to. */
+async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number) {
   const association = cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
-  if (!association || !item || !props.connectionId) return;
+  if (!association || !item || !props.connectionId) return null;
   let cells = foreignKeyAssociationCells({
     association,
     context: props.context,
@@ -14642,45 +14651,101 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
     sourceColumns: props.sourceColumns,
     row: item.data,
   });
-  if (!cells) return;
-  try {
-    const resolved = await resolveLargeValueCells(
-      [item.id],
-      cells.map((cell) => cell.columnIndex),
-    );
-    const resolvedRow = resolved.get(item.id);
-    if (resolvedRow) {
-      cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
-      if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
-    }
-    const conditions = await Promise.all(
-      cells.map(({ foreignKey, value }) =>
-        buildColumnValueFilterCondition({
-          databaseType: resolvedDatabaseType.value,
-          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-          columnName: foreignKey.ref_column,
-          columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
-          rawValue: String(value),
-        }),
-      ),
-    );
-    const condition = combineForeignKeyConditions(conditions);
-    if (!condition) return;
-    await openTableTarget(
-      foreignKeyNavigationTarget({
-        connectionId: props.connectionId,
-        database: props.database || props.tableMeta?.database || "",
-        currentSchema: props.tableMeta?.schema || props.schema,
-        fk: association.foreignKey,
-        whereInput: condition,
-        connection: connectionStore.getConfig(props.connectionId),
+  if (!cells) return null;
+  const resolved = await resolveLargeValueCells(
+    [item.id],
+    cells.map((cell) => cell.columnIndex),
+  );
+  const resolvedRow = resolved.get(item.id);
+  if (resolvedRow) {
+    cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
+    if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
+  }
+  const conditions = await Promise.all(
+    cells.map(({ foreignKey, value }) =>
+      buildColumnValueFilterCondition({
         databaseType: resolvedDatabaseType.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+        columnName: foreignKey.ref_column,
+        columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+        rawValue: String(value),
       }),
-    );
+    ),
+  );
+  const condition = combineForeignKeyConditions(conditions);
+  if (!condition) return null;
+  return foreignKeyNavigationTarget({
+    connectionId: props.connectionId,
+    database: props.database || props.tableMeta?.database || "",
+    currentSchema: props.tableMeta?.schema || props.schema,
+    fk: association.foreignKey,
+    whereInput: condition,
+    connection: connectionStore.getConfig(props.connectionId),
+    databaseType: resolvedDatabaseType.value,
+  });
+}
+
+async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
+  try {
+    const target = await foreignKeyReferenceTarget(rowIndex, actualColIdx);
+    if (target) await openTableTarget(target);
   } catch (e: any) {
     toast(String(e?.message || e), 5000);
   }
 }
+
+// ---- 单元格详情面板的“引用行”标签：就地预览外键指向的那一行 ----
+const idleForeignKeyRowPreview = (): ForeignKeyRowPreviewState => ({ status: "idle", table: "", columns: [], row: [], message: "" });
+const foreignKeyRowPreview = ref<ForeignKeyRowPreviewState>(idleForeignKeyRowPreview());
+let foreignKeyRowPreviewGeneration = 0;
+
+async function loadForeignKeyRowPreview() {
+  const generation = ++foreignKeyRowPreviewGeneration;
+  const cell = detailCell.value;
+  if (!cell || !props.connectionId) {
+    foreignKeyRowPreview.value = idleForeignKeyRowPreview();
+    return;
+  }
+  foreignKeyRowPreview.value = { ...idleForeignKeyRowPreview(), status: "loading" };
+  let table = "";
+  try {
+    const target = await foreignKeyReferenceTarget(cell.rowIndex, cell.col);
+    if (generation !== foreignKeyRowPreviewGeneration) return;
+    if (!target) {
+      foreignKeyRowPreview.value = idleForeignKeyRowPreview();
+      return;
+    }
+    table = [target.schema, target.tableName].filter(Boolean).join(".");
+    const connection = connectionStore.getConfig(props.connectionId);
+    const sql = await buildTableSelectSql({
+      databaseType: resolvedDatabaseType.value,
+      driverProfile: connection?.driver_profile,
+      serverVersion: connection?.database_info?.productVersion,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+      catalog: props.tableMeta?.catalog,
+      database: target.database,
+      schema: target.schema,
+      tableName: target.tableName,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      whereInput: target.whereInput,
+      limit: 1,
+    });
+    const result = await api.executeQuery(props.connectionId, target.database ?? props.executionDatabase ?? props.database ?? "", sql, target.schema, undefined, { maxRows: 1, fetchSize: 1, pageSize: 1 });
+    if (generation !== foreignKeyRowPreviewGeneration) return;
+    foreignKeyRowPreview.value = result.rows.length > 0 ? { status: "ready", table, columns: result.columns, row: result.rows[0], message: "" } : { ...idleForeignKeyRowPreview(), status: "empty", table };
+  } catch (error: any) {
+    if (generation !== foreignKeyRowPreviewGeneration) return;
+    foreignKeyRowPreview.value = { ...idleForeignKeyRowPreview(), status: "error", table, message: String(error?.message || error) };
+  }
+}
+
+watch(
+  () => [activeCellDetailTab.value, detailCell.value?.rowIndex, detailCell.value?.col, props.result] as const,
+  ([tab]) => {
+    if (tab === "foreignKey") void loadForeignKeyRowPreview();
+    else foreignKeyRowPreviewGeneration += 1;
+  },
+);
 
 function contextForeignKeyMenuItem(): ContextMenuItem | null {
   const cell = contextCell.value;
@@ -17904,6 +17969,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 @copy-sql-condition="copyDetailSqlCondition"
               />
               <DataGridCellDetailHexViewer v-if="activeCellDetailTabs.includes('hexViewer')" :rows="activeBinaryHexRows" :byte-count="activeBinaryHexByteCount" />
+              <DataGridCellDetailForeignKey v-if="activeCellDetailTabs.includes('foreignKey') && detailCell" :preview="foreignKeyRowPreview" @open="navigateToForeignKeyCell(detailCell.rowIndex, detailCell.col)" />
 
               <TabsContent v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col p-3 text-xs">
                 <div :style="detailTransformOpen ? { display: 'none' } : null" class="min-w-0 flex min-h-0 flex-1 flex-col">

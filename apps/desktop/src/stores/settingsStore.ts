@@ -1562,7 +1562,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
   dataGridToolbarLayout: "single",
-  dataGridKeepFilterEditorExpanded: false,
+  dataGridKeepFilterEditorExpanded: true,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   dataGridOrderByVisible: true,
   dataGridWhereRatio: 0.5,
@@ -2134,7 +2134,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
   const legacySidebarOpenDatabaseOnSingleClick = (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick?: unknown }).sidebarOpenDatabaseOnSingleClick;
   const legacyDataGridAutoHideFilterBuilder = (settings as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown }).dataGridAutoHideFilterBuilder;
-  const hasDataGridKeepFilterEditorExpanded = Object.prototype.hasOwnProperty.call(settings, "dataGridKeepFilterEditorExpanded");
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
@@ -2335,7 +2334,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
     dataGridToolbarLayout: normalizeDataGridToolbarLayout(settings.dataGridToolbarLayout),
-    dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
+    dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : legacyDataGridAutoHideFilterBuilder !== true,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     dataGridOrderByVisible: settings.dataGridOrderByVisible !== false,
     dataGridWhereRatio: typeof settings.dataGridWhereRatio === "number" && Number.isFinite(settings.dataGridWhereRatio) && settings.dataGridWhereRatio >= 0.2 && settings.dataGridWhereRatio <= 0.85 ? settings.dataGridWhereRatio : DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio,

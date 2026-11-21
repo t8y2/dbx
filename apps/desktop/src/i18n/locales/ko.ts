@@ -5808,6 +5808,7 @@ export default withEnglishFallback({
     scopeFunctions: "함수",
     stepSkipped: "필요한 이전 단계가 실패하여 건너뜁니다.",
     selectedObjectsCount: "{count}개 개체 선택됨",
+    generatePassword: "비밀번호 생성",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "이 OceanBase 버전의 작업 날짜는 마이크로초 정밀도만 지원합니다. 소수 초의 7~9번째 자리를 0으로 바꾸고 다시 미리 보세요. 원래 입력은 보존되었습니다.",

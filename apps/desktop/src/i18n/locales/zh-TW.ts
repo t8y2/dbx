@@ -10716,6 +10716,7 @@ export default withEnglishFallback({
     title: "使用者與權限",
     unsupported: "支援 MySQL 相容和 PostgreSQL 相容連線。SQL Server、Oracle 等其他權限模型將在後續版本中新增。",
     newUser: "新增使用者",
+    generatePassword: "產生密碼",
     anonymous: "匿名",
     roleName: "角色名稱",
     allowLogin: "允許登入",

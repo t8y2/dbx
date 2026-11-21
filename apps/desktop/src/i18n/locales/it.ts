@@ -5516,6 +5516,7 @@ export default withEnglishFallback({
     scopeFunctions: "funzioni",
     stepSkipped: "Ignorato perché un passaggio precedente richiesto non è riuscito.",
     selectedObjectsCount: "{count} oggetti selezionati",
+    generatePassword: "Genera password",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Le date dei job in questa versione di OceanBase supportano solo la precisione al microsecondo. Imposta a 0 le cifre 7–9 dei secondi frazionari e genera di nuovo l'anteprima; l'input originale è stato conservato.",

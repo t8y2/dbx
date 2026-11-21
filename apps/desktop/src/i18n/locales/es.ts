@@ -1553,6 +1553,8 @@ export default withEnglishFallback({
     hiveTicketCacheFallback: "Establecer useSubjectCredsOnly=false",
     hiveJvmOptions: "Opciones de la JVM",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
+    cnosdbTenant: "Inquilino de CnosDB",
+    cnosdbTenantHint: "Espacio de aislamiento multiinquilino, no el nombre de usuario de inicio de sesión. Opcional; en implementaciones de código abierto el valor predeterminado es cnosdb.",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "Debe coincidir con el DBSERVERNAME del servidor o con DBSERVERALIASES.",
     gbaseServerMismatch: "Falló la conexión de GBase 8s: GBASEDBTSERVER no coincide con el DBSERVERNAME del servidor ni con sus DBSERVERALIASES. Introduce el nombre real del servidor.",

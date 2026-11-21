@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { supportsTableStructureEditing } from "@/lib/database/databaseFeatureSupport";
+import { canEditTableStructure, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 
 describe("tableStructureCapabilities", () => {
   it("uses table rebuilds only for native SQLite connections", () => {
@@ -168,5 +169,16 @@ describe("tableStructureCapabilities", () => {
     const third = { original: {}, originalPosition: 2 };
 
     expect(hasLocalTableColumnOrderChange([first, dropped, third])).toBe(false);
+  });
+
+  it("enables create-table for CnosDB without alter/index editing", () => {
+    expect(getTableStructureCapabilities("cnosdb")).toMatchObject({
+      createTable: true,
+      addColumn: false,
+      createIndex: false,
+      foreignKey: false,
+    });
+    expect(canEditTableStructure("cnosdb")).toBe(true);
+    expect(supportsTableStructureEditing("cnosdb")).toBe(true);
   });
 });

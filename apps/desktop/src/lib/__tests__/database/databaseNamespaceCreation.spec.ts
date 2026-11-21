@@ -40,4 +40,11 @@ describe("database namespace creation targets", () => {
     expect(connectionNamespaceCreationTarget(transwarp)).toBe("database");
     expect(databaseNodeNamespaceCreationTarget(transwarp, databaseNode)).toBeNull();
   });
+
+  it("offers Create Database for CnosDB without throwing on menu open", () => {
+    const cnosdb = { db_type: "cnosdb" } as Conn;
+
+    expect(connectionNamespaceCreationTarget(cnosdb)).toBe("database");
+    expect(databaseNodeNamespaceCreationTarget(cnosdb, databaseNode)).toBeNull();
+  });
 });

@@ -91,6 +91,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   sundb: { deferred: "property semantics not verified for first pass" },
   oscar: { deferred: "schema properties need product-specific handling" },
   tdengine: { deferred: "database property editing not verified for first pass" },
+  cnosdb: { deferred: "database property editing not verified for first pass" },
   xugu: { deferred: "schema properties need product-specific handling" },
   iotdb: { deferred: "storage group/database semantics need dedicated IoTDB handling" },
   etcd: { deferred: "key-value namespaces are not databases" },

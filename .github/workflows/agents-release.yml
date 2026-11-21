@@ -1279,6 +1279,176 @@ jobs:
         with:
           name: tdengine-native-${{ matrix.platform }}
           path: "release-native/dbx-agent-tdengine-*"
+  build-cnosdb-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'cnosdb') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+            extension: ""
+            smoke: true
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x64
+            extension: ""
+            smoke: true
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux_2_28_aarch64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+            extension: ""
+            manylinux_image: quay.io/pypa/manylinux_2_28_x86_64
+          - runner: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            extension: .exe
+          - runner: windows-2022
+            target: x86_64-win7-windows-msvc
+            platform: windows-x64
+            extension: .exe
+            smoke: true
+            win7: true
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cnosdb-driver
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.1
+        if: runner.os != 'Linux' && matrix.win7 != true
+        with:
+          targets: ${{ matrix.target }}
+      - name: Setup Rust for Windows 7
+        if: matrix.win7 == true
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-10-25
+          components: rust-src
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # reqwest/rustls HTTP agent build. The manylinux
+            # legs build inside a container and enable CC/CXX wrapping there;
+            # MSVC stays unwrapped.
+            case "${RUNNER_OS}" in
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
+          } >> "$GITHUB_ENV"
+      - name: Build CnosDB native driver
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -e HOME=/tmp/dbx-rust-home \
+              -e CARGO_INCREMENTAL=0 \
+              -e CARGO_TARGET_DIR=/workspace/target/cnosdb-driver \
+              -e RUSTC_WRAPPER \
+              -e SCCACHE_BUCKET \
+              -e SCCACHE_ENDPOINT \
+              -e SCCACHE_REGION \
+              -e SCCACHE_S3_KEY_PREFIX \
+              -e SCCACHE_S3_USE_SSL \
+              -e AWS_ACCESS_KEY_ID \
+              -e AWS_SECRET_ACCESS_KEY \
+              -e SCCACHE_IDLE_TIMEOUT \
+              -v "${{ github.workspace }}:/workspace" \
+              -w /workspace \
+              "${{ matrix.manylinux_image }}" \
+              bash -lc '
+                mkdir -p "$HOME"
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+                source "$HOME/.cargo/env"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  case "$(uname -m)" in
+                    x86_64) SCCACHE_ARCH=x86_64-unknown-linux-musl ;;
+                    aarch64) SCCACHE_ARCH=aarch64-unknown-linux-musl ;;
+                  esac
+                  curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-${SCCACHE_ARCH}.tar.gz" \
+                    | tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+                  export CC="sccache cc" CXX="sccache c++"
+                  sccache --version
+                else
+                  unset RUSTC_WRAPPER
+                fi
+                cargo build \
+                  --manifest-path agents/drivers/cnosdb/Cargo.toml \
+                  --locked \
+                  --release \
+                  --bin dbx-cnosdb-driver \
+                  --target "${{ matrix.target }}"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  sccache --show-stats || true
+                fi
+              '
+          else
+            BUILD_STD=()
+            if [ "${{ matrix.win7 }}" = "true" ]; then
+              BUILD_STD=(-Z build-std=std,panic_abort)
+            fi
+            cargo build \
+              --manifest-path agents/drivers/cnosdb/Cargo.toml \
+              --locked \
+              --release \
+              --bin dbx-cnosdb-driver \
+              --target "${{ matrix.target }}" \
+              "${BUILD_STD[@]}"
+          fi
+          mkdir -p release-native
+          cp \
+            "target/cnosdb-driver/${{ matrix.target }}/release/dbx-cnosdb-driver${{ matrix.extension }}" \
+            "release-native/dbx-agent-cnosdb-${{ matrix.platform }}${{ matrix.extension }}"
+          if [ -n "${{ matrix.manylinux_image }}" ]; then
+            docker run --rm \
+              --user "$(id -u):$(id -g)" \
+              -v "${{ github.workspace }}/release-native:/driver:ro" \
+              "${{ matrix.manylinux_image }}" \
+              "/driver/dbx-agent-cnosdb-${{ matrix.platform }}" < /dev/null
+          elif [ "${{ matrix.smoke }}" = "true" ]; then
+            "release-native/dbx-agent-cnosdb-${{ matrix.platform }}${{ matrix.extension }}" < /dev/null
+          fi
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cnosdb-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-cnosdb-*"
 
   build-jre:
     needs: [bump-versions]
@@ -1388,7 +1558,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-oracle-oci-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-etcd-native, build-etcd2-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-argo-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-nebula-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-oracle-oci-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-etcd-native, build-etcd2-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-argo-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-nebula-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-cnosdb-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -1524,6 +1694,7 @@ jobs:
               nebula) echo "NebulaGraph" ;;
               iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
+              cnosdb) echo "CnosDB" ;;
               etcd) echo "etcd" ;;
               etcd2) echo "etcd 2.x (v2 API)" ;;
               oracle-oci) echo "Oracle (OCI)" ;;
@@ -1590,7 +1761,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle oracle-oci xugu kingbase vastbase neo4j nebula iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive argo tdengine etcd etcd2; do
+          for name in oracle oracle-oci xugu kingbase vastbase neo4j nebula iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive argo tdengine cnosdb etcd etcd2; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1700,6 +1871,7 @@ jobs:
               nebula) echo "NebulaGraph" ;;
               iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
+              cnosdb) echo "CnosDB" ;;
               etcd) echo "etcd" ;;
               etcd2) echo "etcd 2.x (v2 API)" ;;
               oracle-oci) echo "Oracle (OCI)" ;;

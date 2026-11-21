@@ -354,7 +354,7 @@ pub fn build_table_data_select_sql_with_database(
     };
     let where_clause =
         if effective_predicate.is_empty() { String::new() } else { format!(" WHERE ({effective_predicate})") };
-    let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3)) {
+    let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3) | Some(DatabaseType::Cnosdb)) {
         // InfluxQL only allows sorting of the timestamp column; SQL-mode
         // InfluxDB 3 tables also key naturally on `time`.
         Some("time DESC".to_string())
@@ -1446,6 +1446,20 @@ mod tests {
             ..Default::default()
         });
         assert!(!sql.contains("WHERE"), "unexpected WHERE in non-time-series SQL: {sql}");
+    }
+
+    #[test]
+    fn cnosdb_table_select_orders_by_time_desc() {
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::Cnosdb),
+                database: Some("mytest".to_string()),
+                table_name: "bbb_test".to_string(),
+                columns: vec!["time".to_string(), "station".to_string(), "temperature".to_string()],
+                ..Default::default()
+            }),
+            "SELECT * FROM \"bbb_test\" ORDER BY time DESC LIMIT 100;"
+        );
     }
 
     #[test]

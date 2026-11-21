@@ -19,7 +19,7 @@ export const goAgents = [
   { driver: "iotdb", binary: "iotdb", race: false },
 ];
 
-export const rustAgents = ["duckdb", "tdengine"];
+export const rustAgents = ["duckdb", "tdengine", "cnosdb"];
 
 export const integrationCases = [
   ...["3.4.14", "3.5.5", "3.7.0", "3.9.5"].map((version) => ({ driver: "zookeeper", scenario: "zookeeper", version })),

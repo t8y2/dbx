@@ -22,6 +22,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   bigquery: "analytics",
   cache: "sql",
   cassandra: "document",
+  cnosdb: "timeseries",
   dameng: "domestic",
   databend: "analytics",
   databricks: "analytics",

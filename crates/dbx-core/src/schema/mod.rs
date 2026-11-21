@@ -12094,7 +12094,7 @@ fn uses_oracle_metadata_object_source(config: Option<&ConnectionConfig>, object_
 
 fn supports_agent_table_paging(config: &ConnectionConfig) -> bool {
     // Keep paging opt-in until each legacy agent is known to apply metadata constraints server-side.
-    matches!(config.db_type, DatabaseType::Tdengine | DatabaseType::OceanbaseOracle)
+    matches!(config.db_type, DatabaseType::Tdengine | DatabaseType::Cnosdb | DatabaseType::OceanbaseOracle)
         || crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()) == Some("cache")
         || is_default_oracle_agent_config(config)
 }

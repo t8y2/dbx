@@ -1505,6 +1505,8 @@ export default withEnglishFallback({
     hiveTicketCacheFallback: "useSubjectCredsOnly=false 설정",
     hiveJvmOptions: "JVM 옵션",
     hiveJvmOptionsPlaceholder: "-Dsun.security.krb5.debug=true",
+    cnosdbTenant: "CnosDB 테넌트",
+    cnosdbTenantHint: "로그인 사용자 이름이 아니라 멀티 테넌트 격리 네임스페이스입니다. 비워 둘 수 있으며, 오픈소스 배포에서는 기본값이 cnosdb입니다.",
     gbaseServer: "GBASEDBTSERVER",
     gbaseServerHint: "서버의 DBSERVERNAME 또는 DBSERVERALIASES와 일치해야 합니다.",
     gbaseServerMismatch: "GBase 8s 연결 실패: GBASEDBTSERVER가 서버의 DBSERVERNAME 또는 DBSERVERALIASES와 일치하지 않습니다. 연결 설정에 실제 서버 이름을 입력하세요.",

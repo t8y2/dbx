@@ -41,6 +41,8 @@ export interface DataCompareTableResult {
   /** Rows the backend was allowed to inspect per side; incomplete results are never synchronization-eligible. */
   rowBudget: number;
   syncEligible: boolean;
+  /** Keep synchronization scoped to the filter used by this result, not the current form. */
+  targetFilter?: string;
   databaseType?: DatabaseType;
   preSyncStatements?: string[];
   diff: DataCompareResult;
@@ -74,6 +76,8 @@ export interface DataCompareSessionConfig {
    * again — it must not silently fall back to the primary key.
    */
   keyColumnsByTable: Record<string, string[]>;
+  sourceFilter?: string;
+  targetFilter?: string;
   label: string;
 }
 
@@ -189,6 +193,7 @@ export function buildDataCompareSyncPlanTables(results: DataCompareTableResult[]
       },
       databaseType: table.databaseType,
       preSyncStatements: table.preSyncStatements ?? [],
+      targetFilter: table.targetFilter,
       syncEligible: true,
     }))
     .filter((table) => table.preSyncStatements.length > 0 || table.diff.added.length > 0 || table.diff.removed.length > 0 || table.diff.modified.length > 0);
@@ -234,7 +239,7 @@ async function inferKeyColumnsForTable(input: DataCompareSessionConfig, table: s
   return inferCompareKeyColumns(columns);
 }
 
-function buildTableResult(task: DataCompareTableTask, preparation: DataCompareFromTablesPreparation, keyColumns: string[], columns: string[], columnInfo: CompareColumn[], databaseType: DatabaseType | undefined): DataCompareTableResult {
+function buildTableResult(task: DataCompareTableTask, preparation: DataCompareFromTablesPreparation, keyColumns: string[], columns: string[], columnInfo: CompareColumn[], databaseType: DatabaseType | undefined, targetFilter: string | undefined): DataCompareTableResult {
   const added = preparation.result.added.length;
   const removed = preparation.result.removed.length;
   const modified = preparation.result.modified.length;
@@ -255,6 +260,7 @@ function buildTableResult(task: DataCompareTableTask, preparation: DataCompareFr
     targetTruncated: preparation.targetTruncated,
     rowBudget: preparation.rowBudget,
     syncEligible: preparation.syncEligible,
+    targetFilter,
     databaseType,
     preSyncStatements: preparation.preSyncStatements,
     diff: preparation.result,
@@ -366,16 +372,18 @@ async function runDataCompareSession(session: DataCompareSession, tasks: DataCom
             sourceDatabase: input.sourceDatabase,
             sourceSchema: input.sourceSchema,
             sourceTable: task.sourceTable,
+            sourceFilter: input.sourceFilter?.trim() || undefined,
             targetConnectionId: input.targetConnectionId,
             targetDatabase: input.targetDatabase,
             targetSchema: input.targetSchema,
             targetTable: task.targetTable,
+            targetFilter: input.targetFilter?.trim() || undefined,
             columns,
             keyColumns: canonicalKeyColumns,
             sourceColumns: matched.sourceColumns,
           });
           keyColumns = canonicalKeyColumns;
-          results.push(buildTableResult(task, preparation, canonicalKeyColumns, columns, columnInfo, databaseType));
+          results.push(buildTableResult(task, preparation, canonicalKeyColumns, columns, columnInfo, databaseType, input.targetFilter?.trim() || undefined));
         } else {
           const sourceColumns = await loadColumnsWithCache(sourceColumnCache, input.sourceConnectionId, input.sourceDatabase, input.sourceSchema, task.sourceTable);
           const resolvedKeys = configuredTaskKeyColumns(input, task) ?? [];
@@ -386,6 +394,7 @@ async function runDataCompareSession(session: DataCompareSession, tasks: DataCom
             sourceDatabase: input.sourceDatabase,
             sourceSchema: input.sourceSchema,
             sourceTable: task.sourceTable,
+            sourceFilter: input.sourceFilter?.trim() || undefined,
             targetConnectionId: input.targetConnectionId,
             targetDatabase: input.targetDatabase,
             targetSchema: input.targetSchema,

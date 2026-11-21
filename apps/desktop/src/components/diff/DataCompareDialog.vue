@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } from "vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import { createBoundedTextPreview } from "@/lib/common/boundedTextPreview";
 import { countCompareSelection, isCompareRowSelected, setCompareSelection, toggleCompareSelection } from "@/lib/dataGrid/dataCompareSelection";
@@ -88,6 +88,12 @@ const targetDatabases = ref<string[]>([]);
 const targetSchemas = ref<string[]>([]);
 const targetTables = ref<string[]>([]);
 
+const sourceFilter = ref("");
+const targetFilter = ref("");
+const advancedOptionsOpen = ref(false);
+const filterId = useId();
+const hasFilters = computed(() => Boolean(sourceFilter.value.trim() || targetFilter.value.trim()));
+
 const detailPreviewLimit = ref(String(PREVIEW_LIMIT_OPTIONS[1]));
 const batchResults = shallowRef<DataCompareTableResult[]>([]);
 const syncPlan = shallowRef<DataCompareSyncPlan>(emptyDataCompareSyncPlan());
@@ -132,11 +138,12 @@ let columnMetadataGeneration = 0;
 
 const activeSessionId = ref<string | null>(props.sessionId ?? null);
 let syncPlanRequestId = 0;
-let initializingPrefill = false;
+const initializingPrefill = ref(false);
 let initializingPrefillGeneration = 0;
 /** Set while a saved config is being applied so programmatic form writes are not re-saved. */
 let suppressConfigSave = false;
 let configSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let pendingConfigSave: { id: string; snapshot: DataCompareConfigSnapshot } | undefined;
 let componentUnmounted = false;
 let shownSessionError = "";
 
@@ -487,7 +494,7 @@ function comparisonEndpointLabel(connectionId: string, database: string, schema:
 async function restoreDataCompareSession(session: DataCompareSession): Promise<void> {
   const config = session.config;
   const generation = ++initializingPrefillGeneration;
-  initializingPrefill = true;
+  initializingPrefill.value = true;
   try {
     sourceConnectionId.value = config.sourceConnectionId;
     sourceDatabase.value = config.sourceDatabase;
@@ -504,6 +511,9 @@ async function restoreDataCompareSession(session: DataCompareSession): Promise<v
     targetSchemas.value = [...config.targetSchemas];
     targetTables.value = [...config.targetTables];
     targetTable.value = config.targetTable;
+    sourceFilter.value = config.sourceFilter ?? "";
+    targetFilter.value = config.targetFilter ?? "";
+    advancedOptionsOpen.value = hasFilters.value;
     // Restore the per-table match columns so a reopened session keeps every
     // table's own selection instead of collapsing back to one global list.
     keyColumnOverrides.value = normalizeKeyColumnOverrides(config.keyColumnsByTable);
@@ -518,7 +528,7 @@ async function restoreDataCompareSession(session: DataCompareSession): Promise<v
     void prefetchSelectedTableColumns(selectedSourceTableNames.value);
   } finally {
     await nextTick();
-    if (generation === initializingPrefillGeneration) initializingPrefill = false;
+    if (generation === initializingPrefillGeneration) initializingPrefill.value = false;
   }
 }
 
@@ -533,9 +543,19 @@ function dataCompareConfigSnapshot(): DataCompareConfigSnapshot {
     targetDatabase: targetDatabase.value,
     targetSchema: targetSchema.value,
     targetTable: targetTable.value,
+    sourceFilter: sourceFilter.value,
+    targetFilter: targetFilter.value,
     detailPreviewLimit: detailPreviewLimit.value,
     keyColumnsByTable: buildSessionKeyColumnsByTable(),
   };
+}
+
+function flushDataCompareConfigSave() {
+  if (configSaveTimer) clearTimeout(configSaveTimer);
+  configSaveTimer = undefined;
+  const pending = pendingConfigSave;
+  pendingConfigSave = undefined;
+  if (pending) updateDataCompareConfig(pending.id, pending.snapshot);
 }
 
 /**
@@ -547,13 +567,16 @@ function dataCompareConfigSnapshot(): DataCompareConfigSnapshot {
 async function applyDataCompareConfig(config: DataCompareConfig): Promise<void> {
   if (comparing.value || executionLocked.value) return;
   const generation = ++initializingPrefillGeneration;
-  initializingPrefill = true;
+  initializingPrefill.value = true;
   suppressConfigSave = true;
   clearResult();
   shownSessionError = "";
   try {
     sourceConnectionId.value = config.sourceConnectionId;
     targetConnectionId.value = config.targetConnectionId;
+    sourceFilter.value = config.sourceFilter ?? "";
+    targetFilter.value = config.targetFilter ?? "";
+    advancedOptionsOpen.value = hasFilters.value;
     sourceDatabase.value = targetDatabase.value = "";
     sourceSchema.value = targetSchema.value = "";
     sourceDatabases.value = targetDatabases.value = [];
@@ -596,18 +619,20 @@ async function applyDataCompareConfig(config: DataCompareConfig): Promise<void> 
     toast(String(error), 5000);
   } finally {
     await nextTick();
-    if (generation === initializingPrefillGeneration) initializingPrefill = false;
+    if (generation === initializingPrefillGeneration) initializingPrefill.value = false;
     suppressConfigSave = false;
   }
 }
 
 function handleDataCompareConfigSelect(id: string) {
+  flushDataCompareConfigSave();
   dataCompareConfigId.value = id;
   const config = dataCompareConfigs.value.find((item) => item.id === id);
   if (config) void applyDataCompareConfig(config);
 }
 
 function handleSaveDataCompareConfig() {
+  flushDataCompareConfigSave();
   createDataCompareConfig(t("dataCompare.defaultConfigName"), dataCompareConfigSnapshot());
   toast(t("dataCompare.configSaved"), 3000);
 }
@@ -617,11 +642,13 @@ function handleRenameDataCompareConfig(id: string, name: string) {
 }
 
 function handleDuplicateDataCompareConfig() {
+  flushDataCompareConfigSave();
   const id = dataCompareConfigId.value;
   if (id) duplicateDataCompareConfig(id);
 }
 
 function handleDeleteDataCompareConfig() {
+  flushDataCompareConfigSave();
   const id = dataCompareConfigId.value;
   // The form keeps the current selection; only the saved entry is removed so a
   // delete can never clear what the user is looking at.
@@ -650,9 +677,10 @@ function applyDataCompareSession(session: DataCompareSession | undefined): void 
 }
 
 function swapSourceTarget() {
-  if (comparing.value || executionLocked.value || initializingPrefill || pendingMetadataRequests.value > 0) return;
+  if (comparing.value || executionLocked.value || initializingPrefill.value || pendingMetadataRequests.value > 0) return;
+  flushDataCompareConfigSave();
   const generation = ++initializingPrefillGeneration;
-  initializingPrefill = true;
+  initializingPrefill.value = true;
   const previousSelectedTables = [...selectedSourceTableNames.value];
   const nextSingleTarget = previousSelectedTables.length === 1 ? (previousSelectedTables[0] ?? "") : "";
   const nextSourceSelection = previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
@@ -679,6 +707,7 @@ function swapSourceTarget() {
   targetSchemas.value = tmpSchemas;
   targetTables.value = tmpTables;
   targetTable.value = nextSingleTarget;
+  [sourceFilter.value, targetFilter.value] = [targetFilter.value, sourceFilter.value];
 
   sourceTable.value = selectedSourceTableNames.value.length === 1 ? selectedSourceTableNames.value[0] : "";
   keyColumnOverrides.value = {};
@@ -686,7 +715,7 @@ function swapSourceTarget() {
   clearResult();
   void nextTick(() => {
     if (generation !== initializingPrefillGeneration) return;
-    initializingPrefill = false;
+    initializingPrefill.value = false;
     if (dataCompareConfigId.value && !suppressConfigSave) updateDataCompareConfig(dataCompareConfigId.value, dataCompareConfigSnapshot());
     void prefetchSelectedTableColumns(selectedSourceTableNames.value);
   });
@@ -1005,6 +1034,8 @@ function startCompare(): void {
       targetSchemas: [...targetSchemas.value],
       targetTables: [...targetTables.value],
       targetTable: targetTable.value,
+      sourceFilter: sourceFilter.value,
+      targetFilter: targetFilter.value,
       keyColumnsByTable: buildSessionKeyColumnsByTable(),
       label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
     },
@@ -1189,7 +1220,7 @@ function formatModifiedSummary(row: DataCompareModifiedRow): string {
 }
 
 watch(sourceConnectionId, (id) => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   sourceDatabases.value = [];
   sourceDatabase.value = "";
@@ -1203,7 +1234,7 @@ watch(sourceConnectionId, (id) => {
   loadDatabases(id, "source").catch((e) => toast(String(e), 5000));
 });
 watch(targetConnectionId, (id) => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   targetDatabases.value = [];
   targetDatabase.value = "";
@@ -1214,7 +1245,7 @@ watch(targetConnectionId, (id) => {
   loadDatabases(id, "target").catch((e) => toast(String(e), 5000));
 });
 watch(sourceDatabase, () => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   sourceSchema.value = "";
   sourceSchemas.value = [];
@@ -1225,7 +1256,7 @@ watch(sourceDatabase, () => {
   loadSchemas("source", props.prefillSchema).catch((e) => toast(String(e), 5000));
 });
 watch(targetDatabase, () => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   targetSchema.value = "";
   targetSchemas.value = [];
@@ -1234,7 +1265,7 @@ watch(targetDatabase, () => {
   loadSchemas("target").catch((e) => toast(String(e), 5000));
 });
 watch(sourceSchema, () => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   sourceTables.value = [];
   sourceTable.value = "";
@@ -1243,14 +1274,14 @@ watch(sourceSchema, () => {
   if (sourceSchema.value) loadTables("source").catch((e) => toast(String(e), 5000));
 });
 watch(targetSchema, () => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   targetTables.value = [];
   targetTable.value = "";
   if (targetSchema.value) loadTables("target").catch((e) => toast(String(e), 5000));
 });
 watch(selectedSourceTableNames, (tables, previous) => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
   // Drop the match columns and metadata of tables that are no longer compared,
   // so a table that is selected again starts from its own primary key.
@@ -1269,27 +1300,41 @@ watch(selectedSourceTableNames, (tables, previous) => {
   void prefetchSelectedTableColumns(tables);
 });
 watch(targetTable, () => {
-  if (initializingPrefill) return;
+  if (initializingPrefill.value) return;
   clearResult();
+});
+watch([sourceFilter, targetFilter], () => {
+  if (!initializingPrefill.value) clearResult();
 });
 // Keep the selected config in sync with the form so "saved" really means the
 // current selection. Debounced because table multi-select toggles fire rapidly.
 watch(
-  () => [sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, sourceTableSelection.value.join("\u0000"), targetConnectionId.value, targetDatabase.value, targetSchema.value, targetTable.value, detailPreviewLimit.value, JSON.stringify(keyColumnOverrides.value)],
+  () => [
+    sourceConnectionId.value,
+    sourceDatabase.value,
+    sourceSchema.value,
+    sourceTableSelection.value.join("\u0000"),
+    targetConnectionId.value,
+    targetDatabase.value,
+    targetSchema.value,
+    targetTable.value,
+    sourceFilter.value,
+    targetFilter.value,
+    detailPreviewLimit.value,
+    JSON.stringify(keyColumnOverrides.value),
+  ],
   () => {
-    if (suppressConfigSave || initializingPrefill || !dataCompareConfigId.value) return;
+    if (suppressConfigSave || initializingPrefill.value || !dataCompareConfigId.value) return;
     if (configSaveTimer) clearTimeout(configSaveTimer);
-    const configId = dataCompareConfigId.value;
-    configSaveTimer = setTimeout(() => {
-      configSaveTimer = undefined;
-      if (componentUnmounted || configId !== dataCompareConfigId.value) return;
-      updateDataCompareConfig(configId, dataCompareConfigSnapshot());
-    }, 400);
+    // Capture the edited config before another config or historical session replaces the form.
+    pendingConfigSave = { id: dataCompareConfigId.value, snapshot: dataCompareConfigSnapshot() };
+    configSaveTimer = setTimeout(flushDataCompareConfigSave, 400);
   },
 );
 watch(
   [() => open.value, () => props.sessionId],
   async ([value, sessionId]) => {
+    flushDataCompareConfigSave();
     if (!value) {
       executionInterrupted = true;
       if (!executing.value && txnSessionId.value) void finishTransaction(false);
@@ -1300,6 +1345,8 @@ watch(
     shownSessionError = "";
     const session = getDataCompareSession(sessionId);
     if (session) {
+      // A historical session has no binding to the previously selected saved config.
+      dataCompareConfigId.value = "";
       activeSessionId.value = session.id;
       await restoreDataCompareSession(session);
       applyDataCompareSession(session);
@@ -1309,12 +1356,14 @@ watch(
     activeSessionId.value = null;
     if (props.prefillConnectionId) {
       const generation = ++initializingPrefillGeneration;
-      initializingPrefill = true;
+      initializingPrefill.value = true;
       // A prefill is an ad-hoc compare started from another screen; it must not
       // be silently written into whichever config happened to be selected.
       dataCompareConfigId.value = "";
       suppressConfigSave = true;
       try {
+        sourceFilter.value = targetFilter.value = "";
+        advancedOptionsOpen.value = false;
         sourceConnectionId.value = props.prefillConnectionId;
         if (!supportsDatabaseCompare(store.getConfig(props.prefillConnectionId), "data")) {
           sourceDatabase.value = sourceSchema.value = sourceTable.value = "";
@@ -1336,7 +1385,7 @@ watch(
         }
       } finally {
         await nextTick();
-        if (generation === initializingPrefillGeneration) initializingPrefill = false;
+        if (generation === initializingPrefillGeneration) initializingPrefill.value = false;
         suppressConfigSave = false;
       }
       return;
@@ -1360,7 +1409,7 @@ watch(
 );
 onBeforeUnmount(() => {
   componentUnmounted = true;
-  if (configSaveTimer) clearTimeout(configSaveTimer);
+  flushDataCompareConfigSave();
   if (!executing.value && txnSessionId.value) void finishTransaction(false);
 });
 </script>
@@ -1390,7 +1439,7 @@ onBeforeUnmount(() => {
 
       <div class="flex-1 min-h-0 min-w-0 overflow-auto">
         <fieldset :disabled="executionLocked" class="space-y-4 py-2">
-          <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
+          <div class="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] gap-4 items-start">
             <div class="space-y-2 rounded-lg border border-blue-500/35 bg-blue-500/5 p-3">
               <div class="flex items-center gap-2 text-sm font-medium text-blue-600 dark:text-blue-400">
                 <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/15 text-[11px] font-semibold">S</span>
@@ -1431,7 +1480,7 @@ onBeforeUnmount(() => {
               />
             </div>
 
-            <div class="flex items-center pt-6">
+            <div class="flex items-center justify-center sm:pt-6">
               <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing || executionLocked || pendingMetadataRequests > 0" @click="swapSourceTarget">
                 <ArrowLeftRight class="w-3.5 h-3.5" />
               </Button>
@@ -1565,12 +1614,54 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div class="rounded-lg border bg-muted/10">
+            <Button type="button" variant="ghost" class="h-auto min-h-9 w-full justify-start gap-2 px-3 py-2 text-xs" :aria-expanded="advancedOptionsOpen" :aria-controls="`${filterId}-options`" @click="advancedOptionsOpen = !advancedOptionsOpen">
+              <ChevronDown v-if="advancedOptionsOpen" class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {{ t("dataCompare.advancedOptions") }}
+              <span v-if="hasFilters" class="ml-auto rounded bg-primary/10 px-2 py-0.5 text-primary">{{ t("dataCompare.filtersActive") }}</span>
+            </Button>
+            <div v-show="advancedOptionsOpen" :id="`${filterId}-options`" class="space-y-3 border-t p-3">
+              <p :id="`${filterId}-hint`" class="text-xs text-muted-foreground">{{ t("dataCompare.filterHint") }}</p>
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div class="min-w-0 space-y-1.5">
+                  <Label :for="`${filterId}-source`" class="text-xs">{{ t("dataCompare.sourceFilter") }}</Label>
+                  <textarea
+                    :id="`${filterId}-source`"
+                    v-model="sourceFilter"
+                    :aria-describedby="`${filterId}-hint`"
+                    :disabled="comparing || executionLocked || initializingPrefill"
+                    rows="3"
+                    spellcheck="false"
+                    placeholder="tenant_id = 1001 AND deleted = 0"
+                    class="min-h-20 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                </div>
+                <div class="min-w-0 space-y-1.5">
+                  <Label :for="`${filterId}-target`" class="text-xs">{{ t("dataCompare.targetFilter") }}</Label>
+                  <textarea
+                    :id="`${filterId}-target`"
+                    v-model="targetFilter"
+                    :aria-describedby="`${filterId}-hint`"
+                    :disabled="comparing || executionLocked || initializingPrefill"
+                    rows="3"
+                    spellcheck="false"
+                    placeholder="tenant_id = 1001 AND deleted = 0"
+                    class="min-h-20 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <p v-if="isBatchCompare" class="text-xs text-muted-foreground">{{ t("dataCompare.batchFilterHint") }}</p>
+            </div>
+          </div>
+
           <div v-if="comparing" class="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
             <span>{{ compareProgressLabel || t("diff.progress.comparing") }}</span>
           </div>
 
           <div v-if="hasResults" class="space-y-3">
+            <p v-if="hasFilters" class="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">{{ t("dataCompare.filteredResultsHint") }}</p>
             <div class="rounded-lg border p-3 text-sm space-y-2">
               <div class="flex flex-wrap items-start justify-between gap-2">
                 <div class="min-w-0 space-y-2">

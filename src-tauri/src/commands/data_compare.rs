@@ -29,6 +29,6 @@ pub async fn prepare_data_compare_missing_target(
 #[tauri::command]
 pub fn build_data_compare_sync_plan(
     options: dbx_core::data_compare::DataCompareSyncPlanOptions,
-) -> dbx_core::data_compare::DataCompareSyncPlan {
+) -> Result<dbx_core::data_compare::DataCompareSyncPlan, String> {
     dbx_core::data_compare::build_data_compare_sync_plan(options)
 }

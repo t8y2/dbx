@@ -181,6 +181,22 @@ Data Compare is separate from Schema Diff and compares rows between source and t
   </Step>
 </Steps>
 
+### SQL Data Filters
+
+Expand **Advanced options** and set **Source filter (WHERE)** and **Target filter (WHERE)** independently, for example:
+
+```sql
+tenant_id = 1001 AND deleted = 0
+```
+
+Enter only the condition after `WHERE`, without the `WHERE` keyword, semicolons, or comments. Full `SELECT` statements are not accepted. Leave either side blank to disable filtering on that side. Each side can use a different condition and its own database's SQL syntax.
+
+Filters apply before database row counts, paginated reads, and sampling. They are saved with configurations and swapped with the endpoints. In batch comparisons, each filter applies to every selected table on its side, so all those tables must contain the referenced columns. When the target table is missing, only the source data is filtered.
+
+Generated `UPDATE` and `DELETE` statements also include the target filter, so matching key values alone cannot affect excluded rows. `INSERT` statements remain subject to the target table's primary-key and unique constraints.
+
+<Callout type="warn">Results cover only filtered data, not the entire tables. Different scopes can produce additions or removals. Before synchronizing, confirm that both filters select the same business scope and review the generated SQL.</Callout>
+
 ### Data Difference Direction
 
 | Status | Meaning | Synchronization to target |

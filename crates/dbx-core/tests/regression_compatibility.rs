@@ -304,6 +304,7 @@ fn data_compare_from_tables_preparation_deserializes_old_format() {
 fn incomplete_data_compare_cannot_generate_sync_sql() {
     let plan = build_data_compare_sync_plan(DataCompareSyncPlanOptions {
         tables: vec![DataCompareSyncPlanTableOptions {
+            target_filter: None,
             table_name: "users".to_string(),
             schema: Some("public".to_string()),
             columns: vec!["id".to_string()],
@@ -322,7 +323,8 @@ fn incomplete_data_compare_cannot_generate_sync_sql() {
             pre_sync_statements: Vec::new(),
             sync_eligible: false,
         }],
-    });
+    })
+    .unwrap();
 
     assert_eq!(plan.statement_count, 0);
     assert!(plan.sync_statements.is_empty());

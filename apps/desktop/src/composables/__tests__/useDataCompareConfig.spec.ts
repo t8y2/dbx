@@ -113,4 +113,23 @@ describe("useDataCompareConfig", () => {
     expect(state.configs.value).toEqual([]);
     expect(state.activeConfig.value).toBeNull();
   });
+
+  it("persists, duplicates and reloads independent SQL filters", async () => {
+    const { useDataCompareConfig } = await import("../useDataCompareConfig");
+    const state = useDataCompareConfig();
+    const created = state.createConfig("Filtered", snapshot({ sourceFilter: "tenant_id = 1", targetFilter: "tenant_id = 2" }));
+    const copy = state.duplicateConfig(created.id)!;
+    state.updateConfig(copy.id, { sourceFilter: "tenant_id = 3", targetFilter: "" });
+
+    vi.resetModules();
+    const reloaded = (await import("../useDataCompareConfig")).useDataCompareConfig();
+    expect(reloaded.configs.value.find((config) => config.id === created.id)).toMatchObject({ sourceFilter: "tenant_id = 1", targetFilter: "tenant_id = 2" });
+    expect(reloaded.configs.value.find((config) => config.id === copy.id)).toMatchObject({ sourceFilter: "tenant_id = 3", targetFilter: "" });
+  });
+
+  it.each([{}, { sourceFilter: null, targetFilter: 42 }])("loads legacy or invalid filters as empty strings: %j", async (filters) => {
+    localStorage.setItem(CONFIG_KEY, JSON.stringify([{ name: "Old", id: "old", ...filters }]));
+    const { useDataCompareConfig } = await import("../useDataCompareConfig");
+    expect(useDataCompareConfig().configs.value[0]).toMatchObject({ sourceFilter: "", targetFilter: "" });
+  });
 });

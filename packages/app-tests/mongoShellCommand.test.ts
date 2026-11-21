@@ -446,6 +446,21 @@ test("parseMongoCommand rejects malformed db.getSiblingDB() with a specific reas
   }
 });
 
+test("insert accepts multiline backtick strings as document data", () => {
+  const command = parseMongoWriteCommand('db.issue_demo.insert({text: `line1\r\nline2) // "ObjectId()" \\`tick\\` \\${name}`});');
+  assert.ok(command?.kind === "insert");
+  assert.deepEqual(JSON.parse(command.docsJson), { text: 'line1\nline2) // "ObjectId()" `tick` ${name}' });
+  assert.equal(parseMongoWriteCommand('db.issue_demo.insert({text: `value ${name}`})'), null);
+});
+
+test("reads the method arguments after the quoted collection name", () => {
+  for (const source of ['db.getCollection("audit.count(").count({active: true})', 'db["audit.count("].count({active: true})']) {
+    const command = parseMongoCountDocumentsCommand(source);
+    assert.equal(command?.collection, "audit.count(");
+    assert.deepEqual(JSON.parse(command.filter), { active: true });
+  }
+});
+
 test('parseMongoCommand accepts db["name"] bracket collection accessors', () => {
   const find = parseMongoFindCommand('db["orders-2024"].find({a: 1})');
   assert.ok(find);

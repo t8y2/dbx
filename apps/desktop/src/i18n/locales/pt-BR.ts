@@ -10816,6 +10816,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Selecionar a próxima coluna dos dados da tabela",
     shortcutSelectPreviousGridColumn: "Selecionar a coluna anterior dos dados da tabela",
     sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
+    globalNumberGrouping: "Mostrar separador de milhares",
+    globalNumberGroupingDescription: "Exibir números na grade como 1,234,567.89 etc.; formatos de coluna configurados individualmente têm prioridade.",
     toolbarGroup_left: "Barra de ações principal e menu Mais",
     toolbarPinItem: "Fixar {item} na barra de ferramentas",
     completionAutoActivationDelay: "Atraso para ativação automática do autocompletar (milissegundos)",

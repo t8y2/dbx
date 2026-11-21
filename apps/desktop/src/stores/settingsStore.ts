@@ -1259,6 +1259,7 @@ export interface EditorSettings {
   sidebarConnectionIconStyle: SidebarConnectionIconStyle;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
+  globalNumberGrouping: boolean;
   globalDateTimeDisplayFormat: string;
   globalDateTimeExportFormat: string;
   globalDateTimeImportFormat: string;
@@ -1666,6 +1667,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarConnectionIconStyle: "classic",
   columnFormatters: {},
   customColumnFormatters: {},
+  globalNumberGrouping: false,
   globalDateTimeDisplayFormat: "",
   globalDateTimeExportFormat: "",
   globalDateTimeImportFormat: "",
@@ -2491,6 +2493,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarConnectionIconStyle: normalizeSidebarConnectionIconStyle(settings.sidebarConnectionIconStyle),
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
+    globalNumberGrouping: settings.globalNumberGrouping === true,
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
     globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
@@ -3485,6 +3488,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarConnectionIconStyle !== undefined) editorSettings.value.sidebarConnectionIconStyle = normalizeSidebarConnectionIconStyle(partial.sidebarConnectionIconStyle);
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
+    if (partial.globalNumberGrouping !== undefined) editorSettings.value.globalNumberGrouping = partial.globalNumberGrouping === true;
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
     if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);

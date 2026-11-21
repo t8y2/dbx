@@ -9825,6 +9825,8 @@ export default withEnglishFallback({
     performanceSection: "效能",
     exportBatchSize: "匯出批次大小",
     dateTimeSection: "日期與時間",
+    globalNumberGrouping: "顯示千分位分隔符號",
+    globalNumberGroupingDescription: "在網格中將數字顯示為 1,234,567.89 等形式，個別設定的欄位格式優先。",
     globalDateTimeDisplayFormat: "全域顯示格式",
     globalDateTimeDisplayFormatDescription: "套用到所有資料庫中未單獨設定欄位格式的日期時間欄位。",
     globalDateTimeExportFormat: "全域匯出格式",

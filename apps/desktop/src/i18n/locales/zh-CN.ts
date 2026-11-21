@@ -11278,6 +11278,8 @@ export default withEnglishFallback({
     redisDatabaseDisplayLimitOption: "{count} 个数据库",
     exportBatchSize: "导出批次大小",
     dateTimeSection: "日期与时间",
+    globalNumberGrouping: "显示千分位分隔符",
+    globalNumberGroupingDescription: "在网格中将数字显示为 1,234,567.89 等形式，单独配置的列格式优先。",
     globalDateTimeDisplayFormat: "全局显示格式",
     globalDateTimeDisplayFormatDescription: "应用于所有数据库中未单独配置列格式的日期时间字段。",
     globalDateTimeExportFormat: "全局导出格式",

@@ -12409,6 +12409,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    globalNumberGrouping: "Показывать разделитель тысяч",
+    globalNumberGroupingDescription: "Отображать числа в сетке в виде 1,234,567.89 и т. п.; приоритет имеет формат, настроенный для отдельного столбца.",
     toolbarGroup_left: "Основная панель действий и меню «Дополнительно»",
     toolbarPinItem: "Закрепить {item} на панели инструментов",
     completionAutoActivationDelay: "Задержка автоматической активации автодополнения (мс)",

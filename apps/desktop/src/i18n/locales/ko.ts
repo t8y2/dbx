@@ -10916,6 +10916,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
     shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
     sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
+    globalNumberGrouping: "천 단위 구분 기호 표시",
+    globalNumberGroupingDescription: "그리드에서 숫자를 1,234,567.89 등의 형식으로 표시하며, 개별적으로 구성된 열 형식이 우선합니다.",
     toolbarGroup_left: "주요 작업 표시줄 및 추가 메뉴",
     toolbarPinItem: "툴바에 {item} 고정",
     completionAutoActivationDelay: "자동 완성 자동 활성화 지연(밀리초)",

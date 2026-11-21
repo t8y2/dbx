@@ -12771,6 +12771,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "เลือกคอลัมน์ถัดไปของข้อมูลตาราง",
     shortcutSelectPreviousGridColumn: "เลือกคอลัมน์ก่อนหน้าของข้อมูลตาราง",
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
+    globalNumberGrouping: "แสดงตัวคั่นหลักพัน",
+    globalNumberGroupingDescription: "แสดงตัวเลขในตารางในรูปแบบ 1,234,567.89 เป็นต้น โดยรูปแบบคอลัมน์ที่กำหนดค่าแยกไว้จะมีความสำคัญกว่า",
     toolbarGroup_left: "แถบการดำเนินการหลักและเมนูเพิ่มเติม",
     toolbarPinItem: "ปักหมุด {item} ไว้บนแถบเครื่องมือ",
     completionAutoActivationDelay: "ดีเลย์การเปิดใช้งานการเติมข้อความอัตโนมัติ (มิลลิวินาที)",

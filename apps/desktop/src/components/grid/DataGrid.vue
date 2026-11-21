@@ -8221,7 +8221,11 @@ const detailEdit = useDataGridCellDetailEdit({
   nullValue: () => (props.mongoCollectionGrid ? MONGO_DOCUMENT_GRID_NULL : null),
   getRowItem,
   hydrateLargeValueCell,
-  applyCellValue,
+  applyCellValue: (rowId, columnIndex, value) => {
+    // An untouched detail draft can pass the Mongo grid's stored value back unchanged.
+    if (usesMongoDocumentGridValues.value && getRowItem(rowId)?.data[columnIndex] === value) return;
+    applyCellValue(rowId, columnIndex, value);
+  },
   restoreCellValue,
   syncEditor: (value, columnType) => {
     const editor = getDetailEditor();

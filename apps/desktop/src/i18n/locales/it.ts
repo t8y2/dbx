@@ -3728,6 +3728,8 @@ export default withEnglishFallback({
       "binary-uuid": "Binario in UUID",
       "binary-uuid-swapped": "Binario in UUID (bit temporali scambiati)",
     },
+    pasteCellText: "Incolla il testo in questa cella",
+    pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

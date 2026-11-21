@@ -3866,6 +3866,8 @@ export default withEnglishFallback({
       "binary-uuid": "Binario a UUID",
       "binary-uuid-swapped": "Binario a UUID (intercambio de bits de tiempo)",
     },
+    pasteCellText: "Pegar texto en esta celda",
+    pasteCellTextFailed: "No se puede pegar texto en la celda: {message}",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

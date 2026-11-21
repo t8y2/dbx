@@ -3667,6 +3667,8 @@ export default withEnglishFallback({
     addRow: "新增行",
     insertMultipleRows: "插入多行…",
     pasteAsNewRows: "粘贴为新行",
+    pasteCellText: "将文本粘贴到此单元格",
+    pasteCellTextFailed: "无法将文本粘贴到单元格：{message}",
     insertRowsTitle: "新增多行",
     insertRowsDescription: "创建指定数量的未保存草稿行。保存时未填写的空行会被忽略；保存后的显示位置由当前查询排序决定。",
     insertRowCountLabel: "行数",

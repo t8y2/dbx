@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlDecode: "Decodifica componente URL",
       radix: "Conversione di base degli interi",
       flattenLines: "Comprimi più righe in una riga",
+      unicodeEscape: "Testo → escape Unicode",
     },
     units: {
       auto: "Automatica (10/13 cifre)",

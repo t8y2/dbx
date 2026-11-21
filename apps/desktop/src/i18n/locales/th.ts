@@ -474,6 +474,7 @@ export default withEnglishFallback({
       urlDecode: "ถอดรหัสส่วนประกอบ URL",
       radix: "การแปลงฐานจำนวนเต็ม",
       flattenLines: "บีบอัดหลายบรรทัดให้เป็นบรรทัดเดียว",
+      unicodeEscape: "ข้อความ → การ escape เป็น Unicode",
     },
     units: {
       auto: "อัตโนมัติ (10/13 หลัก)",

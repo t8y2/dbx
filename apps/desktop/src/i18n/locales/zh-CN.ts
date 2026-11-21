@@ -656,6 +656,7 @@ export default withEnglishFallback({
       urlDecode: "URL 组件解码",
       radix: "整数进制转换",
       flattenLines: "多行压缩为一行",
+      unicodeEscape: "文本 → Unicode 转义",
     },
     units: {
       auto: "自动（10/13 位）",

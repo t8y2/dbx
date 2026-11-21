@@ -40,6 +40,7 @@ import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -52,6 +53,8 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
+import { resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
+import { effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import { canClearDefaultDatabase, formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
@@ -149,6 +152,15 @@ const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const showQueryPageSize = computed(() => props.activeTab.mode === "query" && !props.activeTab.sourceView && props.activeConnection?.db_type !== "redis" && supportsQueryExecution(props.activeConnection?.db_type));
+const queryPageSize = computed(() => settingsStore.editorSettings.pageSize);
+const queryPageSizeItems = computed(() => {
+  const maxRows = effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows);
+  const current = Math.min(queryPageSize.value, maxRows ?? queryPageSize.value);
+  return resultPageSizeMenuOptions(current)
+    .filter((size) => maxRows === undefined || size <= maxRows)
+    .map((size) => ({ value: String(size), label: `${size}${t("grid.rowsPerPageShort")}` }));
+});
 const showMongoSqlToggle = computed(() => props.activeConnection?.db_type === "mongodb" && props.activeTab.mode === "query");
 const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? "shell");
 
@@ -707,6 +719,18 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ executeInNewResultTabTooltip }}</TooltipContent>
       </Tooltip>
+      <div v-if="showQueryPageSize" class="shrink-0">
+        <LightDropdownMenu
+          :items="queryPageSizeItems"
+          :aria-label="t('settings.queryPageSize')"
+          :trigger-title="t('settings.queryPageSize')"
+          :trigger-label="String(queryPageSize) + t('grid.rowsPerPageShort')"
+          :selected-value="String(queryPageSize)"
+          :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining"
+          trigger-class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 tabular-nums hover:bg-muted hover:text-foreground disabled:opacity-50"
+          @select="(value: string) => settingsStore.updateEditorSettings({ pageSize: Number(value) })"
+        />
+      </div>
       <Tooltip v-if="showPreviewButton">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700" :disabled="activeTab.isExecuting || activeTab.isCancelling" :aria-label="t('editor.previewChanges')" @mousedown.prevent @click="emit('previewChanges')">

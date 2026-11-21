@@ -1,0 +1,20 @@
+[package]
+name = "dbx-sql-dialect"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+dbx-types = { path = "../dbx-types", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
+percent-encoding = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json", "glob"] }
+tempfile = "3"

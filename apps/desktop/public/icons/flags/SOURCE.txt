@@ -1,0 +1,8 @@
+Source: https://github.com/lipis/flag-icons
+Version: v7.5.0
+Tag object: 50a8bff005239b0d2d661254094dedb9c75dbef3
+Commit: 7aa5b2bdddd570ece62c812c0cb588ccdc099e2e
+Original asset directory: https://github.com/lipis/flag-icons/tree/7aa5b2bdddd570ece62c812c0cb588ccdc099e2e/flags/4x3
+Assets: us.svg, az.svg, es.svg, id.svg, it.svg, jp.svg, kr.svg, br.svg, pl.svg, ru.svg, th.svg, tr.svg, cn.svg
+License: MIT; see the unmodified LICENSE file in this directory.
+The SVG files are unmodified copies from the pinned source commit.

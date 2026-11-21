@@ -1,8 +1,11 @@
-import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewport, QueryTab, TabOutputView } from "@/types/database";
+import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewport, QueryTab, TabOutputView, TableInfoTab } from "@/types/database";
+import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlExecutionOverride, SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
 
 export interface StatementRange {
   from: number;
@@ -10,13 +13,17 @@ export interface StatementRange {
 }
 
 export interface QueryEditorSurfaceHandle {
+  focusSqlEditor(): boolean;
   focusSearch(target?: Element | null): boolean;
+  focusWhere(): boolean;
   openGoToColumn(): boolean;
+  openTableStructureEditor?(initialTab?: TableInfoTab): boolean;
   refreshData(target?: Element | null): boolean;
   toggleResultsPane(): boolean;
   refreshQueryEditorCompletionCache(): boolean;
   handleModRTarget(target: Element): boolean;
   requestQueryEditorExecute(): boolean;
+  requestQueryEditorExecuteAll(): boolean;
   captureQueryEditorExecutionSnapshot(): SqlExecutionSnapshot | undefined;
   requestQueryEditorExecuteInNewResultTab(): boolean;
   requestQueryEditorPreviewChanges(stackSql?: string): Promise<boolean>;
@@ -25,30 +32,48 @@ export interface QueryEditorSurfaceHandle {
   acceptQueryEditorExecutionViewport(requestId: number): boolean;
   pasteClipboardAsSqlInCondition(): Promise<boolean>;
   applyTableStructureChanges(): Promise<boolean>;
-  insertRedisCommand(command: string): Promise<boolean>;
-  executeRedisCommand(command: string): Promise<boolean>;
+  /** A Redis logical database is part of the execution target. */
+  insertRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  executeRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  /**
+   * Whether this surface's Redis console is mounted, on screen, and pointed at
+   * `target`. Side-effect free — the AI panel polls it before routing a
+   * command, because the console is a lazily-loaded component rendered only for
+   * the active tab, and retrying the *command* to detect readiness could run it
+   * twice.
+   */
+  isRedisConsoleReady(target: AiConversationBinding): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
+  focusErrorPosition(offset: number): boolean;
+  foldAll?(): boolean;
+  toggleLineComment?(): boolean;
+  unfoldAll?(): boolean;
 }
 
 export interface QueryResultSurfaceHandle {
+  copyActiveResult(isValid?: () => boolean): boolean;
+  focusResultGrid(): boolean;
+  cancelResultGridFocus(): void;
   focusSearch(target?: Element | null): boolean;
   refreshData(target?: Element | null): boolean;
   toggleResultsPane(): boolean;
   handleModRTarget(target: Element): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
+  focusErrorPosition(offset: number): boolean;
 }
 
 export interface ContentAreaSurfaceProps {
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
-  executableSql: string;
+  /** Whether the editor has anything to execute. Deliberately not the SQL text itself: the text changes on every keystroke and would re-render every layer it is threaded through. */
+  hasExecutableSql: boolean;
   activeOutputView: TabOutputView;
   formatSqlRequest: { id: number; tabId: string } | null;
   compressSqlRequest: { id: number; tabId: string } | null;
-  selectedSql: string;
-  cursorPos: number;
+  /** Toolbar `a`/`A`: re-case keywords in the acting tab's editor (issue #11828). */
+  keywordCaseRequest: { id: number; tabId: string; mode: "upper" | "lower" } | null;
   blockDangerousRedisCommands: boolean;
   zenMode?: boolean;
 }
@@ -61,6 +86,10 @@ export interface ContentAreaSurfaceProps {
  * global active tab after an await (see redevelopment guide §6.1).
  */
 export interface ContentAreaSurfaceEmits {
+  closeTab: [tabId: string];
+  "locate-tab": [tab: QueryTab];
+  "locate-sql-file": [tab: QueryTab];
+  "locate-sql-library-file": [tab: QueryTab];
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];
@@ -78,24 +107,27 @@ export interface ContentAreaSurfaceEmits {
   editorStateFlushed: [tabId: string];
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
-  paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string];
-  sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
+  paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string, appendResult?: boolean];
+  sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode, effectiveOrderBy?: string];
   executeSql: [tabId: string, sql: string];
   clickTable: [tabId: string, target: SqlObjectNavigationTarget];
   viewTableData: [tabId: string, target: SqlObjectNavigationTarget];
   viewTableDdl: [tabId: string, target: SqlObjectNavigationTarget];
   editTableStructure: [tabId: string, target: SqlObjectNavigationTarget];
   openObjectSource: [tabId: string, target: SqlObjectNavigationTarget, initialEditing: boolean];
+  openDependencyObject: [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
   openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
+  openDatabaseSearchTarget: [tabId: string, target: NavigationTarget];
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   objectBrowserSearchChange: [tabId: string, query: string];
   objectBrowserFilterChange: [tabId: string, filter: ObjectBrowserFilter];
   addObjectTableToAi: [tabId: string, tables: Array<{ name: string; schema?: string }>];
-  structureEditorSaved: [tabId: string, commentChanged: boolean];
+  structureEditorSaved: [tabId: string, commentChanged: boolean, createdTableName?: string];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];
   focusStatement: [tabId: string, range: StatementRange | null];
+  focusErrorOffset: [tabId: string, offset: number];
   openSettings: [initialTab?: string, initialSection?: string];
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   toggleZenMode: [];

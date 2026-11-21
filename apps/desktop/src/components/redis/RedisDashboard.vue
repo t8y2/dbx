@@ -306,7 +306,7 @@ watch(autoRefreshInterval, () => {
 // ---------------------------------------------------------------------------
 onMounted(async () => {
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }

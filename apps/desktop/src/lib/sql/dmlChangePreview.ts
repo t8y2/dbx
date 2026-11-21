@@ -35,3 +35,14 @@ const DML_PREVIEW_RE = /^\s*(update|insert|delete)\b/i;
 export function looksLikeDmlStatement(sql: string): boolean {
   return DML_PREVIEW_RE.test(sql);
 }
+
+const DML_KEYWORD_RE = /(^|\s)(update|insert|delete)\s/i;
+
+/**
+ * Whether `sql` contains a DML statement anywhere. Without a selection the executable SQL can be
+ * the whole document, so any DML statement is enough to offer the preview action; the exact
+ * "current statement" is resolved by the editor according to the execute mode.
+ */
+export function mayContainDmlStatement(sql: string): boolean {
+  return looksLikeDmlStatement(sql) || DML_KEYWORD_RE.test(sql);
+}

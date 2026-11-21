@@ -1,8 +1,10 @@
 import * as api from "@/lib/backend/api";
 import { ActiveCacheReadTracker } from "./activeCacheReadTracker";
+import { metadataLoadBudgetMs, waitForMetadata } from "./metadataLoadBudget";
 import type { ObjectSourceKind } from "@/types/database";
 import type { MetadataCacheInvalidation } from "./metadataResultCache";
 import { invalidateObjectMetadataCache } from "./objectMetadataCache";
+import { toObjectCacheInvalidationError, type ObjectCacheInvalidationOptions } from "./objectCacheInvalidationError";
 import { getMetadataRuntimeCache, invalidateMetadataRuntimeCachePrefix, recordMetadataCacheL2Hit, recordMetadataCacheRemoteMiss, setMetadataRuntimeCache } from "./metadataRuntimeCache";
 
 const OBJECT_DDL_CACHE_PREFIX = "object-ddl:v1";
@@ -23,11 +25,15 @@ interface InFlightDdlLoad {
 
 export interface ObjectDdlRequest {
   connectionId: string;
+  queryTimeoutSecs?: number;
   database: string;
   schema: string;
   tableName: string;
   objectType?: ObjectSourceKind;
   catalog?: string;
+  exactIdentity?: boolean;
+  separateIndexes?: boolean;
+  explicitOwner?: string;
 }
 
 export interface ObjectDdlLoadResult {
@@ -37,6 +43,7 @@ export interface ObjectDdlLoadResult {
 
 const remoteLoads = new Map<string, InFlightDdlLoad>();
 const activeCacheReads = new ActiveCacheReadTracker();
+const activeLoads = new ActiveCacheReadTracker();
 const pendingInvalidations = new Map<string, Promise<void>>();
 const pendingWrites = new Map<string, Promise<void>>();
 
@@ -56,20 +63,12 @@ async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<
   }
 }
 
-async function deleteSchemaCachePrefixSafe(prefix: string): Promise<void> {
-  try {
-    await api.deleteSchemaCachePrefix(prefix);
-  } catch {
-    // Cache invalidation is best effort when running with a reduced backend.
-  }
-}
-
 function cacheSegment(value: string | undefined): string {
   return encodeURIComponent(value ?? "");
 }
 
 export function objectDdlCacheKey(request: ObjectDdlRequest): string {
-  return `${[OBJECT_DDL_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE")].join(":")}:`;
+  return `${[OBJECT_DDL_CACHE_PREFIX, cacheSegment(request.connectionId), cacheSegment(request.database), cacheSegment(request.schema), cacheSegment(request.tableName), cacheSegment(request.catalog), cacheSegment(request.objectType ?? "TABLE"), ...(request.exactIdentity ? ["exact-v1"] : []), ...(request.separateIndexes ? ["separate-indexes-v1"] : []), ...(request.separateIndexes && request.explicitOwner !== undefined ? ["owner-v1", cacheSegment(request.explicitOwner)] : [])].join(":")}:`;
 }
 
 function invalidationPrefix(match: MetadataCacheInvalidation): string {
@@ -85,16 +84,22 @@ function invalidationPrefix(match: MetadataCacheInvalidation): string {
   return `${parts.join(":")}:`;
 }
 
+function sanitizeDdl(ddl: string): string {
+  return ddl.includes("\0") ? ddl.replaceAll("\0", "") : ddl;
+}
+
 function decodeCachedDdl(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const envelope = payload as Partial<ObjectDdlCacheEnvelope>;
   const cachedAt = typeof envelope.cachedAt === "string" ? Date.parse(envelope.cachedAt) : Number.NaN;
   if (envelope.version !== 1 || !Number.isFinite(cachedAt) || Date.now() - cachedAt > MAX_PERSISTED_DDL_AGE_MS || typeof envelope.ddl !== "string") return null;
-  return envelope.ddl;
+  return sanitizeDdl(envelope.ddl);
 }
 
 async function waitForPendingInvalidations(cacheKey: string): Promise<void> {
-  const pending = [...pendingInvalidations.entries()].filter(([prefix]) => cacheKey.startsWith(prefix)).map(([, promise]) => promise);
+  // Readers only wait for pending deletions to settle; the failure itself is
+  // reported by the caller that started the invalidation.
+  const pending = [...pendingInvalidations.entries()].filter(([prefix]) => cacheKey.startsWith(prefix)).map(([, promise]) => promise.catch(() => undefined));
   if (pending.length) await Promise.all(pending);
 }
 
@@ -129,7 +134,9 @@ function invalidatePersistedPrefix(prefix: string): Promise<void> {
   if (existing) return existing;
   const deletion = (async () => {
     await waitForPendingWrites(prefix);
-    await deleteSchemaCachePrefixSafe(prefix);
+    // Deletion failures propagate so strict callers can observe them;
+    // best-effort callers catch at their own boundary.
+    await api.deleteSchemaCachePrefix(prefix);
   })().finally(() => {
     if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
   });
@@ -137,18 +144,31 @@ function invalidatePersistedPrefix(prefix: string): Promise<void> {
   return deletion;
 }
 
-async function loadRemoteDdl(request: ObjectDdlRequest, cacheKey: string, force: boolean): Promise<string> {
+async function loadRemoteDdl(request: ObjectDdlRequest, cacheKey: string, force: boolean, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
   const existing = remoteLoads.get(cacheKey);
   if (existing && (!force || existing.force)) return existing.promise;
   if (existing) invalidateRemoteLoad(cacheKey);
 
   const entry: InFlightDdlLoad = { force, invalidated: false, promise: Promise.resolve("") };
+  const cancel = () => {
+    entry.invalidated = true;
+    if (remoteLoads.get(cacheKey) === entry) remoteLoads.delete(cacheKey);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   recordMetadataCacheRemoteMiss(cacheKey);
-  entry.promise = api
-    .getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog)
-    .then((ddl) => {
+  const remote = request.exactIdentity
+    ? request.separateIndexes
+      ? api.getTableDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog, false, true, true, request.explicitOwner)
+      : api.getTableDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog, false, true)
+    : request.separateIndexes
+      ? api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog, true, request.explicitOwner)
+      : api.getTableDisplayDdl(request.connectionId, request.database, request.schema, request.tableName, request.objectType, request.catalog);
+  entry.promise = waitForMetadata(
+    remote.then((rawDdl) => {
+      const ddl = sanitizeDdl(rawDdl);
       const current = !entry.invalidated;
-      if (current && ddl.length <= MAX_PERSISTED_DDL_CHARS) {
+      if (current && !request.exactIdentity && ddl.length <= MAX_PERSISTED_DDL_CHARS) {
         const envelope: ObjectDdlCacheEnvelope = { version: 1, cachedAt: new Date().toISOString(), ddl };
         setMetadataRuntimeCache(cacheKey, ddl, request.connectionId);
         persistSchemaCache(cacheKey, envelope, () => entry.invalidated);
@@ -156,15 +176,30 @@ async function loadRemoteDdl(request: ObjectDdlRequest, cacheKey: string, force:
         setMetadataRuntimeCache(cacheKey, ddl, request.connectionId);
       }
       return ddl;
-    })
-    .finally(() => {
-      if (remoteLoads.get(cacheKey) === entry) remoteLoads.delete(cacheKey);
-    });
+    }),
+    metadataLoadBudgetMs(request.queryTimeoutSecs),
+    signal,
+  ).finally(() => {
+    signal.removeEventListener("abort", cancel);
+    if (remoteLoads.get(cacheKey) === entry) remoteLoads.delete(cacheKey);
+  });
   remoteLoads.set(cacheKey, entry);
   return entry.promise;
 }
 
 export async function loadObjectDdl(request: ObjectDdlRequest, options?: { force?: boolean }): Promise<ObjectDdlLoadResult> {
+  const token = activeLoads.begin(objectDdlCacheKey(request));
+  try {
+    return await waitForMetadata(loadObjectDdlInternal(request, token.controller.signal, options), metadataLoadBudgetMs(request.queryTimeoutSecs), token.controller.signal);
+  } catch (error) {
+    token.controller.abort(error);
+    throw error;
+  } finally {
+    activeLoads.finish(token);
+  }
+}
+
+async function loadObjectDdlInternal(request: ObjectDdlRequest, signal: AbortSignal, options?: { force?: boolean }): Promise<ObjectDdlLoadResult> {
   const cacheKey = objectDdlCacheKey(request);
   if (options?.force) {
     const existing = remoteLoads.get(cacheKey);
@@ -174,24 +209,28 @@ export async function loadObjectDdl(request: ObjectDdlRequest, options?: { force
     invalidateMetadataRuntimeCachePrefix(cacheKey);
     const priorInvalidations = waitForPendingInvalidations(cacheKey);
     const deletion = invalidatePersistedPrefix(cacheKey);
-    await Promise.all([priorInvalidations, deletion]);
+    // A failed prefix deletion must not fail the force load itself.
+    await Promise.allSettled([priorInvalidations, deletion]);
   } else {
     await waitForPendingInvalidations(cacheKey);
   }
 
+  signal.throwIfAborted();
   if (!options?.force) {
     const runtime = getMetadataRuntimeCache<string>(cacheKey);
     if (runtime) return { ddl: runtime.value, cacheStatus: "memory" };
+    if (request.exactIdentity) return { ddl: await loadRemoteDdl(request, cacheKey, false, signal), cacheStatus: "remote" };
     const readToken = activeCacheReads.begin(cacheKey);
     let cached: string | null;
     try {
-      cached = decodeCachedDdl(await loadSchemaCacheSafe<unknown>(cacheKey));
+      cached = decodeCachedDdl(await waitForMetadata(loadSchemaCacheSafe<unknown>(cacheKey), metadataLoadBudgetMs(request.queryTimeoutSecs), signal));
     } finally {
       activeCacheReads.finish(readToken);
     }
+    signal.throwIfAborted();
     if (readToken.invalidated) {
       await waitForPendingInvalidations(cacheKey);
-      return { ddl: await loadRemoteDdl(request, cacheKey, false), cacheStatus: "remote" };
+      return { ddl: await loadRemoteDdl(request, cacheKey, false, signal), cacheStatus: "remote" };
     }
     if (cached !== null) {
       recordMetadataCacheL2Hit(cacheKey, cached);
@@ -200,38 +239,53 @@ export async function loadObjectDdl(request: ObjectDdlRequest, options?: { force
     }
   }
 
-  return { ddl: await loadRemoteDdl(request, cacheKey, options?.force === true), cacheStatus: "remote" };
+  return { ddl: await loadRemoteDdl(request, cacheKey, options?.force === true, signal), cacheStatus: "remote" };
 }
 
-export async function invalidateObjectDdlCache(match: MetadataCacheInvalidation): Promise<void> {
+export async function invalidateObjectDdlCache(match: MetadataCacheInvalidation, options?: ObjectCacheInvalidationOptions): Promise<void> {
   const prefix = invalidationPrefix(match);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...remoteLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);
 
   const deletion = invalidatePersistedPrefix(prefix);
-  await Promise.all([deletion, invalidateObjectMetadataCache(match)]);
+  const metadataInvalidation = invalidateObjectMetadataCache(match, options);
+  // Wait for both namespace deletions to settle before deciding, so a strict
+  // caller never reports failure while the other deletion is still in flight.
+  const [ddlSettled, metaSettled] = await Promise.allSettled([deletion, metadataInvalidation]);
+  if (!options?.strict) return;
+  // Judge by settled status, never by the rejection reason's value: a bare
+  // Promise.reject() has reason undefined and must still count as a failure.
+  if (ddlSettled.status === "rejected") throw toObjectCacheInvalidationError(ddlSettled.reason, prefix);
+  if (metaSettled.status === "rejected") throw toObjectCacheInvalidationError(metaSettled.reason, prefix);
 }
 
-export async function invalidateObjectDdl(request: ObjectDdlRequest): Promise<void> {
+export async function invalidateObjectDdl(request: ObjectDdlRequest, options?: ObjectCacheInvalidationOptions & { metadata?: boolean }): Promise<void> {
   const cacheKey = objectDdlCacheKey(request);
   activeCacheReads.invalidatePrefix(cacheKey);
   invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(cacheKey);
-  await Promise.all([
+  const results = await Promise.allSettled([
     invalidatePersistedPrefix(cacheKey),
-    invalidateObjectMetadataCache({
-      connectionId: request.connectionId,
-      database: request.database,
-      schema: request.schema,
-      tableName: request.tableName,
-    }),
+    options?.metadata === false
+      ? Promise.resolve()
+      : invalidateObjectMetadataCache(
+          {
+            connectionId: request.connectionId,
+            database: request.database,
+            schema: request.schema,
+            tableName: request.tableName,
+          },
+          options,
+        ),
   ]);
+  if (options?.strict) for (const result of results) if (result.status === "rejected") throw toObjectCacheInvalidationError(result.reason, cacheKey);
 }
 
 /** Invalidate active loads for a disconnected connection without deleting its persisted snapshot. */
 export function cancelObjectDdlLoadsForConnection(connectionId: string): void {
   const prefix = `${OBJECT_DDL_CACHE_PREFIX}:${cacheSegment(connectionId)}:`;
+  activeLoads.cancelPrefix(prefix);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...remoteLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);
@@ -239,6 +293,7 @@ export function cancelObjectDdlLoadsForConnection(connectionId: string): void {
 
 export function cancelObjectDdlLoadsForDatabase(connectionId: string, database: string): void {
   const prefix = `${OBJECT_DDL_CACHE_PREFIX}:${cacheSegment(connectionId)}:${cacheSegment(database)}:`;
+  activeLoads.cancelPrefix(prefix);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...remoteLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);

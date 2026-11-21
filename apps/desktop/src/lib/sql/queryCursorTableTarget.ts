@@ -1,4 +1,5 @@
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { connectionUsesConnectionRootSchemaMode, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
 import { extractIdentifierPartsAt, isSqlKeyword, sqlObjectNavigationTarget, type SqlObjectNavigationTarget, type SqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 import type { ActiveTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
@@ -6,6 +7,7 @@ import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import type { DatabaseType, QueryTab, TreeNode } from "@/types/database";
 
 export interface QueryCursorTableCandidate {
+  catalog?: string;
   connectionId: string;
   database: string;
   schema?: string;
@@ -21,10 +23,11 @@ export interface QueryTableCandidateAtPositionInput {
   position: number;
 }
 
-export type QueryContextObjectAction = "view-data" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
+export type QueryContextObjectAction = "view-data" | "peek-table-structure" | "edit-table-structure" | "edit-view" | "view-source" | "view-ddl";
 
 export type QueryContextObjectRoute =
   | { event: "viewTableData"; payload: [target: SqlObjectNavigationTarget] }
+  | { event: "peekTableStructure"; payload: [target: SqlObjectNavigationTarget] }
   | { event: "editTableStructure"; payload: [target: SqlObjectNavigationTarget] }
   | { event: "openObjectSource"; payload: [target: SqlObjectNavigationTarget, initialEditing: boolean] }
   | { event: "viewTableDdl"; payload: [target: SqlObjectNavigationTarget] };
@@ -43,7 +46,7 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
   if (!tab || tab.mode !== "query" || !tab.connectionId || !tab.database) return null;
 
   const cursor = tab.editorSelection?.head ?? tab.editorSelection?.anchor ?? tab.sql.length;
-  return queryTableCandidateAtSqlPosition({
+  const candidate = queryTableCandidateAtSqlPosition({
     connectionId: tab.connectionId,
     database: tab.database,
     schema: tab.schema,
@@ -51,6 +54,7 @@ export function queryCursorTableCandidate(tab: QueryTab | undefined | null, data
     sql: tab.sql,
     position: cursor,
   });
+  return candidate && tab.catalog ? { ...candidate, catalog: tab.catalog } : candidate;
 }
 
 export function queryTableCandidateAtSqlPosition(input: QueryTableCandidateAtPositionInput): QueryCursorTableCandidate | null {
@@ -97,9 +101,18 @@ export function resolveQueryContextCandidateDatabase(candidate: QueryCursorTable
   return database && database !== candidate.database ? { ...candidate, database } : candidate;
 }
 
-export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[]): SqlObjectNavigationTarget {
+export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[], preferredSchema?: string): SqlObjectNavigationTarget {
   const nameMatches = tables.filter((table) => sameIdentifier(table.name, candidate.tableName));
-  const match = candidate.schema ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema)) : nameMatches[0];
+  // An unqualified name is ambiguous across schemas. When the SQL did not name a
+  // schema, prefer the query tab's schema (or the connection default) instead of
+  // the first cache entry: otherwise a view in the current schema can be resolved
+  // as a same-named table in another schema (#12865). An explicit schema in the
+  // SQL still wins.
+  const match = candidate.schema
+    ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema))
+    : preferredSchema
+      ? (nameMatches.find((table) => sameIdentifier(table.schema, preferredSchema)) ?? nameMatches.find((table) => !table.schema) ?? nameMatches[0])
+      : nameMatches[0];
   return sqlObjectNavigationTarget({
     name: match?.name ?? candidate.tableName,
     database: candidate.database,
@@ -110,16 +123,18 @@ export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandi
 
 export function queryContextObjectActions(type?: SqlObjectNavigationType): QueryContextObjectAction[] {
   if (type === "view" || type === "materialized_view") {
-    return ["view-data", "edit-view", "view-source", "view-ddl"];
+    return ["view-data", "peek-table-structure", "edit-view", "view-source", "view-ddl"];
   }
   // Unknown metadata preserves the historical table actions instead of disabling existing entry points.
-  return ["view-data", "edit-table-structure", "view-ddl"];
+  return ["view-data", "peek-table-structure", "edit-table-structure", "view-ddl"];
 }
 
 export function queryContextObjectRoute(action: QueryContextObjectAction, target: SqlObjectNavigationTarget): QueryContextObjectRoute {
   switch (action) {
     case "view-data":
       return { event: "viewTableData", payload: [target] };
+    case "peek-table-structure":
+      return { event: "peekTableStructure", payload: [target] };
     case "edit-table-structure":
       return { event: "editTableStructure", payload: [target] };
     case "edit-view":
@@ -152,31 +167,91 @@ function sameIdentifier(left: string | undefined, right: string | undefined): bo
   return (left || "").toLowerCase() === (right || "").toLowerCase();
 }
 
-function nodeMatchesCandidate(node: TreeNode, candidate: QueryCursorTableCandidate): boolean {
+function nodeMatchesCandidate(node: TreeNode, candidate: QueryCursorTableCandidate, matchAnyDatabase = false): boolean {
   if (node.type !== "table" && node.type !== "view" && node.type !== "materialized_view") return false;
   if (node.connectionId !== candidate.connectionId) return false;
-  if (!sameIdentifier(node.database, candidate.database)) return false;
-  if (candidate.schema && !sameIdentifier(node.schema, candidate.schema)) return false;
+  if ((node.catalog || undefined) !== (candidate.catalog || undefined)) return false;
+  if (!matchAnyDatabase && !sameIdentifier(node.database, candidate.database)) return false;
+  if (candidate.schema && !sameIdentifier(node.schema || node.database, candidate.schema)) return false;
   return sameIdentifier(node.label, candidate.tableName);
 }
 
-export function findLoadedTableTargetForCandidate(nodes: readonly TreeNode[], candidate: QueryCursorTableCandidate): ActiveTabSidebarTarget | null {
+export function findLoadedTableTargetForCandidate(nodes: readonly TreeNode[], candidate: QueryCursorTableCandidate, options?: { matchAnyDatabase?: boolean }): ActiveTabSidebarTarget | null {
   for (const node of nodes) {
-    if (nodeMatchesCandidate(node, candidate)) {
+    if (nodeMatchesCandidate(node, candidate, options?.matchAnyDatabase)) {
       return {
         type: "table",
         connectionId: candidate.connectionId,
         database: node.database || candidate.database,
+        ...(node.catalog ? { catalog: node.catalog } : {}),
         schema: node.schema || candidate.schema,
         tableName: node.label,
       };
     }
 
     if (node.children) {
-      const found = findLoadedTableTargetForCandidate(node.children, candidate);
+      const found = findLoadedTableTargetForCandidate(node.children, candidate, options);
       if (found) return found;
     }
   }
 
   return null;
+}
+
+function findLoadedSchemaNode(nodes: readonly TreeNode[], connectionId: string, schema: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.type === "schema" && node.connectionId === connectionId && sameIdentifier(node.database, schema) && sameIdentifier(node.schema || node.label, schema)) {
+      return node;
+    }
+    if (node.children) {
+      const found = findLoadedSchemaNode(node.children, connectionId, schema);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolves the effective schema name for locating in connection-root-schema trees
+ * (Oracle, Dameng, OceanBase Oracle), falling back from service/DB name to login user.
+ */
+export function resolveConnectionRootLocateSchema(nodes: readonly TreeNode[], connectionId: string | undefined, candidateSchema: string | undefined, connection?: JdbcDialectConnection & { username?: string }): string {
+  if (!connectionId) return candidateSchema || "";
+  if (candidateSchema) {
+    const schemaNode = findLoadedSchemaNode(nodes, connectionId, candidateSchema);
+    if (schemaNode) return schemaNode.schema || schemaNode.label;
+  }
+  const loginSchema = connection?.username?.trim();
+  if (loginSchema) {
+    const loginNode = findLoadedSchemaNode(nodes, connectionId, loginSchema);
+    if (loginNode) return loginNode.schema || loginNode.label;
+    return loginSchema;
+  }
+  return candidateSchema || "";
+}
+
+/**
+ * Aligns a locate candidate's `database` and `schema` fields with how the sidebar tree
+ * indexes connection-root-schema engines so loaded lookups and lazy expansion hit the schema node.
+ */
+export function normalizeLocateCandidate(candidate: QueryCursorTableCandidate, nodes: readonly TreeNode[], connection?: JdbcDialectConnection & { username?: string }): QueryCursorTableCandidate {
+  if (!connectionUsesConnectionRootSchemaMode(connection)) return candidate;
+  if (candidate.schema) {
+    return { ...candidate, database: candidate.schema };
+  }
+  const loadedMatch = findLoadedTableTargetForCandidate(nodes, candidate, { matchAnyDatabase: true });
+  if (loadedMatch && loadedMatch.type === "table") {
+    return {
+      ...candidate,
+      database: loadedMatch.database,
+      schema: loadedMatch.schema || loadedMatch.database,
+    };
+  }
+  const resolvedSchema = resolveConnectionRootLocateSchema(nodes, candidate.connectionId, candidate.database, connection);
+  return resolvedSchema ? { ...candidate, database: resolvedSchema, schema: resolvedSchema } : candidate;
+}
+
+export function resolveLoadedLocateTarget(nodes: readonly TreeNode[], target: ActiveTabSidebarTarget, candidate: QueryCursorTableCandidate | null, connection?: JdbcDialectConnection): ActiveTabSidebarTarget | null {
+  if (!candidate) return target;
+  return findLoadedTableTargetForCandidate(nodes, candidate) ?? (!candidate.schema && connectionUsesConnectionRootSchemaMode(connection) ? findLoadedTableTargetForCandidate(nodes, candidate, { matchAnyDatabase: true }) : null);
 }

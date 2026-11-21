@@ -7,6 +7,7 @@ fn table(name: &str) -> TableInfo {
     TableInfo {
         name: name.to_string(),
         table_type: "BASE TABLE".to_string(),
+        valid: None,
         comment: None,
         parent_schema: None,
         parent_name: None,
@@ -19,6 +20,10 @@ fn column(name: &str, data_type: &str) -> ColumnInfo {
 
 fn index(name: &str, columns: &[&str]) -> IndexInfo {
     IndexInfo {
+        owner: None,
+        key_directions: Vec::new(),
+        visibility: None,
+        key_metadata_complete: false,
         name: name.to_string(),
         columns: columns.iter().map(|column| (*column).to_string()).collect(),
         is_unique: false,

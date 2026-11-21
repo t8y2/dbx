@@ -33,9 +33,7 @@ function parseArgs(argv) {
   }
   if (!args.token) throw new Error("CNB_TOKEN is required.");
   if (!args.currentTag || !args.tagPattern || !Number.isInteger(args.retain) || args.retain < 1) {
-    throw new Error(
-      "Usage: cleanup-cnb-releases.mjs --current-tag <tag> --tag-pattern <regex> --retain <count> [--apply]",
-    );
+    throw new Error("Usage: cleanup-cnb-releases.mjs --current-tag <tag> --tag-pattern <regex> --retain <count> [--apply]");
   }
   try {
     new RegExp(args.tagPattern);

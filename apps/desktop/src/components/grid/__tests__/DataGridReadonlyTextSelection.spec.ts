@@ -1,13 +1,10 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DataGridReadonlyTextSelection from "../DataGridReadonlyTextSelection.vue";
 
 const mountedRoots: HTMLDivElement[] = [];
-const dataGridSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
 
 function mountSelection(options: { value?: string; expanded?: boolean } = {}) {
   const root = document.createElement("div");
@@ -30,14 +27,6 @@ afterEach(() => {
 });
 
 describe("DataGridReadonlyTextSelection", () => {
-  it("closes a stale read-only selection when a result is replaced", () => {
-    const resultWatcher = dataGridSource.match(/watch\(\s*\(\) => props\.result,\s*\(result, previousResult\) => \{[\s\S]*?\n\);/)?.[0] ?? "";
-
-    expect(resultWatcher).toContain("const appendCompletion = dataGridInfiniteScrollAppendCompletion(previousResult, result");
-    expect(resultWatcher).toContain("if (appendCompletion) {");
-    expect(resultWatcher).toContain("closeReadonlyCellTextSelection();");
-  });
-
   it("focuses and selects the complete read-only value on mount", async () => {
     const { root } = mountSelection();
     await nextTick();

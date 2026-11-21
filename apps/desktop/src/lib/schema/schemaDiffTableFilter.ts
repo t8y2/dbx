@@ -4,7 +4,7 @@ import type { SchemaDiffCompareOptions } from "@/types/schemaDiff";
 
 export interface CompiledSchemaDiffTableFilter {
   include?: RegExp;
-  exclude?: RegExp;
+  exclude?: RegExp[];
   priority: SchemaDiffCompareOptions["tableFilterPriority"];
 }
 
@@ -24,17 +24,60 @@ function compilePattern(pattern: string, label: "include" | "exclude"): RegExp |
   }
 }
 
+function compileExcludePatterns(input: string): RegExp[] | undefined {
+  const patterns: RegExp[] = [];
+  let start = 0;
+  let escaped = false;
+  let inCharacterClass = false;
+  let groupDepth = 0;
+  let braceDepth = 0;
+  const appendPattern = (end: number) => {
+    const pattern = compilePattern(input.slice(start, end), "exclude");
+    if (pattern) patterns.push(pattern);
+  };
+
+  // Split only outer commas; regex groups, character classes, quantifiers and
+  // escaped commas remain part of their rule. Compile rules separately so
+  // numbered backreferences do not change meaning across rules.
+  for (let index = 0; index < input.length; index++) {
+    const char = input[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (inCharacterClass) {
+      if (char === "]") inCharacterClass = false;
+      continue;
+    }
+    if (char === "[") inCharacterClass = true;
+    else if (char === "(") groupDepth++;
+    else if (char === ")") groupDepth = Math.max(0, groupDepth - 1);
+    else if (char === "{") braceDepth++;
+    else if (char === "}") braceDepth = Math.max(0, braceDepth - 1);
+    else if (char === "," && groupDepth === 0 && braceDepth === 0) {
+      appendPattern(index);
+      start = index + 1;
+    }
+  }
+  appendPattern(input.length);
+  return patterns.length > 0 ? patterns : undefined;
+}
+
 export function compileSchemaDiffTableFilter(options: SchemaDiffCompareOptions): CompiledSchemaDiffTableFilter {
   return {
     include: compilePattern(options.tableIncludePattern, "include"),
-    exclude: compilePattern(options.tableExcludePattern, "exclude"),
+    exclude: compileExcludePatterns(options.tableExcludePattern),
     priority: options.tableFilterPriority,
   };
 }
 
 export function matchesSchemaDiffTableFilter(tableName: string, filter: CompiledSchemaDiffTableFilter): boolean {
   const includeMatches = filter.include ? filter.include.test(tableName) : true;
-  const excludeMatches = filter.exclude ? filter.exclude.test(tableName) : false;
+  const excludeMatches = filter.exclude?.some((pattern) => pattern.test(tableName)) ?? false;
 
   if (filter.include && filter.exclude && includeMatches && excludeMatches) {
     return filter.priority === "include";

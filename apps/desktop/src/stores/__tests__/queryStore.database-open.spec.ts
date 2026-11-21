@@ -54,6 +54,36 @@ describe("queryStore database open state", () => {
     expect(store.tabs.find((tab) => tab.id === firstId)).toMatchObject({ connectionId: "pg-1", database: "", mode: "databases" });
   });
 
+  it.each(["create", "view"] as const)("does not reuse a consumed Schema index %s navigation request id", async (kind) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const request = kind === "create" ? { create: true } : { view: { schema: "APP", name: "IX_A", parentSchema: "OTHER", parentName: "T" } };
+    const id = store.openObjectBrowser("ob", "service", "APP", undefined, undefined, false, "indexes", undefined, request);
+    const state = store.tabs.find((tab) => tab.id === id)!.objectBrowser!;
+    const firstRequest = kind === "create" ? state.indexCreateRequestId : state.initialViewRequestId;
+    state.indexCreateRequestId = undefined;
+    state.initialViewRequestId = undefined;
+    state.initialViewTarget = undefined;
+    expect(store.openObjectBrowser("ob", "service", "APP", undefined, undefined, false, "indexes", undefined, request)).toBe(id);
+    const next = store.tabs.find((tab) => tab.id === id)!.objectBrowser!;
+    expect(kind === "create" ? next.indexCreateRequestId : next.initialViewRequestId).toBeGreaterThan(firstRequest!);
+  });
+
+  it.each(["create", "view"] as const)("supersedes an unconsumed Schema index %s request in the reused tab", async (first) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const view = { schema: "APP", name: "IX_A", parentSchema: "OTHER", parentName: "T" };
+    const id = store.openObjectBrowser("ob", "service", "APP", undefined, undefined, false, "indexes", undefined, first === "create" ? { create: true } : { view });
+    const sequence = store.tabs.find((tab) => tab.id === id)!.objectBrowser!.indexRequestSequence!;
+    expect(store.openObjectBrowser("ob", "service", "APP", undefined, undefined, false, "indexes", undefined, first === "create" ? { view } : { create: true })).toBe(id);
+    const state = store.tabs.find((tab) => tab.id === id)!.objectBrowser!;
+    expect(state.indexRequestSequence).toBeGreaterThan(sequence);
+    expect(state.indexCreateRequestId).toBe(first === "view" ? state.indexRequestSequence : undefined);
+    expect(state.initialViewRequestId).toBe(first === "create" ? state.indexRequestSequence : undefined);
+    expect(state.initialViewTarget).toEqual(first === "create" ? view : undefined);
+    expect(store.tabs.filter((tab) => tab.mode === "objects")).toHaveLength(1);
+  });
+
   it("retargets a connection-scoped driver workspace to a database branch", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -160,6 +190,59 @@ describe("queryStore database open state", () => {
 
     expect(new Set([quotedTabId, schemaCaseTabId, tableCaseTabId])).toHaveLength(3);
     expect(store.openTableStructure("pg-1", "app", "Sales", "Users")).toBe(quotedTabId);
+  });
+
+  it("never upgrades a legacy structure draft to an exact dictionary target", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const legacy = store.openTableStructure("ob", "service", " Mixed ", " T(a) ");
+    const oldTab = store.tabs.find((tab) => tab.id === legacy)!;
+    oldTab.structureDraft = { dirty: true, newTableName: "untouched" } as NonNullable<typeof oldTab.structureDraft>;
+    const exact = store.openTableStructure("ob", "service", " Mixed ", " T(a) ", "indexes", { kind: "index", name: " Ix(a) " }, undefined, "table", true);
+    expect(exact).not.toBe(legacy);
+    expect(oldTab.structureDraft.newTableName).toBe("untouched");
+    expect(oldTab.structureExactIdentity).toBeUndefined();
+    expect(store.tabs.find((tab) => tab.id === exact)).toMatchObject({ schema: " Mixed ", structureTableName: " T(a) ", structureExactIdentity: true });
+    expect(store.openTableStructure("ob", "service", " Mixed ", " T(a) ", "indexes", { kind: "index", name: "Ix(a)" }, undefined, "table", true)).toBe(exact);
+    expect(store.openTableStructure("ob", "service", "Mixed", "T(a)", "indexes", undefined, undefined, "table", true)).not.toBe(exact);
+  });
+
+  it("isolates exact structure refreshes by raw identity, catalog and metadata mode", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    store.invalidateTableStructure("ob", "service", " Mixed ", " T(a) ", true, "catalog");
+    expect(store.tableStructureRefreshVersion("ob", "service", " Mixed ", " T(a) ", true, "catalog")).toBe(1);
+    expect(store.tableStructureRefreshVersion("ob", "service", " Mixed ", " T(a) ")).toBe(0);
+    expect(store.tableStructureRefreshVersion("ob", "service", " Mixed ", " T(a) ", true, "other")).toBe(0);
+    expect(store.tableStructureRefreshVersion("ob", "service", " mixed ", " T(a) ", true, "catalog")).toBe(0);
+    expect(store.tableStructureRefreshVersion("ob", "service", "Mixed", "T(a)", true, "catalog")).toBe(0);
+    store.invalidateTableStructure("ob", "service", "APP", "TABLE");
+    expect(store.tableStructureRefreshVersion("ob", "service", "app", "table")).toBe(1);
+  });
+
+  it("retains explicit create-index requests without inventing an existing index name", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const create = { kind: "index", name: "", action: "create" } as const;
+    const id = store.openTableStructure("ob", "service", "APP", "Items", undefined, create, undefined, "table", true);
+    expect(store.tabs.find((tab) => tab.id === id)).toMatchObject({ structureInitialTarget: create, structureInitialTabRequestId: 1 });
+    store.openTableStructure("ob", "service", "APP", "Items", undefined, create, undefined, "table", true);
+    expect(store.tabs.find((tab) => tab.id === id)).toMatchObject({ structureInitialTarget: create, structureInitialTabRequestId: 2 });
+  });
+
+  it("retains raw index owner requests while reusing an exact parent tab with dirty drafts", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const initial = { kind: "index", name: " Ix(a) ", owner: " Owner " } as const;
+    const id = store.openTableStructure("ob", "service", " Owner ", " T(a) ", "indexes", initial, undefined, "table", true);
+    const tab = store.tabs.find((item) => item.id === id)!;
+    tab.structureDraft = { dirty: true, newTableName: "untouched" } as NonNullable<typeof tab.structureDraft>;
+    expect(tab.structureInitialTarget).toEqual(initial);
+
+    const deletion = { ...initial, action: "delete" } as const;
+    expect(store.openTableStructure("ob", "service", " Owner ", " T(a) ", "indexes", deletion, undefined, "table", true)).toBe(id);
+    expect(tab.structureInitialTarget).toEqual(deletion);
+    expect(tab.structureDraft.newTableName).toBe("untouched");
   });
 
   it("reuses only matching schema-less structure targets", async () => {

@@ -62,3 +62,6 @@ where
 
     T::decode(&mut buf)
 }
+
+#[cfg(test)]
+mod legacy_tests;

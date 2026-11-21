@@ -41,6 +41,8 @@ types:
     category: "BOOLEAN"
   - name: "JSON"
     category: "JSON"
+  - name: "JSONB"
+    category: "JSON"
 
 ddl_capabilities:
   add_column: true

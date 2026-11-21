@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   BACKGROUND_IMAGE_FILE_EXTENSIONS,
+  BACKGROUND_IMAGE_INVERTED_TEXT_VARS,
   BACKGROUND_IMAGE_STORAGE_LIMIT_BYTES,
   BACKGROUND_IMAGE_SURFACE_VARS,
   backgroundImageFileExtension,
+  backgroundImageSolidVarName,
   backgroundImageStyle,
   backgroundImageSurfaceAlpha,
   defaultBackgroundImageSettings,
@@ -146,6 +148,16 @@ describe("surfaceColorWithAlpha", () => {
     expect(surfaceColorWithAlpha("hsl(240 10% 3.9%)", 0.6)).toBe("hsl(240 10% 3.9% / 0.6)");
     expect(surfaceColorWithAlpha("hsl(240, 10%, 3.9%)", 0.6)).toBe("hsl(240, 10%, 3.9%, 0.6)");
     expect(surfaceColorWithAlpha("240 10% 3.9%", 0.6)).toBe("hsl(240 10% 3.9% / 0.6)");
+  });
+});
+
+describe("inverted-text surface vars", () => {
+  it("only marks surface vars that turn translucent, and names their opaque companion", () => {
+    for (const varName of BACKGROUND_IMAGE_INVERTED_TEXT_VARS) {
+      expect(BACKGROUND_IMAGE_SURFACE_VARS).toContain(varName);
+      expect(backgroundImageSolidVarName(varName)).toBe(`${varName}-solid`);
+    }
+    expect(BACKGROUND_IMAGE_INVERTED_TEXT_VARS).toContain("--background");
   });
 });
 

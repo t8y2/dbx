@@ -78,7 +78,9 @@ test("detects whether table data supports inserted rows", () => {
   assert.equal(canInsertTableRows("postgres"), true);
   assert.equal(canInsertTableRows("mysql"), true);
   assert.equal(canInsertTableRows("hive"), true);
-  assert.equal(canInsertTableRows("jdbc"), false);
+  // Generic JDBC connections allow inserts since #14715; the driver surfaces
+  // anything the backend rejects on save.
+  assert.equal(canInsertTableRows("jdbc"), true);
   assert.equal(canInsertTableRows("clickhouse"), true);
   assert.equal(canInsertTableRows("influxdb"), false);
 });
@@ -145,7 +147,13 @@ test("detects the synthetic Oracle ROWID key case", () => {
   assert.equal(usesSyntheticRowIdKey("oceanbase-oracle", [DBX_ROWID_COLUMN]), true);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "VIEW"), false);
   assert.equal(usesSyntheticRowIdKey("oracle", [DBX_ROWID_COLUMN], "MATERIALIZED_VIEW"), false);
-  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), false);
+  // PostgreSQL identifies keyless rows by the hidden `tableoid:ctid:xmin`
+  // locator, so a bare `__DBX_ROWID` key is the synthetic one. Unknown object
+  // types still fail closed rather than assuming a base table.
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN]), true);
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "TABLE"), true);
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "BASE TABLE"), true);
+  assert.equal(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "PARTITIONED TABLE"), false);
   assert.equal(usesSyntheticRowIdKey("oracle", ["ID"]), false);
   assert.equal(usesSyntheticRowIdKey("neo4j", [DBX_NEO4J_ELEMENT_ID_COLUMN]), true);
 });

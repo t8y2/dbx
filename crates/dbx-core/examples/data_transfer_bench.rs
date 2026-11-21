@@ -65,6 +65,7 @@ fn run() -> Result<(), String> {
             source_column: column.clone(),
             target_column: column.clone(),
             target_data_type: None,
+            generator: None,
         })
         .collect::<Vec<_>>();
     let parsed = ParsedImportFile {
@@ -104,6 +105,7 @@ fn run() -> Result<(), String> {
         spatial_values: Vec::new(),
         rows: rows.clone(),
         batch_size: Some(options.batch_size),
+        preserve_original_language: false,
     })?;
     let sql_ms = elapsed_ms(sql_started);
 
@@ -115,6 +117,8 @@ fn run() -> Result<(), String> {
         column_comments: Vec::new(),
         rows,
         numeric_column_right_align: false,
+        auto_filter: None,
+        header_comment_rows: false,
     })?;
     let xlsx_ms = elapsed_ms(xlsx_started);
 

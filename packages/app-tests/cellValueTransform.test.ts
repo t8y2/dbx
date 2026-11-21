@@ -85,6 +85,11 @@ test("xml rejects malformed markup", () => {
   assert.deepEqual(transformCellValue("<a></b>", { kind: "xml" }), { ok: false, error: "invalid" });
 });
 
+test("html preview preserves source markup for rendering", () => {
+  const source = '<article><h1>Hello</h1><p class="lead">World</p></article>';
+  assert.deepEqual(transformCellValue(source, { kind: "html" }), { ok: true, text: source });
+});
+
 test("base64 round-trips CJK text and emoji", () => {
   const encoded = transformCellValue("你好😀", { kind: "base64Encode" });
   assert.deepEqual(encoded, { ok: true, text: "5L2g5aW98J+YgA==" });
@@ -100,9 +105,11 @@ test("base64Decode tolerates whitespace inside the alphabet", () => {
   assert.deepEqual(transformCellValue("5L2g\n 5aW9", { kind: "base64Decode" }), { ok: true, text: "你好" });
 });
 
-test("base64Decode rejects unpadded, url-safe, and non-UTF-8 input", () => {
+test("base64Decode normalizes url-safe input and rejects truncated or non-UTF-8 payloads", () => {
+  // The decoder auto-normalizes cell payloads: "-" and "_" map back to the standard alphabet, so this decodes.
+  assert.deepEqual(transformCellValue("5L2g5aW-", { kind: "base64Decode" }), { ok: true, text: "你奾" });
+  // Missing padding alone is accepted, but the padded bytes must still form valid UTF-8.
   assert.deepEqual(transformCellValue("5L2g5aW", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });
-  assert.deepEqual(transformCellValue("5L2g5aW-", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });
   assert.deepEqual(transformCellValue("5L2g5a_9", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });
   // "/w==" decodes to the single byte 0xFF, which is not valid UTF-8.
   assert.deepEqual(transformCellValue("/w==", { kind: "base64Decode" }), { ok: false, error: "invalidBase64" });

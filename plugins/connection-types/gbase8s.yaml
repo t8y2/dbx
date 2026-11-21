@@ -1,0 +1,37 @@
+schemaVersion: 1
+order: 452
+dbType: gbase8s
+compareModes: [schema, data]
+rustVariant: Gbase8s
+label: 南大通用 GBase 8s
+dialect: Informix
+runtimeMode: agent
+mcpMode: bridge
+agentKey: gbase8s
+driverStoreVisible: true
+driverStoreOrder: 16
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 9088
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

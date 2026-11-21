@@ -86,6 +86,18 @@ pub enum ColumnData<'a> {
 }
 
 impl<'a> ColumnData<'a> {
+    pub(crate) fn type_name_for_version(&self, version: crate::FeatureLevel) -> Cow<'static, str> {
+        if version < crate::FeatureLevel::SqlServer2005 {
+            match self {
+                Self::String(Some(s)) if s.encode_utf16().count() > 4000 => return "ntext".into(),
+                Self::Binary(None) => return "varbinary(8000)".into(),
+                Self::Binary(Some(b)) if b.len() > 8000 => return "image".into(),
+                _ => {}
+            }
+        }
+        self.type_name()
+    }
+
     pub(crate) fn type_name(&self) -> Cow<'static, str> {
         match self {
             ColumnData::U8(_) => "tinyint".into(),
@@ -96,7 +108,7 @@ impl<'a> ColumnData<'a> {
             ColumnData::F64(_) => "float(53)".into(),
             ColumnData::Bit(_) => "bit".into(),
             ColumnData::String(None) => "nvarchar(4000)".into(),
-            ColumnData::String(Some(ref s)) if s.len() <= 4000 => "nvarchar(4000)".into(),
+            ColumnData::String(Some(ref s)) if s.encode_utf16().count() <= 4000 => "nvarchar(4000)".into(),
             ColumnData::String(Some(ref s)) if s.len() <= MAX_NVARCHAR_SIZE => {
                 "nvarchar(max)".into()
             }
@@ -418,7 +430,7 @@ impl<'a> Encode<BytesMutWithTypeInfo<'a>> for ColumnData<'a> {
                     dst.put_u64_le(0xffffffffffffffff)
                 }
             }
-            (ColumnData::String(Some(ref s)), None) if s.len() <= 4000 => {
+            (ColumnData::String(Some(ref s)), None) if s.encode_utf16().count() <= 4000 => {
                 dst.put_u8(VarLenType::NVarchar as u8);
                 dst.put_u16_le(8000);
                 dst.extend_from_slice(&[0u8; 5][..]);
@@ -756,6 +768,69 @@ mod tests {
 
             assert_eq!(decoded_string(value).as_deref(), Some("\u{fffd}"));
         }
+    }
+
+    #[tokio::test]
+    async fn varchar_replaces_invalid_collation_bytes() {
+        // CP936/GB18030 (sort ID 198): 0x81 starts a two-byte sequence, and
+        // 0x40..0x7e is a valid trail byte, so 0x81 0x20 is invalid. A legacy
+        // varchar column can still hold those bytes when an application wrote
+        // them under a different codepage.
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            20,
+            Some(Collation::new(0x804, 198)),
+            &short_string_wire(b"ok\x81\x20ok"),
+        )
+        .await
+        .expect("undecodable varchar bytes must not fail the whole result set");
+
+        let decoded = decoded_string(value).expect("varchar row value");
+        assert!(decoded.starts_with("ok"), "readable bytes are preserved: {decoded:?}");
+        assert!(decoded.ends_with("ok"), "bytes after the bad sequence are preserved: {decoded:?}");
+        assert!(decoded.contains('\u{fffd}'), "the bad sequence is replaced: {decoded:?}");
+    }
+
+    #[tokio::test]
+    async fn text_replaces_invalid_collation_bytes() {
+        let value = decode_wire(
+            VarLenType::Text,
+            0,
+            Some(Collation::new(0x804, 198)),
+            &ntext_wire(b"ok\x81\x20ok"),
+        )
+        .await
+        .expect("undecodable text bytes must not fail the whole result set");
+
+        let decoded = decoded_string(value).expect("text row value");
+        assert!(decoded.starts_with("ok"), "readable bytes are preserved: {decoded:?}");
+        assert!(decoded.ends_with("ok"), "bytes after the bad sequence are preserved: {decoded:?}");
+        assert!(decoded.contains('\u{fffd}'), "the bad sequence is replaced: {decoded:?}");
+    }
+
+    #[tokio::test]
+    async fn varchar_gb18030_does_not_sniff_a_utf8_bom() {
+        // EF BB BF is fully valid GB18030 data: EF BB and BF 61 form two
+        // two-byte sequences (锘縜) followed by ASCII "bc". The collation
+        // already names the encoding, so the lossy decoder must not let
+        // encoding_rs sniff those bytes as a UTF-8 BOM and return "abc".
+        let (text, had_errors) = Collation::new(0x804, 198)
+            .codec()
+            .unwrap()
+            .decode_lossy(b"\xef\xbb\xbfabc");
+        assert_eq!(text, "锘縜bc");
+        assert!(!had_errors, "the bytes are valid GB18030");
+
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            20,
+            Some(Collation::new(0x804, 198)),
+            &short_string_wire(b"\xef\xbb\xbfabc"),
+        )
+        .await
+        .expect("BOM-like varchar bytes must decode as ordinary GB18030 data");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("锘縜bc"));
     }
 
     #[tokio::test]

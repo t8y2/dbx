@@ -39,34 +39,6 @@ const copy = {
     mergedLabel: "MERGED PULL REQUESTS",
     verified: "GITHUB IDENTITY VERIFIED",
   },
-  tr: {
-    title: "Emeğin DBX'in bir parçası.",
-    intro: "Kimliğini doğrulamak ve DBX'e merge edilen pull request'lerin için paylaşılabilir bir sertifika almak üzere GitHub ile giriş yap.",
-    signIn: "GitHub ile doğrula",
-    signingIn: "GitHub oturumu denetleniyor…",
-    contributors: "doğrulanmış katkıcı",
-    merged: "merge edilmiş pull request",
-    commits: "depo commit'i",
-    stars: "GitHub yıldızı",
-    directory: "Katkıcı dizini",
-    search: "GitHub kullanıcı adı ara",
-    showAll: "Tüm katkıcıları göster",
-    showLess: "Daha az katkıcı göster",
-    noResults: "Eşleşen katkıcı yok.",
-    signedInAs: "Doğrulanan hesap",
-    claim: "Sertifikamı aç",
-    notEligible: "Bu GitHub hesabının DBX'te merge edilmiş bir pull request'i henüz yok.",
-    contributionCallout: "Odaklı bir pull request gönder ve bu duvara katıl.",
-    viewGuide: "Katkı kılavuzu",
-    signOut: "Çıkış yap",
-    certificate: "Açık kaynak katkıcısı",
-    awardedTo: "Sunulan kişi",
-    certificateBody: "DBX'e kabul edilip merge edilen çalışman için; veritabanı araçlarını herkes için daha iyi hâle getirdiğin için teşekkürler.",
-    download: "Sertifikayı indir",
-    close: "Kapat",
-    mergedLabel: "MERGE EDİLEN PULL REQUEST",
-    verified: "GITHUB KİMLİĞİ DOĞRULANDI",
-  },
   cn: {
     title: "你的代码，已经成为 DBX 的一部分。",
     intro: "使用 GitHub 验证身份，领取一张属于你的贡献者证书，记录被 DBX 接受并合并的 Pull Request。",
@@ -97,7 +69,7 @@ const copy = {
   },
 } as const;
 
-const NUMBER_LOCALE: Record<Language, string> = { en: "en-US", cn: "zh-CN", tr: "tr-TR" };
+const NUMBER_LOCALE: Record<Language, string> = { en: "en-US", cn: "zh-CN" };
 
 function formatNumber(value: number, lang: Language) {
   return new Intl.NumberFormat(NUMBER_LOCALE[lang]).format(value);

@@ -11,6 +11,7 @@ function savedSqlCopySortKey(name: string): { base: string; copyIndex: number } 
 }
 
 function compareSavedSqlFiles(left: SavedSqlFile, right: SavedSqlFile): number {
+  if (!!left.isDefaultQuery !== !!right.isDefaultQuery) return left.isDefaultQuery ? -1 : 1;
   const leftKey = savedSqlCopySortKey(left.name);
   const rightKey = savedSqlCopySortKey(right.name);
   return savedSqlNameCollator.compare(leftKey.base, rightKey.base) || leftKey.copyIndex - rightKey.copyIndex || savedSqlNameCollator.compare(left.name, right.name) || left.id.localeCompare(right.id);
@@ -24,6 +25,10 @@ export interface SavedSqlDatabaseScope {
 
 export type SavedSqlDatabaseIndex = ReadonlyMap<string, readonly SavedSqlFile[]>;
 type SavedSqlDatabaseSource = readonly SavedSqlFile[] | SavedSqlDatabaseIndex;
+
+export function supportsDatabaseSavedSqlTree(type: TreeNode["type"]): boolean {
+  return type === "database" || type === "redis-db";
+}
 
 export function savedSqlDatabaseScopeKey(scope: SavedSqlDatabaseScope): string {
   // Null is deliberately a concrete built-in/default catalog scope, not a wildcard.
@@ -60,7 +65,7 @@ function savedSqlFileNode(rootId: string, file: SavedSqlFile): TreeNode {
   };
 }
 
-export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" | "connectionId" | "catalog" | "database">, source: SavedSqlDatabaseSource, existingRoot?: TreeNode): TreeNode | null {
+export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" | "connectionId" | "catalog" | "database" | "schema">, source: SavedSqlDatabaseSource, existingRoot?: TreeNode): TreeNode | null {
   if (!databaseNode.connectionId || databaseNode.database === undefined) return null;
 
   const id = `${databaseNode.id}:__queries`;
@@ -71,6 +76,7 @@ export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" 
     connectionId: databaseNode.connectionId,
     catalog: databaseNode.catalog,
     database: databaseNode.database,
+    schema: databaseNode.schema,
     // Default collapsed: opening a connection should not expand the Queries
     // node until the user asks for it; an existing node's state is preserved.
     isExpanded: existingRoot?.isExpanded ?? false,
@@ -82,7 +88,7 @@ export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" 
   };
 }
 
-export function withDatabaseSavedSqlRoot(databaseNode: Pick<TreeNode, "id" | "connectionId" | "catalog" | "database" | "children">, children: readonly TreeNode[], source: SavedSqlDatabaseSource): TreeNode[] {
+export function withDatabaseSavedSqlRoot(databaseNode: Pick<TreeNode, "id" | "connectionId" | "catalog" | "database" | "schema" | "children">, children: readonly TreeNode[], source: SavedSqlDatabaseSource): TreeNode[] {
   const existingRoot = databaseNode.children?.find((child) => child.type === "saved-sql-root");
   const existingMetadataChildren = databaseNode.children?.filter((child) => child.type !== "saved-sql-root") ?? [];
   const metadataChildren = children.filter((child) => child.type !== "saved-sql-root");
@@ -109,12 +115,16 @@ export function withDatabaseSavedSqlRoot(databaseNode: Pick<TreeNode, "id" | "co
 }
 
 export function decorateDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[], source: SavedSqlDatabaseSource, existingNodes: readonly TreeNode[] = []): TreeNode[] {
-  const existingById = new Map(existingNodes.map((node) => [node.id, node]));
+  let existingById: Map<string, TreeNode> | undefined;
   return nodes.map((node) => {
+    // Non-database nodes without children (the bulk of a large table page) are returned untouched.
+    const supportsSavedSql = supportsDatabaseSavedSqlTree(node.type);
+    if (!supportsSavedSql && !node.children?.length) return node;
+    existingById ??= new Map(existingNodes.map((existingNode) => [existingNode.id, existingNode] as const));
     const existing = existingById.get(node.id);
     const children = decorateDatabaseSavedSqlTreeNodes(node.children ?? [], source, existing?.children ?? []);
-    if (node.type !== "database") {
-      return node.children === undefined ? node : { ...node, children };
+    if (!supportsSavedSql) {
+      return { ...node, children };
     }
 
     const databaseNode = {
@@ -129,11 +139,24 @@ export function decorateDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[], so
 }
 
 export function stripDatabaseSavedSqlTreeNodes(nodes: readonly TreeNode[]): TreeNode[] {
-  return nodes.flatMap((node) => {
-    if (node.type === "saved-sql-root" || node.type === "saved-sql-file" || node.type === "saved-sql-folder") return [];
-    const children = node.children ? stripDatabaseSavedSqlTreeNodes(node.children) : undefined;
-    const hiddenChildren = node.hiddenChildren ? stripDatabaseSavedSqlTreeNodes(node.hiddenChildren) : undefined;
-    if (children === node.children && hiddenChildren === node.hiddenChildren) return [node];
-    return [{ ...node, children, hiddenChildren }];
+  const stripped = stripNodeList(nodes);
+  return stripped === nodes ? [...nodes] : stripped;
+}
+
+function stripNodeList(nodes: readonly TreeNode[]): TreeNode[] {
+  let stripped: TreeNode[] | undefined;
+  nodes.forEach((node, index) => {
+    const removed = node.type === "saved-sql-root" || node.type === "saved-sql-file" || node.type === "saved-sql-folder";
+    let next: TreeNode | undefined = node;
+    if (removed) {
+      next = undefined;
+    } else if (node.children?.length || node.hiddenChildren?.length) {
+      const children = node.children ? stripNodeList(node.children) : undefined;
+      const hiddenChildren = node.hiddenChildren ? stripNodeList(node.hiddenChildren) : undefined;
+      if (children !== node.children || hiddenChildren !== node.hiddenChildren) next = { ...node, children, hiddenChildren };
+    }
+    if (next !== node && !stripped) stripped = nodes.slice(0, index);
+    if (next) stripped?.push(next);
   });
+  return stripped ?? (nodes as TreeNode[]);
 }

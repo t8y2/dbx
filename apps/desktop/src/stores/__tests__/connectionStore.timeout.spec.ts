@@ -202,11 +202,12 @@ describe("connectionStore timeout recovery", () => {
     expect(store.connections[0]?.keepalive_interval_secs).toBe(30);
   });
 
-  it("loads persisted editor settings before startup timeout migration", async () => {
+  it.each([undefined, false, true])("loads persisted editor settings before startup migrations (%s user visibility)", async (legacyVisible) => {
     const callOrder: string[] = [];
     const loadEditorSettings = vi.fn(async () => {
       callOrder.push("settings");
       return {
+        sidebarShowUserAdmin: legacyVisible,
         appLayout: "separated",
         uiFontFamily: "persisted-font",
         snippets: [{ id: "persisted", label: "Persisted", prefix: "persisted", body: "SELECT 42", enabled: true }],
@@ -230,6 +231,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections,
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings,
@@ -240,6 +242,7 @@ describe("connectionStore timeout recovery", () => {
     await useConnectionStore().initFromDisk();
 
     expect(callOrder).toEqual(["settings", "connections"]);
+    expect(loadConnections).toHaveBeenCalledWith(legacyVisible !== false);
     expect(saveEditorSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         appLayout: "separated",
@@ -265,6 +268,25 @@ describe("connectionStore timeout recovery", () => {
     expect(saveEditorSettings).not.toHaveBeenCalled();
   });
 
+  it("retries a failed visibility migration with the original legacy opt-out", async () => {
+    const loadConnections = vi.fn().mockRejectedValueOnce(new Error("migration failed")).mockResolvedValue([]);
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: vi.fn().mockResolvedValue({ sidebarShowUserAdmin: false }),
+      loadConnections,
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await expect(store.initFromDisk()).rejects.toThrow("migration failed");
+    await store.initFromDisk();
+    expect(loadConnections.mock.calls).toEqual([[false], [false]]);
+  });
+
   it("migrates legacy timeout defaults to global inheritance and preserves custom overrides", async () => {
     const saveConnections = vi.fn().mockResolvedValue(undefined);
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
@@ -276,6 +298,7 @@ describe("connectionStore timeout recovery", () => {
         .mockResolvedValue([postgresConnection({ id: "default", connect_timeout_secs: 10, query_timeout_secs: 30 }), postgresConnection({ id: "custom", connect_timeout_secs: 45, query_timeout_secs: 300 }), postgresConnection({ id: "inherited", connect_timeout_secs: 60, query_timeout_secs: 60 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections,
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
@@ -310,6 +333,88 @@ describe("connectionStore timeout recovery", () => {
     );
   });
 
+  it("keeps a persisted global query timeout over a stale backup when upgrading", async () => {
+    // Reproduces #10024: the user saved a 60s global query timeout, but the
+    // timeout-inheritance migration re-sourced the global value from a stale
+    // localStorage backup (30s) on the first launch of the new build, resetting
+    // the saved setting. The persisted blob already carries the value, so it must
+    // win over the backup.
+    localStorage.setItem(
+      "dbx-timeout-inheritance-backup-v1",
+      JSON.stringify({
+        version: 1,
+        globalConnectTimeoutSecs: 10,
+        globalQueryTimeoutSecs: 30,
+        connectSnapshots: {},
+        querySnapshots: {},
+      }),
+    );
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue({
+        globalConnectTimeoutSecs: 20,
+        globalQueryTimeoutSecs: 60,
+        timeoutInheritanceMigrationVersion: 1,
+      }),
+      loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "custom", connect_timeout_secs: 45, query_timeout_secs: 300 })]),
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveEditorSettings,
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settingsStore = useSettingsStore();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    await useConnectionStore().initFromDisk();
+
+    expect(settingsStore.editorSettings.globalQueryTimeoutSecs).toBe(60);
+    expect(settingsStore.editorSettings.globalConnectTimeoutSecs).toBe(20);
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ globalQueryTimeoutSecs: 60, globalConnectTimeoutSecs: 20 }));
+  });
+
+  it("still recovers an absent global query timeout from the backup after a downgrade", async () => {
+    // The migration must keep recovering the global value from the backup when
+    // the persisted settings predate the setting entirely (no global keys on
+    // disk) — the case the backup precedence was originally written for.
+    localStorage.setItem(
+      "dbx-timeout-inheritance-backup-v1",
+      JSON.stringify({
+        version: 1,
+        globalConnectTimeoutSecs: 7,
+        globalQueryTimeoutSecs: 12,
+        connectSnapshots: { inherited: 7 },
+        querySnapshots: { inherited: 12 },
+      }),
+    );
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue({ timeoutInheritanceMigrationVersion: 1 }),
+      loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 7, query_timeout_secs: 12 })]),
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settingsStore = useSettingsStore();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    await useConnectionStore().initFromDisk();
+
+    expect(settingsStore.editorSettings.globalQueryTimeoutSecs).toBe(12);
+    expect(settingsStore.editorSettings.queryTimeoutInheritConnectionIds).toContain("inherited");
+  });
+
   it("does not reclassify local default-valued overrides after migration", async () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -318,6 +423,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "local", connect_timeout_secs: 10, query_timeout_secs: 30 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
@@ -353,6 +459,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 7, query_timeout_secs: 12 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
@@ -384,6 +491,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 20, query_timeout_secs: 45 })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
@@ -426,6 +534,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections: vi.fn().mockResolvedValue([postgresConnection({ id: "inherited", connect_timeout_secs: 99, connect_timeout_inherit: true, query_timeout_secs: 99, query_timeout_inherit: true })]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
@@ -462,6 +571,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections: vi.fn().mockResolvedValue([postgresConnection()]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),
@@ -488,6 +598,7 @@ describe("connectionStore timeout recovery", () => {
       loadConnections: vi.fn().mockResolvedValue([postgresConnection()]),
       loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
       loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTableVGroups: vi.fn().mockResolvedValue({}),
       loadTunnelProfiles: vi.fn().mockResolvedValue([]),
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveEditorSettings: vi.fn().mockResolvedValue(undefined),

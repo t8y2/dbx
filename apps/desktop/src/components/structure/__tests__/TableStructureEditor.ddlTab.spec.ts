@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { EditorView } from "@codemirror/view";
@@ -23,6 +23,16 @@ const mocks = vi.hoisted(() => ({
   getTablePartitionStatus: vi.fn(),
   getTableOwner: vi.fn(),
   updateEditorSettings: vi.fn(),
+  editorSettings: {
+    structureEditorDensity: "compact",
+    sqlFormatter: {},
+    tableColumnTemplateFields: [],
+    fontSize: 13,
+    fontFamily: "monospace",
+    theme: "default",
+    generateSqlIncludeDatabaseName: true,
+    generateSqlQuoteIdentifiers: true,
+  },
   loadObjectDdl: vi.fn(),
   invalidateObjectDdl: vi.fn(),
   loadObjectMetadataFacet: vi.fn(),
@@ -31,7 +41,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -43,6 +53,7 @@ vi.mock("@lucide/vue", async () => {
     ChevronLeft: Icon,
     ChevronRight: Icon,
     ChevronUp: Icon,
+    ClipboardList: Icon,
     Copy: Icon,
     Database: Icon,
     Info: Icon,
@@ -55,6 +66,7 @@ vi.mock("@lucide/vue", async () => {
     Plus: Icon,
     RefreshCw: Icon,
     RotateCcw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,
@@ -251,6 +263,8 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -259,7 +273,7 @@ vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRe
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [], fontSize: 13, fontFamily: "monospace", theme: "default", generateSqlQuoteIdentifiers: true },
+    editorSettings: mocks.editorSettings,
     updateEditorSettings: mocks.updateEditorSettings,
   }),
 }));
@@ -293,7 +307,7 @@ import TableStructureEditor from "@/components/structure/TableStructureEditor.vu
 const mountedApps: App[] = [];
 let lastDraft: Record<string, unknown> | undefined;
 
-async function mountStructureEditor() {
+async function mountStructureEditor(props: Record<string, unknown> = {}) {
   const root = document.createElement("div");
   document.body.append(root);
   const app = createApp(TableStructureEditor, {
@@ -301,6 +315,7 @@ async function mountStructureEditor() {
     database: "test",
     tableName: "users",
     initialTab: "columns",
+    ...props,
     "onUpdate:draft": (draft: Record<string, unknown> | undefined) => {
       lastDraft = draft;
     },
@@ -373,11 +388,13 @@ async function editDdl(root: HTMLElement, script: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   lastDraft = undefined;
+  mocks.connection.db_type = "mysql";
+  mocks.editorSettings.generateSqlIncludeDatabaseName = true;
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.executeQuery.mockResolvedValue({ columns: [], rows: [] });
   mocks.executeBatch.mockResolvedValue({ rowsAffected: 0 });
   mocks.listDataTypes.mockResolvedValue([]);
-  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false });
+  mocks.getTablePartitionStatus.mockResolvedValue({ isPartitionedParent: false, isPartition: false, isForeign: false });
   mocks.getTableOwner.mockResolvedValue("");
   mocks.buildTableOwnerChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
@@ -402,6 +419,19 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor DDL tab", () => {
+  it("loads CREATE OR REPLACE VIEW ddl when editing a view", async () => {
+    const viewDdl = "CREATE OR REPLACE VIEW `active_users` AS\nSELECT id FROM users;";
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: viewDdl, cacheStatus: "remote" });
+
+    const root = await mountStructureEditor({ database: "app", schema: "app", tableName: "active_users", tableType: "view" });
+    await clickTab(root, "ddl");
+    await vi.waitFor(() => expect(ddlEditorText(root)).toContain("CREATE OR REPLACE VIEW"), { timeout: 3000 });
+
+    expect(ddlEditorText(root)).toContain("`active_users`");
+    expect(ddlEditorText(root)).not.toContain("CREATE TABLE");
+    expect(mocks.loadObjectDdl).toHaveBeenCalledWith(expect.objectContaining({ tableName: "active_users", objectType: "VIEW" }), expect.anything());
+  });
+
   it("keeps the DDL rendered when the tab is left and revisited", async () => {
     // Regression for #7818/#7778: the second visit re-mounts the pane one tick
     // after the tab activates, and nothing re-fetches (the DDL is already
@@ -433,8 +463,28 @@ describe("TableStructureEditor DDL tab", () => {
     buttonWithText(root, "structureEditor.apply").click();
     await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(1), { timeout: 3000 });
     expect(mocks.executeBatch.mock.calls[0][2]).toEqual(["ALTER TABLE `users` ADD COLUMN `nickname` varchar(64)", "ALTER TABLE `users` ADD INDEX `idx_email` (`email`)"]);
+    // No partition DDL in this batch: it keeps the auto-commit path.
+    expect(mocks.executeBatch.mock.calls[0][5]).toBe(false);
     // The structure builder must not have contributed statements to that batch.
     expect(mocks.buildTableStructureChangeSql).not.toHaveBeenCalled();
+  });
+
+  it("executes generated external-catalog DDL without dropping qualifiers", async () => {
+    mocks.connection.db_type = "doris";
+    mocks.editorSettings.generateSqlIncludeDatabaseName = false;
+    mocks.buildTableStructureChangeSql.mockResolvedValue({
+      statements: ["ALTER TABLE `iceberg`.`analytics`.`users` ADD COLUMN `nickname` STRING;"],
+      warnings: [],
+    });
+
+    const root = await mountStructureEditor({ database: "analytics", catalog: "iceberg" });
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(buttonWithText(root, "structureEditor.apply").disabled).toBe(false), { timeout: 3000 });
+    buttonWithText(root, "structureEditor.apply").click();
+
+    await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(mocks.executeBatch.mock.calls[0][2]).toEqual(["ALTER TABLE `iceberg`.`analytics`.`users` ADD COLUMN `nickname` STRING;"]);
   });
 
   it("carries the edited script in the draft so the tab reports unsaved work", async () => {

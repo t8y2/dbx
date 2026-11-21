@@ -130,9 +130,7 @@ assert.equal(csv.status, 0, csv.stderr);
 assert.match(csv.stdout, /^csv_value\n"a,b"$/);
 console.log("PASS csv escaping");
 
-const limited = jsonOutput(
-  run(rustBinary, ["query", connection, "select 1 as n union all select 2 union all select 3", "--limit", "2", "--json"]),
-);
+const limited = jsonOutput(run(rustBinary, ["query", connection, "select 1 as n union all select 2 union all select 3", "--limit", "2", "--json"]));
 assert.equal(limited.rows.length, 2);
 assert.equal(limited.row_count, 2);
 console.log("PASS query limit");

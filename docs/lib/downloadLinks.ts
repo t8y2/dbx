@@ -40,59 +40,62 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "macos-arm",
     iconId: "macos-arm",
-    labels: { en: "For macOS (Apple Silicon)", cn: "适用于 macOS (Apple Silicon)", tr: "macOS için (Apple Silicon)" },
+    labels: { en: "For macOS (Apple Silicon)", cn: "适用于 macOS (Apple Silicon)" },
     suffix: "arm64.dmg",
   },
   {
     id: "macos-intel",
     iconId: "macos-intel",
-    labels: { en: "For macOS (Intel)", cn: "适用于 macOS (Intel)", tr: "macOS için (Intel)" },
+    labels: { en: "For macOS (Intel)", cn: "适用于 macOS (Intel)" },
     suffix: "x64.dmg",
   },
   {
     id: "windows",
     iconId: "windows",
-    labels: { en: "Windows 10/11 (x64)", cn: "Windows 10/11 (x64)", tr: "Windows 10/11 (x64)" },
-    descriptions: { en: "Standard online installer", cn: "标准在线安装包", tr: "Standart çevrimiçi yükleyici" },
-    badges: { en: "Recommended", cn: "推荐", tr: "Önerilen" },
+    labels: { en: "Windows 10/11 (x64)", cn: "Windows 10/11 (x64)" },
+    descriptions: { en: "Standard online installer", cn: "标准在线安装包" },
+    badges: { en: "Recommended", cn: "推荐" },
     suffix: "x64-setup.exe",
   },
   {
     id: "windows-offline",
     iconId: "windows",
-    labels: { en: "Windows 10 intranet environment installer", cn: "Windows10内网环境安装包", tr: "Windows 10 iç ağ ortamı yükleyicisi" },
-    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含", tr: "WebView2 çevrimdışı çalışma zamanını içerir · İçermez:" },
-    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动", tr: "çevrimdışı veritabanı sürücüleri" },
-    badges: { en: "Intranet", cn: "内网", tr: "İç ağ" },
+    labels: { en: "Windows 10 intranet environment installer", cn: "Windows10内网环境安装包" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
+    badges: { en: "Intranet", cn: "内网" },
     suffix: "x64-offline-setup.exe",
   },
   {
     id: "windows-7-offline",
     iconId: "windows-legacy",
-    labels: { en: "Windows 7 / Server\u00a02012\u00a0R2 package", cn: "Windows 7 / Server\u00a02012\u00a0R2 专用包", tr: "Windows 7 / Server\u00a02012\u00a0R2 paketi" },
-    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含", tr: "WebView2 çevrimdışı çalışma zamanını içerir · İçermez:" },
-    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动", tr: "çevrimdışı veritabanı sürücüleri" },
-    badges: { en: "Legacy", cn: "旧系统", tr: "Eski sistem" },
-    suffix: "x64-win7-server2012r2-offline-setup.exe",
+    labels: {
+      en: "Windows 7 / Server\u00a02008\u00a0R2+",
+      cn: "Windows 7 / Server\u00a02008\u00a0R2 及以上",
+    },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
+    badges: { en: "Legacy", cn: "旧系统" },
+    suffix: "x64-win7-server2008r2-offline-setup.exe",
   },
   {
     id: "linux",
     iconId: "linux",
-    labels: { en: "For Linux x64", cn: "适用于 Linux x64", tr: "Linux x64 için" },
+    labels: { en: "For Linux x64", cn: "适用于 Linux x64" },
     suffix: "amd64.AppImage",
   },
   {
     id: "linux-arm",
     iconId: "linux-arm",
-    labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64", tr: "Linux ARM64 için" },
+    labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64" },
     suffix: "arm64.AppImage",
   },
   {
     id: "linux-browser",
     iconId: "linux",
-    labels: { en: "Linux browser package", cn: "Linux 浏览器版", tr: "Linux tarayıcı paketi" },
-    descriptions: { en: "For Kylin, UnionTech UOS, and other Linux distributions", cn: "适用于麒麟、统信 UOS 等 Linux 发行版", tr: "Kylin, UnionTech UOS ve diğer Linux dağıtımları için" },
-    badges: { en: "Guide", cn: "安装说明", tr: "Kurulum kılavuzu" },
+    labels: { en: "Linux browser package", cn: "Linux 浏览器版" },
+    descriptions: { en: "For Kylin, UnionTech UOS, and other Linux distributions", cn: "适用于麒麟、统信 UOS 等 Linux 发行版" },
+    badges: { en: "Guide", cn: "安装说明" },
     suffix: "x64-browser-static.tar.gz",
     action: "instructions",
     browserStaticSuffixes: {
@@ -102,7 +105,19 @@ const downloadArtifacts: DownloadArtifact[] = [
   },
 ];
 
-export function createInstallOptions(lang: InstallLang, version: string): InstallOption[] {
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(-beta\.\d{8}\.\d+)?$/;
+
+// Stable packages are published once under releases/stable/<release_tag>/. A
+// promoted beta is republished under its plain vX.Y.Z tag; releases promoted
+// earlier keep their beta tag there. Package files are always named by the plain
+// version. Releases from before channels have no release_tag and live in
+// releases/v<version>/.
+function releaseDirectory(version: string, releaseTag?: string) {
+  return releaseTag && RELEASE_TAG_PATTERN.test(releaseTag) ? `stable/${releaseTag}` : `v${version}`;
+}
+
+export function createInstallOptions(lang: InstallLang, version: string, releaseTag?: string): InstallOption[] {
+  const directory = releaseDirectory(version, releaseTag);
   return downloadArtifacts.map((artifact) => ({
     id: artifact.id,
     iconId: artifact.iconId,
@@ -111,12 +126,12 @@ export function createInstallOptions(lang: InstallLang, version: string): Instal
     driverLinkLabel: artifact.driverLinkLabels?.[lang],
     descriptionSuffix: artifact.descriptionSuffixes?.[lang],
     badge: artifact.badges?.[lang],
-    href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    href: `${DOWNLOAD_BASE_URL}/${directory}/DBX_${version}_${artifact.suffix}?v=${version}`,
     action: artifact.action ?? "download",
     browserStaticDownloads: artifact.browserStaticSuffixes
       ? Object.entries(artifact.browserStaticSuffixes).map(([arch, suffix]) => ({
           arch: arch as BrowserStaticArch,
-          href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${suffix}?v=${version}`,
+          href: `${DOWNLOAD_BASE_URL}/${directory}/DBX_${version}_${suffix}?v=${version}`,
         }))
       : undefined,
   }));

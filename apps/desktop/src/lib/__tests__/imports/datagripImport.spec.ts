@@ -232,6 +232,143 @@ describe("DataGrip connection import", () => {
     expect(parseDataGripConnections(importPayload)).toHaveLength(1);
     expect(parseDataGripImport(importPayload).layout).toBeUndefined();
   });
+
+  it("extracts username and password from JDBC authority and query parameters", () => {
+    const result = parseDataGripImport(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="MySQL Auth" uuid="mysql-1">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://myuser:mypass@127.0.0.1:3306/appdb</jdbc-url>
+            </data-source>
+            <data-source name="Postgres Query" uuid="pg-1">
+              <driver-ref>postgresql</driver-ref>
+              <jdbc-url>jdbc:postgresql://127.0.0.1:5432/appdb?user=custom_pg&amp;password=secret</jdbc-url>
+            </data-source>
+            <data-source name="SQL Server Params" uuid="mssql-1">
+              <driver-ref>sqlserver</driver-ref>
+              <jdbc-url>jdbc:sqlserver://127.0.0.1:1433;database=testdb;user=sa_user;password=sapass</jdbc-url>
+            </data-source>
+            <data-source name="Oracle Thin Auth" uuid="ora-1">
+              <driver-ref>oracle</driver-ref>
+              <jdbc-url>jdbc:oracle:thin:scott/tiger@//127.0.0.1:1521/orcl</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    expect(result.fallbackUsernamesCount).toBe(0);
+    expect(result.connections).toHaveLength(4);
+
+    const mysqlConn = result.connections.find((c) => c.name === "MySQL Auth");
+    expect(mysqlConn?.username).toBe("myuser");
+    expect(mysqlConn?.password).toBe("mypass");
+
+    const pgConn = result.connections.find((c) => c.name === "Postgres Query");
+    expect(pgConn?.username).toBe("custom_pg");
+    expect(pgConn?.password).toBe("secret");
+
+    const mssqlConn = result.connections.find((c) => c.name === "SQL Server Params");
+    expect(mssqlConn?.username).toBe("sa_user");
+    expect(mssqlConn?.password).toBe("sapass");
+
+    const oraConn = result.connections.find((c) => c.name === "Oracle Thin Auth");
+    expect(oraConn?.username).toBe("scott");
+    expect(oraConn?.password).toBe("tiger");
+  });
+
+  it("keeps a literal percent sequence in URL credentials instead of aborting the import", () => {
+    const result = parseDataGripImport(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="Literal Percent" uuid="pct-1">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://myuser:p%40ss%zz@127.0.0.1:3306/appdb</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    expect(result.connections).toHaveLength(1);
+    const conn = result.connections.find((c) => c.name === "Literal Percent");
+    expect(conn?.username).toBe("myuser");
+    // Any invalid `%` sequence keeps the credential verbatim rather than throwing URIError.
+    expect(conn?.password).toBe("p%40ss%zz");
+  });
+
+  it("extracts usernames from XML properties and tags without importing encrypted passwords", () => {
+    const result = parseDataGripImport(
+      payload(
+        `
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="Prop User" uuid="prop-1">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://localhost:3306/db</jdbc-url>
+              <property name="user" value="xml_user" />
+              <property name="password" value="xml_pass" />
+            </data-source>
+            <data-source name="Tag Username" uuid="tag-1" user="attr_user">
+              <driver-ref>postgresql</driver-ref>
+              <jdbc-url>jdbc:postgresql://localhost:5432/db</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+        `,
+        `
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source uuid="tag-1">
+              <user-name>local_user</user-name>
+              <password>local_pass</password>
+            </data-source>
+          </component>
+        </project>
+        `,
+      ),
+    );
+
+    expect(result.fallbackUsernamesCount).toBe(0);
+    const propConn = result.connections.find((c) => c.name === "Prop User");
+    expect(propConn?.username).toBe("xml_user");
+    // DataGrip XML always stores encrypted ciphertext; importing it as the working password
+    // would break auth, so XML passwords are ignored (URL-embedded credentials still apply).
+    expect(propConn?.password).toBe("");
+
+    const tagConn = result.connections.find((c) => c.name === "Tag Username");
+    expect(tagConn?.username).toBe("local_user");
+    expect(tagConn?.password).toBe("");
+  });
+
+  it("tracks fallback usernames count when no username is provided", () => {
+    const result = parseDataGripImport(
+      payload(`
+        <project>
+          <component name="DataSourceManagerImpl">
+            <data-source name="MySQL Default" uuid="mysql-def">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://localhost:3306/db</jdbc-url>
+            </data-source>
+            <data-source name="Explicit User" uuid="mysql-exp">
+              <driver-ref>mysql</driver-ref>
+              <jdbc-url>jdbc:mysql://myuser@localhost:3306/db</jdbc-url>
+            </data-source>
+          </component>
+        </project>
+      `),
+    );
+
+    expect(result.fallbackUsernamesCount).toBe(1);
+    const defConn = result.connections.find((c) => c.name === "MySQL Default");
+    expect(defConn?.username).toBe("root");
+
+    const expConn = result.connections.find((c) => c.name === "Explicit User");
+    expect(expConn?.username).toBe("myuser");
+  });
 });
 
 describe("matchDataGripImportFiles", () => {

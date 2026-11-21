@@ -1,8 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosJsonObjectMatches, nacosServiceDetailMatches } from "../nacosServiceManagement";
+import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosJsonObjectMatches, nacosServiceDetailMatches, nacosServiceInstanceHealthSummary } from "../nacosServiceManagement";
 
 describe("Nacos service management state reconciliation", () => {
+  it.each([
+    [{ ipCount: 3, healthyInstanceCount: 3 }, "allHealthy"],
+    [{ ipCount: 3, healthyInstanceCount: 2 }, "partiallyHealthy"],
+    [{ ipCount: 3, healthyInstanceCount: 0 }, "noHealthyInstances"],
+    [{ ipCount: 0, healthyInstanceCount: 0 }, "noInstances"],
+  ] as const)("classifies the service instance health matrix for %o", (service, status) => {
+    expect(nacosServiceInstanceHealthSummary(service)).toEqual({ status, healthy: service.healthyInstanceCount, total: service.ipCount });
+  });
+
+  it.each([{ ipCount: 2 }, { healthyInstanceCount: 1 }, { ipCount: 1, healthyInstanceCount: 2 }, { ipCount: -1, healthyInstanceCount: 0 }])("does not infer health from incomplete or inconsistent counts for %o", (service) => {
+    expect(nacosServiceInstanceHealthSummary(service)).toBeNull();
+  });
+
   it("keeps unknown, persistent and ephemeral instances as separate identities", () => {
     const base = { serviceName: "api", ip: "127.0.0.1", port: 8080, clusterName: "blue" };
     expect(new Set([nacosInstanceRefIdentity(base), nacosInstanceRefIdentity({ ...base, ephemeral: false }), nacosInstanceRefIdentity({ ...base, ephemeral: true })]).size).toBe(3);

@@ -15,6 +15,49 @@ async function flushSearchDebounce() {
 }
 
 describe("useDataGridSearch", () => {
+  it("supports literal case-sensitive replacement searches without column-name matches", async () => {
+    vi.useFakeTimers();
+    const sensitive = ref(true);
+    const search = useDataGridSearch({
+      columns: ["HIT", "value"],
+      rows: [
+        ["HIT", "hit hit"],
+        [" hit ", "hit"],
+      ],
+      getCellSearchText: (row, col) => row[col].toLowerCase(),
+      getCellRawSearchText: (row, col) => row[col],
+      caseSensitive: sensitive,
+      literalQuery: true,
+      includeColumnMatches: false,
+      isCellSearchable: (_row, col) => col === 0,
+    });
+    search.searchText.value = "HIT";
+    await flushSearchDebounce();
+    expect(search.matches.value).toEqual([{ kind: "cell", displayRow: 0, col: 0 }]);
+    sensitive.value = false;
+    await flushSearchDebounce();
+    expect(search.matchCount.value).toBe(2);
+    search.searchText.value = " hit ";
+    await flushSearchDebounce();
+    expect(search.matches.value).toEqual([{ kind: "cell", displayRow: 1, col: 0 }]);
+  });
+  it("degrades case-sensitive matching to case-insensitive without a raw-text provider", async () => {
+    vi.useFakeTimers();
+    const search = useDataGridSearch({
+      columns: ["name"],
+      rows: [["Alice"]],
+      // No getCellRawSearchText: only the lowercase cache exists, so an
+      // uppercase query must still match instead of never finding the cell.
+      getCellSearchText: (row, col) => row[col].toLowerCase(),
+      caseSensitive: true,
+      literalQuery: false,
+      includeColumnMatches: false,
+    });
+    search.searchText.value = "ALICE";
+    await flushSearchDebounce();
+    expect(search.matchCount.value).toBe(1);
+  });
+
   it("debounces matching across columns and cells", async () => {
     vi.useFakeTimers();
     // getCellSearchText 契约：返回小写文本（调用方负责缓存小写副本）
@@ -122,6 +165,91 @@ describe("useDataGridSearch", () => {
     await nextTick();
     expect(search.matches.value).toEqual([]);
     expect(search.currentMatchIndex.value).toBe(-1);
+  });
+
+  it("does not auto-navigate or reset match position when rows change without a query change (#13241)", async () => {
+    vi.useFakeTimers();
+    const rows = ref([
+      ["hit", "other1"],
+      ["hit", "other2"],
+    ]);
+    const onNavigate = vi.fn();
+    const search = useDataGridSearch({
+      columns: ["id", "extra"],
+      rows,
+      getCellSearchText: (row, column) => row[column],
+      onNavigate,
+    });
+    search.searchText.value = "hit";
+    await flushSearchDebounce();
+    expect(search.currentMatchIndex.value).toBe(0);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenLastCalledWith({ kind: "cell", displayRow: 0, col: 0 });
+
+    // User navigates to match 1
+    search.navigateMatch(1);
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+    expect(onNavigate).toHaveBeenLastCalledWith({ kind: "cell", displayRow: 1, col: 0 });
+
+    // User edits an unrelated column on row 1 (or sets it to NULL), updating rows
+    onNavigate.mockClear();
+    rows.value = [
+      ["hit", "other1"],
+      ["hit", "null"],
+    ];
+    await nextTick();
+    await nextTick();
+
+    // Match position must remain at index 1 and onNavigate must NOT be called
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(search.currentMatch.value).toEqual({ kind: "cell", displayRow: 1, col: 0 });
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
+  it("preserves match index without onNavigate when cell is set to null or rows reload after commit (#13241)", async () => {
+    vi.useFakeTimers();
+    const rows = ref<Array<[string, string | null]>>([
+      ["user-1", "val1"],
+      ["user-2", "val2"],
+    ]);
+    const onNavigate = vi.fn();
+    const search = useDataGridSearch({
+      columns: ["_id", "status"],
+      rows,
+      getCellSearchText: (row, column) => (row[column] ?? "").toLowerCase(),
+      onNavigate,
+    });
+    search.searchText.value = "user";
+    await flushSearchDebounce();
+    expect(search.currentMatchIndex.value).toBe(0);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+
+    // Navigate to second document
+    search.navigateMatch(1);
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).toHaveBeenCalledTimes(2);
+
+    // Set field to null
+    onNavigate.mockClear();
+    rows.value = [
+      ["user-1", "val1"],
+      ["user-2", null],
+    ];
+    await nextTick();
+    await nextTick();
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    // Reload after commit with fresh objects but same data
+    rows.value = [
+      ["user-1", "val1"],
+      ["user-2", null],
+    ];
+    await nextTick();
+    await nextTick();
+    expect(search.currentMatchIndex.value).toBe(1);
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 });
 

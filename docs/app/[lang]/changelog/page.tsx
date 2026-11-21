@@ -11,10 +11,6 @@ const i18n = {
     title: "Changelog",
     desc: "Track every release — features, improvements, and fixes.",
   },
-  tr: {
-    title: "Değişiklik Günlüğü",
-    desc: "Her sürümü takip edin — yeni özellikler, iyileştirmeler ve düzeltmeler.",
-  },
   cn: {
     title: "更新日志",
     desc: "追踪每次发布 — 新功能、改进和修复。",
@@ -41,7 +37,7 @@ export default async function ChangelogPage({ params }: { params: Promise<{ lang
   const initialData = await loadChangelogBootstrap(changelogDataLang(l));
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={l} active="changelog" />
 
       {/* 视觉隐藏：页面不再展示大标题，但保留语义 landmark 与 SEO */}

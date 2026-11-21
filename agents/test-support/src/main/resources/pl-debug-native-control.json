@@ -1,0 +1,18 @@
+{
+  "controls": [
+    { "action": "resume", "flag": "break_any_return", "oceanbaseFlag": 512 },
+    { "action": "step_over", "flag": "break_next_line", "oceanbaseFlag": 32 },
+    { "action": "step_in", "flag": "break_any_call", "oceanbaseFlag": 12 }
+  ],
+  "stop": {
+    "result": 0,
+    "line": 27,
+    "terminated": false,
+    "reason": 3,
+    "depth": 3,
+    "breakpoint": 9,
+    "program": " outer, run_info.reason = 15\n\"Quoted.Name\" 汉|* ",
+    "owner": "Mixed Owner",
+    "namespace": 2
+  }
+}

@@ -44,4 +44,8 @@ describe("connection password prompting", () => {
     expect(connectionNeedsPasswordPrompt(connection({ db_type: "mysql", port: 3306, url_params: "auth=noSasl" }))).toBe(true);
     expect(connectionNeedsPasswordPrompt(connection({ db_type: "postgres", port: 5432, save_password: true }))).toBe(false);
   });
+  it("prompts when saving is disabled even if the draft contains a saved reference", () => {
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "mysql", password: "__DBX_SAVED_CREDENTIAL__:ref" }))).toBe(true);
+    expect(connectionNeedsPasswordPrompt(connection({ db_type: "mysql", save_password: true, password: "__DBX_SAVED_CREDENTIAL__:ref" }))).toBe(false);
+  });
 });

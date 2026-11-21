@@ -30,25 +30,35 @@ public final class BatchExecutor {
         Supplier<String> resetSchemaSql
     ) {
         return unchecked(() -> {
-            long start = System.currentTimeMillis();
-            applySchema(conn, schema, setSchemaSql, resetSchemaSql);
-            Long batchAffected = tryExecuteBatch(conn, statements);
-            long totalAffected = batchAffected == null ? executeIndividually(conn, statements) : batchAffected;
-            return new QueryResult(
-                Collections.emptyList(),
-                Collections.emptyList(),
-                totalAffected,
-                System.currentTimeMillis() - start,
-                false
-            );
+            try (JdbcExecutor.NativeOperation operation = JdbcExecutor.current().beginNativeOperation()) {
+                long start = System.currentTimeMillis();
+                operation.checkCancelled();
+                applySchema(conn, schema, setSchemaSql, resetSchemaSql);
+                operation.checkCancelled();
+                Long batchAffected = tryExecuteBatch(conn, statements, operation);
+                long totalAffected = batchAffected == null ? executeIndividually(conn, statements, operation) : batchAffected;
+                operation.checkCancelled();
+                return new QueryResult(
+                    Collections.emptyList(),
+                    Collections.emptyList(),
+                    totalAffected,
+                    System.currentTimeMillis() - start,
+                    false
+                );
+            }
         });
     }
 
-    private static Long tryExecuteBatch(Connection conn, List<String> statements) throws Exception {
-        try (Statement stmt = conn.createStatement()) {
+    private static Long tryExecuteBatch(Connection conn, List<String> statements, JdbcExecutor.NativeOperation operation) throws Exception {
+        try (var tracked = JdbcExecutor.current().trackStatement(conn.createStatement())) {
+            Statement stmt = tracked.statement();
+            if (AgentExecutionContext.statementTimeoutSecs() > 0) {
+                stmt.setQueryTimeout(AgentExecutionContext.statementTimeoutSecs());
+            }
             try {
                 int statementCount = 0;
                 for (String statement : statements) {
+                    operation.checkCancelled();
                     String trimmed = JdbcExecutor.trimSql(statement);
                     if (trimmed.isEmpty()) {
                         continue;
@@ -56,7 +66,8 @@ public final class BatchExecutor {
                     stmt.addBatch(trimmed);
                     statementCount++;
                 }
-                return statementCount == 0 ? 0L : affectedRows(executeBatch(stmt));
+                operation.checkCancelled();
+                return statementCount == 0 ? 0L : affectedRows(executeBatch(stmt, operation));
             } catch (BatchUpdateException e) {
                 long[] counts = e.getLargeUpdateCounts();
                 int failedIndex = counts == null ? 1 : counts.length + 1;
@@ -67,11 +78,16 @@ public final class BatchExecutor {
         }
     }
 
-    private static long executeIndividually(Connection conn, List<String> statements) throws Exception {
+    private static long executeIndividually(Connection conn, List<String> statements, JdbcExecutor.NativeOperation operation) throws Exception {
         long totalAffected = 0;
         int statementIndex = 0;
-        try (Statement stmt = conn.createStatement()) {
+        try (var tracked = JdbcExecutor.current().trackStatement(conn.createStatement())) {
+            Statement stmt = tracked.statement();
+            if (AgentExecutionContext.statementTimeoutSecs() > 0) {
+                stmt.setQueryTimeout(AgentExecutionContext.statementTimeoutSecs());
+            }
             for (String statement : statements) {
+                operation.checkCancelled();
                 String trimmed = JdbcExecutor.trimSql(statement);
                 if (trimmed.isEmpty()) {
                     continue;
@@ -107,10 +123,11 @@ public final class BatchExecutor {
         return total;
     }
 
-    private static long[] executeBatch(Statement stmt) throws Exception {
+    private static long[] executeBatch(Statement stmt, JdbcExecutor.NativeOperation operation) throws Exception {
         try {
             return stmt.executeLargeBatch();
         } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError e) {
+            operation.checkCancelled();
             int[] counts = stmt.executeBatch();
             long[] largeCounts = new long[counts.length];
             for (int i = 0; i < counts.length; i++) {

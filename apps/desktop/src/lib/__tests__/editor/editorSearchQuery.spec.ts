@@ -64,6 +64,29 @@ describe("editorSearchQuery", () => {
     expect(countEditorSearchMatches(query, state, 0, state.doc.length)).toEqual({ count: 50000, currentIndex: 0 });
   });
 
+  it("defaults whole-word matching to off", () => {
+    const state = EditorState.create({ doc: "cat concat cathedral" });
+    const query = createEditorSearchQuery({ search: "cat", caseSensitive: false, useRegex: false });
+
+    expect(countEditorSearchMatches(query, state, 0, state.doc.length)).toEqual({ count: 3, currentIndex: 0 });
+  });
+
+  it("matches whole words only in literal mode", () => {
+    const state = EditorState.create({ doc: "cat concat cathedral" });
+    const query = createEditorSearchQuery({ search: "cat", caseSensitive: true, useRegex: false, wholeWord: true });
+
+    expect(collectEditorSearchMatches(query, state, 0, state.doc.length)).toEqual([{ from: 0, to: 3 }]);
+  });
+
+  it("combines whole-word matching with regular expressions", () => {
+    // @codemirror/search applies a word-boundary test to regex cursors too, so the
+    // toggle composes with useRegex instead of being disabled in regex mode.
+    const state = EditorState.create({ doc: "cat concat cathedral" });
+    const query = createEditorSearchQuery({ search: "cat+", caseSensitive: true, useRegex: true, wholeWord: true });
+
+    expect(collectEditorSearchMatches(query, state, 0, state.doc.length)).toEqual([{ from: 0, to: 3 }]);
+  });
+
   it("keeps replacement collection uncapped", () => {
     const state = EditorState.create({ doc: Array.from({ length: 1001 }, () => "x").join(" ") });
     const query = createEditorSearchQuery({ search: "x", caseSensitive: true, useRegex: false });

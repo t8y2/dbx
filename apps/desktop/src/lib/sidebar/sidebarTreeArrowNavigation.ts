@@ -1,7 +1,7 @@
 import type { FlatTreeNode } from "@/composables/useFlatTree";
 import type { DatabaseType, TreeNode } from "@/types/database";
 import { canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
+import { customTypeCapabilities, supportsOracleTypeAttributeExpansion } from "@/lib/database/databaseObjectCapabilities";
 
 export type SidebarTreeArrowAction = { kind: "select"; nodeId: string } | { kind: "toggle"; nodeId: string; expanded: boolean } | { kind: "none" };
 
@@ -47,7 +47,7 @@ function isArrowExpandable(node: TreeNode, databaseType?: DatabaseType): boolean
   // PostgreSQL-family custom types only expand when the catalog marked them
   // with loadable members; member-less kinds (enum/domain/range/base) stay
   // collapsed even when child metadata rows exist.
-  if (node.type === "type" && customTypeCapabilities(databaseType).details) return node.hasMembers === true;
+  if (node.type === "type" && customTypeCapabilities(databaseType).details) return node.hasMembers === true || (node.hasMembers === undefined && supportsOracleTypeAttributeExpansion(databaseType));
   return canTreeNodeShowExpander({
     type: node.type,
     childCount: node.children?.length ?? 0,

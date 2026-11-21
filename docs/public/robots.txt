@@ -1,7 +1,20 @@
 User-agent: *
 Allow: /
 
-# AI crawlers — explicitly allowed
+# Search and user-requested retrieval
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+# Existing crawler and training permissions are preserved.
 User-agent: GPTBot
 Allow: /
 

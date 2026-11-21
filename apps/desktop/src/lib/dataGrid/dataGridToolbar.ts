@@ -4,7 +4,7 @@ const DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO = 0.75;
 const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_STEP = 40;
 export const DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH = DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
 
-export const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER = ["refresh", "autoRefresh", "navigation", "copyData", "addRow", "deleteRow", "exportData", "transpose", "tableInfo", "layerPreview", "preview", "save", "rollback"] as const;
+export const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER = ["refresh", "autoRefresh", "copyData", "addRow", "deleteRow", "exportData", "transpose", "tableInfo", "layerPreview", "preview", "save", "rollback"] as const;
 
 export type DataGridToolbarActionKey = (typeof DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER)[number];
 
@@ -16,6 +16,16 @@ export function dataGridToolbarCompactBreakpoint(viewportWidth: number, minimumW
 
 export function isDataGridToolbarCompact(toolbarWidth: number, viewportWidth: number, minimumWidth?: number): boolean {
   return toolbarWidth > 0 && toolbarWidth < dataGridToolbarCompactBreakpoint(viewportWidth, minimumWidth);
+}
+
+// Reserve useful SQL input space before the flex row actually overflows.
+const DATA_GRID_CONDITION_INPUT_MIN_WIDTH = 160;
+const DATA_GRID_CONDITION_INPUT_EXPAND_SLACK = 16;
+
+export function shouldCompactDataGridConditionInput(inputWidth: number, hiddenLabelWidth = 0, compact = false): boolean {
+  if (!Number.isFinite(inputWidth)) return false;
+  const expandedInputWidth = inputWidth - Math.max(0, hiddenLabelWidth);
+  return expandedInputWidth < DATA_GRID_CONDITION_INPUT_MIN_WIDTH + (compact ? DATA_GRID_CONDITION_INPUT_EXPAND_SLACK : 0);
 }
 
 export function dataGridToolbarActionCollapseCount(toolbarWidth: number, viewportWidth: number, minimumWidth?: number): number {
@@ -32,7 +42,7 @@ export function isDataGridToolbarActionCompact(action: DataGridToolbarActionKey,
   return actionIndex < Math.max(0, Math.floor(compactActionCount));
 }
 
-export type DataGridReloadIntent = "refresh";
+export type DataGridReloadIntent = "refresh" | "auto-refresh" | "row-identifier-change";
 
 export interface DataGridToolbarActionCapability {
   label: string;
@@ -104,6 +114,8 @@ export interface DataGridToolbarAutoRefreshCapability {
   disabled?: boolean;
   enabled: boolean;
   intervalSeconds: number;
+  /** Bumped whenever the auto-refresh countdown (re)starts, so the toolbar's clock hand restarts in phase with the real timer. */
+  sweepKey: number;
   intervalOptions: readonly number[];
   intervalLabel: (seconds: number) => string;
   onToggle: () => void | Promise<void>;

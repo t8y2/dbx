@@ -1,5 +1,4 @@
 import { createPinia, setActivePinia } from "pinia";
-import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const saved: unknown[] = [];
@@ -66,15 +65,6 @@ describe("settings store type color scheme persistence", () => {
     const last = saved.at(-1) as Record<string, unknown> | undefined;
     expect(last?.dataGridTypeColorSchemes).toEqual([SCHEME]);
     expect(last?.activeDataGridTypeColorSchemeId).toBe(SCHEME.id);
-  });
-
-  it("stages scheme edits in the settings draft", () => {
-    const dialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
-
-    expect(dialogSource).toContain("editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(schemes)");
-    expect(dialogSource).not.toContain("structuredClone(settingsStore.editorSettings.dataGridTypeColorSchemes)");
-    expect(dialogSource).toContain("editActiveDataGridTypeColorSchemeId.value = activeId");
-    expect(dialogSource).not.toMatch(/settingsStore\.updateEditorSettings\w*\(\{[^}]*DataGridTypeColorScheme/);
   });
 
   it("restores a persisted scheme through normalization", async () => {

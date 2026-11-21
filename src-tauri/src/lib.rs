@@ -1,21 +1,42 @@
+mod background_backup;
 mod commands;
 mod data_dir;
+pub use background_backup::run_if_requested as run_backup_worker_if_requested;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
 #[cfg(target_os = "macos")]
 mod macos_escape_guard;
+mod migration_gate;
 mod models;
+mod plugin_ui_protocol;
+mod promoted_build;
+#[cfg(any(target_os = "windows", test))]
+mod startup_messages;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
 #[path = "startup_recovery_noop.rs"]
 mod startup_recovery;
 #[cfg(any(target_os = "windows", test))]
+mod webview2_legacy_css;
+#[cfg(target_os = "windows")]
+mod webview2_preflight;
+#[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
+mod window_geometry;
 mod window_state_guard;
+#[cfg(target_os = "windows")]
+mod windows_appcompat;
+#[cfg(not(target_os = "windows"))]
+#[path = "windows_appcompat_noop.rs"]
+mod windows_appcompat;
+#[cfg(any(target_os = "windows", test))]
+mod windows_appcompat_state;
+mod workspace_session;
 
 use commands::connection::AppState;
+use dbx_core::persistence::secret_codec::SecretKeyPolicy;
 use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
 use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
@@ -32,7 +53,7 @@ use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, EventTarget, Manager};
 #[cfg(target_os = "macos")]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
@@ -45,10 +66,73 @@ const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 #[cfg(target_os = "macos")]
 const APP_MENU_COPY_SUPPORT_INFO_ID: &str = "app-menu-copy-support-info";
+#[cfg(target_os = "macos")]
+const APP_MENU_CLOSE_TAB_ID: &str = "app-menu-close-tab";
+#[cfg(target_os = "macos")]
+const APP_CLOSE_ACTIVE_TAB_EVENT: &str = "dbx-close-active-tab";
 
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
     frontend_ready: AtomicBool,
+}
+
+struct WindowOwnership {
+    logical_primary: String,
+    last_active: std::collections::HashMap<String, u64>,
+    activity_sequence: u64,
+}
+
+/// Tracks the business-level primary workspace independently from Tauri's fixed
+/// `main` label. The label remains a bootstrap detail; ownership may move to a
+/// detached tab window when the current logical primary closes.
+pub struct WindowOwnershipState {
+    inner: std::sync::Mutex<WindowOwnership>,
+}
+
+impl WindowOwnershipState {
+    fn new() -> Self {
+        let mut last_active = std::collections::HashMap::new();
+        last_active.insert("main".to_string(), 1);
+        Self {
+            inner: std::sync::Mutex::new(WindowOwnership {
+                logical_primary: "main".to_string(),
+                last_active,
+                activity_sequence: 1,
+            }),
+        }
+    }
+
+    fn logical_primary(&self) -> String {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).logical_primary.clone()
+    }
+
+    fn record_activity(&self, label: &str) {
+        let mut ownership = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ownership.activity_sequence = ownership.activity_sequence.saturating_add(1);
+        let activity_sequence = ownership.activity_sequence;
+        ownership.last_active.insert(label.to_string(), activity_sequence);
+    }
+
+    /// Removes a closed workspace and transfers logical ownership only when the
+    /// closed workspace owned it. The most recently active remaining window wins.
+    fn complete_close(&self, label: &str, remaining_labels: &[String]) -> Option<String> {
+        let mut ownership = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ownership.last_active.remove(label);
+        for remaining_label in remaining_labels {
+            ownership.last_active.entry(remaining_label.clone()).or_insert(0);
+        }
+        if ownership.logical_primary != label {
+            return None;
+        }
+        let next_primary = remaining_labels
+            .iter()
+            .max_by_key(|candidate| ownership.last_active.get(*candidate).copied().unwrap_or(0))
+            .cloned();
+        if let Some(next_primary) = &next_primary {
+            ownership.logical_primary = next_primary.clone();
+        }
+        next_primary
+    }
 }
 
 impl CloseBehaviorState {
@@ -160,6 +244,78 @@ fn linux_appindicator_available() -> bool {
     })
 }
 
+/// Without a compositing manager (XFCE with compositing off, i3, openbox, ...) a transparent
+/// window renders black where it should be see-through.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_compositing_available() -> bool {
+    gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
+}
+
+/// Desktops where the floating frame is enabled automatically. Driver/WebKitGTK combinations
+/// can still cause flickering on GNOME, so the saved setting can disable this default.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsStr>) -> bool {
+    current_desktop
+        .map(|value| value.to_string_lossy().split(':').any(|name| name.eq_ignore_ascii_case("GNOME")))
+        .unwrap_or(false)
+}
+
+/// `DBX_LINUX_FLOATING_FRAME=1|0` overrides the saved preference; otherwise the frame is only used on
+/// GNOME running as a native Wayland client. GNOME on X11 ("GNOME on Xorg") keeps the opaque
+/// window: there the transparent WebKitGTK window stays see-through and only repaints the regions
+/// that get damaged (e.g. under the mouse).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn should_enable_linux_floating_frame(
+    compositing: bool,
+    native_wayland: bool,
+    override_value: Option<&std::ffi::OsStr>,
+    current_desktop: Option<&std::ffi::OsStr>,
+    enabled: bool,
+) -> bool {
+    if !compositing {
+        return false;
+    }
+    match override_value.and_then(|value| value.to_str()) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => enabled && native_wayland && linux_desktop_supports_floating_frame(current_desktop),
+    }
+}
+
+/// The Linux config declares the main window with `create: false` so its transparency can
+/// depend at runtime on the desktop, the Wayland/X11 session and whether a compositor is available.
+#[cfg(target_os = "linux")]
+fn create_linux_main_window(app: &tauri::App, floating_frame_enabled: bool) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
+        return Ok(());
+    };
+    let compositing = linux_compositing_available();
+    let native_wayland = linux_uses_native_wayland(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("XDG_SESSION_TYPE").as_deref(),
+        std::env::var_os("GDK_BACKEND").as_deref(),
+    );
+    let override_value = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
+    let current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
+    let floating_frame = should_enable_linux_floating_frame(
+        compositing,
+        native_wayland,
+        override_value.as_deref(),
+        current_desktop.as_deref(),
+        floating_frame_enabled,
+    );
+    log::info!(
+        "[WINDOW] Linux main window compositing={compositing}; native_wayland={native_wayland}; floating_frame={floating_frame}"
+    );
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(floating_frame);
+    if floating_frame {
+        // Read by index.html before first paint to draw the rounded, shadowed frame.
+        builder = builder.initialization_script("window.__DBX_LINUX_FLOATING__ = true;");
+    }
+    builder.build()?;
+    Ok(())
+}
+
 #[cfg(not(target_os = "linux"))]
 fn linux_appindicator_available() -> bool {
     false
@@ -190,6 +346,23 @@ fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, conf
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
 }
 
+/// Route a Linux compositor close request (Wayland `xdg_toplevel.close`, X11
+/// `WM_DELETE_WINDOW`) through the tray-aware close flow instead of the default
+/// window destroy, which would bypass the "minimize to tray on close" setting.
+/// Requires the main window, a ready frontend listener, and a registered tray.
+/// The tray is only created when the tray setting is on with AppIndicator
+/// available and is never destroyed or hidden at runtime, so its presence is a
+/// sound proxy for the window being restorable; any missed premise keeps the
+/// native close.
+fn should_route_linux_close_through_tray(
+    target_os: &str,
+    window_label: &str,
+    frontend_ready: bool,
+    tray_registered: bool,
+) -> bool {
+    target_os == "linux" && window_label == "main" && frontend_ready && tray_registered
+}
+
 fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
     target == "quit" && !frontend_ready
 }
@@ -205,9 +378,16 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app_handle.package_info();
     let app_name = pkg_info.name.clone();
+    let build_version = pkg_info.version.to_string();
+    // A promoted stable build keeps its beta version inside the binary; the
+    // renderer reports the promotion so the panel can show the stable version
+    // like Settings → About and the copied support info do.
+    let promoted = app_handle.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+    let (version, short_version) = promoted_build::about_version_pair(&build_version, promoted.as_deref());
     let about_metadata = AboutMetadata {
         name: Some(app_name.clone()),
-        version: Some(pkg_info.version.to_string()),
+        version: Some(version),
+        short_version,
         copyright: Some(commands::support_info::format_support_info_for_native_about()),
         icon: Some(ABOUT_APP_ICON),
         ..Default::default()
@@ -225,6 +405,13 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
         app_menu_quit_label(&current_app_locale(app_handle), &app_name),
         true,
         Some("Cmd+Q"),
+    )?;
+    let close_tab_item = MenuItem::with_id(
+        app_handle,
+        APP_MENU_CLOSE_TAB_ID,
+        app_menu_close_tab_label(&current_app_locale(app_handle)),
+        true,
+        Some("Cmd+W"),
     )?;
 
     Menu::with_items(
@@ -246,7 +433,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                     &quit_item,
                 ],
             )?,
-            &Submenu::with_items(app_handle, "File", true, &[&PredefinedMenuItem::close_window(app_handle, None)?])?,
+            &Submenu::with_items(app_handle, "File", true, &[&close_tab_item])?,
             &Submenu::with_items(
                 app_handle,
                 "Edit",
@@ -266,12 +453,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                 app_handle,
                 "Window",
                 true,
-                &[
-                    &PredefinedMenuItem::minimize(app_handle, None)?,
-                    &PredefinedMenuItem::maximize(app_handle, None)?,
-                    &PredefinedMenuItem::separator(app_handle)?,
-                    &PredefinedMenuItem::close_window(app_handle, None)?,
-                ],
+                &[&PredefinedMenuItem::minimize(app_handle, None)?, &PredefinedMenuItem::maximize(app_handle, None)?],
             )?,
             &Submenu::with_items(app_handle, "Help", true, &[])?,
         ],
@@ -315,8 +497,15 @@ fn linux_nvidia_driver_from_state(
     proprietary_control_exists: bool,
     proprietary_proc_exists: bool,
     render_driver: Option<&str>,
+    prime_render_offload: bool,
 ) -> LinuxNvidiaDriver {
-    if proprietary_control_exists || proprietary_proc_exists {
+    // On hybrid laptops the proprietary module is loaded for the dGPU while the
+    // integrated GPU (i915/xe/amdgpu) drives the display and WebKit's renderer.
+    // Applying the NVIDIA workarounds there needlessly disables DMABuf and drops
+    // WebKitGTK to the slow shared-memory path (laggy scrolling everywhere).
+    let renders_on_nvidia =
+        prime_render_offload || render_driver.is_none_or(|driver| driver.eq_ignore_ascii_case("nvidia"));
+    if (proprietary_control_exists || proprietary_proc_exists) && renders_on_nvidia {
         LinuxNvidiaDriver::Proprietary
     } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
         LinuxNvidiaDriver::Nouveau
@@ -516,6 +705,7 @@ fn apply_linux_webkit_rendering_workarounds() {
         std::path::Path::new("/dev/nvidiactl").exists(),
         std::path::Path::new("/proc/driver/nvidia/version").exists(),
         selected_device.and_then(|device| device.driver.as_deref()),
+        std::env::var_os("__NV_PRIME_RENDER_OFFLOAD").is_some_and(|value| value == "1"),
     );
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
@@ -546,7 +736,42 @@ fn apply_linux_webkit_rendering_workarounds() {
     }
 }
 
-/// Brings the main window to the foreground, reporting whether it ended up visible.
+pub(crate) fn is_workspace_window_label(label: &str) -> bool {
+    label == "main" || (label.starts_with("dbx-tab-") && !label.starts_with("dbx-tab-drag-preview"))
+}
+
+pub(crate) fn other_workspace_window_labels<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    current_label: &str,
+) -> Vec<String> {
+    app.webview_windows()
+        .into_keys()
+        .filter(|label| label != current_label && is_workspace_window_label(label))
+        .collect()
+}
+
+fn logical_primary_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    if let Some(state) = app.try_state::<WindowOwnershipState>() {
+        let label = state.logical_primary();
+        if app.get_webview_window(&label).is_some() {
+            return Some(label);
+        }
+    }
+    if app.get_webview_window("main").is_some() {
+        return Some("main".to_string());
+    }
+    app.webview_windows().into_keys().find(|label| is_workspace_window_label(label))
+}
+
+pub(crate) fn emit_workspace_close_request<R: tauri::Runtime>(window: &tauri::Window<R>, target: &str) {
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
+        APP_CLOSE_REQUESTED_EVENT,
+        serde_json::json!({ "target": target, "windowLabel": window.label() }),
+    );
+}
+
+/// Brings the active logical primary window to the foreground, reporting whether it ended up visible.
 ///
 /// The individual calls used to be discarded with `let _ =`, which made a failed
 /// reveal completely silent. That matters on macOS: an instance that has lost its
@@ -555,31 +780,43 @@ fn apply_linux_webkit_rendering_workarounds() {
 /// so the app looks like it simply does not start. Logging here is what makes that
 /// state diagnosable at all.
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("[WINDOW] show_main_window: no \"main\" webview window to reveal");
+    let Some(label) = logical_primary_window_label(app) else {
+        eprintln!("[WINDOW] show_main_window: no workspace window to reveal");
+        return false;
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        eprintln!("[WINDOW] show_main_window: logical primary window \"{label}\" is missing");
+        startup_recovery::record(format!("show_main_window: workspace window \"{label}\" is missing"));
         return false;
     };
     if let Err(err) = window.show() {
         eprintln!("[WINDOW] show_main_window: show() failed: {err}");
+        startup_recovery::record(format!("show_main_window: show() failed: {err}"));
     }
     if let Err(err) = window.unminimize() {
         eprintln!("[WINDOW] show_main_window: unminimize() failed: {err}");
+        startup_recovery::record(format!("show_main_window: unminimize() failed: {err}"));
     }
     if let Err(err) = window.set_focus() {
         eprintln!("[WINDOW] show_main_window: set_focus() failed: {err}");
+        startup_recovery::record(format!("show_main_window: set_focus() failed: {err}"));
     }
     match window.is_visible() {
         Ok(visible) => visible,
         Err(err) => {
             eprintln!("[WINDOW] show_main_window: is_visible() failed: {err}");
+            startup_recovery::record(format!("show_main_window: is_visible() failed: {err}"));
             false
         }
     }
 }
 
 fn main_window_probe_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    let Some(window) = app.get_webview_window("main") else {
-        return "main_window=missing".to_string();
+    let Some(label) = logical_primary_window_label(app) else {
+        return "workspace_window=missing".to_string();
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        return format!("workspace_window={label}:missing");
     };
     format!(
         "main_window visible={:?} minimized={:?} maximized={:?} fullscreen={:?} position={:?} size={:?}",
@@ -602,9 +839,10 @@ fn prepare_main_window_for_display<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
 }
 
 fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval(
-            r#"
+    if let Some(label) = logical_primary_window_label(app) {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.eval(
+                r#"
             (() => {
               const active = document.activeElement;
               if (active instanceof HTMLElement) active.blur();
@@ -616,7 +854,8 @@ fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
               }
             })();
             "#,
-        );
+            );
+        }
     }
 }
 
@@ -658,7 +897,8 @@ pub(crate) fn hide_main_window_for_close<R: tauri::Runtime>(app: &tauri::AppHand
 }
 
 pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, target: &str) {
-    let frontend_ready = app.try_state::<CloseBehaviorState>().is_some_and(|state| state.is_frontend_ready());
+    let frontend_ready =
+        app.try_state::<workspace_session::WorkspaceSessionState>().is_some_and(|state| state.any_ready());
     if should_fallback_to_native_quit(target, frontend_ready) {
         // A missing WebView2 runtime can prevent the frontend listener from ever
         // loading. Only the explicit tray Quit fallback bypasses the prompt.
@@ -669,17 +909,43 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
-    let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
+    window_state_guard::remember_main_window_geometry(app);
+    let Some(window_label) = logical_primary_window_label(app) else {
+        return;
+    };
+    if target == "quit" {
+        let sessions = app.state::<workspace_session::WorkspaceSessionState>();
+        let preferred = if sessions.is_ready(&window_label) {
+            window_label
+        } else {
+            app.webview_windows().into_keys().find(|label| sessions.is_ready(label)).unwrap_or(window_label)
+        };
+        let (id, label) = sessions.begin(&preferred);
+        workspace_session::send_quit_request(app, &id, &label);
+        return;
+    }
+    let _ = app.emit_to(
+        EventTarget::webview_window(window_label.as_str()),
+        APP_CLOSE_REQUESTED_EVENT,
+        serde_json::json!({ "target": target, "windowLabel": window_label }),
+    );
 }
 
-fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+fn register_deep_link_state<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    // macOS can deliver Opened before setup, so its queue must already exist.
+    builder.manage(commands::deep_link::DeepLinkOpenState::default())
+}
+
+fn open_connection_deep_links<R: tauri::Runtime>(app: &tauri::AppHandle<R>, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_connection_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_connection_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-connection-links", links);
     }
-    let _ = app.emit("dbx-open-connection-links", links);
     show_main_window(app);
 }
 
@@ -687,10 +953,25 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     if links.is_empty() {
         return;
     }
-    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
-        state.push_ai_config_links(links.clone());
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_ai_config_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-ai-config-links", links);
     }
-    let _ = app.emit("dbx-open-ai-config-links", links);
+    show_main_window(app);
+}
+
+fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+    if links.is_empty() {
+        return;
+    }
+    let should_emit = app
+        .try_state::<commands::deep_link::DeepLinkOpenState>()
+        .is_none_or(|state| state.route_plugin_install_links(links.clone()));
+    if should_emit {
+        let _ = app.emit("dbx-open-plugin-install-links", links);
+    }
     show_main_window(app);
 }
 
@@ -698,13 +979,17 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
 enum LocaleFamily {
     Azerbaijani,
     English,
+    Thai,
     SimplifiedChinese,
     TraditionalChinese,
     Japanese,
     Korean,
     Spanish,
+    Indonesian,
     Italian,
     Portuguese,
+    Polish,
+    Russian,
     Turkish,
 }
 
@@ -725,18 +1010,26 @@ fn locale_family(locale: &str) -> LocaleFamily {
         }
     } else if is_language("ja") {
         LocaleFamily::Japanese
+    } else if is_language("th") {
+        LocaleFamily::Thai
     } else if is_language("ko") {
         LocaleFamily::Korean
     } else if is_language("az") {
         LocaleFamily::Azerbaijani
     } else if is_language("es") {
         LocaleFamily::Spanish
+    } else if is_language("id") {
+        LocaleFamily::Indonesian
     } else if is_language("tr") {
         LocaleFamily::Turkish
     } else if is_language("it") {
         LocaleFamily::Italian
     } else if is_language("pt") {
         LocaleFamily::Portuguese
+    } else if is_language("pl") {
+        LocaleFamily::Polish
+    } else if is_language("ru") {
+        LocaleFamily::Russian
     } else {
         LocaleFamily::English
     }
@@ -746,13 +1039,17 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese => ("显示 DBX", "退出 DBX"),
         LocaleFamily::TraditionalChinese => ("顯示 DBX", "退出 DBX"),
+        LocaleFamily::Thai => ("แสดง DBX", "ออกจาก DBX"),
         LocaleFamily::Japanese => ("DBXを表示", "DBXを終了"),
         LocaleFamily::Korean => ("DBX 표시", "DBX 종료"),
         LocaleFamily::Azerbaijani => ("DBX-i göstər", "DBX-dən çıx"),
         LocaleFamily::Spanish => ("Mostrar DBX", "Salir de DBX"),
+        LocaleFamily::Indonesian => ("Tampilkan DBX", "Keluar dari DBX"),
         LocaleFamily::Italian => ("Mostra DBX", "Esci da DBX"),
         LocaleFamily::Turkish => ("DBX'i Göster", "DBX'ten Çık"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
+        LocaleFamily::Russian => ("Показать DBX", "Выйти из DBX"),
+        LocaleFamily::Polish => ("Pokaż DBX", "Zakończ DBX"),
         LocaleFamily::English => ("Show DBX", "Quit DBX"),
     }
 }
@@ -763,14 +1060,38 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese => "复制支持信息",
         LocaleFamily::TraditionalChinese => "複製支援資訊",
+        LocaleFamily::Thai => "คัดลอกข้อมูลสำหรับขอความช่วยเหลือ",
         LocaleFamily::Japanese => "サポート情報をコピー",
         LocaleFamily::Korean => "지원 정보 복사",
         LocaleFamily::Azerbaijani => "Dəstək məlumatlarını kopyala",
         LocaleFamily::Spanish => "Copiar información",
+        LocaleFamily::Indonesian => "Salin Info Dukungan",
         LocaleFamily::Italian => "Copia informazioni",
         LocaleFamily::Turkish => "Destek bilgilerini kopyala",
         LocaleFamily::Portuguese => "Copiar informações",
+        LocaleFamily::Russian => "Копировать сведения о поддержке",
+        LocaleFamily::Polish => "Kopiuj informacje o pomocy technicznej",
         LocaleFamily::English => "Copy Support Info",
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_menu_close_tab_label(locale: &str) -> &'static str {
+    match locale_family(locale) {
+        LocaleFamily::SimplifiedChinese => "关闭标签页",
+        LocaleFamily::TraditionalChinese => "關閉分頁",
+        LocaleFamily::Thai => "ปิดแท็บ",
+        LocaleFamily::Japanese => "タブを閉じる",
+        LocaleFamily::Korean => "탭 닫기",
+        LocaleFamily::Azerbaijani => "Vərəqi bağla",
+        LocaleFamily::Spanish => "Cerrar pestaña",
+        LocaleFamily::Indonesian => "Tutup Tab",
+        LocaleFamily::Italian => "Chiudi scheda",
+        LocaleFamily::Turkish => "Sekmeyi kapat",
+        LocaleFamily::Portuguese => "Fechar aba",
+        LocaleFamily::Russian => "Закрыть вкладку",
+        LocaleFamily::Polish => "Zamknij kartę",
+        LocaleFamily::English => "Close Tab",
     }
 }
 
@@ -778,13 +1099,17 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
 fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese | LocaleFamily::TraditionalChinese => format!("退出 {app_name}"),
+        LocaleFamily::Thai => format!("ออกจาก {app_name}"),
         LocaleFamily::Japanese => format!("{app_name}を終了"),
         LocaleFamily::Korean => format!("{app_name} 종료"),
         LocaleFamily::Azerbaijani => format!("{app_name}-dən çıx"),
         LocaleFamily::Spanish => format!("Salir de {app_name}"),
+        LocaleFamily::Indonesian => format!("Keluar dari {app_name}"),
         LocaleFamily::Italian => format!("Esci da {app_name}"),
         LocaleFamily::Turkish => format!("{app_name} Uygulamasından Çık"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
+        LocaleFamily::Russian => format!("Выйти из {app_name}"),
+        LocaleFamily::Polish => format!("Zakończ {app_name}"),
         LocaleFamily::English => format!("Quit {app_name}"),
     }
 }
@@ -863,10 +1188,14 @@ fn setup_desktop_tray<R: tauri::Runtime, M: Manager<R>>(
 }
 
 #[cfg(target_os = "macos")]
-fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+fn apply_macos_app_icon_theme(
+    app: &tauri::AppHandle,
+    icon_theme: DesktopIconTheme,
+    persist_bundle_icon: bool,
+) -> tauri::Result<()> {
     use objc2::{AllocAnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
+    use objc2_app_kit::{NSApplication, NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
+    use objc2_foundation::{NSBundle, NSData, NSString};
 
     let icon_bytes = match icon_theme {
         DesktopIconTheme::Default => MACOS_DEFAULT_APP_ICON,
@@ -877,9 +1206,31 @@ fn apply_macos_app_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconThe
         // app switcher reflect the selected theme immediately.
         let marker = unsafe { MainThreadMarker::new_unchecked() };
         let application = NSApplication::sharedApplication(marker);
+        let workspace = NSWorkspace::sharedWorkspace();
+        let app_bundle_path = NSBundle::mainBundle().bundlePath();
         let data = NSData::with_bytes(icon_bytes);
         if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
             unsafe { application.setApplicationIconImage(Some(&icon)) };
+
+            // NSApplication only changes the icon for this process lifetime.
+            // Persist the selected icon on the app bundle so Finder and the
+            // Dock keep showing it after DBX exits. A nil image removes the
+            // custom icon and restores the bundle's packaged default.
+            if persist_bundle_icon {
+                let persistent_icon = match icon_theme {
+                    DesktopIconTheme::Default => None,
+                    DesktopIconTheme::Black => Some(&*icon),
+                };
+                if app_bundle_path.hasSuffix(&NSString::from_str(".app"))
+                    && !workspace.setIcon_forFile_options(
+                        persistent_icon,
+                        &app_bundle_path,
+                        NSWorkspaceIconCreationOptions::empty(),
+                    )
+                {
+                    log::warn!("Failed to persist the selected macOS app icon; the app bundle may not be writable");
+                }
+            }
         } else {
             log::warn!("Failed to decode the selected macOS application icon");
         }
@@ -901,21 +1252,23 @@ fn apply_macos_development_dock_badge(app: &tauri::AppHandle) -> tauri::Result<(
     })
 }
 
-fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
+pub(crate) fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        apply_macos_app_icon_theme(app, icon_theme)
+        apply_macos_app_icon_theme(app, icon_theme, true)
     }
 
     #[cfg(not(target_os = "macos"))]
-    if let Some(window) = app.get_webview_window("main") {
-        match icon_theme {
-            DesktopIconTheme::Default => {
-                if let Some(icon) = app.default_window_icon().cloned() {
-                    window.set_icon(icon)?;
+    if let Some(label) = logical_primary_window_label(app) {
+        if let Some(window) = app.get_webview_window(&label) {
+            match icon_theme {
+                DesktopIconTheme::Default => {
+                    if let Some(icon) = app.default_window_icon().cloned() {
+                        window.set_icon(icon)?;
+                    }
                 }
+                DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
             }
-            DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -963,22 +1316,225 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
     Ok(())
 }
 
+async fn shutdown_runtime_resources(app_handle: &tauri::AppHandle) {
+    if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+        backups.shutdown().await;
+    }
+    if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>() {
+        server.shutdown(Duration::from_secs(1)).await;
+    }
+    if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+        state.shutdown(Duration::from_secs(3)).await;
+    }
+}
+
+fn run_shutdown_on_dedicated_thread(shutdown: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("dbx-runtime-shutdown".into())
+        .spawn(shutdown)
+        .map_err(|error| format!("failed to start runtime shutdown: {error}"))?
+        .join()
+        .map_err(|_| "runtime shutdown thread panicked".to_string())
+}
+
+pub(crate) fn cleanup_before_updater_forced_exit(app_handle: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    window_state_guard::save_current_main_window_geometry(app_handle);
+
+    let shutdown_app = app_handle.clone();
+    if let Err(error) = run_shutdown_on_dedicated_thread(move || {
+        tauri::async_runtime::block_on(shutdown_runtime_resources(&shutdown_app));
+    }) {
+        log::warn!("Failed to shut down DBX runtime resources before updater exit: {error}");
+    }
+    app_handle.cleanup_before_exit();
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_requires_dmabuf_workaround,
-        linux_drm_driver_is_software_only, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
-        linux_pci_id_from_sysfs_value, linux_selected_drm_render_device, linux_uses_native_wayland,
-        linux_webkit_environment_override, linux_webkit_rendering_workarounds, native_window_decorations_override,
-        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
-        should_hide_window_before_exit, should_hide_window_on_close, should_setup_desktop_tray,
-        should_show_main_window_after_setup, should_show_main_window_before_setup_tasks, startup_data_dir_mode,
-        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        app_menu_close_tab_label, app_menu_copy_support_info_label, app_menu_quit_label,
+        linux_appimage_requires_dmabuf_workaround, linux_drm_driver_is_software_only,
+        linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
+        linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
+        linux_webkit_rendering_workarounds, native_window_decorations_override, run_shutdown_on_dedicated_thread,
+        should_confirm_app_exit_request, should_enable_linux_floating_frame, should_enable_single_instance,
+        should_fallback_to_native_quit, should_hide_window_before_exit, should_hide_window_on_close,
+        should_route_linux_close_through_tray, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver, WindowOwnershipState,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    #[cfg(desktop)]
+    fn deep_links_received_before_setup_survive_until_frontend_ready() {
+        use crate::commands::deep_link::{pending_open_connection_links, DeepLinkOpenState};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tauri::test::{mock_builder, mock_context, noop_assets};
+        use tauri::{Listener, Manager};
+
+        let setup_ran = Arc::new(AtomicBool::new(false));
+        let setup_observed = setup_ran.clone();
+        // Use the production registration path, not a test-only manage call.
+        let mut app = super::register_deep_link_state(mock_builder())
+            .setup(move |_| {
+                setup_observed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        assert!(!setup_ran.load(Ordering::SeqCst));
+        assert!(app.try_state::<DeepLinkOpenState>().is_some());
+
+        let emitted = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let observed = emitted.clone();
+        app.listen("dbx-open-connection-links", move |event| {
+            observed.lock().unwrap().push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let first = "dbx://connection/new?type=mysql&one_time=true".to_string();
+        let second = "dbx://connection/new?type=postgres&one_time=false".to_string();
+        super::open_connection_deep_links(app.handle(), vec![first.clone()]);
+        super::open_connection_deep_links(app.handle(), vec![first.clone(), second.clone()]);
+        assert!(emitted.lock().unwrap().is_empty());
+
+        // Tauri runs setup here even though MockRuntime's iteration is a no-op.
+        // A single iteration avoids the busy-loop the deprecation warns about.
+        #[allow(deprecated)]
+        app.run_iteration(|_, _| {});
+        assert!(setup_ran.load(Ordering::SeqCst));
+        assert!(emitted.lock().unwrap().is_empty());
+        assert_eq!(pending_open_connection_links(app.state()), vec![first, second]);
+        assert!(pending_open_connection_links(app.state()).is_empty());
+
+        let warm = "dbx://connection/new?type=mysql&host=localhost".to_string();
+        super::open_connection_deep_links(app.handle(), vec![warm.clone()]);
+        assert_eq!(*emitted.lock().unwrap(), vec![vec![warm]]);
+        assert!(pending_open_connection_links(app.state()).is_empty());
+    }
+
+    #[test]
+    fn forced_exit_shutdown_waits_for_a_dedicated_cleanup_thread() {
+        let caller = std::thread::current().id();
+        let cleanup_thread = Arc::new(Mutex::new(None));
+        let observed_thread = cleanup_thread.clone();
+
+        run_shutdown_on_dedicated_thread(move || {
+            *observed_thread.lock().unwrap() = Some(std::thread::current().id());
+        })
+        .unwrap();
+
+        let cleanup_thread = cleanup_thread.lock().unwrap().expect("cleanup thread id");
+        assert_ne!(cleanup_thread, caller);
+    }
+
+    #[test]
+    fn linux_floating_frame_is_enabled_by_default_on_gnome_wayland_only() {
+        for desktop in ["GNOME", "ubuntu:GNOME", "gnome", "GNOME-Classic:GNOME"] {
+            assert!(should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop)), true), "{desktop}");
+        }
+        for desktop in ["KDE", "XFCE", "X-Cinnamon", "sway", "", "GNOMEISH"] {
+            assert!(
+                !should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop)), true),
+                "{desktop}"
+            );
+        }
+        assert!(!should_enable_linux_floating_frame(true, true, None, None, true));
+    }
+
+    #[test]
+    fn linux_floating_frame_is_disabled_by_default_on_gnome_x11() {
+        for desktop in ["GNOME", "ubuntu:GNOME", "GNOME-Classic:GNOME"] {
+            assert!(
+                !should_enable_linux_floating_frame(true, false, None, Some(OsStr::new(desktop)), true),
+                "{desktop}"
+            );
+        }
+        assert!(should_enable_linux_floating_frame(
+            true,
+            false,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
+    }
+
+    #[test]
+    fn linux_floating_frame_override_wins_over_desktop() {
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), Some(OsStr::new("KDE")), true));
+        assert!(!should_enable_linux_floating_frame(
+            true,
+            true,
+            Some(OsStr::new("0")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
+        for value in ["", "true", "auto", "01"] {
+            assert!(should_enable_linux_floating_frame(
+                true,
+                true,
+                Some(OsStr::new(value)),
+                Some(OsStr::new("GNOME")),
+                true
+            ));
+            assert!(!should_enable_linux_floating_frame(
+                true,
+                true,
+                Some(OsStr::new(value)),
+                Some(OsStr::new("KDE")),
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn linux_floating_frame_requires_compositing() {
+        assert!(!should_enable_linux_floating_frame(
+            false,
+            true,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
+        assert!(!should_enable_linux_floating_frame(false, true, None, Some(OsStr::new("GNOME")), true));
+    }
+
+    #[test]
+    fn linux_floating_frame_setting_can_disable_gnome_default() {
+        let desktop = Some(OsStr::new("GNOME"));
+        assert!(!should_enable_linux_floating_frame(true, true, None, desktop, false));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("auto")), desktop, false));
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), desktop, false));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("0")), desktop, true));
+        assert!(!should_enable_linux_floating_frame(true, false, None, desktop, true));
+        assert!(!should_enable_linux_floating_frame(false, true, Some(OsStr::new("1")), desktop, false));
+    }
+
+    #[test]
+    fn transfers_logical_primary_to_most_recent_remaining_workspace() {
+        let state = WindowOwnershipState::new();
+        state.record_activity("dbx-tab-a");
+        state.record_activity("dbx-tab-b");
+
+        assert_eq!(
+            state.complete_close("main", &["dbx-tab-a".to_string(), "dbx-tab-b".to_string()]),
+            Some("dbx-tab-b".to_string())
+        );
+        assert_eq!(state.logical_primary(), "dbx-tab-b");
+    }
+
+    #[test]
+    fn closing_a_non_primary_workspace_keeps_existing_owner() {
+        let state = WindowOwnershipState::new();
+        state.record_activity("dbx-tab-a");
+
+        assert_eq!(state.complete_close("dbx-tab-a", &["main".to_string()]), None);
+        assert_eq!(state.logical_primary(), "main");
+    }
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -990,12 +1546,18 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("zh-Hant-HK"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("zh-MO"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("ja-JP"), ("DBXを表示", "DBXを終了"));
+        assert_eq!(tray_menu_labels_for_locale("th-TH"), ("แสดง DBX", "ออกจาก DBX"));
+        assert_eq!(tray_menu_labels_for_locale("th_TH"), ("แสดง DBX", "ออกจาก DBX"));
         assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("DBX 표시", "DBX 종료"));
         assert_eq!(tray_menu_labels_for_locale("az-AZ"), ("DBX-i göstər", "DBX-dən çıx"));
         assert_eq!(tray_menu_labels_for_locale("es-ES"), ("Mostrar DBX", "Salir de DBX"));
+        assert_eq!(tray_menu_labels_for_locale("id-ID"), ("Tampilkan DBX", "Keluar dari DBX"));
         assert_eq!(tray_menu_labels_for_locale("it-IT"), ("Mostra DBX", "Esci da DBX"));
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
         assert_eq!(tray_menu_labels_for_locale("tr-TR"), ("DBX'i Göster", "DBX'ten Çık"));
+        assert_eq!(tray_menu_labels_for_locale("ru-RU"), ("Показать DBX", "Выйти из DBX"));
+        assert_eq!(tray_menu_labels_for_locale("pl-PL"), ("Pokaż DBX", "Zakończ DBX"));
+        assert_eq!(tray_menu_labels_for_locale("pl_PL"), ("Pokaż DBX", "Zakończ DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
@@ -1007,17 +1569,29 @@ mod tests {
         assert_eq!(app_menu_quit_label("zh-CN", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("zh-TW", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("ja-JP", "DBX"), "DBXを終了");
+        assert_eq!(app_menu_quit_label("th-TH", "DBX"), "ออกจาก DBX");
+        assert_eq!(app_menu_quit_label("th_TH", "DBX"), "ออกจาก DBX");
         assert_eq!(app_menu_quit_label("ko-KR", "DBX"), "DBX 종료");
         assert_eq!(app_menu_quit_label("tr-TR", "DBX"), "DBX Uygulamasından Çık");
+        assert_eq!(app_menu_quit_label("ru-RU", "DBX"), "Выйти из DBX");
         assert_eq!(app_menu_quit_label("az-AZ", "DBX"), "DBX-dən çıx");
+        assert_eq!(app_menu_quit_label("id-ID", "DBX"), "Keluar dari DBX");
         assert_eq!(app_menu_quit_label("en-US", "DBX"), "Quit DBX");
         assert_eq!(app_menu_quit_label("", "DBX"), "Quit DBX");
         assert_eq!(app_menu_copy_support_info_label("zh-CN"), "复制支持信息");
         assert_eq!(app_menu_copy_support_info_label("zh-TW"), "複製支援資訊");
+        assert_eq!(app_menu_copy_support_info_label("th-TH"), "คัดลอกข้อมูลสำหรับขอความช่วยเหลือ");
         assert_eq!(app_menu_copy_support_info_label("ko-KR"), "지원 정보 복사");
         assert_eq!(app_menu_copy_support_info_label("tr-TR"), "Destek bilgilerini kopyala");
+        assert_eq!(app_menu_copy_support_info_label("ru-RU"), "Копировать сведения о поддержке");
         assert_eq!(app_menu_copy_support_info_label("az-AZ"), "Dəstək məlumatlarını kopyala");
+        assert_eq!(app_menu_copy_support_info_label("id-ID"), "Salin Info Dukungan");
         assert_eq!(app_menu_copy_support_info_label("en-US"), "Copy Support Info");
+        assert_eq!(app_menu_close_tab_label("zh-CN"), "关闭标签页");
+        assert_eq!(app_menu_close_tab_label("zh-TW"), "關閉分頁");
+        assert_eq!(app_menu_close_tab_label("ja-JP"), "タブを閉じる");
+        assert_eq!(app_menu_close_tab_label("th-TH"), "ปิดแท็บ");
+        assert_eq!(app_menu_close_tab_label("en-US"), "Close Tab");
     }
 
     #[test]
@@ -1029,6 +1603,17 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn routes_linux_close_through_tray_only_with_main_window_frontend_and_tray() {
+        assert!(should_route_linux_close_through_tray("linux", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "main", true, false));
+        assert!(!should_route_linux_close_through_tray("linux", "main", false, true));
+        assert!(!should_route_linux_close_through_tray("linux", "detached-tab-1", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "plugin-floating-audio", true, true));
+        assert!(!should_route_linux_close_through_tray("macos", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("windows", "main", true, true));
     }
 
     #[test]
@@ -1138,13 +1723,19 @@ mod tests {
 
     #[test]
     fn classifies_linux_nvidia_driver_from_selected_renderer() {
-        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None, false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("nvidia"), false), LinuxNvidiaDriver::Proprietary);
+        // Hybrid laptops: the iGPU renders, so the proprietary dGPU module must not disable DMABuf.
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("xe"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), true), LinuxNvidiaDriver::Proprietary);
     }
 
     fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
@@ -1232,7 +1823,10 @@ mod tests {
 
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1245,7 +1839,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
 
@@ -1255,7 +1849,10 @@ mod tests {
         ];
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1268,7 +1865,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
     }
@@ -1396,29 +1993,133 @@ mod tests {
     }
 }
 
+fn route_external_commands(
+    main_handler: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    dbx_tauri_consul::route(dbx_tauri_schema::route(main_handler))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebView2 warm-up child mode: when a compatibility profile asks for a
+    // preflight, the parent re-launches this executable with
+    // DBX_WEBVIEW2_PREFLIGHT_CHILD=1. The child only creates and releases a
+    // WebView2 environment (forcing AV products to scan/trust msedgewebview2.exe)
+    // and exits before any Tauri/window setup. Doing this in a separate process
+    // isolates a hanging environment creation from the real startup attempt.
+    #[cfg(target_os = "windows")]
+    if webview2_preflight::run_child_if_requested() {
+        return;
+    }
+
+    // Metadata/completion command chains nest very large async futures and can
+    // exhaust tokio's default 2 MiB worker stack, which aborts the process with
+    // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
+    // server runtimes use as well.
+    let runtime = dbx_core::scheduled_backup::worker_runtime().expect("Failed to build tokio runtime");
+    let runtime_handle = runtime.handle().clone();
+    let _runtime = Box::leak(Box::new(runtime));
+    tauri::async_runtime::set(runtime_handle);
+
     startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
     append_startup_probe("runtime prerequisites configured");
+    // Record the WebView2 / security-software environment before any window is
+    // created. This is the first thing to look at when a startup recovery chain
+    // fails: it distinguishes a missing/hooked WebView2 runtime from an AV
+    // product that blocks the child browser process.
+    #[cfg(target_os = "windows")]
+    let webview2_runtime_health = webview2_preflight::runtime_health();
+    #[cfg(target_os = "windows")]
+    append_startup_probe(format!("webview2 runtime_health={}", webview2_runtime_health.as_str()));
+
+    #[cfg(target_os = "windows")]
+    {
+        // Collect WebView2/AV diagnostics on a worker thread with a hard deadline:
+        // on machines where a security product hooks the WebView2 loader (the very
+        // machines this diagnostics targets) the version query must never be able
+        // to delay the real startup path. A timed-out worker is abandoned and dies
+        // with the process.
+        let (diagnostics_tx, diagnostics_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let diagnostics = webview2_preflight::collect_diagnostics();
+            let _ = diagnostics_tx.send(webview2_preflight::format_diagnostics(&diagnostics));
+        });
+        match diagnostics_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(lines) => {
+                for line in lines {
+                    append_startup_probe(line);
+                }
+            }
+            Err(_) => append_startup_probe("webview2 diagnostics timed out after 3s; continuing startup"),
+        }
+    }
+    // A missing/damaged WebView2 runtime is the #1 cause of "the window never
+    // appears" on enterprise Windows machines, and it used to be misdiagnosed as a
+    // security product blocking WebView2 (the compatibility ladder then retried for
+    // minutes). Detect it before Tauri tries to create the window and show one
+    // clear, actionable message instead.
+    #[cfg(target_os = "windows")]
+    {
+        // Diagnostic escape hatch: a user who wants the AV compatibility ladder to
+        // run even though the WebView2 runtime is missing/damaged can force it.
+        // This makes no difference on a healthy runtime but lets support reproduce
+        // "try everything" behaviour on a broken machine.
+        let force_compat_on_broken_runtime =
+            std::env::var_os("DBX_TRY_COMPAT_ON_BROKEN_WEBVIEW2").is_some_and(|value| value == "1");
+        match webview2_runtime_health {
+            webview2_preflight::WebView2RuntimeHealth::Missing if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_missing_webview2_runtime();
+                return;
+            }
+            webview2_preflight::WebView2RuntimeHealth::RegisteredButDamaged if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_damaged_webview2_runtime(
+                    webview2_preflight::collect_diagnostics().runtime_version.as_deref(),
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Profile-specific pre-Tauri work (scan delay, WebView2 warm-up preflight).
+    // This must run before `Builder::default().build()` because wry reads the
+    // WebView2 environment variables during window creation.
+    startup_recovery::run_profile_pre_tauri_hooks();
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
 
     let startup_begin = Instant::now();
 
-    let builder = tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let default_data_dir = dirs::data_dir().expect("Failed to resolve app data dir").join(&context.config().identifier);
+    let mut data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
+    data_dir_resolution.prepare().expect("Failed to prepare app data dir");
+    let instance_secret = data_dir_resolution.single_instance_secret();
+    let window_state_filename = if data_dir_resolution.uses_custom_data_dir() {
+        data_dir_resolution.data_dir.join(tauri_plugin_window_state::DEFAULT_FILENAME).to_string_lossy().into_owned()
+    } else {
+        tauri_plugin_window_state::DEFAULT_FILENAME.to_owned()
+    };
+
+    let builder = register_deep_link_state(tauri::Builder::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_fs::init())
+        // Plugin workbench sandbox documents lazy-load their code-split chunks
+        // through this scheme; see plugin_ui_protocol.rs.
+        .register_asynchronous_uri_scheme_protocol(plugin_ui_protocol::PLUGIN_UI_SCHEME, plugin_ui_protocol::handle);
 
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
-        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        builder.plugin(tauri_plugin_single_instance::Builder::new().secret(instance_secret).callback(|app, args, cwd| {
             let app_open_requested = args.iter().any(|arg| commands::deep_link::is_app_open_deep_link(arg));
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
             let ai_config_links = commands::deep_link::ai_config_deep_links_from_args(args.clone());
             open_ai_config_deep_links(app, ai_config_links);
+            let plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(args.clone());
+            open_plugin_install_deep_links(app, plugin_install_links);
 
             let paths = commands::external_sql::sql_file_paths_from_args(args.clone(), std::path::Path::new(&cwd));
             if !paths.is_empty() {
@@ -1445,7 +2146,7 @@ pub fn run() {
                     main_window_probe_state(app)
                 );
             }
-        }))
+        }).build())
     } else {
         builder
     };
@@ -1454,10 +2155,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_filename(window_state_filename)
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                // The main window's geometry is restored by `window_state_guard`
+                // in logical units; the plugin's physical restore is the bug in
+                // issue #13168.
+                .skip_initial_state("main")
                 .build(),
         );
 
@@ -1468,19 +2173,35 @@ pub fn run() {
         if event.id() == APP_MENU_QUIT_ID {
             request_app_close(app, "quit");
         } else if event.id() == APP_MENU_COPY_SUPPORT_INFO_ID {
-            if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
+            let promoted = app.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+            let text = commands::support_info::format_support_info_for_clipboard(promoted.as_deref());
+            if let Err(err) = app.clipboard().write_text(text) {
                 log::warn!("Failed to copy support info from app menu: {err}");
             }
+        } else if event.id() == APP_MENU_CLOSE_TAB_ID {
+            let _ = app.emit(APP_CLOSE_ACTIVE_TAB_EVENT, ());
         }
     });
 
     builder
+        .manage(data_dir_resolution)
         .manage(CloseBehaviorState::new())
+        .manage(WindowOwnershipState::new())
+        .manage(workspace_session::WorkspaceSessionState::default())
+        .manage(commands::tab_drag_preview::TabDragPreviewState::default())
+        .manage(commands::plugin_file::PluginFileState::new())
+        .manage(commands::plugin_media::PluginMediaState::new())
+        .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
+        // Managed on the builder, not in setup: `build_app_menu` runs before
+        // setup and reads it to render the About panel.
+        .manage(promoted_build::PromotedBuildState::new())
         .on_page_load(|webview, payload| {
-            if payload.event() == PageLoadEvent::Started {
+            if payload.event() == PageLoadEvent::Started && is_workspace_window_label(webview.label()) {
+                let sessions = webview.app_handle().state::<workspace_session::WorkspaceSessionState>();
+                sessions.set_ready(webview.label(), false);
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
-                    state.set_frontend_ready(false);
+                    state.set_frontend_ready(sessions.any_ready());
                 }
             }
         })
@@ -1488,21 +2209,28 @@ pub fn run() {
             let setup_start = Instant::now();
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
+            #[cfg(not(target_os = "linux"))]
+            {
+                window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
-            if should_show_main_window_before_setup_tasks() {
-                prepare_main_window_for_display(app.handle());
-                show_main_window(app.handle());
-                append_startup_probe(format!(
-                    "early main window show requested; {}",
-                    main_window_probe_state(app.handle())
-                ));
+                if should_show_main_window_before_setup_tasks() {
+                    prepare_main_window_for_display(app.handle());
+                    show_main_window(app.handle());
+                    append_startup_probe(format!(
+                        "early main window show requested; {}",
+                        main_window_probe_state(app.handle())
+                    ));
+                    startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                        app.handle(),
+                    ));
+                }
             }
 
             append_startup_probe("resolving app data dir");
-            let default_data_dir =
-                app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
-            let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
+            let data_dir_resolution = app.state::<data_dir::DataDirResolution>();
             let data_dir = data_dir_resolution.data_dir.clone();
+            let portable_mode = data_dir_resolution.is_portable_mode();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
             let data_dir_mode = startup_data_dir_mode(&data_dir_resolution.mode);
             append_startup_probe(format!("data dir ready mode={data_dir_mode}"));
@@ -1513,19 +2241,66 @@ pub fn run() {
             }
             let db_path = data_dir.join("dbx.db");
 
+            // Failure logs from previous runs are kept only within their retention
+            // limits; prune once at startup so a killed process cannot leave the
+            // directory growing forever.
+            commands::sql_file::prune_desktop_sql_file_failure_logs(&data_dir);
+
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let s = Storage::open(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path)
+                    .await
+                    .expect("Failed to open storage")
+                    .with_desktop_credential_recovery();
+                if portable_mode {
+                    s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
+                    match s.prepare_portable_secret_key().await {
+                        Ok(true) => append_startup_probe("portable key copied from the platform credential store"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[STARTUP] portable key preparation failed: {error}");
+                            append_startup_probe(format!("portable key preparation failed: {error}"));
+                        }
+                    }
+                }
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
-                s.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
-                eprintln!("[STARTUP]   migrate_from_json in {:?}", t2.elapsed());
-                append_startup_probe(format!("json migration completed in {:?}", t2.elapsed()));
+                eprintln!("[STARTUP]   migration wizard deferred in {:?}", t2.elapsed());
+                append_startup_probe(format!("migration deferred to security wizard in {:?}", t2.elapsed()));
                 s
             });
+            let migration_ready = tauri::async_runtime::block_on(storage.inspect_data_migration())
+                .map(|status| status.is_ready())
+                .unwrap_or(false);
+            let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
+            app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
+            // The app menu — and with it the About panel metadata — is built
+            // before storage exists, so hand the stored marker over now.
+            #[cfg(target_os = "macos")]
+            {
+                let stored_promotion = tauri::async_runtime::block_on(storage.load_promoted_build()).unwrap_or(None);
+                promoted_build::apply_stored_promotion(app.handle(), stored_promotion);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // Transparency must be chosen before creating the native window. Read the saved
+                // preference first so a disabled frame is never briefly shown during startup.
+                create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
+                window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
+
+                if should_show_main_window_before_setup_tasks() {
+                    prepare_main_window_for_display(app.handle());
+                    show_main_window(app.handle());
+                    append_startup_probe(format!(
+                        "early main window show requested; {}",
+                        main_window_probe_state(app.handle())
+                    ));
+                }
+            }
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
@@ -1595,6 +2370,7 @@ pub fn run() {
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            state.set_honor_fixed_ssh_local_ports(true);
             let oidc_app_handle = app.handle().clone();
             state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
                 oidc_app_handle
@@ -1602,19 +2378,43 @@ pub fn run() {
                     .open_url(url, None::<&str>)
                     .map_err(|err| format!("Failed to open the system browser: {err}"))
             }));
+            let sf_app_handle = app.handle().clone();
+            state.set_salesforce_browser_opener(Arc::new(move |url| {
+                sf_app_handle
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|err| format!("Failed to open the system browser: {err}"))
+            }));
             let state = Arc::new(state);
             app.manage(state.clone());
+            commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            commands::connection::install_connection_liveness_bridge(app.handle(), state.clone());
+            commands::connection::install_connection_idle_closed_bridge(app.handle(), state.clone());
+            let app_identifier = app.config().identifier.clone();
+            let backups = tauri::async_runtime::block_on(async {
+                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone(), app_identifier)
+            });
+            match backups {
+                Ok(backups) => {
+                    if let Err(error) = backups.resume() {
+                        log::error!("[database-backup] background registration failed: {error}");
+                    }
+                    app.manage(backups);
+                }
+                Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
+            }
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
             let mcp_http_state = state.clone();
+            let mcp_gate = migration_gate.clone();
             tauri::async_runtime::spawn(async move {
+                mcp_gate.wait().await;
                 commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
             });
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());
             app.manage(commands::external_db::ExternalDbOpenState::default());
-            app.manage(commands::deep_link::DeepLinkOpenState::default());
             app.manage(commands::update::PendingUpdateState::default());
             app.manage(commands::ssh_prompt::SshPromptState::new());
             commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());
@@ -1630,9 +2430,16 @@ pub fn run() {
             open_connection_deep_links(app.handle(), startup_links);
             let startup_ai_config_links = commands::deep_link::ai_config_deep_links_from_args(&startup_args);
             open_ai_config_deep_links(app.handle(), startup_ai_config_links);
+            let startup_plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(&startup_args);
+            open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
-            commands::mcp_bridge::start(app_handle, state, data_dir);
+            #[cfg(target_os = "windows")]
+            tauri::async_runtime::spawn_blocking(commands::mcp::cleanup_mcp_installation_temp_files);
+            tauri::async_runtime::spawn(async move {
+                migration_gate.wait().await;
+                commands::mcp_bridge::start(app_handle, state, data_dir);
+            });
             eprintln!("[STARTUP] setup complete in {:?} (total {:?})", setup_start.elapsed(), startup_begin.elapsed());
             append_startup_probe(format!(
                 "setup tasks complete in {:?} total {:?}",
@@ -1657,6 +2464,9 @@ pub fn run() {
                     "final main window show requested; {}",
                     main_window_probe_state(app.handle())
                 ));
+                startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                    app.handle(),
+                ));
             }
             #[cfg(any(windows, target_os = "linux"))]
             let _ = app.deep_link().register_all();
@@ -1665,13 +2475,58 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Anchor the plugin-file drop consent on the Rust side: paths are
+            // registered for the webview that physically received the drop,
+            // and plugin_file_open_dropped consumes them there. Folders are
+            // granted as themselves and expand to their contained files at
+            // open time. Renderer-side drop events stay display-only; they
+            // cannot mint file access.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let dropped: Vec<String> = paths
+                    .iter()
+                    .filter(|path| path.is_file() || path.is_dir())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                if !dropped.is_empty() {
+                    if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
+                        state.register_dropped_paths(window.label(), dropped);
+                    }
+                }
+                return;
+            }
             if let tauri::WindowEvent::Destroyed = event {
+                window
+                    .app_handle()
+                    .state::<workspace_session::WorkspaceSessionState>()
+                    .set_ready(window.label(), false);
+                let _ = window.app_handle().emit("dbx:workspace-windows-changed", window.label());
+                // A webview that no longer exists must not leave drop grants
+                // behind for a future renderer to claim.
+                if let Some(state) = window.try_state::<commands::plugin_file::PluginFileState>() {
+                    state.clear_dropped_paths(window.label());
+                }
                 if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
                     let _ = window.emit("dbx:detached-tab-lost", serde_json::json!({ "tabId": tab_id }));
                 }
                 return;
             }
+            if let tauri::WindowEvent::Focused(true) = event {
+                if is_workspace_window_label(window.label()) {
+                    if let Some(state) = window.app_handle().try_state::<WindowOwnershipState>() {
+                        state.record_activity(window.label());
+                    }
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Floating plugin widgets (label prefix shared with the frontend's
+                // floatingWindowLabel) close like ordinary windows. Hiding them to
+                // the tray would keep their plugin instance — audio included —
+                // running invisibly, and the app-wide close prompt belongs to the
+                // main shell, not to a widget the user dismissed.
+                if window.label().starts_with("plugin-floating-") {
+                    return;
+                }
                 if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
                     if commands::app_settings::take_approved_detached_window_close(window.label()) {
                         return;
@@ -1683,24 +2538,43 @@ pub fn run() {
                     let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
                     return;
                 }
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                if !is_workspace_window_label(window.label()) {
                     return;
                 }
                 let app = window.app_handle();
-                if app.try_state::<CloseBehaviorState>().is_none() {
+                let close_behavior = app.try_state::<CloseBehaviorState>();
+                // Only intercept Linux close requests when the tray can restore
+                // the main window and the frontend can handle the close event.
+                let linux_tray_close = should_route_linux_close_through_tray(
+                    std::env::consts::OS,
+                    window.label(),
+                    close_behavior.as_ref().is_some_and(|state| state.is_frontend_ready()),
+                    app.tray_by_id(DESKTOP_TRAY_ID).is_some(),
+                );
+                let has_other_workspaces = !other_workspace_window_labels(app, window.label()).is_empty();
+                if !should_hide_window_on_close(std::env::consts::OS) && !linux_tray_close && !has_other_workspaces {
+                    return;
+                }
+                if close_behavior.is_none() {
                     api.prevent_close();
                     hide_main_window_for_close(app, window);
                     return;
                 }
                 api.prevent_close();
-                request_app_close(app, "settings");
+                let target =
+                    if other_workspace_window_labels(app, window.label()).is_empty() { "settings" } else { "window" };
+                emit_workspace_close_request(window, target);
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(migration_gate::guard_handler(route_external_commands(tauri::generate_handler![
             commands::ai::ai_complete,
             commands::ai::ai_stream,
             commands::ai::ai_agent_stream,
             commands::ai::ai_cancel_stream,
+            commands::ai::ai_resolve_tool_approval,
+            commands::ai::get_ai_plugin_tool_plugins,
+            commands::ai::set_ai_plugin_tool_plugin_enabled,
+            commands::ai::preview_plugin_ai_tools,
             commands::ai::ai_test_connection,
             commands::ai::ai_list_models,
             commands::ai::ai_resolve_model_effort,
@@ -1721,22 +2595,36 @@ pub fn run() {
             commands::ai_multi_config::set_default_ai_config,
             commands::ai_multi_config::save_ai_config_item,
             commands::ai_multi_config::delete_ai_config,
+            commands::cc_switch::load_cc_switch_ai_configs,
+            commands::cc_switch::load_magpie_ai_configs,
             commands::prompt_template::load_prompt_templates,
             commands::prompt_template::save_prompt_template,
             commands::prompt_template::delete_prompt_template,
             commands::prompt_template::get_ai_global_custom_instructions,
             commands::prompt_template::set_ai_global_custom_instructions,
+            commands::user_skills::list_user_skills,
+            commands::user_skills::read_user_skills,
             commands::app_settings::load_desktop_settings,
             commands::app_settings::save_desktop_settings,
             commands::app_settings::load_max_agent_turns,
             commands::app_settings::save_max_agent_turns,
+            commands::app_settings::load_history_retention_limit,
+            commands::app_settings::save_history_retention_limit,
+            commands::app_settings::load_mcp_history_retention_limit,
+            commands::app_settings::save_mcp_history_retention_limit,
             commands::app_settings::load_max_retries,
             commands::app_settings::save_max_retries,
+            commands::app_settings::load_app_appearance_settings,
+            commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
+            commands::app_settings::set_promoted_build,
             commands::app_settings::complete_app_close,
+            commands::app_settings::cancel_app_quit,
+            commands::app_settings::complete_window_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,
+            commands::window_controls::get_linux_window_control_icons,
             commands::app_settings::set_driver_store_dir,
             commands::app_settings::set_plugin_store_dir,
             commands::app_settings::set_agent_store_dir,
@@ -1745,6 +2633,15 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::app_settings::load_mcp_tool_catalog,
+            commands::app_settings::load_mcp_access_policy,
+            commands::app_settings::reset_invalid_mcp_access_policy,
+            commands::app_settings::set_mcp_plugin_scope_rule,
+            commands::app_settings::list_plugin_mcp_views,
+            commands::app_settings::load_plugin_mcp_view,
+            commands::app_settings::list_mcp_plugin_scopes,
+            commands::app_settings::save_plugin_mcp_grant,
+            commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
             commands::background_image::read_background_image,
@@ -1755,6 +2652,8 @@ pub fn run() {
             commands::mcp_http_server::rotate_mcp_http_server_token,
             commands::app_settings::load_editor_settings,
             commands::app_settings::save_editor_settings,
+            commands::app_settings::load_global_search_settings,
+            commands::app_settings::save_global_search_settings,
             commands::app_settings::load_open_tabs_state,
             commands::app_settings::save_open_tabs_state,
             commands::app_settings::save_detached_tab_handoff,
@@ -1770,6 +2669,12 @@ pub fn run() {
             commands::diagnostics::get_process_memory_info,
             commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
+            commands::cloud_sync::migration_status,
+            commands::cloud_sync::migration_start,
+            commands::cloud_sync::migration_retry,
+            commands::cloud_sync::migration_cleanup_backups,
+            commands::cloud_sync::migration_prepare_credential_reset,
+            commands::cloud_sync::migration_reset_credentials,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,
@@ -1778,18 +2683,34 @@ pub fn run() {
             commands::cloud_sync::forget_webdav_sync_secrets_passphrase,
             commands::cloud_sync::webdav_sync_upload,
             commands::cloud_sync::webdav_sync_download,
+            commands::cloud_sync::webdav_sync_inspect,
+            commands::cloud_sync::cloud_sync_local_catalog,
             commands::cloud_sync::snippet_sync_test,
             commands::cloud_sync::snippet_token_status,
             commands::cloud_sync::save_snippet_saved_token,
             commands::cloud_sync::forget_snippet_saved_token,
+            commands::cloud_sync::snippet_passphrase_status,
+            commands::cloud_sync::save_snippet_saved_passphrase,
+            commands::cloud_sync::forget_snippet_saved_passphrase,
             commands::cloud_sync::snippet_sync_settings,
             commands::cloud_sync::save_snippet_sync_id,
             commands::cloud_sync::retry_snippet_legacy_cleanup,
             commands::cloud_sync::snippet_sync_upload,
             commands::cloud_sync::snippet_sync_download,
+            commands::cloud_sync::snippet_sync_inspect,
+            commands::local_backup::local_backup_export,
+            commands::local_backup::local_backup_inspect,
+            commands::local_backup::local_backup_import,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
+            commands::connection::connection_parameters,
             commands::connection::test_ssh_tunnel,
+            commands::salesforce_oauth::salesforce_oauth_browser_authorize,
+            commands::salesforce_oauth::salesforce_oauth_device_start,
+            commands::salesforce_oauth::salesforce_oauth_device_poll,
+            commands::salesforce_oauth::salesforce_oauth_refresh,
+            commands::salesforce_oauth::salesforce_oauth_password_login,
+            commands::salesforce_oauth::salesforce_current_user,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,
@@ -1800,6 +2721,8 @@ pub fn run() {
             commands::connection::clear_all_session_credentials,
             commands::connection::refresh_connections,
             commands::connection::check_connection_health,
+            commands::connection::connection_is_open,
+            commands::connection::prewarm_connection,
             commands::connection::connection_identifier_quote,
             commands::connection::connection_database_info,
             commands::connection::save_connection_database_info,
@@ -1810,7 +2733,51 @@ pub fn run() {
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
             commands::connection::load_sidebar_layout,
+            commands::connection::save_table_vgroups,
+            commands::connection::load_table_vgroups,
+            commands::connection::delete_table_vgroups_for_connection,
+            commands::plugin_file::plugin_file_open_dropped,
+            commands::plugin_file::plugin_file_pick_files,
+            commands::plugin_file::plugin_file_save_as,
+            commands::plugin_file::plugin_file_read,
+            commands::plugin_file::plugin_file_write,
+            commands::plugin_file::plugin_file_close,
+            commands::plugin_media::plugin_media_open,
+            commands::plugin_media::plugin_media_close,
+            commands::plugin_storage::plugin_ui_storage_get,
+            commands::plugin_storage::plugin_ui_storage_set,
+            commands::plugin_storage::plugin_ui_storage_delete,
             commands::plugins::list_plugins,
+            commands::plugins::list_plugin_trusted_keys,
+            commands::plugins::save_plugin_trusted_key,
+            commands::plugins::remove_plugin_trusted_key,
+            commands::plugins::list_plugin_repositories,
+            commands::plugins::save_plugin_repository,
+            commands::plugins::remove_plugin_repository,
+            commands::plugins::fetch_plugin_marketplace_catalogs,
+            commands::plugins::install_marketplace_plugin,
+            commands::plugins::install_plugin_package,
+            commands::plugins::install_plugin_package_from_url,
+            commands::plugins::rollback_plugin,
+            commands::plugins::uninstall_plugin,
+            commands::plugins::activate_plugin,
+            commands::plugins::list_active_plugins,
+            commands::plugins::stop_plugin,
+            commands::plugins::invoke_plugin,
+            commands::plugin_download::download_plugin_file,
+            commands::plugin_download::cancel_plugin_download,
+            commands::plugins::invoke_plugin_connection_action,
+            commands::plugins::notify_plugin,
+            commands::plugins::send_plugin_binary,
+            commands::plugins::list_plugin_filesystem_entries,
+            commands::plugins::read_plugin_filesystem_file,
+            commands::plugins::write_plugin_filesystem_file,
+            commands::plugins::create_plugin_filesystem_directory,
+            commands::plugins::delete_plugin_filesystem_entry,
+            commands::plugins::rename_plugin_filesystem_entry,
+            commands::plugins::read_plugin_ui_entry,
+            commands::plugins::read_plugin_asset,
+            commands::plugins::read_plugin_ui_asset,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
             commands::plugins::list_jdbc_local_bundles,
@@ -1824,51 +2791,6 @@ pub fn run() {
             commands::plugins::install_jdbc_plugin,
             commands::plugins::install_jdbc_plugin_local,
             commands::plugins::uninstall_jdbc_plugin,
-            commands::schema::list_databases,
-            commands::schema::list_database_metadata,
-            commands::schema::list_database_storage,
-            commands::schema::list_xugu_tablespaces,
-            commands::schema::get_sqlserver_completion_context,
-            commands::schema::list_doris_catalogs,
-            commands::schema::list_doris_catalog_databases,
-            commands::schema::list_sqlserver_linked_servers,
-            commands::schema::list_sqlserver_linked_server_catalogs,
-            commands::schema::list_sqlserver_linked_server_schemas,
-            commands::schema::list_sqlserver_linked_server_tables,
-            commands::schema::list_tables,
-            commands::schema::get_table_comment,
-            commands::schema::get_mysql_table_auto_increment,
-            commands::schema::list_objects,
-            commands::schema::list_object_statistics,
-            commands::schema::list_completion_objects,
-            commands::schema::completion_assistant_search,
-            commands::schema::get_object_source,
-            commands::schema::get_event_info,
-            commands::schema::get_custom_type_details,
-            commands::schema::list_schemas,
-            commands::schema::list_schema_infos,
-            commands::schema::list_data_types,
-            commands::schema::get_columns,
-            commands::schema::get_all_columns,
-            commands::schema::get_sqlserver_column_metadata,
-            commands::schema::list_indexes,
-            commands::schema::list_reference_key_columns,
-            commands::schema::list_reference_keys,
-            commands::schema::list_foreign_keys,
-            commands::schema::list_triggers,
-            commands::schema::list_constraints,
-            commands::schema::list_partitions,
-            commands::schema::get_table_partition_status,
-            commands::schema::list_invalid_indexes,
-            commands::schema::list_subpartitions,
-            commands::schema::get_table_ddl,
-            commands::schema::list_functions,
-            commands::schema::list_sequences,
-            commands::schema::list_rules,
-            commands::schema::list_owners,
-            commands::schema::get_table_owner,
-            commands::schema::list_extensions,
-            commands::schema::list_available_extensions,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
             commands::schema_diff::generate_schema_sync_plan,
@@ -1883,11 +2805,26 @@ pub fn run() {
             commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
+            commands::pl_debug::pl_debug_bootstrap,
+            commands::pl_debug::pl_debug_inspect,
+            commands::pl_debug::pl_debug_compile,
+            commands::pl_debug::pl_debug_compile_status,
+            commands::pl_debug::pl_debug_list,
+            commands::pl_debug::pl_debug_start,
+            commands::pl_debug::pl_debug_status,
+            commands::pl_debug::pl_debug_heartbeat,
+            commands::pl_debug::pl_debug_operation,
+            commands::pl_debug::pl_debug_operate,
+            commands::pl_debug::pl_debug_read,
             commands::query::execute_conditional_update,
             commands::query::execute_multi,
             commands::query::cancel_query,
             commands::query::cancel_conditional_update,
             commands::query::close_query_session,
+            commands::query::read_large_value_chunk,
+            commands::query::release_large_value,
+            commands::query::download_large_value,
+            commands::query::export_snapshot_result,
             commands::query::close_client_connection_session,
             commands::query::execute_batch,
             commands::query::execute_script,
@@ -1903,10 +2840,19 @@ pub fn run() {
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
             commands::query::get_explain_info,
+            commands::query::get_plugin_plan_capabilities,
+            commands::query::get_plugin_estimated_plan,
+            commands::query::query_plugin_data,
+            commands::query::get_plugin_data_grants,
+            commands::query::set_plugin_data_grant,
             commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
             commands::query::build_database_search_sql,
+            commands::query::build_database_search_columns_sql,
+            commands::query::build_database_search_probe_sql,
+            commands::query::build_database_structure_search_sql,
+            commands::query::supports_database_structure_search,
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
             commands::query::build_rename_database_sql,
@@ -1929,15 +2875,26 @@ pub fn run() {
             commands::query::build_duplicate_table_structure_sql,
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
+            commands::query::validate_oracle_executable_object_source,
+            commands::query::prepare_oracle_trigger_sql,
+            commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
+            commands::query::build_oracle_object_export_sql,
             commands::query::build_routine_rename_object_source_statements,
+            commands::query::rewrite_oracle_routine_references,
+            commands::query::rewrite_oracle_table_references,
+            commands::query::parse_oracle_object_name,
+            commands::query::build_oracle_view_rename_source,
+            commands::query::review_oracle_view_rename_source,
             commands::query::build_view_ddl_sql,
             commands::query::build_table_structure_change_sql,
             commands::query::build_table_owner_change_sql,
             commands::query::preview_sqlite_table_structure_change,
             commands::query::apply_sqlite_table_structure_change,
             commands::query::build_create_table_sql,
+            commands::query::build_create_partitioned_table_sql,
+            commands::query::build_table_partition_operation_sql,
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,
             commands::query::prepare_data_grid_save,
@@ -1960,31 +2917,57 @@ pub fn run() {
             commands::data_compare::prepare_data_compare_missing_target,
             commands::data_compare::build_data_compare_sync_plan,
             commands::sql_file::preview_sql_file,
+            commands::sql_file::inspect_sql_file_tables,
             commands::sql_file::execute_sql_file,
             commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
+            commands::sql_file::sql_file_failure_log_info,
+            commands::sql_file::export_sql_file_failure_log,
+            commands::sql_file::read_sql_file_failure_log_text,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
             commands::external_sql::inspect_external_sql_file,
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
+            commands::list_sql_files::search_sql_file_contents,
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
+            commands::list_sql_files::create_sql_folder_in_folder,
+            commands::list_sql_files::rename_sql_folder_in_folder,
+            commands::list_sql_files::delete_sql_folder_in_folder,
+            commands::global_search::global_search,
+            commands::global_search::cancel_global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::deep_link::pending_open_ai_config_links,
+            commands::deep_link::pending_open_plugin_install_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
+            commands::tab_drag_preview::start_tab_drag_preview,
+            commands::tab_drag_preview::stop_tab_drag_preview,
+            commands::mongodb_import_export::preview_mongodb_import_file,
+            commands::mongodb_import_export::import_mongodb_file,
+            commands::mongodb_import_export::cancel_mongodb_import,
+            commands::mongodb_import_export::export_mongodb_query,
+            commands::mongodb_import_export::cancel_mongodb_export,
+            commands::mongodb_dump::inspect_mongodb_database_dump,
+            commands::mongodb_dump::prepare_mongodb_restore_source,
+            commands::mongodb_dump::release_mongodb_restore_source,
+            commands::mongodb_dump::dump_mongodb_database,
+            commands::mongodb_dump::restore_mongodb_database,
+            commands::mongodb_dump::cancel_mongodb_database_dump,
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
+            commands::redis_cmd::redis_key_metadata_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
+            commands::redis_cmd::redis_get_raw_value,
             commands::redis_cmd::redis_get_ttl,
             commands::redis_cmd::redis_get_stream_entries,
             commands::redis_cmd::redis_get_stream_groups,
@@ -2011,7 +2994,10 @@ pub fn run() {
             commands::redis_cmd::redis_check_json_module,
             commands::redis_cmd::redis_set_ttl,
             commands::redis_cmd::redis_set_expire_at,
+            commands::redis_cmd::redis_set_keys_ttl,
+            commands::redis_cmd::redis_set_keys_expire_at,
             commands::redis_cmd::redis_delete_keys,
+            commands::redis_cmd::redis_delete_keys_by_pattern,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
             commands::redis_cmd::redis_load_more,
@@ -2040,109 +3026,6 @@ pub fn run() {
             commands::zookeeper_cmd::zookeeper_get,
             commands::zookeeper_cmd::zookeeper_put,
             commands::zookeeper_cmd::zookeeper_delete,
-            commands::consul_cmd::consul_capabilities,
-            commands::consul_cmd::consul_txn,
-            commands::consul_cmd::consul_rename_key,
-            commands::consul_cmd::consul_blocking_query,
-            commands::consul_cmd::consul_domain_watch,
-            commands::consul_cmd::consul_cancel_blocking,
-            commands::consul_cmd::consul_watch_start,
-            commands::consul_cmd::consul_list_prefix,
-            commands::consul_cmd::consul_list_recursive,
-            commands::consul_cmd::consul_search,
-            commands::consul_cmd::consul_search_progress,
-            commands::consul_cmd::consul_cancel_search,
-            commands::consul_cmd::consul_export_bundle,
-            commands::consul_cmd::consul_import_preview,
-            commands::consul_cmd::consul_import_execute,
-            commands::consul_cmd::consul_delete_prefix_preview,
-            commands::consul_cmd::consul_delete_prefix_execute,
-            commands::consul_cmd::consul_get,
-            commands::consul_cmd::consul_put,
-            commands::consul_cmd::consul_delete,
-            commands::consul_cmd::consul_prepared_query_list,
-            commands::consul_cmd::consul_prepared_query_read,
-            commands::consul_cmd::consul_prepared_query_create,
-            commands::consul_cmd::consul_prepared_query_update,
-            commands::consul_cmd::consul_prepared_query_delete,
-            commands::consul_cmd::consul_prepared_query_execute,
-            commands::consul_cmd::consul_prepared_query_explain,
-            commands::consul_cmd::consul_event_list,
-            commands::consul_cmd::consul_event_fire,
-            commands::consul_cmd::consul_coordinate_nodes,
-            commands::consul_cmd::consul_operator_read,
-            commands::consul_cmd::consul_snapshot_generate,
-            commands::consul_cmd::consul_snapshot_restore,
-            commands::consul_cmd::consul_autopilot_update,
-            commands::consul_cmd::consul_raft_transfer,
-            commands::consul_cmd::consul_raft_remove,
-            commands::consul_cmd::consul_keyring_write,
-            commands::consul_cmd::consul_license_write,
-            commands::consul_cmd::consul_status_leader,
-            commands::consul_cmd::consul_status_peers,
-            commands::consul_cmd::consul_agent_self,
-            commands::consul_cmd::consul_agent_members,
-            commands::consul_cmd::consul_agent_metrics,
-            commands::consul_cmd::consul_catalog_datacenters,
-            commands::consul_cmd::consul_catalog_nodes,
-            commands::consul_cmd::consul_catalog_services,
-            commands::consul_cmd::consul_catalog_service_nodes,
-            commands::consul_cmd::consul_catalog_node_services,
-            commands::consul_cmd::consul_health_node,
-            commands::consul_cmd::consul_health_checks,
-            commands::consul_cmd::consul_health_service,
-            commands::consul_cmd::consul_health_state,
-            commands::consul_cmd::consul_agent_services,
-            commands::consul_cmd::consul_agent_service,
-            commands::consul_cmd::consul_agent_checks,
-            commands::consul_cmd::consul_agent_register_service,
-            commands::consul_cmd::consul_agent_deregister_service,
-            commands::consul_cmd::consul_agent_service_maintenance,
-            commands::consul_cmd::consul_agent_register_check,
-            commands::consul_cmd::consul_agent_deregister_check,
-            commands::consul_cmd::consul_agent_update_ttl,
-            commands::consul_cmd::consul_sessions,
-            commands::consul_cmd::consul_node_sessions,
-            commands::consul_cmd::consul_session,
-            commands::consul_cmd::consul_session_keys,
-            commands::consul_cmd::consul_session_destroy_impact,
-            commands::consul_cmd::consul_create_session,
-            commands::consul_cmd::consul_renew_session,
-            commands::consul_cmd::consul_destroy_session,
-            commands::consul_cmd::consul_acquire_lock,
-            commands::consul_cmd::consul_release_lock,
-            commands::consul_cmd::consul_acl_list,
-            commands::consul_cmd::consul_acl_token_self,
-            commands::consul_cmd::consul_acl_token_clone,
-            commands::consul_cmd::consul_acl_get,
-            commands::consul_cmd::consul_acl_apply,
-            commands::consul_cmd::consul_acl_references,
-            commands::consul_cmd::consul_acl_delete,
-            commands::consul_cmd::consul_enterprise_list,
-            commands::consul_cmd::consul_enterprise_get,
-            commands::consul_cmd::consul_enterprise_apply,
-            commands::consul_cmd::consul_enterprise_impact,
-            commands::consul_cmd::consul_enterprise_delete,
-            commands::consul_cmd::consul_mesh_config_list,
-            commands::consul_cmd::consul_mesh_config_get,
-            commands::consul_cmd::consul_mesh_config_apply,
-            commands::consul_cmd::consul_mesh_config_delete,
-            commands::consul_cmd::consul_mesh_intentions_list,
-            commands::consul_cmd::consul_mesh_intention_get,
-            commands::consul_cmd::consul_mesh_intention_get_exact,
-            commands::consul_cmd::consul_mesh_intention_upsert,
-            commands::consul_cmd::consul_mesh_intention_delete,
-            commands::consul_cmd::consul_mesh_intention_delete_exact,
-            commands::consul_cmd::consul_mesh_intention_match,
-            commands::consul_cmd::consul_mesh_intention_check,
-            commands::consul_cmd::consul_mesh_discovery_chain,
-            commands::consul_cmd::consul_mesh_peering_list,
-            commands::consul_cmd::consul_mesh_peering_get,
-            commands::consul_cmd::consul_mesh_peering_generate_token,
-            commands::consul_cmd::consul_mesh_peering_establish,
-            commands::consul_cmd::consul_mesh_peering_delete,
-            commands::consul_cmd::consul_mesh_exported_services_list,
-            commands::consul_cmd::consul_mesh_exported_services_apply,
             commands::nacos_cmd::nacos_test_connection,
             commands::nacos_cmd::nacos_list_namespaces,
             commands::nacos_cmd::nacos_sidebar_snapshot,
@@ -2194,13 +3077,18 @@ pub fn run() {
             commands::saved_sql::save_saved_sql_folder,
             commands::saved_sql::delete_saved_sql_folder,
             commands::saved_sql::save_saved_sql_file,
+            commands::saved_sql::save_default_query_content,
             commands::saved_sql::delete_saved_sql_file,
             commands::saved_sql::saved_sql_storage_dir,
             commands::saved_sql::open_saved_sql_storage_dir,
             commands::saved_sql::sync_saved_sql_directory,
+            commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
+            commands::fs_open::open_path_with_default_app,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
+            background_backup::database_backup_command,
+            background_backup::database_backup_background,
             commands::sqlite_backup::backup_sqlite_database,
             commands::sqlite_backup::restore_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
@@ -2215,6 +3103,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_rename_collection,
             commands::mongo_cmd::mongo_clone_collection,
             commands::docs::docs_collect_snapshot,
+            commands::docs::docs_collect_snapshot_for_export,
             commands::docs::docs_load_annotations,
             commands::docs::docs_apply_annotations,
             commands::docs::docs_save_annotations,
@@ -2237,6 +3126,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_parse_shell_command,
             commands::mongo_cmd::mongo_find_one,
+            commands::mongo_cmd::mongo_explain_find,
             commands::mongo_cmd::mongo_count_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_collection_stats,
@@ -2253,6 +3143,8 @@ pub fn run() {
             commands::document_cmd::document_update_document,
             commands::mongo_cmd::mongo_update_document,
             commands::mongo_cmd::mongo_update_documents,
+            commands::mongo_cmd::mongo_replace_document,
+            commands::mongo_cmd::mongo_bulk_write,
             commands::document_cmd::document_delete_document,
             commands::document_cmd::document_save_meilisearch_batch,
             commands::document_cmd::meilisearch_search_documents,
@@ -2262,6 +3154,7 @@ pub fn run() {
             commands::document_cmd::meilisearch_update_index_settings,
             commands::document_cmd::meilisearch_get_index_stats,
             commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_create_index,
             commands::document_cmd::meilisearch_delete_index,
             commands::document_cmd::meilisearch_delete_all_documents,
             commands::document_cmd::meilisearch_get_system_overview,
@@ -2309,6 +3202,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_topics,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_topics_page,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_topic,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_delete_topic,
@@ -2320,6 +3215,8 @@ pub fn run() {
             commands::mq_cmd::mq_get_topic_internal_stats,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_list_exchanges,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_list_exchanges_page,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_create_exchange,
             #[cfg(feature = "mq-admin")]
@@ -2415,6 +3312,8 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_cluster_info,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_broker_config,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_topic_route,
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_alter_topic_config,
@@ -2454,17 +3353,31 @@ pub fn run() {
             commands::mqtt_cmd::mqtt_get_messages,
             #[cfg(feature = "mq-admin")]
             commands::mqtt_cmd::mqtt_clear_messages,
+            #[cfg(feature = "mq-admin")]
+            commands::mqtt_cmd::mqtt_delete_message,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::search_history,
             commands::history::load_history_connection_options,
             commands::history::clear_history,
+            commands::history::clear_history_by_source,
+            commands::history::cleanup_mcp_history_retention,
             commands::history::delete_history_entry,
+            commands::task_history::load_task_runs,
+            commands::task_history::load_task_run,
+            commands::task_history::load_task_run_items,
             commands::mcp::check_mcp_server_status,
+            commands::mcp::check_mcp_keychain_access,
+            commands::mcp::authorize_mcp_keychain,
             commands::mcp::install_mcp_server,
+            commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
+            commands::mcp::uninstall_npm_mcp_server,
+            commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
+            commands::update::fetch_changelog_index,
+            commands::update::fetch_changelog_release,
             commands::update::get_system_proxy_url,
             commands::update::get_downloaded_update,
             commands::update::discard_downloaded_update,
@@ -2482,7 +3395,12 @@ pub fn run() {
             commands::database_export::record_database_export_destination,
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,
+            commands::dameng_dump::start_dameng_dump,
+            commands::dameng_dump::cancel_dameng_dump,
+            commands::dameng_dump::resolve_dameng_dump_tool,
             commands::query_result_export::start_query_result_export,
+            commands::query_result_export::create_query_result_temp_file,
+            commands::query_result_export::open_query_result_temp_file,
             commands::query_result_export::cancel_query_result_export,
             commands::csv_export::export_query_result_csv,
             commands::csv_export::export_table_data_csv,
@@ -2490,6 +3408,7 @@ pub fn run() {
             commands::xlsx_export::export_query_results_xlsx,
             commands::text_export::export_query_result_json,
             commands::text_export::export_query_result_markdown,
+            commands::text_export::export_query_result_html,
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
             commands::agents::is_agent_installed,
@@ -2517,14 +3436,16 @@ pub fn run() {
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,
+            commands::ssh_keys::list_local_ssh_keys,
             commands::ssh_prompt::ssh_prompt_ready,
             commands::ssh_prompt::ssh_prompt_not_ready,
             commands::ssh_prompt::resolve_ssh_prompt,
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
-        ])
-        .build(tauri::generate_context!())
+            commands::tunnel_profiles::list_ssh_agent_identities,
+        ])))
+        .build(context)
         .inspect(|app| {
             append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
             startup_recovery::start_watchdog(app.handle());
@@ -2552,18 +3473,11 @@ pub fn run() {
                     // shutdown below gives WindowServer time to remove it.
                     if should_hide_window_before_exit(std::env::consts::OS) {
                         if let Some(window) = app_handle.get_webview_window("main") {
+                            window_state_guard::remember_main_window_geometry(app_handle);
                             let _ = window.hide();
                         }
                     }
-                    tauri::async_runtime::block_on(async {
-                        if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
-                        {
-                            server.shutdown(Duration::from_secs(1)).await;
-                        }
-                        if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
-                            state.shutdown(Duration::from_secs(3)).await;
-                        }
-                    });
+                    tauri::async_runtime::block_on(shutdown_runtime_resources(app_handle));
                 }
             }
 
@@ -2587,6 +3501,13 @@ pub fn run() {
                     .collect();
                 open_ai_config_deep_links(app_handle, ai_config_links);
 
+                let plugin_install_links: Vec<String> = urls
+                    .iter()
+                    .map(|url| url.to_string())
+                    .filter_map(|url| commands::deep_link::plugin_install_deep_link_from_arg(&url))
+                    .collect();
+                open_plugin_install_deep_links(app_handle, plugin_install_links);
+
                 let paths: Vec<String> = urls
                     .iter()
                     .filter_map(|url| url.to_file_path().ok())
@@ -2598,10 +3519,7 @@ pub fn run() {
                         state.push(paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-sql-files", paths);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
 
                 let db_paths: Vec<String> = urls
@@ -2615,10 +3533,7 @@ pub fn run() {
                         state.push(db_paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-db-files", db_paths);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
             }
 
@@ -2633,7 +3548,13 @@ pub fn run() {
                     );
                 }
                 let app_handle = app_handle.clone();
+                let migration_gate =
+                    app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let Some(migration_gate) = migration_gate else {
+                        return;
+                    };
+                    migration_gate.wait().await;
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }
@@ -2642,7 +3563,13 @@ pub fn run() {
 
             if let RunEvent::Resumed = &event {
                 let app_handle = app_handle.clone();
+                let migration_gate =
+                    app_handle.try_state::<Arc<migration_gate::MigrationGate>>().map(|state| state.inner().clone());
                 tauri::async_runtime::spawn(async move {
+                    let Some(migration_gate) = migration_gate else {
+                        return;
+                    };
+                    migration_gate.wait().await;
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         state.refresh_connections().await;
                     }

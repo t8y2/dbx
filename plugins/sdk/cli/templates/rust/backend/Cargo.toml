@@ -1,0 +1,19 @@
+[package]
+name = "{{BINARY_NAME}}"
+version = "{{VERSION}}"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+dbx-plugin-sdk = {{RUST_SDK_DEPENDENCY}}
+serde_json = "1"
+
+# Keep plugin binaries close to the host app's size: default release settings
+# leave ~20MB of symbols and unoptimized generic code in an OpenDAL-sized backend.
+# panic stays "unwind" so the sidecar protocol can report panics as errors.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

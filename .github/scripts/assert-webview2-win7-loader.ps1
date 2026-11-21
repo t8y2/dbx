@@ -46,7 +46,7 @@ $summary
 
 A loader >= 1.0.1054.31 was linked instead of the prepared one and will fail on
 Server 2012 R2 with ERROR_NOT_SUPPORTED. Do not ship this binary: rebuild the
-win7 target and investigate how the registry loader patch was bypassed.
+win7 target and investigate why Cargo did not select the vendored loader.
 "@
 }
 

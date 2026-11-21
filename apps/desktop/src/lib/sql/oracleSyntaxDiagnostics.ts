@@ -178,7 +178,7 @@ function offsetToPosition(source: string, offset: number): { line: number; colum
 function tokenizeOracleSyntax(source: string, baseOffset = 0): OracleSyntaxToken[] {
   const tokens: OracleSyntaxToken[] = [];
 
-  for (let index = 0; index < source.length; ) {
+  for (let index = 0; index < source.length;) {
     const ignoredEnd = skipIgnorableOracleSyntax(source, index);
     if (ignoredEnd !== null) {
       index = ignoredEnd;

@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 110
 dbType: mongodb
+transferSupportLevel: best-effort
 rustVariant: MongoDb
 label: MongoDB (Legacy)
 runtimeMode: agent

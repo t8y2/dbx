@@ -1,25 +1,72 @@
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey } from "./editorSettingsDraft";
-import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeEditorSettings, type EditorSettings } from "@/stores/settingsStore";
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX } from "@/lib/sidebar/sidebarHoverSettings";
+import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey, type EditorSettingsImportPatch } from "./editorSettingsDraft";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, type ToolbarItemKey } from "./toolbarCustomization";
+import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, isSidebarConnectionIconStyle, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
+import type { AppThemeMode } from "@/lib/app/appTheme";
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
-import { isCompleteSqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { DEFAULT_SQL_FORMATTER_RULE_SETTINGS, DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings, type SqlFormatterRuleSettings } from "@/lib/sql/sqlFormatterConfig";
 import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
 /**
  * Local backup / restore of application settings ("配置导入与导出").
  *
  * The transfer file is a versioned JSON document with a strict field
- * whitelist: only dialog-managed editor settings are serialized. Connection
- * data, saved SQL libraries, AI configuration and device-specific paths are
- * never part of the payload, and unknown fields in an imported file are
- * ignored instead of being written into the draft.
+ * whitelist. The `settings.editor` section carries the dialog-managed editor
+ * settings; the optional `settings.appearance` and `settings.desktop`
+ * sections carry the app-wide theme mode and the preference-like desktop
+ * settings. Connection data, saved SQL libraries, AI configuration and
+ * device-specific paths are never part of the payload, and unknown fields in
+ * an imported file are ignored instead of being written anywhere.
  */
 
 export const SETTINGS_TRANSFER_FORMAT_VERSION = 1;
 
 /** Upper bound for an import file; real settings files are a few dozen KB. */
 export const MAX_SETTINGS_TRANSFER_FILE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Preference-like `DesktopSettings` keys eligible for transfer. Device-
+ * specific paths (driver/plugin/agent/skill directories, saved-SQL sync dir)
+ * and the one-shot `close_action_prompted` flag are deliberately excluded:
+ * they are either meaningless on another machine or not a user preference.
+ */
+export const TRANSFERABLE_DESKTOP_SETTINGS_KEYS = [
+  "show_tray_icon",
+  "icon_theme",
+  "quit_on_close",
+  "debug_logging_enabled",
+  "metadata_cache_max_memory_mb",
+  "duckdb_worker_process_isolation",
+  "duckdb_worker_max_processes",
+  "sidebar_table_page_size",
+] as const satisfies readonly (keyof DesktopSettings)[];
+
+export type TransferableDesktopSettingsKey = (typeof TRANSFERABLE_DESKTOP_SETTINGS_KEYS)[number];
+
+/** The transferable keys without their `null` "unset" variants. */
+export type TransferableDesktopSettings = {
+  [K in TransferableDesktopSettingsKey]: Exclude<DesktopSettings[K], null>;
+};
+
+/** Non-editor sections carried alongside the editor draft in the transfer file. */
+export interface SettingsTransferExtras {
+  /** App-wide light/dark/system mode from `settings.appearance`. */
+  themeMode?: AppThemeMode;
+  /** Preference-like desktop settings from `settings.desktop`. */
+  desktopSettings?: Partial<TransferableDesktopSettings>;
+}
+
+/** Keeps only the whitelisted desktop keys, ignoring everything else. */
+export function pickTransferableDesktopSettings(settings: Partial<DesktopSettings>): Partial<TransferableDesktopSettings> {
+  const picked: Partial<TransferableDesktopSettings> = {};
+  for (const key of TRANSFERABLE_DESKTOP_SETTINGS_KEYS) {
+    const value = settings[key];
+    if (value !== undefined && value !== null) picked[key] = value as never;
+  }
+  return picked;
+}
 
 export type SettingsTransferCategoryId = "appearance" | "editor" | "formatter" | "navigation" | "data" | "shortcuts" | "snippets" | "other";
 
@@ -35,13 +82,32 @@ export interface ParsedSettingsTransfer {
   formatVersion: number;
   appVersion?: string;
   exportedAt?: string;
-  /** Validated, normalized values for exactly the keys present in the file. */
-  editorSettings: Partial<EditorSettings>;
+  /** Validated values for exactly the keys present in the file. */
+  editorSettings: EditorSettingsImportPatch;
+  /** Validated theme mode from the optional appearance section. */
+  themeMode?: AppThemeMode;
+  /** Validated desktop preferences for exactly the keys present in the file. */
+  desktopSettings: Partial<TransferableDesktopSettings>;
   categories: SettingsTransferCategoryId[];
+}
+
+export interface SettingsTransferParseOptions {
+  /**
+   * Whether the platform-specific `settings.desktop` section applies. Web
+   * callers pass false: those switches are desktop-only, so the section is
+   * skipped the same way an older reader skips an unknown section — its
+   * values are neither validated nor listed among the importable categories.
+   */
+  includeDesktopSettings?: boolean;
 }
 
 export interface SettingsTransferExportMeta {
   appVersion?: string;
+}
+
+export interface SettingsTransferExportOptions {
+  /** Omit toolbar entries that have no meaning on the exporting platform. */
+  omitToolbarItemKeys?: readonly ToolbarItemKey[];
 }
 
 export function buildSettingsTransferFilename(date = new Date()): string {
@@ -55,14 +121,29 @@ export function buildSettingsTransferFilename(date = new Date()): string {
  * Serializes the saved editor settings into the transfer format. The draft
  * helper provides the whitelist, deep cloning and per-key normalization, so
  * the payload never contains fields outside `EDITOR_SETTINGS_DRAFT_KEYS`.
+ * The optional extras add the `appearance`/`desktop` sections; files written
+ * by older versions simply lack them.
  */
-export function serializeSettingsTransfer(settings: EditorSettings, meta: SettingsTransferExportMeta = {}): string {
+export function serializeSettingsTransfer(settings: EditorSettings, meta: SettingsTransferExportMeta = {}, extras: SettingsTransferExtras = {}, options: SettingsTransferExportOptions = {}): string {
+  const desktopSettings = extras.desktopSettings ? pickTransferableDesktopSettings(extras.desktopSettings) : {};
+  const omittedToolbarItems = new Set(options.omitToolbarItemKeys ?? []);
+  const editor = editorSettingsDraftFromSettings(settings);
+  const editorPayload =
+    omittedToolbarItems.size === 0
+      ? editor
+      : {
+          ...editor,
+          toolbarItems: Object.fromEntries(Object.entries(editor.toolbarItems).filter(([key]) => !omittedToolbarItems.has(key as ToolbarItemKey))),
+          toolbarItemOrder: editor.toolbarItemOrder.filter((key) => !omittedToolbarItems.has(key)),
+        };
   const payload = {
     formatVersion: SETTINGS_TRANSFER_FORMAT_VERSION,
     app: { name: "dbx", ...(meta.appVersion ? { version: meta.appVersion } : {}) },
     exportedAt: new Date().toISOString(),
     settings: {
-      editor: editorSettingsDraftFromSettings(settings),
+      editor: editorPayload,
+      ...(extras.themeMode ? { appearance: { themeMode: extras.themeMode } } : {}),
+      ...(Object.keys(desktopSettings).length > 0 ? { desktop: desktopSettings } : {}),
     },
   };
   return JSON.stringify(payload, null, 2);
@@ -71,35 +152,55 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "updateNotificationsEnabled"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition", "sidebarConnectionIconStyle"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
+    "keepExplicitTransactionInAutoCommit",
     "executeAllOnBlankLine",
     "showExecutionTargetPicker",
     "showStatementRunButtons",
+    "locateCursorOnGutterExecute",
     "showLineNumbers",
     "showCurrentStatementFrame",
     "showInsertValueHints",
+    "showConnectionGroupPath",
     "autoAliasTables",
+    "qualifyColumnCompletions",
+    "batchColumnSelectionIncludeComments",
+    "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
+    "sqlServerSpaceConfirmsCompletion",
+    "functionCompletionIncludeParams",
+    "sequenceCompletionEnabled",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
+    "completionAutoActivationDelayMs",
     "completionTriggerMode",
+    "completionMatchMode",
+    "excludedCompletionItems",
     "wordWrap",
+    "showWhitespace",
     "vimModeEnabled",
+    "caretBrowsingEnabled",
+    "doubleClickStringSelectionMode",
     "autoCloseBrackets",
+    "restoreSqlFromSourcePasteEnabled",
     "sqlSemanticDiagnosticsMode",
     "confirmDangerousSqlExecution",
     "continueOnErrorOnBatch",
     "confirmUnsavedSqlClose",
     "appCloseUnsavedTabsMode",
     "savedSqlOpenTargetMode",
+    "aiSqlApplyTargetMode",
     "prefillNewQueryWithSelect",
+    "openQueryOnConnectionOpen",
     "generateSqlIncludeDatabaseName",
     "generateSqlQuoteIdentifiers",
     "formatSqlOnSqlFileSave",
+    "ddlOpenMode",
     "showTableDdlHoverPreview",
+    "tableHoverLookupMode",
     "sqlVariableSubstitutionEnabled",
     "sqlVariableSyntaxOverrides",
   ],
@@ -108,32 +209,61 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "appLayout",
     "tabLayout",
     "tabPlacement",
+    "crossWindowTabDragPreviewEnabled",
     "tabGroupMode",
+    "colorizeConnectionTabs",
+    "colorizeConnectionTabsScope",
     "tabSortMode",
+    "tabMaxWidth",
+    "tabDoubleClickAction",
+    "tabGroupRows",
     "sidebarActivation",
+    "sidebarColumnDoubleClickAction",
     "sidebarObjectDisplay",
+    "sidebarSimpleHideIndexes",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",
+    "sidebarSearchOpenedDatabasesOnly",
     "autoSelectActiveSidebarNode",
+    "sidebarPinDefaultDatabase",
     "sidebarBrowseObjectsOnDatabaseActivation",
+    "sidebarAutoExpandOnDatabaseActivation",
+    "sidebarTableClickNavigation",
     "openTabsRestoreMode",
+    "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
+    "deleteConnectionTabHandlingMode",
+    "rememberConnectionDatabaseOnDelete",
+    "deepLinkConnectionConfirmMode",
+    "duplicateTabTitleMode",
     "dataTabReuseMode",
     "openDataTabsNextToActive",
+    "openTablesInDetachedWindow",
     "clickTableNavigationTarget",
+    "objectBrowserAutoOpenDetailPanel",
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
+    "sidebarShowConnectionEndpoints",
+    "sidebarHoverEnabled",
+    "sidebarHoverDelay",
     "sidebarShowTooltips",
     "sidebarIndent",
     "sidebarFontSize",
+    "sidebarDensity",
     "sidebarHiddenTablePrefixes",
     "sidebarCopyTableNameSeparator",
     "sidebarCopyTableNameIncludeSchema",
   ],
   data: [
     "showColumnCommentsInHeader",
+    "dataGridColumnCommentsInInfoArea",
     "showColumnTypesInHeader",
+    "showColumnHeaderTooltips",
+    "showResultSourceDatabase",
+    "resultTabNamingMode",
+    "resultTabPreferComments",
     "dataGridShowTransposeFieldMetadata",
+    "dataGridTransposeMetadataInInfoColumn",
     "colorizeDataGridCellTypes",
     "dataGridTypeColorSchemes",
     "activeDataGridTypeColorSchemeId",
@@ -143,34 +273,60 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridFilterEditorView",
     "dataGridKeepFilterEditorExpanded",
     "dataGridTextFilterPanelHeight",
+    "dataGridToolbarLayout",
+    "dataGridOrderByVisible",
+    "dataGridWhereRatio",
     "defaultAutoKeepResults",
+    "pinResultTabOnClick",
     "multiStatementDefaultView",
+    "defaultExplainView",
     "dataGridAutoTransposeSingleRow",
     "dataGridCellDetailButtonVisible",
+    "dataGridCellDetailDialogDefault",
     "dataGridCrosshairHighlight",
+    "dataGridCrosshairRowBg",
+    "dataGridCrosshairColBg",
+    "dataGridStripedRows",
+    "dataGridZebraRowBg",
     "flatteningMultiLineText",
+    "dataGridShowWhitespace",
     "pageSize",
     "tableOpenPageSize",
+    "tableOpenSortMode",
+    "tableDatabaseSortDirection",
+    "tableLocalSortDirection",
     "queryResultMaxRowsEnabled",
     "queryResultMaxRows",
     "externalSqlEditorMaxMb",
     "infiniteScroll",
     "regexMaxMatchCount",
     "autoCalculateTotalRows",
+    "modelGenerationTemplates",
     "tableColumnTemplateFields",
     "redisKeyTemplates",
+    "redisDatabaseDisplayLimit",
     "exportBatchSize",
+    "preferredExportPath",
+    "damengClientBinDir",
+    "autoOpenExportFolder",
+    "applyColumnFormattersOnExport",
+    "csvWithoutBom",
     "csvQuoteMode",
+    "csvNullMode",
+    "queryResultExportFileNameSource",
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",
+    "globalNumberGrouping",
     "globalDateTimeDisplayFormat",
     "globalDateTimeExportFormat",
     "globalDateTimeImportFormat",
+    "globalConnectTimeoutSecs",
+    "globalQueryTimeoutSecs",
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
-  snippets: ["snippets"],
-  other: ["updateDownloadSource"],
+  snippets: ["snippets", "snippetTriggerKey"],
+  other: ["updateDownloadSource", "updateChannel", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
 };
 
 const KEY_TO_CATEGORY = new Map<string, SettingsTransferCategoryId>();
@@ -247,35 +403,64 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  * enum or a non-boolean flag refuses the whole file instead.
  */
 const PASS_THROUGH_BOOLEAN_KEYS = [
+  "sidebarTableClickNavigation",
   "wordWrap",
+  "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
+  "qualifyColumnCompletions",
+  "functionCompletionIncludeParams",
+  "sequenceCompletionEnabled",
+  "fontSmoothing",
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "showColumnCommentsInHeader",
+  "dataGridColumnCommentsInInfoArea",
+  "dataGridTransposeMetadataInInfoColumn",
   "showColumnTypesInHeader",
+  "showColumnHeaderTooltips",
+  "showResultSourceDatabase",
+  "resultTabPreferComments",
   "colorizeDataGridCellTypes",
   "showIndexIndicatorsInHeader",
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
+  "dataGridStripedRows",
   "flatteningMultiLineText",
+  "dataGridShowWhitespace",
   "infiniteScroll",
   "autoCalculateTotalRows",
   "autoSelectActiveSidebarNode",
+  "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
+  "sidebarHoverEnabled",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
+  "autoDownloadUpdates",
+  "autoUpdateApp",
+  "autoUpdateDrivers",
+  "autoUpdateJdbc",
+  "autoUpdateMcp",
+  "autoUpdatePlugins",
 ] as const satisfies readonly EditorSettingsDraftKey[];
 
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  sidebarHoverDelay: (value) => typeof value === "number" && Number.isInteger(value) && value >= SIDEBAR_HOVER_DELAY_MIN && value <= SIDEBAR_HOVER_DELAY_MAX,
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
+  welcomePageMode: (value) => value === "intro" || value === "workspace",
+  aiSqlApplyTargetMode: (value) => value === "current" || value === "first" || value === "new",
   appLayout: (value) => value === "separated" || value === "classic",
+  webLogoPosition: (value) => value === "left" || value === "right" || value === "hidden",
+  resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
-  // normalizeToolbarItems keeps unknown/typed values for every known key, so
-  // each one must already be the boolean the UI writes, and no extra key may
-  // appear.
-  toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean") && Object.keys(value).every((key) => key in DEFAULT_TOOLBAR_ITEMS),
+  sidebarDensity: (value) => value === "default" || value === "compact",
+  sidebarConnectionIconStyle: isSidebarConnectionIconStyle,
+  // Each supplied toolbar key must already be the boolean the UI writes. The
+  // object may be partial because older and cross-platform files legitimately
+  // omit keys introduced later or owned by another runtime.
+  toolbarItems: isRawToolbarItemsShape,
+  toolbarItemOrder: isRawToolbarItemOrderShape,
   ...Object.fromEntries(PASS_THROUGH_BOOLEAN_KEYS.map((key) => [key, (value: unknown) => typeof value === "boolean"])),
 };
 
@@ -309,7 +494,7 @@ const CUSTOM_THEME_DDL_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_DDL_CO
  * cover them and a wrong-typed value (e.g. `background: {}`) would otherwise
  * pass validation and reach the persisted settings.
  */
-const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground"] as const;
+const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground", "activeLine", "selection", "cursor", "gutterBackground", "lineNumber", "matchingBracket"] as const;
 
 function hasValidOptionalColorKinds(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
@@ -347,10 +532,30 @@ function isSqlSnippetItem(value: unknown): boolean {
   return value.enabled === undefined || typeof value.enabled === "boolean";
 }
 
+function isModelGenerationTemplatesShape(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  return value.every((item) => {
+    if (!isPlainObject(item) || typeof item.id !== "string" || !item.id || ids.has(item.id) || !isNonEmptyTrimmedString(item.name) || typeof item.extension !== "string" || !/^[a-zA-Z0-9]+$/.test(item.extension) || typeof item.body !== "string") return false;
+    ids.add(item.id);
+    return true;
+  });
+}
+
 function isSqlShortcutActionItem(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || typeof value.shortcut !== "string" || typeof value.sql !== "string") return false;
-  return value.enabled === undefined || typeof value.enabled === "boolean";
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") return false;
+  if (value.kind !== undefined && value.kind !== "template" && value.kind !== "select-limit") return false;
+  if (value.limit !== undefined && (typeof value.limit !== "number" || !Number.isFinite(value.limit))) return false;
+  if (value.databaseTypes !== undefined) {
+    if (!Array.isArray(value.databaseTypes) || !value.databaseTypes.every((item) => typeof item === "string" && item.trim().length > 0)) return false;
+  }
+  if (value.sqlByDatabaseType !== undefined) {
+    if (!isPlainObject(value.sqlByDatabaseType)) return false;
+    if (!Object.values(value.sqlByDatabaseType).every((sql) => typeof sql === "string")) return false;
+  }
+  return true;
 }
 
 const SHORTCUT_ACTION_IDS = new Set<string>(SHORTCUT_DEFINITIONS.map((definition) => definition.id));
@@ -366,17 +571,78 @@ function isRawShortcutSettingsShape(value: unknown): boolean {
 }
 
 /**
- * Raw shape: every known toolbar key must already be a boolean.
+ * Raw shape: visibility keys are booleans and pinned entries are strings.
  * normalizeToolbarItems coerces `exclusiveRightSidebarPanels` with `!== false`
  * (and fills the rest with nullish defaults), so a non-boolean like "no" would
  * otherwise be silently turned into `true` and pass the normalized round-trip
- * check. Unknown keys stay ignored for forward compatibility.
+ * check. Unknown keys are ignored for forward compatibility.
  */
 function isRawToolbarItemsShape(value: unknown): boolean {
-  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean");
+  return (
+    isPlainObject(value) &&
+    Object.entries(value).every(([key, entry]) => {
+      if (key === "pinnedMenuItems") return Array.isArray(entry) && entry.every((item) => typeof item === "string");
+      return !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean";
+    })
+  );
+}
+
+function isRawToolbarItemOrderShape(value: unknown): boolean {
+  return Array.isArray(value) && value.every((key) => typeof key === "string");
+}
+
+function normalizeImportedToolbarItems(value: unknown): Partial<EditorSettings["toolbarItems"]> {
+  const imported: Partial<EditorSettings["toolbarItems"]> = {};
+  if (!isPlainObject(value)) return imported;
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "pinnedMenuItems") imported.pinnedMenuItems = normalizePinnedToolbarMenuItems(entry);
+    else if (key in DEFAULT_TOOLBAR_ITEMS && typeof entry === "boolean") imported[key as Exclude<keyof EditorSettings["toolbarItems"], "pinnedMenuItems">] = entry;
+  }
+  return imported;
+}
+
+function normalizeImportedToolbarItemOrder(value: unknown): ToolbarItemKey[] {
+  const seen = new Set<ToolbarItemKey>();
+  const order: ToolbarItemKey[] = [];
+  if (!Array.isArray(value)) return order;
+  for (const key of value) {
+    if (typeof key !== "string" || !DEFAULT_TOOLBAR_ITEM_ORDER.includes(key as ToolbarItemKey)) continue;
+    const typedKey = key as ToolbarItemKey;
+    if (seen.has(typedKey)) continue;
+    seen.add(typedKey);
+    order.push(typedKey);
+  }
+  return order;
 }
 
 const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
+
+/**
+ * Formatter option keys introduced after the settings-transfer format shipped
+ * (v0.6.7). An export written before a key existed legitimately lacks it, so
+ * requiring every current key would reject the entire file and discard every
+ * other setting it carries — which is what happened when `commaPosition`
+ * landed in v0.6.35. Absence is only tolerated for these keys, and only
+ * because the version boundary is known; nothing is inferred about which
+ * style the user meant. Every future formatter option must be added here.
+ */
+const SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT = new Set<keyof SqlFormatterOptionSettings>(["commaPosition", "layoutStyle", ...(Object.keys(DEFAULT_SQL_FORMATTER_RULE_SETTINGS) as (keyof SqlFormatterRuleSettings)[])]);
+
+/**
+ * Complete-schema check that tolerates the absence of the post-transfer
+ * formatter keys: present keys keep the strict check (valid value, no unknown
+ * key), and the missing baseline-compatible ones are filled with their
+ * defaults before delegating, so a payload missing a baseline key such as
+ * `keywordCase` is still rejected.
+ */
+function isTransferableSqlFormatterSettings(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const filled: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of SQL_FORMATTER_KEYS_ADDED_AFTER_TRANSFER_FORMAT) {
+    if (!(key in filled)) filled[key] = DEFAULT_SQL_FORMATTER_SETTINGS[key];
+  }
+  return isCompleteSqlFormatterSettings(filled);
+}
 
 function isSqlVariableSyntaxOverridesShape(value: unknown, isAllowedToggle: (toggle: unknown) => boolean): boolean {
   if (!isPlainObject(value)) return false;
@@ -396,12 +662,13 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
   dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
   tableColumnTemplateFields: isNonEmptyStringArray,
   shortcuts: isShortcutSettingsShape,
-  sqlFormatter: isCompleteSqlFormatterSettings,
+  sqlFormatter: isTransferableSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isNonEmptyStringArray,
   redisKeyTemplates: isNonEmptyStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
-  sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => toggle === false),
+  sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };
 
 /**
@@ -420,10 +687,12 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
   tableColumnTemplateFields: isStringArray,
   shortcuts: isRawShortcutSettingsShape,
   toolbarItems: isRawToolbarItemsShape,
-  sqlFormatter: isCompleteSqlFormatterSettings,
+  toolbarItemOrder: isRawToolbarItemOrderShape,
+  sqlFormatter: isTransferableSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,
   snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  modelGenerationTemplates: isModelGenerationTemplatesShape,
   sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
   sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };
@@ -446,7 +715,7 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
  * nested schema (see NESTED_FIELD_VALIDATORS): malformed nested payloads are
  * rejected instead of being silently repaired or persisted.
  */
-export function parseSettingsTransferFile(text: string): { ok: true; value: ParsedSettingsTransfer } | { ok: false; error: SettingsTransferParseError } {
+export function parseSettingsTransferFile(text: string, options: SettingsTransferParseOptions = {}): { ok: true; value: ParsedSettingsTransfer } | { ok: false; error: SettingsTransferParseError } {
   if (exceedsSettingsTransferSizeLimit(text)) {
     return { ok: false, error: { code: "too-large" } };
   }
@@ -467,17 +736,62 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   const settings = parsed.settings;
   if (!isPlainObject(settings)) return { ok: false, error: { code: "invalid-structure" } };
   const editor = settings.editor;
-  if (!isPlainObject(editor)) return { ok: false, error: { code: "empty-settings" } };
+  if (editor !== undefined && !isPlainObject(editor)) return { ok: false, error: { code: "invalid-structure" } };
+  const appearance = settings.appearance;
+  if (appearance !== undefined && !isPlainObject(appearance)) return { ok: false, error: { code: "invalid-structure" } };
+  const includeDesktop = options.includeDesktopSettings !== false;
+  const desktop = settings.desktop;
+  if (includeDesktop && desktop !== undefined && !isPlainObject(desktop)) return { ok: false, error: { code: "invalid-structure" } };
+
+  // App-wide theme mode from the optional appearance section. Only the three
+  // canonical modes are accepted; legacy soft-* values normalize before they
+  // ever reach a transfer file.
+  let themeMode: AppThemeMode | undefined;
+  if (isPlainObject(appearance) && appearance.themeMode !== undefined) {
+    const value = appearance.themeMode;
+    if (value === "light" || value === "dark" || value === "system") {
+      themeMode = value;
+    } else {
+      return { ok: false, error: { code: "invalid-fields", detail: "appearance.themeMode" } };
+    }
+  }
+
+  // Desktop preferences from the optional desktop section, skipped whole on
+  // platforms where the switches do not exist. Unknown keys are ignored like
+  // in the editor section; the accepted values must survive the store
+  // normalizer unchanged, so a clamped number (duckdb worker processes) or an
+  // out-of-domain enum (icon theme) rejects the whole file instead of being
+  // silently repaired.
+  const desktopKeys = includeDesktop && isPlainObject(desktop) ? TRANSFERABLE_DESKTOP_SETTINGS_KEYS.filter((key) => key in desktop) : [];
+  const importedDesktop: Partial<TransferableDesktopSettings> = {};
+  if (desktopKeys.length > 0 && isPlainObject(desktop)) {
+    const desktopProbe: Record<string, unknown> = { ...DEFAULT_DESKTOP_SETTINGS };
+    for (const key of desktopKeys) {
+      const raw = desktop[key];
+      if (typeof raw !== typeof DEFAULT_DESKTOP_SETTINGS[key]) {
+        return { ok: false, error: { code: "invalid-fields", detail: `desktop.${key}` } };
+      }
+      desktopProbe[key] = raw;
+    }
+    const normalizedDesktop = normalizeDesktopSettings(desktopProbe as Partial<DesktopSettings>);
+    for (const key of desktopKeys) {
+      if (normalizedDesktop[key] !== desktop[key]) {
+        return { ok: false, error: { code: "invalid-fields", detail: `desktop.${key}` } };
+      }
+      importedDesktop[key] = normalizedDesktop[key] as never;
+    }
+  }
 
   // Old exports used the inverse `dataGridAutoHideFilterBuilder` flag. Keep
   // accepting it, but normalize it into the single current preference before
   // applying the strict whitelist below.
-  if (!("dataGridKeepFilterEditorExpanded" in editor) && typeof editor.dataGridAutoHideFilterBuilder === "boolean") {
+  if (isPlainObject(editor) && !("dataGridKeepFilterEditorExpanded" in editor) && typeof editor.dataGridAutoHideFilterBuilder === "boolean") {
     editor.dataGridKeepFilterEditorExpanded = !editor.dataGridAutoHideFilterBuilder;
   }
 
-  const presentKeys = EDITOR_SETTINGS_DRAFT_KEYS.filter((key) => key in editor);
-  if (presentKeys.length === 0) return { ok: false, error: { code: "empty-settings" } };
+  const editorObject = isPlainObject(editor) ? editor : {};
+  const presentKeys = EDITOR_SETTINGS_DRAFT_KEYS.filter((key) => key in editorObject);
+  if (presentKeys.length === 0 && desktopKeys.length === 0 && themeMode === undefined) return { ok: false, error: { code: "empty-settings" } };
 
   // Validate the raw file values BEFORE the normalizer runs. Some store
   // normalizers assume well-formed containers (e.g. customThemes items must
@@ -486,7 +800,7 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   // rather than crashing the parse.
   const invalidKeys: string[] = [];
   for (const key of presentKeys) {
-    const raw = editor[key];
+    const raw = editorObject[key];
     if (jsonKindOf(raw) !== EXPECTED_JSON_KINDS.get(key)) {
       invalidKeys.push(key);
       continue;
@@ -505,17 +819,27 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   // mutated by a malformed file.
   const probe = deepClone(DEFAULT_EDITOR_SETTINGS) as EditorSettings;
   for (const key of presentKeys) {
-    (probe as unknown as Record<string, unknown>)[key] = editor[key];
+    (probe as unknown as Record<string, unknown>)[key] = editorObject[key];
   }
   const normalized = normalizeEditorSettings(probe);
 
   const imported: Partial<EditorSettings> = {};
   for (const key of presentKeys) {
-    const raw = editor[key];
+    const raw = editorObject[key];
     const value = (normalized as unknown as Record<string, unknown>)[key];
     const validator = PASS_THROUGH_FIELD_VALIDATORS[key] ?? NESTED_FIELD_VALIDATORS[key];
     if (validator && !validator(value)) {
       invalidKeys.push(key);
+      continue;
+    }
+    // Keep nested toolbar values partial. The normalizer fills missing keys,
+    // but those defaults must not overwrite the target draft during import.
+    if (key === "toolbarItems") {
+      imported[key] = deepClone(normalizeImportedToolbarItems(raw)) as never;
+      continue;
+    }
+    if (key === "toolbarItemOrder") {
+      imported[key] = normalizeImportedToolbarItemOrder(raw) as never;
       continue;
     }
     if (typeof raw === "boolean" || typeof raw === "number" || typeof raw === "string") {
@@ -548,6 +872,10 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   const rawAppVersion = typeof app.version === "string" ? app.version.trim() : "";
   const rawExportedAt = typeof parsed.exportedAt === "string" ? parsed.exportedAt : "";
 
+  const categories = new Set(collectTransferCategories(Object.keys(imported)));
+  if (themeMode !== undefined) categories.add("appearance");
+  if (desktopKeys.length > 0) categories.add("other");
+
   return {
     ok: true,
     value: {
@@ -555,7 +883,9 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
       ...(rawAppVersion ? { appVersion: rawAppVersion } : {}),
       ...(rawExportedAt ? { exportedAt: rawExportedAt } : {}),
       editorSettings: imported,
-      categories: collectTransferCategories(Object.keys(imported)),
+      ...(themeMode !== undefined ? { themeMode } : {}),
+      desktopSettings: importedDesktop,
+      categories: sortTransferCategories(categories),
     },
   };
 }

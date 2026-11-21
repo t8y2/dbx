@@ -3,7 +3,7 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
-import { createQueryEditorExecutionShortcutBindings } from "../../editor/queryEditorExecutionShortcut";
+import { createQueryEditorExecutionShortcutBindings, createQueryEditorExecutionShortcutHandler } from "../../editor/queryEditorExecutionShortcut";
 
 function createView(bindings: ReturnType<typeof createQueryEditorExecutionShortcutBindings>[]): EditorView {
   return new EditorView({
@@ -104,5 +104,111 @@ describe("QueryEditor execution shortcuts", () => {
     expect(execute).toHaveBeenCalledOnce();
     expect(executeInNewResultTab).toHaveBeenCalledOnce();
     view.destroy();
+  });
+
+  describe("createQueryEditorExecutionShortcutHandler", () => {
+    const shortcuts = {
+      executeSql: "Mod+Enter",
+      executeAllSql: "Alt+X",
+      executeSqlInNewResultTab: "Mod+\\",
+      explainSql: "Mod+E",
+    };
+
+    it("passes through non-repeated events when not executing", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => false,
+      });
+
+      const event = executeEvent("Enter", { repeat: false });
+      const preventDefault = vi.spyOn(event, "preventDefault");
+      const stopPropagation = vi.spyOn(event, "stopPropagation");
+
+      expect(handler(event)).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+    });
+
+    it("suppresses execution shortcuts when event.repeat is true", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => false,
+      });
+
+      const event = executeEvent("Enter", { repeat: true });
+      const preventDefault = vi.spyOn(event, "preventDefault");
+      const stopPropagation = vi.spyOn(event, "stopPropagation");
+
+      expect(handler(event)).toBe(true);
+      expect(preventDefault).toHaveBeenCalled();
+      expect(stopPropagation).toHaveBeenCalled();
+    });
+
+    it("suppresses execute all SQL shortcut when event.repeat is true or executing", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => false,
+      });
+
+      const repeatEvent = new KeyboardEvent("keydown", {
+        key: "x",
+        code: "KeyX",
+        altKey: true,
+        repeat: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(handler(repeatEvent)).toBe(true);
+
+      const executingHandler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => true,
+      });
+      const executingEvent = new KeyboardEvent("keydown", {
+        key: "x",
+        code: "KeyX",
+        altKey: true,
+        repeat: false,
+        bubbles: true,
+        cancelable: true,
+      });
+      expect(executingHandler(executingEvent)).toBe(true);
+    });
+
+    it("suppresses execution shortcuts when isExecuting is true", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => true,
+      });
+
+      const event = executeEvent("Enter", { repeat: false });
+      const preventDefault = vi.spyOn(event, "preventDefault");
+      const stopPropagation = vi.spyOn(event, "stopPropagation");
+
+      expect(handler(event)).toBe(true);
+      expect(preventDefault).toHaveBeenCalled();
+      expect(stopPropagation).toHaveBeenCalled();
+    });
+
+    it("suppresses explain shortcut when enabled and isExecuting is true", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => true,
+        enableExplainShortcut: () => true,
+      });
+
+      const event = executeEvent("e", { repeat: false });
+      expect(handler(event)).toBe(true);
+    });
+
+    it("does not suppress unrelated keys even if repeating", () => {
+      const handler = createQueryEditorExecutionShortcutHandler({
+        getShortcuts: () => shortcuts,
+        isExecuting: () => true,
+      });
+
+      const event = new KeyboardEvent("keydown", { key: "a", repeat: true });
+      expect(handler(event)).toBe(false);
+    });
   });
 });

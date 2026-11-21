@@ -3,15 +3,20 @@ use std::sync::Arc;
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use axum::extract::State;
+use axum::http::header;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::Json;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dbx_core::storage::{McpGlobalPolicy, McpGlobalPolicyState};
 use pbkdf2::pbkdf2_hmac;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::captcha::CaptchaMode;
 use crate::error::AppError;
 use crate::state::WebState;
+use crate::web_mcp::{UpdateWebMcpRequest, WebMcpHttpStatus};
 
 const CONFIG_PBKDF2_ITERATIONS: u32 = 100_000;
 
@@ -38,6 +43,41 @@ pub struct DecryptConfigRequest {
     pub passphrase: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebLoginCaptchaState {
+    /// `always` | `auto` | `off`
+    pub mode: &'static str,
+    /// `DBX_WEB_CAPTCHA` is set, so the dialog must show the value read-only.
+    pub env_locked: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWebLoginCaptchaRequest {
+    pub mode: String,
+}
+
+pub async fn load_web_login_captcha(State(state): State<Arc<WebState>>) -> Json<WebLoginCaptchaState> {
+    let mode = *state.captcha_mode.read().await;
+    Json(WebLoginCaptchaState { mode: mode.as_str(), env_locked: state.captcha_env_locked })
+}
+
+pub async fn save_web_login_captcha(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveWebLoginCaptchaRequest>,
+) -> Result<Json<WebLoginCaptchaState>, AppError> {
+    // A deployment that pins the policy with `DBX_WEB_CAPTCHA` must not be
+    // silently weakened from the UI.
+    if state.captcha_env_locked {
+        return Err(AppError::conflict("captcha_env_locked"));
+    }
+    let mode = CaptchaMode::from_user_input(&body.mode).ok_or_else(|| AppError::bad_request("captcha_mode_invalid"))?;
+    state.app.storage.save_web_login_captcha_mode(mode.as_str()).await.map_err(AppError::from)?;
+    *state.captcha_mode.write().await = mode;
+    Ok(Json(WebLoginCaptchaState { mode: mode.as_str(), env_locked: false }))
+}
+
 pub async fn load_pinned_tree_node_ids(State(state): State<Arc<WebState>>) -> Result<Json<Vec<String>>, AppError> {
     let ids = state.app.storage.load_pinned_tree_node_ids().await.map_err(AppError::from)?;
     Ok(Json(ids))
@@ -57,6 +97,149 @@ pub async fn load_mcp_global_policy(
     state.app.storage.load_mcp_global_policy().await.map(Json).map_err(AppError::from)
 }
 
+pub async fn load_mcp_tool_catalog() -> Json<dbx_core::mcp_catalog::McpToolCatalog> {
+    Json(dbx_mcp::DbxMcpServer::tool_catalog())
+}
+
+pub async fn list_plugin_mcp_views(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<Vec<dbx_core::plugin_mcp::PluginMcpView>>, AppError> {
+    dbx_core::plugin_mcp::list_plugin_views(&state.app).await.map(Json).map_err(AppError::from)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMcpViewRequest {
+    pub plugin_id: String,
+}
+
+pub async fn load_plugin_mcp_view(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<PluginMcpViewRequest>,
+) -> Result<Json<dbx_core::plugin_mcp::PluginMcpView>, AppError> {
+    dbx_core::plugin_mcp::plugin_view_for(&state.app, &body.plugin_id).await.map(Json).map_err(AppError::bad_request)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPluginMcpScopesRequest {
+    pub plugin_id: String,
+    pub connection_id: String,
+}
+
+pub async fn list_plugin_mcp_scopes(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ListPluginMcpScopesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let manifest = state
+        .app
+        .plugins
+        .list_installed()
+        .map_err(AppError::from)?
+        .into_iter()
+        .find(|plugin| plugin.manifest.id == body.plugin_id)
+        .ok_or_else(|| AppError::bad_request("Plugin is not installed."))?
+        .manifest;
+    let method = manifest
+        .mcp_contribution()
+        .and_then(|mcp| mcp.scope.as_ref())
+        .and_then(|scope| scope.list_method.as_deref())
+        .ok_or_else(|| AppError::bad_request("This plugin does not declare a scope list method."))?;
+    let (policy, group_paths) = crate::routes::mcp_policy::load_policy_context(&state).await?;
+    let connection = state
+        .app
+        .storage
+        .load_connections()
+        .await
+        .map_err(AppError::from)?
+        .into_iter()
+        .find(|connection| connection.id == body.connection_id)
+        .ok_or_else(|| AppError::bad_request("CONNECTION_NOT_FOUND: connection is not available."))?;
+    if connection.plugin_id.as_deref() != Some(body.plugin_id.as_str()) {
+        return Err(AppError::bad_request("CONNECTION_OUT_OF_SCOPE: connection is not owned by this plugin."));
+    }
+    crate::routes::mcp_policy::ensure_allowed(&policy, group_paths.get(&connection.id), &connection.id)?;
+    let value = state
+        .app
+        .plugin_host
+        .invoke::<serde_json::Value>(
+            &body.plugin_id,
+            method,
+            serde_json::json!({ "connectionId": connection.id }),
+            None,
+            Some(std::time::Duration::from_secs(8)),
+        )
+        .await
+        .map_err(AppError::bad_request)?;
+    let values: Vec<String> = serde_json::from_value(
+        value
+            .get("values")
+            .cloned()
+            .ok_or_else(|| AppError::bad_request("Plugin scope list must return { values: string[] }."))?,
+    )
+    .map_err(|_| AppError::bad_request("Plugin scope list must return { values: string[] }."))?;
+    Ok(Json(serde_json::json!({ "values": values })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePluginMcpGrantRequest {
+    pub plugin_id: String,
+    pub grant: dbx_core::storage::PluginMcpGrant,
+    #[serde(default)]
+    pub approve_current: bool,
+}
+
+pub async fn save_plugin_mcp_grant(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SavePluginMcpGrantRequest>,
+) -> Result<Json<dbx_core::plugin_mcp::PluginMcpView>, AppError> {
+    dbx_core::plugin_mcp::save_plugin_grant(&state.app, &body.plugin_id, body.grant, body.approve_current)
+        .await
+        .map(Json)
+        .map_err(AppError::bad_request)
+}
+
+pub async fn load_mcp_access_policy(
+    State(state): State<Arc<WebState>>,
+) -> Result<Json<dbx_core::mcp_access::McpAccessPolicy>, AppError> {
+    state.app.storage.load_mcp_access_policy().await.map(Json).map_err(AppError::from)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMcpPluginScopeRuleRequest {
+    pub connection_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub rule: Option<dbx_core::mcp_access::McpAccessRule>,
+    #[serde(default)]
+    pub sub_scope: Option<dbx_core::mcp_access::McpSubScopeMode>,
+}
+
+pub async fn set_mcp_plugin_scope_rule(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SetMcpPluginScopeRuleRequest>,
+) -> Result<Json<dbx_core::mcp_access::McpAccessPolicy>, AppError> {
+    dbx_core::plugin_mcp::set_scope_rule(
+        &state.app,
+        &body.connection_id,
+        &body.kind,
+        body.value.as_deref(),
+        body.rule,
+        body.sub_scope,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::bad_request)
+}
+
+pub async fn reset_invalid_mcp_access_policy(State(state): State<Arc<WebState>>) -> Result<Json<()>, AppError> {
+    state.app.storage.reset_invalid_mcp_access_policy().await.map(Json).map_err(AppError::bad_request)
+}
+
 pub async fn save_mcp_global_policy(
     State(state): State<Arc<WebState>>,
     Json(policy): Json<McpGlobalPolicy>,
@@ -67,39 +250,61 @@ pub async fn save_mcp_global_policy(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WebMcpHttpStatus {
-    pub enabled: bool,
-    pub endpoint_path: String,
-    pub token_source: Option<&'static str>,
-    pub allowed_hosts: Vec<String>,
-    pub allowed_origins: Vec<String>,
+pub struct WebCapabilities {
+    pub password_viewer_enabled: bool,
 }
 
-pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> Json<WebMcpHttpStatus> {
-    let token_source = match (std::env::var_os("DBX_WEB_MCP_TOKEN"), std::env::var_os("DBX_WEB_MCP_TOKEN_FILE")) {
-        (Some(_), None) => Some("environment"),
-        (None, Some(_)) => Some("file"),
-        _ => None,
-    };
+pub async fn load_web_capabilities(State(state): State<Arc<WebState>>) -> Json<WebCapabilities> {
+    Json(WebCapabilities { password_viewer_enabled: state.password_viewer_enabled })
+}
+
+pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     let endpoint_path =
         if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
-    Json(WebMcpHttpStatus {
-        enabled: token_source.is_some(),
-        endpoint_path,
-        token_source,
-        allowed_hosts: comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS"),
-        allowed_origins: comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS"),
-    })
+    let management_available =
+        !state.password_disabled && state.password_hash.read().await.is_some() && !state.demo_mode;
+    let mut status = state.web_mcp.status(endpoint_path, management_available);
+    if state.demo_mode {
+        status.enabled = false;
+    }
+    web_mcp_status_response(status)
 }
 
-fn comma_separated_env(name: &str) -> Vec<String> {
-    std::env::var(name)
-        .ok()
-        .into_iter()
-        .flat_map(|value| {
-            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
-        })
-        .collect()
+pub async fn save_web_mcp_http_settings(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateWebMcpRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    ensure_web_mcp_management_allowed(&state, &headers).await?;
+    state.web_mcp.update(&state.app.storage, request).await.map_err(AppError::bad_request)?;
+    let endpoint_path =
+        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
+    Ok(web_mcp_status_response(state.web_mcp.status(endpoint_path, true)))
+}
+
+pub async fn rotate_web_mcp_token(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    ensure_web_mcp_management_allowed(&state, &headers).await?;
+    state.web_mcp.rotate(&state.app.storage).await.map_err(AppError::bad_request)?;
+    let endpoint_path =
+        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
+    Ok(web_mcp_status_response(state.web_mcp.status(endpoint_path, true)))
+}
+
+fn web_mcp_status_response(status: WebMcpHttpStatus) -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Json(status))
+}
+
+async fn ensure_web_mcp_management_allowed(state: &WebState, headers: &HeaderMap) -> Result<(), AppError> {
+    if state.demo_mode || state.password_disabled || state.password_hash.read().await.is_none() {
+        return Err(AppError::forbidden("Web MCP management requires password-protected DBX Web"));
+    }
+    if headers.get("x-dbx-mcp-settings").and_then(|value| value.to_str().ok()) != Some("1") {
+        return Err(AppError::forbidden("Web MCP management requires a same-origin settings request"));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -118,6 +323,41 @@ pub async fn save_max_agent_turns(
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_max_agent_turns(body.max_agent_turns).await.map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+#[derive(Deserialize)]
+pub struct SaveHistoryRetentionLimitRequest {
+    pub limit: u32,
+}
+
+pub async fn load_history_retention_limit(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_history_retention_limit().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_history_retention_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveHistoryRetentionLimitRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::history::validate_history_retention_limit(body.limit).map_err(AppError::bad_request)?;
+    state.app.storage.save_history_retention_limit(body.limit).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn load_mcp_history_retention_limit(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    state.app.storage.load_mcp_history_retention_limit().await.map(Json).map_err(AppError::from)
+}
+
+pub async fn save_mcp_history_retention_limit(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveHistoryRetentionLimitRequest>,
+) -> Result<Json<()>, AppError> {
+    dbx_core::history::validate_history_retention_limit(body.limit).map_err(AppError::bad_request)?;
+    state.app.storage.save_mcp_history_retention_limit(body.limit).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn cleanup_mcp_history_retention(State(state): State<Arc<WebState>>) -> Result<Json<u64>, AppError> {
+    state.app.storage.cleanup_mcp_history_retention().await.map(Json).map_err(AppError::from)
 }
 
 #[derive(Deserialize)]

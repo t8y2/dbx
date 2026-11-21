@@ -78,6 +78,15 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
                     Object value = rs.getBigDecimal(index);
                     return rs.wasNull() ? null : value;
                 });
+            case Types.BIT:
+            case Types.BOOLEAN:
+                // IRIS has no boolean type: %Boolean is stored as 1/0 and only
+                // the JDBC driver turns it into a Java boolean, which would
+                // surface as true/false in the grid. Report the stored 1/0.
+                return unchecked(() -> {
+                    int value = rs.getInt(index);
+                    return rs.wasNull() ? null : value;
+                });
             case Types.OTHER:
                 return unchecked(() -> JdbcExecutor.normalizeResultValue(rs.getObject(index)));
             default:
@@ -128,8 +137,60 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
             if (!hasPrimaryKey(columns)) {
                 markPrimaryKeys(columns, irisPrimaryKeys(conn, schema, table));
             }
+            markIdentityColumns(columns, irisIdentityColumns(conn, schema, table));
             return columns;
         });
+    }
+
+    /**
+     * IRIS RowId / IDENTITY columns are system-assigned: their values cannot be
+     * user-specified on INSERT, so the grid must omit them when saving new rows
+     * (mirrors how the Dameng agent reports IDENTITY columns). IRIS exposes this
+     * through INFORMATION_SCHEMA.COLUMNS extension columns (IS_ROWID / IS_IDENTITY,
+     * not part of the SQL standard). The probe is defensive on purpose: when a
+     * server build lacks the extension columns the query fails and column listing
+     * keeps working exactly as before.
+     */
+    private static Set<String> irisIdentityColumns(Connection conn, String schema, String table) {
+        Set<String> names = new LinkedHashSet<>();
+        try (PreparedStatement stmt = conn.prepareStatement(identityColumnSql(schema))) {
+            int index = 1;
+            if (!isBlank(schema)) {
+                stmt.setString(index++, schema.trim());
+            }
+            stmt.setString(index, table);
+            try (ResultSet rs = stmt.executeQuery()) {
+                addPrimaryKeys(names, rs);
+            }
+        } catch (Exception ignored) {
+            // Identity metadata is optional; older builds report it through
+            // neither extension column and must not break column listing.
+        }
+        return names;
+    }
+
+    private static String identityColumnSql(String schema) {
+        StringBuilder sql = new StringBuilder(
+            "SELECT COLUMN_NAME "
+                + "FROM INFORMATION_SCHEMA.COLUMNS WHERE "
+                + "(UPPER(IS_ROWID) = 'YES' OR UPPER(IS_IDENTITY) = 'YES') AND "
+        );
+        if (!isBlank(schema)) {
+            sql.append("UPPER(TABLE_SCHEMA) = UPPER(?) AND ");
+        }
+        sql.append("UPPER(TABLE_NAME) = UPPER(?)");
+        return sql.toString();
+    }
+
+    private static void markIdentityColumns(List<ColumnInfo> columns, Set<String> identityColumns) {
+        if (identityColumns.isEmpty()) {
+            return;
+        }
+        for (ColumnInfo column : columns) {
+            if (identityColumns.contains(column.getName().toUpperCase(Locale.ROOT))) {
+                column.setExtra("identity");
+            }
+        }
     }
 
     static List<String> dedupeCaseInsensitiveSchemas(List<String> schemas) {

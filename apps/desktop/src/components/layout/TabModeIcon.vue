@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { Activity, AlertTriangle, CalendarClock, Code2, Database, Eye, FunctionSquare, Gauge, KeyRound, ListOrdered, Network, PencilRuler, ShieldCheck, Table, TableProperties, Zap } from "@lucide/vue";
+import { Activity, AlertTriangle, Braces, CalendarClock, Clock, Code2, Database, Eye, FileCode, Gauge, KeyRound, Link2, ListTree, Network, Package, PencilRuler, ScrollText, Search, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import { tabDatabaseIconType } from "@/lib/tabs/tabPresentation";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import { isEventObjectBrowserTab, tabDatabaseIconType } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
 
 // Mirrors EditorGroupTabBar's per-mode tab icon chain so surfaces outside the
@@ -21,14 +22,26 @@ defineProps<{ tab: QueryTab }>();
   <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" />
   <Network v-else-if="tab.mode === 'nacos'" />
   <Database v-else-if="tab.mode === 'databases'" />
+  <Clock v-else-if="isEventObjectBrowserTab(tab)" />
   <TableProperties v-else-if="tab.mode === 'objects'" />
+  <UsersRound v-else-if="tab.mode === 'users'" />
   <PencilRuler v-else-if="tab.mode === 'structure'" />
-  <FunctionSquare v-else-if="tab.objectSource?.objectType === 'PROCEDURE' || tab.objectSource?.objectType === 'FUNCTION'" />
+  <Search v-else-if="tab.mode === 'database-search'" />
+  <ScrollText v-else-if="tab.objectSource?.objectType === 'PROCEDURE'" />
+  <Braces v-else-if="tab.objectSource?.objectType === 'FUNCTION'" />
   <Zap v-else-if="tab.objectSource?.objectType === 'TRIGGER'" />
-  <CalendarClock v-else-if="tab.objectSource?.objectType === 'EVENT' || tab.objectSource?.objectType === 'JOB'" />
-  <ListOrdered v-else-if="tab.objectSource?.objectType === 'SEQUENCE'" />
-  <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" />
+  <Clock v-else-if="tab.objectSource?.objectType === 'EVENT' || tab.objectSource?.objectType === 'JOB'" />
+  <ListTree v-else-if="tab.objectSource?.objectType === 'SEQUENCE'" />
+  <Link2 v-else-if="tab.objectSource?.objectType === 'SYNONYM'" />
+  <Package v-else-if="tab.objectSource?.objectType === 'PACKAGE'" />
+  <FileCode v-else-if="tab.objectSource?.objectType === 'PACKAGE_BODY'" />
+  <Braces v-else-if="tab.objectSource?.objectType === 'TYPE'" />
+  <FileCode v-else-if="tab.objectSource?.objectType === 'TYPE_BODY'" />
+  <CalendarClock v-else-if="tab.mode === 'dameng-jobs' || tab.mode === 'database-jobs'" />
   <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" />
   <Gauge v-else-if="tab.mode === 'dolt-version-control'" />
+  <PluginIcon v-else-if="tab.mode === 'plugin-workbench' && tab.pluginWorkbench" :plugin-id="tab.pluginWorkbench.pluginId" :contribution-id="tab.pluginWorkbench.contributionId" />
+  <PluginIcon v-else-if="tab.mode === 'plugin-filesystem' && tab.pluginFilesystem" :plugin-id="tab.pluginFilesystem.pluginId" :contribution-id="tab.pluginFilesystem.providerId" />
+  <FileCode v-else-if="tab.mode === 'query'" />
   <Code2 v-else />
 </template>

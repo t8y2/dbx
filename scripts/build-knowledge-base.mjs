@@ -14,9 +14,7 @@ async function main() {
   const lang = args.lang ?? DEFAULT_LANG;
   const fileSuffix = lang ? `.${lang}.mdx` : ".mdx";
 
-  const files = (await fs.readdir(inputDir))
-    .filter((name) => name.endsWith(fileSuffix))
-    .sort((a, b) => a.localeCompare(b));
+  const files = (await fs.readdir(inputDir)).filter((name) => name.endsWith(fileSuffix)).sort((a, b) => a.localeCompare(b));
 
   if (files.length === 0) {
     throw new Error(`No ${fileSuffix} files found in ${inputDir}`);
@@ -104,7 +102,10 @@ function parseFrontmatter(source) {
     const separator = line.indexOf(":");
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim().replace(/^["']|["']$/g, "");
+    const value = line
+      .slice(separator + 1)
+      .trim()
+      .replace(/^["']|["']$/g, "");
     fields[key] = value;
   }
 
@@ -234,21 +235,10 @@ function keywordsFor(category, heading, description, text) {
 }
 
 function renderMarkdown(documents) {
-  const lines = [
-    "# DBX 中文知识库",
-    "",
-    "> 从 `docs/content/docs/*.cn.mdx` 生成的纯 Markdown 知识库内容。",
-    "",
-    "## 来源索引",
-    "",
-    "| 来源文件 | 标题 | 描述 | 知识条数 |",
-    "| --- | --- | --- | ---: |",
-  ];
+  const lines = ["# DBX 中文知识库", "", "> 从 `docs/content/docs/*.cn.mdx` 生成的纯 Markdown 知识库内容。", "", "## 来源索引", "", "| 来源文件 | 标题 | 描述 | 知识条数 |", "| --- | --- | --- | ---: |"];
 
   for (const document of documents) {
-    lines.push(
-      `| ${escapeTableCell(document.source)} | ${escapeTableCell(document.title)} | ${escapeTableCell(document.description)} | ${document.sections.length} |`,
-    );
+    lines.push(`| ${escapeTableCell(document.source)} | ${escapeTableCell(document.title)} | ${escapeTableCell(document.description)} | ${document.sections.length} |`);
   }
 
   for (const document of documents) {
@@ -266,7 +256,10 @@ function renderMarkdown(documents) {
     }
   }
 
-  return `${lines.join("\n").replace(/\n{4,}/g, "\n\n\n").trim()}\n`;
+  return `${lines
+    .join("\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim()}\n`;
 }
 
 function escapeTableCell(value) {

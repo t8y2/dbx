@@ -33,23 +33,14 @@ export function selectChunk(issues, { chunkIndex, chunkCount, maxIssues = 0 }) {
 export async function listOpenUnassignedIssues(client) {
   const issues = [];
   for (let page = 1; ; page += 1) {
-    const items = await client.request(
-      "GET",
-      `/repos/${client.repository}/issues?state=open&sort=created&direction=desc&per_page=100&page=${page}`,
-    );
+    const items = await client.request("GET", `/repos/${client.repository}/issues?state=open&sort=created&direction=desc&per_page=100&page=${page}`);
     issues.push(...items.filter((issue) => !issue.pull_request && (issue.assignees || []).length === 0));
     if (items.length < 100) break;
   }
   return issues;
 }
 
-export async function backfill({
-  client,
-  chunkIndex,
-  chunkCount,
-  maxIssues = 0,
-  searchDelayMs = DEFAULT_SEARCH_DELAY_MS,
-}) {
+export async function backfill({ client, chunkIndex, chunkCount, maxIssues = 0, searchDelayMs = DEFAULT_SEARCH_DELAY_MS }) {
   const issues = selectChunk(await listOpenUnassignedIssues(client), { chunkIndex, chunkCount, maxIssues });
   const originalSearchIssues = client.searchIssues.bind(client);
   let lastSearchStartedAt = 0;
@@ -98,10 +89,6 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     chunkIndex: integerValue(process.env.BACKFILL_CHUNK_INDEX, 0, "BACKFILL_CHUNK_INDEX"),
     chunkCount: integerValue(process.env.BACKFILL_CHUNK_COUNT, 1, "BACKFILL_CHUNK_COUNT"),
     maxIssues: integerValue(process.env.BACKFILL_MAX_ISSUES, 0, "BACKFILL_MAX_ISSUES"),
-    searchDelayMs: integerValue(
-      process.env.BACKFILL_SEARCH_DELAY_MS,
-      DEFAULT_SEARCH_DELAY_MS,
-      "BACKFILL_SEARCH_DELAY_MS",
-    ),
+    searchDelayMs: integerValue(process.env.BACKFILL_SEARCH_DELAY_MS, DEFAULT_SEARCH_DELAY_MS, "BACKFILL_SEARCH_DELAY_MS"),
   });
 }

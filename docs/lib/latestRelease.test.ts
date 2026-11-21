@@ -34,3 +34,12 @@ test("latest release metadata fails closed without a GitHub API fallback", async
   assert.equal(await fetchLatestReleaseInfo(), null);
   assert.deepEqual(requestedUrls, ["https://dl.dbxio.com/releases/latest/latest.json"]);
 });
+
+test("latest release metadata keeps the release tag of a promoted beta", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ version: "0.6.63", release_tag: "v0.6.63-beta.20261101.3" })),
+  );
+
+  assert.deepEqual(await fetchLatestReleaseInfo(), { version: "0.6.63", release_tag: "v0.6.63-beta.20261101.3" });
+});

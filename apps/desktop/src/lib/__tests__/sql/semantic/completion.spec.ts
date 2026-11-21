@@ -30,11 +30,52 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
     databaseType: options.databaseType,
     keywordCase: input.keywordCase,
     autoAliasTables: input.autoAliasTables,
+    tableCompletionSchemaQualification: input.tableCompletionSchemaQualification,
   });
   return { sql, cursor, model, context, items };
 }
 
 describe("semantic SQL completion candidates", () => {
+  it("does not suggest alias snippets when completing a table name (#13750)", () => {
+    const markedSql = `SELECT *
+FROM dbo.Dh_Workcenter b
+INNER JOIN dbo.Dh_WorkcenterProcess c ON c.Workcenter_ID = b.Workcenter_ID
+INNER JOIN dbo.DH_MODEL_CAP_SUB dmcs ON c.Process_ID = dmcs.Process_ID
+INNER JOIN dbo.Dh_Process a ON c.Process_ID = a.Process_ID AND a.Process_Type = '02'
+LEFT JOIN dbo.Db_ModelSetTemplat|
+WHERE b.Workcenter_ID = :workcenter_ID`;
+    const { items } = semanticCompletion(
+      markedSql,
+      {
+        tables: [{ name: "Db_ModelSetTemplate", schema: "dbo", type: "table" }],
+        autoAliasTables: true,
+      },
+      { databaseType: "sqlserver", dialect: "sqlserver" },
+    );
+
+    expect(items.some((item) => item.type === "snippet" && item.detail?.includes("alias for"))).toBe(false);
+    expect(items.some((item) => item.label.includes("dmst") && item.type === "snippet")).toBe(false);
+    expect(items.some((item) => item.type === "table" && item.label === "Db_ModelSetTemplate")).toBe(true);
+
+    // When the cursor is after the table name and a space, alias snippets should be offered
+    const afterTableSpaceSql = `SELECT *
+FROM dbo.Dh_Workcenter b
+LEFT JOIN dbo.Db_ModelSetTemplate |
+WHERE b.Workcenter_ID = :workcenter_ID`;
+    const afterTable = semanticCompletion(
+      afterTableSpaceSql,
+      {
+        tables: [{ name: "Db_ModelSetTemplate", schema: "dbo", type: "table" }],
+        autoAliasTables: false,
+      },
+      { databaseType: "sqlserver", dialect: "sqlserver" },
+    );
+
+    const aliasSnippet = afterTable.items.find((item) => item.type === "snippet" && item.detail?.includes("alias for Db_ModelSetTemplate"));
+    expect(aliasSnippet).toBeDefined();
+    expect(aliasSnippet?.apply).toBe("dmst ");
+  });
+
   it("does not mix SELECT aliases into a following UPDATE statement", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["codex_completion_a", [{ name: "id", table: "codex_completion_a", schema: "public" }]],
@@ -60,13 +101,14 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("legacy_id");
   });
 
-  it("shows the column comment inline in the completion detail", () => {
+  it.each(["postgres", "mysql", "sqlserver"] as const)("shows the column comment inline in the %s completion detail", (databaseType) => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", [{ name: "nickname", table: "users", schema: "public", dataType: "text", comment: "用户昵称" }]]]);
 
-    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType, dialect: databaseType });
 
     const nickname = items.find((item) => item.type === "column" && item.label === "nickname");
     expect(nickname?.detail).toContain("-- 用户昵称");
+    expect(nickname?.comment).toBe("用户昵称");
   });
 
   it("ignores line-comment semicolons after a real statement boundary", () => {
@@ -204,6 +246,24 @@ describe("semantic SQL completion candidates", () => {
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: expectedKeyword, type: "keyword" })]));
   });
 
+  it.each([
+    ["UPDATE", "update|", "sqlserver"],
+    ["FROM", "select * from|", "mysql"],
+    ["JOIN", "select * from t1 join|", "mysql"],
+  ] as const)("keeps a fully typed table introducer keyword (%s) in the candidate list", (keyword, sql, databaseType) => {
+    const { context, items } = semanticCompletion(sql, {}, { databaseType });
+
+    expect(context.suggestKeywords).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: keyword, type: "keyword" })]));
+  });
+
+  it("offers tables once a table introducer keyword is committed with whitespace", () => {
+    const { context, items } = semanticCompletion("update |", { tables: [{ name: "orders" }] }, { databaseType: "sqlserver" });
+
+    expect(context.exclusiveTableSuggestions).toBe(true);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "orders", type: "table" })]));
+  });
+
   it("does not offer keyword continuations for qualified column prefixes", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([["t", [{ name: "order_number", table: "t" }]]]);
     const { context, items } = semanticCompletion("SELECT * FROM t WHERE t.or|", { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
@@ -329,6 +389,60 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column")).toEqual(
       expect.arrayContaining([expect.objectContaining({ label: "id", apply: "id", batchSelectionMode: "select", batchSelectionQualifier: "u" }), expect.objectContaining({ label: "name", apply: "name", batchSelectionMode: "select", batchSelectionQualifier: "u" })]),
     );
+  });
+
+  // #11330 / #15190: the repeated qualifier must stay exactly as typed. Oracle
+  // folds `ap` to AP, so quoting it as `"ap"` targets a different identifier.
+  it("keeps an unquoted Oracle batch qualifier unquoted", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id", "status"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT ap.| FROM orders ap", { columnsByTable }, { databaseType: "oracle" });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.length).toBeGreaterThan(0);
+    for (const item of columns) {
+      expect(item.batchSelectionQualifier).not.toContain('"');
+      // The semantic layer may fold the part to uppercase; both spellings are
+      // the same identifier on Oracle, a quoted one is not.
+      expect(item.batchSelectionQualifier?.toLowerCase()).toBe("ap");
+    }
+  });
+
+  it("keeps the quotes of a quoted Oracle batch qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion('SELECT "ap".| FROM orders "ap"', { columnsByTable }, { databaseType: "oracle" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === '"ap"')).toBe(true);
+  });
+
+  it("keeps an unquoted mixed-case PostgreSQL batch qualifier unquoted", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT MyAlias.| FROM orders MyAlias", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+    const columns = items.filter((item) => item.type === "column");
+
+    expect(columns.length).toBeGreaterThan(0);
+    // Postgres folds the bare alias to lowercase, which is the same identifier;
+    // quoting it would not be.
+    expect(columns.every((item) => !item.batchSelectionQualifier?.includes('"'))).toBe(true);
+    expect(columns.every((item) => item.batchSelectionQualifier?.toLowerCase() === "myalias")).toBe(true);
+  });
+
+  it("still quotes a reserved-word PostgreSQL batch qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion('SELECT "select".| FROM orders "select"', { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === '"select"')).toBe(true);
+  });
+
+  it("still quotes a MySQL batch qualifier that needs backticks", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items } = semanticCompletion("SELECT `Order Alias`.| FROM orders AS `Order Alias`", { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionQualifier === "`Order Alias`")).toBe(true);
   });
 
   it("retains a typed table name when the referenced table also has an alias", () => {
@@ -475,13 +589,14 @@ FROM (
   });
 
   it.each([
-    ["Oracle", "oracle", "mysql", '"ID", o."created at", o."SELECT", o.safe_name'],
-    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
-    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name'],
-    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name"],
-    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
+    ["Oracle", "oracle", "mysql", 'ID, o."created at", o."SELECT", o."safe_name", o."OrderId", o."order_id"'],
+    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name, o.`OrderId`, o.order_id"],
+    ["ClickHouse", "clickhouse", "mysql", "ID, o.`created at`, o.`SELECT`, o.safe_name, o.OrderId, o.order_id"],
+    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name, o."OrderId", o.order_id'],
+    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name, o.[OrderId], o.order_id"],
+    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name, o.`OrderId`, o.order_id"],
   ] as const)("uses %s identifier quoting in qualified star completion items", (_label, databaseType, dialect, expected) => {
-    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name"].map((name) => ({ name, table: "orders" }))]]);
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name", "OrderId", "order_id"].map((name) => ({ name, table: "orders" }))]]);
 
     const starItems = semanticCompletion("SELECT o.*| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
     const selectAllItems = semanticCompletion("SELECT o.| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
@@ -490,15 +605,47 @@ FROM (
     expect(selectAllItems.find((item) => item.label === "o.*")?.apply).toBe(expected);
   });
 
+  it("quotes non-ASCII/Chinese and reserved columns with backticks while leaving bare English identifiers unquoted for ClickHouse", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["id", "order_id", "姓名", "时间", "prewhere", "final", "status"].map((name) => ({ name, table: "orders" }))]]);
+
+    const { items: columnItems } = semanticCompletion("SELECT o.| FROM orders o", { columnsByTable }, { databaseType: "clickhouse", dialect: "mysql" });
+    expect(columnItems.find((item) => item.label === "姓名")?.apply).toBe("`姓名`");
+    expect(columnItems.find((item) => item.label === "时间")?.apply).toBe("`时间`");
+    expect(columnItems.find((item) => item.label === "prewhere")?.apply).toBe("`prewhere`");
+    expect(columnItems.find((item) => item.label === "final")?.apply).toBe("`final`");
+    expect(columnItems.find((item) => item.label === "id")?.apply).toBe("id");
+    expect(columnItems.find((item) => item.label === "order_id")?.apply).toBe("order_id");
+    expect(columnItems.find((item) => item.label === "status")?.apply).toBe("status");
+
+    const star = columnItems.find((item) => item.label === "o.*");
+    expect(star?.apply).toBe("id, o.order_id, o.`姓名`, o.`时间`, o.`prewhere`, o.`final`, o.status");
+
+    const { items: tableItems } = semanticCompletion(
+      "SELECT * FROM |",
+      {
+        tables: [
+          { name: "用户表", type: "table" },
+          { name: "normal_table", type: "table" },
+          { name: "order", type: "table" },
+        ],
+      },
+      { databaseType: "clickhouse", dialect: "mysql" },
+    );
+
+    expect(tableItems.find((item) => item.label === "用户表")?.apply).toBe("`用户表`");
+    expect(tableItems.find((item) => item.label === "normal_table")?.apply).toBe("normal_table");
+    expect(tableItems.find((item) => item.label === "order")?.apply).toBe("`order`");
+  });
+
   it("uses Oracle quoting for an unqualified multi-table star completion item", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
-      ["ORDERS", ["ID", "created at"].map((name) => ({ name, table: "ORDERS" }))],
-      ["AUDIT", ["ID", "SELECT"].map((name) => ({ name, table: "AUDIT" }))],
+      ["ORDERS", ["ID", "created at", "OrderId"].map((name) => ({ name, table: "ORDERS" }))],
+      ["AUDIT", ["ID", "SELECT", "order_id"].map((name) => ({ name, table: "AUDIT" }))],
     ]);
 
     const { items } = semanticCompletion("SELECT *| FROM ORDERS o JOIN AUDIT a ON a.ID = o.ID", { columnsByTable }, { databaseType: "oracle", dialect: "mysql" });
 
-    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o."ID", o."created at", a."ID", a."SELECT"');
+    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o.ID, o."created at", o."OrderId", a.ID, a."SELECT", a."order_id"');
   });
 
   it("generates collision-free table aliases from semantic row sources", () => {
@@ -507,7 +654,99 @@ FROM (
       autoAliasTables: true,
     });
 
-    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi2");
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi2");
+  });
+
+  it("omits generated aliases on a DELETE target table (issue #9186)", () => {
+    const { items } = semanticCompletion("DELETE FROM DH|_MODEL_CAP", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on a schema-qualified DELETE target table", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.DH_MODEL_CAP|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases while the DELETE target schema is being typed", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.DH|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    // The qualifier resolves to the delete target itself, so no alias is offered.
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on an empty-prefix DELETE target (manual trigger)", () => {
+    const { items } = semanticCompletion("DELETE FROM |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on an empty-prefix schema-qualified DELETE target", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on empty-prefix UPDATE and INSERT targets", () => {
+    const updated = semanticCompletion("UPDATE |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+    const inserted = semanticCompletion("INSERT INTO |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(updated.items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+    expect(inserted.items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("keeps generated aliases on JOIN sources inside a DELETE statement", () => {
+    const { items } = semanticCompletion("DELETE t1 FROM t1 JOIN ord|", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+  });
+
+  it("keeps generated aliases after a multi-table DELETE target list", () => {
+    const { items } = semanticCompletion("DELETE t1 FROM |", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+  });
+
+  it("keeps generated aliases on FROM and JOIN sources", () => {
+    const joined = semanticCompletion("SELECT * FROM DH_MODEL_CAP JOIN ord|", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+    const queried = semanticCompletion("SELECT * FROM DH|_MODEL_CAP", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(joined.items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+    expect(queried.items.find((item) => item.label === "DH_MODEL_CAP")?.apply).toBe("DH_MODEL_CAP dmc");
   });
 
   it("preserves dialect-aware identifier quoting in apply text", () => {
@@ -609,5 +848,77 @@ FROM (
 
     expect(context.suggestKeywords).toBe(true);
     expect(items.filter((item) => item.type === "keyword").map((item) => item.label)).toEqual(expect.arrayContaining(["WHERE", "WHEN", "WITH"]));
+  });
+});
+
+describe("implicit join table lists end at the next clause (#14445)", () => {
+  const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+    ["emp", ["id", "emp_name"].map((name) => ({ name, table: "emp" }))],
+    ["dept", ["id", "dept_name"].map((name) => ({ name, table: "dept" }))],
+  ]);
+
+  it.each([
+    ["MySQL", { databaseType: "mysql", dialect: "mysql" }],
+    ["PostgreSQL", { databaseType: "postgres", dialect: "postgres" }],
+    ["Oracle", { databaseType: "oracle" }],
+  ] as const)("offers columns after WHERE in a %s comma join", (_label, options) => {
+    const { context, items } = semanticCompletion("SELECT * FROM emp e, dept d WHERE |", { columnsByTable }, options);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+    const labels = items.filter((item) => item.type === "column").map((item) => item.label);
+    expect(labels).toEqual(expect.arrayContaining(["e.emp_name", "d.dept_name"]));
+  });
+
+  it.each([
+    ["WHERE", "SELECT * FROM emp e, dept d WHERE e.id = 1 AND |"],
+    ["ORDER BY", "SELECT * FROM emp e, dept d ORDER BY |"],
+    ["GROUP BY", "SELECT * FROM emp e, dept d GROUP BY |"],
+  ] as const)("keeps column completion after %s in a comma join", (_label, markedSql) => {
+    const { context } = semanticCompletion(markedSql, { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+  });
+
+  it("still treats the slot after a FROM-list comma as a table name", () => {
+    const { context } = semanticCompletion("SELECT * FROM emp e, dept d, |", {}, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("table");
+    expect(context.suggestTables).toBe(true);
+  });
+});
+
+describe("DROP TABLE IF EXISTS completion (#14113)", () => {
+  const mysql = { databaseType: "mysql", dialect: "mysql" } as const;
+  const tables = [{ name: "oblist_partition", type: "table" as const }];
+
+  it.each([
+    ["DROP TABLE IF EXISTS |", "oblist_partition"],
+    ["DROP TABLE IF EXISTS obl|", "oblist_partition"],
+    ["drop temporary table if exists |", "oblist_partition"],
+  ])("suggests table names after IF EXISTS: %s", (markedSql, expected) => {
+    const { context, items } = semanticCompletion(markedSql, { tables }, mysql);
+
+    expect(context.suggestTables).toBe(true);
+    expect(items.some((item) => item.type === "table" && item.label === expected)).toBe(true);
+  });
+
+  it.each([
+    ["DROP TABLE |", "IF"],
+    ["DROP TABLE I|", "IF"],
+    ["DROP TABLE IF |", "EXISTS"],
+    ["DROP TABLE IF E|", "EXISTS"],
+  ])("offers the optional %s keyword", (markedSql, keyword) => {
+    const { items } = semanticCompletion(markedSql, { tables }, mysql);
+
+    expect(items.some((item) => item.type === "keyword" && item.label === keyword)).toBe(true);
+  });
+
+  it("does not offer IF EXISTS words once a table name has been written", () => {
+    const { context } = semanticCompletion("DROP TABLE oblist_partition |", { tables }, mysql);
+
+    expect(context.preferredKeywords).not.toContain("IF");
+    expect(context.preferredKeywords).not.toContain("EXISTS");
   });
 });

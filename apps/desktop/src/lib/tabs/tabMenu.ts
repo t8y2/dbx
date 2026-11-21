@@ -1,4 +1,4 @@
-import { Copy, Crosshair, Pencil, Pin, X } from "@lucide/vue";
+import { Copy, Crosshair, Pencil, Pin, RotateCcw, Save, X } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import type { QueryTab } from "@/types/database";
 
@@ -17,7 +17,7 @@ export function createRenameDuplicateTabItems(options: { tab: QueryTab; t: (key:
       label: options.t("contextMenu.duplicateTab"),
       action: options.onDuplicate,
       icon: Copy,
-      visible: options.canRename,
+      visible: options.canRename || options.tab.mode === "data" || options.tab.mode === "mongo",
     },
   ];
 }
@@ -42,6 +42,16 @@ export function createPinTabMenuItem(options: { label: string; iconClass?: strin
 
 export function createCloseTabMenuItem(options: { label: string; onClose: () => void }): ContextMenuItem {
   return { label: options.label, action: options.onClose, icon: X };
+}
+
+export function createReopenClosedTabMenuItem(options: { label: string; disabled?: boolean; shortcut?: string; onReopen: () => void }): ContextMenuItem {
+  return {
+    label: options.label,
+    action: options.onReopen,
+    ...(options.disabled !== undefined ? { disabled: options.disabled } : {}),
+    ...(options.shortcut ? { shortcut: options.shortcut } : {}),
+    icon: RotateCcw,
+  };
 }
 
 export function createCloseOtherTabMenuItem(options: { label: string; disabled?: boolean; shortcut?: string; onClose: () => void }): ContextMenuItem {
@@ -78,5 +88,15 @@ export function createCloseAllTabMenuItem(options: { label: string; variant?: "d
     action: options.onClose,
     ...(options.variant ? { variant: options.variant } : {}),
     icon: X,
+  };
+}
+
+export function createSaveAllTabsMenuItem(options: { label: string; disabled?: boolean; shortcut?: string; onSaveAll: () => void }): ContextMenuItem {
+  return {
+    label: options.label,
+    action: options.onSaveAll,
+    ...(options.disabled !== undefined ? { disabled: options.disabled } : {}),
+    ...(options.shortcut ? { shortcut: options.shortcut } : {}),
+    icon: Save,
   };
 }

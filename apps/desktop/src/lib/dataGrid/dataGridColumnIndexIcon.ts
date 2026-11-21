@@ -37,6 +37,20 @@ export function columnIndexMetadataRequestCurrent(options: { requestGeneration: 
   return options.requestGeneration === options.currentGeneration && options.requestIdentity === options.currentIdentity;
 }
 
+/** How the cached column-index metadata reacts to a table identity update. */
+export type ColumnIndexCacheAction = "reset" | "keep-refresh" | "unchanged";
+
+/**
+ * Keeps the header index badges stable while the same table's metadata is refreshed
+ * (issue #12093): a manual refresh re-publishes `tableMeta`, and clearing the cached
+ * indexes there made the badges blink until the new `listIndexes` result arrived.
+ * Only a real table switch resets them.
+ */
+export function columnIndexCacheAction(previousIdentity: string | undefined, nextIdentity: string | undefined, loaded: boolean): ColumnIndexCacheAction {
+  if (previousIdentity !== nextIdentity) return "reset";
+  return loaded ? "keep-refresh" : "unchanged";
+}
+
 function columnIndexPriority(kind: ColumnIndexKind): number {
   switch (kind) {
     case "primary":

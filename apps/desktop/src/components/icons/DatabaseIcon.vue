@@ -3,130 +3,17 @@ import { computed } from "vue";
 import { Database } from "@lucide/vue";
 import { useTheme } from "@/composables/useTheme";
 import { webPath } from "@/lib/common/webPath";
+import { databaseIconAssetName, normalizeDatabaseIconType } from "@/lib/database/databaseIconAssets";
 
 const props = defineProps<{
   dbType?: string;
 }>();
 const { isDark } = useTheme();
 
-const assetIcons: Record<string, string> = {
-  mysql: "mysql",
-  postgres: "postgres",
-  postgresql: "postgres",
-  cloudberry: "cloudberry",
-  opentenbase: "opentenbase",
-  sqlite: "sqlite",
-  "sqlite-worker": "sqlite",
-  rqlite: "rqlite.png",
-  turso: "turso.png",
-  cloudflare_d1: "cloudflare-d1",
-  redis: "redis",
-  mongodb: "mongodb",
-  mongodb_legacy: "mongodb",
-  dynamodb: "dynamodb",
-  clickhouse: "clickhouse",
-  duckdb: "duckdb",
-  mariadb: "mariadb",
-  tidb: "tidb",
-  elasticsearch: "elasticsearch",
-  easysearch: "easysearch",
-  meilisearch: "meilisearch",
-  oracle: "oracle",
-  "oracle-10g": "oracle",
-  "oracle-legacy": "oracle",
-  oracle_10g: "oracle",
-  oracle_legacy: "oracle",
-  sqlserver: "sqlserver",
-  access: "access.png",
-  oceanbase: "oceanbase",
-  oceanbase_oracle: "oceanbase",
-  opengauss: "opengauss",
-  gaussdb: "gaussdb",
-  questdb: "questdb",
-  kwdb: "kwdb",
-  kingbase: "kingbase",
-  highgo: "highgo.png",
-  uxdb: "uxdb",
-  goldendb: "goldendb.png",
-  databend: "databend",
-  vastbase: "vastbase",
-  yashandb: "yashandb.png",
-  snowflake: "snowflake",
-  h2: "h2",
-  dm: "dm",
-  dameng: "dm",
-  presto: "presto",
-  prestosql: "presto",
-  hive: "hive",
-  argo: "hive",
-  kyuubi: "kyuubi.png",
-  impala: "impala",
-  hbase: "hbase",
-  phoenix: "phoenix",
-  spark: "spark-logo.png",
-  apache_kylin: "apache_kylin",
-  apache_ignite: "apache_ignite",
-  sundb: "sundb",
-  trino: "trino",
-  kylin: "apache_kylin",
-  ignite: "apache_ignite",
-  ignite3: "apache_ignite",
-  cockroachdb: "cockroachdb",
-  db2: "db2",
-  dremio: "dremio",
-  bigquery: "bigquery",
-  spanner: "spanner",
-  cassandra: "cassandra",
-  doris: "doris",
-  manticoresearch: "manticoresearch.png",
-  selectdb: "selectdb",
-  tdengine: "tdengine",
-  starrocks: "starrocks",
-  redshift: "redshift",
-  neo4j: "neo4j",
-  informix: "informix",
-  databricks: "databricks",
-  saphana: "saphana",
-  teradata: "teradata",
-  vertica: "vertica.webp",
-  firebird: "firebird",
-  exasol: "exasol",
-  gbase: "gbase.png",
-  gbase8a: "gbase.png",
-  gbase8s: "gbase.png",
-  tdsql: "tdsql",
-  polardb: "polardb.webp",
-  greatsql: "greatsql.webp",
-  xugu: "xugu.png",
-  iotdb: "iotdb",
-  etcd: "etcd",
-  etcd2: "etcd",
-  qdrant: "qdrant",
-  milvus: "milvus.png",
-  weaviate: "weaviate",
-  chromadb: "chromadb",
-  mq: "pulsar",
-  pulsar: "pulsar",
-  kafka: "kafka",
-  rocketmq: "rocketmq",
-  rabbitmq: "rabbitmq",
-  nacos: "nacos.png",
-  consul: "consul",
-  iris: "iris",
-  cache: "iris",
-  influxdb: "influxdb",
-  influxdb3: "influxdb",
-  victoriametrics: "victoriametrics.png",
-  zookeeper: "zookeeper",
-  oscar: "oscar.png",
-  jdbcx: "jdbcx",
-  mqtt: "mqtt",
-  dolt: "dolt",
-};
-
-const normalizedType = computed(() => (props.dbType || "").toLowerCase().replace(/[\s-]+/g, "_"));
-const assetName = computed(() => assetIcons[normalizedType.value]);
+const normalizedType = computed(() => normalizeDatabaseIconType(props.dbType));
+const assetName = computed(() => databaseIconAssetName(normalizedType.value));
 const useLightIconInDarkMode = computed(() => normalizedType.value === "easysearch" && isDark.value);
+const brightenInceptorInDarkMode = computed(() => isDark.value && (normalizedType.value === "transwarp" || normalizedType.value === "transwarp_inceptor"));
 const assetSrc = computed(() => {
   if (!assetName.value) return "";
   if (normalizedType.value === "uxdb" && isDark.value) return webPath("/icons/database/uxdb-dark.svg");
@@ -135,7 +22,14 @@ const assetSrc = computed(() => {
 </script>
 
 <template>
-  <img v-if="assetName" :src="assetSrc" alt="" class="database-logo object-contain" :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-impala': normalizedType === 'impala' }" aria-hidden="true" />
+  <img
+    v-if="assetName"
+    :src="assetSrc"
+    alt=""
+    class="database-logo object-contain"
+    :class="{ 'database-logo-light': useLightIconInDarkMode, 'database-logo-inceptor-dark': brightenInceptorInDarkMode, 'database-logo-impala': normalizedType === 'impala', 'database-logo-solr': normalizedType === 'solr' }"
+    aria-hidden="true"
+  />
   <Database v-else class="text-blue-400" />
 </template>
 
@@ -149,7 +43,17 @@ const assetSrc = computed(() => {
   filter: brightness(0) invert(82%);
 }
 
+.database-logo-inceptor-dark {
+  filter: brightness(1.6);
+}
+
 .database-logo-impala {
   transform: scale(1.55);
+}
+
+/* solr.svg 的图形撑满整个 viewBox（无内边距），其他 logo 留白约 20-25%，
+   统一 scale(1.35) 下视觉偏大，单独收敛到与多数 logo 一致的占幅。 */
+.database-logo-solr {
+  transform: scale(1.02);
 }
 </style>

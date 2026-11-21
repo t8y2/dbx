@@ -2,18 +2,49 @@
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDataCompareSelection, isCompareRowSelected } from "@/lib/dataGrid/dataCompareSelection";
 import i18n from "@/i18n";
 import DataCompareDialog from "@/components/diff/DataCompareDialog.vue";
 import type { DataCompareSession } from "@/composables/useDataCompareSession";
 
+vi.mock("vue-virtual-scroller", () => ({
+  DynamicScroller: defineComponent({
+    props: ["items"],
+    setup:
+      (props, { slots }) =>
+      () =>
+        h(
+          "div",
+          props.items.map((item: unknown, index: number) => slots.default?.({ item, index, active: true })),
+        ),
+  }),
+  DynamicScrollerItem: defineComponent({
+    setup:
+      (_, { slots }) =>
+      () =>
+        h("div", slots.default?.()),
+  }),
+}));
+
 const mocks = vi.hoisted(() => ({
+  toast: vi.fn(),
+  copyToClipboard: vi.fn().mockResolvedValue(undefined),
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   listDatabases: vi.fn().mockResolvedValue([]),
   listSchemas: vi.fn().mockResolvedValue(["DBX_TEST", "REPORTING", "SYS"]),
   listTables: vi.fn().mockResolvedValue([{ name: "CODEX_7467_META", table_type: "TABLE" }]),
   getColumns: vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_primary_key: true }]),
   buildDataCompareSyncPlan: vi.fn(),
+  executeBatch: vi.fn(),
+  beginManualTransaction: vi.fn().mockResolvedValue("compare-txn"),
+  executeInManualTransaction: vi.fn().mockResolvedValue([]),
+  commitManualTransaction: vi.fn().mockResolvedValue({}),
+  rollbackManualTransaction: vi.fn().mockResolvedValue({}),
 }));
+
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
+
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
 const sessionMocks = vi.hoisted(() => ({
   session: null as DataCompareSession | null,
@@ -58,6 +89,11 @@ vi.mock("@/lib/backend/api", () => ({
   listTables: mocks.listTables,
   getColumns: mocks.getColumns,
   buildDataCompareSyncPlan: mocks.buildDataCompareSyncPlan,
+  executeBatch: mocks.executeBatch,
+  beginManualTransaction: mocks.beginManualTransaction,
+  executeInManualTransaction: mocks.executeInManualTransaction,
+  commitManualTransaction: mocks.commitManualTransaction,
+  rollbackManualTransaction: mocks.rollbackManualTransaction,
 }));
 
 const mountedApps: App[] = [];
@@ -74,6 +110,7 @@ afterEach(() => {
   document.body.textContent = "";
   sessionMocks.session = null;
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function completedSession(): DataCompareSession {
@@ -115,11 +152,14 @@ function completedSession(): DataCompareSession {
         targetRowCount: 0,
         sourceTruncated: false,
         targetTruncated: false,
+        rowBudget: 100_000,
+        syncEligible: true,
         databaseType: "oracle",
+        selection: { added: createDataCompareSelection(true), removed: createDataCompareSelection(true), modified: createDataCompareSelection(true) },
         diff: {
           added: [
-            { key: "1", keyValues: { ID: 1 }, values: { ID: 1, NAME: "first" }, selected: true },
-            { key: "2", keyValues: { ID: 2 }, values: { ID: 2, NAME: "second" }, selected: true },
+            { key: "1", keyValues: { ID: 1 }, values: { ID: 1, NAME: "first" } },
+            { key: "2", keyValues: { ID: 2 }, values: { ID: 2, NAME: "second" } },
           ],
           removed: [],
           modified: [],
@@ -156,6 +196,150 @@ function mountSessionDialog(session: DataCompareSession): App {
   app.mount(container);
   return app;
 }
+
+function buttonFor(key: string): HTMLButtonElement {
+  const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t(key));
+  if (!button) throw new Error(`Missing button: ${key}`);
+  return button;
+}
+
+async function mountManualSession(session = completedSession()) {
+  const app = mountSessionDialog(session);
+  await flushAsyncSetup();
+  const label = [...document.querySelectorAll("label")].find((label) => label.textContent?.includes(i18n.global.t("toolbar.manualTransaction")));
+  const checkbox = label?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  expect(checkbox).toBeDefined();
+  checkbox!.click();
+  await nextTick();
+  return app;
+}
+
+describe("DataCompareDialog manual transactions", () => {
+  it("keeps the target session pending until commit and locks target changes", async () => {
+    const session = completedSession();
+    await mountManualSession(session);
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("dataCompare.pendingTransaction")));
+    expect(mocks.beginManualTransaction).toHaveBeenCalledWith("oracle-jdbc-11g", "REPORTING", "DBX_TEST");
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledWith("compare-txn", "INSERT 1;\nINSERT 2", "REPORTING", "DBX_TEST");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+    expect(buttonFor("dataCompare.recompare").disabled).toBe(true);
+    expect([...document.querySelectorAll<HTMLButtonElement>("button.dbx-searchable-select-trigger")].every((button) => button.disabled)).toBe(true);
+    buttonFor("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.commitManualTransaction).toHaveBeenCalledWith("compare-txn"));
+    await flushAsyncSetup();
+    expect(document.body.textContent).not.toContain(i18n.global.t("dataCompare.pendingTransaction"));
+    expect(session.syncPlan.syncStatements).toEqual([]);
+    expect(session.batchResults).toEqual([]);
+  });
+
+  it("rolls back without committing", async () => {
+    await mountManualSession();
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("dataCompare.pendingTransaction")));
+    buttonFor("toolbar.rollback").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("compare-txn"));
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("stops on the first failed batch without ordinary retries or later batches", async () => {
+    const session = completedSession();
+    session.syncPlan.syncStatements = Array.from({ length: 501 }, (_, index) => `INSERT ${index}`);
+    session.syncPlan.statementCount = 501;
+    mocks.executeInManualTransaction.mockRejectedValueOnce(new Error("transaction statement rejected"));
+    await mountManualSession(session);
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("compare-txn"));
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("cleans up a transaction created after the dialog unmounts", async () => {
+    let resolveBegin!: (id: string) => void;
+    mocks.beginManualTransaction.mockReturnValueOnce(new Promise((resolve) => (resolveBegin = resolve)));
+    const app = await mountManualSession();
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(mocks.beginManualTransaction).toHaveBeenCalled());
+    mountedApps.splice(mountedApps.indexOf(app), 1);
+    app.unmount();
+    resolveBegin("late-compare-txn");
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("late-compare-txn"));
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("keeps a rollback control when commit fails", async () => {
+    mocks.commitManualTransaction.mockRejectedValueOnce(new Error("commit unavailable"));
+    await mountManualSession();
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("dataCompare.pendingTransaction")));
+    buttonFor("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.commitManualTransaction).toHaveBeenCalled());
+    await flushAsyncSetup();
+    expect(buttonFor("toolbar.rollback").disabled).toBe(false);
+    expect(document.body.textContent).toContain(i18n.global.t("dataCompare.pendingTransaction"));
+  });
+
+  it("waits for an active batch before rollback on unmount and skips later batches", async () => {
+    const session = completedSession();
+    session.syncPlan.syncStatements = Array.from({ length: 501 }, (_, index) => `INSERT ${index}`);
+    session.syncPlan.statementCount = 501;
+    let finish!: (rows: unknown[]) => void;
+    mocks.executeInManualTransaction.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const app = await mountManualSession(session);
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(mocks.executeInManualTransaction).toHaveBeenCalledOnce());
+    mountedApps.splice(mountedApps.indexOf(app), 1);
+    app.unmount();
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    finish([]);
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("compare-txn"));
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates the sync plan after an unknown commit result without claiming success", async () => {
+    const session = completedSession();
+    mocks.commitManualTransaction.mockRejectedValueOnce(new Error("response lost"));
+    await mountManualSession(session);
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("dataCompare.pendingTransaction")));
+    buttonFor("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("response lost", 5000));
+    expect(buttonFor("toolbar.commit").disabled).toBe(true);
+    mocks.rollbackManualTransaction.mockRejectedValueOnce(new Error("Transaction session not found"));
+    buttonFor("toolbar.rollback").click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith(i18n.global.t("toolbar.commitOutcomeUnknown"), 5000));
+    expect(session.syncPlan.syncStatements).toEqual([]);
+    expect(session.batchResults).toEqual([]);
+    expect(mocks.toast).not.toHaveBeenCalledWith(i18n.global.t("dataCompare.syncSuccess"), 2000);
+  });
+
+  it("disables commit when rollback after an execution error fails", async () => {
+    mocks.executeInManualTransaction.mockRejectedValueOnce(new Error("statement failed"));
+    mocks.rollbackManualTransaction.mockRejectedValueOnce(new Error("rollback unavailable"));
+    await mountManualSession();
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalled());
+    await flushAsyncSetup();
+    expect(buttonFor("toolbar.commit").disabled).toBe(true);
+    expect(buttonFor("toolbar.rollback").disabled).toBe(false);
+  });
+
+  it("requires rollback confirmation before closing a pending transaction", async () => {
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    vi.stubGlobal("confirm", confirm);
+    await mountManualSession();
+    buttonFor("diff.executeSync").click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain(i18n.global.t("dataCompare.pendingTransaction")));
+    buttonFor("common.close").click();
+    await flushAsyncSetup();
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    buttonFor("common.close").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("compare-txn"));
+    expect(confirm).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("DataCompareDialog source prefill", () => {
   it("keeps the Oracle source table after loading database and schema prefills", async () => {
@@ -259,6 +443,45 @@ describe("DataCompareDialog session restore", () => {
     expect(document.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe("INSERT 1;\nINSERT 2;");
   });
 
+  it("starts another comparison and distinguishes source and target panels after results", async () => {
+    mountSessionDialog(completedSession());
+
+    await flushAsyncSetup();
+
+    const recompareButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.recompare")));
+    expect(recompareButton).toBeDefined();
+    expect([...document.querySelectorAll("div")].filter((element) => element.classList.contains("border-blue-500/35"))).toHaveLength(1);
+    expect([...document.querySelectorAll("div")].filter((element) => element.classList.contains("border-emerald-500/35"))).toHaveLength(1);
+
+    recompareButton?.click();
+    await flushAsyncSetup();
+
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("oracle-11g");
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("oracle-jdbc-11g");
+  });
+
+  it("disables recompare while sync SQL is still executing against the target", async () => {
+    mocks.executeBatch.mockImplementation(() => new Promise(() => {}));
+    mountSessionDialog(completedSession());
+
+    await flushAsyncSetup();
+    mocks.ensureConnected.mockClear();
+
+    const executeButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("diff.executeSync")));
+    expect(executeButton).toBeDefined();
+    executeButton?.click();
+    await flushAsyncSetup();
+
+    const recompareButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.recompare")));
+    expect(recompareButton).toBeDefined();
+    expect(recompareButton?.disabled).toBe(true);
+
+    recompareButton?.click();
+    await flushAsyncSetup();
+
+    expect(mocks.ensureConnected).not.toHaveBeenCalledWith("oracle-11g");
+  });
+
   it("persists the latest selection plan when the dialog closes during planning", async () => {
     const session = completedSession();
     let resolvePlan!: (plan: DataCompareSession["syncPlan"]) => void;
@@ -284,8 +507,73 @@ describe("DataCompareDialog session restore", () => {
     });
     await flushAsyncSetup();
 
-    expect(session.batchResults[0]?.diff.added[0]?.selected).toBe(false);
+    expect(isCompareRowSelected(session.batchResults[0]!.selection.added, 0)).toBe(false);
     expect(session.syncPlan.syncStatements).toEqual(["INSERT 2"]);
     expect(session.syncPlan.syncSql).toBe("INSERT 2;");
   });
+});
+
+describe("DataCompareDialog results layout", () => {
+  it("scrolls results in a plain container so the footer cannot overlap them", async () => {
+    // Chromium cannot scroll or clip a <fieldset> that owns `overflow-auto`
+    // (see issue #9839), so the scroll region must be a plain element and the
+    // fieldset may only stay in the tree as the disabled-state provider.
+    mountSessionDialog(completedSession());
+    await flushAsyncSetup();
+
+    const fieldset = document.querySelector("fieldset");
+    expect(fieldset).not.toBeNull();
+    expect(fieldset?.className).not.toContain("overflow-auto");
+
+    const scroller = fieldset?.parentElement;
+    expect(scroller?.tagName).toBe("DIV");
+    expect(scroller?.className).toContain("overflow-auto");
+    expect(scroller?.className).toContain("min-h-0");
+
+    const dialogFooter = document.querySelector('[data-slot="dialog-footer"]');
+    expect(dialogFooter).not.toBeNull();
+    expect(scroller?.contains(dialogFooter)).toBe(false);
+  });
+});
+
+describe("DataCompareDialog truncation warning", () => {
+  it("warns that a table larger than the row budget was only partially compared", async () => {
+    const session = completedSession();
+    const result = session.batchResults[0]!;
+    result.sourceTruncated = true;
+    result.sourceRowCount = 4_000_000;
+    result.rowBudget = 100_000;
+
+    mountSessionDialog(session);
+    await flushAsyncSetup();
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain(i18n.global.t("dataCompare.truncatedTitle"));
+    expect(text).toContain(i18n.global.t("dataCompare.truncatedBadge", { budget: 100_000 }));
+    expect(text).toContain(i18n.global.t("dataCompare.truncatedTable", { table: "ORDERS", source: 4_000_000, target: 0, budget: 100_000 }));
+  });
+
+  it("keeps the warning out of the results when every table fit the budget", async () => {
+    mountSessionDialog(completedSession());
+    await flushAsyncSetup();
+
+    expect(document.body.textContent ?? "").not.toContain(i18n.global.t("dataCompare.truncatedTitle"));
+  });
+});
+
+it("bounds the SQL preview while executing the complete plan", async () => {
+  const session = completedSession();
+  const statements = Array.from({ length: 1000 }, (_, index) => `UPDATE orders SET name = '${"x".repeat(32)}' WHERE id = ${index};`);
+  session.syncPlan = { insertCount: 0, updateCount: 1000, deleteCount: 0, statementCount: statements.length, syncStatements: statements, syncSql: statements.join("\n") };
+  mountSessionDialog(session);
+  await flushAsyncSetup();
+  const preview = document.querySelector<HTMLTextAreaElement>("textarea[readonly]")!.value;
+  expect(preview.length).toBeLessThan(9000);
+  expect(preview).toContain("WHERE id = 999;");
+  buttonFor("diff.copySql").click();
+  await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(session.syncPlan.syncSql));
+  mocks.executeBatch.mockResolvedValue(undefined);
+  buttonFor("diff.executeSync").click();
+  await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledTimes(2));
+  expect(mocks.executeBatch.mock.calls.flatMap((call) => call[2])).toEqual(statements);
 });

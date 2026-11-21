@@ -1,7 +1,11 @@
+import type { RedisKeyTypeFilter } from "@/lib/redis/redisKeyTree";
+
 export type RedisKeyBrowserSearchMode = "key" | "value" | "all";
 
 export interface RedisKeyBrowserStateSnapshot {
-  /** Key / value / all search input text. */
+  /** Implicit key scope captured when this tab opened, independent of search input and later connection edits. */
+  defaultKeyFilter?: string;
+  /** User-entered Key / value / all search text; never prefilled from the connection scope. */
   searchPattern: string;
   /** Which Redis search mode the toolbar is in. */
   searchMode: RedisKeyBrowserSearchMode;
@@ -9,6 +13,7 @@ export interface RedisKeyBrowserStateSnapshot {
   fuzzyKeySearch: boolean;
   /** Local filter: only show keys with TTL = -1 in the loaded result set. */
   noExpiryOnly: boolean;
+  keyTypeFilter?: RedisKeyTypeFilter;
 }
 
 // ContentArea renders only the active tab, so RedisKeyBrowser is unmounted on

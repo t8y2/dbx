@@ -1,34 +1,72 @@
 ---
 title: SQL Quick Actions
-description: Run custom SQL templates from the editor after selecting a table name and pressing a shortcut.
+description: Run built-in or custom SQL templates from the editor after selecting a table name.
 ---
 
-SQL Quick Actions let you run reusable SQL templates against the text you have selected in the query editor. Select a table identifier first, then press the shortcut you configured in **Settings → Shortcuts**.
+SQL Quick Actions let you run reusable SQL against the text you have selected in the query editor. Select a table identifier first, then press the shortcut you configured in **Settings → Shortcuts**.
 
 This is different from [SQL Snippets](/en/docs/sql-snippets), which insert templates at the cursor through completion. Quick Actions generate SQL from the current selection and send it through the normal execution path.
 
 ## Manage Quick Actions
 
-Open **Settings → Shortcuts** and scroll to **SQL Quick Actions**. Each action contains:
+Open **Settings → Shortcuts** and scroll to **SQL Quick Actions**.
+
+### Built-in templates
+
+DBX ships two built-in actions (shown as **Built-in** in the list):
+
+| Action | Default shortcut | Editable |
+| --- | --- | --- |
+| **Select first N rows** | `Mod+Shift+1` | Shortcut and row count |
+| **Count rows** | `Mod+Shift+2` | Shortcut only |
+
+Built-in labels are localized and not user-editable. They always apply to all databases and cannot be deleted (disable them instead). An empty list restores these defaults; existing lists append any missing built-in ids without overwriting your edits.
+
+### Custom actions
+
+Click **Add** to create a custom template. Each custom action includes:
 
 | Field | Purpose |
 | --- | --- |
 | Label | Name shown in the settings list. |
 | Shortcut | Key combination that runs the action. |
+| Databases | Optional scope. Empty means all databases; otherwise the action only runs for selected types. |
+| SQL Template | Custom SQL with `${table}`. When scoped to specific databases, you can edit a different SQL body per type. |
 | Status | Enables or disables the action without deleting it. |
-| SQL Template | SQL executed after `${table}` is replaced with the selected text. |
 
-You can add, edit, enable, disable, or delete actions. Changes are saved immediately from the action dialog, or when you click **Apply** in the settings window.
+You cannot create another “first N rows” action type from **Add**—that remains a built-in responsibility. Changes are saved immediately from the action dialog, or when you click **Apply** in the settings window.
+
+Quick Actions run **only in the SQL editor** (MySQL, PostgreSQL, Hive, ClickHouse, and other SQL dialects). They do not fire in Redis, MongoDB, Elasticsearch, or other non-SQL editors.
 
 <Callout type="info">
   Shortcuts that include `Mod` (`Cmd` on macOS, `Ctrl` on Windows/Linux) are recommended. They are less likely to interfere with normal typing than bare letter keys such as `Shift+U`.
 </Callout>
 
+## Select first N rows
+
+The built-in **Select first N rows** action adapts syntax for the active connection:
+
+- MySQL / PostgreSQL / unknown JDBC: `LIMIT N`
+- SQL Server: `TOP N`
+- Oracle / Dameng: `ROWNUM`
+- DB2: `FETCH FIRST N ROWS ONLY`
+
+You only configure the row count and shortcut once. Unknown JDBC connections use `LIMIT` so the action never runs an unbounded `SELECT *`.
+
+## Custom SQL per database
+
+When a custom action is limited to specific database types, the SQL editor shows a dialect dropdown next to the template:
+
+- Switching databases **auto-saves** the current textarea into that type’s override (`sqlByDatabaseType`), then loads the next type (override if present, otherwise the default `sql`).
+- Dialog **Save** persists the default `sql` plus overrides only for databases you actually edited—it does not copy the current text onto every selected type.
+- **Apply to all selected** copies the current textarea to every selected type and updates the default `sql`.
+- Unchecking a database deletes its override (re-checking does not restore it). Switching back to **All databases** clears all overrides and keeps the currently visible text as the single template.
+
 ## Run a Quick Action
 
-1. Select a table name or qualified identifier in the SQL editor, for example `orders` or `public.users`.
+1. Select a table name or qualified identifier in the SQL editor, for example `orders` or `public.users`. You can also place the caret on the identifier without selecting it (quoted names and `schema.table` are included).
 2. Press the configured shortcut.
-3. DBX replaces every `${table}` token with the trimmed selection and executes the expanded SQL.
+3. For templates, DBX replaces every `${table}` token with the trimmed selection (using the per-database body when present). For first-N actions, it generates dialect-aware SQL using the selection as the table expression, then executes it.
 
 Example template:
 
@@ -42,16 +80,16 @@ With `orders` selected, DBX runs:
 SELECT COUNT(*) FROM orders
 ```
 
-If nothing is selected, the shortcut does not run and normal editor input continues.
+If there is a selection, DBX uses that text as `${table}`. Otherwise it uses the qualified identifier under the caret (including quotes and `schema.table`). If neither is available, the shortcut does nothing. If the action is scoped to other database types than the current connection, the shortcut is ignored for that tab.
 
 ## Shortcut Conflicts
 
 DBX checks Quick Action shortcuts against:
 
-- Other Quick Actions in your list
+- Other Quick Actions whose **database scopes overlap** (all-databases counts as overlapping everything)
 - Built-in editor and global shortcuts shown in **Settings → Shortcuts**
 
-Conflicting bindings are highlighted and block **Apply** until you resolve them.
+The same shortcut may be reused for different database types when their scopes do not overlap (for example MySQL-only and SQL Server-only). Conflicting bindings are highlighted and block **Apply** until you resolve them.
 
 ## Storage, Sync, and Safety
 

@@ -1,6 +1,6 @@
 plugins {
     id 'java'
-    id 'com.gradleup.shadow' version '9.0.0-beta12'
+    id 'com.gradleup.shadow' version '9.6.1'
 }
 
 repositories {
@@ -8,8 +8,8 @@ repositories {
 }
 
 dependencies {
-    implementation 'org.apache.iotdb:iotdb-jdbc:2.0.8'
-    implementation 'org.slf4j:slf4j-nop:2.0.16'
+    implementation 'org.apache.iotdb:iotdb-jdbc:2.0.11'
+    implementation 'org.slf4j:slf4j-nop:2.0.20'
 }
 
 sourceSets {

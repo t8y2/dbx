@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   databaseBackupFileNamePatternIsValid,
   databaseBackupFilePath,
+  databaseBackupRunDirectory,
+  databaseBackupTimestamp,
   sanitizeDatabaseBackupFileSegment,
   databaseBackupRunsToPrune,
   databaseBackupTableMatchesPattern,
   normalizeDatabaseBackupRun,
   resolveScheduledDatabaseBackupTableScope,
   type DatabaseBackupRun,
+  normalizeDatabaseBackupTableTargets,
+  databaseBackupTableTargetKey,
+  normalizeDatabaseBackupSchedule,
+  toDatabaseBackupExecutionConfig,
 } from "../../backup/scheduledDatabaseBackup";
 
 const startedAt = "2026-08-12T00:00:00.000Z";
@@ -28,6 +34,13 @@ function run(overrides: Record<string, unknown> = {}) {
 }
 
 describe("database backup run persistence", () => {
+  it("renders preview names in the saved zone rather than the browser zone", () => {
+    const instant = "2026-09-12T18:00:00Z";
+    expect(databaseBackupTimestamp(instant, "Asia/Shanghai")).toBe("20260913-020000");
+    expect(databaseBackupTimestamp(instant, "America/New_York")).toBe("20260912-140000");
+    expect(databaseBackupRunDirectory("/backups", "{date}/{timestamp}", "Daily", instant, "12345678", "Asia/Shanghai")).toBe("/backups/20260913/20260913020000");
+    expect(databaseBackupFilePath("/backups", "Daily", "app", instant, "12345678", "gzip", "{timestamp}", "Asia/Shanghai")).toBe("/backups/20260913-020000__app.sql.gz");
+  });
   it("uses a gzip extension when the backup output is compressed", () => {
     expect(databaseBackupFilePath("/backups", "Nightly", "app", startedAt, "run-12345678", "gzip")).toMatch(/\.sql\.gz$/);
   });
@@ -114,5 +127,24 @@ describe("database backup file name segment sanitization", () => {
   it("keeps ordinary segment names unchanged", () => {
     expect(sanitizeDatabaseBackupFileSegment("nightly-full")).toBe("nightly-full");
     expect(sanitizeDatabaseBackupFileSegment("con_backup")).toBe("con_backup");
+  });
+});
+
+describe("exact backup target persistence", () => {
+  it("keeps literal identifiers and distinguishes dotted schema and table names", () => {
+    const first = { database: "app", schema: "a.b", table: " odd*,name' " };
+    const second = { database: "app", schema: "a", table: "b. odd*,name' " };
+    expect(databaseBackupTableTargetKey(first)).not.toBe(databaseBackupTableTargetKey(second));
+    expect(normalizeDatabaseBackupTableTargets([first, first, second])).toEqual([first, second]);
+    const plan = normalizeDatabaseBackupSchedule({ id: "exact", connectionId: "source", destinationDirectory: "/backups", tableFilterMode: "selected", databases: ["app"], selectedTables: [first, second] })!;
+    expect(plan.tableFilterMode).toBe("selected");
+    expect(toDatabaseBackupExecutionConfig(plan).selectedTables).toEqual([first, second]);
+  });
+
+  it("rejects a malformed selection instead of silently dropping part of backup coverage", () => {
+    const valid = { database: "app", schema: "public", table: "chosen" };
+    expect(() => normalizeDatabaseBackupTableTargets([valid, { database: "app", table: "broken" }])).toThrow();
+    expect(normalizeDatabaseBackupSchedule({ id: "exact", connectionId: "source", destinationDirectory: "/backups", tableFilterMode: "selected", selectedTables: [valid, { table: "broken" }] })).toBeNull();
+    expect(() => resolveScheduledDatabaseBackupTableScope("selected", [], ["chosen"])).toThrow();
   });
 });

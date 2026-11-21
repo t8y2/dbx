@@ -5,12 +5,14 @@ import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
   defaultAutoCommitForDbType,
   isSchemaAware,
+  pagesTablePartitionsWithRootPage,
   supportsConnectionQueryActions,
   supportsConnectionScopedQueryExecution,
   supportsConnectionDatabaseBrowser,
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
   supportsDatabaseSearch,
+  supportsFieldLineage,
   supportsObjectBrowser,
   supportsObjectBrowserTreeNode,
   supportsQueryExecution,
@@ -19,7 +21,10 @@ import {
   supportsSqlInListPaste,
   supportsTableImport,
   supportsTableVacuum,
+  supportsTransfer,
   supportsTransaction,
+  usesOracleStickyTransactionState,
+  usesProvenReadOnlyStickyTransactionState,
   usesConnectionOnlyQueryTarget,
   usesTreeSchemaMode,
   schemaNodeHasLoadableName,
@@ -37,6 +42,17 @@ describe("schema awareness", () => {
     // former, `sales` showed up in the schema-diff dropdown but was unreachable in the object tree.
     expect(isSchemaAware("spanner")).toBe(true);
     expect(usesTreeSchemaMode("spanner")).toBe(true);
+  });
+
+  it("keeps SunDB on a schema tree so the database name is never used as the schema", () => {
+    // SUNDB reports a real schema level (its driver implements SET SCHEMA and
+    // DatabaseMetaData.getSchemas()), while the database in the JDBC URL is a
+    // catalog. Without both traits the sidebar expanded the database node with
+    // loadTables(database, undefined) and the agent sent the catalog name as the
+    // getTables schemaPattern; the driver matched `TABLE_SCHEMA LIKE '<catalog>'`
+    // and the tree showed "表 0" (issue #11360).
+    expect(isSchemaAware("sundb")).toBe(true);
+    expect(usesTreeSchemaMode("sundb")).toBe(true);
   });
 
   it("treats Cloud Spanner's blank schema as a loadable node name", () => {
@@ -117,9 +133,18 @@ describe("connection query actions", () => {
     expect(supportsConnectionQueryActions("mq")).toBe(false);
     expect(supportsConnectionQueryActions("mqtt")).toBe(false);
   });
+
+  it("hides the sidebar new-query entry for Meilisearch", () => {
+    expect(supportsConnectionQueryActions("meilisearch")).toBe(false);
+  });
 });
 
 describe("message queue query capabilities", () => {
+  it("advertises DynamoDB PartiQL execution and query entry points", () => {
+    expect(supportsQueryExecution("dynamodb")).toBe(true);
+    expect(supportsConnectionQueryActions("dynamodb")).toBe(true);
+    expect(supportsTransaction("dynamodb")).toBe(false);
+  });
   it("does not advertise query execution for broker surfaces", () => {
     expect(supportsQueryExecution("mq")).toBe(false);
     expect(supportsQueryExecution("mqtt")).toBe(false);
@@ -137,19 +162,19 @@ describe("zookeeper query capabilities", () => {
 });
 
 describe("database and schema qualifiers", () => {
-  it.each(["sqlserver", "trino", "prestosql"] as const)("supports three-part object names for %s", (databaseType) => {
+  it.each(["sqlserver", "trino", "prestosql", "snowflake"] as const)("supports three-part object names for %s", (databaseType) => {
     expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(true);
   });
 
-  it.each(["mysql", "postgres", "oracle", "snowflake"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
+  it.each(["mysql", "postgres", "oracle"] as const)("does not widen unverified three-part completion for %s", (databaseType) => {
     expect(supportsDatabaseSchemaQualifier(databaseType)).toBe(false);
   });
 
-  it.each(["mysql", "sqlite", "sqlserver"] as const)("suggests database names for %s", (databaseType) => {
+  it.each(["mysql", "sqlite", "sqlserver", "snowflake"] as const)("suggests database names for %s", (databaseType) => {
     expect(supportsDatabaseNameCompletion(databaseType)).toBe(true);
   });
 
-  it.each(["postgres", "oracle", "snowflake", "trino", "prestosql"] as const)("does not add database name completion for %s", (databaseType) => {
+  it.each(["postgres", "oracle", "trino", "prestosql"] as const)("does not add database name completion for %s", (databaseType) => {
     expect(supportsDatabaseNameCompletion(databaseType)).toBe(false);
   });
 });
@@ -157,13 +182,16 @@ describe("database and schema qualifiers", () => {
 describe("supportsTransaction", () => {
   it("returns true for supported database types", () => {
     expect(supportsTransaction("postgres")).toBe(true);
+    expect(supportsTransaction("gaussdb")).toBe(true);
+    expect(supportsTransaction("opengauss")).toBe(true);
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
+    expect(supportsTransaction("oceanbase-oracle")).toBe(true);
+    expect(supportsTransaction("dameng")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
-    expect(supportsTransaction("oceanbase-oracle")).toBe(false);
     expect(supportsTransaction("redis")).toBe(false);
     expect(supportsTransaction("mongodb")).toBe(false);
     expect(supportsTransaction("duckdb")).toBe(false);
@@ -172,8 +200,7 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("cloudflare-d1")).toBe(false);
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
-    expect(supportsTransaction("sqlserver")).toBe(false);
-    expect(supportsTransaction("dameng")).toBe(false);
+    expect(supportsTransaction("sqlserver")).toBe(true);
     expect(supportsTransaction("rqlite")).toBe(false);
     expect(supportsTransaction("agent")).toBe(false);
   });
@@ -196,8 +223,14 @@ describe("defaultAutoCommitForDbType", () => {
   it("honors the configured default transaction mode", () => {
     expect(defaultAutoCommitForDbType("mysql", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("gaussdb", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("opengauss", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("sqlserver", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("sqlserver", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("mysql", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "auto")).toBe(true);
   });
@@ -206,10 +239,49 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("redis", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("mongodb", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("sqlite", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("clickhouse", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "manual")).toBe(true);
+  });
+});
+
+describe("usesOracleStickyTransactionState", () => {
+  it("marks only the Oracle family for schema-change compensation", () => {
+    expect(usesOracleStickyTransactionState("oracle")).toBe(true);
+    expect(usesOracleStickyTransactionState("oceanbase-oracle")).toBe(true);
+  });
+
+  it("keeps other databases on the generic transaction path", () => {
+    expect(usesOracleStickyTransactionState("mysql")).toBe(false);
+    expect(usesOracleStickyTransactionState("postgres")).toBe(false);
+    expect(usesOracleStickyTransactionState("jdbc")).toBe(false);
+    expect(usesOracleStickyTransactionState(undefined)).toBe(false);
+  });
+});
+
+describe("usesProvenReadOnlyStickyTransactionState", () => {
+  it("enables the sticky toolbar for the Oracle family, MySQL and the PostgreSQL family", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("oceanbase-oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("mysql")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("gaussdb")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("opengauss")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(true);
+  });
+
+  it("keeps databases without manual-transaction support on the legacy toolbar", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("doris")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("jdbc")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("redis")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState(undefined)).toBe(false);
+  });
+
+  it("only enables sticky state where manual mode is reachable", () => {
+    // The sticky UX gates commit/rollback in manual mode; a member without
+    // transaction support could never reach it. Guards against drift.
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss", "kingbase"]) {
+      expect(supportsTransaction(dbType)).toBe(true);
+    }
   });
 });
 
@@ -278,8 +350,40 @@ describe("supportsTableVacuum", () => {
 });
 
 describe("supportsTableImport", () => {
+  it("enables DB2 table import", () => {
+    expect(supportsTableImport("db2")).toBe(true);
+  });
+
   it("enables OceanBase Oracle table import", () => {
     expect(supportsTableImport("oceanbase-oracle")).toBe(true);
+  });
+
+  it("keeps Xugu table import available", () => {
+    expect(supportsTableImport("xugu")).toBe(true);
+  });
+
+  it("enables openGauss table import", () => {
+    expect(supportsTableImport("opengauss")).toBe(true);
+  });
+
+  it("enables SAP HANA table import", () => {
+    expect(supportsTableImport("saphana")).toBe(true);
+  });
+});
+
+describe("supportsFieldLineage", () => {
+  it("enables field lineage only for databases that advertise support", () => {
+    expect(supportsFieldLineage("db2")).toBe(true);
+    expect(supportsFieldLineage("xugu")).toBe(true);
+    expect(supportsFieldLineage("redis")).toBe(false);
+  });
+});
+
+describe("DB2 transfer and namespace capabilities", () => {
+  it("enables table transfers without enabling database lifecycle operations", () => {
+    expect(supportsTransfer("db2")).toBe(true);
+    expect(connectionNamespaceCreationTarget({ db_type: "db2" })).toBeNull();
+    expect(databaseNodeNamespaceCreationTarget({ db_type: "db2" }, { type: "database", database: "SAMPLE" })).toBe("schema");
   });
 });
 
@@ -327,8 +431,9 @@ describe("database namespace creation", () => {
     expect(connectionNamespaceCreationTarget({ db_type: "duckdb" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "sqlite" })).toBe("attach");
     expect(connectionNamespaceCreationTarget({ db_type: "mongodb" })).toBe("special");
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBeNull();
-    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBeNull();
+    // The Legacy Agent creates databases through runCommand, so it gets the same flow.
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "mongodb-legacy" })).toBe("special");
+    expect(connectionNamespaceCreationTarget({ db_type: "mongodb", driver_profile: "legacy" })).toBe("special");
   });
 
   it("hides persistent SQLite attachment for memory and SQLCipher connections", () => {
@@ -355,5 +460,23 @@ describe("database namespace creation", () => {
     expect(databaseNodeNamespaceCreationTarget({ db_type: "goldendb" }, { type: "database", database: "app" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "duckdb" }, { type: "database", database: "main" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "jdbc" }, { type: "database", database: "main" })).toBeNull();
+  });
+});
+
+describe("root-paged table partitions", () => {
+  it("enables root paging only for native PostgreSQL-protocol drivers", () => {
+    for (const dbType of ["postgres", "redshift", "gaussdb", "kwdb", "opengauss"] as const) {
+      expect(pagesTablePartitionsWithRootPage({ db_type: dbType })).toBe(true);
+    }
+    expect(pagesTablePartitionsWithRootPage({ db_type: "postgres", driver_profile: "cloudberry" })).toBe(true);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "mysql" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "kingbase" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage(undefined)).toBe(false);
+  });
+
+  it("keeps GaussDB's external M/JDBC driver on row-based paging", () => {
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "gaussdb-m" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "GAUSSDB-M" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "gaussdb" })).toBe(true);
   });
 });

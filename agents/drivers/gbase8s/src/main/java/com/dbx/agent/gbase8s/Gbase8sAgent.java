@@ -9,12 +9,16 @@ import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
+import com.dbx.agent.StandardJdbcMetadata;
 import com.dbx.agent.TableInfo;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Statement;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -25,9 +29,36 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private static final long METADATA_CACHE_TTL_MILLIS = 10_000L;
+
+    // Whitelist for a JDBC locale value (language_territory.codeset). The value is concatenated
+    // into the connection URL, so reject anything outside ordinary identifier characters to guard
+    // against a malformed or hostile server-reported collation.
+    private static final Pattern SAFE_DATABASE_LOCALE = Pattern.compile("[A-Za-z0-9_.\\-]{1,64}");
+    // Upper bound on the sysmaster locale-probe connection so a hung probe cannot stall connect.
+    private static final int LOCALE_PROBE_LOGIN_TIMEOUT_SECS = 10;
+
+    /**
+     * Leading directive comment emitted by the Rust admin-SQL layer for GBase 8s / Informix
+     * "Create Database" when the user picks a character set, e.g.
+     * {@code -- DBX_DB_LOCALE=zh_CN.utf8\nCREATE DATABASE mydb;}. Informix cannot express a new
+     * database's codeset in {@code CREATE DATABASE} — it inherits the creating session's DB_LOCALE —
+     * so the chosen locale is carried out-of-band and honored here by opening a sysmaster session
+     * pinned to that DB_LOCALE.
+     */
+    private static final Pattern CREATE_DATABASE_LOCALE_DIRECTIVE = Pattern.compile(
+        "^\\s*--\\s*DBX_DB_LOCALE\\s*=\\s*(\\S+)\\s*\\r?\\n(.*)$", Pattern.DOTALL);
+
+    // A bare `DROP DATABASE <name>` (unquoted identifier, optional trailing semicolon). The target
+    // database's own locale is resolvable (it exists in sysdbslocale), so the drop is routed here
+    // without a directive.
+    private static final Pattern DROP_DATABASE_STATEMENT = Pattern.compile(
+        "^\\s*DROP\\s+DATABASE\\s+([A-Za-z0-9_]+)\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
 
     public static final JdbcAgentProfile GBASE8S_PROFILE = new JdbcAgentProfile(
         "com.gbasedbt.jdbc.Driver",
@@ -47,6 +78,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private long tableCacheTimeMillis;
     private List<TableInfo> tableCache = Collections.emptyList();
     private ConnectParams databaseListParams;
+    private final Map<String, String> collateByDatabase = new ConcurrentHashMap<>();
 
     public Gbase8sAgent() {
         super(GBASE8S_PROFILE);
@@ -122,6 +154,126 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return super.openConnection(withResolvedDatabaseLocale(params));
+    }
+
+    /**
+     * Return a copy of {@code params} whose {@code CLIENT_LOCALE}/{@code DB_LOCALE} match the real
+     * collation of the target database, so one connection profile can open every database on the
+     * instance regardless of locale. Falls back to the configured parameters whenever the collation
+     * cannot be resolved (custom connection string, catalog unavailable, or lookup error).
+     */
+    private ConnectParams withResolvedDatabaseLocale(ConnectParams params) {
+        if (!params.getConnection_string().trim().isEmpty()) {
+            return params;
+        }
+        String database = params.getDatabase().trim().isEmpty() ? "sysmaster" : params.getDatabase().trim();
+        String collate = resolveCollate(params, database);
+        if (collate.isEmpty() || collate.equalsIgnoreCase(currentLocaleOf(params))) {
+            return params;
+        }
+        ConnectParams localized = new ConnectParams(
+            params.getHost(),
+            params.getPort(),
+            params.getDatabase(),
+            params.getUsername(),
+            params.getPassword(),
+            overrideLocaleParams(params.getUrl_params(), collate),
+            params.getConnection_string(),
+            params.isMysql_compat_mode(),
+            params.getJdbc_driver_class(),
+            params.getJdbc_driver_paths()
+        );
+        localized.setGbase_server(getGbaseServer(params));
+        return localized;
+    }
+
+    private static String collateCacheKey(ConnectParams params, String database) {
+        return params.getHost() + "|" + params.getPort() + "|" + getGbaseServer(params)
+            + "|" + database.toLowerCase(Locale.ROOT);
+    }
+
+    private String resolveCollate(ConnectParams params, String database) {
+        String key = collateCacheKey(params, database);
+        String cached = collateByDatabase.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        String collate = "";
+        try (Connection connection = super.openConnection(withProbeLoginTimeout(paramsForDatabase(params, "sysmaster")));
+             PreparedStatement stmt = connection.prepareStatement(
+                 "SELECT dbs_collate FROM sysmaster:sysdbslocale WHERE LOWER(dbs_dbsname) = ?")) {
+            stmt.setString(1, database.toLowerCase(Locale.ROOT));
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    collate = trim(rs.getString(1));
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep the configured locale when the collation catalog is unreachable.
+        }
+        // Only cache a successful lookup. Caching an empty result would pin a transient failure —
+        // or a database that was just created and is not yet listed in sysdbslocale — to the stale
+        // fallback until disconnect, so leave failures uncached to retry on the next connect.
+        if (!collate.isEmpty()) {
+            collateByDatabase.put(key, collate);
+        }
+        return collate;
+    }
+
+    /**
+     * Return a copy of {@code params} with a bounded {@code LOGIN_TIMEOUT} appended to its JDBC
+     * parameters (unless one is already configured), so the sysmaster locale probe can never hang
+     * the connect path.
+     */
+    private static ConnectParams withProbeLoginTimeout(ConnectParams params) {
+        String urlParams = params.getUrl_params() == null ? "" : params.getUrl_params();
+        if (containsIgnoreCase(urlParams, "LOGIN_TIMEOUT=")) {
+            return params;
+        }
+        String joined = urlParams.isEmpty()
+            ? "LOGIN_TIMEOUT=" + LOCALE_PROBE_LOGIN_TIMEOUT_SECS
+            : urlParams + ";LOGIN_TIMEOUT=" + LOCALE_PROBE_LOGIN_TIMEOUT_SECS;
+        ConnectParams copy = new ConnectParams(
+            params.getHost(),
+            params.getPort(),
+            params.getDatabase(),
+            params.getUsername(),
+            params.getPassword(),
+            joined,
+            params.getConnection_string(),
+            params.isMysql_compat_mode(),
+            params.getJdbc_driver_class(),
+            params.getJdbc_driver_paths()
+        );
+        copy.setGbase_server(params.getGbase_server());
+        return copy;
+    }
+
+    private static String currentLocaleOf(ConnectParams params) {
+        return connectionParameterValue(params.getUrl_params(), "DB_LOCALE");
+    }
+
+    private static String connectionParameterValue(String parameters, String parameterName) {
+        for (String segment : trim(parameters).split(";")) {
+            int equals = segment.indexOf('=');
+            if (equals < 0) {
+                continue;
+            }
+            String key = segment.substring(0, equals).trim();
+            int urlPrefix = key.lastIndexOf(':');
+            if (urlPrefix >= 0) {
+                key = key.substring(urlPrefix + 1).trim();
+            }
+            if (key.equalsIgnoreCase(parameterName)) {
+                return segment.substring(equals + 1).trim();
+            }
+        }
+        return "";
+    }
+
+    @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         super.afterConnect(params, connection);
         databaseListParams = paramsForDatabase(params, "sysmaster");
@@ -131,16 +283,121 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     @Override
     protected void afterDisconnect() {
         databaseListParams = null;
+        collateByDatabase.clear();
         clearMetadataCache();
     }
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        CreateDatabaseLocaleDirective directive = parseCreateDatabaseLocaleDirective(sql);
+        if (directive != null) {
+            runDdlOnSysmasterWithLocale(directive.statement(), directive.locale());
+            clearMetadataCache();
+            return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
+        }
+        String dropTarget = parseDropDatabaseName(sql);
+        if (dropTarget != null && databaseListParams != null) {
+            // Informix cannot drop a database from a session whose DB_LOCALE differs, nor the
+            // current database; run it from sysmaster pinned to the target database's own locale.
+            String collate = resolveCollate(databaseListParams, dropTarget);
+            runDdlOnSysmasterWithLocale("DROP DATABASE " + dropTarget, collate);
+            invalidateCollateCache(dropTarget);
+            clearMetadataCache();
+            return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
+        }
         QueryResult result = super.executeQuery(sql, schema, options);
         if (mayChangeMetadata(sql)) {
             clearMetadataCache();
         }
         return result;
+    }
+
+    /**
+     * Parse {@code sql} as a bare {@code DROP DATABASE <name>} statement, returning the (unquoted)
+     * target database name or {@code null} for anything else. Package visible so the routing
+     * decision is testable without a live connection.
+     */
+    static String parseDropDatabaseName(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        Matcher drop = DROP_DATABASE_STATEMENT.matcher(sql);
+        return drop.matches() ? drop.group(1) : null;
+    }
+
+    private void invalidateCollateCache(String database) {
+        ConnectParams base = databaseListParams;
+        if (base == null) {
+            return;
+        }
+        collateByDatabase.remove(collateCacheKey(base, database));
+    }
+
+    /**
+     * A {@code CREATE DATABASE} statement plus the DB_LOCALE carried by its leading directive
+     * comment. Package visible so the routing decision is directly testable without a live
+     * connection.
+     */
+    record CreateDatabaseLocaleDirective(String locale, String statement) {
+    }
+
+    /**
+     * Parse {@code sql} as a directive-prefixed {@code CREATE DATABASE} (as emitted by the Rust
+     * admin-SQL layer), returning {@code null} for anything else so it falls through to the
+     * normal query path.
+     */
+    static CreateDatabaseLocaleDirective parseCreateDatabaseLocaleDirective(String sql) {
+        Matcher directive = sql == null ? null : CREATE_DATABASE_LOCALE_DIRECTIVE.matcher(sql);
+        if (directive == null || !directive.matches()) {
+            return null;
+        }
+        String statement = directive.group(2).trim();
+        if (!statement.regionMatches(true, 0, "CREATE DATABASE", 0, "CREATE DATABASE".length())) {
+            return null;
+        }
+        return new CreateDatabaseLocaleDirective(directive.group(1).trim(), statement);
+    }
+
+    /**
+     * Run a DDL statement (e.g. {@code CREATE DATABASE} / {@code DROP DATABASE}) on a sysmaster
+     * session whose {@code DB_LOCALE} is pinned to {@code locale}. Informix has no charset clause
+     * in {@code CREATE DATABASE} (the new database inherits the creating session's DB_LOCALE) and
+     * cannot drop a database from a session whose locale differs, or drop the current database —
+     * so both run from sysmaster with the relevant locale. Falls back to the configured locale when
+     * {@code locale} is blank or unsafe.
+     */
+    private void runDdlOnSysmasterWithLocale(String statement, String locale) {
+        ConnectParams base = databaseListParams;
+        if (base == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        ConnectParams pinned = base;
+        if (locale != null && SAFE_DATABASE_LOCALE.matcher(locale).matches()) {
+            pinned = new ConnectParams(
+                base.getHost(),
+                base.getPort(),
+                base.getDatabase(),
+                base.getUsername(),
+                base.getPassword(),
+                overrideLocaleParams(base.getUrl_params(), locale),
+                base.getConnection_string(),
+                base.isMysql_compat_mode(),
+                base.getJdbc_driver_class(),
+                base.getJdbc_driver_paths()
+            );
+            pinned.setGbase_server(base.getGbase_server());
+        }
+        try (Connection connection = super.openConnection(pinned);
+             Statement stmt = connection.createStatement()) {
+            stmt.execute(stripTrailingSemicolon(statement));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static String stripTrailingSemicolon(String sql) {
+        String trimmed = sql.trim();
+        return trimmed.endsWith(";") ? trimmed.substring(0, trimmed.length() - 1).trim() : trimmed;
     }
 
     @Override
@@ -247,54 +504,314 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public List<ObjectInfo> listObjects(String schema) {
+        return listObjects(schema, MetadataListConstraints.NONE);
+    }
+
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
+        MetadataListConstraints normalized = MetadataListConstraints.orNone(constraints);
+        String resolved = schema == null ? "" : schema.trim();
+        List<TableInfo> tables = listTables(resolved, normalized);
+        return normalized.filterObjects(StandardJdbcMetadata.INSTANCE.listObjects(tables, resolved));
+    }
+
+    @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
         try {
             Connection conn = requireConnection();
             String owner = trim(schema);
             Set<Integer> primaryKeyColumns = getPrimaryKeyColumnNumbers(conn, owner, table);
-            List<Object> args = new ArrayList<>();
-            args.add(table);
-            StringBuilder sql = new StringBuilder("""
+            Map<String, String> columnDefaults = loadColumnDefaults(conn, owner, table);
+            try {
+                return loadColumns(conn, owner, table, true, primaryKeyColumns, columnDefaults);
+            } catch (Exception ignored) {
+                return loadColumns(conn, owner, table, false, primaryKeyColumns, columnDefaults);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private List<ColumnInfo> loadColumns(
+        Connection conn,
+        String owner,
+        String table,
+        boolean includeExtendedTypes,
+        Set<Integer> primaryKeyColumns,
+        Map<String, String> columnDefaults
+    ) throws Exception {
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        StringBuilder sql = new StringBuilder();
+        if (includeExtendedTypes) {
+            sql.append("""
+                SELECT c.colname, c.coltype, c.colno, c.collength, cc.comments, x.name AS extended_name
+                FROM syscolumns c
+                JOIN systables t ON t.tabid = c.tabid
+                LEFT JOIN sysxtdtypes x ON x.extended_id = c.extended_id
+                LEFT JOIN syscolcomms cc ON cc.tabid = c.tabid AND cc.colno = c.colno
+                WHERE t.tabid >= 100 AND t.tabname = ?
+                """.stripIndent().trim());
+        } else {
+            sql.append("""
                 SELECT c.colname, c.coltype, c.colno, c.collength, cc.comments
                 FROM syscolumns c
                 JOIN systables t ON t.tabid = c.tabid
                 LEFT JOIN syscolcomms cc ON cc.tabid = c.tabid AND cc.colno = c.colno
                 WHERE t.tabid >= 100 AND t.tabname = ?
                 """.stripIndent().trim());
-            if (!owner.isEmpty()) {
-                sql.append(" AND t.owner = ?");
-                args.add(owner);
-            }
-            sql.append(" ORDER BY c.colno");
+        }
+        if (!owner.isEmpty()) {
+            sql.append(" AND t.owner = ?");
+            args.add(owner);
+        }
+        sql.append(" ORDER BY c.colno");
 
-            List<ColumnInfo> result = new ArrayList<>();
-            try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
-                bind(stmt, args);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) {
-                        String name = trim(rs.getString("colname"));
-                        int coltype = rs.getInt("coltype");
-                        int baseType = baseColType(coltype);
-                        int length = rs.getInt("collength");
-                        result.add(new ColumnInfo(
-                            name,
-                            mapColType(baseType),
-                            (coltype & 256) == 0,
-                            null,
-                            primaryKeyColumns.contains(rs.getInt("colno")),
-                            null,
-                            emptyToNull(trim(rs.getString("comments"))),
-                            numericPrecision(baseType, length),
-                            numericScale(baseType, length),
-                            characterMaximumLength(baseType, length)
-                        ));
+        List<ColumnInfo> result = new ArrayList<>();
+        try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String name = trim(rs.getString("colname"));
+                    int coltype = rs.getInt("coltype");
+                    int baseType = baseColType(coltype);
+                    int length = rs.getInt("collength");
+                    String extendedName = "";
+                    if (includeExtendedTypes) {
+                        try {
+                            extendedName = trim(rs.getString("extended_name"));
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    result.add(new ColumnInfo(
+                        name,
+                        mapColType(baseType, length, extendedName),
+                        (coltype & 256) == 0,
+                        columnDefaults.get(name),
+                        primaryKeyColumns.contains(rs.getInt("colno")),
+                        null,
+                        emptyToNull(trim(rs.getString("comments"))),
+                        numericPrecision(baseType, length),
+                        numericScale(baseType, length),
+                        characterMaximumLength(baseType, length)
+                    ));
+                }
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, String> loadColumnDefaults(
+        Connection conn,
+        String owner,
+        String table
+    ) {
+        // sysdefaults is the canonical catalog for column defaults (referenced
+        // through syscolumns.coldefault) and covers literal, USER/CURRENT/TODAY
+        // and NULL defaults; sysdefaultsexpr only exposes compiled expression
+        // defaults, which is why tables whose defaults are plain literals came
+        // back empty before (issue #13220). Query both and keep the first value
+        // per column; either source failing leaves the other usable.
+        //
+        // sysdefaults layout (GBase 8s SQL Reference / IBM SYSDEFAULTS): the
+        // key is tabid+colno+class, there is no seqno column, `class` marks the
+        // column category (T = table column), and `type` holds the DEFAULT
+        // clause marker (C=Current, L=Literal, N=NULL, S=Dbservername, T=Today,
+        // U=User) with the literal itself in `default`.
+        //
+        // Literal defaults of non-character columns are stored ENCODED: the
+        // `default` column holds a 6-bit binary prefix, a blank, then the ASCII
+        // text (IBM Informix 12.10 SYSDEFAULTS). Decode them server-side with
+        // the builtin gbasedbt.get_default_value(c.coltype, c.extended_id,
+        // c.collength, d.default::lvarchar(256)) — the same call DBeaver's
+        // GBase 8s meta model and GBase's DDL-reconstruction recipe use. The
+        // builtin returns character literals unquoted, so quotes are re-added
+        // per column type below. Servers whose build lacks the builtin (older
+        // GBase 8s / Informix, where the routine is informix.get_default_value
+        // or absent) fall back to the plain undecoded query instead of losing
+        // every default.
+        //
+        // The `default` catalog column is always backtick-quoted: the GBase JDBC
+        // driver's statement parser rejects a bare `default` column reference
+        // with a syntax error (even though dbaccess parses it), in every
+        // SQLMODE, while the backtick form is accepted in both the server's
+        // standard mode and SQLMODE=mysql (verified against GBase 8s 8.8 with
+        // driver 3.6.5.21).
+        Map<String, String> defaults = new LinkedHashMap<>();
+        if (loadColumnDefaultsFromSource(
+            defaults,
+            conn,
+            owner,
+            table,
+            """
+                SELECT c.colname, c.coltype,
+                    CASE d.type
+                        WHEN 'L' THEN gbasedbt.get_default_value(c.coltype, c.extended_id, c.collength, d.`default`::lvarchar(256))
+                        ELSE d.`default`
+                    END AS column_default,
+                    d.type AS default_class
+                FROM systables t
+                JOIN syscolumns c ON t.tabid = c.tabid
+                JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno
+                WHERE t.tabname = ? AND d.class = 'T'
+                """.stripIndent().trim(),
+            true,
+            true
+        ) == DefaultsQueryOutcome.DECODE_ROUTINE_MISSING) {
+            loadColumnDefaultsFromSource(
+                defaults,
+                conn,
+                owner,
+                table,
+                """
+                    SELECT c.colname, c.coltype, d.`default` AS column_default, d.type AS default_class
+                    FROM systables t
+                    JOIN syscolumns c ON t.tabid = c.tabid
+                    JOIN sysdefaults d ON d.tabid = c.tabid AND d.colno = c.colno
+                    WHERE t.tabname = ? AND d.class = 'T'
+                    """.stripIndent().trim(),
+                true,
+                false
+            );
+        }
+        loadColumnDefaultsFromSource(
+            defaults,
+            conn,
+            owner,
+            table,
+            """
+                SELECT c.colname, e.`default` AS column_default
+                FROM systables t
+                JOIN syscolumns c ON t.tabid = c.tabid
+                JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
+                WHERE t.tabname = ? AND e.type = 'T'
+                """.stripIndent().trim(),
+            false,
+            false
+        );
+        return defaults;
+    }
+
+    private enum DefaultsQueryOutcome {
+        COMPLETED,
+        DECODE_ROUTINE_MISSING,
+        FAILED
+    }
+
+    private static DefaultsQueryOutcome loadColumnDefaultsFromSource(
+        Map<String, String> defaults,
+        Connection conn,
+        String owner,
+        String table,
+        String sqlText,
+        boolean hasDefaultClass,
+        boolean decodeLiterals
+    ) {
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        StringBuilder sql = new StringBuilder(sqlText);
+        if (!owner.isEmpty()) {
+            sql.append(" AND t.owner = ?");
+            args.add(owner);
+        }
+
+        try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String value = rs.getString("column_default");
+                    String defaultClass = hasDefaultClass ? rs.getString("default_class") : null;
+                    // sysdefaults (decoded or raw) returns character literals
+                    // unquoted, so both sysdefaults queries re-add the quotes by
+                    // column type; sysdefaultsexpr rows are expression text and
+                    // are passed through as-is.
+                    if (hasDefaultClass
+                        && "L".equals(defaultClass)
+                        && value != null
+                        && isCharFamilyColType(rs.getInt("coltype"))) {
+                        value = quoteCharacterDefault(value);
+                    }
+                    value = sanitizeColumnDefault(value);
+                    if (value == null && hasDefaultClass) {
+                        // sysdefaults stores keyword defaults with a NULL value
+                        // and the class marker instead; surface the DEFAULT
+                        // clause keyword the class stands for.
+                        value = defaultClassKeyword(defaultClass);
+                    }
+                    if (value != null) {
+                        defaults.putIfAbsent(trim(rs.getString("colname")), value);
                     }
                 }
             }
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+        } catch (SQLException e) {
+            // Either catalog failing (older servers may lack the view or the
+            // decoding builtin) leaves whatever the other source contributed in
+            // place, but never silently: the failure is visible on stderr.
+            if (decodeLiterals && missingDecodeRoutine(e)) {
+                System.err.println(
+                    "[gbase8s] gbasedbt.get_default_value unavailable, retrying sysdefaults undecoded: " + e.getMessage());
+                return DefaultsQueryOutcome.DECODE_ROUTINE_MISSING;
+            }
+            System.err.println("[gbase8s] column defaults query failed, skipping this defaults source: " + e.getMessage());
+            return DefaultsQueryOutcome.FAILED;
         }
+        return DefaultsQueryOutcome.COMPLETED;
+    }
+
+    /** Whether a sysdefaults failure is the server lacking the literal-decoding builtin it names. */
+    private static boolean missingDecodeRoutine(SQLException e) {
+        String message = e.getMessage();
+        return message != null && message.toLowerCase(Locale.ROOT).contains("get_default_value");
+    }
+
+    /**
+     * get_default_value returns character literals unquoted, but a DEFAULT clause needs them
+     * quoted (GBase's DDL-reconstruction recipe re-adds the quotes by column type), so wrap
+     * the decoded literal and double embedded quotes. The value is not trimmed: surrounding
+     * blanks can be part of the literal.
+     */
+    static String quoteCharacterDefault(String decoded) {
+        String literal = decoded == null ? "" : decoded;
+        int nullIndex = literal.indexOf('\0');
+        if (nullIndex >= 0) {
+            literal = literal.substring(0, nullIndex);
+        }
+        return "'" + literal.replace("'", "''") + "'";
+    }
+
+    /** Whether the syscolumns coltype is a character type whose decoded literal must be re-quoted. */
+    static boolean isCharFamilyColType(int coltype) {
+        int baseType = baseColType(coltype);
+        return baseType == 0 /* CHAR */ || baseType == 13 /* VARCHAR */ || baseType == 15 /* NCHAR */
+            || baseType == 16 /* NVARCHAR */ || baseType == 40 /* LVARCHAR */;
+    }
+
+    /** The Informix DEFAULT clause keyword a sysdefaults.type marker stands for. */
+    static String defaultClassKeyword(String defaultClass) {
+        if (defaultClass == null) {
+            return null;
+        }
+        return switch (defaultClass) {
+            case "U" -> "USER";
+            case "C" -> "CURRENT";
+            case "T" -> "TODAY";
+            case "S" -> "DBSERVERNAME";
+            case "N" -> "NULL";
+            default -> null;
+        };
+    }
+
+    public static String sanitizeColumnDefault(String value) {
+        if (value == null) {
+            return null;
+        }
+        int nullIndex = value.indexOf('\0');
+        if (nullIndex >= 0) {
+            value = value.substring(0, nullIndex);
+        }
+        value = value.trim();
+        return value.isEmpty() ? null : value;
     }
 
     @Override
@@ -459,6 +976,62 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         return value.toLowerCase(Locale.ROOT).contains(needle.toLowerCase(Locale.ROOT));
     }
 
+    /**
+     * Force {@code CLIENT_LOCALE} and {@code DB_LOCALE} in a {@code ;}-separated JDBC parameter
+     * string to {@code collate}, leaving every other parameter (and their order) untouched.
+     *
+     * <p>A GBase 8s / Informix instance can host databases with different locales, and the JDBC
+     * driver rejects a connection whose {@code DB_LOCALE} does not match the target database's real
+     * locale with "database locale information mismatch" (数据库地点信息不匹配). A single connection
+     * profile only pins one locale, so reusing it to open a differently-locale database fails. The
+     * agent therefore resolves each database's real collation from {@code sysmaster.sysdbslocale}
+     * and rewrites both locale parameters to it, so every database under the connection opens with
+     * its own locale. Setting {@code CLIENT_LOCALE} to the same value keeps client and database
+     * codesets identical, which avoids the cross-codeset conversion the bundled client cannot load.
+     */
+    static String overrideLocaleParams(String jdbcParams, String collate) {
+        if (collate == null || collate.trim().isEmpty()) {
+            return jdbcParams;
+        }
+        String value = collate.trim();
+        // The value is concatenated into the JDBC URL; only accept an ordinary locale token so a
+        // malformed or hostile server-reported collation cannot inject extra parameters.
+        if (!SAFE_DATABASE_LOCALE.matcher(value).matches()) {
+            return jdbcParams;
+        }
+        List<String> segments = new ArrayList<>();
+        if (jdbcParams != null && !jdbcParams.isEmpty()) {
+            for (String segment : jdbcParams.split(";")) {
+                int equals = segment.indexOf('=');
+                String key = (equals >= 0 ? segment.substring(0, equals) : segment).trim();
+                if (key.equalsIgnoreCase("CLIENT_LOCALE")) {
+                    segments.add("CLIENT_LOCALE=" + value);
+                } else if (key.equalsIgnoreCase("DB_LOCALE")) {
+                    segments.add("DB_LOCALE=" + value);
+                } else {
+                    segments.add(segment);
+                }
+            }
+        }
+        boolean hasClient = false;
+        boolean hasDb = false;
+        for (String segment : segments) {
+            String key = segment.substring(0, Math.max(segment.indexOf('='), 0)).trim();
+            if (key.equalsIgnoreCase("CLIENT_LOCALE")) {
+                hasClient = true;
+            } else if (key.equalsIgnoreCase("DB_LOCALE")) {
+                hasDb = true;
+            }
+        }
+        if (!hasClient) {
+            segments.add("CLIENT_LOCALE=" + value);
+        }
+        if (!hasDb) {
+            segments.add("DB_LOCALE=" + value);
+        }
+        return String.join(";", segments);
+    }
+
     private List<String> queryDatabaseNamesFromSysmaster() {
         ConnectParams params = databaseListParams;
         if (params == null) {
@@ -533,7 +1106,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String chunk = rs.getString("viewtext");
-                        source.append(chunk == null ? "" : chunk);
+                        if (chunk != null) {
+                            int nullIndex = chunk.indexOf('\0');
+                            if (nullIndex >= 0) {
+                                source.append(chunk, 0, nullIndex);
+                            } else {
+                                source.append(chunk);
+                            }
+                        }
                     }
                 }
             }
@@ -591,7 +1171,25 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     public static String mapColType(int coltype) {
-        return switch (baseColType(coltype)) {
+        return mapColType(coltype, 0, null);
+    }
+
+    public static String mapColType(int coltype, String extendedName) {
+        return mapColType(coltype, 0, extendedName);
+    }
+
+    public static String mapColType(int coltype, int length, String extendedName) {
+        if (extendedName != null && !extendedName.trim().isEmpty()) {
+            return extendedName.trim().toUpperCase(Locale.ROOT);
+        }
+        int baseType = baseColType(coltype);
+        if (baseType == 41) {
+            if (length == 72) {
+                return "BLOB";
+            }
+            return "BOOLEAN";
+        }
+        return switch (baseType) {
             case 0 -> "CHAR";
             case 1 -> "SMALLINT";
             case 2 -> "INTEGER";
@@ -620,7 +1218,15 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             case 41 -> "BOOLEAN";
             case 43, 52 -> "BIGINT";
             case 44, 53 -> "BIGSERIAL";
-            default -> "UNKNOWN(" + baseColType(coltype) + ")";
+            case 63 -> "VARCHAR2";
+            case 64 -> "NVARCHAR2";
+            // MySQL-compat extended types (SQLMODE=mysql); codes match the
+            // 3.6.5+ driver's IfxBigIntUnsigned/IfxTinyInt/IfxMediumInt/IfxBit.
+            case 66 -> "BIGINT UNSIGNED";
+            case 67 -> "TINYINT";
+            case 68 -> "MEDIUMINT";
+            case 69 -> "BIT";
+            default -> "UNKNOWN(" + baseType + ")";
         };
     }
 
@@ -740,7 +1346,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     private static Integer characterMaximumLength(int baseType, int length) {
         return switch (baseType) {
-            case 0, 13, 15, 16, 40 -> length;
+            case 0, 13, 15, 16, 40, 63, 64 -> length;
             default -> null;
         };
     }
@@ -764,7 +1370,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         sql.append(" AND tabtype IN (").append(String.join(", ", tabTypes)).append(")");
     }
 
-    private static void bind(PreparedStatement stmt, List<Object> args) throws Exception {
+    private static void bind(PreparedStatement stmt, List<Object> args) throws SQLException {
         for (int index = 0; index < args.size(); index += 1) {
             stmt.setString(index + 1, String.valueOf(args.get(index)));
         }
@@ -778,7 +1384,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     private static String trim(String value) {
-        return value == null ? "" : value.trim();
+        if (value == null) {
+            return "";
+        }
+        int nullIndex = value.indexOf('\0');
+        if (nullIndex >= 0) {
+            value = value.substring(0, nullIndex);
+        }
+        return value.trim();
     }
 
     private static String emptyToNull(String value) {
@@ -786,7 +1399,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     private static String stripTrailing(String value) {
-        return value == null ? "" : value.stripTrailing();
+        if (value == null) {
+            return "";
+        }
+        int nullIndex = value.indexOf('\0');
+        if (nullIndex >= 0) {
+            value = value.substring(0, nullIndex);
+        }
+        return value.stripTrailing();
     }
 
     private String currentCatalog() {

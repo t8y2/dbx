@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 290
 dbType: uxdb
+compareModes: [schema, data]
 rustVariant: Uxdb
 label: 优炫 UXDB
 dialect: PostgreSQL

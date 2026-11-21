@@ -338,7 +338,9 @@ export async function createIssuePreview(
       body: JSON.stringify({
         model,
         temperature: 0.2,
-        max_tokens: 1800,
+        // Reasoning models spend the budget on reasoning_content before content,
+        // so keep generous headroom to avoid truncated (unparseable) drafts.
+        max_tokens: 6000,
         messages: [
           { role: "system", content: issuePrompt(language) },
           { role: "user", content: userContent },

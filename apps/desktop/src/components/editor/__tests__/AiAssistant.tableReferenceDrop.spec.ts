@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it } from "vitest";
-import { handleAiTableReferenceDropEvent, type AiTableReferenceDropContext } from "@/lib/ai/aiTableReferenceDrop";
+import { handleAiTableReferenceDropEvent } from "@/lib/ai/aiTableReferenceDrop";
 import { createTableReferenceDropEvent, createTableReferencePayload, DBX_TABLE_REFERENCE_DROP_EVENT, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
 
-function dispatchTableReferenceDrop(payload: QueryEditorTableReferencePayload, context: AiTableReferenceDropContext) {
+function dispatchTableReferenceDrop(payload: QueryEditorTableReferencePayload) {
   const assistantRoot = document.createElement("div");
   const target = document.createElement("span");
   assistantRoot.append(target);
@@ -12,7 +12,6 @@ function dispatchTableReferenceDrop(payload: QueryEditorTableReferencePayload, c
   const mentions: string[] = [];
   const listener = (event: Event) => {
     handleAiTableReferenceDropEvent(event, {
-      context,
       assistantRoot,
       elementFromPoint: () => target,
       onMention: (mention) => mentions.push(mention.raw),
@@ -39,15 +38,20 @@ afterEach(() => {
 });
 
 describe("AI assistant table reference drop", () => {
-  it("accepts a table dropped from the active connection and database", () => {
-    expect(dispatchTableReferenceDrop(tablePayload(), { connectionId: "conn-1", database: "app-db" })).toEqual(["@public.users"]);
+  it("accepts a table dropped from the conversation's own connection and database", () => {
+    expect(dispatchTableReferenceDrop(tablePayload())).toEqual(["@public.users"]);
   });
 
-  it("rejects a table dropped from another connection", () => {
-    expect(dispatchTableReferenceDrop(tablePayload({ connectionId: "conn-2" }), { connectionId: "conn-1", database: "app-db" })).toEqual([]);
+  // #9902 reversed the old "reject a foreign table" contract. It was correct
+  // while the panel's connection was whatever editor tab was active — there was
+  // nothing to retarget, so a foreign table had to be dropped. Now the
+  // conversation owns its binding and the drop retargets it, so the mention is
+  // accepted and resolved against the database it came from.
+  it("accepts a table dropped from another connection, so the drop can retarget the conversation", () => {
+    expect(dispatchTableReferenceDrop(tablePayload({ connectionId: "conn-2" }))).toEqual(["@public.users"]);
   });
 
-  it("rejects a table dropped from another database", () => {
-    expect(dispatchTableReferenceDrop(tablePayload({ database: "analytics" }), { connectionId: "conn-1", database: "app-db" })).toEqual([]);
+  it("accepts a table dropped from another database on the same connection", () => {
+    expect(dispatchTableReferenceDrop(tablePayload({ database: "analytics" }))).toEqual(["@public.users"]);
   });
 });

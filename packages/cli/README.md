@@ -43,11 +43,24 @@ chmod +x dbx
 
 Standalone binaries do not require Node.js. They read the same DBX connection storage as the desktop application; set `DBX_DATA_DIR` when using a custom or portable data directory.
 
+## Official Agent Skill
+
+The CLI binary includes the official DBX Skill for shell-capable AI agents. Enable it once after installing or upgrading the CLI:
+
+```bash
+dbx agent setup
+dbx agent status
+```
+
+The default location is `~/.agents/skills/dbx`. `setup` runs entirely offline and can be repeated to install a newer bundled version. It refuses to overwrite an unmanaged or locally modified DBX Skill unless `--force` is supplied. Use `--skills-dir <path>` when the agent reads a different skills root.
+
 ## Usage
 
 ```bash
 dbx doctor
 dbx capabilities
+dbx agent setup
+dbx agent status --json
 dbx connections list --json
 dbx connections list --format csv
 dbx schema list local --json
@@ -66,6 +79,8 @@ dbx open local users
 | ------------------------------------------- | ----------------------------------------------------- |
 | `dbx doctor`                                | Show local DBX config and desktop bridge diagnostics  |
 | `dbx capabilities`                          | Show direct-query and desktop-bridge database support |
+| `dbx agent setup`                           | Install or update the bundled official DBX Skill      |
+| `dbx agent status`                          | Inspect the installed DBX Skill                       |
 | `dbx connections list`                      | List DBX connections without printing secrets         |
 | `dbx schema list <connection>`              | List tables and views                                 |
 | `dbx schema describe <connection> <table>`  | Show table columns                                    |
@@ -140,6 +155,11 @@ CLI JSON errors use stable codes:
 | `CONNECTION_NOT_FOUND`   | No DBX connection matched the requested name        |
 | `SQL_BLOCKED`            | SQL safety rules blocked execution                  |
 | `DBX_NOT_RUNNING`        | DBX Desktop bridge is unavailable                   |
+| `HOME_NOT_FOUND`         | The default user skills directory cannot be resolved |
+| `SKILL_MODIFIED`         | An unmanaged or locally edited DBX Skill was found  |
+| `SKILL_PATH_UNSAFE`      | A managed Skill path is a symbolic link             |
+| `SKILL_READ_FAILED`      | An installed Skill file could not be read            |
+| `SKILL_WRITE_FAILED`     | The bundled Skill could not be installed             |
 | `ERROR`                  | Unexpected runtime failure                          |
 
 ## Codex

@@ -8,7 +8,9 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "event",
   "procedure",
   "function",
+  "postgres-aggregate-functions",
   "synonym",
+  "oracle-db-link",
   "package",
   "package-body",
   "type-body",
@@ -16,7 +18,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "type-attribute",
   "type-method",
   "object-browser",
-  "redis-db",
+  "mqtt-topic",
   "mq-tenant",
   "etcd-root",
   "etcd-dashboard",
@@ -42,9 +44,11 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "datafile",
 ]);
 
-const fullWidthLabelTypes: Set<TreeNodeType> = new Set(["table", "view", "materialized_view", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
+// Controls stay viewport-sized. Names, including connections and groups, may
+// contribute their natural width when the user allows horizontal scrolling.
+const nonNaturalWidthTypes: Set<TreeNodeType> = new Set(["table-search-control", "load-more"]);
 
-const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder", "type"]);
+const emptyContainerTypes: Set<TreeNodeType> = new Set(["redis-db", "saved-sql-root", "saved-sql-folder", "type"]);
 
 const pinnableTypes: Set<TreeNodeType> = new Set([
   "connection-group",
@@ -68,7 +72,7 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "nacos-namespace",
 ]);
 
-const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
+const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "procedure", "function", "trigger", "sequence", "synonym", "package", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
 
 export const SIDEBAR_INDENT_DEFAULT_PX = 16;
 
@@ -77,6 +81,7 @@ export function treeItemPaddingLeft(depth: number, indentPx = SIDEBAR_INDENT_DEF
 }
 
 export const trailingCommentGapPx = 8;
+export const sidebarRightCommentMaxWidthPx = 240;
 export const sidebarPinnedActionSlotWidthPx = 24;
 
 export function trailingCommentAvailableWidth(containerWidth: number, leadingWidth: number): number {
@@ -100,7 +105,11 @@ export interface SidebarTreeNaturalWidthItem {
   depth: number;
   label: string;
   usesNaturalWidth: boolean;
+  trailingText?: string;
   trailingWidth?: number;
+  leadingWidth?: number;
+  comment?: string;
+  rightAlignedComment?: boolean;
 }
 
 // Right padding, expander/icon widths and the two flex gaps before the label.
@@ -111,7 +120,10 @@ export function sidebarTreeNaturalContentWidth(items: readonly SidebarTreeNatura
   for (const item of items) {
     if (!item.usesNaturalWidth) continue;
     const paddingLeft = item.depth * indentPx + 8;
-    width = Math.max(width, Math.ceil(paddingLeft + sidebarTreeRowChromeWidth + measureText(item.label) + (item.trailingWidth ?? 0)));
+    const labelWidth = Math.max(measureText(item.label), item.leadingWidth ?? 0);
+    const commentWidth = item.comment ? (item.rightAlignedComment ? trailingCommentGapPx + Math.min(sidebarRightCommentMaxWidthPx, measureText(item.comment)) : 16 + measureText(item.comment)) : 0;
+    const trailingWidth = item.trailingText ? trailingCommentGapPx + measureText(item.trailingText) : 0;
+    width = Math.max(width, Math.ceil(paddingLeft + sidebarTreeRowChromeWidth + labelWidth + commentWidth + trailingWidth + (item.trailingWidth ?? 0)));
   }
   return width;
 }
@@ -148,12 +160,17 @@ export function sidebarTreeNodeComment(node: TreeNode, showConnectionNotes: bool
   return node.comment || null;
 }
 
+export function isSidebarCommentSupportedType(type: TreeNodeType): boolean {
+  return commentTypes.has(type);
+}
+
 export function isSidebarCommentAlignableNode(node: TreeNode): boolean {
-  return commentTypes.has(node.type);
+  return isSidebarCommentSupportedType(node.type);
 }
 
 export function usesFullWidthTreeLabel(type: TreeNodeType, allowHorizontalScroll: boolean, hasTrailingComment = false): boolean {
-  return allowHorizontalScroll && !hasTrailingComment && fullWidthLabelTypes.has(type);
+  void hasTrailingComment;
+  return allowHorizontalScroll && !nonNaturalWidthTypes.has(type) && !type.startsWith("group-") && type !== "type-attributes" && type !== "type-methods";
 }
 
 export function treeLabelWidthClass({ fullWidth, hasTrailingComment, hasInlineAction = false, alignLeading = false }: { fullWidth: boolean; hasTrailingComment: boolean; hasInlineAction?: boolean; alignLeading?: boolean }): string {

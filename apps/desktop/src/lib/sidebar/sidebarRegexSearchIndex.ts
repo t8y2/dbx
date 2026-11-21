@@ -1,7 +1,7 @@
 import type { TableInfo, TreeNode, TreeNodeType } from "@/types/database";
 import type { SidebarRegexIndexScope, SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
 
-export const regexLocalTableParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+export const regexLocalTableParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views"]);
 
 export function regexTableSearchParents(nodes: readonly TreeNode[], result: TreeNode[] = []): TreeNode[] {
   for (const node of nodes) {
@@ -105,4 +105,14 @@ export function resolveSidebarSearchDispatchMode(transition: SidebarSearchTransi
   if (options.localSearchEnabled) return "none";
   if (transition.wasRegexMode && !transition.query) return "none";
   return "ordinary";
+}
+
+/**
+ * Keep an ordinary-search projection available while a non-empty regex is
+ * filtering it. Restoring those tracked nodes on the mode switch can remove
+ * the only currently loaded matches before a local table index exists. The
+ * projection is restored once the regex query is cleared.
+ */
+export function shouldRestoreTrackedSidebarSearchTargetsInRegexMode(query: string): boolean {
+  return query.length === 0;
 }

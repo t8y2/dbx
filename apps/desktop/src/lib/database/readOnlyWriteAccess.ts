@@ -1,8 +1,11 @@
 import { getActivePinia } from "pinia";
 import { useReadOnlyUnlockStore, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
+import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { classifySqlRisk, isSqlRiskMutation } from "@/lib/sql/sqlRisk";
 import type { DatabaseType } from "@/types/database";
+import { mysqlDataCharsetEnabled, type MysqlDataCharsetConnection } from "@/lib/connection/mysqlDataCharset";
+import { useToast } from "@/composables/useToast";
 
 export type { WriteUnlockDurationSecs };
 
@@ -29,7 +32,8 @@ export function isWriteUnlockActive(connectionId: string | undefined | null): bo
   return unlockStoreOrNull()?.isUnlocked(connectionId) === true;
 }
 
-export function connectionIsEffectivelyReadOnly(connection?: { id?: string; read_only?: boolean } | null): boolean {
+export function connectionIsEffectivelyReadOnly(connection?: ({ id?: string; read_only?: boolean } & MysqlDataCharsetConnection) | null): boolean {
+  if (mysqlDataCharsetEnabled(connection)) return true;
   if (!connection?.read_only) return false;
   return !isWriteUnlockActive(connection.id);
 }
@@ -39,14 +43,14 @@ export function sqlLooksLikeMutation(sql: string | undefined, databaseType?: Dat
   if (databaseType === "redis") {
     return sql.split("\n").some((line) => {
       const command = line.trim();
-      return command.length > 0 && classifyRedisCommandSafety(command) !== "allowed";
+      return command.length > 0 && !isRedisCommentLine(command) && classifyRedisCommandSafety(command) !== "allowed";
     });
   }
   return isSqlRiskMutation(classifySqlRisk(sql, { dialect: databaseType }).risk);
 }
 
 export interface ReadOnlyWriteAccessOptions {
-  connection?: { id?: string; name?: string; read_only?: boolean; db_type?: DatabaseType } | null;
+  connection?: ({ id?: string; name?: string; read_only?: boolean; db_type?: DatabaseType } & MysqlDataCharsetConnection) | null;
   sql?: string;
   source?: string;
   treatAsMutation?: boolean;
@@ -54,6 +58,12 @@ export interface ReadOnlyWriteAccessOptions {
 
 export async function ensureReadOnlyWriteAccess(options: ReadOnlyWriteAccessOptions): Promise<boolean> {
   const connection = options.connection;
+  if (mysqlDataCharsetEnabled(connection)) {
+    if (options.treatAsMutation !== true && !sqlLooksLikeMutation(options.sql, connection?.db_type)) return true;
+    const { default: i18n } = await import("@/i18n");
+    useToast().toast(i18n.global.t("connection.mysqlDataCharsetWriteBlocked"), 5000);
+    return false;
+  }
   if (!connection?.read_only) return true;
   if (!connection.id) return false;
   const store = unlockStoreOrNull();

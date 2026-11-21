@@ -1,6 +1,9 @@
 export type ElasticsearchConnectionMode = "direct" | "kibana";
+export type ElasticsearchAuthType = "basic" | "apiKey";
 
 export interface ElasticsearchExternalConfig {
+  /** API keys use the encrypted main password slot; no credential is stored here. */
+  authType?: ElasticsearchAuthType;
   mode?: "kibana" | "direct";
   kibanaBasePath?: string;
   /** GET path for connect/test/health. Empty means GET /. */
@@ -28,6 +31,10 @@ export function normalizeElasticsearchConnectivityCheckPath(value: string): stri
   const withoutMethod = line.replace(/^GET\s+/i, "").trim();
   if (!withoutMethod || withoutMethod === "/") return "";
   return withoutMethod.startsWith("/") ? withoutMethod : `/${withoutMethod}`;
+}
+
+export function elasticsearchAuthTypeFromConfig(value: unknown): ElasticsearchAuthType {
+  return externalConfigRecord(value).authType === "apiKey" ? "apiKey" : "basic";
 }
 
 export function elasticsearchConnectionModeFromConfig(value: unknown): ElasticsearchConnectionMode {
@@ -62,12 +69,13 @@ export function elasticsearchIndexGroupingPatternFromConfig(value: unknown): str
   return typeof pattern === "string" ? pattern.trim() : "";
 }
 
-export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMode, kibanaBasePath: string, connectivityCheckPath = "", indexGroupingPattern = "", connectivityCheckDisabled = false): ElasticsearchExternalConfig | undefined {
+export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMode, kibanaBasePath: string, connectivityCheckPath = "", indexGroupingPattern = "", connectivityCheckDisabled = false, authType: ElasticsearchAuthType = "basic"): ElasticsearchExternalConfig | undefined {
   const checkPath = normalizeElasticsearchConnectivityCheckPath(connectivityCheckPath);
   const grouping = indexGroupingPattern.trim();
   if (mode !== "kibana") {
-    if (!checkPath && !grouping && !connectivityCheckDisabled) return undefined;
+    if (!checkPath && !grouping && !connectivityCheckDisabled && authType === "basic") return undefined;
     const config: ElasticsearchExternalConfig = {};
+    if (authType === "apiKey") config.authType = authType;
     if (checkPath) config.connectivityCheckPath = checkPath;
     if (connectivityCheckDisabled) config.connectivityCheckDisabled = true;
     if (grouping) config.indexGroupingPattern = grouping;
@@ -75,6 +83,7 @@ export function buildElasticsearchExternalConfig(mode: ElasticsearchConnectionMo
   }
   const normalizedPath = normalizeKibanaBasePath(kibanaBasePath);
   const config: ElasticsearchExternalConfig = { mode: "kibana" };
+  if (authType === "apiKey") config.authType = authType;
   if (normalizedPath) config.kibanaBasePath = normalizedPath;
   if (checkPath) config.connectivityCheckPath = checkPath;
   if (connectivityCheckDisabled) config.connectivityCheckDisabled = true;

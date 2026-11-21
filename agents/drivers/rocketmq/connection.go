@@ -22,15 +22,20 @@ type socksProxyConfig struct {
 }
 
 type connectionConfig struct {
-	NameServers    []string
-	ClusterName    string
-	BrokerAddr     string
-	AccessKey      string
-	SecretKey      string
-	RequestTimeout time.Duration
-	ConnectTimeout time.Duration
-	TLSSkipVerify  bool
-	SocksProxy     *socksProxyConfig
+	NameServers       []string
+	Mode              string
+	ProxyEndpoint     string
+	ProxyDialEndpoint string
+	ProxyTLS          bool
+	ManagementEnabled bool
+	ClusterName       string
+	BrokerAddr        string
+	AccessKey         string
+	SecretKey         string
+	RequestTimeout    time.Duration
+	ConnectTimeout    time.Duration
+	TLSSkipVerify     bool
+	SocksProxy        *socksProxyConfig
 }
 
 func parseConnection(params map[string]any) (connectionConfig, error) {
@@ -39,18 +44,43 @@ func parseConnection(params map[string]any) (connectionConfig, error) {
 		connection = params
 	}
 	nameServers := splitAddresses(stringValue(connection, "namesrv_addr", "namesrvAddr"))
-	if len(nameServers) == 0 {
+	mode := stringValue(connection, "connection_mode", "connectionMode")
+	if mode == "" {
+		mode = "remoting"
+	}
+	if mode != "remoting" && mode != "proxy" {
+		return connectionConfig{}, fmt.Errorf("unsupported connection_mode: %s", mode)
+	}
+	management := mode == "remoting" || boolValue(connection, false, "management_enabled", "managementEnabled")
+	if len(nameServers) == 0 && management {
 		return connectionConfig{}, fmt.Errorf("namesrv_addr is required")
 	}
 	config := connectionConfig{
-		NameServers:    nameServers,
-		ClusterName:    stringValue(connection, "cluster_name", "clusterName"),
-		BrokerAddr:     stringValue(connection, "broker_addr", "brokerAddr"),
-		AccessKey:      stringValue(connection, "access_key", "accessKey"),
-		SecretKey:      stringValue(connection, "secret_key", "secretKey"),
-		RequestTimeout: time.Duration(intValue(connection, int(defaultRequestTimeout/time.Millisecond), "request_timeout_ms")) * time.Millisecond,
-		ConnectTimeout: time.Duration(intValue(connection, int(defaultConnectTimeout/time.Millisecond), "connect_timeout_ms")) * time.Millisecond,
-		TLSSkipVerify:  boolValue(connection, false, "tls_skip_verify"),
+		Mode: mode, ManagementEnabled: management,
+		ProxyEndpoint:     stringValue(connection, "proxy_endpoint", "proxyEndpoint"),
+		ProxyDialEndpoint: stringValue(connection, "proxy_dial_endpoint", "proxyDialEndpoint"),
+		ProxyTLS:          boolValue(connection, true, "proxy_tls", "proxyTls"),
+		NameServers:       nameServers,
+		ClusterName:       stringValue(connection, "cluster_name", "clusterName"),
+		BrokerAddr:        stringValue(connection, "broker_addr", "brokerAddr"),
+		AccessKey:         stringValue(connection, "access_key", "accessKey"),
+		SecretKey:         stringValue(connection, "secret_key", "secretKey"),
+		RequestTimeout:    time.Duration(intValue(connection, int(defaultRequestTimeout/time.Millisecond), "request_timeout_ms")) * time.Millisecond,
+		ConnectTimeout:    time.Duration(intValue(connection, int(defaultConnectTimeout/time.Millisecond), "connect_timeout_ms")) * time.Millisecond,
+		TLSSkipVerify:     boolValue(connection, false, "tls_skip_verify"),
+	}
+	if mode == "proxy" {
+		if err := validateProxyEndpoint(config.ProxyEndpoint); err != nil {
+			return connectionConfig{}, fmt.Errorf("proxy_endpoint: %w", err)
+		}
+		if config.ProxyDialEndpoint != "" {
+			if err := validateProxyEndpoint(config.ProxyDialEndpoint); err != nil {
+				return connectionConfig{}, fmt.Errorf("proxy_dial_endpoint: %w", err)
+			}
+		}
+		if (config.AccessKey == "") != (config.SecretKey == "") {
+			return connectionConfig{}, fmt.Errorf("proxy access_key and secret_key must be provided together")
+		}
 	}
 	if config.RequestTimeout <= 0 {
 		config.RequestTimeout = defaultRequestTimeout
@@ -78,6 +108,9 @@ func (a *rocketMQAgent) connect(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if config.Mode == "proxy" {
+		return a.connectProxy(config, false)
+	}
 	client, proxies, clusterInfo, err := buildClient(config)
 	if err != nil {
 		return nil, err
@@ -92,13 +125,17 @@ func (a *rocketMQAgent) connect(params map[string]any) (any, error) {
 	}
 
 	a.mu.Lock()
-	oldClient, oldProxies := a.client, a.proxies
+	oldClient, oldProxies, oldMessaging := a.client, a.proxies, a.messaging
+	a.messaging = nil
 	a.client = client
 	a.proxies = proxies
 	a.connection = config
 	a.clusterName = clusterName
 	a.brokerAddr = brokerAddr
 	a.mu.Unlock()
+	if oldMessaging != nil {
+		oldMessaging.Close()
+	}
 	if oldClient != nil {
 		_ = oldClient.Close()
 	}
@@ -112,6 +149,9 @@ func (a *rocketMQAgent) testConnection(params map[string]any) (any, error) {
 	config, err := parseConnection(params)
 	if err != nil {
 		return nil, err
+	}
+	if config.Mode == "proxy" {
+		return a.connectProxy(config, true)
 	}
 	a.mu.RLock()
 	if a.client != nil && a.connection.equal(config) {
@@ -233,11 +273,16 @@ func clusterTestResult(client *admin.Client, info *admin.ClusterInfo, config con
 	return map[string]any{
 		"ok": true, "clusterId": resolveClusterName(info, config.ClusterName),
 		"brokers": brokers, "nodeCount": len(brokers), "controller": controller,
-		"aclEnabled": aclEnabled,
+		"aclEnabled":   aclEnabled,
+		"capabilities": transportCapabilities(true),
+		"channels":     map[string]any{"messaging": map[string]any{"status": "ready"}, "management": map[string]any{"status": "ready"}},
 	}
 }
 
 func (config connectionConfig) equal(other connectionConfig) bool {
+	if config.Mode != other.Mode || config.ProxyEndpoint != other.ProxyEndpoint || config.ProxyDialEndpoint != other.ProxyDialEndpoint || config.ProxyTLS != other.ProxyTLS || config.ManagementEnabled != other.ManagementEnabled {
+		return false
+	}
 	if config.ClusterName != other.ClusterName || config.BrokerAddr != other.BrokerAddr ||
 		config.AccessKey != other.AccessKey || config.SecretKey != other.SecretKey ||
 		config.RequestTimeout != other.RequestTimeout || config.ConnectTimeout != other.ConnectTimeout ||

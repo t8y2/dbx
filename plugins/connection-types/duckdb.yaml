@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 80
 dbType: duckdb
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: DuckDb
 label: DuckDB
 dialect: DuckDB

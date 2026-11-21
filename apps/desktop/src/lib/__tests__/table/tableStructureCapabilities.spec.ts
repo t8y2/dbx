@@ -28,6 +28,16 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("postgres", "postgres").alterStrategy).toBe("direct");
   });
 
+  it("narrows the Doris index features to what the backend can build", () => {
+    expect(getTableStructureCapabilities("doris", "mysql")).toMatchObject({
+      createIndex: true,
+      dropIndex: true,
+      rebuildIndex: false,
+      indexType: false,
+      indexComment: false,
+    });
+  });
+
   it("enables PostgreSQL index INCLUDE only for known supported versions", () => {
     expect(getTableStructureCapabilities("postgres", "postgres", "PostgreSQL 10.15 (Transwarp) on x86_64-pc-linux-gnu").indexInclude).toBe(false);
     expect(getTableStructureCapabilities("postgres", "postgres", "9.6.24").indexInclude).toBe(false);
@@ -102,12 +112,37 @@ describe("tableStructureCapabilities", () => {
       addPrimaryKey: true,
       alterPrimaryKey: false,
     });
-    for (const databaseType of ["oceanbase-oracle", "iris"] as const) {
+    expect(getTableStructureCapabilities("sqlserver", "sqlserver")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: true,
+      foreignKey: true,
+    });
+    expect(getTableStructureCapabilities("oceanbase-oracle", "oceanbase-oracle")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: false,
+      foreignKey: false,
+    });
+    for (const databaseType of ["yashandb", "xugu", "iris"] as const) {
       expect(getTableStructureCapabilities(databaseType, databaseType)).toMatchObject({
         addPrimaryKey: false,
         alterPrimaryKey: false,
       });
     }
+  });
+
+  it("enables only the verified Inceptor column structure operations", () => {
+    expect(getTableStructureCapabilities("transwarp", "transwarp")).toMatchObject({
+      dialect: "mysql",
+      alterStrategy: "direct",
+      createTable: true,
+      addColumn: true,
+      dropColumn: false,
+      renameColumn: true,
+      alterExistingColumn: true,
+      comment: true,
+      createIndex: false,
+      foreignKey: false,
+    });
   });
 
   it("uses local-only column reordering for editable databases without physical reorder support", () => {

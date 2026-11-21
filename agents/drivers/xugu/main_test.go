@@ -300,6 +300,28 @@ func TestServerDisconnectClearsDegradedControlState(t *testing.T) {
 	}
 }
 
+func TestXuguControlSessionRequiresSystemLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params connectParams
+		want   bool
+	}{
+		{"system administrator", connectParams{Database: " system ", Username: "sysdba"}, true},
+		{"ordinary user in system", connectParams{Database: "SYSTEM", Username: "DBX_USER"}, false},
+		{"database-scoped administrator", connectParams{Database: "SHOP_DEMO", Username: "SYSDBA"}, false},
+		{"database-scoped native DSN", connectParams{ConnectionString: "IP=db.example.com;DB=SHOP_DEMO;USER=SYSDBA", Username: "SYSDBA"}, false},
+		{"system JDBC URL", connectParams{ConnectionString: "jdbc:xugu://db.example.com:5138/SYSTEM", Username: "SYSDBA"}, true},
+		{"selected database overrides URL", connectParams{Database: "SHOP_DEMO", ConnectionString: "jdbc:xugu://db.example.com:5138/SYSTEM", Username: "SYSDBA"}, false},
+		{"missing database", connectParams{Username: "SYSDBA"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := xuguControlSessionEligible(tc.params); got != tc.want {
+				t.Fatalf("SYSTEM control eligibility = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestXuguControlParamsForcesSystemDatabase(t *testing.T) {
 	params := connectParams{
 		Host:     "127.0.0.1",
@@ -449,6 +471,34 @@ func TestBuildDSNUsesConnectionFields(t *testing.T) {
 		if !strings.Contains(dsn, part) {
 			t.Fatalf("dsn should contain %s, got: %s", part, dsn)
 		}
+	}
+}
+
+func TestOpenDBRejectsMissingDatabaseBeforeOpeningDriver(t *testing.T) {
+	tests := []struct {
+		name   string
+		params connectParams
+	}{
+		{name: "empty structured database", params: connectParams{Host: "db.example.com", Username: "app"}},
+		{name: "whitespace structured database", params: connectParams{Host: "db.example.com", Database: " \t ", Username: "app"}},
+		{name: "empty native DSN database", params: connectParams{ConnectionString: "IP=db.example.com;DB=;User=app"}},
+		{name: "quoted whitespace native DSN database", params: connectParams{ConnectionString: "IP=db.example.com;DB='  ';User=app"}},
+		{name: "URL without database", params: connectParams{ConnectionString: "xugu://app:secret@db.example.com:5138/"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := openDB(test.params)
+			if err == nil {
+				if db != nil {
+					_ = db.Close()
+				}
+				t.Fatal("expected missing database to be rejected before opening the driver")
+			}
+			if !strings.Contains(err.Error(), "XuguDB requires an existing database name") {
+				t.Fatalf("unexpected missing-database error: %v", err)
+			}
+		})
 	}
 }
 
@@ -707,6 +757,9 @@ func TestConfiguredDatabaseName(t *testing.T) {
 		{params: connectParams{ConnectionString: "xugu://user:secret@db.example.com:5138/demo"}, want: "demo"},
 		{params: connectParams{ConnectionString: "jdbc:xugu://db.example.com:5138/reporting"}, want: "reporting"},
 		{params: connectParams{ConnectionString: "IP=db.example.com;DB=SYSTEM;User=SYSDBA;PWD=secret"}, want: "SYSTEM"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='shop;east';User=APP"}, want: "shop;east"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='sales''east';User=APP"}, want: "sales'east"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='  ';User=APP"}, want: ""},
 	}
 
 	for _, tc := range cases {
@@ -963,6 +1016,42 @@ func TestXuguPrimaryKeyMatchingDoesNotGuessAmbiguousCase(t *testing.T) {
 	primaryKeys := map[string]bool{"ID": true, "id": true}
 	if xuguPrimaryKeyMatches("Id", primaryKeys) {
 		t.Fatal("must not choose between primary-key names that differ only by case")
+	}
+}
+
+func TestGetColumnsMarksXuguIdentityColumnsAsAutoIncrement(t *testing.T) {
+	db, err := sql.Open("xugu-test-table-ddl", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	s := newServer()
+	s.db = db
+	columns, err := s.getColumns("APP", "CHILD")
+	if err != nil {
+		t.Fatalf("get columns: %v", err)
+	}
+	if len(columns) != 2 {
+		t.Fatalf("expected two columns, got %#v", columns)
+	}
+	if columns[0].Name != "ID" || columns[0].Extra == nil || *columns[0].Extra != "auto_increment" {
+		t.Fatalf("identity column should be marked auto_increment: %#v", columns[0])
+	}
+	if columns[1].Name != "PARENT_ID" || columns[1].Extra != nil {
+		t.Fatalf("ordinary column must not be marked auto_increment: %#v", columns[1])
+	}
+}
+
+func TestXuguIdentityColumnMatchingIsCaseInsensitiveOnlyWhenUnambiguous(t *testing.T) {
+	if !xuguIdentityMatchesColumn("id", map[string]xuguIdentityInfo{"ID": {Column: "ID"}}) {
+		t.Fatal("expected an unambiguous case-insensitive identity match")
+	}
+	if xuguIdentityMatchesColumn("id", map[string]xuguIdentityInfo{
+		"ID": {Column: "ID"},
+		"Id": {Column: "Id"},
+	}) {
+		t.Fatal("ambiguous case-insensitive identity names must not match")
 	}
 }
 
@@ -1857,6 +1946,65 @@ func TestRenderXuguTableDDLPreservesProgrammableTableMetadata(t *testing.T) {
 	}
 	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
 		t.Fatalf("standalone table DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestRenderXuguTableDDLDefersPrimaryKeyForCopyNumberLobTable(t *testing.T) {
+	ddl := renderXuguTableDDL(
+		"APP", "LOB_TABLE",
+		[]columnInfo{
+			{Name: "ID", DataType: "INTEGER", IsNullable: false},
+			{Name: "BLOB_C", DataType: "BLOB", IsNullable: true},
+			{Name: "CLOB_C", DataType: "CLOB", IsNullable: true},
+			{Name: "JSON_C", DataType: "JSON", IsNullable: true},
+			{Name: "XML_C", DataType: "XML", IsNullable: true},
+		},
+		xuguTableMetadata{CopyNum: 3},
+		nil,
+		[]xuguConstraintInfo{{Name: "PK_LOB_TABLE", Type: "P", Definition: `"ID"`, Enabled: true}},
+		nil, nil,
+	)
+
+	if strings.Contains(strings.Split(ddl, "ALTER TABLE")[0], `CONSTRAINT "PK_LOB_TABLE" PRIMARY KEY`) {
+		t.Fatalf("primary key must not be inline for a LOB table with explicit COPY NUMBER:\n%s", ddl)
+	}
+	if !strings.Contains(ddl, "COPY NUMBER 3;\n\nALTER TABLE \"APP\".\"LOB_TABLE\" ADD CONSTRAINT \"PK_LOB_TABLE\" PRIMARY KEY (\"ID\")") {
+		t.Fatalf("the original named primary key must follow CREATE TABLE:\n%s", ddl)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(ddl), ";") {
+		t.Fatalf("standalone table DDL must end with a statement terminator:\n%s", ddl)
+	}
+}
+
+func TestRenderXuguTableDDLLeavesOtherPrimaryKeysInline(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata xuguTableMetadata
+		columns  []columnInfo
+	}{
+		{
+			name:     "copy number without a large-object column",
+			metadata: xuguTableMetadata{CopyNum: 3},
+			columns:  []columnInfo{{Name: "ID", DataType: "INTEGER"}},
+		},
+		{
+			name:     "large-object column without explicit copy number",
+			metadata: xuguTableMetadata{},
+			columns:  []columnInfo{{Name: "ID", DataType: "INTEGER"}, {Name: "BODY", DataType: "CLOB"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ddl := renderXuguTableDDL(
+				"APP", "T", test.columns, test.metadata, nil,
+				[]xuguConstraintInfo{{Name: "PK_T", Type: "P", Definition: `"ID"`, Enabled: true}}, nil, nil,
+			)
+			if !strings.Contains(ddl, `CONSTRAINT "PK_T" PRIMARY KEY ("ID")`) {
+				t.Fatalf("primary key must remain inline outside the verified Xugu case:\n%s", ddl)
+			}
+			if strings.Contains(ddl, `ALTER TABLE "APP"."T" ADD CONSTRAINT "PK_T" PRIMARY KEY`) {
+				t.Fatalf("primary key must not be deferred outside the verified Xugu case:\n%s", ddl)
+			}
+		})
 	}
 }
 

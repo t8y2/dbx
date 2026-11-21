@@ -18,6 +18,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import KvValueEditor from "@/components/kv/KvValueEditor.vue";
 import type { KvCreateMode, KvDeleteOptions, KvGetOptions, KvGetResponse, KvHistoryEvent, KvHistoryResponse, KvInt64, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import type { KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, kvKeyTreeNodePath, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
 import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseSummaries, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
@@ -47,6 +48,7 @@ import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { detectKvValueFormat, validateKvValue, type KvValueFormat } from "@/lib/kv/kvValueFormat";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { saveTextFile } from "@/lib/export/saveTextFile";
 
 interface KvKeyBrowserLabels {
   prefixPlaceholder: string;
@@ -712,7 +714,7 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     }
   } catch (error) {
     if (reset && generation === keyLoadGeneration && props.connectionId === connectionId) {
-      listError.value = error instanceof Error ? error.message : String(error);
+      listError.value = formatError(error);
     }
   } finally {
     if (generation === keyLoadGeneration && props.connectionId === connectionId) {
@@ -792,7 +794,7 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
     }
   } catch (error) {
     if (lazyLoadContextValid(context)) {
-      listError.value = error instanceof Error ? error.message : String(error);
+      listError.value = formatError(error);
     }
   } finally {
     if (lazyLoadContextValid(context)) loading.value = false;
@@ -932,7 +934,7 @@ async function refreshLazyParent(parentPath: string) {
   }
 }
 
-async function loadSelectedKey(input: string | KvKeyRoute) {
+async function loadSelectedKey(input: string | KvKeyRoute): Promise<boolean> {
   const route = routeFromKey(input);
   const key = route.key;
   const keyIdentity = routeIdentity(route);
@@ -949,7 +951,7 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
   detailError.value = "";
   try {
     const result = await props.api.get(connectionId, key, route.keyBytes ? { keyBytes: route.keyBytes } : undefined);
-    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
+    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return false;
     const lazyNode = lazyTreeState.nodeByKey.get(key);
     if (lazyNode) {
       lazyNode.hasValue = result.found;
@@ -957,16 +959,18 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
     }
     if (!result.found) {
       removeExpiredSelectedKey(key);
-      return;
+      return false;
     }
     selectedValue.value = result;
     selectedKeyIdentity.value = result.keyIdentity ?? selectedKeyIdentity.value;
     selectedRouteKeyBytes.value = result.keyBytes ?? selectedRouteKeyBytes.value;
     startMetadataRefresh(key);
     startKeyListRefresh();
+    return true;
   } catch (error) {
-    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
-    detailError.value = error instanceof Error ? error.message : String(error);
+    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return false;
+    detailError.value = formatError(error);
+    return false;
   } finally {
     if (requestId === detailRequestId && connectionId === props.connectionId) detailLoading.value = false;
   }
@@ -1414,7 +1418,7 @@ async function deleteSelectedKey() {
     }
     toast(props.labels.deleted, 2500);
   } catch (error) {
-    detailError.value = error instanceof Error ? error.message : String(error);
+    detailError.value = formatError(error);
     showDeleteConfirm.value = false;
   } finally {
     deleting.value = false;
@@ -1471,7 +1475,7 @@ async function copySelectedValue() {
     }, 1500);
   } catch (error) {
     selectedValueCopied.value = false;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     const failureTemplate = props.labels.copyFailed || "Copy failed: {message}";
     toast(failureTemplate.includes("{message}") ? failureTemplate.replace("{message}", message) : `${failureTemplate}: ${message}`, 3500);
   }
@@ -1486,54 +1490,47 @@ function watchSelectedKey() {
   });
 }
 
-function downloadText(filename: string, content: string, type = "application/json") {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function exportSelectedKey() {
-  if (!selectedKey.value || !selectedValue.value?.found) return;
-  downloadText(
-    `${selectedKey.value.split("/").filter(Boolean).pop() || props.exportFallbackName}${props.exportFileExtension}`,
-    JSON.stringify(
-      {
-        format: props.exportFormat,
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        prefix: selectedKey.value,
-        scopeKind: "key",
-        entries: [
-          {
-            key: selectedKeyBytes.value ?? { encoding: "utf8", data: selectedKey.value },
-            value: selectedValue.value.value,
-            metadata: selectedValue.value.metadata,
-            formatHint: detectKvValueFormat(selectedTextValue.value, selectedValueIsBase64.value ? "base64" : "utf8"),
-          },
-        ],
-      },
-      null,
-      2,
-    ),
+async function exportSelectedKey(): Promise<boolean> {
+  if (!selectedKey.value || !selectedValue.value?.found) return false;
+  const filename = `${selectedKey.value.split("/").filter(Boolean).pop() || props.exportFallbackName}${props.exportFileExtension}`;
+  const content = JSON.stringify(
+    {
+      format: props.exportFormat,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      prefix: selectedKey.value,
+      scopeKind: "key",
+      entries: [
+        {
+          key: selectedKeyBytes.value ?? { encoding: "utf8", data: selectedKey.value },
+          value: selectedValue.value.value,
+          metadata: selectedValue.value.metadata,
+          formatHint: detectKvValueFormat(selectedTextValue.value, selectedValueIsBase64.value ? "base64" : "utf8"),
+        },
+      ],
+    },
+    null,
+    2,
   );
+  return Boolean(await saveTextFile(content, filename, "DBX KV Bundle", "json", { operation: "kv-key-export" }));
 }
 
 async function exportNode(node: BrowserTreeNode) {
-  const request: KvExportScopeRequest = {
-    path: nodePath(node),
-    kind: nodeIsExpandable(node) ? "prefix" : "key",
-    keyBytes: node.kind === "lazy" ? null : node.keyBytes,
-  };
-  if (props.api.exportScope) {
-    await props.api.exportScope(props.connectionId, request);
-    return;
+  try {
+    const request: KvExportScopeRequest = {
+      path: nodePath(node),
+      kind: nodeIsExpandable(node) ? "prefix" : "key",
+      keyBytes: node.kind === "lazy" ? null : node.keyBytes,
+    };
+    if (props.api.exportScope) {
+      await props.api.exportScope(props.connectionId, request);
+      return;
+    }
+    if (!nodeHasValue(node)) return;
+    if (await loadSelectedKey(routeFromNode(node))) await exportSelectedKey();
+  } catch (error) {
+    toast(formatError(error), 4000);
   }
-  if (!nodeHasValue(node)) return;
-  await loadSelectedKey(routeFromNode(node));
-  exportSelectedKey();
 }
 
 async function openCloneDialog() {
@@ -1603,7 +1600,7 @@ async function moveOrCopySelectedKey() {
     await loadSelectedKey({ key: next, keyIdentity: next, keyBytes: { encoding: "utf8", data: next } });
     toast(props.labels.saved, 2500);
   } catch (error) {
-    renameError.value = error instanceof Error ? error.message : String(error);
+    renameError.value = formatError(error);
   } finally {
     renaming.value = false;
   }
@@ -1626,7 +1623,7 @@ async function openHistory() {
     historyEvents.value = response.events;
   } catch (error) {
     historyEvents.value = [];
-    historyError.value = error instanceof Error ? error.message : String(error);
+    historyError.value = formatError(error);
   } finally {
     historyLoading.value = false;
   }
@@ -1650,7 +1647,7 @@ async function restoreHistory() {
     await loadKeys(true, { preserveSelection: true });
     toast(props.labels.saved, 2500);
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    historyError.value = formatError(error);
   } finally {
     restoring.value = false;
   }
@@ -1824,7 +1821,7 @@ watch(
     clearSelectedKey();
     clearMultiSelection();
     try {
-      await connectionStore.ensureConnected(props.connectionId);
+      await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     } catch {
       // Connection failed — loadKeys will show the error state
     }
@@ -1871,7 +1868,7 @@ watch(editKey, () => {
 onMounted(() => {
   initialLoadPromise = (async () => {
     try {
-      await connectionStore.ensureConnected(props.connectionId);
+      await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
     }

@@ -30,30 +30,21 @@ export const STATIC_LABEL_SPECS = {
   "tests-only": { color: "bfd4f2", description: "Changes only tests, fixtures, or snapshots" },
 };
 
+const CORE_CRATE_PATH = /^crates\/dbx-(?:core|driver(?:s|-[^/]+)|sql(?:-[^/]+)?|formats|types|platform|ai-provider|plugin-runtime)\//;
+
 const TYPE_LABELS = new Set(["bug", "enhancement", "documentation", "maintenance"]);
-const LABEL_PALETTE = [
-  "0e8a16",
-  "1d76db",
-  "5319e7",
-  "c2e0c6",
-  "bfd4f2",
-  "d4c5f9",
-  "fef2c0",
-  "fbca04",
-  "f9d0c4",
-  "e99695",
-  "f29513",
-  "c5def5",
-];
+const LABEL_PALETTE = ["0e8a16", "1d76db", "5319e7", "c2e0c6", "bfd4f2", "d4c5f9", "fef2c0", "fbca04", "f9d0c4", "e99695", "f29513", "c5def5"];
 
 const DRIVER_DATABASE_ALIASES = {
   "cassandra-go": "cassandra",
   gbase8a: "gbase",
+  gbase8c: "gbase",
   gbase8s: "gbase",
   "h2-legacy": "h2",
   kafka: "mq",
   "kingbase-go": "kingbase",
   "neo4j-go": "neo4j",
+  "nebula-go": "nebula",
   "oracle-10g": "oracle",
   "oracle-go": "oracle",
   "oracle-legacy": "oracle",
@@ -83,12 +74,7 @@ const DATABASE_PATH_TOKENS = [
   [/sqlserver/i, "sqlserver"],
 ];
 
-const PACKAGE_DEPENDENCY_SECTIONS = [
-  "dependencies",
-  "devDependencies",
-  "optionalDependencies",
-  "peerDependencies",
-];
+const PACKAGE_DEPENDENCY_SECTIONS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 
 function stablePaletteColor(value) {
   let hash = 0;
@@ -103,14 +89,14 @@ function normalizeChangedFiles(changedFiles) {
 }
 
 function conventionalType(title) {
-  const normalized = String(title || "").trim().replace(/^[^\p{L}\p{N}]+/u, "");
+  const normalized = String(title || "")
+    .trim()
+    .replace(/^[^\p{L}\p{N}]+/u, "");
   return /^([a-z]+)(?:\([^)]*\))?!?[:：]/i.exec(normalized)?.[1]?.toLowerCase() || null;
 }
 
 export function isDocumentationFile(file) {
-  return file.startsWith("docs/")
-    || /(^|\/)README(?:\.[^/]+)?\.md$/i.test(file)
-    || /(^|\/)(SECURITY|CONTRIBUTING|CODE_OF_CONDUCT)\.md$/i.test(file);
+  return file.startsWith("docs/") || /(^|\/)README(?:\.[^/]+)?\.md$/i.test(file) || /(^|\/)(SECURITY|CONTRIBUTING|CODE_OF_CONDUCT)\.md$/i.test(file);
 }
 
 export function inferTypeLabel(title, changedFiles) {
@@ -127,39 +113,26 @@ export function inferAreaLabels(changedFiles) {
   const labels = new Set();
   const has = (predicate) => changedFiles.some(predicate);
 
-  if (has((file) => file === "package.json"
-    || file.startsWith("apps/desktop/")
-    || file.startsWith("packages/app-tests/")
-    || file.startsWith("src-tauri/"))) {
+  if (has((file) => file === "package.json" || file.startsWith("apps/desktop/") || file.startsWith("packages/app-tests/") || file.startsWith("src-tauri/"))) {
     labels.add("area/desktop");
   }
-  if (has((file) => file.startsWith("crates/dbx-core/") || file.startsWith("packages/node-core/"))) {
+  if (has((file) => CORE_CRATE_PATH.test(file) || file.startsWith("packages/node-core/"))) {
     labels.add("area/core");
   }
   if (has((file) => file.startsWith("crates/dbx-web/") || file.startsWith("examples/web-api/"))) {
     labels.add("area/web");
   }
   if (has((file) => file.startsWith("agents/"))) labels.add("area/agents");
-  if (has((file) => file.startsWith("crates/dbx-mcp/")
-    || file.startsWith("packages/mcp-")
-    || file.startsWith("packages/mcp-server/")
-    || file.startsWith("examples/mcp/"))) {
+  if (has((file) => file.startsWith("crates/dbx-mcp/") || file.startsWith("packages/mcp-") || file.startsWith("packages/mcp-server/") || file.startsWith("examples/mcp/"))) {
     labels.add("area/mcp");
   }
-  if (has((file) => file.startsWith("crates/dbx-cli/")
-    || file.startsWith("packages/cli-")
-    || file.startsWith("packages/cli/")
-    || file.startsWith("examples/cli/"))) {
+  if (has((file) => file.startsWith("crates/dbx-cli/") || file.startsWith("packages/cli-") || file.startsWith("packages/cli/") || file.startsWith("skills/dbx/") || file.startsWith("examples/cli/"))) {
     labels.add("area/cli");
   }
   if (has((file) => file.startsWith("plugins/"))) labels.add("area/plugins");
   if (has(isDocumentationFile)) labels.add("area/docs");
   if (has((file) => file.startsWith(".github/"))) labels.add("area/ci");
-  if (has((file) => file.startsWith("deploy/")
-    || file === "flake.nix"
-    || file === "flake.lock"
-    || file === "Makefile"
-    || /^packages\/(?:cli|mcp)-(?:darwin|linux|win32)-/.test(file))) {
+  if (has((file) => file.startsWith("deploy/") || file === "flake.nix" || file === "flake.lock" || file === "Makefile" || /^packages\/(?:cli|mcp)-(?:darwin|linux|win32)-/.test(file))) {
     labels.add("area/deploy");
   }
 
@@ -174,29 +147,20 @@ export function isUiChangeFile(file) {
   if (isTestFile(file)) return false;
 
   if (file.startsWith("apps/desktop/")) {
-    return /\.(?:vue|css|less|sass|scss|styl)$/i.test(file)
-      || file.startsWith("apps/desktop/src/components/")
-      || file.startsWith("apps/desktop/src/i18n/")
-      || file.startsWith("apps/desktop/src/styles/")
-      || file.startsWith("apps/desktop/public/")
-      || isVisualAsset(file);
+    return /\.(?:vue|css|less|sass|scss|styl)$/i.test(file) || file.startsWith("apps/desktop/src/components/") || file.startsWith("apps/desktop/src/i18n/") || file.startsWith("apps/desktop/src/styles/") || file.startsWith("apps/desktop/public/") || isVisualAsset(file);
   }
 
   if (file.startsWith("src-tauri/icons/")) return true;
 
   if (file.startsWith("docs/")) {
-    return /\.(?:css|jsx|tsx)$/i.test(file)
-      || file.startsWith("docs/components/")
-      || (file.startsWith("docs/public/") && isVisualAsset(file));
+    return /\.(?:css|jsx|tsx)$/i.test(file) || file.startsWith("docs/components/") || (file.startsWith("docs/public/") && isVisualAsset(file));
   }
 
   return false;
 }
 
 export function isTestFile(file) {
-  return /(^|\/)(?:__tests__|fixtures|snapshots|test|tests|test-support)(\/|$)/.test(file)
-    || /\.(?:spec|test)\.[^/]+$/i.test(file)
-    || /(^|\/)packages\/app-tests\//.test(file);
+  return /(^|\/)(?:__tests__|fixtures|snapshots|test|tests|test-support)(\/|$)/.test(file) || /\.(?:spec|test)\.[^/]+$/i.test(file) || /(^|\/)packages\/app-tests\//.test(file);
 }
 
 function normalizeDatabaseType(value, aliases) {
@@ -220,7 +184,7 @@ export function inferDatabaseTypes(changedFiles, knownDatabaseTypes) {
 
     if (file.startsWith("plugins/jdbc/")) add("jdbc");
 
-    if (file.startsWith("apps/desktop/src/") || file.startsWith("crates/dbx-core/src/")) {
+    if (file.startsWith("apps/desktop/src/") || CORE_CRATE_PATH.test(file)) {
       for (const [pattern, databaseType] of DATABASE_PATH_TOKENS) {
         if (pattern.test(file)) add(databaseType);
       }
@@ -244,8 +208,7 @@ export function parsePackageDependencyNames(source) {
 
 function unquoteTomlKey(value) {
   const trimmed = String(value || "").trim();
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"'))
-    || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
     return trimmed.slice(1, -1);
   }
   return trimmed;
@@ -336,17 +299,10 @@ function dependencySide(file) {
   if (file === "package.json" || file === "docs/package.json" || file === "packages/mongo-shell/package.json") {
     return "frontend";
   }
-  if (/^packages\/(?:cli(?:-|\/)|mcp(?:-|server\/)).*\/package\.json$/.test(file)
-    || file === "packages/cli/package.json"
-    || file === "packages/mcp-server/package.json") {
+  if (/^packages\/(?:cli(?:-|\/)|mcp(?:-|server\/)).*\/package\.json$/.test(file) || file === "packages/cli/package.json" || file === "packages/mcp-server/package.json") {
     return "backend";
   }
-  if (file === "Cargo.toml"
-    || file.endsWith("/Cargo.toml")
-    || file.endsWith("/build.gradle")
-    || file.endsWith("/build.gradle.kts")
-    || file.endsWith("/go.mod")
-    || file.endsWith("/pom.xml")) {
+  if (file === "Cargo.toml" || file.endsWith("/Cargo.toml") || file.endsWith("/build.gradle") || file.endsWith("/build.gradle.kts") || file.endsWith("/go.mod") || file.endsWith("/pom.xml")) {
     return "backend";
   }
   return null;
@@ -378,13 +334,7 @@ export function inferAddedDependencies(changedFiles, readBaseFile, readHeadFile)
   return added;
 }
 
-export function evaluatePullRequestLabels({
-  title,
-  changedFiles,
-  knownDatabaseTypes,
-  readBaseFile = () => null,
-  readHeadFile = () => null,
-}) {
+export function evaluatePullRequestLabels({ title, changedFiles, knownDatabaseTypes, readBaseFile = () => null, readHeadFile = () => null }) {
   const files = normalizeChangedFiles(changedFiles);
   const areaLabels = inferAreaLabels(files);
   const labels = new Set(areaLabels.length > 3 ? ["area/multiple"] : areaLabels);
@@ -506,12 +456,7 @@ async function removeLabel(pullRequestNumber, name) {
 }
 
 function isManagedLabel(name) {
-  return TYPE_LABELS.has(name)
-    || name.startsWith("area/")
-    || name.startsWith(DATABASE_LABEL_PREFIX)
-    || name.startsWith("dependencies/")
-    || name === "tests-only"
-    || name === "ui-change";
+  return TYPE_LABELS.has(name) || name.startsWith("area/") || name.startsWith(DATABASE_LABEL_PREFIX) || name.startsWith("dependencies/") || name === "tests-only" || name === "ui-change";
 }
 
 async function main() {
@@ -543,14 +488,20 @@ async function main() {
     };
   }
 
-  console.log(JSON.stringify({
-    pullRequest: pullRequest.number,
-    title: pullRequest.title,
-    ...result,
-    existingLabels,
-    labelsToAdd,
-    labelsToRemove,
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        pullRequest: pullRequest.number,
+        title: pullRequest.title,
+        ...result,
+        existingLabels,
+        labelsToAdd,
+        labelsToRemove,
+      },
+      null,
+      2,
+    ),
+  );
 
   if (dryRun) {
     console.log("Dry run enabled; no GitHub API calls were made");

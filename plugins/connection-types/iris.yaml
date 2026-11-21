@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 740
 dbType: iris
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Iris
 label: InterSystems IRIS
 dialect: Iris
@@ -30,10 +32,10 @@ capabilities:
   objectSource: true
   schemaSearch: true
   diagram: true
-  tableDataEdit: false
+  tableDataEdit: true
   tableStructureEdit: true
   tableImport: false
-  dataTransfer: false
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: false
   fieldLineage: false

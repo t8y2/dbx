@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 350
 dbType: yashandb
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Yashandb
 label: 崖山 YashanDB
 dialect: YashanDB
@@ -27,7 +29,7 @@ capabilities:
   tableDataEdit: true
   tableStructureEdit: true
   tableImport: true
-  dataTransfer: false
+  dataTransfer: true
   sqlFileExecution: true
   databaseCreate: true
   fieldLineage: false

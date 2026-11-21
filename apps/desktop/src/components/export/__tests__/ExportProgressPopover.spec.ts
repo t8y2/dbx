@@ -4,6 +4,11 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 
+vi.mock("@/lib/backend/browserAppStateStorage", () => ({
+  loadBrowserAppState: vi.fn(async () => null),
+  saveBrowserAppState: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/components/ui/popover", async () => {
   const { defineComponent, h } = await import("vue");
   const passthrough = defineComponent({
@@ -29,7 +34,7 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/backend/api")>();
-  return { ...original, revealPathInFileManager: vi.fn() };
+  return { ...original, revealPathInFileManager: vi.fn(), startTransfer: vi.fn() };
 });
 
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
@@ -84,6 +89,40 @@ async function mountPopover() {
   await nextTick();
 }
 
+describe("table copy background task", () => {
+  it("shares phase, elapsed time, details and cancellation without claiming a row percentage", async () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const cancel = vi.fn();
+    const task = tracker.addTableCopyTask("copy-task", "orders_copy", onOpen);
+    task.copyPhase = "data";
+    tracker.registerTaskCancelHandler(task.exportId, cancel);
+    await mountPopover();
+    expect(document.body.textContent).toContain("Table copy: orders_copy");
+    expect(document.body.textContent).toContain("Copying data");
+    expect(document.body.textContent).toContain("Elapsed:");
+    expect(document.body.textContent).not.toContain("0 rows");
+    expect(document.body.textContent).not.toContain("0%");
+    (document.querySelector('button[title="Open task"]') as HTMLButtonElement).click();
+    expect(onOpen).toHaveBeenCalledOnce();
+    (document.querySelector('button[title="Cancel"]') as HTMLButtonElement).click();
+    await nextTick();
+    expect(cancel).toHaveBeenCalledOnce();
+    task.status = "Unknown";
+    await nextTick();
+    expect(document.querySelector('button[title="Remove"]')).toBeNull();
+    tracker.removeTask(task.exportId);
+    expect(tracker.tasks.value).toContain(task);
+    task.status = "Done";
+    task.copyPhase = "succeeded";
+    task.canRemove = true;
+    task.canCancel = false;
+    task.affectedRows = 1000;
+    await nextTick();
+    expect(document.body.textContent).toContain("Database-confirmed copied rows: 1000");
+  });
+});
+
 describe("failure detail copy text", () => {
   it("formats a data-transfer failure from its authoritative fields", () => {
     expect(dataTransferFailureCopyText({ table: "users", error: "permission denied" })).toBe("users\npermission denied");
@@ -91,6 +130,124 @@ describe("failure detail copy text", () => {
 
   it("includes available SQL context without adding lines for missing fields", () => {
     expect(sqlFileFailureCopyText({ statementIndex: 2, fileName: "batch.sql", statementSummary: "", error: "raw error" }, "syntax error")).toBe("#2 batch.sql\nsyntax error");
+  });
+});
+
+describe("data dictionary background task", () => {
+  it("keeps a snapshot export active and preserves cancellation across preparation updates", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addTask("settlements", "csv", "/tmp/settlements.csv", "snapshot-task");
+    const progress = { exportId: task.exportId, tableName: "settlements", rowsExported: 0, totalRows: 20000, status: "PreparingSnapshot" as const };
+    tracker.updateTableExportTask(task.exportId, progress);
+    const cancel = vi.fn();
+    tracker.registerTaskCancelHandler(task.exportId, cancel);
+    await mountPopover();
+    expect(tracker.activeCount.value).toBe(1);
+    expect(document.body.textContent).toContain("Preparing a consistent export snapshot");
+    expect(document.querySelector('button[title="Cancel"]')).toBeTruthy();
+    await tracker.cancelTask(task.exportId);
+    expect(cancel).toHaveBeenCalledOnce();
+    // A delayed preparation event must not turn a cancelling task back into running.
+    tracker.unregisterTaskCancelHandler(task.exportId);
+    task.status = "Cancelling";
+    tracker.updateTableExportTask(task.exportId, progress);
+    expect(task.status).toBe("Cancelling");
+  });
+
+  it("shows actual collected-object progress and retains the finished output after the wizard closes", async () => {
+    const tracker = useExportTracker();
+    tracker.addDataDictionaryTask("dictionary-task", "shop", 2);
+    tracker.updateDataDictionaryTask("dictionary-task", { dictionaryPhase: "collecting", dictionaryProgressKnown: true, dictionaryCompleted: 1, dictionaryTotal: 2 });
+    await mountPopover();
+    expect(document.body.textContent).toContain("Export Data Dictionary: shop");
+    expect(document.body.textContent).toContain("1 / 2 objects");
+    tracker.updateDataDictionaryTask("dictionary-task", { dictionaryPhase: "saving", status: "Writing" });
+    await nextTick();
+    expect(document.body.textContent).toContain("Saving file");
+    tracker.updateDataDictionaryTask("dictionary-task", { status: "Done", filePath: "/tmp/shop.pdf" });
+    await nextTick();
+    expect(document.body.textContent).toContain("Export completed!");
+    expect(document.querySelector('[title="Open containing folder"]')).not.toBeNull();
+  });
+});
+
+describe("data generation background task", () => {
+  it("shows global progress and opens the resumable task", async () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.addDataGenerationTask("generate-task", "app.users", 1_000, 2, onOpen);
+    tracker.updateDataGenerationTask(task.exportId, {
+      status: "Running",
+      tableIndex: 1,
+      totalTables: 2,
+      currentTable: "users",
+      rowsGenerated: 250,
+      totalRows: 1_000,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("Data generation: app.users");
+    expect(document.body.textContent).toContain("1 / 2 tables · users · 250 / 1,000 rows");
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton?.click();
+    expect(onOpen).toHaveBeenCalledOnce();
+  });
+});
+
+describe("SQL file byte progress", () => {
+  it("keeps legacy progress indeterminate instead of using successful statements as the total", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("legacy-sql-progress", "large.sql", "/tmp/large.sql");
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "running",
+      statementIndex: 772205,
+      successCount: 772205,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 1000,
+      statementSummary: "INSERT INTO users VALUES (1)",
+    });
+    await mountPopover();
+    expect(document.querySelector('[data-testid="sql-file-progress"] [role="progressbar"]')?.hasAttribute("aria-valuenow")).toBe(false);
+    expect(task.totalRows).toBeNull();
+  });
+
+  it.each(["done", "error", "cancelled"] as const)("shows byte progress and preserves it on %s", async (status) => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask(`byte-progress-${status}`, "large.sql", "/tmp/large.sql");
+    const progress = {
+      executionId: task.exportId,
+      status: "running" as const,
+      statementIndex: 772205,
+      successCount: 772205,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 1000,
+      statementSummary: "INSERT INTO users VALUES (1)",
+      bytesRead: 1024,
+      totalBytes: 4096,
+      phase: "executing" as const,
+    };
+    tracker.updateSqlFileTask(task.exportId, progress);
+    await mountPopover();
+    const indicator = document.querySelector('[data-testid="sql-file-progress"]')!;
+    expect(indicator.textContent).toContain("Executing SQL");
+    expect(indicator.textContent).toContain("Read 1.0 KB / 4.0 KB");
+    expect(indicator.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("25");
+
+    tracker.updateSqlFileTask(task.exportId, { ...progress, status: "statementDone", fileIndex: 1, statementIndex: 2, successCount: 2, bytesRead: 2048 });
+    await nextTick();
+    expect(indicator.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("50");
+
+    tracker.updateSqlFileTask(task.exportId, { ...progress, status, bytesRead: undefined, totalBytes: undefined, phase: undefined });
+    await nextTick();
+    expect(indicator.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe(status === "done" ? "100" : "50");
+    expect(task.bytesRead).toBe(2048);
+    expect(task.totalBytes).toBe(4096);
+    expect(task.elapsedMs).toBe(1000);
   });
 });
 
@@ -533,6 +690,63 @@ describe("ExportProgressPopover task duration", () => {
 });
 
 describe("ExportProgressPopover file name and reveal action", () => {
+  it("shows a queued saved file without running progress and cancels it from the task row", async () => {
+    const tracker = useExportTracker();
+    let finish!: (outcome: "settled") => void;
+    tracker.submitExportTask(
+      tracker.addTask("first", "csv", "/tmp/first.csv"),
+      "queued",
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const waiting = tracker.addTask("Query Result", "csv", "/tmp/waiting.csv");
+    const run = vi.fn(async () => "settled" as const);
+    tracker.submitExportTask(waiting, "queued", run);
+
+    await mountPopover();
+    const title = Array.from(document.body.querySelectorAll("span")).find((node) => node.textContent === "waiting.csv");
+    const row = title?.closest("div.flex.items-start");
+    expect(row?.textContent).toContain("Queued");
+    expect(row?.textContent).not.toContain("Elapsed:");
+    expect(row?.querySelector(".export-progress-indeterminate")).toBeNull();
+    row?.querySelector<HTMLButtonElement>('button[title="Cancel"]')?.click();
+    await nextTick();
+    expect(waiting.status).toBe("Cancelled");
+    finish("settled");
+    await Promise.resolve();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("requires confirmation before deleting an unknown export and does not animate it", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addTask("Query Result", "csv", "/tmp/unknown.csv");
+    task.status = "Unknown";
+    task.errorMessage = "transport interrupted";
+    await mountPopover();
+    expect(document.body.textContent).toContain("Export status unknown; the queue is blocked");
+    expect(document.body.textContent).toContain("transport interrupted");
+    const remove = document.body.querySelector<HTMLButtonElement>('button[title="Remove"]');
+    expect(remove).not.toBeNull();
+    expect(document.body.querySelector(".export-progress-indeterminate")).toBeNull();
+    remove!.click();
+    await nextTick();
+    expect(tracker.tasks.value).toContain(task);
+    expect(document.body.textContent).toContain(i18n.global.t("exportProgress.recoveryMessage"));
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const cancel = Array.from(dialog!.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Cancel");
+    cancel!.click();
+    await nextTick();
+    expect(tracker.tasks.value).toContain(task);
+    remove!.click();
+    await nextTick();
+    const confirm = Array.from(document.body.querySelector('[role="dialog"]')!.querySelectorAll("button")).find((button) => button.textContent?.trim() === i18n.global.t("exportProgress.recoveryConfirm"));
+    confirm!.click();
+    await nextTick();
+    expect(tracker.tasks.value).not.toContain(task);
+  });
+
   it("shows the saved file name instead of the synthetic query-result label", async () => {
     const tracker = useExportTracker();
     tracker.addTask("Query Result", "sql", "C:\\exports\\自定义.sql");
@@ -544,6 +758,38 @@ describe("ExportProgressPopover file name and reveal action", () => {
     expect(document.body.textContent).toContain("report-final.xlsx");
     expect(document.body.textContent).not.toContain("Query Result.sql");
     expect(document.body.textContent).not.toContain("Query Result.xlsx");
+  });
+
+  it("offers confirmed recovery independently of the cancel button and releases only after acceptance", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addTask("stalled", "csv", "/old/stalled.csv");
+    let finish!: (outcome: "settled") => void;
+    tracker.submitExportTask(
+      task,
+      "queued",
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const next = vi.fn(async () => "settled" as const);
+    tracker.submitExportTask(tracker.addTask("next", "csv", "/different/next.csv"), "queued", next);
+    task.status = "Cancelling";
+    task.canCancel = false;
+    task.canRecoverCancellation = true;
+    await mountPopover();
+    document.body.querySelector<HTMLButtonElement>('button[title="Remove"]')!.click();
+    await nextTick();
+    expect(next).not.toHaveBeenCalled();
+    const confirm = Array.from(document.body.querySelector('[role="dialog"]')!.querySelectorAll("button")).find((button) => button.textContent?.trim() === i18n.global.t("exportProgress.recoveryConfirm"));
+    expect(document.body.textContent).toContain(i18n.global.t("exportProgress.recoveryMessage"));
+    confirm!.click();
+    await nextTick();
+    expect(next).toHaveBeenCalledOnce();
+    expect(tracker.tasks.value).not.toContain(task);
+    finish("settled");
+    await Promise.resolve();
+    expect(next).toHaveBeenCalledOnce();
   });
 
   it("falls back to the table label when the task has no file path", async () => {
@@ -637,5 +883,57 @@ describe("ExportProgressPopover file name and reveal action", () => {
     await vi.waitFor(() => {
       expect(useToast().message.value).toContain("Failed to open folder");
     });
+  });
+
+  it("does not offer direct re-execution bypass from the task list and routes via task details (#13621)", async () => {
+    vi.mocked(api.startTransfer).mockResolvedValue(undefined);
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.startDataTransferTask(
+      {
+        transferId: "popover-transfer",
+        sourceConnectionId: "source",
+        sourceDatabase: "sdb",
+        targetConnectionId: "target",
+        targetDatabase: "tdb",
+        tables: ["customers"],
+        createTable: true,
+        content: "structureAndData",
+        objects: [],
+        mode: "append",
+        targetTableNameCase: "preserve",
+        quoteTargetColumnNames: true,
+        batchSize: 1000,
+        dropTargetBeforeCreate: false,
+        dropTargetConfirmed: false,
+      },
+      "sdb → tdb",
+      { openTask: onOpen },
+    );
+
+    // Complete the task
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "customers",
+      tableIndex: 1,
+      totalTables: 1,
+      rowsTransferred: 50,
+      totalRows: 50,
+      status: "done",
+      terminal: true,
+      error: null,
+    });
+
+    await mountPopover();
+
+    const reexecuteTitle = i18n.global.t("transfer.reexecute");
+    const reexecuteButton = document.body.querySelector<HTMLButtonElement>(`button[title="${reexecuteTitle}"]`);
+    expect(reexecuteButton).toBeNull();
+
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton!.click();
+    expect(onOpen).toHaveBeenCalledWith(task.exportId);
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
   });
 });

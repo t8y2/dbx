@@ -118,10 +118,19 @@ describe("connectionStore pinned tree node removal", () => {
     store.sidebarLayout = layout;
     store.treeNodes = [group];
 
-    await expect(store.deleteConnectionGroup(group.id)).rejects.toThrow("layout unavailable");
+    vi.useFakeTimers();
+    try {
+      const deleting = expect(store.deleteConnectionGroup(group.id)).rejects.toThrow("recovery was incomplete");
+      await vi.advanceTimersByTimeAsync(6000);
+      await deleting;
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(store.sidebarLayout).toStrictEqual(layout);
-    expect(store.treeNodes).toEqual([group]);
+    // Recovery rebuilds the real tree, including pin/order metadata. Check the
+    // restored group state rather than the hand-built fixture's missing fields.
+    expect(store.treeNodes).toEqual([expect.objectContaining({ ...group, pinned: false })]);
     expect(saveSidebarLayout).toHaveBeenCalledWith({ groups: [], order: [] });
     expect(saveSidebarLayout).toHaveBeenLastCalledWith(layout);
   });
@@ -157,7 +166,7 @@ describe("connectionStore pinned tree node removal", () => {
 
     expect(store.connections).toEqual([connection]);
     expect(settingsStore.editorSettings.connectTimeoutInheritConnectionIds).toEqual([connection.id]);
-    expect(saveConnections).toHaveBeenCalledWith([]);
+    expect(saveConnections).toHaveBeenCalledWith([], ["connection-1"]);
     expect(saveConnections).toHaveBeenLastCalledWith([connection]);
   });
 
@@ -334,5 +343,51 @@ describe("connectionStore pinned tree node removal", () => {
     expect(store.replacePinnedTreeNode(users, accounts)).toBe(true);
     expect(store.isTreeNodePinned(users)).toBe(false);
     expect(store.isTreeNodePinned(accounts)).toBe(false);
+  });
+
+  it("pins default database to top when sidebarPinDefaultDatabase is true and restores natural order when false", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settingsStore = useSettingsStore();
+    const store = useConnectionStore();
+
+    store.connections = [
+      {
+        id: "conn",
+        name: "Test Connection",
+        db_type: "mysql",
+        host: "localhost",
+        database: "beta",
+      },
+    ];
+
+    const dbAlpha: TreeNode = { id: "conn:alpha", label: "alpha", type: "database", connectionId: "conn", database: "alpha" };
+    const dbBeta: TreeNode = { id: "conn:beta", label: "beta", type: "database", connectionId: "conn", database: "beta" };
+    const dbGamma: TreeNode = { id: "conn:gamma", label: "gamma", type: "database", connectionId: "conn", database: "gamma" };
+
+    const connNode: TreeNode = {
+      id: "conn",
+      label: "Test Connection",
+      type: "connection",
+      connectionId: "conn",
+      children: [dbAlpha, dbBeta, dbGamma],
+    };
+    store.treeNodes = [connNode];
+
+    expect(settingsStore.editorSettings.sidebarPinDefaultDatabase).toBe(true);
+    store.syncPinnedTreeState(connNode.children);
+    expect(connNode.children.map((node) => node.database)).toEqual(["beta", "alpha", "gamma"]);
+
+    settingsStore.updateEditorSettings({ sidebarPinDefaultDatabase: false });
+    await vi.waitFor(() => {
+      expect(connNode.children.map((node) => node.database)).toEqual(["alpha", "beta", "gamma"]);
+    });
+
+    settingsStore.updateEditorSettings({ sidebarPinDefaultDatabase: true });
+    await vi.waitFor(() => {
+      expect(connNode.children.map((node) => node.database)).toEqual(["beta", "alpha", "gamma"]);
+    });
   });
 });

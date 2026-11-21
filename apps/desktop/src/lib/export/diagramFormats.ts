@@ -75,6 +75,28 @@ function mermaidCardinality(sourceCardinality: "1" | "N", targetCardinality: "1"
   return "}o--o{";
 }
 
+/** Comments are optional metadata; blank/whitespace-only values export nothing (same rule as the cards, issue #9748). */
+function commentText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Escape a DBML note exactly like the official dbml-core exporter: backslashes
+ * are doubled first, then plain values stay single-quoted while values with
+ * single quotes or line breaks switch to triple quotes with `\'` escapes
+ * (https://docs.dbml.org/docs/annotation).
+ */
+function dbmlNote(value: string): string {
+  let escaped = value.replace(/\\/g, "\\\\");
+  if (!/['\n\r]/.test(escaped)) return `'${escaped}'`;
+  return `'''${escaped.replace(/'/g, "\\'").replace(/\r\n/g, "\n")}'''`;
+}
+
+/** Mermaid attribute comments are single-line and cannot contain double quotes (https://mermaid.js.org/syntax/entityRelationshipDiagram.html). */
+function mermaidCommentText(value: string): string {
+  return value.replace(/"/g, "'").replace(/\s+/g, " ").trim();
+}
+
 export function diagramExportFileName(connectionName: string, databaseName: string, mode: "table" | "engineering", format: DiagramExportFormat): string {
   const context = [connectionName, databaseName].map(fileToken).filter(Boolean);
   const modeSuffix = mode === "engineering" ? "engineering-er" : "table-structure";
@@ -96,9 +118,13 @@ export function buildDiagramDbml(tables: DiagramTable[], relationships: DiagramR
       const attrs: string[] = [];
       if (column.is_primary_key) attrs.push("pk");
       if (!column.is_nullable) attrs.push("not null");
+      const columnComment = commentText(column.comment);
+      if (columnComment) attrs.push(`note: ${dbmlNote(columnComment)}`);
       const attrSuffix = attrs.length > 0 ? ` [${attrs.join(", ")}]` : "";
       lines.push(`  ${quoteIdent(column.name)} ${dbmlType(column.data_type)}${attrSuffix}`);
     }
+    const tableComment = commentText(table.comment);
+    if (tableComment) lines.push(`  Note: ${dbmlNote(tableComment)}`);
     lines.push("}", "");
   }
 
@@ -116,11 +142,17 @@ export function buildDiagramMermaid(tables: DiagramTable[], relationships: Diagr
 
   for (const table of tables) {
     const entity = mermaidIdent(table.name);
+    // erDiagram has no entity-level note syntax, so the table comment rides on
+    // a `%%` comment line (comments must sit on their own line) above the block.
+    const tableComment = commentText(table.comment);
+    if (tableComment) lines.push(`  %% ${mermaidCommentText(table.name)}: ${mermaidCommentText(tableComment)}`);
     lines.push(`  ${entity} {`);
     for (const column of table.columns) {
       const typeToken = (column.data_type || "unknown").replace(/\s+/g, "_").replace(/[^A-Za-z0-9_]/g, "") || "unknown";
       const key = column.is_primary_key ? " PK" : "";
-      lines.push(`    ${typeToken} ${mermaidIdent(column.name)}${key}`);
+      const columnComment = commentText(column.comment);
+      const commentSuffix = columnComment ? ` "${mermaidCommentText(columnComment)}"` : "";
+      lines.push(`    ${typeToken} ${mermaidIdent(column.name)}${key}${commentSuffix}`);
     }
     lines.push("  }");
   }

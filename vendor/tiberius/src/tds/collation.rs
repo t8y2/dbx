@@ -103,6 +103,34 @@ impl CollationCodec {
         }
     }
 
+    /// Decode legacy varchar/text data, substituting U+FFFD for byte sequences
+    /// that are invalid in the target encoding.
+    ///
+    /// Legacy `varchar`/`text` columns can hold bytes that do not form a valid
+    /// sequence in their declared collation, usually from an application that
+    /// wrote data under a different codepage. Decoding those strictly fails the
+    /// whole result set, so a single bad row makes an otherwise readable table
+    /// impossible to browse, while other clients render the row and replace the
+    /// undecodable bytes. This mirrors the lossy UTF-16 handling that `nchar`,
+    /// `nvarchar`, and `ntext` already use for unpaired surrogates.
+    ///
+    /// Returns the decoded string and whether any byte had to be replaced.
+    pub fn decode_lossy(&self, bytes: &[u8]) -> (String, bool) {
+        match self {
+            // No BOM handling: the collation already names the encoding, so a
+            // leading byte sequence that looks like a UTF-8 BOM is ordinary
+            // data (the NVARCHAR path likewise keeps a U+FEFF character).
+            CollationCodec::BuiltIn(encoding) => {
+                let (text, had_errors) = encoding.decode_without_bom_handling(bytes);
+                (text.into_owned(), had_errors)
+            }
+            // Single-byte codecs map every one of the 256 byte values, so they
+            // can never fail and never need a replacement character.
+            CollationCodec::Cp437 => (decode_single_byte(bytes, &CP437_HIGH), false),
+            CollationCodec::Cp850 => (decode_single_byte(bytes, &CP850_HIGH), false),
+        }
+    }
+
     /// Encode a string for a legacy varchar parameter. Returns `None` when the
     /// input contains a character that the target encoding cannot represent.
     pub fn encode_from_utf8(&self, text: &str) -> Option<Vec<u8>> {

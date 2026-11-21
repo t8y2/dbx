@@ -70,6 +70,7 @@ pub struct DocumentFindRequest {
     pub cursor: Option<String>,
     #[serde(default)]
     pub cursor_pagination: bool,
+    pub include_total: Option<bool>,
     pub execution_id: Option<String>,
 }
 
@@ -188,6 +189,13 @@ pub struct MeilisearchDocumentPageRequest {
 pub struct MeilisearchIndexRequest {
     pub connection_id: String,
     pub index: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchCreateIndexRequest {
+    pub connection_id: String,
+    pub input: dbx_core::db::meilisearch_driver::MeilisearchCreateIndexInput,
 }
 
 #[derive(Deserialize)]
@@ -335,7 +343,7 @@ pub async fn find_documents(
     let result = run_cancellable(
         &state,
         req.execution_id,
-        dbx_core::document_ops::find_documents_core(
+        dbx_core::document_ops::find_documents_core_with_total(
             &state.app,
             &req.connection_id,
             &req.database,
@@ -348,6 +356,7 @@ pub async fn find_documents(
             req.collation.as_deref(),
             req.cursor.as_deref(),
             req.cursor_pagination,
+            req.include_total.unwrap_or(true),
         ),
     )
     .await?;
@@ -611,6 +620,17 @@ pub async fn meilisearch_get_overview(
             .await
             .map_err(AppError::from)?;
     Ok(Json(result))
+}
+
+pub async fn meilisearch_create_index(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchCreateIndexRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Create index").await?;
+    dbx_core::document_ops::meilisearch_create_index_core(&state.app, &req.connection_id, &req.input)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
 }
 
 pub async fn meilisearch_delete_index(

@@ -1,0 +1,619 @@
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use serde_json::Value;
+use std::borrow::Cow;
+use std::fmt::Write as _;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalKind {
+    Date,
+    Time,
+    DateTime,
+    DateTimeWithTimeZone,
+}
+
+enum ParsedTemporal {
+    Zoned(DateTime<FixedOffset>),
+    DateTime(NaiveDateTime),
+    Date(NaiveDate),
+    Time(NaiveTime),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExcelTemporalKind {
+    Date,
+    DateTime,
+}
+
+fn temporal_kind(data_type: Option<&str>) -> Option<TemporalKind> {
+    let normalized = data_type?.trim().to_ascii_lowercase().replace(char::is_whitespace, " ");
+    let base = normalized.split(['(', ':', ' ']).next().unwrap_or("");
+    if matches!(base, "datetimeoffset" | "datetimeoffsetn" | "timestamptz")
+        || (base == "timestamp"
+            && (normalized.contains("with time zone") || normalized.contains("with local time zone")))
+    {
+        return Some(TemporalKind::DateTimeWithTimeZone);
+    }
+    match base {
+        "date" | "date32" | "daten" => Some(TemporalKind::Date),
+        "time" | "time64" | "timen" | "timetz" => Some(TemporalKind::Time),
+        "datetime" | "datetime2" | "datetime4" | "datetime64" | "datetimen" | "smalldatetime" | "timestamp"
+        | "timestampdty" => Some(TemporalKind::DateTime),
+        _ if base.starts_with("timestamp_") => Some(TemporalKind::DateTime),
+        _ => None,
+    }
+}
+
+fn dayjs_to_chrono_pattern(pattern: &str) -> Option<String> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.len() > 100 || pattern.contains('%') {
+        return None;
+    }
+    let tokens = [
+        ("YYYY", "%Y"),
+        ("SSS", "%3f"),
+        ("ZZ", "%z"),
+        ("MM", "%m"),
+        ("DD", "%d"),
+        ("HH", "%H"),
+        ("mm", "%M"),
+        ("ss", "%S"),
+        ("M", "%-m"),
+        ("D", "%-d"),
+        ("H", "%-H"),
+        ("m", "%-M"),
+        ("s", "%-S"),
+        ("Z", "%:z"),
+    ];
+    let mut output = String::with_capacity(pattern.len() * 2);
+    let mut index = 0;
+    while index < pattern.len() {
+        let remaining = &pattern[index..];
+        if remaining.starts_with('[') {
+            let close = remaining.find(']')?;
+            output.push_str(&remaining[1..close]);
+            index += close + 1;
+            continue;
+        }
+        if let Some((token, replacement)) = tokens.iter().find(|(token, _)| remaining.starts_with(token)) {
+            output.push_str(replacement);
+            index += token.len();
+            continue;
+        }
+        let ch = remaining.chars().next()?;
+        // Reject unknown Day.js tokens instead of silently exporting different text than the frontend displays.
+        if ch.is_ascii_alphabetic() {
+            return None;
+        }
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    Some(output)
+}
+
+fn parse_with_pattern(value: &str, pattern: &str) -> Option<ParsedTemporal> {
+    let pattern = dayjs_to_chrono_pattern(pattern)?;
+    DateTime::parse_from_str(value, &pattern)
+        .map(ParsedTemporal::Zoned)
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(value, &pattern).map(ParsedTemporal::DateTime).ok())
+        .or_else(|| NaiveDate::parse_from_str(value, &pattern).map(ParsedTemporal::Date).ok())
+        .or_else(|| NaiveTime::parse_from_str(value, &pattern).map(ParsedTemporal::Time).ok())
+}
+
+fn parse_known_temporal(value: &str) -> Option<ParsedTemporal> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Some(ParsedTemporal::Zoned(parsed));
+    }
+    for pattern in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f", "%Y/%m/%d %H:%M:%S%.f", "%Y/%m/%dT%H:%M:%S%.f"] {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, pattern) {
+            return Some(ParsedTemporal::DateTime(parsed));
+        }
+    }
+    for pattern in ["%Y-%m-%d", "%Y/%m/%d"] {
+        if let Ok(parsed) = NaiveDate::parse_from_str(value, pattern) {
+            return Some(ParsedTemporal::Date(parsed));
+        }
+    }
+    for pattern in ["%H:%M:%S%.f", "%H:%M:%S"] {
+        if let Ok(parsed) = NaiveTime::parse_from_str(value, pattern) {
+            return Some(ParsedTemporal::Time(parsed));
+        }
+    }
+    None
+}
+
+/// A driver may hand back a bare epoch integer for a column it still reports as
+/// a temporal type — IoTDB's `TIMESTAMP(ms)` does exactly that. The data grid's
+/// export formatter already renders those (`columnFormatter.ts`,
+/// `unit: "auto"`), which is why "export current page" shows a real date while
+/// the Rust streaming exporters used to write the raw epoch. Mirror that
+/// formatter's rule exactly so both paths agree: accept only 10 digits
+/// (seconds) or 13 digits (milliseconds), require the result to land in
+/// 1970..=2100, and render in the local zone the same way `dayjs(ms).format()`
+/// does. Widening this (microseconds, nanoseconds, other digit counts) would
+/// re-introduce the mismatch in the opposite direction.
+fn parse_epoch_temporal(value: &str) -> Option<NaiveDateTime> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parsed = value.parse::<i64>().ok()?;
+    let milliseconds = match digits.len() {
+        10 => parsed.checked_mul(1000)?,
+        13 => parsed,
+        _ => return None,
+    };
+    let local = DateTime::from_timestamp_millis(milliseconds)?.with_timezone(&Local).naive_local();
+    (1970..=2100).contains(&local.year()).then_some(local)
+}
+
+fn parse_temporal(value: &str, preferred_pattern: Option<&str>) -> Option<ParsedTemporal> {
+    let value = strip_csv_force_text_wrapper(value);
+    preferred_pattern
+        .filter(|pattern| !pattern.trim().is_empty())
+        .and_then(|pattern| parse_with_pattern(value, pattern))
+        .or_else(|| parse_known_temporal(value))
+}
+
+pub fn excel_temporal_serial(
+    value: &str,
+    data_type: Option<&str>,
+    preferred_pattern: Option<&str>,
+) -> Option<(f64, ExcelTemporalKind)> {
+    let kind = match temporal_kind(data_type)? {
+        TemporalKind::Date => ExcelTemporalKind::Date,
+        TemporalKind::DateTime => ExcelTemporalKind::DateTime,
+        // Excel cannot retain a timezone in a numeric date cell, so preserve
+        // timezone-bearing and time-only values as text.
+        TemporalKind::DateTimeWithTimeZone | TemporalKind::Time => return None,
+    };
+    let parsed = parse_temporal(value.trim(), preferred_pattern)
+        .or_else(|| parse_epoch_temporal(value.trim()).map(ParsedTemporal::DateTime))?;
+    let (date, time) = match (kind, parsed) {
+        (ExcelTemporalKind::Date, ParsedTemporal::Date(date)) => (date, NaiveTime::default()),
+        (ExcelTemporalKind::Date, ParsedTemporal::DateTime(value)) => (value.date(), value.time()),
+        (ExcelTemporalKind::DateTime, ParsedTemporal::Date(date)) => (date, NaiveTime::default()),
+        (ExcelTemporalKind::DateTime, ParsedTemporal::DateTime(value)) => (value.date(), value.time()),
+        (_, ParsedTemporal::Zoned(_) | ParsedTemporal::Time(_)) => return None,
+    };
+    let excel_min_date = NaiveDate::from_ymd_opt(1900, 1, 1)?;
+    if date < excel_min_date {
+        return None;
+    }
+    let epoch = NaiveDate::from_ymd_opt(1899, 12, 31)?;
+    let mut serial = date.signed_duration_since(epoch).num_days() as f64;
+    // Excel's 1900 date system retains the historical fake 1900-02-29.
+    if date >= NaiveDate::from_ymd_opt(1900, 3, 1)? {
+        serial += 1.0;
+    }
+    let seconds = time.num_seconds_from_midnight() as f64 + f64::from(time.nanosecond()) / 1_000_000_000.0;
+    Some((serial + seconds / 86_400.0, kind))
+}
+
+fn format_parsed(parsed: ParsedTemporal, pattern: &str) -> Option<String> {
+    let pattern = dayjs_to_chrono_pattern(pattern)?;
+    let mut output = String::new();
+    // Chrono reports missing date/time fields through fmt::Error; propagate it so exports preserve the raw value.
+    match parsed {
+        ParsedTemporal::Zoned(value) => write!(&mut output, "{}", value.format(&pattern)),
+        ParsedTemporal::DateTime(value) => write!(&mut output, "{}", value.format(&pattern)),
+        ParsedTemporal::Date(value) => write!(&mut output, "{}", value.format(&pattern)),
+        ParsedTemporal::Time(value) => write!(&mut output, "{}", value.format(&pattern)),
+    }
+    .ok()?;
+    Some(output)
+}
+
+pub fn format_temporal_export_value(value: &Value, data_type: Option<&str>, pattern: Option<&str>) -> Value {
+    let Some(pattern) = pattern.filter(|pattern| !pattern.trim().is_empty()) else {
+        return value.clone();
+    };
+    if temporal_kind(data_type).is_none() {
+        return value.clone();
+    }
+    let Some(raw) = value.as_str() else {
+        return value.clone();
+    };
+    parse_known_temporal(raw)
+        .or_else(|| parse_epoch_temporal(raw.trim()).map(ParsedTemporal::DateTime))
+        .and_then(|parsed| format_parsed(parsed, pattern))
+        .map(Value::String)
+        .unwrap_or_else(|| value.clone())
+}
+
+fn active_temporal_pattern(pattern: Option<&str>) -> Option<&str> {
+    pattern.filter(|pattern| !pattern.trim().is_empty())
+}
+
+pub fn strip_csv_force_text_wrapper(value: &str) -> &str {
+    value.strip_prefix("=\"").and_then(|value| value.strip_suffix('"')).unwrap_or(value)
+}
+
+pub fn format_temporal_export_row_cow<'a>(
+    row: &'a [Value],
+    column_types: &[Option<String>],
+    pattern: Option<&str>,
+) -> Cow<'a, [Value]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(row);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(data_type.as_deref()).is_some()) {
+        return Cow::Borrowed(row);
+    }
+    Cow::Owned(
+        row.iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format_temporal_export_value(
+                    value,
+                    column_types.get(index).and_then(|data_type| data_type.as_deref()),
+                    Some(pattern),
+                )
+            })
+            .collect(),
+    )
+}
+
+pub fn format_temporal_export_row(row: &[Value], column_types: &[Option<String>], pattern: Option<&str>) -> Vec<Value> {
+    format_temporal_export_row_cow(row, column_types, pattern).into_owned()
+}
+
+pub fn format_temporal_export_rows_cow<'a>(
+    rows: &'a [Vec<Value>],
+    column_types: &[Option<String>],
+    pattern: Option<&str>,
+) -> Cow<'a, [Vec<Value>]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(rows);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(data_type.as_deref()).is_some()) {
+        return Cow::Borrowed(rows);
+    }
+    Cow::Owned(rows.iter().map(|row| format_temporal_export_row(row, column_types, Some(pattern))).collect())
+}
+
+pub fn format_temporal_export_rows(
+    rows: &[Vec<Value>],
+    column_types: &[Option<String>],
+    pattern: Option<&str>,
+) -> Vec<Vec<Value>> {
+    format_temporal_export_rows_cow(rows, column_types, pattern).into_owned()
+}
+
+pub fn format_temporal_export_row_with_string_types_cow<'a>(
+    row: &'a [Value],
+    column_types: &[String],
+    pattern: Option<&str>,
+) -> Cow<'a, [Value]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(row);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(Some(data_type)).is_some()) {
+        return Cow::Borrowed(row);
+    }
+    Cow::Owned(
+        row.iter()
+            .enumerate()
+            .map(|(index, value)| {
+                format_temporal_export_value(value, column_types.get(index).map(String::as_str), Some(pattern))
+            })
+            .collect(),
+    )
+}
+
+pub fn format_temporal_export_row_with_string_types(
+    row: &[Value],
+    column_types: &[String],
+    pattern: Option<&str>,
+) -> Vec<Value> {
+    format_temporal_export_row_with_string_types_cow(row, column_types, pattern).into_owned()
+}
+
+pub fn format_temporal_export_rows_with_string_types_cow<'a>(
+    rows: &'a [Vec<Value>],
+    column_types: &[String],
+    pattern: Option<&str>,
+) -> Cow<'a, [Vec<Value>]> {
+    let Some(pattern) = active_temporal_pattern(pattern) else {
+        return Cow::Borrowed(rows);
+    };
+    if !column_types.iter().any(|data_type| temporal_kind(Some(data_type)).is_some()) {
+        return Cow::Borrowed(rows);
+    }
+    Cow::Owned(
+        rows.iter().map(|row| format_temporal_export_row_with_string_types(row, column_types, Some(pattern))).collect(),
+    )
+}
+
+pub fn format_temporal_export_rows_with_string_types(
+    rows: &[Vec<Value>],
+    column_types: &[String],
+    pattern: Option<&str>,
+) -> Vec<Vec<Value>> {
+    format_temporal_export_rows_with_string_types_cow(rows, column_types, pattern).into_owned()
+}
+
+pub fn normalize_temporal_import_value_cow<'a>(
+    value: &'a Value,
+    data_type: Option<&str>,
+    pattern: Option<&str>,
+) -> Cow<'a, Value> {
+    let Some(kind) = temporal_kind(data_type) else {
+        return Cow::Borrowed(value);
+    };
+    let Some(raw) = value.as_str() else {
+        return Cow::Borrowed(value);
+    };
+    let Some(parsed) = parse_temporal(raw.trim(), pattern) else {
+        return Cow::Borrowed(value);
+    };
+
+    let normalized = match (kind, parsed) {
+        (TemporalKind::Date, ParsedTemporal::Zoned(value)) => value.date_naive().format("%Y-%m-%d").to_string(),
+        (TemporalKind::Date, ParsedTemporal::DateTime(value)) => value.date().format("%Y-%m-%d").to_string(),
+        (TemporalKind::Date, ParsedTemporal::Date(value)) => value.format("%Y-%m-%d").to_string(),
+        (TemporalKind::Date, ParsedTemporal::Time(_)) => return Cow::Borrowed(value),
+        (TemporalKind::Time, ParsedTemporal::Zoned(value)) => value.time().format("%H:%M:%S%.f").to_string(),
+        (TemporalKind::Time, ParsedTemporal::DateTime(value)) => value.time().format("%H:%M:%S%.f").to_string(),
+        (TemporalKind::Time, ParsedTemporal::Time(value)) => value.format("%H:%M:%S%.f").to_string(),
+        (TemporalKind::Time, ParsedTemporal::Date(_)) => return Cow::Borrowed(value),
+        (TemporalKind::DateTime, ParsedTemporal::Zoned(value)) => {
+            value.naive_local().format("%Y-%m-%d %H:%M:%S%.f").to_string()
+        }
+        (TemporalKind::DateTime, ParsedTemporal::DateTime(value)) => value.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+        (TemporalKind::DateTime, ParsedTemporal::Date(date)) => {
+            let Some(value) = date.and_hms_opt(0, 0, 0) else {
+                return Cow::Borrowed(value);
+            };
+            value.format("%Y-%m-%d %H:%M:%S").to_string()
+        }
+        (TemporalKind::DateTime, ParsedTemporal::Time(_)) => return Cow::Borrowed(value),
+        (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Zoned(value)) => {
+            value.format("%Y-%m-%dT%H:%M:%S%.f%:z").to_string()
+        }
+        (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::DateTime(value)) => {
+            value.format("%Y-%m-%d %H:%M:%S%.f").to_string()
+        }
+        (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Date(date)) => {
+            let Some(value) = date.and_hms_opt(0, 0, 0) else {
+                return Cow::Borrowed(value);
+            };
+            value.format("%Y-%m-%d %H:%M:%S").to_string()
+        }
+        (TemporalKind::DateTimeWithTimeZone, ParsedTemporal::Time(_)) => return Cow::Borrowed(value),
+    };
+    Cow::Owned(Value::String(normalized))
+}
+
+pub fn normalize_temporal_import_value(value: &Value, data_type: Option<&str>, pattern: Option<&str>) -> Value {
+    normalize_temporal_import_value_cow(value, data_type, pattern).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn formats_driver_epoch_timestamps_like_the_current_page_export() {
+        // IoTDB hands back `strconv.FormatInt(epoch, 10)` for a TIMESTAMP(ms)
+        // column, so the streaming exporters used to write the raw epoch while
+        // "export current page" (formatted in the frontend) showed a real date.
+        let pattern = Some("YYYY-MM-DD HH:mm:ss.SSS");
+        let formatted = format_temporal_export_value(&json!("1785042135456"), Some("TIMESTAMP(ms)"), pattern);
+        let rendered = formatted.as_str().expect("formatted value stays a string");
+        assert_ne!(rendered, "1785042135456", "epoch must not pass through unformatted");
+        assert!(rendered.ends_with(":15.456"), "milliseconds must survive: {rendered}");
+
+        // Ten digits are seconds, matching columnFormatter.ts `unit: "auto"`.
+        let seconds = format_temporal_export_value(&json!("1785042135"), Some("TIMESTAMP(ms)"), pattern);
+        assert_eq!(seconds.as_str().expect("string").get(..4), rendered.get(..4));
+
+        // CSV keeps the formatted date as plain text instead of changing it
+        // into a formula.
+        let rows = vec![vec![json!("1785042135456"), json!("device-a")]];
+        let types = vec!["TIMESTAMP(ms)".to_string(), "TEXT".to_string()];
+        let exported = format_temporal_export_rows_with_string_types_cow(&rows, &types, pattern);
+        let cell = exported[0][0].as_str().expect("string");
+        assert_eq!(cell, rendered);
+    }
+
+    #[test]
+    fn leaves_non_auto_epoch_shapes_untouched() {
+        let pattern = Some("YYYY-MM-DD HH:mm:ss.SSS");
+        // Microsecond/nanosecond epochs are outside the shapes the data grid
+        // formatter accepts; formatting them here would make the streaming
+        // export disagree with "export current page" in the other direction.
+        for raw in ["1785042135456789", "1785042135456789012", "17850421", "not-a-number"] {
+            assert_eq!(
+                format_temporal_export_value(&json!(raw), Some("TIMESTAMP(ms)"), pattern),
+                json!(raw),
+                "raw={raw}"
+            );
+        }
+        // A plain integer column is not temporal, so it is never touched.
+        assert_eq!(
+            format_temporal_export_value(&json!("1785042135456"), Some("BIGINT"), pattern),
+            json!("1785042135456")
+        );
+    }
+
+    #[test]
+    fn normalizes_unpadded_slash_dates_for_import() {
+        assert_eq!(
+            normalize_temporal_import_value(&json!("2024/2/25 13:02:15"), Some("DATE"), None),
+            json!("2024-02-25")
+        );
+        assert_eq!(
+            normalize_temporal_import_value(
+                &json!("25.02.2024 13:02:15"),
+                Some("TIMESTAMP(6)"),
+                Some("DD.MM.YYYY HH:mm:ss")
+            ),
+            json!("2024-02-25 13:02:15")
+        );
+    }
+
+    #[test]
+    fn formats_only_typed_temporal_export_values() {
+        let row = vec![json!(1), json!("2024-02-25 13:02:15"), json!("2024-02-25 13:02:15")];
+        assert_eq!(
+            format_temporal_export_row(
+                &row,
+                &[Some("NUMBER".into()), Some("TIMESTAMP".into()), Some("VARCHAR2".into())],
+                Some("YYYY/M/D HH:mm:ss")
+            ),
+            vec![json!(1), json!("2024/2/25 13:02:15"), json!("2024-02-25 13:02:15")]
+        );
+    }
+
+    #[test]
+    fn csv_export_preserves_formatted_temporal_values_without_formula_wrapper() {
+        let row = vec![json!(1), json!("2024-02-25 13:02:15"), json!("plain text")];
+        let column_types = [Some("NUMBER".into()), Some("TIMESTAMP".into()), Some("VARCHAR2".into())];
+        assert_eq!(
+            format_temporal_export_row_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss")).into_owned(),
+            vec![json!(1), json!("2024/2/25 13:02:15"), json!("plain text")]
+        );
+    }
+
+    #[test]
+    fn csv_export_serializes_temporal_values_without_formula_wrapper() {
+        let row = vec![json!("2024-02-25 13:02:15")];
+        let column_types = [Some("TIMESTAMP".into())];
+        let formatted = format_temporal_export_row_cow(&row, &column_types, None);
+        let csv = crate::csv_export::format_csv_with_quote_mode(
+            &["created_at".to_string()],
+            &[formatted.into_owned()],
+            crate::csv_export::CsvQuoteMode::All,
+        );
+
+        assert_eq!(csv, "\"created_at\"\n\"2024-02-25 13:02:15\"");
+        assert!(!csv.contains("=\""));
+    }
+
+    #[test]
+    fn csv_export_preserves_raw_temporal_values_without_formula_wrapper() {
+        // "保持数据库原始值": no export pattern configured, so the raw driver
+        // string is preserved as-is.
+        let row = vec![json!("2024-02-25 13:02:15.000")];
+        let column_types = [Some("DATETIME".into())];
+        assert_eq!(
+            format_temporal_export_row_cow(&row, &column_types, None).into_owned(),
+            vec![json!("2024-02-25 13:02:15.000")]
+        );
+    }
+
+    #[test]
+    fn csv_export_preserves_null_temporal_values() {
+        let row = vec![json!(Value::Null)];
+        let column_types = [Some("DATE".into())];
+        assert_eq!(format_temporal_export_row_cow(&row, &column_types, None).into_owned(), vec![json!(Value::Null)]);
+    }
+
+    #[test]
+    fn csv_export_force_text_flag_is_ignored() {
+        let row = vec![json!("2024-02-25 13:02:15")];
+        let column_types = [Some("TIMESTAMP".into())];
+        let expected = format_temporal_export_row(&row, &column_types, Some("YYYY/M/D HH:mm:ss"));
+        assert_eq!(
+            format_temporal_export_row_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss")).into_owned(),
+            expected
+        );
+        assert_eq!(
+            format_temporal_export_row_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss")).into_owned(),
+            expected
+        );
+    }
+
+    #[test]
+    fn csv_export_with_string_types_preserves_temporal_values() {
+        let row = vec![json!("2024-02-25"), json!(42)];
+        let column_types = ["DATE".to_string(), "INT".to_string()];
+        assert_eq!(
+            format_temporal_export_row_with_string_types_cow(&row, &column_types, None).into_owned(),
+            vec![json!("2024-02-25"), json!(42)]
+        );
+    }
+
+    #[test]
+    fn import_normalization_unwraps_csv_force_text_temporal_values() {
+        assert_eq!(
+            normalize_temporal_import_value(&json!("=\"2026-06-24 02:00:07\""), Some("DATETIME"), None),
+            json!("2026-06-24 02:00:07")
+        );
+        assert_eq!(normalize_temporal_import_value(&json!("=\"2026-06-24\""), Some("DATE"), None), json!("2026-06-24"));
+    }
+
+    #[test]
+    fn preserves_raw_export_values_when_pattern_requires_missing_fields() {
+        assert_eq!(
+            format_temporal_export_value(&json!("2024-02-25"), Some("DATE"), Some("YYYY-MM-DD HH:mm:ss")),
+            json!("2024-02-25")
+        );
+        assert_eq!(
+            format_temporal_export_value(&json!("13:02:15"), Some("TIME"), Some("YYYY-MM-DD HH:mm:ss")),
+            json!("13:02:15")
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_dayjs_tokens_but_allows_literal_text() {
+        assert_eq!(dayjs_to_chrono_pattern("MM/DD/YYYY hh:mm A"), None);
+        assert_eq!(dayjs_to_chrono_pattern("YYYY-MM-DD [at] HH:mm:ss"), Some("%Y-%m-%d at %H:%M:%S".into()));
+    }
+
+    #[test]
+    fn recognizes_common_driver_temporal_type_aliases() {
+        for data_type in ["DateTime64(3)", "date32", "timestamp_ns", "TimeStampDTY", "datetimeoffsetn", "timen"] {
+            assert!(temporal_kind(Some(data_type)).is_some(), "{data_type}");
+        }
+    }
+
+    #[test]
+    fn export_formatting_preserves_offset_datetime_fields() {
+        assert_eq!(
+            format_temporal_export_value(&json!("2024-02-25T13:02:15Z"), Some("DATE"), Some("YYYY/M/D HH:mm:ss")),
+            json!("2024/2/25 13:02:15")
+        );
+    }
+
+    #[test]
+    fn import_normalization_preserves_timezone_offsets() {
+        assert_eq!(
+            normalize_temporal_import_value(
+                &json!("2024-02-25T13:02:15+08:00"),
+                Some("timestamp with time zone"),
+                None
+            ),
+            json!("2024-02-25T13:02:15+08:00")
+        );
+    }
+
+    #[test]
+    fn export_cow_borrows_when_no_formatting_is_needed() {
+        let row = vec![json!(1), json!("2024-02-25 13:02:15")];
+        let rows = vec![row.clone()];
+
+        assert!(matches!(
+            format_temporal_export_row_cow(&row, &[None, Some("TIMESTAMP".to_string())], None),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            format_temporal_export_rows_cow(&rows, &[None, Some("VARCHAR".to_string())], Some("YYYY/MM/DD")),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn import_cow_borrows_unchanged_values_and_owns_normalized_values() {
+        let text = json!("plain");
+        assert!(matches!(normalize_temporal_import_value_cow(&text, Some("TEXT"), None), Cow::Borrowed(_)));
+
+        let timestamp = json!("2024/2/25 13:02:15");
+        assert_eq!(
+            normalize_temporal_import_value_cow(&timestamp, Some("TIMESTAMP"), None).into_owned(),
+            json!("2024-02-25 13:02:15")
+        );
+    }
+}

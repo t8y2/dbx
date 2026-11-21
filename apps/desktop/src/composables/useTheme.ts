@@ -27,6 +27,7 @@ import {
 } from "@/lib/app/appTheme";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { persistAppAppearancePatch, type AppAppearanceSettingsPatch } from "@/lib/app/appAppearance";
 
 function isLinuxTauriRuntime() {
   return isTauriRuntime() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
@@ -57,6 +58,44 @@ if (savedThemeMode && savedThemeMode !== themeMode.value) safeLocalStorageSet(AP
 if (savedCornerStyle && savedCornerStyle !== cornerStyle.value) safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
 const systemPrefersDark = ref(readSystemPrefersDark());
 const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemPrefersDark.value) === "dark");
+// Bumped at the end of every applyTheme(): theme changes are DOM mutations
+// (classes / inline vars), so watchers keyed on reactive sources like isDark
+// miss palette switches and custom-color edits. Consumers that mirror the
+// resolved token set (plugin iframe bridge) watch this revision instead.
+const themeRevision = ref(0);
+
+// Token mutations on the root that happen outside applyTheme() — e.g. the UI
+// and editor font settings write --font-sans / --font-mono inline — bump this
+// so open plugin workbench bridges re-read and re-push the resolved tokens.
+function bumpThemeRevision() {
+  themeRevision.value += 1;
+}
+
+let pendingBumpTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The one sanctioned way to write a design token onto the root outside
+// applyTheme(): writes the inline override AND bumps the theme revision.
+// Writing root tokens directly (documentElement.style.setProperty) skips the
+// bump and open plugin bridges keep stale tokens — always go through here.
+// `debounceMs` coalesces rapid writes (font-family preview keystrokes) into
+// one bump; an immediate write afterwards supersedes the pending one.
+function writeRootToken(cssVar: string, value: string, options?: { debounceMs?: number }) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(cssVar, value);
+  if (options?.debounceMs) {
+    if (pendingBumpTimer) clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = setTimeout(() => {
+      pendingBumpTimer = undefined;
+      bumpThemeRevision();
+    }, options.debounceMs);
+    return;
+  }
+  if (pendingBumpTimer) {
+    clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = undefined;
+  }
+  bumpThemeRevision();
+}
 
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
@@ -103,6 +142,7 @@ function applyTheme() {
 
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
+  themeRevision.value += 1;
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
   if (!isTauriRuntime()) return;
 
@@ -111,25 +151,31 @@ function applyTheme() {
   // to light, so only skip the native system-theme write and keep explicit modes.
   if (isLinuxTauriRuntime() && tauriTheme == null) return;
 
-  if (cachedTauriWindow) {
-    cachedTauriWindow
-      .getCurrentWindow()
-      .setTheme(tauriTheme)
-      .catch(() => {});
-  } else {
-    import("@tauri-apps/api/window").then((mod) => {
-      cachedTauriWindow = mod;
+  const applyTauriTheme = (mod: typeof import("@tauri-apps/api/window")) => {
+    try {
       mod
         .getCurrentWindow()
         .setTheme(tauriTheme)
         .catch(() => {});
+    } catch {
+      // The Tauri window API can throw synchronously when no native window exists.
+    }
+  };
+
+  if (cachedTauriWindow) {
+    applyTauriTheme(cachedTauriWindow);
+  } else {
+    import("@tauri-apps/api/window").then((mod) => {
+      cachedTauriWindow = mod;
+      applyTauriTheme(mod);
     });
   }
 }
 
-function setThemeMode(mode: AppThemeMode) {
+function setThemeMode(mode: AppThemeMode, options: { persist?: boolean } = {}) {
   themeMode.value = mode;
   safeLocalStorageSet(APP_THEME_STORAGE_KEY, mode);
+  if (options.persist !== false) persistAppAppearancePatch({ themeMode: mode });
   applyTheme();
 }
 
@@ -137,6 +183,7 @@ function setThemePalette(palette: AppThemePalette) {
   savedThemePaletteValue.value = palette;
   previewedThemePalette.value = null;
   safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
+  persistAppAppearancePatch({ themePalette: palette });
   applyTheme();
 }
 
@@ -186,6 +233,7 @@ function setCustomUiColors(colors: AppCustomUiColors) {
     customUiColors.value = next;
     safeLocalStorageSet(APP_CUSTOM_UI_STORAGE_KEY, JSON.stringify(next));
   }
+  persistAppAppearancePatch({ [isDark.value ? "customUiColorsDark" : "customUiColors"]: next });
   applyCustomUiColors();
 }
 
@@ -196,6 +244,19 @@ function resetCustomUiColors() {
 function setCornerStyle(style: AppCornerStyle) {
   cornerStyle.value = normalizeAppCornerStyle(style);
   safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
+  persistAppAppearancePatch({ cornerStyle: cornerStyle.value });
+  applyTheme();
+}
+
+export function applySharedTheme(patch: AppAppearanceSettingsPatch) {
+  if (patch.themeMode) themeMode.value = normalizeAppThemeMode(patch.themeMode);
+  if (patch.themePalette) {
+    savedThemePaletteValue.value = normalizeAppThemePalette(patch.themePalette);
+    previewedThemePalette.value = null;
+  }
+  if (patch.customUiColors) customUiColors.value = normalizeAppCustomUiColors(patch.customUiColors);
+  if (patch.customUiColorsDark) customUiColorsDark.value = normalizeAppCustomUiColors(patch.customUiColorsDark);
+  if (patch.cornerStyle) cornerStyle.value = normalizeAppCornerStyle(patch.cornerStyle);
   applyTheme();
 }
 
@@ -206,5 +267,25 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
+  return {
+    isDark,
+    themeMode,
+    themePalette,
+    customUiColors,
+    customUiColorsDark,
+    activeCustomUiColors,
+    themeRevision,
+    bumpThemeRevision,
+    writeRootToken,
+    cornerStyle,
+    applyTheme,
+    setThemeMode,
+    setThemePalette,
+    previewThemePalette,
+    clearThemePalettePreview,
+    setCustomUiColors,
+    resetCustomUiColors,
+    setCornerStyle,
+    toggleTheme,
+  };
 }

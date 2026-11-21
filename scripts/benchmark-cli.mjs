@@ -66,14 +66,24 @@ for (const benchmark of cases) {
   run(legacyBinary, benchmark.args);
   const samples = { rust: [], legacy: [] };
   for (let index = 0; index < benchmark.iterations; index += 1) {
-    const order = index % 2 === 0 ? [["rust", rustBinary], ["legacy", legacyBinary]] : [["legacy", legacyBinary], ["rust", rustBinary]];
+    const order =
+      index % 2 === 0
+        ? [
+            ["rust", rustBinary],
+            ["legacy", legacyBinary],
+          ]
+        : [
+            ["legacy", legacyBinary],
+            ["rust", rustBinary],
+          ];
     for (const [runtime, binary] of order) samples[runtime].push(run(binary, benchmark.args));
   }
-  for (const [runtime, binary] of [["rust", rustBinary], ["legacy", legacyBinary]]) {
+  for (const [runtime, binary] of [
+    ["rust", rustBinary],
+    ["legacy", legacyBinary],
+  ]) {
     const stats = summarize(samples[runtime]);
     const rss = peakRss(binary, benchmark.args);
-    console.log(
-      `${benchmark.name}\t${runtime}\t${stats.median.toFixed(1)}\t${stats.p90.toFixed(1)}\t${stats.p95.toFixed(1)}\t${stats.mean.toFixed(1)}\t${rss.toFixed(1)}`,
-    );
+    console.log(`${benchmark.name}\t${runtime}\t${stats.median.toFixed(1)}\t${stats.p90.toFixed(1)}\t${stats.p95.toFixed(1)}\t${stats.mean.toFixed(1)}\t${rss.toFixed(1)}`);
   }
 }

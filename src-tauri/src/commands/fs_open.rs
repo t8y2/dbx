@@ -75,6 +75,19 @@ pub async fn reveal_path_in_file_manager(path: String) -> Result<(), String> {
     reveal_in_file_manager(&resolved)
 }
 
+/// Open an absolute file path with the OS default application. The path may use a
+/// leading `~` which is expanded via `dbx_core::path_utils::expand_tilde`.
+pub fn open_with_default_app(path: &Path) -> Result<(), String> {
+    tauri_plugin_opener::open_path(path, None::<&str>)
+        .map_err(|e| format!("failed to open file with default application: {e}"))
+}
+
+#[tauri::command]
+pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
+    let resolved = validate_path(&path)?;
+    open_with_default_app(&resolved)
+}
+
 #[tauri::command]
 pub async fn is_sqlite_database_file(path: String) -> Result<bool, String> {
     let resolved = validate_path(&path)?;
@@ -106,8 +119,9 @@ fn validate_database_backup_file(raw: &str, allowed_roots: &[PathBuf]) -> Result
     }
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     let lower_file_name = file_name.to_ascii_lowercase();
-    if !(lower_file_name.ends_with(".sql") || lower_file_name.ends_with(".sql.gz")) {
-        return Err(format!("backup file must use the .sql or .sql.gz extension: {expanded}"));
+    if !(lower_file_name.ends_with(".sql") || lower_file_name.ends_with(".sql.gz") || lower_file_name.ends_with(".nb3"))
+    {
+        return Err(format!("backup file must use the .sql, .sql.gz or .nb3 extension: {expanded}"));
     }
     if file_name.chars().any(char::is_control) {
         return Err(format!("backup file name contains control characters: {expanded}"));
@@ -312,5 +326,13 @@ mod tests {
                 assert!(resolved.is_absolute());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn open_path_with_default_app_rejects_missing_file() {
+        let path = std::env::temp_dir().join(format!("dbx-missing-file-{}.xlsx", uuid::Uuid::new_v4()));
+        let result = open_path_with_default_app(path.to_string_lossy().to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("file does not exist"));
     }
 }

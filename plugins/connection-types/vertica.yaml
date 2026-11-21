@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 390
 dbType: vertica
+compareModes: [schema, data]
 rustVariant: Vertica
 label: Vertica
 dialect: Vertica

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase } from "../dataCompare";
+import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase, normalizeKeyColumns, sameKeyColumns } from "../dataCompare";
 
 describe("inferCompareKeyColumns", () => {
   it("returns all primary-key columns when a primary key exists", () => {
@@ -69,5 +69,38 @@ describe("matchColumnNameIgnoreCase", () => {
 
   it("returns undefined when no column matches", () => {
     expect(matchColumnNameIgnoreCase("missing", ["snid"])).toBeUndefined();
+  });
+});
+
+describe("normalizeKeyColumns", () => {
+  it("keeps the given order so a composite key stays stable", () => {
+    expect(normalizeKeyColumns(["tenant_id", "order_id"])).toEqual(["tenant_id", "order_id"]);
+  });
+
+  it("trims names and drops blanks", () => {
+    expect(normalizeKeyColumns([" id ", "", "  ", "name"])).toEqual(["id", "name"]);
+  });
+
+  it("drops case-insensitive duplicates but keeps the first spelling", () => {
+    expect(normalizeKeyColumns(["ID", "id", "Id"])).toEqual(["ID"]);
+  });
+
+  it("returns an empty array for an empty selection", () => {
+    expect(normalizeKeyColumns([])).toEqual([]);
+  });
+});
+
+describe("sameKeyColumns", () => {
+  it("ignores order and identifier case", () => {
+    expect(sameKeyColumns(["tenant_id", "order_id"], ["ORDER_ID", "TENANT_ID"])).toBe(true);
+  });
+
+  it("detects different selections and different lengths", () => {
+    expect(sameKeyColumns(["id"], ["ID", "name"])).toBe(false);
+    expect(sameKeyColumns(["id"], ["name"])).toBe(false);
+  });
+
+  it("treats two empty selections as equal", () => {
+    expect(sameKeyColumns([], [])).toBe(true);
   });
 });

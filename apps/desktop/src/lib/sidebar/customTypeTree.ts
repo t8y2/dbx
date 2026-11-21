@@ -19,6 +19,19 @@ function typeMemberNode(parent: TreeNode, identity: string, label: string, meta:
 }
 
 export function buildCustomTypeTreeChildren(parent: TreeNode, details: CustomTypeDetails): TreeNode[] {
+  if (details.oracleMetadata) {
+    if (details.oracleMetadata.attributesRead.state === "unavailable" || details.oracleMetadata.attributesRead.state === "unsupported") return [];
+    return details.oracleMetadata.attributes.map((attribute, index) => {
+      const typeName = [attribute.typeOwner, attribute.typeName, attribute.typeModifier].filter(Boolean).join(".");
+      const typeArguments = attribute.precision != null ? `(${attribute.precision}${attribute.scale == null ? "" : `, ${attribute.scale}`})` : attribute.length != null ? `(${attribute.length})` : "";
+      return typeMemberNode(parent, attribute.name, attribute.name, {
+        kind: "field",
+        displayValue: `${typeName || "—"}${typeArguments}`,
+        ordinal: attribute.ordinal ?? index + 1,
+      });
+    });
+  }
+
   if (details.kind === "composite") {
     return details.members.map((member) =>
       typeMemberNode(parent, member.name, member.name, {

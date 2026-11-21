@@ -6228,6 +6228,11 @@ export interface TransferRequest {
    * (`select * from t_order where id <= 90000`). Missing/empty = full table.
    */
   tableFilters?: Record<string, string>;
+  /**
+   * Optional explicit target table name per source table (key = source table name).
+   * Wins over `targetTableNameCase`; tables without an entry keep the case option's name.
+   */
+  targetTableNames?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
   oraclePackages?: OraclePackageTransferRequest;

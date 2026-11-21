@@ -8392,6 +8392,11 @@ export default withEnglishFallback({
     totalFiles: "{count} ファイル",
     executeSuccess: "SQLファイルを実行しました",
     completedWithErrors: "実行が完了しました: 成功 {succeeded} 件、失敗 {failed} 件",
+    newDatabase: "新規データベース",
+    newDatabasePlaceholder: "新規データベース名",
+    newDatabaseCreate: "作成",
+    newDatabaseCreated: "データベース「{name}」を作成しました",
+    newDatabaseFailed: "データベースを作成できません：{message}",
   },
   diff: {
     additionalSchemas: "これらのスキーマも比較",

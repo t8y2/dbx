@@ -8371,6 +8371,11 @@ export default withEnglishFallback({
     totalFiles: "{count} arquivos",
     executeSuccess: "Arquivo SQL executado com sucesso",
     completedWithErrors: "Execução concluída: {succeeded} com sucesso, {failed} com falha",
+    newDatabase: "Novo banco de dados",
+    newDatabasePlaceholder: "Nome do novo banco de dados",
+    newDatabaseCreate: "Criar",
+    newDatabaseCreated: 'Banco de dados "{name}" criado',
+    newDatabaseFailed: "Não foi possível criar o banco de dados: {message}",
   },
   diff: {
     additionalSchemas: "Comparar também estes esquemas",

@@ -10198,6 +10198,11 @@ export default withEnglishFallback({
     totalFiles: "ไฟล์ {count} ไฟล์",
     executeSuccess: "เรียกใช้ไฟล์ SQL สำเร็จแล้ว",
     completedWithErrors: "การเรียกใช้เสร็จสิ้น: สำเร็จ {succeeded}, ล้มเหลว {failed}",
+    newDatabase: "สร้างฐานข้อมูลใหม่",
+    newDatabasePlaceholder: "ชื่อฐานข้อมูลใหม่",
+    newDatabaseCreate: "สร้าง",
+    newDatabaseCreated: "สร้างฐานข้อมูล «{name}» แล้ว",
+    newDatabaseFailed: "ไม่สามารถสร้างฐานข้อมูล: {message}",
   },
   sqlFileTree: {
     searchIncompleteHelp: "เหตุผลที่ผลการค้นหาครั้งนี้ไม่ครบถ้วน:",

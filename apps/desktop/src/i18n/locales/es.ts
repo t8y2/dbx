@@ -8618,6 +8618,11 @@ export default withEnglishFallback({
     totalFiles: "{count} archivos",
     executeSuccess: "Archivo SQL ejecutado con éxito",
     completedWithErrors: "Ejecución completada: {succeeded} correctos, {failed} fallidos",
+    newDatabase: "Nueva base de datos",
+    newDatabasePlaceholder: "Nombre de la nueva base de datos",
+    newDatabaseCreate: "Crear",
+    newDatabaseCreated: "Se ha creado la base de datos «{name}»",
+    newDatabaseFailed: "No se pudo crear la base de datos: {message}",
   },
   diff: {
     additionalSchemas: "Comparar también estos esquemas",

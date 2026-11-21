@@ -9574,6 +9574,11 @@ export default {
     exportData: "Export Data",
   },
   sqlFile: {
+    newDatabase: "New database",
+    newDatabasePlaceholder: "New database name",
+    newDatabaseCreate: "Create",
+    newDatabaseCreated: 'Created database "{name}"',
+    newDatabaseFailed: "Could not create the database: {message}",
     resolveIncludes: "Resolve SQL file includes",
     resolveIncludesHint: "Supports -- {'@'}include \"path.sql\"; only .sql files within the entry script directory are allowed.",
     encodingHint: "Applies to all selected files. A byte order mark (BOM), if present, takes precedence.",

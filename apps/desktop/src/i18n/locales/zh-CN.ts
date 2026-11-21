@@ -9538,6 +9538,11 @@ export default withEnglishFallback({
     exportData: "导出数据",
   },
   sqlFile: {
+    newDatabase: "新建数据库",
+    newDatabasePlaceholder: "新数据库名称",
+    newDatabaseCreate: "创建",
+    newDatabaseCreated: "已创建数据库「{name}」",
+    newDatabaseFailed: "无法创建数据库：{message}",
     resolveIncludes: "解析 SQL 文件引用",
     resolveIncludesHint: "支持 -- {'@'}include \"路径.sql\"；引用仅限入口脚本目录内的 .sql 文件。",
     encodingHint: "应用于本次选择的所有文件；文件含字节序标记（BOM）时，优先采用 BOM 指定的编码。",

@@ -10307,6 +10307,9 @@ export default withEnglishFallback({
     warnings: "คำเตือน",
   },
   diff: {
+    additionalSchemas: "เปรียบเทียบ Schema เหล่านี้ด้วย",
+    additionalSchemasHint: "แต่ละรายการจะถูกเปรียบเทียบกับ Schema ชื่อเดียวกันบนปลายทาง แล้วตรวจสอบและปรับใช้แยกกัน",
+    schemaResults: "ผลลัพธ์ตาม Schema",
     progress: {
       loadingObjects: "กำลังอ่านออบเจ็กต์ฐานข้อมูลต้นทางและปลายทาง…",
       loadingSourceDetails: "กำลังอ่านโครงสร้างตารางฐานข้อมูลต้นทาง",
@@ -12773,6 +12776,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "เลือกคอลัมน์ถัดไปของข้อมูลตาราง",
     shortcutSelectPreviousGridColumn: "เลือกคอลัมน์ก่อนหน้าของข้อมูลตาราง",
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
+    globalNumberGrouping: "แสดงตัวคั่นหลักพัน",
+    globalNumberGroupingDescription: "แสดงตัวเลขในตารางในรูปแบบ 1,234,567.89 เป็นต้น โดยรูปแบบคอลัมน์ที่กำหนดค่าแยกไว้จะมีความสำคัญกว่า",
     toolbarGroup_left: "แถบการดำเนินการหลักและเมนูเพิ่มเติม",
     toolbarPinItem: "ปักหมุด {item} ไว้บนแถบเครื่องมือ",
     completionAutoActivationDelay: "ดีเลย์การเปิดใช้งานการเติมข้อความอัตโนมัติ (มิลลิวินาที)",

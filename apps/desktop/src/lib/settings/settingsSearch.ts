@@ -537,6 +537,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   ...createToolbarVisibilitySettingsSearchDefinitions(),
   { id: "appearance-toolbar-order", category: "appearance", titleKey: "settings.toolbarTitle", descriptionKey: "settings.toolbarOrderHint", targetId: "appearance" },
   { id: "data-datetime", category: "data", titleKey: "settings.dateTimeSection", targetId: "data" },
+  { id: "data-number-grouping", category: "data", titleKey: "settings.globalNumberGrouping", descriptionKey: "settings.globalNumberGroupingDescription", targetId: "global-number-grouping" },
   { id: "data-datetime-display-format", category: "data", titleKey: "settings.globalDateTimeDisplayFormat", descriptionKey: "settings.globalDateTimeDisplayFormatDescription", targetId: "data" },
   { id: "data-datetime-export-format", category: "data", titleKey: "settings.globalDateTimeExportFormat", descriptionKey: "settings.globalDateTimeExportFormatDescription", targetId: "data" },
   { id: "data-datetime-import-format", category: "data", titleKey: "settings.globalDateTimeImportFormat", descriptionKey: "settings.globalDateTimeImportFormatDescription", targetId: "data" },

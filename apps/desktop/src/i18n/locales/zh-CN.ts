@@ -9731,6 +9731,9 @@ export default withEnglishFallback({
     warnings: "警告",
   },
   diff: {
+    additionalSchemas: "同时比较这些模式",
+    additionalSchemasHint: "每个模式都会与目标端同名模式比较，并分别审查和部署。",
+    schemaResults: "模式比较结果",
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",
       loadingSourceDetails: "正在读取源数据库表结构",
@@ -11278,6 +11281,8 @@ export default withEnglishFallback({
     redisDatabaseDisplayLimitOption: "{count} 个数据库",
     exportBatchSize: "导出批次大小",
     dateTimeSection: "日期与时间",
+    globalNumberGrouping: "显示千分位分隔符",
+    globalNumberGroupingDescription: "在网格中将数字显示为 1,234,567.89 等形式，单独配置的列格式优先。",
     globalDateTimeDisplayFormat: "全局显示格式",
     globalDateTimeDisplayFormatDescription: "应用于所有数据库中未单独配置列格式的日期时间字段。",
     globalDateTimeExportFormat: "全局导出格式",

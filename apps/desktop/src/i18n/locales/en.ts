@@ -9767,6 +9767,9 @@ export default {
     warnings: "Warnings",
   },
   diff: {
+    additionalSchemas: "Also compare these schemas",
+    additionalSchemasHint: "Each one is compared with the schema of the same name on the target, then reviewed and deployed separately.",
+    schemaResults: "Schema results",
     progress: {
       loadingObjects: "Reading source and target database objects...",
       loadingSourceDetails: "Reading source database table structures",
@@ -11317,6 +11320,8 @@ export default {
     redisDatabaseDisplayLimitOption: "{count} databases",
     exportBatchSize: "Export batch size",
     dateTimeSection: "Date and time",
+    globalNumberGrouping: "Show thousands separators",
+    globalNumberGroupingDescription: "Show numbers such as 1,234,567.89 in the grid. Column-specific formatters take precedence.",
     globalDateTimeDisplayFormat: "Global display format",
     globalDateTimeDisplayFormatDescription: "Applies to temporal columns without a column-specific formatter in every database.",
     globalDateTimeExportFormat: "Global export format",

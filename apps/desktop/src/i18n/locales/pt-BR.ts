@@ -8359,6 +8359,9 @@ export default withEnglishFallback({
     completedWithErrors: "Execução concluída: {succeeded} com sucesso, {failed} com falha",
   },
   diff: {
+    additionalSchemas: "Comparar também estes esquemas",
+    additionalSchemasHint: "Cada um é comparado com o esquema de mesmo nome no destino e depois revisado e implantado separadamente.",
+    schemaResults: "Resultados por esquema",
     progress: {
       loadingObjects: "Lendo os objetos dos bancos de dados de origem e destino...",
       loadingSourceDetails: "Lendo a estrutura das tabelas do banco de dados de origem",
@@ -10818,6 +10821,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Selecionar a próxima coluna dos dados da tabela",
     shortcutSelectPreviousGridColumn: "Selecionar a coluna anterior dos dados da tabela",
     sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
+    globalNumberGrouping: "Mostrar separador de milhares",
+    globalNumberGroupingDescription: "Exibir números na grade como 1,234,567.89 etc.; formatos de coluna configurados individualmente têm prioridade.",
     toolbarGroup_left: "Barra de ações principal e menu Mais",
     toolbarPinItem: "Fixar {item} na barra de ferramentas",
     completionAutoActivationDelay: "Atraso para ativação automática do autocompletar (milissegundos)",

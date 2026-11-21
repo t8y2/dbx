@@ -35,6 +35,8 @@ export interface DataCompareResult {
   added: DataCompareRow[];
   removed: DataCompareRow[];
   modified: DataCompareModifiedRow[];
+  /** Rows matching on key columns whose differences all fall in ignored columns; identical for diff and sync purposes. */
+  ignoredOnlyCount?: number;
 }
 
 export interface DataComparePreparationOptions {
@@ -42,6 +44,8 @@ export interface DataComparePreparationOptions {
   schema?: string;
   columns: string[];
   keyColumns: string[];
+  /** Columns whose value differences are tolerated: still read, never compared. */
+  ignoredColumns?: string[];
   columnInfo?: ColumnInfo[];
   sourceRows: DataCompareCellValue[][];
   targetRows: DataCompareCellValue[][];
@@ -65,6 +69,8 @@ export interface DataCompareFromTablesOptions {
   targetTable: string;
   columns: string[];
   keyColumns: string[];
+  /** Columns whose value differences are tolerated: still read, never compared. */
+  ignoredColumns?: string[];
   /** Source-side column names aligned positionally with `columns`; needed when the two databases store identifier case differently (e.g. SQL Server vs Oracle). */
   sourceColumns?: string[];
   fetchBatchSize?: number;
@@ -227,4 +233,43 @@ export function intersectCompareColumns(sourceColumns: Pick<ColumnInfo, "name">[
 export function matchColumnNameIgnoreCase(name: string, columns: string[]): string | undefined {
   const lowerName = name.toLowerCase();
   return columns.find((column) => column.toLowerCase() === lowerName);
+}
+
+/**
+ * Effective ignored columns of one compare task: the global list plus the
+ * table's own additions, resolved case-insensitively against the columns being
+ * compared (a cross-database compare may store identifier case differently).
+ *
+ * Duplicates are removed, the result keeps the compared-column order, and match
+ * (key) columns always win over ignoring: a name that is also a key column
+ * keeps its key role, because locating rows must not break.
+ */
+export function resolveEffectiveIgnoredColumns(input: { globalIgnoredColumns: readonly string[]; tableIgnoredColumns?: readonly string[]; columns: readonly string[]; keyColumns: readonly string[] }): string[] {
+  const requested = new Set<string>();
+  for (const name of [...input.globalIgnoredColumns, ...(input.tableIgnoredColumns ?? [])]) {
+    const trimmed = name.trim();
+    if (trimmed) requested.add(trimmed.toLowerCase());
+  }
+  if (requested.size === 0) return [];
+  const keyColumns = new Set(input.keyColumns.map((column) => column.toLowerCase()));
+  return input.columns.filter((column) => requested.has(column.toLowerCase()) && !keyColumns.has(column.toLowerCase()));
+}
+
+/**
+ * Picks audit-style columns (names containing "create" or "update",
+ * case-insensitive — created_at, updated_by, gmt_create, ...) from the given
+ * columns for the "ignore audit fields" shortcut. The result only ever fills
+ * the editable ignore list; nothing is ignored automatically.
+ */
+export function auditColumnCandidates(columns: readonly string[]): string[] {
+  return columns.filter((column) => /create|update/i.test(column));
+}
+
+/**
+ * Ignored column names that match none of the given column lists — across all
+ * compared tables, almost certainly a typo, since a name missing from a single
+ * table is expected in a multi-table compare.
+ */
+export function ignoredColumnsWithoutMatch(names: readonly string[], columnLists: readonly (readonly string[])[]): string[] {
+  return names.filter((name) => !columnLists.some((columns) => matchColumnNameIgnoreCase(name, [...columns]) !== undefined));
 }

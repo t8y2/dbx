@@ -35,6 +35,9 @@ pub(super) async fn prepare_table_ddl(
     table_comment: Option<&str>,
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
 ) -> Result<PreparedTableDdl, String> {
+    if postgres_xugu::is_pair(source_db_type, target_db_type) {
+        return postgres_xugu::prepare_table(state, request, table, target_table, source_pool_key, columns).await;
+    }
     if mysql_xugu::is_pair(source_db_type, target_db_type) {
         let ddl = crate::schema::get_table_transfer_ddl_core(
             state,

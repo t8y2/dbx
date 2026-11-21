@@ -15229,7 +15229,9 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
         action: () => {
           // One-off use of the chosen format; do NOT persist it as the default —
           // the saved default stays controlled by the toolbar/settings dialog.
-          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor));
+          const wholeQueryResult = extractor === "sql-updates" && isResultsContext.value && props.databaseType === "mysql" && props.fullExportResult && !hasCompleteLocalResult.value && isSelectingAll.value && selectedCellCount.value === visibleDisplayItems.value.length * visibleColumns.value.length;
+          const scope = wholeQueryResult ? "result" : "selection";
+          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope));
         },
         disabled: !canCopyWithExtractor(extractor),
       });

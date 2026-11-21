@@ -16,6 +16,9 @@ pub enum DatabaseObjectType {
     Function,
     Event,
     Trigger,
+    Sequence,
+    Package,
+    PackageBody,
     Type,
     TypeBody,
 }
@@ -1131,7 +1134,13 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
 }
 
 pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: DatabaseObjectType) -> bool {
-    if object_type == DatabaseObjectType::Trigger {
+    if matches!(
+        object_type,
+        DatabaseObjectType::Trigger
+            | DatabaseObjectType::Sequence
+            | DatabaseObjectType::Package
+            | DatabaseObjectType::PackageBody
+    ) {
         return false;
     }
     let Some(database_type) = database_type else {
@@ -1488,6 +1497,9 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::Function => "FUNCTION",
         DatabaseObjectType::Event => "EVENT",
         DatabaseObjectType::Trigger => "TRIGGER",
+        DatabaseObjectType::Sequence => "SEQUENCE",
+        DatabaseObjectType::Package => "PACKAGE",
+        DatabaseObjectType::PackageBody => "PACKAGE BODY",
         DatabaseObjectType::Type => "TYPE",
         DatabaseObjectType::TypeBody => "TYPE BODY",
     }
@@ -2497,6 +2509,32 @@ mod tests {
                 value: "1".to_string(),
             })
             .is_err());
+        }
+    }
+
+    #[test]
+    fn drop_transport_supports_sequences_packages_and_package_bodies() {
+        for (database, object_type, expected) in [
+            ("oracle", "SEQUENCE", r#"DROP SEQUENCE "Mixed Owner"."My""Object";"#),
+            ("postgres", "SEQUENCE", r#"DROP SEQUENCE "Mixed Owner"."My""Object";"#),
+            ("kingbase", "SEQUENCE", r#"DROP SEQUENCE "Mixed Owner"."My""Object";"#),
+            ("oracle", "PACKAGE", r#"DROP PACKAGE "Mixed Owner"."My""Object";"#),
+            ("oracle", "PACKAGE_BODY", r#"DROP PACKAGE BODY "Mixed Owner"."My""Object";"#),
+            ("oceanbase-oracle", "PACKAGE_BODY", r#"DROP PACKAGE BODY "Mixed Owner"."My""Object";"#),
+            ("dameng", "PACKAGE", r#"DROP PACKAGE "Mixed Owner"."My""Object";"#),
+            ("opengauss", "PACKAGE_BODY", r#"DROP PACKAGE BODY "Mixed Owner"."My""Object";"#),
+            ("firebird", "PACKAGE_BODY", r#"DROP PACKAGE BODY "My""Object";"#),
+        ] {
+            let options: DropObjectSqlOptions = serde_json::from_value(serde_json::json!({
+                "databaseType": database,
+                "objectType": object_type,
+                "schema": "Mixed Owner",
+                "name": "My\"Object",
+                "signature": "integer"
+            }))
+            .unwrap();
+            assert!(!supports_object_rename(Some(DatabaseType::SqlServer), options.object_type));
+            assert_eq!(build_drop_object_sql(options), expected, "{database} {object_type}");
         }
     }
 

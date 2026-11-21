@@ -7159,6 +7159,8 @@ export default withEnglishFallback({
     selectedTables: "已选择 {count} 张表",
     exportSelected: "导出所选",
     dropSelected: "删除所选",
+    selectedObjects: "已选择 {count} 个对象",
+    dropPackageBodyHint: "删除包规范时，也会删除已有的包体。",
     truncateSelected: "截断所选",
     clearSelection: "清空选择",
     confirmBatchDropTitle: "删除所选表",

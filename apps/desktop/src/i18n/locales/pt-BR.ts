@@ -6062,6 +6062,8 @@ export default withEnglishFallback({
     showPackageMembers: "Expandir membros do pacote",
     packageFunctionAtLine: "Função {name}, linha {line}",
     packageProcedureAtLine: "Procedimento {name}, linha {line}",
+    selectedObjects: "{count} objetos selecionados",
+    dropPackageBodyHint: "Ao excluir a especificação do pacote, o corpo do pacote existente também será excluído.",
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabela",

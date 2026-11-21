@@ -6116,6 +6116,8 @@ export default withEnglishFallback({
     showPackageMembers: "パッケージのメンバーを展開する",
     packageFunctionAtLine: "関数 {name}、{line} 行目",
     packageProcedureAtLine: "プロシージャ {name}、{line} 行目",
+    selectedObjects: "{count} 個のオブジェクトを選択しました",
+    dropPackageBodyHint: "パッケージ仕様部を削除すると、既存のパッケージ本体も削除されます。",
   },
   postgresForeignTable: {
     tableKind: "テーブルの種類",

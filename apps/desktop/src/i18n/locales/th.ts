@@ -7086,6 +7086,8 @@ export default withEnglishFallback({
     showPackageMembers: "ขยายสมาชิกแพ็กเกจ",
     packageFunctionAtLine: "ฟังก์ชัน {name} บรรทัดที่ {line}",
     packageProcedureAtLine: "โพรซีเดอร์ {name} บรรทัดที่ {line}",
+    selectedObjects: "เลือกออบเจ็กต์แล้ว {count} รายการ",
+    dropPackageBodyHint: "เมื่อลบ package specification ระบบจะลบ package body ที่มีอยู่ด้วย",
   },
   postgresForeignTable: {
     tableKind: "ประเภทตาราง",

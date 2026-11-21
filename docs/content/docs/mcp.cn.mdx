@@ -127,6 +127,9 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
 | `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
 | `dbx_remove_connection` | 从 DBX 存储删除连接 |
+| `dbx_list_sidebar_groups` | 列出侧边栏分组及稳定 ID、完整路径、组内连接和未分组连接 |
+| `dbx_create_sidebar_group` | 创建侧边栏分组，可指定父分组或完整多级路径；同一父分组下同名分组幂等返回 |
+| `dbx_move_connections_to_group` | 按稳定分组 ID（优先）或显示路径把已有连接移动到分组 |
 | `dbx_list_tables` | 列出表、视图或集合 |
 | `dbx_describe_table` | 返回列定义和表元数据 |
 | `dbx_list_routines` | 列出 Schema 中的存储过程和函数，支持可选的 `routine_type` 过滤（PROCEDURE 或 FUNCTION） |
@@ -185,6 +188,28 @@ Nacos 公共命名空间在权限规则中使用 `public`；连接默认命名�
 Nacos 的用户、角色、命名空间增删改等管理工具，以及 Consul 的 ACL、Intentions 等管理工具默认不开放。快照恢复、Raft/集群成员变更、License 写入和其他无法可靠判定风险的集群操作不会作为 MCP 工具提供。
 
 `dbx_list_connections` 和 `dbx://connections` 会返回已保存的连接备注，不受侧边栏显示开关影响。可访问该连接的 MCP 客户端也能看到备注，请勿在备注中保存密码或其他敏感信息。
+
+### 侧边栏连接分组
+
+`dbx_list_sidebar_groups` 读取已持久化的侧边栏层级。每个分组都会返回稳定 `id` 和完整 `path`，批量导入时可以先创建 `本地 / MySQL / MySQL 8.0`，再复用返回的 ID，不必按名称猜测。
+
+`dbx_create_sidebar_group` 支持两种写法：
+
+- `name` 加可选的 `parent_group_id`（优先）或 `parent_group_path`；将 `create_missing_parents` 设为 `true` 可同时创建父路径中缺失的层级；
+- `path`，例如 `["本地", "MySQL", "MySQL 8.0"]`，一次创建所有缺失层级。
+
+同一父分组下的同名分组是幂等的：返回已有分组和 `created: false`，不会重复创建。
+
+`dbx_add_connection` 支持 `group_id`（优先）或 `group_path`，连接写入与布局更新在同一个存储事务中完成。`dbx_move_connections_to_group` 支持 `connection_ids`（优先）或唯一的 `connection_names`，以及 `group_id` 或 `group_path`；布局写入使用 compare-and-swap，避免静默覆盖并发的界面编辑。
+
+分组管理遵守 MCP 权限：
+
+- 全局只读模式会阻止三个写操作；
+- 当策略按侧边栏分组决定可见性或执行权限时，禁止带分组的添加和移动，因为改变分组会改变权限；
+- 连接作用域会话会隐藏分组工具；
+- 组内成员全部超出 MCP 可见范围的分组不会出现在 `dbx_list_sidebar_groups` 中。
+
+MCP 工具和桌面侧边栏都使用条件写入：桌面保存遇到并发写入时会重新读取存储并合并本地改动，因此 MCP 新建的分组或移动过的连接不会被仍在防抖队列里的拖拽操作覆盖。移动和带分组添加会在同一个存储事务内重新校验当前 MCP 策略；即使策略在请求开始后才切换为只读或启用分组权限，写入也会被拒绝。
 
 `dbx_execute_query` 返回行数：
 

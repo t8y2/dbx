@@ -482,11 +482,12 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert_eq!(metadata["type"], "object");
     assert!(!nacos_registration.input_schema["required"].as_array().unwrap().contains(&json!("metadata")));
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-    // Includes the 22 product-provider tools (14 Nacos + 8 Consul).
+    // Includes the 22 product-provider tools (14 Nacos + 8 Consul) and the
+    // three sidebar connection-group tools.
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 47);
+    assert_eq!(names.len(), 50);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 45);
+    assert_eq!(names.len(), 48);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]

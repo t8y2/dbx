@@ -131,8 +131,8 @@ describe("connectionStore pinned tree node removal", () => {
     // Recovery rebuilds the real tree, including pin/order metadata. Check the
     // restored group state rather than the hand-built fixture's missing fields.
     expect(store.treeNodes).toEqual([expect.objectContaining({ ...group, pinned: false })]);
-    expect(saveSidebarLayout).toHaveBeenCalledWith({ groups: [], order: [] });
-    expect(saveSidebarLayout).toHaveBeenLastCalledWith(layout);
+    expect(saveSidebarLayout).toHaveBeenCalledWith({ groups: [], order: [] }, null);
+    expect(saveSidebarLayout).toHaveBeenLastCalledWith(layout, null);
   });
 
   it("restores saved connections when timeout settings cannot be updated", async () => {

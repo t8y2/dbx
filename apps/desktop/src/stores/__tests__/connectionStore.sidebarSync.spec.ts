@@ -269,6 +269,59 @@ describe("connectionStore adopting a sidebar layout written elsewhere", () => {
     expect(store.groupIdForConnection("a")).toBe("other");
     vi.useRealTimers();
   });
+
+  it("merges an external MCP group written while a debounced save is in flight", async () => {
+    vi.useFakeTimers();
+    const store = await storeWithFlatLayout();
+    store.connections = [connection("a"), connection("b")];
+    store.sidebarLayout = {
+      groups: [],
+      order: [
+        { type: "connection", id: "a" },
+        { type: "connection", id: "b" },
+      ],
+    } as SidebarLayout;
+    loadSidebarLayout.mockResolvedValue({
+      groups: [],
+      order: [
+        { type: "connection", id: "a" },
+        { type: "connection", id: "b" },
+      ],
+    });
+    await store.syncSidebarLayoutOnce();
+
+    const remote: SidebarLayout = {
+      groups: [{ id: "mcp", name: "MCP", collapsed: false }],
+      order: [
+        { type: "group", id: "mcp", children: [{ type: "connection", id: "a" }] },
+        { type: "connection", id: "b" },
+      ],
+    };
+    loadSidebarLayout.mockResolvedValue(remote);
+    let attempts = 0;
+    saveSidebarLayout.mockImplementation(() => Promise.resolve(++attempts > 1));
+
+    const local = store.createConnectionGroup("Local");
+    store.moveConnectionToGroup("b", local);
+    await vi.advanceTimersByTimeAsync(300);
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+
+    expect(attempts).toBe(2);
+    const saved = saveSidebarLayout.mock.calls.at(-1)?.[0] as SidebarLayout;
+    expect(saved.order).toContainEqual({
+      type: "group",
+      id: "mcp",
+      children: [{ type: "connection", id: "a" }],
+    });
+    expect(saved.order).toContainEqual({
+      type: "group",
+      id: local,
+      children: [{ type: "connection", id: "b" }],
+    });
+    expect(store.groupIdForConnection("a")).toBe("mcp");
+    expect(store.groupIdForConnection("b")).toBe(local);
+    vi.useRealTimers();
+  });
 });
 
 describe("connectionStore deleting a connection while the layout changes", () => {

@@ -210,6 +210,10 @@ pub struct SaveConnectionsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct McpAddConnectionRequest {
     pub config: ConnectionConfig,
+    /// Optional stable sidebar group id; the storage layer adds the connection
+    /// and places it in this group in one transaction.
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1096,7 +1100,12 @@ pub async fn mcp_add_connection(
         dbx_core::query::pl_debug::PlDebugMutationScope::Connections(vec![config.id.clone()]),
     )
     .await?;
-    let saved = state.app.storage.add_connection_for_mcp(config).await.map_err(AppError::from)?;
+    let saved = state
+        .app
+        .storage
+        .add_connection_for_mcp_in_group(config, body.group_id.as_deref())
+        .await
+        .map_err(AppError::from)?;
     permit
         .after_debug_cleanup_with_error(async {
             state.app.session_credentials.clear_connection(&saved.id);
@@ -2368,7 +2377,7 @@ done
         let result = mcp_add_connection(
             State(state.clone()),
             HeaderMap::new(),
-            Json(McpAddConnectionRequest { config: added.clone() }),
+            Json(McpAddConnectionRequest { config: added.clone(), group_id: None }),
         )
         .await;
         assert!(result.is_ok());
@@ -2472,7 +2481,10 @@ done
         let read_only_error = mcp_add_connection(
             State(state.clone()),
             HeaderMap::new(),
-            Json(McpAddConnectionRequest { config: sqlite_config("new", &dir.join("new.db").to_string_lossy()) }),
+            Json(McpAddConnectionRequest {
+                config: sqlite_config("new", &dir.join("new.db").to_string_lossy()),
+                group_id: None,
+            }),
         )
         .await
         .unwrap_err();
@@ -3019,7 +3031,7 @@ done
         let reused = mcp_add_connection(
             State(state.clone()),
             HeaderMap::new(),
-            Json(McpAddConnectionRequest { config: recreated.clone() }),
+            Json(McpAddConnectionRequest { config: recreated.clone(), group_id: None }),
         )
         .await
         .unwrap_or_else(|error| panic!("{}", error.message));

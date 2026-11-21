@@ -654,7 +654,7 @@ mod tests {
         let Json(added) = connection::mcp_add_connection(
             State(state.clone()),
             HeaderMap::new(),
-            Json(McpAddConnectionRequest { config }),
+            Json(McpAddConnectionRequest { config, group_id: None }),
         )
         .await
         .unwrap();

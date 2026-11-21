@@ -110,7 +110,7 @@ CREATE TABLE notes (id INTEGER, body TEXT);
 
 ### 公开文档
 
-在另一个客户端配置中开启新会话。该配置只启用 Parallel Search MCP，不连接 DBX、不访问数据库文件，也不带入之前的对话上下文。用它的 `web_search` 工具搜索下方的公开问题。搜索请求中不要包含表结构、SQL、凭据、数据行或实例 URL。[Parallel Search MCP 安装指南](https://docs.parallel.ai/integrations/mcp/installation)
+使用浏览器或独立的搜索会话查阅下方的公开问题。如果使用搜索助手，请新建会话，保持 DBX MCP 关闭，并确保会话无法访问本地数据库。只发送公开问题，将表结构、SQL、凭据、数据行和实例 URL 留在本地会话中。
 
 > SQLite 3.45.0 的 JSONB 存储的是什么？请引用 SQLite 官方文档。
 

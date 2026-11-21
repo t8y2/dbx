@@ -1,0 +1,72 @@
+{
+  "node": "v26.7.0",
+  "measurements": [
+    {
+      "name": "typical",
+      "dialect": "postgres",
+      "characters": 134,
+      "iterations": 14,
+      "p50Ms": 0.46008299999999736,
+      "p95Ms": 1.0377499999999884,
+      "maxMs": 27.937332999999995,
+      "heapGrowthBytes": 9124504,
+      "budgetRejected": false,
+      "astNodes": 48,
+      "blockNodes": 29
+    },
+    {
+      "name": "long-select-list",
+      "dialect": "mysql",
+      "characters": 1668,
+      "iterations": 14,
+      "p50Ms": 2.4101670000000013,
+      "p95Ms": 3.3925000000000125,
+      "maxMs": 15.613584000000003,
+      "heapGrowthBytes": 10590184,
+      "budgetRejected": false,
+      "astNodes": 325,
+      "blockNodes": 324
+    },
+    {
+      "name": "deep-nesting",
+      "dialect": "postgres",
+      "characters": 279,
+      "iterations": 14,
+      "p50Ms": 1.302250000000015,
+      "p95Ms": 1.453958,
+      "maxMs": 2.2295000000000016,
+      "heapGrowthBytes": 2887936,
+      "budgetRejected": false,
+      "astNodes": 94,
+      "blockNodes": 64
+    },
+    {
+      "name": "multi-statement",
+      "dialect": "sqlite",
+      "characters": 11469,
+      "iterations": 14,
+      "p50Ms": 17.71766600000001,
+      "p95Ms": 20.22520800000001,
+      "maxMs": 23.740957999999978,
+      "heapGrowthBytes": 35962936,
+      "budgetRejected": false,
+      "astNodes": 3200,
+      "blockNodes": 2601
+    },
+    {
+      "name": "million-characters",
+      "dialect": "postgres",
+      "characters": 1062483,
+      "iterations": 0,
+      "p50Ms": 0,
+      "p95Ms": 0,
+      "maxMs": 0,
+      "heapGrowthBytes": 0,
+      "budgetRejected": true,
+      "astNodes": 0,
+      "blockNodes": 0
+    }
+  ],
+  "mainThreadEngineWork": "not-run-by-design",
+  "cancellationMs": 0.02983399999999392
+}

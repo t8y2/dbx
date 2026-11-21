@@ -10441,6 +10441,7 @@ export default withEnglishFallback({
     sqlFormatterIndentStyleTabularRight: "Табличный справа",
     sqlFormatterLayoutStyle: "Стиль разметки",
     sqlFormatterLayoutStyleDbx: "DBX",
+    sqlFormatterLayoutStyleDataGrip: "DataGrip",
     sqlFormatterLayoutStyleClassic: "Классический",
     sqlFormatterLogicalOperatorNewline: "Перенос логических операторов",
     sqlFormatterLogicalBefore: "Перед оператором",

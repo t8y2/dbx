@@ -108,6 +108,14 @@ describe("sqlFormatterConfig layout style", () => {
     if (parsed.ok) expect(parsed.settings.layoutStyle).toBe("classic");
   });
 
+  it("round-trips the DataGrip layout style", () => {
+    const serialized = JSON.parse(serializeSqlFormatterConfig({ layoutStyle: "datagrip" }));
+    expect(serialized.options.layoutStyle).toBe("datagrip");
+    const parsed = parseSqlFormatterConfig(serializeSqlFormatterConfig({ layoutStyle: "datagrip" }));
+    expect(parsed).toEqual(expect.objectContaining({ ok: true }));
+    if (parsed.ok) expect(parsed.settings.layoutStyle).toBe("datagrip");
+  });
+
   it("rejects a layout style outside the accepted values", () => {
     const result = parseSqlFormatterConfig(JSON.stringify({ version: 2, formatter: "sql-formatter", options: { layoutStyle: "upstream" } }));
 

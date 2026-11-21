@@ -3680,6 +3680,7 @@ export default withEnglishFallback({
       "binary-uuid": "바이너리를 UUID로",
       "binary-uuid-swapped": "바이너리를 UUID로 (시간 비트 교환)",
     },
+    sortOptions: "정렬 옵션",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

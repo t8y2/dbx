@@ -16618,6 +16618,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               <ArrowDown v-else-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
                               <ArrowUpDown v-else class="h-3 w-3 shrink-0" />
                             </button>
+                            <button
+                              type="button"
+                              class="flex h-4 w-3 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                              :title="t('grid.sortOptions')"
+                              :aria-label="t('grid.sortOptions')"
+                              aria-haspopup="menu"
+                              :aria-expanded="open"
+                              @mousedown.stop
+                              @click.stop="toggle"
+                            >
+                              <ChevronDown class="size-3" />
+                            </button>
                           </template>
                         </LightDropdownMenu>
                         <LightDropdownMenu

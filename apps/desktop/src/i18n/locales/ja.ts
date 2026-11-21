@@ -10841,6 +10841,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "テーブルデータの次の列を選択",
     shortcutSelectPreviousGridColumn: "テーブルデータの前の列を選択",
     sidebarSimpleHideIndexes: "テーブルと並んで表示されるインデックスを非表示",
+    completionAutoActivationDelay: "補完の自動アクティブ化遅延（ミリ秒）",
+    completionAutoActivationDelayDescription: "入力後に補完候補が表示されるまでの遅延時間。デフォルトは 500 ミリ秒です。値を大きくすると、連続入力時に補完が頻繁に表示されて編集の妨げになるのを防げます。0 は即時に表示することを意味します。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

@@ -1092,10 +1092,7 @@ fn resolve_visible_group_target(
     request: &MoveConnectionsToGroupRequest,
 ) -> Result<SidebarGroupSpec, String> {
     let visible = connections.iter().map(|connection| connection.id.as_str()).collect::<std::collections::HashSet<_>>();
-    let summary = match describe_layout(layout) {
-        Ok(summary) => summary,
-        Err(error) => return Err(error),
-    };
+    let summary = describe_layout(layout)?;
     let visible_groups = summary
         .groups
         .into_iter()

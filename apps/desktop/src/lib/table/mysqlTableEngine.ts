@@ -37,7 +37,7 @@ export function quoteMysqlTableIdentifier(value: string): string {
  */
 export function mysqlTableEngineChangeSql(options: { database?: string | null; table: string; engine: string }): string | undefined {
   const engine = options.engine.trim();
-  if (!/^[A-Za-z0-9_$]+$/.test(engine)) return undefined;
+  if (engine.length > 64 || !/^[A-Za-z0-9_$]+$/.test(engine)) return undefined;
   // MySQL preserves spaces inside quoted identifiers: trim only for the emptiness
   // check, otherwise ` orders ` would silently target `orders`.
   const table = options.table;

@@ -66,10 +66,13 @@ describe("mysqlTableEngine", () => {
     expect(mysqlTableEngineChangeSql({ database: "  ", table: " orders ", engine: "InnoDB" })).toBe("ALTER TABLE ` orders ` ENGINE = InnoDB");
   });
 
-  it("refuses engine values that are not bare engine names", () => {
+  it("refuses engine values that are not bare engine names or exceed MySQL's length limit", () => {
     expect(mysqlTableEngineChangeSql({ database: "app", table: "orders", engine: "InnoDB; DROP TABLE x" })).toBeUndefined();
     expect(mysqlTableEngineChangeSql({ database: "app", table: "orders", engine: "`InnoDB`" })).toBeUndefined();
     expect(mysqlTableEngineChangeSql({ database: "app", table: "orders", engine: "  " })).toBeUndefined();
+    const maxLengthEngine = "A".repeat(64);
+    expect(mysqlTableEngineChangeSql({ database: "app", table: "orders", engine: maxLengthEngine })).toBe(`ALTER TABLE \`app\`.\`orders\` ENGINE = ${maxLengthEngine}`);
+    expect(mysqlTableEngineChangeSql({ database: "app", table: "orders", engine: `${maxLengthEngine}A` })).toBeUndefined();
     expect(mysqlTableEngineChangeSql({ database: "app", table: "", engine: "InnoDB" })).toBeUndefined();
   });
 });

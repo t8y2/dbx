@@ -1,4 +1,5 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { formatBinaryColumnValue, isBinaryColumnFormat, type BinaryColumnFormat } from "@/lib/dataGrid/binaryCellDownload";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import dayjs, { Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
@@ -124,6 +125,8 @@ export type ColumnFormatterConfig =
   | { kind: "iotdb-timestamp"; precision: IoTDBTimestampPrecision; timezone: string }
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
+  | { kind: "number"; useGrouping: boolean; decimalPlaces?: number }
+  | { kind: BinaryColumnFormat }
   | {
       kind: "foreign-key-display";
       referenceMode?: "foreign-key" | "manual";
@@ -256,6 +259,14 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
     return { kind: "mask", prefix: config.prefix as number, suffix: config.suffix as number };
   }
 
+  if (config.kind === "number") {
+    if (typeof config.useGrouping !== "boolean") return undefined;
+    if (config.decimalPlaces !== undefined && (!Number.isInteger(config.decimalPlaces) || config.decimalPlaces < 0 || config.decimalPlaces > 20)) return undefined;
+    return { kind: "number", useGrouping: config.useGrouping, decimalPlaces: config.decimalPlaces };
+  }
+
+  if (isBinaryColumnFormat(config.kind)) return { kind: config.kind };
+
   if (config.kind === "foreign-key-display") {
     if (typeof config.refTable !== "string" || !config.refTable.trim()) return undefined;
     if (typeof config.refColumn !== "string" || !config.refColumn.trim()) return undefined;
@@ -295,6 +306,8 @@ const FOREIGN_KEY_DISPLAY_FILTER_MODES = new Set<DataGridContextFilterMode>([
   "not-like",
   "begins-with",
   "ends-with",
+  "not-begins-with",
+  "not-ends-with",
   "less-than",
   "less-than-or-equal",
   "greater-than",
@@ -481,11 +494,43 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
     if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit, formatter.pattern, formatter.timezone);
     if (formatter.kind === "json-path") return formatJsonPath(value, formatter.path);
     if (formatter.kind === "mask") return formatMask(value, formatter);
+    if (formatter.kind === "number") return formatNumber(value, formatter);
+    if (isBinaryColumnFormat(formatter.kind)) return formatBinaryColumnValue(value, formatter.kind) ?? displayCellValue(value);
     if (formatter.kind === "custom-template") return formatCustomTemplate(value, formatter.template);
     return displayCellValue(value);
   } catch {
     return displayCellValue(value);
   }
+}
+
+function formatNumber(value: CellValue, formatter: Extract<ColumnFormatterConfig, { kind: "number" }>): string {
+  if (typeof value !== "number" && typeof value !== "string") return displayCellValue(value);
+  if (formatter.decimalPlaces !== undefined && (!Number.isInteger(formatter.decimalPlaces) || formatter.decimalPlaces < 0 || formatter.decimalPlaces > 20)) return displayCellValue(value);
+  const text = String(value).trim();
+  // Bound work before expanding exponents or parsing arbitrary numeric text.
+  if (text.length > 1000) return displayCellValue(value);
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!match) return displayCellValue(value);
+  const [, sign, integerDigits, fractionDigits = "", exponentText = "0"] = match;
+  if (!integerDigits && !fractionDigits) return displayCellValue(value);
+  const exponent = Number(exponentText);
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 1000) return displayCellValue(value);
+
+  // Keep DECIMAL/BIGINT text exact instead of converting it through a double.
+  const digits = integerDigits + fractionDigits;
+  const point = integerDigits.length + exponent;
+  let integer = digits.slice(0, Math.max(0, point)).padEnd(Math.max(0, point), "0").replace(/^0+/, "") || "0";
+  let fraction = "0".repeat(Math.max(0, -point)) + digits.slice(Math.max(0, point));
+  if (formatter.decimalPlaces !== undefined) {
+    const places = formatter.decimalPlaces;
+    const kept = fraction.slice(0, places).padEnd(places, "0");
+    // Round half away from zero, including a carry into the integer part.
+    const rounded = (BigInt(integer + kept) + (Number(fraction[places] ?? "0") >= 5 ? 1n : 0n)).toString().padStart(places + 1, "0");
+    integer = rounded.slice(0, rounded.length - places);
+    fraction = places ? rounded.slice(-places) : "";
+  }
+  if (formatter.useGrouping) integer = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${sign === "-" ? "-" : ""}${integer}${fraction ? `.${fraction}` : ""}`;
 }
 
 function formatDateTime(value: CellValue, unit: DateTimeFormatterUnit, pattern: string, timezone: string | undefined): string {

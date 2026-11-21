@@ -358,6 +358,15 @@ Connection providers may add ordered custom actions before DBX-owned lifecycle b
 
 A workbench opens in a normal persistent DBX tab. The iframe is loaded with `sandbox="allow-scripts"`, a restrictive CSP, no Tauri object, no parent DOM access, and no direct network access. The host injects `window.dbxPlugin`:
 
+Opening a saved plugin connection normally reuses its existing workbench. The
+native **New Query** action instead creates a new tab with a fresh
+`context.workbenchId` and `context.newQuery: true`. When invoked from a workbench
+on the same connection, `context.sourceWorkbenchId` identifies the source tab so
+the plugin can inherit its location without copying query results or document
+drafts. Plugins should restore saved state by workbench id, initialize a new
+query with blank/default input, and keep each tab's requests and editing state
+independent. Restoring a tab must not automatically execute a query.
+
 - `ready` / `context` / `locale` — `locale` is the current DBX locale such as `en` or `zh-CN`
 - `theme` — `{ appearance: "light" | "dark", tokens }` with the resolved DBX design tokens; theme changes are pushed live through env updates, and the SDK applies them to the plugin document root
 - `onContext(listener)` — context changes are pushed live; the iframe is not reloaded, so plugin UI state survives navigation
@@ -371,6 +380,7 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
 - `getPlanCapabilities(connectionId)` / `explainPlan(request)` — reads an estimated execution plan for one connection; requires `host.plans:read`, see [Estimated execution plans](#estimated-execution-plans)
 - `getTableMetadata({ connectionId, database?, schema?, table })` — reads narrow schema metadata for one table on an already-open connection; requires `host.schema:read`, see [Table Schema Metadata](#table-schema-metadata)
+- `connections.getEditFields(connectionId)` / `connections.openEdit({ connectionId, fields? })` — discover field descriptors for the saved connection’s form and open an optional edit draft for user review. Requires `host.connections:edit` and `capabilities.connectionEditApi` (Host API 1.5). Field discovery contains no saved values. DBX applies the draft when the user saves it.
 - `queryData({ connectionId, database?, schema?, sql, maxRows?, timeoutMs? })` — runs one read-only SQL statement on a connection the user granted to the plugin; requires `host.data:read`, see [Read-only data queries](#read-only-data-queries)
 - `storage` — `storage.get(key)` / `storage.set(key, value)` / `storage.delete(key)` persist small JSON state per plugin in `plugin-data/<id>`; requires `host.storage`; values cap at 256 KiB and the whole store at 1 MiB, bulk data belongs in the sidecar's `DBX_PLUGIN_DATA_DIR`
 - `ai.openConversation({ title, prompt, context, send?, mode? })` — opens a plugin conversation in the built-in DBX AI panel; requires `host.ai`; `mode` defaults to `ask` for snapshot compatibility, while `mode: "agent"` uses live tools on the context's open plugin connection when available. `title` caps at 200 characters, `prompt` at 32000, and `context` at 2 MiB, and `send` defaults to `false` so pass `true` to start the analysis immediately. The host copies the snapshot into the conversation as history data and never hands model output or model configuration back to the plugin through this conversation API
@@ -763,7 +773,7 @@ A plugin can read the **estimated** execution plan of a query without touching a
 }
 ```
 
-- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON document for `json` and the plan text otherwise, so the plugin can parse and normalize it itself.
+- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON value for `json` and the plan text otherwise, so the plugin can parse and normalize it itself. SQLite `EXPLAIN QUERY PLAN` is returned as an array of row objects retaining the native `id`, `parent`, `notused`, and `detail` fields.
 - `warnings` carries `plan_not_json` when the server answered with something that is not JSON (the payload is then reported as `text` rather than pretending it is JSON), `plan_truncated` when the host cut the plan to respect `maxPlanBytes`, and `plan_rows_truncated` when the driver stopped collecting plan rows.
 - `truncated` is `true` whenever the host cut the plan for either reason.
 

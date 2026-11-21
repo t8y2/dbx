@@ -81,7 +81,7 @@ import {
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isWindows } from "@/lib/backend/platform";
-import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, externalBasePath, normalizeBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
 import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
@@ -100,7 +100,8 @@ import {
   supportsIdleTimeout,
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionEditPrefill, resolveConnectionEditPrefill, type ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
 import {
   connectionDeepLinkServiceHydrationValue,
   parseConnectionDeepLink,
@@ -155,13 +156,14 @@ import { pluginFieldHasValue as pluginFieldHasValueOf, pluginFieldIsRequired, pl
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { parseSqlServerHostPort } from "@/lib/sqlserver/sqlServerHostPort";
+import { parseSqlServerHostPort, resolveSqlServerPortSubmission } from "@/lib/sqlserver/sqlServerHostPort";
 import { normalizeNacosConsoleUrl, normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
   ArrowDown,
   ArrowUp,
+  Asterisk,
   Check,
   CheckSquare,
   ChevronRight,
@@ -189,9 +191,18 @@ import {
   Square,
   Trash2,
 } from "@lucide/vue";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { resolveVisibleDatabaseSaveAction, visibleDatabasePatternsWithoutMatchAll } from "@/components/sidebar/visibleDatabasesDialogState";
-import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
+import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "@/components/sidebar/visibleDatabasesDialogState";
+import {
+  MATCH_ALL_VISIBLE_DATABASE_PATTERN,
+  canSaveVisibleDatabaseSelection,
+  connectionUsesVisibleSchemaFilter,
+  filterDatabaseNamesForVisiblePicker,
+  filterVisibleDatabaseNames,
+  filterSchemaNamesForVisiblePicker,
+  buildDraftVisibleSchemasConnectionId,
+  normalizeVisibleSchemaSelection,
+} from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionIdentityFields, normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
@@ -341,7 +352,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
-  updatePrefill?: ConnectionDeepLinkUpdate | null;
+  updatePrefill?: ConnectionEditPrefill | null;
   pluginProvider?: PluginCenterFocus | null;
   initialTab?: ConfigTab;
 }>();
@@ -860,7 +871,9 @@ function setSqlServerPortExplicit(config: Pick<ConnectionConfig, "db_type"> & { 
 }
 
 function markSqlServerPortExplicit() {
-  setSqlServerPortExplicit(form.value, true);
+  // Keep the in-editor flag equal to what submit will derive: a fresh connection
+  // starts on the default port, and typing it back must not look deliberate.
+  setSqlServerPortExplicit(form.value, resolveSqlServerPortSubmission(form.value.port, selectedProfile().port).portExplicit);
 }
 
 function handleHostBlur() {
@@ -1724,13 +1737,15 @@ const INFLUXDB_V3_DEFAULT_PORT = 8181;
 
 const influxDbVersion = ref<InfluxDbVersion>("1");
 const influxDbOrg = ref("");
+const influxDbBasePath = ref("");
 const victoriaMetricsApiPath = ref("/prometheus");
 const victoriaMetricsLookback = ref("1h");
 
 function resetInfluxDbFields(config?: Partial<InfluxDbExternalConfig>, versionHint?: InfluxDbVersion) {
   const version = versionHint ?? (config?.version === "2" ? "2" : config?.version === "3" ? "3" : "1");
   influxDbVersion.value = version;
-  influxDbOrg.value = config?.org?.trim() || "";
+  influxDbOrg.value = typeof config?.org === "string" ? config.org.trim() : "";
+  influxDbBasePath.value = externalBasePath(config);
 }
 
 function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
@@ -1738,6 +1753,11 @@ function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
     resetInfluxDbFields(undefined, versionHint);
     return;
   }
+  // The driver accepts both spellings, so the form has to read both as well:
+  // `buildInfluxDbExternalConfig` rebuilds the whole external config from the
+  // form, and a stored `base_path` would otherwise be dropped on save.
+  // `externalBasePath` resolves both keys with the same precedence as the
+  // driver, so the form cannot show a prefix the driver would ignore.
   resetInfluxDbFields(value as Partial<InfluxDbExternalConfig>, versionHint);
 }
 
@@ -1756,15 +1776,18 @@ function resetDamengJvmOptions(config?: Pick<ConnectionConfig, "agent_java_optio
 }
 
 function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
+  // Reverse proxies that serve InfluxDB under a sub path need that prefix on
+  // every request URL, so it is stored normalized next to the version.
+  const basePath = normalizeBasePath(influxDbBasePath.value);
   // InfluxDB 3 Core can run with --without-auth; the driver treats an empty
   // password as "no Authorization header", so the token stays optional here.
-  if (influxDbVersion.value === "3") return { version: "3" };
-  if (influxDbVersion.value !== "2") return { version: "1" };
+  if (influxDbVersion.value === "3") return basePath ? { version: "3", basePath } : { version: "3" };
+  if (influxDbVersion.value !== "2") return basePath ? { version: "1", basePath } : { version: "1" };
   const org = influxDbOrg.value.trim();
   if (!org) throw new Error("InfluxDB 2.x organization is required");
   if (!form.value.password.trim()) throw new Error("InfluxDB 2.x token is required");
   if (!form.value.database?.trim()) throw new Error("InfluxDB 2.x bucket is required");
-  return { version: "2", org };
+  return basePath ? { version: "2", org, basePath } : { version: "2", org };
 }
 
 function resetVictoriaMetricsFields(config?: Partial<VictoriaMetricsExternalConfig>) {
@@ -3209,6 +3232,52 @@ function applyRequestedPluginProvider(target: PluginCenterFocus | null | undefin
   return true;
 }
 
+/**
+ * 深链指向插件连接（`type=ssh` 这类由插件注册的 `database_type`）时，选中该提供者并把
+ * 链接上的通用字段（名称/主机/端口/用户/口令）落到插件表单。
+ *
+ * 插件字段的 `binding` 与内置连接的通用字段一一对应，所以这里复用一个等价的
+ * `ConnectionConfig` 交给 {@link pluginConnectionFormValues} 做绑定，而不是再实现一遍。
+ */
+function applyPluginConnectionPrefill(draft: ConnectionDeepLinkDraft): boolean {
+  const target = draft.pluginProvider;
+  if (!target) return false;
+  const entry = pluginProviderEntry(target.pluginId, target.providerId);
+  if (!entry) return false;
+  if (!applyPluginProvider(pluginConnectionProviderOptionValue(target.pluginId, target.providerId))) return false;
+
+  selectedDbCategory.value = "plugins";
+  const seed = {
+    id: editingId.value || "",
+    name: draft.name?.trim() || entry.contribution.label,
+    db_type: "plugin",
+    driver_profile: "plugin",
+    driver_label: entry.contribution.label,
+    host: draft.host ?? "",
+    port: draft.port ?? 0,
+    username: draft.username ?? "",
+    password: draft.password ?? "",
+    database: draft.database,
+  } as ConnectionConfig;
+  pluginFormValues.value = pluginConnectionFormValues(entry.contribution, seed);
+
+  form.value.name = seed.name;
+  form.value.one_time = draft.oneTime || undefined;
+  if (draft.host) form.value.host = draft.host;
+  if (draft.port) form.value.port = draft.port;
+  if (draft.username !== undefined) form.value.username = draft.username;
+  if (draft.password !== undefined) form.value.password = draft.password;
+  if (!draft.name?.trim()) {
+    const nameField = entry.contribution.fields.find((field) => field.binding === "name");
+    const defaultName = nameField ? pluginFormValues.value[nameField.key] : undefined;
+    if (typeof defaultName === "string" && defaultName.trim()) form.value.name = defaultName.trim();
+  }
+  dialogStep.value = "config";
+  configTab.value = "connection";
+  resetTestState();
+  return true;
+}
+
 function switchOceanbaseMode(mode: "mysql" | "oracle") {
   const port = form.value.port;
   const sourceProfile = oceanbaseSubMode.value === "mysql" ? "oceanbase" : "oceanbase-oracle";
@@ -3233,7 +3302,7 @@ function switchGbaseProfile(profile: GbaseProfile) {
 }
 
 let applyingConnectionUpdate = false;
-let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
+let appliedConnectionUpdate: ConnectionEditPrefill | null = null;
 
 /**
  * 免确认保存的去重键。必须早于下面这个 `immediate` watcher 声明——更新链接的
@@ -3267,7 +3336,7 @@ watch(
     // flag the update as applied when the prefill really targeted this
     // connection, so an ID mismatch cannot freeze port-flag recomputation.
     const connectionUpdate = savedConfig && props.updatePrefill?.connectionId === savedConfig.id ? props.updatePrefill : null;
-    const config = connectionUpdate && savedConfig ? applyConnectionDeepLinkUpdate(savedConfig, connectionUpdate) : savedConfig;
+    const config = connectionUpdate && savedConfig ? applyConnectionEditPrefill(savedConfig, connectionUpdate) : savedConfig;
     resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
@@ -3436,9 +3505,9 @@ watch(
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
-      if (props.updatePrefill) {
+      if (connectionUpdate) {
         finishApplyingConnectionUpdate();
-        submitUpdateIfAutoConfirmed(props.updatePrefill);
+        if (connectionUpdate.source !== "plugin") submitUpdateIfAutoConfirmed(connectionUpdate);
       }
       // Form/profile watchers normalize derived fields in this flush. Capture
       // the saved baseline afterwards so those initial changes are not treated
@@ -4053,9 +4122,10 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "cassandra",
   "nebula",
   "zookeeper",
+  "tdengine",
 ]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type) || supportsMysqlTlsTab(form.value.db_type, selectedType.value));
-const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
+const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics" || form.value.db_type === "tdengine");
 const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase" && form.value.db_type !== "nebula");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => mysqlTlsOptionsSupported(form.value.db_type, selectedType.value));
@@ -4308,9 +4378,15 @@ function hasNacosNamespaceScopeForSave(): boolean {
 }
 const canChooseVisibleDatabases = computed(() => !canChooseVisibleNacosNamespaces.value && connectionCanChooseVisibleDatabases(form.value));
 const visibleFilterUsesSchemas = computed(() => connectionUsesVisibleSchemaFilter(form.value));
-const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases));
+// 这里没有通配符输入框，只展示和锁定可见对象过滤器里配置的通配符；schema 模式下的通配符是内部兜底，不算用户筛选。
+const visibleDatabaseUserPatterns = computed(() => (visibleFilterUsesSchemas.value ? [] : visibleDatabasePatternsWithoutMatchAll(form.value.visible_database_patterns)));
+const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases) || visibleDatabaseUserPatterns.value.length > 0);
 const visibleDatabaseSummary = computed(() => {
   const configured = form.value.visible_databases;
+  // 只有通配符时也要显示成已筛选，否则按钮看起来像没有设置过滤（#14221）。
+  if (visibleDatabaseUserPatterns.value.length > 0) {
+    return t("visibleDatabases.selectedCount", { selected: filterVisibleDatabaseNames(visibleDatabaseNames.value, configured, visibleDatabaseUserPatterns.value).length, total: visibleDatabaseNames.value.length });
+  }
   if (!Array.isArray(configured)) return t("visibleDatabases.showAll");
   return t("visibleDatabases.selectedCount", { selected: configured.length, total: visibleDatabaseNames.value.length });
 });
@@ -4325,9 +4401,14 @@ const filteredVisibleDatabaseNames = computed(() => {
   if (!query) return listedVisibleDatabaseNames.value;
   return listedVisibleDatabaseNames.value.filter((name) => name.toLowerCase().includes(query));
 });
-const visibleDatabaseSelectedCount = computed(() => visibleDatabaseSelection.value.size);
+const visibleDatabasePatternMatchedNames = computed(() => visibleDatabasePatternMatches(visibleDatabaseNames.value, visibleDatabaseUserPatterns.value));
+const visibleDatabaseSelectedCount = computed(() => {
+  if (visibleDatabaseUserPatterns.value.length === 0) return visibleDatabaseSelection.value.size;
+  return listedVisibleDatabaseNames.value.filter((name) => visibleDatabaseSelection.value.has(name) || visibleDatabasePatternMatchedNames.value.has(name)).length;
+});
 const visibleDatabaseTotalCount = computed(() => listedVisibleDatabaseNames.value.length);
-const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value]));
+const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseUserPatterns.value));
+const visibleDatabaseShowsNothing = computed(() => visibleDatabaseFilterShowsNothing(visibleDatabaseSelection.value, visibleDatabaseUserPatterns.value, visibleDatabasePatternMatchedNames.value));
 const visibleDatabaseHasSystemObjects = computed(() => defaultListedVisibleDatabaseNames.value.length < visibleDatabaseNames.value.length);
 const visibleSystemObjectsLabelKey = computed(() => (visibleFilterUsesSchemas.value ? "visibleSchemas.showSystemSchemas" : "visibleDatabases.showSystemDatabases"));
 const filteredVisibleNacosNamespaces = computed(() => {
@@ -4844,6 +4925,15 @@ function applyConnectionUrlToForm(input: string): boolean {
     } else {
       selectedType.value = parsed.driverProfile;
     }
+    if (parsed.dbType === "influxdb" || parsed.dbType === "influxdb3") {
+      // The influxdb3 engine is presented as a version option inside the
+      // InfluxDB card; the form keeps db_type = influxdb and the save side
+      // swaps it back to influxdb3.
+      if (parsed.dbType === "influxdb3") {
+        form.value.db_type = "influxdb";
+      }
+      hydrateInfluxDbFields(form.value.external_config, parsed.dbType === "influxdb3" ? "3" : undefined);
+    }
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
     if (form.value.db_type === "h2") {
@@ -5065,6 +5155,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
     config.save_password = form.value.save_password;
+    config.one_time = form.value.one_time;
     // 生产保护只拦截 SQL/数据编辑路径，插件连接走不到；表单已隐藏该区块，提交时清掉历史残留标志。
     config.is_production = false;
     config.production_databases = [];
@@ -5357,10 +5448,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   } else if (config.db_type === "sqlserver") {
     const parsed = parseSqlServerHostPort(config.host, config.port);
     config.host = parsed.host;
-    if (parsed.portExplicit && parsed.port !== undefined) {
-      config.port = parsed.port;
-      setSqlServerPortExplicit(config, true);
-    }
+    // A cleared port field stays the empty string and cannot deserialize as the
+    // backend's u16 (#14239). Deriving the flag from the final port instead of
+    // "did the user touch the field" also stops one edit from permanently
+    // disabling SQL Browser resolution for `host\instance` (#14238).
+    const submission = resolveSqlServerPortSubmission(parsed.portExplicit && parsed.port !== undefined ? parsed.port : config.port, selectedProfile().port);
+    config.port = submission.port;
+    setSqlServerPortExplicit(config, submission.portExplicit);
     if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
@@ -5982,7 +6076,11 @@ async function openVisibleDatabasesPicker() {
     visibleDatabaseNames.value = names;
     visibleDatabaseShowSystem.value = false;
     const configuredSchemas = visibleSchemaObjectSelection.value;
-    const initialSelection = visibleFilterUsesSchemas.value ? (Array.isArray(configuredSchemas) ? normalizeVisibleSchemaSelection(configuredSchemas, names) : filterSchemaNamesForVisiblePicker(names, draftConfig)) : initialVisibleDatabaseSelection(names, form.value.visible_databases, draftConfig);
+    const initialSelection = visibleFilterUsesSchemas.value
+      ? Array.isArray(configuredSchemas)
+        ? normalizeVisibleSchemaSelection(configuredSchemas, names)
+        : filterSchemaNamesForVisiblePicker(names, draftConfig)
+      : initialVisibleDatabaseDialogSelection(names, { ...draftConfig, visible_databases: form.value.visible_databases, visible_database_patterns: form.value.visible_database_patterns });
     visibleDatabaseSelection.value = new Set(initialSelection);
     const defaultVisible = new Set(defaultListedVisibleDatabaseNames.value);
     visibleDatabaseShowSystem.value = initialSelection.some((name) => !defaultVisible.has(name));
@@ -6276,6 +6374,7 @@ function saveProductionDatabaseSelection() {
 }
 
 function toggleVisibleDatabase(database: string) {
+  if (visibleDatabasePatternMatchedNames.value.has(database)) return;
   const next = new Set(visibleDatabaseSelection.value);
   if (next.has(database)) next.delete(database);
   else next.add(database);
@@ -6505,6 +6604,7 @@ function prefillDraftKey(draft: ConnectionDeepLinkDraft) {
     draft.useMongoUrl,
     draft.serviceConfig,
     draft.mqConfig,
+    draft.pluginProvider,
   ]);
 }
 
@@ -6558,7 +6658,8 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
   return next;
 }
 
-function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
+function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft): boolean {
+  if (draft.pluginProvider) return applyPluginConnectionPrefill(draft);
   applyProfile(draft.driverProfile);
   form.value = applyConnectionDraftToConfig(form.value, draft);
   if (draft.serviceConfig?.kind === "consul") {
@@ -6598,10 +6699,36 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   dialogStep.value = "config";
   configTab.value = "connection";
   resetTestState();
+  return true;
+}
+
+/**
+ * 插件深链的预填必须等 `listPlugins` 返回，否则选中提供者时插件表还是空的。
+ *
+ * `notifyFailure` 只在「插件表已经就绪」的调用点为真：此时仍然找不到提供者说明插件
+ * 没装或被禁用，需要告诉用户，而不是静默留一个空表单。
+ */
+function applyDeferredPluginConnectionPrefill(notifyFailure = true): boolean {
+  const draft = props.prefillConfig;
+  if (!open.value || !draft?.pluginProvider) return false;
+  if (!applyConnectionDraftToForm(draft)) {
+    if (notifyFailure) toast(t("connection.pluginProviderUnavailable"), 5000);
+    return false;
+  }
+  submitPrefillIfAutoConfirmed(draft);
+  return true;
 }
 
 function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
   resetForm();
+  if (draft.pluginProvider) {
+    // 插件表在这里可能还没加载完（首次打开时 `installedPlugins` 为空），
+    // 因此先等插件就绪再落表单，避免预填成一条没有 provider 的连接。
+    if (!applyDeferredPluginConnectionPrefill(false)) {
+      void loadInstalledPlugins().then(() => applyDeferredPluginConnectionPrefill());
+    }
+    return;
+  }
   applyConnectionDraftToForm(draft);
   submitPrefillIfAutoConfirmed(draft);
 }
@@ -6632,6 +6759,8 @@ watch(
           selectedDbCategory.value = "plugins";
           pluginFormValues.value = pluginConnectionFormValues(entry.contribution, props.editConfig);
         }
+      } else if (props.prefillConfig?.pluginProvider) {
+        applyDeferredPluginConnectionPrefill(false);
       } else if (!props.prefillConfig) {
         applyRequestedPluginProvider(props.pluginProvider);
       }
@@ -6650,6 +6779,8 @@ watch(
           selectedDbCategory.value = "plugins";
           pluginFormValues.value = pluginConnectionFormValues(entry.contribution, props.editConfig);
         }
+      } else if (props.prefillConfig?.pluginProvider) {
+        applyDeferredPluginConnectionPrefill(false);
       } else if (!props.prefillConfig) {
         applyRequestedPluginProvider(props.pluginProvider);
       }
@@ -7009,8 +7140,8 @@ function validateConnectionUpdateTarget() {
   const update = props.updatePrefill ?? appliedConnectionUpdate;
   if (!update) return;
   const target = store.getConfig(update.connectionId);
-  resolveConnectionDeepLinkUpdate(update, target ? [target] : [], false);
-  if (editingId.value !== update.connectionId) throw new Error("The connection specified by the update link is no longer being edited.");
+  resolveConnectionEditPrefill(update, target ? [target] : [], false);
+  if (editingId.value !== update.connectionId) throw new Error("The target connection is no longer being edited.");
 }
 
 async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
@@ -7362,7 +7493,7 @@ async function browseKafkaTlsFile(target: "ca" | "clientCert" | "clientKey") {
 async function browseDbFilePath() {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const filters = form.value.db_type === "duckdb" ? [{ name: "DuckDB", extensions: ["duckdb", "db"] }] : form.value.db_type === "access" ? [{ name: "Microsoft Access", extensions: ["accdb", "mdb"] }] : form.value.db_type === "h2" ? [{ name: "H2", extensions: ["db"] }] : undefined;
+    const filters = form.value.db_type === "access" ? [{ name: "Microsoft Access", extensions: ["accdb", "mdb"] }] : form.value.db_type === "h2" ? [{ name: "H2", extensions: ["db"] }] : undefined;
     const selected = await open({
       title: "Select Database File",
       multiple: false,
@@ -9166,6 +9297,13 @@ function openExternalUrl(url: string) {
                       <Input v-model="form.host" class="col-span-2" />
                       <Input v-model.number="form.port" type="number" class="col-span-1" />
                     </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.influxdbApiPath") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Input v-model="influxDbBasePath" placeholder="/influxdb" />
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.influxdbApiPathHint") }}</p>
+                      </div>
+                    </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <label class="col-span-3 flex items-center gap-2 text-sm">
@@ -10112,37 +10250,37 @@ function openExternalUrl(url: string) {
                       </PopoverContent>
                     </Popover>
                   </div>
+                </template>
 
-                  <div class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
-                    <div class="col-span-3 flex min-w-0 items-start gap-3">
-                      <textarea
-                        ref="noteTextareaRef"
-                        v-model="form.note"
-                        rows="1"
-                        class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
-                        :placeholder="t('connection.notePlaceholder')"
-                        @input="resizeNoteTextarea"
-                      />
-                      <div class="mt-1.5 flex shrink-0 items-center gap-2">
-                        <div class="flex items-center gap-1">
-                          <Label for="connection-note-sidebar-visibility" class="text-sm font-normal text-muted-foreground">
-                            {{ t("connection.noteShow") }}
-                          </Label>
-                          <Tooltip>
-                            <TooltipTrigger as-child>
-                              <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                            </TooltipTrigger>
-                            <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                              {{ t("connection.noteShowInSidebar") }}
-                            </TooltipContent>
-                          </Tooltip>
-                        </div>
-                        <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
+                <div class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
+                  <div class="col-span-3 flex min-w-0 items-start gap-3">
+                    <textarea
+                      ref="noteTextareaRef"
+                      v-model="form.note"
+                      rows="1"
+                      class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                      :placeholder="t('connection.notePlaceholder')"
+                      @input="resizeNoteTextarea"
+                    />
+                    <div class="mt-1.5 flex shrink-0 items-center gap-2">
+                      <div class="flex items-center gap-1">
+                        <Label for="connection-note-sidebar-visibility" class="text-sm font-normal text-muted-foreground">
+                          {{ t("connection.noteShow") }}
+                        </Label>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                            {{ t("connection.noteShowInSidebar") }}
+                          </TooltipContent>
+                        </Tooltip>
                       </div>
+                      <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
                     </div>
                   </div>
-                </template>
+                </div>
               </div>
             </TabsContent>
 
@@ -11594,6 +11732,11 @@ function openExternalUrl(url: string) {
         <Input v-model="visibleDatabaseSearchText" :placeholder="t(visibleObjectSearchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError" />
       </div>
 
+      <p v-if="visibleDatabaseUserPatterns.length > 0" class="flex min-w-0 items-center gap-1 px-1 text-xs text-muted-foreground" :title="t('visibleDatabases.patternsHint')" data-visible-database-configured-patterns>
+        <Asterisk class="h-3.5 w-3.5 shrink-0" />
+        <span class="truncate">{{ visibleDatabaseUserPatterns.join(", ") }} · {{ t("visibleDatabases.patternsMatchCount", { count: visibleDatabasePatternMatchedNames.size }) }}</span>
+      </p>
+
       <div class="flex items-center justify-between text-xs text-muted-foreground">
         <span>
           {{
@@ -11618,6 +11761,9 @@ function openExternalUrl(url: string) {
       <p v-if="!isLoadingVisibleDatabases && !visibleDatabaseError && !visibleDatabaseCanSave" class="text-xs text-destructive">
         {{ t(visibleObjectEmptySelectionKey) }}
       </p>
+      <p v-else-if="!isLoadingVisibleDatabases && !visibleDatabaseError && visibleDatabaseShowsNothing" class="text-xs text-amber-600">
+        {{ t("visibleDatabases.patternsNoMatch") }}
+      </p>
 
       <label v-if="visibleDatabaseHasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
         <input v-model="visibleDatabaseShowSystem" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError" />
@@ -11638,12 +11784,16 @@ function openExternalUrl(url: string) {
             v-for="database in filteredVisibleDatabaseNames"
             :key="database"
             type="button"
-            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none aria-disabled:cursor-default"
+            :aria-disabled="visibleDatabasePatternMatchedNames.has(database) || undefined"
+            :title="visibleDatabasePatternMatchedNames.has(database) ? t('visibleDatabases.patternsHint') : undefined"
             @click="toggleVisibleDatabase(database)"
           >
-            <CheckSquare v-if="visibleDatabaseSelection.has(database)" class="h-4 w-4 shrink-0 text-primary" />
+            <CheckSquare v-if="visibleDatabasePatternMatchedNames.has(database)" class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <CheckSquare v-else-if="visibleDatabaseSelection.has(database)" class="h-4 w-4 shrink-0 text-primary" />
             <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
             <span class="truncate">{{ database }}</span>
+            <Asterisk v-if="visibleDatabasePatternMatchedNames.has(database)" class="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           </button>
         </template>
       </div>

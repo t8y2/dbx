@@ -8,7 +8,20 @@ import { Label } from "@/components/ui/label";
 import { currentLocale } from "@/i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, clearChangelogCache, createLatestRequestGuard, fetchChangelogIndex, fetchChangelogRelease, type ChangelogItem, type ChangelogLang, type ChangelogRelease, type ChangelogReleaseSummary } from "@/lib/app/changelog";
+import {
+  changelogLangFromLocale,
+  changelogReleaseUrl,
+  changelogWebsiteUrl,
+  clearChangelogCache,
+  createLatestRequestGuard,
+  displayChangelogTag,
+  fetchChangelogIndex,
+  fetchChangelogRelease,
+  type ChangelogItem,
+  type ChangelogLang,
+  type ChangelogRelease,
+  type ChangelogReleaseSummary,
+} from "@/lib/app/changelog";
 
 const PAGE_SIZE = 5;
 
@@ -240,7 +253,7 @@ watch(changelogLang, (lang) => {
         <button type="button" class="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :aria-expanded="isExpanded(release.tag)" @click="toggleRelease(release.tag)">
           <Badge variant="secondary" class="shrink-0 gap-1 font-mono text-[11px]">
             <Tag class="h-3 w-3" />
-            {{ release.tag.replace(/^v/, "") }}
+            {{ displayChangelogTag(release.tag).replace(/^v/, "") }}
           </Badge>
           <span v-if="isLatestRelease(release.tag)" class="shrink-0 rounded-sm bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none tracking-wide text-primary-foreground">
             {{ t("settings.changelogNew") }}

@@ -132,10 +132,45 @@ describe("transpose record scrolling", () => {
     const endSpacerWidth = transposeEndAlignmentSpacerWidth({
       viewportWidth: 1200,
       pinnedWidth: 104,
+      recordsWidth: 1500,
+      lastRecordWidth: 300,
+    });
+
+    expect(endSpacerWidth).toBe(796);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 4,
+        totalRecords: 5,
+        viewportWidth: 1200,
+        pinnedWidth: 104,
+        recordWidth: 300,
+        currentScrollLeft: 0,
+        alignment: "start",
+        endSpacerWidth,
+      }),
+    ).toBe(1200);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 4,
+        totalRecords: 5,
+        viewportWidth: 1200,
+        pinnedWidth: 104,
+        recordWidth: 300,
+        currentScrollLeft: 404,
+        endSpacerWidth,
+      }),
+    ).toBe(404);
+  });
+
+  it("does not add horizontal scroll space when all records fit in the viewport", () => {
+    const endSpacerWidth = transposeEndAlignmentSpacerWidth({
+      viewportWidth: 1200,
+      pinnedWidth: 104,
+      recordsWidth: 5 * 168,
       lastRecordWidth: 168,
     });
 
-    expect(endSpacerWidth).toBe(928);
+    expect(endSpacerWidth).toBe(0);
     expect(
       transposeScrollLeftForRecord({
         recordIndex: 4,
@@ -145,17 +180,6 @@ describe("transpose record scrolling", () => {
         recordWidth: 168,
         currentScrollLeft: 0,
         alignment: "start",
-        endSpacerWidth,
-      }),
-    ).toBe(672);
-    expect(
-      transposeScrollLeftForRecord({
-        recordIndex: 4,
-        totalRecords: 5,
-        viewportWidth: 1200,
-        pinnedWidth: 104,
-        recordWidth: 168,
-        currentScrollLeft: 0,
         endSpacerWidth,
       }),
     ).toBe(0);
@@ -207,6 +231,7 @@ describe("transpose record scrolling", () => {
     const endSpacerWidth = transposeEndAlignmentSpacerWidth({
       viewportWidth: 300,
       pinnedWidth: 100,
+      recordsWidth: 692,
       lastRecordWidth: 96,
     });
 

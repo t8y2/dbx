@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT_SETTINGS } from "@/lib/editor/shortcutRegistry";
 import { buildSelectStarWithLimitSql } from "@/lib/sql/sqlDialectSelectLimit";
-import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, findSqlShortcutConflicts, hasSqlShortcutConflicts, resolveSqlShortcutForDatabase, resolveSqlShortcutTemplate, sqlShortcutAppliesToDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
+import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, findSqlShortcutConflicts, hasSqlShortcutConflicts, normalizeSqlShortcutLimit, resolveSqlShortcutForDatabase, resolveSqlShortcutTemplate, sqlShortcutAppliesToDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
 import type { SqlShortcutAction } from "@/types/database";
 
 function action(id: string, shortcut: string, overrides: Partial<SqlShortcutAction> = {}): SqlShortcutAction {
@@ -326,5 +326,29 @@ describe("normalizeSqlShortcuts", () => {
   it("blocks saving when canonical duplicates conflict at validation time", () => {
     const actions = [action("a", "Mod+Shift+1"), action("b", "Shift+Mod+1")];
     expect(hasSqlShortcutConflicts(actions, DEFAULT_SHORTCUT_SETTINGS)).toBe(true);
+  });
+});
+
+// Issue #14149: the select-limit shortcut silently clamped configured row counts
+// to 100000, so setting 200000 still produced LIMIT 100000 queries.
+describe("normalizeSqlShortcutLimit (#14149)", () => {
+  it("keeps configured limits above the previous 100000 cap", () => {
+    expect(normalizeSqlShortcutLimit(200000)).toBe(200000);
+    expect(normalizeSqlShortcutLimit("300000")).toBe(300000);
+  });
+
+  it("floors fractional values", () => {
+    expect(normalizeSqlShortcutLimit(200000.8)).toBe(200000);
+  });
+
+  it("clamps to the int32 ceiling shared with queryResultMaxRows", () => {
+    expect(normalizeSqlShortcutLimit(2_147_483_648)).toBe(2_147_483_647);
+  });
+
+  it("falls back to the default for invalid input", () => {
+    expect(normalizeSqlShortcutLimit(0)).toBe(10);
+    expect(normalizeSqlShortcutLimit(-5)).toBe(10);
+    expect(normalizeSqlShortcutLimit("abc")).toBe(10);
+    expect(normalizeSqlShortcutLimit(undefined)).toBe(10);
   });
 });

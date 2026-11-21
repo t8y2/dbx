@@ -1,12 +1,41 @@
 import { defineAsyncComponent, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
-import { Blocks, ListTree } from "@lucide/vue";
+import { Blocks, ListTree, MoreHorizontal } from "@lucide/vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ContextMenuItem } from "@/components/ui/customContextMenuRegistry";
 import { buildSidebarMenuLayout, sidebarMenuScope, type SidebarMenuScope, type SidebarMenuTargetType } from "@/lib/sidebar/sidebarMenuLayout";
 
 const SidebarMenuPreferencesDialog = defineAsyncComponent(() => import("@/components/sidebar/SidebarMenuPreferencesDialog.vue"));
+
+function collapseSqlEditorMenuGroups(items: ContextMenuItem[], t: (key: string) => string): ContextMenuItem[] {
+  const secondary: ContextMenuItem[] = [];
+  const more: ContextMenuItem = { sidebarActionId: "common.more", label: t("common.more"), icon: MoreHorizontal, children: secondary };
+  const result: ContextMenuItem[] = [];
+  for (const item of items) {
+    if (!item.sidebarActionId?.startsWith("group.") || item.variant === "destructive" || !item.children?.length) {
+      result.push(item);
+      continue;
+    }
+    if (!secondary.length) result.push(more);
+    else secondary.push({ label: "", separator: true });
+    secondary.push(...item.children);
+  }
+
+  const executionActionIds = ["editor.contextMenu.executeScriptFromHere", "toolbar.executeAllSql"];
+  const executionActions = executionActionIds.flatMap((id) => {
+    const action = secondary.find((item) => item.sidebarActionId === id);
+    return action ? [action] : [];
+  });
+  if (executionActions.length > 0) {
+    const executionActionIdSet = new Set(executionActions.map((item) => item.sidebarActionId));
+    const remaining = secondary.filter((item) => !executionActionIdSet.has(item.sidebarActionId));
+    if (remaining.length > 0 && !remaining[remaining.length - 1]?.separator) remaining.push({ label: "", separator: true });
+    secondary.splice(0, secondary.length, ...remaining, ...executionActions);
+  }
+
+  return result;
+}
 
 /** Shared by the tree and database/object browsers; execution stays with each owner. */
 export function useSidebarMenuPresentation() {
@@ -21,10 +50,11 @@ export function useSidebarMenuPresentation() {
     const scope = sidebarMenuScope(type);
     if (!scope) return originalItems;
     const full = settings.editorSettings.sidebarMenuLayout === "full";
-    const items = buildSidebarMenuLayout(originalItems, scope, settings.editorSettings.sidebarMenuLayout, settings.editorSettings.sidebarMenuPinnedActions?.[scope] ?? [], t, {
+    let items = buildSidebarMenuLayout(originalItems, scope, settings.editorSettings.sidebarMenuLayout, settings.editorSettings.sidebarMenuPinnedActions?.[scope] ?? [], t, {
       hiddenPrimaryIds: settings.editorSettings.sidebarMenuHiddenPrimaryActions?.[scope],
       order: settings.editorSettings.sidebarMenuOrder?.[scope],
     });
+    if (scope === "sql-editor" && !full) items = collapseSqlEditorMenuGroups(items, t);
     items.push({ label: "", separator: true });
     if (!full)
       items.push({

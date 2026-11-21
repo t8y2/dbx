@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
@@ -52,20 +52,38 @@ const layout: SidebarLayout = {
   order: [{ type: "group", id: "g1", children: [{ type: "connection", id: "c1" }] }],
 };
 
-async function mountPicker(extraConnections: ConnectionConfig[] = []) {
+async function mountPicker(extraConnections: ConnectionConfig[] = [], customTrigger = false) {
   const container = document.createElement("div");
   document.body.append(container);
-  const app = createApp(ConnectionTreeSelect, {
+  const state = reactive({
     modelValue: "",
-    connections: [...connections, ...extraConnections],
-    layout,
-    placeholder: "Select connection",
-    searchPlaceholder: "Search connections",
-    emptyText: "No connections",
+    connections: [...connections, ...extraConnections].map((connection) => ({ ...connection })),
+  });
+  const app = createApp({
+    render: () =>
+      h(
+        ConnectionTreeSelect,
+        {
+          ...state,
+          layout,
+          placeholder: "Select connection",
+          searchPlaceholder: "Search connections",
+          emptyText: "No connections",
+          "onUpdate:modelValue": (value: string) => (state.modelValue = value),
+        },
+        customTrigger ? { "trigger-label": ({ label }: { label: string }) => h("strong", label) } : undefined,
+      ),
   });
   mountedApps.push(app);
   app.mount(container);
   await nextTick();
+  return { container, state };
+}
+
+function cssBackgroundColor(color: string) {
+  const element = document.createElement("span");
+  element.style.backgroundColor = color;
+  return element.style.backgroundColor;
 }
 
 async function setSearchText(value: string) {
@@ -89,6 +107,72 @@ afterEach(() => {
 });
 
 describe("ConnectionTreeSelect search collapse behavior", () => {
+  it.each(["red", "hsl(0, 100%, 50%)", "#ff000080", "rgba(255, 0, 0, 0.5)"])("preserves custom CSS color %s in the row and selected trigger", async (color) => {
+    const { container, state } = await mountPicker([{ ...connections[0], id: "custom", color }]);
+    const row = container.querySelector<HTMLButtonElement>('[data-picker-connection="custom"]')!;
+    const trigger = container.querySelector<HTMLButtonElement>("button")!;
+    const expected = cssBackgroundColor(color);
+    expect(expected).not.toBe("");
+
+    row.click();
+    await nextTick();
+    expect(state.modelValue).toBe("custom");
+    for (const element of [row, trigger]) {
+      expect(element.querySelector<HTMLElement>("[data-connection-color]")?.style.backgroundColor).toBe(expected);
+    }
+
+    // Saving a connection replaces its config in the store instead of mutating it.
+    state.connections = state.connections.map((connection) => (connection.id === "custom" ? { ...connection, color: undefined } : connection));
+    await nextTick();
+    for (const element of [row, trigger]) {
+      expect(element.querySelector("[data-connection-color]")).toBeNull();
+      expect(element.classList.contains("dbx-connection-picker-colored")).toBe(false);
+      expect(element.style.getPropertyValue("--connection-picker-background")).toBe("");
+    }
+  });
+
+  it.each([false, true])("syncs configured colors while switching and editing connections (custom trigger: %s)", async (customTrigger) => {
+    const { container, state } = await mountPicker(
+      [
+        { ...connections[0], id: "prod", name: "Production DB", color: "#ef4444" },
+        { ...connections[0], id: "test", name: "Test DB", color: "#22c55e" },
+      ],
+      customTrigger,
+    );
+    const row = (id: string) => container.querySelector<HTMLButtonElement>(`[data-picker-connection="${id}"]`)!;
+    const marker = (element: Element) => element.querySelector<HTMLElement>("[data-connection-color]");
+    const trigger = container.querySelector<HTMLButtonElement>("button")!;
+
+    expect(marker(trigger)).toBeNull();
+    expect(marker(row("c1"))).toBeNull();
+    expect(marker(row("prod"))?.style.backgroundColor).toBe(cssBackgroundColor("#ef4444"));
+    expect(marker(row("test"))?.style.backgroundColor).toBe(cssBackgroundColor("#22c55e"));
+
+    row("prod").click();
+    await nextTick();
+    expect(state.modelValue).toBe("prod");
+    expect(marker(trigger)?.style.backgroundColor).toBe(cssBackgroundColor("#ef4444"));
+    expect(trigger.textContent).toContain("Production DB");
+
+    state.connections.find((connection) => connection.id === "prod")!.color = "#abc";
+    await nextTick();
+    expect(marker(trigger)?.style.backgroundColor).toBe(cssBackgroundColor("#abc"));
+    expect(marker(row("prod"))?.style.backgroundColor).toBe(cssBackgroundColor("#abc"));
+
+    row("test").click();
+    await nextTick();
+    expect(marker(trigger)?.style.backgroundColor).toBe(cssBackgroundColor("#22c55e"));
+    state.connections.find((connection) => connection.id === "test")!.color = "";
+    await nextTick();
+    expect(marker(trigger)).toBeNull();
+    expect(marker(row("test"))).toBeNull();
+    expect(trigger.style.getPropertyValue("--connection-picker-background")).toBe("");
+
+    state.modelValue = "missing";
+    await nextTick();
+    expect(marker(trigger)).toBeNull();
+  });
+
   it("passes plugin identity and provider logo metadata to the shared icon", async () => {
     await mountPicker([{ ...connections[0], id: "plugin", name: "Plugin", db_type: "plugin", plugin_id: "sample.plugin", plugin_connection_provider: "sample.connection" }]);
     const icon = document.body.querySelector('[data-picker-connection="plugin"] [data-plugin-id]');

@@ -39,8 +39,17 @@ if (manifest.version !== baseVersion && manifest.version !== tagVersion && !prom
 // The promoted binary keeps its beta build version, which the stable manifest
 // no longer exposes. Record it so an installed beta build can recognise that
 // it is the build that was promoted.
+// Rerunning a promotion feeds the already-promoted manifest back in, and it
+// must stay byte-identical: dropping promoted_from would lose the build
+// provenance the installed beta uses to recognise itself.
+const alreadyPromoted =
+  channel === "stable" &&
+  promoted === "true" &&
+  manifest.is_promoted === true &&
+  typeof manifest.promoted_from === "string" &&
+  manifest.promoted_from.length > 0;
 if (promotesBetaBuild) manifest.promoted_from = manifest.version;
-else delete manifest.promoted_from;
+else if (!alreadyPromoted) delete manifest.promoted_from;
 manifest.version = channel === "beta" ? tagVersion : baseVersion;
 manifest.channel = channel;
 manifest.release_tag = tag;

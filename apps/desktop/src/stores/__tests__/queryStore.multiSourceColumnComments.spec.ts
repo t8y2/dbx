@@ -551,6 +551,57 @@ describe("queryStore multi-source result column comments", () => {
     expect(tab.resultColumnComments).toEqual([undefined, undefined]);
   });
 
+  it("resolves an aggregate label back to its single base column for display comments", async () => {
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "aggregation" });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["amount", "user_id"],
+        rows: [["10.00", 100]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT MAX(amount) AS amount, user_id FROM orders GROUP BY user_id");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    // The aggregate has no direct column reference, but with one source its
+    // label still identifies the physical column whose comment the user
+    // expects to see above the result.
+    expect(tab.resultColumnComments).toEqual(["订单金额", "下单用户"]);
+    expect(tab.resultColumnTypeLabels).toEqual(["varchar(64)", "varchar(64)"]);
+    // Display-only fallback: an aggregate must not gain a writable source
+    // identity that the SQL binder did not prove.
+    expect(tab.queryDisplaySourceColumns).toEqual([undefined, expect.objectContaining({ sourceColumn: "user_id" })]);
+  });
+
+  it("does not attribute an aggregate whose label does not name its input column", async () => {
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "aggregation" });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "user_id"],
+        rows: [[2, 100]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT COUNT(*) AS id, user_id FROM orders GROUP BY user_id");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    expect(tab.resultColumnComments).toEqual([undefined, "下单用户"]);
+  });
+
   it("keeps unsupported keyless row predicates read-only while surfacing comments", async () => {
     getConnectionConfig.mockReturnValue({ id: "trino-1", name: "Trino", db_type: "trino", database: "app", query_timeout_secs: 30 });
     analyzeEditableQueryEditability.mockResolvedValue({

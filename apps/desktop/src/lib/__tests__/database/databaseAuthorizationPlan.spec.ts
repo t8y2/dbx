@@ -164,6 +164,57 @@ describe("database authorization plans", () => {
     expect(authorizationPlanSql(plan)).toContain("GRANT ALL PRIVILEGES ON `app-db`.* TO 'app'@'%';");
   });
 
+  it.each([
+    ["readOnly", "SELECT_PRIV"],
+    ["dml", "SELECT_PRIV, LOAD_PRIV"],
+    ["ddl", "ALTER_PRIV, CREATE_PRIV, DROP_PRIV"],
+    ["readWrite", "SELECT_PRIV, LOAD_PRIV, ALTER_PRIV, CREATE_PRIV, DROP_PRIV, SHOW_VIEW_PRIV"],
+  ] as const)("uses the Doris %s preset for database-wide grants", (preset, expectedPrivileges) => {
+    const plan = buildCreateUserAuthorizationPlan({
+      provider: dorisUserAdminProvider,
+      principal: { user: "reporter", host: "%", password: "fixture-password" },
+      accountType: "standard",
+      databases: [{ database: "analytics", preset }],
+    });
+
+    expect(plan.steps.map((step) => step.operation)).toEqual(["createUser", "grantDatabase"]);
+    expect(plan.steps[1]?.sql).toBe(`GRANT ${expectedPrivileges} ON \`internal\`.\`analytics\`.* TO 'reporter'@'%';`);
+  });
+
+  it("grants valid custom Doris privileges only on the selected tables", () => {
+    const plan = buildCreateUserAuthorizationPlan({
+      provider: dorisUserAdminProvider,
+      principal: { user: "reporter", host: "%", password: "fixture-password" },
+      accountType: "standard",
+      databases: [{ database: "analytics", preset: "custom", privileges: [" select_priv ", "LOAD_PRIV", "SELECT_PRIV", "INSERT", "ADMIN_PRIV"], tables: [{ name: "orders" }, { name: "audit`log" }, { name: "orders" }] }],
+    });
+
+    expect(plan.steps.slice(1).map((step) => step.sql)).toEqual(["GRANT SELECT_PRIV, LOAD_PRIV ON `internal`.`analytics`.`orders` TO 'reporter'@'%';", "GRANT SELECT_PRIV, LOAD_PRIV ON `internal`.`analytics`.`audit``log` TO 'reporter'@'%';"]);
+  });
+
+  it("does not grant access for empty Doris table or privilege selections", () => {
+    const plan = buildCreateUserAuthorizationPlan({
+      provider: dorisUserAdminProvider,
+      principal: { user: "reporter", host: "%", password: "fixture-password" },
+      accountType: "standard",
+      databases: [
+        { database: "analytics", preset: "readOnly", tables: [] },
+        { database: "audit", preset: "custom", privileges: ["INSERT"], tables: [{ name: "orders" }] },
+      ],
+    });
+
+    expect(plan.steps.map((step) => step.operation)).toEqual(["createUser"]);
+  });
+
+  it("generates provider-specific administrator grants for Doris and MySQL", () => {
+    const input = { principal: { user: "operator", host: "%", password: "fixture-password" }, accountType: "admin" as const, databases: [] };
+    const doris = buildCreateUserAuthorizationPlan({ ...input, provider: dorisUserAdminProvider });
+    const mysql = buildCreateUserAuthorizationPlan({ ...input, provider: mysqlUserAdminProvider });
+
+    expect(doris.steps.slice(1).map((step) => step.sql)).toEqual(["GRANT ADMIN_PRIV ON *.*.* TO 'operator'@'%';"]);
+    expect(mysql.steps.slice(1).map((step) => step.sql)).toEqual(["GRANT ALL PRIVILEGES ON *.* TO 'operator'@'%' WITH GRANT OPTION;"]);
+  });
+
   it("keeps creation plans usable when authorization capabilities are unavailable", () => {
     const createOnlyProvider = { ...mysqlUserAdminProvider, grantPrivilegesSql: undefined };
     const databasePlan = buildCreateDatabaseAuthorizationPlan({

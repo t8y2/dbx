@@ -133,6 +133,84 @@ describe("sqlFormatter", () => {
     expect(sqlFormatDialectForDbType("dameng")).toBe("dameng");
   });
 
+  it("maps Doris and StarRocks to the MySQL formatter dialect", () => {
+    // Both speak MySQL-protocol SQL, so they reuse the MySQL grammar instead
+    // of the generic one (issue #15321).
+    expect(sqlFormatDialectForDbType("doris")).toBe("mysql");
+    expect(sqlFormatDialectForDbType("starrocks")).toBe("mysql");
+  });
+
+  it("formats a Doris CREATE TABLE with FIXED RANGE partitions (issue #15321)", async () => {
+    // Doris FIXED RANGE partitions list their bounds as `VALUES [(...), (...))`
+    // (the list opens with `[` and closes with `)`). Neither the MySQL nor
+    // the generic grammar parses that shape, so formatting used to throw and
+    // the editor reported "SQL 格式化失败". The bracket lists are masked
+    // before formatting and restored byte-for-byte afterwards.
+    const sql =
+      'CREATE TABLE IF NOT EXISTS example_db.my_table (`user_id` LARGEINT NOT NULL COMMENT "user id", `date` DATE NOT NULL COMMENT "date", `city` VARCHAR(20) COMMENT "city", `age` SMALLINT COMMENT "age", `cost` BIGINT SUM DEFAULT "0" COMMENT "cost", `max_dwell_time` INT MAX DEFAULT "0" COMMENT "max") ENGINE=OLAP AGGREGATE KEY(`user_id`, `date`, `city`, `age`) COMMENT "test" PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES [("2020-01-01"), ("2020-02-01")), PARTITION p202002 VALUES [("2020-02-01"), ("2020-03-01"))) DISTRIBUTED BY HASH(`user_id`) BUCKETS 10 PROPERTIES ("replication_allocation" = "tag.location.default: 1");';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain('VALUES [("2020-01-01"), ("2020-02-01"))');
+    expect(formatted).toContain('VALUES [("2020-02-01"), ("2020-03-01"))');
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+
+    // The editor path used to swallow the parse error and return the input
+    // unchanged; it must now return formatted SQL.
+    const edited = await formatSqlForEditing(sql, sqlFormatDialectForDbType("doris"));
+    expect(edited).not.toBe(sql);
+    expect(edited).toContain('VALUES [("2020-01-01"), ("2020-02-01"))');
+    expect(edited).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
+  it("keeps a block comment between VALUES and a Doris bracket list (issue #15321)", async () => {
+    // A comment between the keyword and the bracket used to leave the range
+    // unprotected, so formatting failed instead of masking the list.
+    const sql = 'CREATE TABLE IF NOT EXISTS example_db.my_table (`date` DATE NOT NULL COMMENT "date") ENGINE=OLAP PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES /* bounds */ [("2020-01-01"), ("2020-02-01"))) DISTRIBUTED BY HASH(`date`) BUCKETS 10;';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(formatted).toContain("/* bounds */");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+
+    const edited = await formatSqlForEditing(sql, sqlFormatDialectForDbType("doris"));
+    expect(edited).not.toBe(sql);
+    expect(edited).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(edited).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
+  it("keeps a `#` comment with a paren inside a Doris bracket list (issue #15321)", async () => {
+    // The `)` inside the `#` comment used to be mistaken for the list closer,
+    // truncating the masked range and failing the format.
+    const sql = 'CREATE TABLE IF NOT EXISTS example_db.my_table (`date` DATE NOT NULL COMMENT "date") ENGINE=OLAP PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES [(1), # close )\n (2))) DISTRIBUTED BY HASH(`date`) BUCKETS 10;';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain("[(1), # close )\n (2))");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
+  it("does not treat MySQL subtraction as a comment when protecting Doris partitions", async () => {
+    const sql = "CREATE TABLE t (k INT) PARTITION BY RANGE(k) (PARTITION p VALUES [(1--1), (2)));";
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+
+    expect(formatted).toContain("[(1--1), (2))");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
+  it("keeps comments with parentheses across multiple Doris partitions (issue #15321)", async () => {
+    // A line comment between VALUES and `[` on one partition and a block
+    // comment with parens inside the range on another must both survive,
+    // with each range restored byte-for-byte.
+    const sql =
+      'CREATE TABLE IF NOT EXISTS example_db.my_table (`date` DATE NOT NULL COMMENT "date") ENGINE=OLAP PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES -- bounds (2020)\n [("2020-01-01"), ("2020-02-01")), PARTITION p202002 VALUES [("2020-02-01"), /* note (x) */ ("2020-03-01"))) DISTRIBUTED BY HASH(`date`) BUCKETS 10;';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(formatted).toContain('[("2020-02-01"), /* note (x) */ ("2020-03-01"))');
+    expect(formatted).toContain("-- bounds (2020)");
+    expect(formatted).toContain("/* note (x) */");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
   it("maps DuckDB to its scoped formatter dialect", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });
@@ -927,11 +1005,44 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
   });
 
   it("reproduces a Doris/generic query", async () => {
-    // Doris and StarRocks have no dedicated formatter dialect, so they exercise
-    // the generic grammar plus its PostgreSQL retry.
+    // The generic grammar is requested explicitly here, so this query still
+    // exercises it plus its PostgreSQL retry. Doris connections themselves
+    // now map to the MySQL dialect (issue #15321).
     const sql = "select `db`.`t`.`k`, sum(`db`.`t`.`v`) as total from `db`.`t` where `db`.`t`.`dt` = '2024-01-01' group by `db`.`t`.`k` having total > 10 order by total desc limit 20;";
 
     expect(await formatSqlText(sql, "generic", classic)).toBe(lines("SELECT", "  `db`.`t`.`k`,", "  sum(`db`.`t`.`v`) AS total", "FROM", "  `db`.`t`", "WHERE", "  `db`.`t`.`dt` = '2024-01-01'", "GROUP BY", "  `db`.`t`.`k`", "HAVING", "  total > 10", "ORDER BY", "  total DESC", "LIMIT", "  20;"));
+  });
+
+  it("reproduces a Doris CREATE TABLE with FIXED RANGE partitions (issue #15321)", async () => {
+    const sql =
+      'CREATE TABLE IF NOT EXISTS example_db.my_table (`user_id` LARGEINT NOT NULL COMMENT "user id", `date` DATE NOT NULL COMMENT "date", `city` VARCHAR(20) COMMENT "city", `age` SMALLINT COMMENT "age", `cost` BIGINT SUM DEFAULT "0" COMMENT "cost", `max_dwell_time` INT MAX DEFAULT "0" COMMENT "max") ENGINE=OLAP AGGREGATE KEY(`user_id`, `date`, `city`, `age`) COMMENT "test" PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES [("2020-01-01"), ("2020-02-01")), PARTITION p202002 VALUES [("2020-02-01"), ("2020-03-01"))) DISTRIBUTED BY HASH(`user_id`) BUCKETS 10 PROPERTIES ("replication_allocation" = "tag.location.default: 1");';
+
+    // The bracketed value lists are restored verbatim; the `VALUES` line
+    // breaks and the trailing-comma placement are sql-formatter's own
+    // classic layout for this shape, not DBX post-processing.
+    expect(await formatSqlText(sql, sqlFormatDialectForDbType("doris"), classic)).toBe(
+      lines(
+        "CREATE TABLE IF NOT EXISTS example_db.my_table (",
+        '  `user_id` LARGEINT NOT NULL COMMENT "user id",',
+        '  `date` DATE NOT NULL COMMENT "date",',
+        '  `city` VARCHAR(20) COMMENT "city",',
+        '  `age` SMALLINT COMMENT "age",',
+        '  `cost` BIGINT SUM DEFAULT "0" COMMENT "cost",',
+        '  `max_dwell_time` INT MAX DEFAULT "0" COMMENT "max"',
+        ') ENGINE = OLAP AGGREGATE KEY (`user_id`, `date`, `city`, `age`) COMMENT "test"',
+        "PARTITION BY",
+        "  RANGE (`date`) (",
+        "    PARTITION p202001",
+        "    VALUES",
+        '      [("2020-01-01"), ("2020-02-01")),',
+        "      PARTITION p202002",
+        "    VALUES",
+        '      [("2020-02-01"), ("2020-03-01"))',
+        "  ) DISTRIBUTED BY HASH (`user_id`) BUCKETS 10 PROPERTIES (",
+        '    "replication_allocation" = "tag.location.default: 1"',
+        "  );",
+      ),
+    );
   });
 
   it("reproduces a short statement without collapsing it", async () => {

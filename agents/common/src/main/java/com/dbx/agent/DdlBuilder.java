@@ -85,6 +85,24 @@ public final class DdlBuilder {
         boolean includeColumnComments,
         String tableComment
     ) {
+        return buildTableDdl(
+            schema, table, columns, indexes, foreignKeys, checkConstraints,
+            useBacktick, includeColumnComments, tableComment, false
+        );
+    }
+
+    public static String buildTableDdl(
+        String schema,
+        String table,
+        List<ColumnInfo> columns,
+        List<IndexInfo> indexes,
+        List<ForeignKeyInfo> foreignKeys,
+        List<CheckConstraintInfo> checkConstraints,
+        boolean useBacktick,
+        boolean includeColumnComments,
+        String tableComment,
+        boolean defaultBeforeNotNull
+    ) {
         String tableRef = qualifiedName(schema, table, useBacktick);
         List<String> columnLines = new ArrayList<>();
         for (ColumnInfo column : columns) {
@@ -97,13 +115,16 @@ public final class DdlBuilder {
             if (identityClause != null) {
                 line.append(" ").append(identityClause);
             }
-            if (!column.getIs_nullable()) {
+            if (!column.getIs_nullable() && !defaultBeforeNotNull) {
                 line.append(" NOT NULL");
             }
             String columnDefault = sanitizeDefault(column.getColumn_default());
             if (notBlank(columnDefault)) {
                 line.append(" DEFAULT ");
                 line.append(columnDefault);
+            }
+            if (!column.getIs_nullable() && defaultBeforeNotNull) {
+                line.append(" NOT NULL");
             }
             columnLines.add(line.toString());
         }

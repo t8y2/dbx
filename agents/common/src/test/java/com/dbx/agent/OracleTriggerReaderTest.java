@@ -60,6 +60,23 @@ class OracleTriggerReaderTest {
     }
 
     @Test
+    void listsSchemaLevelTriggerObjectsForTheTreeGroup() throws Exception {
+        try (Connection connection = fixture()) {
+            OracleTriggerReader reader = new OracleTriggerReader(connection, "oceanbase-oracle");
+            List<ObjectInfo> objects = reader.listSchemaObjects(OWNER);
+            assertEquals(1, objects.size());
+            ObjectInfo trigger = objects.get(0);
+            assertEquals("TRIGGER", trigger.getObject_type());
+            assertEquals(NAME, trigger.getName());
+            assertEquals(OWNER, trigger.getSchema());
+            assertNotNull(trigger.getTrigger());
+            assertEquals(PARENT_OWNER, trigger.getParent_schema());
+            assertEquals(" Parent ", trigger.getParent_name());
+            assertFalse(trigger.getValid());
+        }
+    }
+
+    @Test
     void missingColumnsStayUnknownRatherThanDisabledOrValid() throws Exception {
         try (Connection connection = fixture()) {
             connection.createStatement().execute("ALTER TABLE ALL_TRIGGERS DROP COLUMN STATUS");

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { formatFilterRawValue, formatFilterRawValues, parseFilterValue, parseFilterValues } from "@/lib/dataGrid/dataGridColumnFilter";
+import { filterModeIsSupportedForDatabase, filterModeNeedsValue, filterModeUsesList, filterModeUsesRange, formatFilterRawValue, formatFilterRawValues, parseFilterValue, parseFilterValues } from "@/lib/dataGrid/dataGridColumnFilter";
 import { dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 
 describe("data grid filter candidate value serialization", () => {
   it("keeps simple single values readable and quotes surrounding whitespace", () => {
@@ -41,6 +42,29 @@ describe("data grid filter candidate value serialization", () => {
     expect(dataGridNullSuggestionFilterMode("not-like")).toBe("is-not-null");
   });
 
+  it("keeps the negation when NULL is picked for a negated operator (#14365)", () => {
+    // Picking NULL out of the value list under "does not start with" must ask for
+    // NOT NULL rows; it used to fall through to `is-null` and invert the filter.
+    expect(dataGridNullSuggestionFilterMode("not-begins-with")).toBe("is-not-null");
+    expect(dataGridNullSuggestionFilterMode("not-ends-with")).toBe("is-not-null");
+    // Positive operators keep asking for NULL rows.
+    expect(dataGridNullSuggestionFilterMode("begins-with")).toBe("is-null");
+    expect(dataGridNullSuggestionFilterMode("ends-with")).toBe("is-null");
+  });
+
+  it("decides the NULL mapping for every filter mode without falling through", () => {
+    // Exhaustive over the union: a new mode fails the type check here until it is
+    // listed, so it cannot silently inherit the positive `is-null` branch again.
+    const negated = ["not-equals", "not-like", "not-between", "not-begins-with", "not-ends-with"] as const;
+    const positive = ["equals", "like", "between", "begins-with", "ends-with", "is-null", "is-not-null", "is-blank", "is-not-blank", "less-than", "less-than-or-equal", "greater-than", "greater-than-or-equal", "in", "not-in"] as const;
+    type MissingMode = Exclude<DataGridContextFilterMode, (typeof negated)[number] | (typeof positive)[number]>;
+    const everyModeIsListed: [MissingMode] extends [never] ? true : never = true;
+    expect(everyModeIsListed).toBe(true);
+
+    for (const mode of negated) expect(dataGridNullSuggestionFilterMode(mode)).toBe("is-not-null");
+    for (const mode of positive) expect(dataGridNullSuggestionFilterMode(mode)).toBe("is-null");
+  });
+
   it("toggles all currently displayed candidates without removing hidden selections", () => {
     const options = [
       { key: "str:a", label: "a", value: "a", count: 2 },
@@ -57,5 +81,15 @@ describe("data grid filter candidate value serialization", () => {
 
     const cleared = toggleAllDataGridDistinctValueOptions(selected, options);
     expect([...cleared.entries()]).toEqual([["str:manual", "manual"]]);
+  });
+
+  it("treats the negated prefix/suffix modes as supported value filters (#14365)", () => {
+    for (const mode of ["not-begins-with", "not-ends-with"] as const) {
+      expect(filterModeIsSupportedForDatabase(mode, "postgres")).toBe(true);
+      expect(filterModeIsSupportedForDatabase(mode, "mysql")).toBe(true);
+      expect(filterModeNeedsValue(mode)).toBe(true);
+      expect(filterModeUsesList(mode)).toBe(false);
+      expect(filterModeUsesRange(mode)).toBe(false);
+    }
   });
 });

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'app.dbx'
-version = '0.1.51'
+version = '0.1.54'
 
 java {
     toolchain {
@@ -42,7 +42,7 @@ dependencies {
     runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
 
     testImplementation 'com.h2database:h2:2.2.224'
-    testRuntimeOnly 'org.duckdb:duckdb_jdbc:2.0.0.0'
+    testRuntimeOnly 'org.duckdb:duckdb_jdbc:2.0.1.0'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.14.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

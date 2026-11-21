@@ -101,12 +101,35 @@ public final class CacheAgent extends ConfiguredJdbcAgent {
             try {
                 return readTables(connection, schema, normalized, tableTypes);
             } catch (SQLException error) {
-                if (error.getErrorCode() != -30 && !"42S02".equals(error.getSQLState())) {
+                if (!isInformationSchemaUnavailable(error)) {
                     throw error;
                 }
                 return StandardJdbcMetadata.INSTANCE.listTables(connection, CACHE_PROFILE, configuredDatabase, schema, normalized);
             }
         });
+    }
+
+    /**
+     * Caché reports a missing INFORMATION_SCHEMA as "Table or View not found".
+     * Older drivers leave {@link SQLException#getErrorCode()} at 0 and the
+     * SQLSTATE empty, so the SQLCODE only shows up in the message:
+     * {@code [SQLCODE: <-30>:<Table or View not found>] ... [%msg:<Table
+     * 'INFORMATION_SCHEMA.TABLES' not found>]}. Match that text as well,
+     * otherwise those servers surface the raw error instead of falling back to
+     * plain JDBC metadata (#15090).
+     */
+    static boolean isInformationSchemaUnavailable(SQLException error) {
+        if (error.getErrorCode() == -30 || "42S02".equals(error.getSQLState())) {
+            return true;
+        }
+        String message = error.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("sqlcode: <-30>")
+            || normalized.contains("table or view not found")
+            || (normalized.contains("information_schema") && normalized.contains("not found"));
     }
 
     private static List<TableInfo> readTables(

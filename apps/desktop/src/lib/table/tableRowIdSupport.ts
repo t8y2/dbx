@@ -41,6 +41,11 @@ export function shouldRetryWithoutRowIdLocator(sql: string, result: QueryResult 
   return sql.includes(DBX_ROWID_COLUMN) && !!result && isQueryExecutionErrorResult(result);
 }
 
+/** Match explicit PostgreSQL-compatible engine errors, excluding transport failures. */
+export function isPostgresTupleLocatorRejection(message: string): boolean {
+  return /\bsystem column ["']?(?:tableoid|ctid|xmin)["']? is not supported\b/i.test(message) || /\bvariable (?:tableoid|ctid|xmin)\b[^\r\n]*can't be found in query translation/i.test(message);
+}
+
 /** Only a successful fallback keeps the flag; a failed one shows the real error. */
 export function shouldKeepRowIdLocatorDisabled(result: QueryResult | undefined | null): boolean {
   return !!result && !isQueryExecutionErrorResult(result);

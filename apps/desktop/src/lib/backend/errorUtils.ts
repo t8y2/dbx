@@ -193,7 +193,13 @@ export function normalizeBackendError(error: unknown): BackendError | null {
 export function isManualTransactionSessionExpired(error: unknown): boolean {
   if (normalizeBackendError(error)?.code === MANUAL_TRANSACTION_SESSION_EXPIRED_CODE) return true;
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-  return message?.startsWith("Transaction session not found or expired;") === true || message === "Transaction was auto-rolled back due to 5 minutes of inactivity";
+  return (
+    message?.startsWith("Transaction session not found or expired;") === true ||
+    // Current backend idle-rollback message, plus the pre-0.6.70 wording that
+    // hardcoded the five-minute timeout.
+    message === "Transaction was auto-rolled back due to inactivity" ||
+    message === "Transaction was auto-rolled back due to 5 minutes of inactivity"
+  );
 }
 
 export function isUnsupportedManualTransactionMethod(error: unknown): boolean {

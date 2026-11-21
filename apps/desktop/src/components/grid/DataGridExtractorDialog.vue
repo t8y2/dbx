@@ -63,7 +63,7 @@ const draftExtractor = computed<DataGridCopyExtractorId | null>(() => (selectedF
 const extractorCategory = computed(() => (draftExtractor.value ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[draftExtractor.value].category : null));
 const isDsv = computed(() => extractorCategory.value === "delimited");
 const supportsCsvOptions = computed(() => draftExtractor.value === "csv" || draftExtractor.value === "csv-with-headers" || draftExtractor.value === "dsv" || draftExtractor.value === "tsv" || draftExtractor.value === "tsv-with-headers");
-const isSql = computed(() => draftExtractor.value === "sql-inserts" || draftExtractor.value === "sql-deletes-inserts" || draftExtractor.value === "sql-updates");
+const isSql = computed(() => draftExtractor.value === "sql-inserts" || draftExtractor.value === "sql-deletes" || draftExtractor.value === "sql-deletes-inserts" || draftExtractor.value === "sql-updates");
 const isJson = computed(() => extractorCategory.value === "json");
 const isDbunit = computed(() => draftExtractor.value === "dbunit");
 const isPhp = computed(() => draftExtractor.value === "php");

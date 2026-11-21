@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, shallowRef } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
+import type { HostNode } from "./vueHostHarness";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
 const settingsMock = vi.hoisted(() => ({ store: null as any }));
@@ -1587,6 +1588,88 @@ describe("DataGridQueryControls", () => {
     expect(popoverContent.props["collision-padding"]).toBe(8);
   });
 
+  it("summarizes complete structured rules per field and drops one from its × (#14969)", async () => {
+    const removeRule = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["order_no", "status"],
+      conditionColumns: ["order_no", "status"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: true,
+      filterButtonCount: 2,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [
+        { id: "r1", columnName: "order_no", mode: "equals", rawValue: "1001", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "status", mode: "between", rawValue: "1", rawEndValue: "9", conjunction: "AND" },
+        // An incomplete rule (no value yet) must not show up in the summary.
+        { id: "r3", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" },
+        // A disabled rule is not part of the active filter either.
+        { id: "r4", columnName: "order_no", mode: "equals", rawValue: "x", rawEndValue: "", conjunction: "AND", disabled: true },
+      ],
+      filteredColumns: ["order_no", "status"],
+      modeOptions: [
+        { value: "equals", labelKey: "grid.filterBuilderEquals" },
+        { value: "between", labelKey: "grid.filterBuilderBetween" },
+      ],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onRemoveRule: removeRule,
+    });
+
+    expect(hostText(mounted.root)).toContain("grid.structuredFiltersActive");
+    expect(hostText(mounted.root)).toContain("order_no");
+    expect(hostText(mounted.root)).toContain("grid.filterBuilderEquals");
+    expect(hostText(mounted.root)).toContain("1001");
+    // Range conditions summarize both bounds.
+    expect(hostText(mounted.root)).toContain("1 ~ 9");
+
+    // Each field row's × removes exactly that rule.
+    const fieldRows = findAll(mounted.root, (node) => node.type === "div" && String(node.props.class ?? "").includes("border-sky-500/10"));
+    expect(fieldRows).toHaveLength(2);
+    const dropButton = findOne(fieldRows[0], (node) => node.type === "button");
+    dispatch(dropButton, "click");
+    expect(removeRule).toHaveBeenCalledExactlyOnceWith("r1");
+  });
+
+  it("omits the structured summary block when no rule is active (#14969)", () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "grid.filterBuilderEquals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    expect(hostText(mounted.root)).not.toContain("grid.structuredFiltersActive");
+  });
+
   it("forwards database value suggestions in the quick filter popover", () => {
     const openValueSuggestions = vi.fn();
     const closeValueSuggestions = vi.fn();
@@ -1743,6 +1826,75 @@ describe("DataGridQueryControls", () => {
     expect(updateFilterBuilderOpen).toHaveBeenCalledWith(true);
     expect(ensureRule).toHaveBeenCalledOnce();
   });
+
+  it("hides order by pane and expands where pane when showOrderBy is false", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      showOrderBy: false,
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    const wherePane = findOne(mounted.root, (node) => String(node.props.class).includes("flex flex-1 items-center gap-1"));
+    expect(wherePane.props.style).toEqual({ flex: "1 1 100%", width: "100%" });
+    const resizeButton = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "Resize WHERE and ORDER BY");
+    expect(resizeButton).toHaveLength(0);
+    const sortButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderTitle");
+    expect(sortButtons).toHaveLength(0);
+    const orderInputs = findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridConditionEditor" && node.props.kind === "orderBy");
+    expect(orderInputs).toHaveLength(0);
+  });
+
+  it("applies custom wherePaneRatio to where pane style", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      showOrderBy: true,
+      wherePaneRatio: 0.6,
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    const wherePane = findOne(mounted.root, (node) => String(node.props.class).includes("flex flex-1 items-center gap-1"));
+    expect(String(wherePane.props.style?.flex)).toContain("60%");
+  });
 });
 
 describe("DataGridDistinctValuePopover", () => {
@@ -1889,6 +2041,56 @@ describe("DataGridFilterWorkbench", () => {
 
     await mounted.setProps({ rules: [{ id: "r1", columnName: "status", mode: "in", rawValue: "", rawEndValue: "", conjunction: "AND" }] });
     expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
+  });
+
+  it("shows active local column filters in the conditions workbench and forwards clears", () => {
+    const clearLocalFilter = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [],
+      columns: ["department"],
+      filteredColumns: [],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      hasLocalColumnFilters: true,
+      localFilterCount: 1,
+      localFilterSummaries: [{ columnIndex: 0, columnName: "department", values: ["Engineering", "HR"], hiddenValueCount: 3 }],
+      onClearLocalFilter: clearLocalFilter,
+    });
+
+    const summary = findOne(mounted.root, (node) => node.props["data-grid-local-filter-summary"] === "");
+    expect(hostText(summary)).toContain("grid.localFiltersActive");
+    expect(hostText(summary)).toContain("department");
+    expect(hostText(summary)).toContain("Engineering");
+    expect(hostText(summary)).toContain("grid.localFilterMoreValues");
+
+    const withinSummary = (node: HostNode) => {
+      let current: HostNode | null = node;
+      while (current) {
+        if (current.props["data-grid-local-filter-summary"] === "") return true;
+        current = current.parent;
+      }
+      return false;
+    };
+    const clearColumnButton = findOne(mounted.root, (node) => node.type === "button" && node.props.title === "grid.clearFilter" && withinSummary(node));
+    dispatch(clearColumnButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith(0);
+    const clearAllButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearLocalFiltersShort");
+    dispatch(clearAllButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith();
+  });
+
+  it("hides the local filter summary when no local column filters are active", () => {
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [],
+      columns: ["department"],
+      filteredColumns: [],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+    });
+
+    expect(findAll(mounted.root, (node) => node.props["data-grid-local-filter-summary"] === "")).toHaveLength(0);
   });
 
   it("exposes value suggestions in the reusable popover builder when provided", () => {
@@ -2048,6 +2250,42 @@ describe("DataGridFilterWorkbench", () => {
 });
 
 describe("DataGridTextFilterWorkbench", () => {
+  it("shows active local column filters in the text workbench and forwards clears", () => {
+    const clearLocalFilter = vi.fn();
+    const mounted = mountComponent(DataGridTextFilterWorkbench, {
+      height: 168,
+      sqlPreview: "",
+      rules: [],
+      columns: ["department"],
+      filteredColumns: [],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      hasLocalColumnFilters: true,
+      localFilterCount: 1,
+      localFilterSummaries: [{ columnIndex: 0, columnName: "department", values: ["Engineering"], hiddenValueCount: 0 }],
+      onClearLocalFilter: clearLocalFilter,
+    });
+
+    const summary = findOne(mounted.root, (node) => node.props["data-grid-local-filter-summary"] === "");
+    expect(hostText(summary)).toContain("grid.localFiltersActive");
+    expect(hostText(summary)).toContain("department");
+
+    const withinSummary = (node: HostNode) => {
+      let current: HostNode | null = node;
+      while (current) {
+        if (current.props["data-grid-local-filter-summary"] === "") return true;
+        current = current.parent;
+      }
+      return false;
+    };
+    const clearColumnButton = findOne(mounted.root, (node) => node.type === "button" && node.props.title === "grid.clearFilter" && withinSummary(node));
+    dispatch(clearColumnButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith(0);
+    const clearAllButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearLocalFiltersShort");
+    dispatch(clearAllButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith();
+  });
+
   it("shows and forwards database value suggestions in the text filter panel", async () => {
     const openValueSuggestions = vi.fn();
     const closeValueSuggestions = vi.fn();

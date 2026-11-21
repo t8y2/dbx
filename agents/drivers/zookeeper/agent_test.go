@@ -34,7 +34,7 @@ func TestHandshakeAndRPCFailures(t *testing.T) {
 		t.Fatalf("handshake response = %#v, shutdown=%v", response, shutdown)
 	}
 	handshake, ok := response.Result.(handshakeResult)
-	if !ok || handshake.ProtocolVersion != 1 || handshake.AgentProtocolVersion != 1 || strings.Join(handshake.Capabilities, ",") != "connect,test_connection,connection_info,kv" {
+	if !ok || handshake.ProtocolVersion != 1 || handshake.AgentProtocolVersion != 1 || strings.Join(handshake.Capabilities, ",") != "connect,test_connection,connection_info,kv,zookeeper_endpoint_routes" {
 		t.Fatalf("unexpected handshake: %#v", response.Result)
 	}
 

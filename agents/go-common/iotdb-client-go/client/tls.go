@@ -20,6 +20,7 @@
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -63,6 +64,61 @@ func newTransport(host string, port string, connectionTimeoutInMs int, tlsConfig
 		base = thrift.NewTSSLSocketConf(hostPort, conf)
 	}
 
+	return thrift.NewTFramedTransportConf(base, conf), nil
+}
+
+// newTransportWithContext dials the endpoint with ctx and returns an already
+// connected transport. newTransport dials lazily inside Open, where a
+// cancellation cannot reach net.Dial or the TLS handshake; the transparent
+// reconnect path uses this variant so a cancelled query stops promptly
+// (#13935 review round 3).
+func newTransportWithContext(ctx context.Context, host string, port string, connectionTimeoutInMs int, tlsConfig *TLSConfig) (thrift.TTransport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	conf := &thrift.TConfiguration{
+		ConnectTimeout: time.Duration(connectionTimeoutInMs) * time.Millisecond,
+		MaxFrameSize:   thrift.DEFAULT_MAX_FRAME_SIZE,
+	}
+	dialTimeout := conf.ConnectTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, ctx.Err()
+		}
+		if dialTimeout <= 0 || remaining < dialTimeout {
+			dialTimeout = remaining
+		}
+	}
+	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, err
+	}
+	base := thrift.TTransport(thrift.NewTSocketFromConnConf(conn, conf))
+	if tlsConfig != nil {
+		cfg, err := buildTLSConfig(tlsConfig)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		if cfg.MinVersion == 0 {
+			// Match NewTSSLSocketConf's default instead of silently raising it.
+			cfg.MinVersion = tls.VersionTLS10
+		}
+		if cfg.ServerName == "" {
+			cfg.ServerName = host
+		}
+		tlsConn := tls.Client(conn, cfg)
+		if dialTimeout > 0 {
+			_ = tlsConn.SetDeadline(time.Now().Add(dialTimeout))
+		}
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+		base = thrift.NewTSSLSocketFromConnConf(tlsConn, conf)
+	}
 	return thrift.NewTFramedTransportConf(base, conf), nil
 }
 

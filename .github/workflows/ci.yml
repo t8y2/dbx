@@ -238,7 +238,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1097,6 +1097,8 @@ jobs:
           RUST_FEATURE_MODE: ""
           RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
+        # Avoid disk exhaustion when restoring the complete target cache for large Rust test groups.
+        if: matrix.group != 'drivers' && matrix.group != 'workspace'
         with:
           prefix-key: v1-rust-complete
           workspaces: "./ -> target"
@@ -1108,7 +1110,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1578,7 +1580,7 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
           tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
@@ -1629,6 +1631,15 @@ jobs:
           BINARY: ${{ matrix.binary }}
           RACE: ${{ matrix.race }}
         run: bash ../.github/scripts/ci-agent-go.sh "$DRIVER" "$BINARY" "$RACE"
+      - name: Setup Neo4j Windows-compatible Go
+        if: matrix.driver == 'neo4j-go'
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/neo4j-go/go.windows-legacy.sum
+      - name: Test Neo4j Windows-compatible build
+        if: matrix.driver == 'neo4j-go'
+        run: bash drivers/neo4j-go/build-windows-legacy.sh "$RUNNER_TEMP/dbx-agent-neo4j-windows-x64.exe"
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -1678,7 +1689,7 @@ jobs:
         if: matrix.driver == 'tdengine'
       - name: Install nextest
         if: matrix.driver == 'tdengine'
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
           tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache

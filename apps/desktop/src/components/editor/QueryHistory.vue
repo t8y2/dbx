@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
-import type { McpCallHistoryRequest, McpCallHistoryResource } from "@/lib/mcp/mcpCallHistory";
+import { mcpRequestSql, type McpCallHistoryRequest, type McpCallHistoryResource } from "@/lib/mcp/mcpCallHistory";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { CalendarClock, Check, Copy, Database, ListFilter, LoaderCircle, Maximize2, Minimize2, Minus, RefreshCw, RotateCcw, Search, Sparkles, Trash2, X } from "@lucide/vue";
@@ -65,6 +65,7 @@ const selectedDatabases = ref<HistoryDatabaseFilter[]>([]);
 const startDateInputRef = ref<HTMLInputElement | null>(null);
 const endDateInputRef = ref<HTMLInputElement | null>(null);
 const selectedEntry = ref<HistoryEntry | null>(null);
+const selectedMcpSql = computed(() => (selectedEntry.value ? mcpRequestSql(selectedEntry.value.mcp_request_json) : null));
 const isRollingBack = ref(false);
 const manualRollback = ref(false);
 const resolvingTransaction = ref(false);
@@ -894,6 +895,16 @@ onBeforeUnmount(() => {
             </template>
           </div>
           <div v-if="selectedEntry.source === 'mcp' || historyEntrySource(selectedEntry) === 'MCP'" class="space-y-2">
+            <div v-if="selectedMcpSql">
+              <div class="mb-1 flex items-center justify-between">
+                <div class="text-sm font-medium">SQL</div>
+                <Button variant="ghost" size="sm" class="h-7" @click="copyText(selectedMcpSql)">
+                  <Copy class="h-3.5 w-3.5" />
+                  {{ t("history.copy") }}
+                </Button>
+              </div>
+              <pre class="max-h-48 overflow-auto rounded border bg-muted/30 p-3 text-xs" v-html="highlight(selectedMcpSql)"></pre>
+            </div>
             <div class="mb-1 flex items-center justify-between">
               <div class="text-sm font-medium">{{ t("history.mcp.request") }}</div>
               <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('history.copy')" :aria-label="t('history.copy')" @click="copyText(selectedEntry.mcp_request_json || selectedEntry.sql || selectedEntry.details_json || '-')">

@@ -49,6 +49,10 @@ export async function collectSidebarRemoteSearchResults(options: {
         if (!options.signal.aborted && !published) publish(resultFor(node, children));
         return;
       }
+      if (node.type === "table-vgroup" && node.vgroupKind === "databases") {
+        for (const child of node.children ?? []) await visit(child);
+        return;
+      }
       if (!containerTypes.has(node.type)) return;
       const children = await options.discover(node);
       for (const child of children) await visit(child);

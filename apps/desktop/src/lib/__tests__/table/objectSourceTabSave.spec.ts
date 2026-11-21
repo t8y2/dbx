@@ -156,3 +156,47 @@ describe("App object source tab Save handler", () => {
     expect(api.executeOracleRoutineOperation).not.toHaveBeenCalled();
   });
 });
+
+describe("trigger source tab Save handler", () => {
+  function openTriggerDraft(dbType: "mysql" | "oracle") {
+    const connection = { id: `trigger-tab-${dbType}`, name: "Trigger target", db_type: dbType, is_production: false } as ConnectionConfig;
+    useConnectionStore().connections.push(connection);
+    const queryStore = useQueryStore();
+    const original = "CREATE TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()";
+    const sql = original.replace("NOW()", "CURRENT_TIMESTAMP");
+    const id = queryStore.openObjectSourceTab({ connectionId: connection.id, database: "shop", schema: "shop", title: "trg_orders", sql: original, objectSource: { name: "trg_orders", schema: "shop", objectType: "TRIGGER" } });
+    queryStore.updateSql(id, sql);
+    const tab = queryStore.tabs.find((tab) => tab.id === id)!;
+    const toast = vi.fn();
+    const t = (key: string, values?: Record<string, unknown>) => `${key}${values ? `:${values.message}` : ""}`;
+    return { connection, queryStore, tab, sql, original, toast, t, save: () => saveObjectSourceTab(tab, { connection, queryStore, t, toast }) };
+  }
+
+  it("saves a MySQL trigger through the executable DROP+CREATE statements", async () => {
+    const draft = openTriggerDraft("mysql");
+    // Statement generation lives in dbx-sql-core (see its trigger tests); here the
+    // mocked builder stands in for the Rust DROP+CREATE output.
+    vi.mocked(api.buildExecutableObjectSourceStatements).mockResolvedValueOnce(["DROP TRIGGER IF EXISTS `shop`.`trg_orders`;", `${draft.sql};`]);
+    await expect(draft.save()).resolves.toBe(true);
+
+    expect(api.buildExecutableObjectSourceStatements).toHaveBeenCalledExactlyOnceWith({
+      databaseType: "mysql",
+      objectType: "TRIGGER",
+      schema: "shop",
+      name: "trg_orders",
+      source: draft.sql,
+    });
+    expect(api.executeQuery.mock.calls.map((call) => call[2])).toEqual(["DROP TRIGGER IF EXISTS `shop`.`trg_orders`;", `${draft.sql};`]);
+    expect(draft.toast).toHaveBeenCalledWith("objects.sourceSaved", 2000);
+    expect(draft.queryStore.isTabDirty(draft.tab)).toBe(false);
+  });
+
+  it("routes an Oracle trigger save to the trigger source action instead of generic statements", async () => {
+    const draft = openTriggerDraft("oracle");
+    const runAction = vi.spyOn(draft.queryStore, "runOracleTriggerSourceAction").mockResolvedValue(true);
+    await expect(draft.save()).resolves.toBe(true);
+
+    expect(runAction).toHaveBeenCalledExactlyOnceWith(draft.tab.id);
+    expect(api.buildExecutableObjectSourceStatements).not.toHaveBeenCalled();
+  });
+});

@@ -42,12 +42,12 @@ on:
         type: string
       sdk-ref:
         description: DBX tag or commit used only when installing the plugin CLI from source
-        default: plugin-sdk-v1
+        default: plugin-cli-v0.1.10
         required: false
         type: string
       plugin-cli-version:
         description: Published @dbx-app/plugin-cli version used to package the plugin
-        default: "0.1.2"
+        default: "0.1.10"
         required: false
         type: string
       install-plugin-cli:

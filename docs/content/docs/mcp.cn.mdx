@@ -98,7 +98,7 @@ macOS 上，Shell 安装器还会在替换二进制前验证官方 Developer ID 
 CREATE TABLE notes (id INTEGER, body TEXT);
 ```
 
-在 **设置 → MCP → 权限管理 → 访问控制**中选择**仅选中的**，只勾选示例连接，并将权限设为**只读**。在**能力 → 高级配置**中将工具白名单设为仅允许 `dbx_describe_table`，然后点击**应用**。这些设置对所有 DBX MCP 客户端生效。
+在 **设置 → MCP → 权限管理 → 访问控制**中选择**仅选中的**，只勾选示例连接，并将权限设为**只读**。在**能力**中停用其他分类和工具组，在表结构工具组中打开**查看详情**，只启用 `dbx_describe_table`，关闭其余工具，然后在设置中点击**应用**。这些设置对所有 DBX MCP 客户端生效。
 
 在仅配置了原生 DBX MCP Server 的客户端配置中，用以下参数调用 `dbx_describe_table`。
 

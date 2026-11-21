@@ -98,7 +98,7 @@ In DBX Desktop, save a SQLite connection named `Local SQLite demo` that points t
 CREATE TABLE notes (id INTEGER, body TEXT);
 ```
 
-In **Settings → MCP → Permission management → Access control**, choose **Selected only**, select the demo connection, and set its permission to **Read only**. Under **Capabilities → Advanced configuration**, set the tool allowlist to `dbx_describe_table` and click **Apply**. These settings are shared by all DBX MCP clients.
+In **Settings → MCP → Permission management → Access control**, choose **Selected only**, select the demo connection, and set its permission to **Read only**. In **Capabilities**, disable the other categories and toolsets. In the schema toolset, open **View details**, enable `dbx_describe_table` only, and disable the other tools. Click **Apply** in Settings. These settings are shared by all DBX MCP clients.
 
 In a client profile configured with only the native DBX MCP server, call `dbx_describe_table` with these arguments.
 

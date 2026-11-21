@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::OracleDialect;
+use sqlparser::dialect::{Dialect, OracleDialect, SQLiteDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -209,6 +209,9 @@ struct SqlDialectProfile {
     supports_postgres_dollar_quoted_routines: bool,
     supports_hana_script_blocks: bool,
     supports_firebird_routine_blocks: bool,
+    /// SQLite `CREATE TRIGGER ... BEGIN ...; END;`: the body's semicolons do not
+    /// end the statement.
+    supports_sqlite_trigger_blocks: bool,
     supports_go_batch_separator: bool,
     keeps_sqlserver_module_batch_at_cursor: bool,
     /// Whether a top-level T-SQL control-flow batch (`IF`/`WHILE` with a block
@@ -241,6 +244,7 @@ impl Default for SqlDialectProfile {
             supports_postgres_dollar_quoted_routines: false,
             supports_hana_script_blocks: false,
             supports_firebird_routine_blocks: false,
+            supports_sqlite_trigger_blocks: false,
             supports_go_batch_separator: false,
             keeps_sqlserver_module_batch_at_cursor: false,
             keeps_sqlserver_control_flow_batches: false,
@@ -329,6 +333,13 @@ impl SqlDialectProfile {
 
         if matches!(db_type, DatabaseType::Jdbc | DatabaseType::Hive) {
             return Self { supports_oracle_style_routine_bodies: true, ..Self::default() };
+        }
+
+        if matches!(
+            db_type,
+            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+        ) {
+            return Self { supports_sqlite_trigger_blocks: true, ..Self::default() };
         }
 
         Self::default()
@@ -989,6 +1000,13 @@ impl SqlStatementSplitter {
                         if firebird_routine_block_is_complete(&self.buffer) {
                             self.push_current_statement(&mut statements);
                         }
+                    } else if self.options.profile.supports_sqlite_trigger_blocks
+                        && starts_with_sqlite_trigger_block(&self.buffer)
+                    {
+                        self.buffer.push(ch);
+                        if sqlite_trigger_block_is_complete(&self.buffer) {
+                            self.push_current_statement(&mut statements);
+                        }
                     } else if keeps_sqlserver_control_flow_batch(self.options, &self.buffer) {
                         // T-SQL does not end a control-flow batch at a semicolon
                         // (#9336, #13051, #13514): the inner `;` stays in the
@@ -1501,6 +1519,9 @@ fn split_statement_range_at_blank_lines(
     if options.profile.supports_firebird_routine_blocks && starts_with_firebird_routine_block(&statement.text) {
         return vec![statement.clone()];
     }
+    if options.profile.supports_sqlite_trigger_blocks && starts_with_sqlite_trigger_block(&statement.text) {
+        return vec![statement.clone()];
+    }
 
     let mut ranges = Vec::new();
     let mut scanner = SqlScanner::with_profile(options.profile);
@@ -1773,6 +1794,14 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                         && starts_with_firebird_routine_block(&sql[start..i])
                     {
                         if !firebird_routine_block_is_complete(&sql[start..i + ch.len_utf8()]) {
+                            i += ch.len_utf8();
+                            continue;
+                        }
+                        push_statement_range(&mut ranges, sql, start, i + ch.len_utf8(), options);
+                    } else if options.profile.supports_sqlite_trigger_blocks
+                        && starts_with_sqlite_trigger_block(&sql[start..i])
+                    {
+                        if !sqlite_trigger_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
                             continue;
                         }
@@ -4181,43 +4210,65 @@ impl FirebirdRoutineBlock {
     }
 
     fn is_complete(&self) -> bool {
-        if !self.starts_block() {
-            return false;
-        }
-
-        let mut block_depth = 0usize;
-        let mut case_depth = 0usize;
-        let mut saw_begin = false;
-
-        for (index, token) in self.tokens.iter().enumerate() {
-            if token.is_word("BEGIN") {
-                if previous_adjacent_word(&self.tokens, index).is_some_and(|previous| previous == "END") {
-                    continue;
-                }
-                block_depth += 1;
-                saw_begin = true;
-                continue;
-            }
-            if token.is_word("CASE") {
-                if previous_adjacent_word(&self.tokens, index).is_none_or(|previous| previous != "END") {
-                    case_depth += 1;
-                }
-                continue;
-            }
-            if token.is_word("END") {
-                if case_depth > 0 {
-                    case_depth -= 1;
-                } else {
-                    block_depth = block_depth.saturating_sub(1);
-                }
-            }
-        }
-
-        saw_begin
-            && block_depth == 0
-            && case_depth == 0
-            && self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon)
+        self.starts_block() && begin_end_block_is_closed(&self.tokens)
     }
+}
+
+/// Whether a `BEGIN ... END` body (with `CASE ... END` expressions inside it)
+/// has closed and the statement ends with `;`.
+fn begin_end_block_is_closed(tokens: &[OraclePlSqlToken]) -> bool {
+    let mut block_depth = 0usize;
+    let mut case_depth = 0usize;
+    let mut saw_begin = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if token.is_word("BEGIN") {
+            if previous_adjacent_word(tokens, index).is_some_and(|previous| previous == "END") {
+                continue;
+            }
+            block_depth += 1;
+            saw_begin = true;
+            continue;
+        }
+        if token.is_word("CASE") {
+            if previous_adjacent_word(tokens, index).is_none_or(|previous| previous != "END") {
+                case_depth += 1;
+            }
+            continue;
+        }
+        if token.is_word("END") {
+            if case_depth > 0 {
+                case_depth -= 1;
+            } else {
+                block_depth = block_depth.saturating_sub(1);
+            }
+        }
+    }
+
+    saw_begin && block_depth == 0 && case_depth == 0 && tokens.last().is_some_and(OraclePlSqlToken::is_semicolon)
+}
+
+/// SQLite `CREATE [TEMP | TEMPORARY] TRIGGER ...`; its body is `BEGIN ... END`.
+fn starts_with_sqlite_trigger_block(sql: &str) -> bool {
+    let tokens = oracle_plsql_tokens(sql);
+    let mut words = tokens.iter().take(3).map(OraclePlSqlToken::as_word);
+    if words.next().flatten() != Some("CREATE") {
+        return false;
+    }
+    match words.next().flatten() {
+        Some("TRIGGER") => true,
+        Some("TEMP" | "TEMPORARY") => words.next().flatten() == Some("TRIGGER"),
+        _ => false,
+    }
+}
+
+fn sqlite_trigger_block_is_complete(sql: &str) -> bool {
+    // SQLite also quotes identifiers with `[...]` and backticks, which the Oracle
+    // tokenizer reads as words: `INSERT INTO [END]` must not close the body.
+    starts_with_sqlite_trigger_block(sql)
+        && begin_end_block_is_closed(
+            &plsql_tokens_for_dialect(&SQLiteDialect {}, sql).unwrap_or_else(|| oracle_plsql_tokens(sql)),
+        )
 }
 
 /// The BEGIN/END scope walk behind [`OraclePlSqlBlock::is_complete`], kept resumable so
@@ -4710,22 +4761,22 @@ fn push_other_token(tokens: &mut Vec<OraclePlSqlToken>) {
 }
 
 fn oracle_plsql_tokens(sql: &str) -> Vec<OraclePlSqlToken> {
-    let dialect = OracleDialect {};
-    if let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize() {
-        let mut out = Vec::new();
-        for token in tokens {
-            if let Some(mapped) = OraclePlSqlToken::from_sqlparser_token(token) {
-                if mapped == OraclePlSqlToken::Other {
-                    push_other_token(&mut out);
-                } else {
-                    out.push(mapped);
-                }
+    plsql_tokens_for_dialect(&OracleDialect {}, sql).unwrap_or_else(|| oracle_plsql_tokens_fallback(sql))
+}
+
+fn plsql_tokens_for_dialect(dialect: &dyn Dialect, sql: &str) -> Option<Vec<OraclePlSqlToken>> {
+    let tokens = Tokenizer::new(dialect, sql).tokenize().ok()?;
+    let mut out = Vec::new();
+    for token in tokens {
+        if let Some(mapped) = OraclePlSqlToken::from_sqlparser_token(token) {
+            if mapped == OraclePlSqlToken::Other {
+                push_other_token(&mut out);
+            } else {
+                out.push(mapped);
             }
         }
-        return out;
     }
-
-    oracle_plsql_tokens_fallback(sql)
+    Some(out)
 }
 
 fn oracle_plsql_tokens_fallback(sql: &str) -> Vec<OraclePlSqlToken> {
@@ -6695,6 +6746,46 @@ SELECT 2 FROM RDB$DATABASE;";
     }
 
     #[test]
+    fn sqlite_split_keeps_trigger_block_together() {
+        let trigger = "CREATE TRIGGER orders_audit AFTER INSERT ON orders\nBEGIN\n  INSERT INTO audit VALUES (NEW.id, CASE WHEN NEW.total > 100 THEN 'big' ELSE 'small' END);\n  UPDATE stats SET n = n + 1;\nEND;";
+        let sql = format!("CREATE TABLE orders(id INTEGER PRIMARY KEY, total REAL);\n{trigger}\nINSERT INTO orders(total) VALUES (9.5);");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Sqlite),
+            vec![
+                "CREATE TABLE orders(id INTEGER PRIMARY KEY, total REAL)",
+                trigger,
+                "INSERT INTO orders(total) VALUES (9.5)"
+            ]
+        );
+        let cursor = sql.find("UPDATE stats").unwrap();
+        assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Sqlite), trigger);
+    }
+
+    #[test]
+    fn sqlite_split_keeps_trigger_with_quoted_begin_end_identifiers_together() {
+        for name in ["[END]", "`END`", "\"END\"", "[BEGIN]", "`BEGIN`"] {
+            let trigger =
+                format!("CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO {name} VALUES (1); DELETE FROM b; END;");
+            let sql = format!("{trigger} SELECT 1;");
+            assert_eq!(
+                split_sql_statements_for_database(&sql, DatabaseType::Sqlite),
+                vec![trigger.as_str(), "SELECT 1"],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_split_keeps_temp_trigger_block_together() {
+        let sql = "CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END; SELECT 1;";
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Sqlite),
+            vec!["CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END;", "SELECT 1"]
+        );
+    }
+
+    #[test]
     fn firebird_split_keeps_procedure_with_declarations_together() {
         let sql = "\
 CREATE OR ALTER PROCEDURE SP_GET_USER (USER_ID INT)
@@ -6716,6 +6807,17 @@ SELECT 1 FROM RDB$DATABASE;";
                 "CREATE OR ALTER PROCEDURE SP_GET_USER (USER_ID INT)\nRETURNS (USERNAME VARCHAR(50), TOTAL_AMOUNT NUMERIC(18, 2))\nAS\nDECLARE VARIABLE V_TEMP NUMERIC(18, 2);\nDECLARE VARIABLE V_STATUS INT;\nBEGIN\n  SELECT FIRST 1 NAME FROM USERS WHERE ID = :USER_ID INTO :USERNAME;\n  V_TEMP = 100.50;\n  TOTAL_AMOUNT = :V_TEMP;\n  SUSPEND;\nEND;",
                 "SELECT 1 FROM RDB$DATABASE"
             ]
+        );
+    }
+
+    #[test]
+    fn firebird_split_keeps_if_for_while_bodies_together() {
+        let procedure = "CREATE OR ALTER PROCEDURE SP_FLAGS\nRETURNS (N INT)\nAS\nDECLARE VARIABLE I INT = 0;\nBEGIN\n  IF (I = 0) THEN\n  BEGIN\n    N = 1;\n  END\n  ELSE\n    N = 2;\n  FOR SELECT ID FROM USERS INTO :N DO\n  BEGIN\n    SUSPEND;\n  END\n  WHILE (I < 3) DO\n  BEGIN\n    I = I + 1;\n  END\nEND;";
+        let sql = format!("{procedure}\nSELECT 1 FROM RDB$DATABASE;");
+
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Firebird),
+            vec![procedure, "SELECT 1 FROM RDB$DATABASE"]
         );
     }
 

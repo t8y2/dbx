@@ -1086,6 +1086,23 @@ SELECT 2 FROM DUMMY;`;
     expect(rangeSqlTexts(splitSqlStatementRanges("ALTER PROCEDURE PUBLIC.P RECOMPILE; SELECT 1 FROM DUMMY;", "saphana"))).toEqual(["ALTER PROCEDURE PUBLIC.P RECOMPILE", "SELECT 1 FROM DUMMY"]);
   });
 
+  it("keeps SQLite CREATE TRIGGER blocks together", () => {
+    const trigger = `CREATE TRIGGER orders_audit AFTER INSERT ON orders
+BEGIN
+  INSERT INTO audit VALUES (NEW.id, CASE WHEN NEW.total > 100 THEN 'big' ELSE 'small' END);
+  UPDATE stats SET n = n + 1;
+END;`;
+    const sql = `CREATE TABLE orders(id INTEGER PRIMARY KEY, total REAL);\n${trigger}\nINSERT INTO orders(total) VALUES (9.5);`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlite"))).toEqual(["CREATE TABLE orders(id INTEGER PRIMARY KEY, total REAL)", trigger, "INSERT INTO orders(total) VALUES (9.5)"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges("CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END; SELECT 1;", "sqlite"))).toEqual(["CREATE TEMP TRIGGER t AFTER DELETE ON a BEGIN DELETE FROM b; DELETE FROM c; END;", "SELECT 1"]);
+  });
+
+  it.each(["[END]", "`END`", '"END"', "[BEGIN]", "`BEGIN`"])("keeps a SQLite trigger together when a quoted identifier is %s", (name) => {
+    const trigger = `CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO ${name} VALUES (1); DELETE FROM b; END;`;
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${trigger} SELECT 1;`, "sqlite"))).toEqual([trigger, "SELECT 1"]);
+  });
+
   it("keeps Firebird CREATE OR ALTER TRIGGER blocks together (#12407)", () => {
     const trigger = `CREATE OR ALTER TRIGGER "WL_FYD_TP_AU" FOR "WL_FYD" ACTIVE
 AFTER UPDATE
@@ -1113,6 +1130,32 @@ BEGIN
   V_TEMP = 100.50;
   TOTAL_AMOUNT = :V_TEMP;
   SUSPEND;
+END;`;
+    const sql = `${procedure}\nSELECT 1 FROM RDB$DATABASE;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "firebird"))).toEqual([procedure, "SELECT 1 FROM RDB$DATABASE"]);
+  });
+
+  it("keeps Firebird procedures with IF, FOR and WHILE bodies together", () => {
+    const procedure = `CREATE OR ALTER PROCEDURE SP_FLAGS
+RETURNS (N INT)
+AS
+DECLARE VARIABLE I INT = 0;
+BEGIN
+  IF (I = 0) THEN
+  BEGIN
+    N = 1;
+  END
+  ELSE
+    N = 2;
+  FOR SELECT ID FROM USERS INTO :N DO
+  BEGIN
+    SUSPEND;
+  END
+  WHILE (I < 3) DO
+  BEGIN
+    I = I + 1;
+  END
 END;`;
     const sql = `${procedure}\nSELECT 1 FROM RDB$DATABASE;`;
 

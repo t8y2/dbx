@@ -462,10 +462,10 @@ const activeResultSchema = computed(() => activeResultExecutionTarget.value?.sch
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
-const showOraclePackageMembers = computed(() => {
+const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
-  return (type === "oracle" || type === "oceanbase-oracle") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+  return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
 });
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
@@ -2421,12 +2421,12 @@ defineExpose({
                   {{ t("common.retry") }}
                 </Button>
               </div>
-              <div v-else :class="showOraclePackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showOraclePackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+              <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"
-                  :class="{ 'min-w-0': showOraclePackageMembers }"
+                  :class="{ 'min-w-0': showPackageMembers }"
                   :auto-focus="sourceSectionActive && autoFocus !== false"
                   :model-value="activeTab.sql"
                   :tab-id="activeTab.id"

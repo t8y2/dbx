@@ -12,7 +12,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{Response, Sse};
 use axum::Json;
 use dbx_core::query_cancel::RunningTaskMetadata;
-use dbx_core::query_result_export::{self, QueryResultExportRequest};
+use dbx_core::query_result_export::{self, QueryResultExportInvocation};
 use dbx_core::table_export::{ExportStatus, TableExportProgress};
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -24,7 +24,7 @@ use crate::state::{WebExportFile, WebState};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartQueryResultExportRequest {
-    pub request: QueryResultExportRequest,
+    pub request: QueryResultExportInvocation,
 }
 
 #[derive(Deserialize)]
@@ -38,7 +38,7 @@ pub async fn start_query_result_export(
     State(state): State<Arc<WebState>>,
     Json(body): Json<StartQueryResultExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let mut req = body.request;
+    let QueryResultExportInvocation { request: mut req, source_client_session_id } = body.request;
     dbx_core::query::mysql_data_charset_policy::check_export(&state.app, &req.connection_id, &req.format)
         .await
         .map_err(AppError::from)?;
@@ -89,15 +89,23 @@ pub async fn start_query_result_export(
             )
         });
         let cancel_token = registered_query.as_ref().map(|query| query.token());
-        let result = query_result_export::export_query_result_core(&app, &req, cancel_token, |progress| {
-            if matches!(progress.status, ExportStatus::Cancelled) {
-                cancelled_progress.store(true, Ordering::SeqCst);
-            }
-            if let Ok(json) = serde_json::to_string(&progress) {
-                let _ = tx.send(json);
-            }
-        })
-        .await;
+        let result = query_result_export::export_query_result_with_cleanup(
+            &app,
+            &req,
+            cancel_token,
+            |progress| {
+                if matches!(progress.status, ExportStatus::Cancelled) {
+                    cancelled_progress.store(true, Ordering::SeqCst);
+                }
+                if let Ok(json) = serde_json::to_string(&progress) {
+                    let _ = tx.send(json);
+                }
+            },
+            false,
+            source_client_session_id.as_deref(),
+        )
+        .await
+        .result;
         drop(registered_query);
 
         if let Err(e) = result {

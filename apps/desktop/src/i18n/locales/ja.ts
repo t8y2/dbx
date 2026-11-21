@@ -3754,6 +3754,7 @@ export default withEnglishFallback({
       "binary-uuid": "バイナリ→UUID",
       "binary-uuid-swapped": "バイナリ→UUID（時間ビット交換）",
     },
+    queryCanceled: "クエリはキャンセルされました",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

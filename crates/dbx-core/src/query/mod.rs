@@ -4554,6 +4554,9 @@ fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> 
 }
 
 fn mysql_batch_backend_error(action: PoolErrorAction, error: &str) -> crate::backend_error::BackendError {
+    if error == QUERY_CANCELED {
+        return canceled_query_execution_error().into_backend_error();
+    }
     if action == PoolErrorAction::Keep {
         crate::backend_error::BackendError::from_sql_detail(error)
     } else {

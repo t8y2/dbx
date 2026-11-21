@@ -138,7 +138,7 @@ export function sqlErrorEditorOffset(options: SqlErrorOffsetOptions): EditorErro
 
 export function sqlErrorEditorRange(options: SqlErrorOffsetOptions): { from: number; to: number } | undefined {
   const resolved = resolveSqlErrorOffset(options);
-  return resolved ? { from: resolved.offset, to: resolved.to } : undefined;
+  return resolved && resolved.offset < resolved.to ? { from: resolved.offset, to: resolved.to } : undefined;
 }
 
 /**
@@ -203,13 +203,17 @@ function resolveSqlErrorOffset(options: SqlErrorOffsetOptions): (EditorErrorPosi
   const sourceEnd = drifted ? mapExecutedOffsetToSource(executedStatement!, range.sql, basisEnd) : basisEnd;
   const exactRange = sourceEnd > sourceOffset && range.sql.slice(sourceOffset, sourceEnd) === positionBasis.slice(basisOffset, basisEnd);
 
-  // Clamp inside the resolved statement range so a residual mismatch can never
-  // place the caret outside the statement it belongs to.
-  const editorOffset = Math.max(range.from, Math.min(range.from + sourceOffset, range.to));
+  // An error in an appended clause (such as LIMIT) maps to the end of the
+  // source statement. Anchor it on the last source character so the underline,
+  // label and caret point to the same place in the editor.
+  const inGeneratedSuffix = drifted && sourceOffset === range.sql.length && basisOffset < positionBasis.length;
+  const lastCharacterWidth = (range.sql.codePointAt(range.sql.length - 2) ?? 0) > 0xffff ? 2 : 1;
+  const sourceAnchor = inGeneratedSuffix ? range.sql.length - lastCharacterWidth : clamp(sourceOffset, 0, range.sql.length);
+  const editorOffset = range.from + sourceAnchor;
   // Report the row/column of the *source* statement, so the label always points
   // at the same character the caret lands on (the position itself is relative to
   // the executed statement, which DBX may have rewritten).
-  const display = utf16OffsetToScalarPosition(range.sql, clamp(sourceOffset, 0, range.sql.length));
+  const display = utf16OffsetToScalarPosition(range.sql, sourceAnchor);
   if (isSqlErrorPositionDebugEnabled()) {
     logDiagnostics("resolved", options, {
       position: position ?? { derivedFromMessage: true },

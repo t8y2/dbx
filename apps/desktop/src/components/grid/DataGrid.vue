@@ -111,7 +111,7 @@ import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetails
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
 import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef, QueryPageJumpProgress } from "@/types/database";
-import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { isQueryCancellationResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
@@ -16294,7 +16294,11 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               "
               @hover-suggestion="suggestionIndex = $event"
             />
-            <ErrorBanner v-if="isErrorResult" variant="centered" :message="errorMessage">
+            <div v-if="isQueryCancellationResult(props.result)" role="status" class="flex flex-1 flex-col items-center justify-center gap-1 px-6 py-4 text-center text-muted-foreground">
+              <p class="text-sm font-medium">{{ t("grid.queryCanceled") }}</p>
+              <p v-if="props.result.error" class="max-w-lg select-text whitespace-pre-wrap break-words text-xs">{{ errorMessage }}</p>
+            </div>
+            <ErrorBanner v-else-if="isErrorResult" variant="centered" :message="errorMessage">
               <template #actions>
                 <slot name="error-actions" :error-message="errorMessage" />
               </template>

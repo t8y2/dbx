@@ -1002,6 +1002,10 @@ function isPairPrefixKeywordForFollowing(keyword: string, followingKeyword: stri
 }
 
 const MAX_TABLE_COMPLETION_ITEMS = 200;
+// Bounds the ranked column candidate pool, in parity with the table cap. Prefix
+// matching, ranking, dedupe/qualification and the per-table prefilter still run
+// first, so the cap only trims the tail of an already-ranked list (issue #15129).
+const MAX_COLUMN_COMPLETION_ITEMS = 200;
 const EXACT_LABEL_MATCH_BOOST = 10000;
 const EXACT_CUSTOM_SNIPPET_TRIGGER_BOOST = 40000;
 
@@ -7027,7 +7031,7 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       return { column, index, boost: matchScore + keyBoost + relevanceBoost };
     })
     .sort((left, right) => right.boost - left.boost || left.index - right.index)
-    .slice(0, context.insertTable || !context.prefix ? 50 : context.qualifier ? 30 : 20);
+    .slice(0, MAX_COLUMN_COMPLETION_ITEMS);
 
   const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
   const quoteBatchColumns = !!batchSelectionMode && quoteIdentifiers !== false && (databaseType === "mysql" || databaseType === "starrocks");

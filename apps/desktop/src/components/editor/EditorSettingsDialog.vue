@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import ToolbarSettingsList from "@/components/editor/ToolbarSettingsList.vue";
-import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, mergeToolbarItemOrder, type ToolbarItemGroup, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { TOOLBAR_SETTINGS_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, mergeToolbarItemOrder, type ToolbarSettingsGroup, type ToolbarItemKey, type ToolbarMenuItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
@@ -1104,6 +1104,7 @@ const editCsvWithoutBom = ref(settingsStore.editorSettings.csvWithoutBom);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editQueryResultExportFileNameSource = ref<QueryResultExportFileNameSource>(settingsStore.editorSettings.queryResultExportFileNameSource);
+const editGlobalNumberGrouping = ref(settingsStore.editorSettings.globalNumberGrouping);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
@@ -1122,10 +1123,13 @@ const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorS
 const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
 const editToolbarItemOrder = ref([...settingsStore.editorSettings.toolbarItemOrder]);
-const toolbarGroups = Object.keys(TOOLBAR_ITEM_GROUPS) as ToolbarItemGroup[];
-function toolbarGroupItems(group: ToolbarItemGroup) {
-  const keys = new Set<ToolbarItemKey>(TOOLBAR_ITEM_GROUPS[group]);
+function toolbarGroupItems(group: ToolbarSettingsGroup) {
+  const keys = new Set(toolbarGroupOrder(editToolbarItemOrder.value, group));
   return toolbarVisibilityItems.value.filter((item) => keys.has(item.key));
+}
+function toggleToolbarMenuPin(key: ToolbarMenuItemKey) {
+  const pinned = editToolbarItems.value.pinnedMenuItems;
+  editToolbarItems.value.pinnedMenuItems = pinned.includes(key) ? pinned.filter((item) => item !== key) : [...pinned, key];
 }
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
@@ -1515,6 +1519,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     queryResultExportFileNameSource: editQueryResultExportFileNameSource.value,
+    globalNumberGrouping: editGlobalNumberGrouping.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
@@ -2242,6 +2247,7 @@ function syncEditorSettingsDraftFromStore() {
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editQueryResultExportFileNameSource.value = settingsStore.editorSettings.queryResultExportFileNameSource;
+  editGlobalNumberGrouping.value = settingsStore.editorSettings.globalNumberGrouping;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
@@ -2440,6 +2446,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   exportRowLimitEnabled: editExportRowLimitEnabled,
   exportRowLimit: editExportRowLimit,
   queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled,
+  globalNumberGrouping: editGlobalNumberGrouping,
   globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat,
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
@@ -3110,6 +3117,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
+    editGlobalNumberGrouping.value = DEFAULT_EDITOR_SETTINGS.globalNumberGrouping;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -3308,6 +3316,7 @@ function resetAllDefaults() {
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
+  editGlobalNumberGrouping.value = DEFAULT_EDITOR_SETTINGS.globalNumberGrouping;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -9882,14 +9891,16 @@ onUnmounted(() => {
                 </div>
                 <p class="mt-2 text-xs text-muted-foreground">{{ t("settings.toolbarOrderHint") }}</p>
                 <div class="mt-2 grid gap-3 sm:grid-cols-2">
-                  <div v-for="group in toolbarGroups" :key="group" class="min-w-0 space-y-1.5">
+                  <div v-for="group in TOOLBAR_SETTINGS_GROUPS" :key="group" class="min-w-0 space-y-1.5">
                     <h4 class="text-xs font-medium">{{ t(`settings.toolbarGroup_${group}`) }}</h4>
                     <ToolbarSettingsList
                       :group="group"
                       :items="toolbarGroupItems(group)"
                       :order="toolbarGroupOrder(editToolbarItemOrder, group)"
                       :visibility="editToolbarItems"
+                      :pinned-menu-items="editToolbarItems.pinnedMenuItems"
                       @toggle="(key: ToolbarItemKey, visible: boolean) => (editToolbarItems[key] = visible)"
+                      @toggle-pin="toggleToolbarMenuPin"
                       @reorder="(keys: ToolbarItemKey[]) => (editToolbarItemOrder = replaceToolbarItemOrder(editToolbarItemOrder, keys))"
                     />
                   </div>
@@ -11248,6 +11259,14 @@ onUnmounted(() => {
 
                 <Separator />
               </template>
+
+              <div data-settings-search-id="global-number-grouping" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="settingsSearchTargetClass('global-number-grouping')">
+                <div class="min-w-0 space-y-1">
+                  <Label for="global-number-grouping">{{ t("settings.globalNumberGrouping") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.globalNumberGroupingDescription") }}</p>
+                </div>
+                <Switch id="global-number-grouping" v-model="editGlobalNumberGrouping" />
+              </div>
 
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">

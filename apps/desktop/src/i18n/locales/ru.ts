@@ -494,6 +494,7 @@ export default withEnglishFallback({
       urlDecode: "Декодировать компонент URL",
       radix: "Преобразование систем счисления",
       flattenLines: "Сжать несколько строк в одну",
+      unicodeEscape: "Текст → экранирование Unicode",
     },
     units: {
       auto: "Авто (10/13 цифр)",
@@ -6263,6 +6264,7 @@ export default withEnglishFallback({
     scopeFunctions: "функции",
     stepSkipped: "Пропущено из-за сбоя необходимого предыдущего шага.",
     selectedObjectsCount: "Выбрано объектов: {count}",
+    generatePassword: "Сгенерировать пароль",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Даты заданий в этой версии OceanBase поддерживают только микросекундную точность. Установите цифры 7–9 дробной части секунды в 0 и повторите предварительный просмотр; исходный ввод сохранён.",
@@ -9936,6 +9938,9 @@ export default withEnglishFallback({
     openWithDefaultAppFailed: "Не удалось открыть с помощью системного приложения по умолчанию: {message}",
   },
   diff: {
+    additionalSchemas: "Также сравнить эти схемы",
+    additionalSchemasHint: "Каждая сравнивается со схемой с тем же именем в целевой базе, затем проверяется и развёртывается отдельно.",
+    schemaResults: "Результаты по схемам",
     progress: {
       loadingObjects: "Чтение объектов исходной и целевой баз данных...",
       loadingSourceDetails: "Чтение структур таблиц исходной базы данных",
@@ -12408,6 +12413,10 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    globalNumberGrouping: "Показывать разделитель тысяч",
+    globalNumberGroupingDescription: "Отображать числа в сетке в виде 1,234,567.89 и т. п.; приоритет имеет формат, настроенный для отдельного столбца.",
+    toolbarGroup_left: "Основная панель действий и меню «Дополнительно»",
+    toolbarPinItem: "Закрепить {item} на панели инструментов",
     completionAutoActivationDelay: "Задержка автоматической активации автодополнения (мс)",
     completionAutoActivationDelayDescription: "Задержка перед показом вариантов автодополнения после ввода; по умолчанию — 500 мс. Увеличение значения предотвращает частое появление автодополнения при непрерывном вводе, мешающее редактированию; 0 означает показывать сразу.",
   },

@@ -711,6 +711,7 @@ export default {
       urlDecode: "URL component decode",
       radix: "Integer base conversion",
       flattenLines: "Collapse lines to one",
+      unicodeEscape: "Text → Unicode escapes",
     },
     units: {
       auto: "Auto (10/13 digits)",
@@ -6480,6 +6481,7 @@ export default {
     title: "Users & Privileges",
     unsupported: "MySQL-compatible and PostgreSQL-compatible connections are supported. SQL Server, Oracle, and other permission models can be added next.",
     newUser: "New User",
+    generatePassword: "Generate password",
     anonymous: "Anonymous",
     roleName: "Role name",
     allowLogin: "Allow login",
@@ -9766,6 +9768,9 @@ export default {
     warnings: "Warnings",
   },
   diff: {
+    additionalSchemas: "Also compare these schemas",
+    additionalSchemasHint: "Each one is compared with the schema of the same name on the target, then reviewed and deployed separately.",
+    schemaResults: "Schema results",
     progress: {
       loadingObjects: "Reading source and target database objects...",
       loadingSourceDetails: "Reading source database table structures",
@@ -10223,10 +10228,12 @@ export default {
   },
   settings: {
     toolbarGroup_primary: "Primary actions",
+    toolbarGroup_left: "Primary actions and More",
     toolbarGroup_menu: "More menu",
     toolbarGroup_right: "Right toolbar",
     toolbarGroup_controls: "System actions",
-    toolbarOrderHint: "Drag to reorder within each group. Hidden primary and system actions remain available in More.",
+    toolbarOrderHint: "Drag to reorder within each group. Use the pin icon to move an action from More to the toolbar. Hidden primary and system actions remain available in More.",
+    toolbarPinItem: "Pin {item} to the toolbar",
     toolbarReorderItem: "Drag to reorder {item}",
     toolbarExportProgress: "Task progress",
     historyRetentionLimit: "Query history retention",
@@ -11314,6 +11321,8 @@ export default {
     redisDatabaseDisplayLimitOption: "{count} databases",
     exportBatchSize: "Export batch size",
     dateTimeSection: "Date and time",
+    globalNumberGrouping: "Show thousands separators",
+    globalNumberGroupingDescription: "Show numbers such as 1,234,567.89 in the grid. Column-specific formatters take precedence.",
     globalDateTimeDisplayFormat: "Global display format",
     globalDateTimeDisplayFormatDescription: "Applies to temporal columns without a column-specific formatter in every database.",
     globalDateTimeExportFormat: "Global export format",

@@ -496,6 +496,7 @@ export default withEnglishFallback({
       urlDecode: "URL 元件解碼",
       radix: "整數進位轉換",
       flattenLines: "多行壓縮為一行",
+      unicodeEscape: "文字 → Unicode 跳脫",
     },
     units: {
       auto: "自動（10/13 位）",
@@ -7482,6 +7483,9 @@ export default withEnglishFallback({
     runInBackground: "背景執行",
   },
   diff: {
+    additionalSchemas: "同時比較這些結構描述",
+    additionalSchemasHint: "每個結構描述都會與目標端同名的結構描述比較，並分別檢視與部署。",
+    schemaResults: "結構描述比較結果",
     progress: {
       loadingObjects: "正在讀取來源與目標資料庫物件……",
       loadingSourceDetails: "正在讀取來源資料庫資料表結構",
@@ -9825,6 +9829,8 @@ export default withEnglishFallback({
     performanceSection: "效能",
     exportBatchSize: "匯出批次大小",
     dateTimeSection: "日期與時間",
+    globalNumberGrouping: "顯示千分位分隔符號",
+    globalNumberGroupingDescription: "在網格中將數字顯示為 1,234,567.89 等形式，個別設定的欄位格式優先。",
     globalDateTimeDisplayFormat: "全域顯示格式",
     globalDateTimeDisplayFormatDescription: "套用到所有資料庫中未單獨設定欄位格式的日期時間欄位。",
     globalDateTimeExportFormat: "全域匯出格式",
@@ -9939,6 +9945,8 @@ export default withEnglishFallback({
     showConnectionGroupPath: "顯示查詢連線完整群組路徑",
     showConnectionGroupPathDescription: "開啟後，查詢頁面右上角的連線選擇器會在連線名稱前顯示完整群組路徑；關閉後僅顯示連線名稱。",
     shortcutConvertSelectionToDelimited: "將選取內容轉換為以分隔符號分隔的清單",
+    toolbarGroup_left: "主操作列與更多選單",
+    toolbarPinItem: "將{item}釘選到工具列",
     completionAutoActivationDelay: "補全自動啟用延遲（毫秒）",
     completionAutoActivationDelayDescription: "輸入後延遲多久彈出補全候選，預設 500 毫秒；調大可避免連續輸入時補全頻繁彈出干擾編輯，0 表示立即彈出。",
   },
@@ -10714,6 +10722,7 @@ export default withEnglishFallback({
     title: "使用者與權限",
     unsupported: "支援 MySQL 相容和 PostgreSQL 相容連線。SQL Server、Oracle 等其他權限模型將在後續版本中新增。",
     newUser: "新增使用者",
+    generatePassword: "產生密碼",
     anonymous: "匿名",
     roleName: "角色名稱",
     allowLogin: "允許登入",

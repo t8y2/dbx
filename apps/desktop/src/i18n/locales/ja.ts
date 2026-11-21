@@ -515,6 +515,7 @@ export default withEnglishFallback({
       urlDecode: "URL コンポーネントのデコード",
       radix: "整数の基数変換",
       flattenLines: "複数行を1行に圧縮",
+      unicodeEscape: "テキスト → Unicode エスケープ",
     },
     units: {
       auto: "自動（10/13 桁）",
@@ -5578,6 +5579,7 @@ export default withEnglishFallback({
     scopeFunctions: "関数",
     stepSkipped: "必要な前のステップが失敗したためスキップしました。",
     selectedObjectsCount: "選択済み {count} 個のオブジェクト",
+    generatePassword: "パスワードを生成",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "この OceanBase バージョンのジョブ日付はマイクロ秒精度のみ対応しています。小数秒の 7～9 桁目を 0 にして、もう一度プレビューしてください。元の入力は保持されています。",
@@ -8379,6 +8381,9 @@ export default withEnglishFallback({
     completedWithErrors: "実行が完了しました: 成功 {succeeded} 件、失敗 {failed} 件",
   },
   diff: {
+    additionalSchemas: "これらのスキーマも比較",
+    additionalSchemasHint: "それぞれターゲットの同名スキーマと比較し、個別に確認してデプロイします。",
+    schemaResults: "スキーマごとの結果",
     progress: {
       loadingObjects: "ソースとターゲットのデータベースオブジェクトを読み込み中...",
       loadingSourceDetails: "ソースデータベースのテーブル構造を読み込み中",
@@ -10846,6 +10851,10 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "テーブルデータの次の列を選択",
     shortcutSelectPreviousGridColumn: "テーブルデータの前の列を選択",
     sidebarSimpleHideIndexes: "テーブルと並んで表示されるインデックスを非表示",
+    globalNumberGrouping: "桁区切り記号を表示",
+    globalNumberGroupingDescription: "グリッド内で数値を 1,234,567.89 などの形式で表示します。個別に設定された列の書式が優先されます。",
+    toolbarGroup_left: "メイン操作バーとその他のメニュー",
+    toolbarPinItem: "{item}をツールバーに固定",
     completionAutoActivationDelay: "補完の自動アクティブ化遅延（ミリ秒）",
     completionAutoActivationDelayDescription: "入力後に補完候補が表示されるまでの遅延時間。デフォルトは 500 ミリ秒です。値を大きくすると、連続入力時に補完が頻繁に表示されて編集の妨げになるのを防げます。0 は即時に表示することを意味します。",
   },

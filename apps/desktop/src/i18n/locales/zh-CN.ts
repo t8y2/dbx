@@ -656,6 +656,7 @@ export default withEnglishFallback({
       urlDecode: "URL 组件解码",
       radix: "整数进制转换",
       flattenLines: "多行压缩为一行",
+      unicodeEscape: "文本 → Unicode 转义",
     },
     units: {
       auto: "自动（10/13 位）",
@@ -6452,6 +6453,7 @@ export default withEnglishFallback({
     title: "用户与权限",
     unsupported: "当前支持 MySQL 兼容与 PostgreSQL 兼容连接。SQL Server、Oracle 等会按各自权限模型继续扩展。",
     newUser: "新建用户",
+    generatePassword: "生成密码",
     anonymous: "匿名用户",
     roleName: "角色名",
     allowLogin: "允许登录",
@@ -9730,6 +9732,9 @@ export default withEnglishFallback({
     warnings: "警告",
   },
   diff: {
+    additionalSchemas: "同时比较这些模式",
+    additionalSchemasHint: "每个模式都会与目标端同名模式比较，并分别审查和部署。",
+    schemaResults: "模式比较结果",
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",
       loadingSourceDetails: "正在读取源数据库表结构",
@@ -10187,10 +10192,12 @@ export default withEnglishFallback({
   },
   settings: {
     toolbarGroup_primary: "主操作栏",
+    toolbarGroup_left: "主操作栏和更多菜单",
     toolbarGroup_menu: "更多菜单",
     toolbarGroup_right: "右侧工具栏",
     toolbarGroup_controls: "系统入口",
-    toolbarOrderHint: "拖拽调整同一区域的顺序。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarOrderHint: "拖拽调整同一区域的顺序。点击图钉可将“更多”中的操作固定到主操作栏。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarPinItem: "将{item}固定到工具栏",
     toolbarReorderItem: "拖拽调整{item}的顺序",
     toolbarExportProgress: "任务进度",
     historyRetentionLimit: "查询历史保留条数",
@@ -11275,6 +11282,8 @@ export default withEnglishFallback({
     redisDatabaseDisplayLimitOption: "{count} 个数据库",
     exportBatchSize: "导出批次大小",
     dateTimeSection: "日期与时间",
+    globalNumberGrouping: "显示千分位分隔符",
+    globalNumberGroupingDescription: "在网格中将数字显示为 1,234,567.89 等形式，单独配置的列格式优先。",
     globalDateTimeDisplayFormat: "全局显示格式",
     globalDateTimeDisplayFormatDescription: "应用于所有数据库中未单独配置列格式的日期时间字段。",
     globalDateTimeExportFormat: "全局导出格式",

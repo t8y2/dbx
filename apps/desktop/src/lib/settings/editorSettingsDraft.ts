@@ -186,6 +186,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
+  "globalNumberGrouping",
   "globalDateTimeDisplayFormat",
   "globalDateTimeExportFormat",
   "globalDateTimeImportFormat",

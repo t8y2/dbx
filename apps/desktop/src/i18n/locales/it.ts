@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlDecode: "Decodifica componente URL",
       radix: "Conversione di base degli interi",
       flattenLines: "Comprimi più righe in una riga",
+      unicodeEscape: "Testo → escape Unicode",
     },
     units: {
       auto: "Automatica (10/13 cifre)",
@@ -5516,6 +5517,7 @@ export default withEnglishFallback({
     scopeFunctions: "funzioni",
     stepSkipped: "Ignorato perché un passaggio precedente richiesto non è riuscito.",
     selectedObjectsCount: "{count} oggetti selezionati",
+    generatePassword: "Genera password",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Le date dei job in questa versione di OceanBase supportano solo la precisione al microsecondo. Imposta a 0 le cifre 7–9 dei secondi frazionari e genera di nuovo l'anteprima; l'input originale è stato conservato.",
@@ -8361,6 +8363,9 @@ export default withEnglishFallback({
     completedWithErrors: "Esecuzione completata: {succeeded} riusciti, {failed} non riusciti",
   },
   diff: {
+    additionalSchemas: "Confronta anche questi schemi",
+    additionalSchemasHint: "Ognuno viene confrontato con lo schema omonimo sulla destinazione, poi rivisto e distribuito separatamente.",
+    schemaResults: "Risultati per schema",
     progress: {
       loadingObjects: "Lettura degli oggetti dei database sorgente e di destinazione...",
       loadingSourceDetails: "Lettura della struttura delle tabelle del database sorgente",
@@ -10820,6 +10825,10 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleziona la colonna successiva dei dati della tabella",
     shortcutSelectPreviousGridColumn: "Seleziona la colonna precedente dei dati della tabella",
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
+    globalNumberGrouping: "Mostra separatore delle migliaia",
+    globalNumberGroupingDescription: "Visualizza i numeri nella griglia nel formato 1.234.567,89 o simile; le formattazioni di colonna configurate singolarmente hanno la precedenza.",
+    toolbarGroup_left: "Barra delle azioni principale e menu Altro",
+    toolbarPinItem: "Fissa {item} alla barra degli strumenti",
     completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
     completionAutoActivationDelayDescription:
       "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",

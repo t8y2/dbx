@@ -234,7 +234,10 @@ export function parseFilterValue(rawValue: string, columnInfo?: Pick<DataGridCol
 export function parseFilterValues(rawValue: string, columnInfo?: Pick<DataGridColumnInfo, "data_type">, databaseType?: DatabaseType): GridCellValue[] {
   return splitFilterValues(rawValue).map(({ value, quoted }) => {
     if (!quoted && value.toLowerCase() === "null") return null;
-    return parseFilterValue(value, columnInfo, databaseType);
+    // Re-quote quoted members before parsing: parseFilterValue trims its
+    // input, which would drop the spaces inside a quoted value like ' a '
+    // (#15323 review).
+    return parseFilterValue(quoted ? quoteWhereLiteral(value) : value, columnInfo, databaseType);
   });
 }
 
@@ -349,6 +352,10 @@ function isNumericLiteral(text: string): boolean {
  * an unquoted number or boolean against a text column would come back
  * quoted (`code = 1` becoming `code = '1'`), so that condition stays
  * manual instead of silently changing the comparison (#15323 review).
+ * The same all-or-nothing rule applies to a mode the builder cannot
+ * express for this database (e.g. IN on jdbc) or a rule it treats as
+ * incomplete: either would be dropped by the rebuild, so the whole
+ * input stays manual.
  * Identifiers may be bare, backtick-quoted (MySQL), double-quoted, or
  * bracket-quoted, and may carry a table qualifier (`t`.`col`).
  */
@@ -367,6 +374,12 @@ export function parseDataGridWhereInputToRules(whereInput: string | undefined, c
   for (const segment of segments) {
     const parsed = parseDataGridWhereCondition(segment.text, columns, columnContext);
     if (!parsed) return null;
+    // A parsed rule still cannot move into the panel when the filter builder
+    // cannot express it for this database (e.g. IN on jdbc) or treats it as
+    // incomplete — the rebuild would silently drop the predicate, so the
+    // whole WHERE stays manual (#15323 review).
+    if (!filterModeIsSupportedForDatabase(parsed.mode, columnContext?.databaseType)) return null;
+    if (!filterModeHasCompleteValue(parsed.mode, parsed.rawValue, parsed.rawEndValue)) return null;
     rules.push({ id: createId(), conjunction: segment.conjunction, ...parsed });
   }
   return rules.length ? rules : null;
@@ -576,7 +589,16 @@ type ParsedWhereLiteral = {
   value: string;
   quoted: boolean;
   kind: "string" | "number" | "boolean";
+  // The literal as written (including quotes for quoted literals). Kept so a
+  // quoted value round-trips through the panel without losing its exact
+  // contents, e.g. the spaces in ' Alice '.
+  source: string;
 };
+
+/** Quote a literal's contents as it would appear in SQL (single quotes, '' escapes). */
+function quoteWhereLiteral(content: string): string {
+  return `'${content.replaceAll("'", "''")}'`;
+}
 
 function parseWhereLiteral(text: string): ParsedWhereLiteral | null {
   const trimmed = text.trim();
@@ -591,14 +613,14 @@ function parseWhereLiteral(text: string): ParsedWhereLiteral | null {
           continue;
         }
         if (end !== trimmed.length - 1) return null;
-        return { value: unescapeDoubledQuotes(trimmed.slice(1, end), first), quoted: true, kind: "string" };
+        return { value: unescapeDoubledQuotes(trimmed.slice(1, end), first), quoted: true, kind: "string", source: trimmed };
       }
       end += 1;
     }
     return null;
   }
-  if (/^(true|false)$/i.test(trimmed)) return { value: trimmed, quoted: false, kind: "boolean" };
-  if (isNumericLiteral(trimmed)) return { value: trimmed, quoted: false, kind: "number" };
+  if (/^(true|false)$/i.test(trimmed)) return { value: trimmed, quoted: false, kind: "boolean", source: trimmed };
+  if (isNumericLiteral(trimmed)) return { value: trimmed, quoted: false, kind: "number", source: trimmed };
   return null;
 }
 
@@ -721,7 +743,9 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     const low = parseWhereLiteral(split.left);
     const high = parseWhereLiteral(split.right);
     if (low === null || high === null || !isLiteralRoundTrippable(low) || !isLiteralRoundTrippable(high)) return null;
-    return { columnName, mode, rawValue: low.value, rawEndValue: high.value };
+    // Keep the quoted spelling for quoted literals so the spaces inside a
+    // quoted bound survive the round trip through the panel (#15323 review).
+    return { columnName, mode, rawValue: low.quoted ? low.source : low.value, rawEndValue: high.quoted ? high.source : high.value };
   }
 
   if (mode === "like" || mode === "not-like") {
@@ -729,10 +753,15 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     if (value === null) return null;
     const mapped = parseLikePattern(value.value, mode === "not-like");
     if (!mapped) return null;
-    return { columnName, mode: mapped.mode, rawValue: mapped.rawValue };
+    // Keep the quoted spelling of the pattern's inner content so spaces
+    // survive the round trip (#15323 review). rawEndValue is required by
+    // ParsedWhereCondition (this was the frontend typecheck failure).
+    return { columnName, mode: mapped.mode, rawValue: value.quoted ? quoteWhereLiteral(mapped.rawValue) : mapped.rawValue, rawEndValue: "" };
   }
 
   const value = parseWhereLiteral(rest);
   if (value === null || !isLiteralRoundTrippable(value)) return null;
-  return { columnName, mode, rawValue: value.value, rawEndValue: "" };
+  // Keep the quoted spelling for quoted literals so the spaces inside a
+  // quoted value survive the round trip through the panel (#15323 review).
+  return { columnName, mode, rawValue: value.quoted ? value.source : value.value, rawEndValue: "" };
 }

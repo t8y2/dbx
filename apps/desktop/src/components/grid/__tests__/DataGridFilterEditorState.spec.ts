@@ -7,7 +7,7 @@ import i18n from "@/i18n";
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import type { QueryResult } from "@/types/database";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { clearDataGridStructuredFilterStates } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { clearDataGridStructuredFilterStates, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSortBuilderMemoryCache } from "@/composables/useDataGridSortBuilder";
 
 const backendMocks = vi.hoisted(() => ({
@@ -324,6 +324,61 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("`id` = 2");
     expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE `id` = 2");
     expect(onExecuteSql).not.toHaveBeenCalled();
+  });
+
+  it("leaves a manual WHERE in the WHERE box when a rule cannot rebuild (#15323 review)", async () => {
+    const { host, onExecuteSql } = mountGrid(view, false, { initialWhereInput: "id = 1 AND id = 2" });
+    await settle();
+
+    const callsBefore = backendMocks.buildDataGridContextFilterCondition.mock.calls.length;
+    // The first rule's condition cannot be built: the migration must leave
+    // the whole WHERE manual instead of moving only the second rule.
+    backendMocks.buildDataGridContextFilterCondition.mockImplementationOnce(async () => null as unknown as string);
+
+    filterToggle(host).click();
+    await vi.waitFor(() => expect(backendMocks.buildDataGridContextFilterCondition.mock.calls.length).toBeGreaterThan(callsBefore));
+    // Let the migration's continuation run to completion before asserting:
+    // asserting too early would pass vacuously even with the guard removed.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
+    await settle();
+
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("id = 1 AND id = 2");
+    expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE id = 1 AND id = 2");
+    expect(onExecuteSql).not.toHaveBeenCalled();
+  });
+
+  it("keeps the old grouping when restoring rules saved by the previous panel (#15323 review)", async () => {
+    // Seed the cache exactly as the previous panel saved it: no recorded
+    // grouping, and the applied SQL in its left-associative form.
+    saveDataGridStructuredFilterState(["", "", "table-data", "", "items"].join("\u0001"), {
+      scopeKey: ["", "", "", "table-data", "", "items", "id"].join("\u0001"),
+      manualWhereInput: "",
+      rules: [
+        { id: "rule-1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+        { id: "rule-2", columnName: "id", mode: "equals", rawValue: "2", rawEndValue: "", conjunction: "OR" },
+        { id: "rule-3", columnName: "id", mode: "equals", rawValue: "3", rawEndValue: "", conjunction: "AND" },
+      ],
+      appliedWhereInput: "((`id` = 1) OR (`id` = 2)) AND (`id` = 3)",
+      serverColumnFilters: {},
+    });
+
+    const { host, onExecuteSql } = mountGrid(view, false);
+    await settle();
+
+    filterToggle(host).click();
+    await vi.waitFor(() => expect(host.querySelector(panelSelector(view))?.textContent).toContain("WHERE ((`id` = 1) OR (`id` = 2)) AND (`id` = 3)"));
+
+    // Edit the last rule and reapply: the saved meaning must survive the edit.
+    const valueEditor = [...host.querySelectorAll<HTMLInputElement>("[data-filter-value-editor]")].find((input) => input.value === "3");
+    if (!valueEditor) throw new Error("Third rule value editor not found");
+    valueEditor.value = "4";
+    valueEditor.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    applyButton(host, view).click();
+    await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledOnce());
+    expect(onExecuteSql.mock.calls[0][0]).toContain("WHERE ((`id` = 1) OR (`id` = 2)) AND (`id` = 4)");
   });
 
   it("uses the persisted expansion preference only as the initial state", async () => {

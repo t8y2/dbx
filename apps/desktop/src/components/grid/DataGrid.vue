@@ -1524,6 +1524,13 @@ function invalidateConditionalBulkEditMatchCountPreview() {
 watch([conditionalBulkEditConditionSource, conditionalBulkEditCurrentWhereInput, conditionalBulkEditWhereInput, conditionalBulkEditRules], invalidateConditionalBulkEditMatchCountPreview, { deep: true });
 
 const structuredFilterRules = filterBuilder.rules;
+// How mixed-conjunction rules join when rebuilt. "legacy" is the grouping
+// the previous panel used (left-associative: A OR B AND C became
+// (A OR B) AND C); "sql" is SQL precedence (AND binds tighter). Rules
+// restored from a cache written before this grouping was recorded keep the
+// old meaning; rules migrated from a hand-written WHERE, and rules built
+// fresh in the panel, use SQL precedence (#15323 review).
+const structuredFilterWhereGrouping = ref<"legacy" | "sql">("sql");
 const filterBuilderOpen = filterBuilder.open;
 const filterWorkbenchRef = ref<{ focusRuleValue: (ruleId: string) => void }>();
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
@@ -1853,37 +1860,43 @@ function cachedStructuredFilterState(): DataGridStructuredFilterCacheState | und
 }
 
 const structuredFilterConditionCache = createDataGridFilterConditionCache();
-async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Promise<string> {
+async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Promise<string>;
+async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], options: { strict: true }): Promise<string | null>;
+async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], buildOptions?: { strict?: boolean }): Promise<string | null> {
   structuredFilterConditionCache.retain(rules.map((rule) => rule.id));
-  const rulesWithConditions = (
-    await Promise.all(
-      rules.map(async (rule) => {
-        if (rule.disabled) return { rule, condition: null };
-        if (!rule.columnName) return { rule, condition: null };
-        if (!filterModeIsSupportedForDatabase(rule.mode, resolvedDatabaseType.value)) return { rule, condition: null };
-        if (!filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)) return { rule, condition: null };
-        const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName)?.columnInfo;
-        const usesList = filterModeUsesList(rule.mode);
-        const usesRange = filterModeUsesRange(rule.mode);
-        const options = {
-          databaseType: resolvedDatabaseType.value,
-          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-          columnName: rule.columnName,
-          columnInfo,
-          mode: rule.mode,
-          value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo, resolvedDatabaseType.value) : null,
-          values: usesList ? parseFilterValues(rule.rawValue, columnInfo, resolvedDatabaseType.value) : undefined,
-          endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo, resolvedDatabaseType.value) : undefined,
-        };
-        return {
-          rule,
-          condition: await structuredFilterConditionCache.resolve(rule.id, JSON.stringify(options), async () => (await buildDataGridContextFilterCondition(options)) ?? null),
-        };
-      }),
-    )
-  ).filter((item): item is { rule: StructuredFilterRule; condition: string } => !!item.condition);
+  const resolved = await Promise.all(
+    rules.map(async (rule) => {
+      if (rule.disabled) return { rule, condition: null as string | null, dropped: false };
+      if (!rule.columnName) return { rule, condition: null as string | null, dropped: false };
+      if (!filterModeIsSupportedForDatabase(rule.mode, resolvedDatabaseType.value)) return { rule, condition: null as string | null, dropped: true };
+      if (!filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)) return { rule, condition: null as string | null, dropped: true };
+      const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName)?.columnInfo;
+      const usesList = filterModeUsesList(rule.mode);
+      const usesRange = filterModeUsesRange(rule.mode);
+      const options = {
+        databaseType: resolvedDatabaseType.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+        columnName: rule.columnName,
+        columnInfo,
+        mode: rule.mode,
+        value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo, resolvedDatabaseType.value) : null,
+        values: usesList ? parseFilterValues(rule.rawValue, columnInfo, resolvedDatabaseType.value) : undefined,
+        endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo, resolvedDatabaseType.value) : undefined,
+      };
+      const condition = await structuredFilterConditionCache.resolve(rule.id, JSON.stringify(options), async () => (await buildDataGridContextFilterCondition(options)) ?? null);
+      return { rule, condition, dropped: condition === null };
+    }),
+  );
+  // Strict callers (WHERE migration, saved-state restore) must not silently
+  // drop a predicate: a dropped rule means the rebuilt WHERE no longer
+  // means the same query, so they keep the original input instead
+  // (#15323 review). Disabled and column-less rules are intentionally
+  // excluded, not dropped.
+  if (buildOptions?.strict && resolved.some((item) => item.dropped)) return null;
+  const rulesWithConditions = resolved.filter((item): item is { rule: StructuredFilterRule; condition: string; dropped: boolean } => !!item.condition);
 
-  return buildGroupedWhere(
+  const groupWhere = structuredFilterWhereGrouping.value === "legacy" ? buildLegacyGroupedWhere : buildGroupedWhere;
+  return groupWhere(
     rulesWithConditions.map((item) => item.condition),
     rulesWithConditions.map((item) => item.rule),
   );
@@ -1996,6 +2009,9 @@ function persistStructuredFilterState() {
     manualWhereInput: whereFilterInput.value,
     rules: cloneDataGridStructuredFilterRules(structuredFilterRules.value),
     appliedWhereInput: appliedStructuredWhereInput.value,
+    // How these rules join when rebuilt, so a later restore keeps the
+    // meaning they were applied with (#15323 review).
+    whereGrouping: structuredFilterWhereGrouping.value,
     // Vue wraps ref-held objects in proxies; structuredClone cannot clone those proxies.
     serverColumnFilters: structuredClone(toRaw(serverColumnFilters.value)),
   });
@@ -2009,15 +2025,21 @@ function loadStructuredFilterStateForScope() {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
     structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
+    // Caches written before the grouping was recorded were built by the
+    // previous panel, so they keep its left-associative meaning (#15323 review).
+    structuredFilterWhereGrouping.value = cached.whereGrouping ?? "legacy";
     appliedStructuredWhereInput.value = cached.appliedWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     // Restore the applied SQL before the manual input so the whereInput watcher
     // emits the combined condition instead of a brief empty WHERE (#8831).
     whereFilterInput.value = cached.manualWhereInput;
-    void buildStructuredWhereFromRules(structuredFilterRules.value)
+    void buildStructuredWhereFromRules(structuredFilterRules.value, { strict: true })
       .then((whereInput) => {
         if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-        appliedStructuredWhereInput.value = whereInput;
+        // A strict rebuild returns null when a rule would be dropped (or the
+        // grouping cannot reproduce the saved SQL); keep the cached applied
+        // SQL instead of silently changing the query (#15323 review).
+        if (whereInput !== null) appliedStructuredWhereInput.value = whereInput;
         nextTick(() => {
           emit("update:whereInput", currentWhereInput() ?? "");
           markConditionInputsApplied();
@@ -2069,6 +2091,7 @@ function updateTextFilterPanelHeight(height: number) {
 
 function resetStructuredFilters() {
   closeFilterValueSuggestions();
+  structuredFilterWhereGrouping.value = "sql";
   filterBuilder.reset();
 }
 
@@ -2077,6 +2100,49 @@ async function clearAllFilters() {
   resetStructuredFilters();
   clearLocalFilter(undefined, false);
   if (canUseWhereSearch.value) await applyWhereFilter();
+}
+
+/**
+ * The grouping the previous panel used, kept verbatim so rules saved by it
+ * keep the meaning they were applied with. It groups consecutive
+ * same-conjunction runs and joins the groups left-associatively, so
+ * `A OR B AND C` rebuilds as `((A) OR (B)) AND (C)` — not SQL precedence.
+ * Only the restore path uses it, for caches written before the grouping
+ * was recorded (#15323 review).
+ */
+function buildLegacyGroupedWhere(conditions: string[], rules: StructuredFilterRule[]): string {
+  if (conditions.length === 0) return "";
+  if (conditions.length === 1) return conditions[0];
+
+  const groups: { conditions: string[]; conjunction: string }[] = [];
+  let current = { conditions: [conditions[0]], conjunction: "AND" };
+
+  for (let i = 1; i < conditions.length; i++) {
+    const conj = rules[i].conjunction;
+    if (conj !== current.conjunction) {
+      groups.push(current);
+      current = { conditions: [conditions[i]], conjunction: conj };
+    } else {
+      current.conditions.push(conditions[i]);
+    }
+  }
+  groups.push(current);
+
+  if (groups.length === 1) {
+    const g = groups[0];
+    return g.conditions.length > 1 ? `(${g.conditions.join(` ${g.conjunction} `)})` : g.conditions[0];
+  }
+
+  const groupClauses = groups.map((g) => {
+    const inner = g.conditions.join(` ${g.conjunction} `);
+    return g.conditions.length > 1 ? `(${inner})` : inner;
+  });
+
+  let result = groupClauses[0];
+  for (let i = 1; i < groupClauses.length; i++) {
+    result = `(${result}) ${groups[i].conjunction} (${groupClauses[i]})`;
+  }
+  return result;
 }
 
 /**
@@ -2125,8 +2191,8 @@ async function applyStructuredFilters() {
  * apply while it is open. Only when the builder holds no complete rule yet,
  * the manual input is already applied, and the whole input parses into
  * rules; anything else leaves the manual text and the rules untouched, and
- * the text only moves once the rules rebuild to a non-empty condition, so
- * the executed query never changes.
+ * the text only moves once every rule rebuilds to an equivalent condition,
+ * so the executed query never changes.
  */
 async function syncManualWhereInputIntoFilterBuilder(): Promise<void> {
   try {
@@ -2146,10 +2212,13 @@ async function syncManualWhereInputIntoFilterBuilder(): Promise<void> {
     const cacheKeyBefore = structuredFilterCacheKey.value;
     const scopeKeyBefore = structuredFilterScopeKey.value;
     const rulesBefore = JSON.stringify(structuredFilterRules.value);
-    const where = await buildStructuredWhereFromRules(parsed);
+    const where = await buildStructuredWhereFromRules(parsed, { strict: true });
     if (!where) return;
     if (whereFilterInput.value !== whereInputBefore || conditionInputRevision.value !== revisionBefore || structuredFilterCacheKey.value !== cacheKeyBefore || structuredFilterScopeKey.value !== scopeKeyBefore || JSON.stringify(structuredFilterRules.value) !== rulesBefore) return;
     structuredFilterRules.value = parsed;
+    // These rules came from a hand-written WHERE, so they join with SQL
+    // precedence from here on (#15323 review).
+    structuredFilterWhereGrouping.value = "sql";
     whereFilterInput.value = "";
     appliedStructuredWhereInput.value = where;
     // Clearing the manual input bumps its revision; the condition is already

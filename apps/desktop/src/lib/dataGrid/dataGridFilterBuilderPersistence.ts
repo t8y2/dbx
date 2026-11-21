@@ -14,6 +14,10 @@ export type DataGridStructuredFilterCacheState = {
   manualWhereInput: string;
   rules: DataGridStructuredFilterRule[];
   appliedWhereInput: string;
+  /** How the rules join when rebuilt: "legacy" (left-associative, the
+   * previous panel) or "sql" (SQL precedence). Absent on caches written
+   * before this was recorded — those were built by the previous panel. */
+  whereGrouping?: "legacy" | "sql";
   serverColumnFilters: Record<number, DataGridCachedServerColumnFilter>;
 };
 
@@ -108,6 +112,7 @@ function sanitizeState(value: unknown): DataGridStructuredFilterCacheState | und
     manualWhereInput: state.manualWhereInput,
     rules,
     appliedWhereInput: state.appliedWhereInput,
+    whereGrouping: state.whereGrouping === "legacy" || state.whereGrouping === "sql" ? state.whereGrouping : undefined,
     serverColumnFilters,
   };
 }
@@ -213,7 +218,7 @@ export async function removeDataGridStructuredFilterColumnsForTab(tabId: string,
   // and connection components instead of reconstructing them from another pane.
   const scopeParts = state.scopeKey.split("\u0001");
   scopeParts[scopeParts.length - 1] = remainingColumns.join("\0");
-  const next = { scopeKey: scopeParts.join("\u0001"), rules, manualWhereInput, appliedWhereInput, serverColumnFilters };
+  const next = { scopeKey: scopeParts.join("\u0001"), rules, manualWhereInput, appliedWhereInput, whereGrouping: state.whereGrouping, serverColumnFilters };
   structuredFilterStateCache.set(tabId, cloneState(next));
   persistToStorage();
   return next;

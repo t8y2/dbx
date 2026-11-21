@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDataGridWhereInputToRules } from "@/lib/dataGrid/dataGridColumnFilter";
+import { parseDataGridWhereInputToRules, parseFilterValues } from "@/lib/dataGrid/dataGridColumnFilter";
 
 const COLUMNS = ["id", "status", "age", "name", "created_at"];
 
@@ -27,24 +27,31 @@ function parseTyped(whereInput: string | undefined) {
   return rules.map(({ id, ...rule }) => rule);
 }
 
+function parseJdbc(whereInput: string | undefined) {
+  let count = 0;
+  const rules = parseDataGridWhereInputToRules(whereInput, TYPED_COLUMNS, () => `rule-${++count}`, { dataTypes: TYPED_COLUMN_TYPES, databaseType: "jdbc" });
+  if (rules === null) return null;
+  return rules.map(({ id, ...rule }) => rule);
+}
+
 describe("parseDataGridWhereInputToRules (#15320)", () => {
   it("parses a simple equals condition", () => {
     expect(parse("id = 1")).toEqual([{ columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }]);
   });
 
   it("parses MySQL backtick identifiers and quoted string values", () => {
-    expect(parse("`status` = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "active", rawEndValue: "", conjunction: "AND" }]);
-    expect(parse("`t`.`status` = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "active", rawEndValue: "", conjunction: "AND" }]);
-    expect(parse("t.status = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "active", rawEndValue: "", conjunction: "AND" }]);
+    expect(parse("`status` = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "'active'", rawEndValue: "", conjunction: "AND" }]);
+    expect(parse("`t`.`status` = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "'active'", rawEndValue: "", conjunction: "AND" }]);
+    expect(parse("t.status = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "'active'", rawEndValue: "", conjunction: "AND" }]);
   });
 
   it("matches column names case-insensitively and keeps the known casing", () => {
-    expect(parse("STATUS = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "active", rawEndValue: "", conjunction: "AND" }]);
+    expect(parse("STATUS = 'active'")).toEqual([{ columnName: "status", mode: "equals", rawValue: "'active'", rawEndValue: "", conjunction: "AND" }]);
   });
 
   it("keeps AND/OR conjunctions across conditions", () => {
     expect(parse("status = 'active' AND age > 18")).toEqual([
-      { columnName: "status", mode: "equals", rawValue: "active", rawEndValue: "", conjunction: "AND" },
+      { columnName: "status", mode: "equals", rawValue: "'active'", rawEndValue: "", conjunction: "AND" },
       { columnName: "age", mode: "greater-than", rawValue: "18", rawEndValue: "", conjunction: "AND" },
     ]);
     expect(parse("id = 1 OR id = 2")).toEqual([
@@ -75,10 +82,10 @@ describe("parseDataGridWhereInputToRules (#15320)", () => {
   });
 
   it("maps LIKE wildcards onto the matching builder mode", () => {
-    expect(parse("name LIKE '%ann%'")?.[0]).toMatchObject({ mode: "like", rawValue: "ann" });
-    expect(parse("name LIKE 'ann%'")?.[0]).toMatchObject({ mode: "begins-with", rawValue: "ann" });
-    expect(parse("name LIKE '%ann'")?.[0]).toMatchObject({ mode: "ends-with", rawValue: "ann" });
-    expect(parse("name NOT LIKE '%ann%'")?.[0]).toMatchObject({ mode: "not-like", rawValue: "ann" });
+    expect(parse("name LIKE '%ann%'")?.[0]).toMatchObject({ mode: "like", rawValue: "'ann'" });
+    expect(parse("name LIKE 'ann%'")?.[0]).toMatchObject({ mode: "begins-with", rawValue: "'ann'" });
+    expect(parse("name LIKE '%ann'")?.[0]).toMatchObject({ mode: "ends-with", rawValue: "'ann'" });
+    expect(parse("name NOT LIKE '%ann%'")?.[0]).toMatchObject({ mode: "not-like", rawValue: "'ann'" });
   });
 
   it("unwraps outer parentheses and tolerates a leading WHERE and trailing semicolon", () => {
@@ -87,7 +94,7 @@ describe("parseDataGridWhereInputToRules (#15320)", () => {
   });
 
   it("keeps quoted values with escaped quotes and AND inside strings intact", () => {
-    expect(parse("name = 'O''Brien'")?.[0]).toMatchObject({ rawValue: "O'Brien" });
+    expect(parse("name = 'O''Brien'")?.[0]).toMatchObject({ rawValue: "'O''Brien'" });
     expect(parse("name = 'a AND b' AND id = 1")).toHaveLength(2);
   });
 
@@ -130,5 +137,29 @@ describe("parseDataGridWhereInputToRules (#15320)", () => {
     expect(parse("status = 01")).toBeNull();
     expect(parse("status = true")).toBeNull();
     expect(parse("id = 1")).not.toBeNull();
+  });
+
+  it("keeps the quoted spelling of string literals so spaces survive the round trip (#15323 review)", () => {
+    // The rebuild unwraps the quotes and the backend quotes the value back,
+    // so the spaces inside ' Alice ' must still be there when it does.
+    expect(parse("name = ' Alice '")?.[0]).toMatchObject({ rawValue: "' Alice '" });
+    expect(parse("name = 'a  b'")?.[0]).toMatchObject({ rawValue: "'a  b'" });
+    expect(parse("name BETWEEN ' a ' AND 'z'")?.[0]).toMatchObject({ rawValue: "' a '", rawEndValue: "'z'" });
+    expect(parse("name LIKE '% ann %'")?.[0]).toMatchObject({ mode: "like", rawValue: "' ann '" });
+    // Quoted IN members keep their spaces too once the value parser sees
+    // them quoted instead of trimmed.
+    expect(parseFilterValues("' a ', 'b'")).toEqual([" a ", "b"]);
+    expect(parseFilterValues("'a', 'b'")).toEqual(["a", "b"]);
+  });
+
+  it("leaves modes the database cannot express manual, and keeps empty strings (#15323 review)", () => {
+    // IN is not supported on jdbc, so the whole input stays manual instead
+    // of dropping the IN predicate on rebuild.
+    expect(parseJdbc("status IN ('a')")).toBeNull();
+    expect(parseJdbc("id = 1 AND status IN ('a')")).toBeNull();
+    expect(parseJdbc("id = 1")).not.toBeNull();
+    // An empty-string rule is complete and migrates: it must not be dropped.
+    expect(parseTyped("name = ''")?.[0]).toMatchObject({ rawValue: "''" });
+    expect(parseTyped("name = '' AND id = 1")).toHaveLength(2);
   });
 });

@@ -80,7 +80,7 @@ export function applyImportMappingTemplate(template: ImportMappingTemplate, sour
   const used = new Set<string>();
   let matched = 0;
   for (const source of sourceColumns) {
-    const wanted = Object.hasOwn(template.mapping, source) ? template.mapping[source] : templateTargets.get(normalizeImportColumnName(source));
+    const wanted = Object.prototype.hasOwnProperty.call(template.mapping, source) ? template.mapping[source] : templateTargets.get(normalizeImportColumnName(source));
     const target = wanted === undefined ? undefined : targetColumns.includes(wanted) ? wanted : targetsByName.get(normalizeImportColumnName(wanted));
     // Two file columns must not land in the same table column.
     if (target !== undefined && !used.has(target)) {

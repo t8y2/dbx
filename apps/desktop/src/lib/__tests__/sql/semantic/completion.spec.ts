@@ -834,3 +834,37 @@ describe("implicit join table lists end at the next clause (#14445)", () => {
     expect(context.suggestTables).toBe(true);
   });
 });
+
+describe("DROP TABLE IF EXISTS completion (#14113)", () => {
+  const mysql = { databaseType: "mysql", dialect: "mysql" } as const;
+  const tables = [{ name: "oblist_partition", type: "table" as const }];
+
+  it.each([
+    ["DROP TABLE IF EXISTS |", "oblist_partition"],
+    ["DROP TABLE IF EXISTS obl|", "oblist_partition"],
+    ["drop temporary table if exists |", "oblist_partition"],
+  ])("suggests table names after IF EXISTS: %s", (markedSql, expected) => {
+    const { context, items } = semanticCompletion(markedSql, { tables }, mysql);
+
+    expect(context.suggestTables).toBe(true);
+    expect(items.some((item) => item.type === "table" && item.label === expected)).toBe(true);
+  });
+
+  it.each([
+    ["DROP TABLE |", "IF"],
+    ["DROP TABLE I|", "IF"],
+    ["DROP TABLE IF |", "EXISTS"],
+    ["DROP TABLE IF E|", "EXISTS"],
+  ])("offers the optional %s keyword", (markedSql, keyword) => {
+    const { items } = semanticCompletion(markedSql, { tables }, mysql);
+
+    expect(items.some((item) => item.type === "keyword" && item.label === keyword)).toBe(true);
+  });
+
+  it("does not offer IF EXISTS words once a table name has been written", () => {
+    const { context } = semanticCompletion("DROP TABLE oblist_partition |", { tables }, mysql);
+
+    expect(context.preferredKeywords).not.toContain("IF");
+    expect(context.preferredKeywords).not.toContain("EXISTS");
+  });
+});

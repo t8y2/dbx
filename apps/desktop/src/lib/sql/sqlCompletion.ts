@@ -3396,7 +3396,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // tokenizeSqlSemantic pass, so the duplicate work is worth avoiding.
   const inTableListContext = isInTableListContext(beforeToken, options.databaseType);
   const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken, options.databaseType);
-  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || isAfterDropTableIfExists(beforeToken, options.databaseType) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const scopedReferences = exclusiveTableSuggestions ? undefined : scopedQueryCompletionReferences(fullStatement, cursorInStatement, referencedTables, cteDefs, options);
   if (scopedReferences) referencedTables = scopedReferences;
@@ -4174,11 +4174,29 @@ function preferredKeywordsForCompletion(
     keywords.push("LIMIT");
   }
   if (isAfterConditionExpression(beforeToken, databaseType)) keywords.push("AND", "OR");
+  keywords.push(...dropTableIfExistsKeywords(beforeToken, databaseType));
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
   if (deleteInfo?.afterTarget) keywords.push("WHERE");
   keywords.push(...driverProfileContextKeywords(driverProfile, { beforeCursor, beforeToken, databaseType }));
   return keywords;
+}
+
+const DROP_TABLE_NAME_SLOT_PATTERN = /^\s*drop\s+(?:temporary\s+)?table\s+if\s+exists$/i;
+const DROP_TABLE_IF_SLOT_PATTERN = /^\s*drop\s+(?:temporary\s+)?table$/i;
+const DROP_TABLE_EXISTS_SLOT_PATTERN = /^\s*drop\s+(?:temporary\s+)?table\s+if$/i;
+
+/** `DROP TABLE IF EXISTS |` expects a table name, but `exists` is not a table trigger keyword (#14113). */
+function isAfterDropTableIfExists(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
+  return DROP_TABLE_NAME_SLOT_PATTERN.test(maskSqlLiteralsAndComments(beforeToken, databaseType).trim());
+}
+
+/** Offer the optional `IF EXISTS` words while a DROP TABLE statement is still waiting for them. */
+function dropTableIfExistsKeywords(beforeToken: string, databaseType: DatabaseType | undefined): string[] {
+  const cleaned = maskSqlLiteralsAndComments(beforeToken, databaseType).trim();
+  if (DROP_TABLE_IF_SLOT_PATTERN.test(cleaned)) return ["IF"];
+  if (DROP_TABLE_EXISTS_SLOT_PATTERN.test(cleaned)) return ["EXISTS"];
+  return [];
 }
 
 function hasSelectListExpression(beforeCursor: string, databaseType: DatabaseType | undefined): boolean {

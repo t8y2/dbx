@@ -2663,7 +2663,7 @@ function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions
     return;
   }
   pendingCloseActionChoice.value = !!options.requireCloseActionChoice;
-  if (queryStore.hasUnsavedWindowTabs) {
+  if (action !== "hide" && queryStore.hasUnsavedWindowTabs) {
     pendingAppCloseAction.value = action;
     pendingSaveShouldCloseTab.value = false;
     if (queryStore.requestWindowCloseConfirmation()) return;

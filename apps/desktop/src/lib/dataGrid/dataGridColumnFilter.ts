@@ -600,11 +600,27 @@ function quoteWhereLiteral(content: string): string {
   return `'${content.replaceAll("'", "''")}'`;
 }
 
-function parseWhereLiteral(text: string): ParsedWhereLiteral | null {
+/**
+ * Whether a dialect writes string literals with double quotes. MySQL (and its
+ * wire-compatible dialects) does by default; everywhere else — PostgreSQL,
+ * SQLite, Oracle, SQL Server, ... — double quotes delimit identifiers, so a
+ * double-quoted value there names a column, not a string. When the dialect is
+ * unknown the equivalence is uncertain, so it is not a string either
+ * (#15323 review).
+ */
+function doubleQuotedTextIsStringLiteral(databaseType?: DatabaseType): boolean {
+  return databaseType === "mysql" || databaseType === "doris" || databaseType === "starrocks";
+}
+
+function parseWhereLiteral(text: string, databaseType?: DatabaseType): ParsedWhereLiteral | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
   const first = trimmed[0]!;
   if (first === "'" || first === '"') {
+    // A double-quoted value is a string only where the dialect writes
+    // strings that way; elsewhere (and when the dialect is unknown) it is a
+    // column reference, so the condition cannot move into the panel.
+    if (first === '"' && !doubleQuotedTextIsStringLiteral(databaseType)) return null;
     let end = 1;
     while (end < trimmed.length) {
       if (trimmed[end] === first) {
@@ -628,13 +644,16 @@ function parseWhereLiteral(text: string): ParsedWhereLiteral | null {
  * Whether a literal written in the manual WHERE rebuilds to the same
  * comparison from its structured rule (#15323 review). A quoted string
  * always does: the value parser unwraps it and the backend quotes it
- * back. An unquoted number only does against a numeric column, where the
- * parser preserves the spelling and the backend emits it unquoted — or
- * against an untyped column, where the parser keeps it numeric, except
- * leading-zero spellings and integers past JS safe range, which it keeps
- * as text and the backend would quote. An unquoted boolean only does
- * against a boolean column. Anything else (e.g. `code = 1` on VARCHAR,
- * which would rebuild as `code = '1'`) must stay manual.
+ * back — and a double-quoted one only reaches here for a dialect where
+ * double quotes write strings, since parseWhereLiteral rejects it
+ * elsewhere as a column reference. An unquoted number only does against a
+ * numeric column, where the parser preserves the spelling and the backend
+ * emits it unquoted — or against an untyped column, where the parser keeps
+ * it numeric, except leading-zero spellings and integers past JS safe
+ * range, which it keeps as text and the backend would quote. An unquoted
+ * boolean only does against a boolean column. Anything else (e.g.
+ * `code = 1` on VARCHAR, which would rebuild as `code = '1'`) must stay
+ * manual.
  */
 function isWhereLiteralRoundTrippable(literal: ParsedWhereLiteral, dataType: string | undefined, databaseType?: DatabaseType): boolean {
   if (literal.quoted) return true;
@@ -732,7 +751,7 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     if (inner === rest) return null;
     const parts = splitTopLevelCommas(inner);
     if (!parts) return null;
-    const values = parts.map((part) => parseWhereLiteral(part));
+    const values = parts.map((part) => parseWhereLiteral(part, columnContext?.databaseType));
     if (!values.length || values.some((value) => value === null || !isLiteralRoundTrippable(value))) return null;
     return { columnName, mode, rawValue: inner.trim(), rawEndValue: "" };
   }
@@ -740,8 +759,8 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
   if (mode === "between" || mode === "not-between") {
     const split = splitTopLevelAndOnce(rest);
     if (!split) return null;
-    const low = parseWhereLiteral(split.left);
-    const high = parseWhereLiteral(split.right);
+    const low = parseWhereLiteral(split.left, columnContext?.databaseType);
+    const high = parseWhereLiteral(split.right, columnContext?.databaseType);
     if (low === null || high === null || !isLiteralRoundTrippable(low) || !isLiteralRoundTrippable(high)) return null;
     // Keep the quoted spelling for quoted literals so the spaces inside a
     // quoted bound survive the round trip through the panel (#15323 review).
@@ -749,7 +768,7 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
   }
 
   if (mode === "like" || mode === "not-like") {
-    const value = parseWhereLiteral(rest);
+    const value = parseWhereLiteral(rest, columnContext?.databaseType);
     if (value === null) return null;
     const mapped = parseLikePattern(value.value, mode === "not-like");
     if (!mapped) return null;
@@ -759,7 +778,7 @@ function parseDataGridWhereCondition(segment: string, columns: readonly string[]
     return { columnName, mode: mapped.mode, rawValue: value.quoted ? quoteWhereLiteral(mapped.rawValue) : mapped.rawValue, rawEndValue: "" };
   }
 
-  const value = parseWhereLiteral(rest);
+  const value = parseWhereLiteral(rest, columnContext?.databaseType);
   if (value === null || !isLiteralRoundTrippable(value)) return null;
   // Keep the quoted spelling for quoted literals so the spaces inside a
   // quoted value survive the round trip through the panel (#15323 review).

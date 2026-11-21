@@ -129,6 +129,7 @@ function mountGrid(
     dataGridOrderByVisible?: boolean;
     initialOrderByInput?: string;
     initialWhereInput?: string;
+    onUpdateWhereInput?: (value: string) => void;
     sortColumn?: string;
     sortColumnIndex?: number;
     sortDirection?: "asc" | "desc";
@@ -179,6 +180,7 @@ function mountGrid(
                 },
                 onExecuteSql,
                 onSort,
+                "onUpdate:whereInput": options.onUpdateWhereInput,
               }),
           },
         );
@@ -379,6 +381,37 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     applyButton(host, view).click();
     await vi.waitFor(() => expect(onExecuteSql).toHaveBeenCalledOnce());
     expect(onExecuteSql.mock.calls[0][0]).toContain("WHERE ((`id` = 1) OR (`id` = 2)) AND (`id` = 4)");
+  });
+
+  it("builds an imported manual WHERE with SQL precedence after restoring an old cache with no complete rule (#15323 review)", async () => {
+    // Seed the cache exactly as the previous panel saved it: no recorded
+    // grouping (so it restores as legacy) and no complete rule, with a mixed
+    // AND/OR manual WHERE already applied.
+    saveDataGridStructuredFilterState(["", "", "table-data", "", "items"].join("\u0001"), {
+      scopeKey: ["", "", "", "table-data", "", "items", "id"].join("\u0001"),
+      manualWhereInput: "id = 1 OR id = 2 AND id = 3",
+      rules: [],
+      appliedWhereInput: "id = 1 OR id = 2 AND id = 3",
+      serverColumnFilters: {},
+    });
+
+    // The panel preview rebuilds after the grouping flips to "sql", so it
+    // cannot tell a wrong migration from a right one — assert on the WHERE
+    // the grid actually emits to its parent instead, which is what the next
+    // execution runs.
+    const whereEmissions: string[] = [];
+    const { host, onExecuteSql } = mountGrid(view, false, { onUpdateWhereInput: (value) => whereEmissions.push(value) });
+    await settle();
+
+    filterToggle(host).click();
+    await vi.waitFor(() => expect(whereEmissions).toContain("`id` = 1 OR (`id` = 2 AND `id` = 3)"));
+    await settle();
+
+    // The migration must not have emitted the legacy regrouping at any point,
+    // and opening the panel did not re-run the query.
+    expect(whereEmissions).not.toContain("((`id` = 1) OR (`id` = 2)) AND (`id` = 3)");
+    expect(host.querySelector<HTMLTextAreaElement>('textarea[aria-label="WHERE"]')?.value).toBe("");
+    expect(onExecuteSql).not.toHaveBeenCalled();
   });
 
   it("uses the persisted expansion preference only as the initial state", async () => {

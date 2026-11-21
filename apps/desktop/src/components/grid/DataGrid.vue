@@ -1861,8 +1861,8 @@ function cachedStructuredFilterState(): DataGridStructuredFilterCacheState | und
 
 const structuredFilterConditionCache = createDataGridFilterConditionCache();
 async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Promise<string>;
-async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], options: { strict: true }): Promise<string | null>;
-async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], buildOptions?: { strict?: boolean }): Promise<string | null> {
+async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], options: { strict: true; grouping?: "legacy" | "sql" }): Promise<string | null>;
+async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], buildOptions?: { strict?: boolean; grouping?: "legacy" | "sql" }): Promise<string | null> {
   structuredFilterConditionCache.retain(rules.map((rule) => rule.id));
   const resolved = await Promise.all(
     rules.map(async (rule) => {
@@ -1895,7 +1895,11 @@ async function buildStructuredWhereFromRules(rules: StructuredFilterRule[], buil
   if (buildOptions?.strict && resolved.some((item) => item.dropped)) return null;
   const rulesWithConditions = resolved.filter((item): item is { rule: StructuredFilterRule; condition: string; dropped: boolean } => !!item.condition);
 
-  const groupWhere = structuredFilterWhereGrouping.value === "legacy" ? buildLegacyGroupedWhere : buildGroupedWhere;
+  // An explicit grouping wins over the restored one: imported manual rules
+  // are built with SQL precedence whatever the cache recorded, so the
+  // migration never re-groups them the old way (#15323 review).
+  const grouping = buildOptions?.grouping ?? structuredFilterWhereGrouping.value;
+  const groupWhere = grouping === "legacy" ? buildLegacyGroupedWhere : buildGroupedWhere;
   return groupWhere(
     rulesWithConditions.map((item) => item.condition),
     rulesWithConditions.map((item) => item.rule),
@@ -2212,7 +2216,9 @@ async function syncManualWhereInputIntoFilterBuilder(): Promise<void> {
     const cacheKeyBefore = structuredFilterCacheKey.value;
     const scopeKeyBefore = structuredFilterScopeKey.value;
     const rulesBefore = JSON.stringify(structuredFilterRules.value);
-    const where = await buildStructuredWhereFromRules(parsed, { strict: true });
+    // Imported manual rules join with SQL precedence, independent of the
+    // grouping the restored cache recorded (#15323 review).
+    const where = await buildStructuredWhereFromRules(parsed, { strict: true, grouping: "sql" });
     if (!where) return;
     if (whereFilterInput.value !== whereInputBefore || conditionInputRevision.value !== revisionBefore || structuredFilterCacheKey.value !== cacheKeyBefore || structuredFilterScopeKey.value !== scopeKeyBefore || JSON.stringify(structuredFilterRules.value) !== rulesBefore) return;
     structuredFilterRules.value = parsed;

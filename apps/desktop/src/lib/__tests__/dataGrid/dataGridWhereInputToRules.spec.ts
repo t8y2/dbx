@@ -7,7 +7,7 @@ function parse(whereInput: string | undefined) {
   let count = 0;
   const rules = parseDataGridWhereInputToRules(whereInput, COLUMNS, () => `rule-${++count}`);
   if (rules === null) return null;
-  return rules.map(({ id, ...rule }) => rule);
+  return rules.map(({ id: _id, ...rule }) => rule);
 }
 
 const TYPED_COLUMNS = ["id", "status", "age", "name", "created_at", "active"];
@@ -24,14 +24,21 @@ function parseTyped(whereInput: string | undefined) {
   let count = 0;
   const rules = parseDataGridWhereInputToRules(whereInput, TYPED_COLUMNS, () => `rule-${++count}`, { dataTypes: TYPED_COLUMN_TYPES, databaseType: "mysql" });
   if (rules === null) return null;
-  return rules.map(({ id, ...rule }) => rule);
+  return rules.map(({ id: _id, ...rule }) => rule);
 }
 
 function parseJdbc(whereInput: string | undefined) {
   let count = 0;
   const rules = parseDataGridWhereInputToRules(whereInput, TYPED_COLUMNS, () => `rule-${++count}`, { dataTypes: TYPED_COLUMN_TYPES, databaseType: "jdbc" });
   if (rules === null) return null;
-  return rules.map(({ id, ...rule }) => rule);
+  return rules.map(({ id: _id, ...rule }) => rule);
+}
+
+function parsePostgres(whereInput: string | undefined) {
+  let count = 0;
+  const rules = parseDataGridWhereInputToRules(whereInput, TYPED_COLUMNS, () => `rule-${++count}`, { dataTypes: TYPED_COLUMN_TYPES, databaseType: "postgres" });
+  if (rules === null) return null;
+  return rules.map(({ id: _id, ...rule }) => rule);
 }
 
 describe("parseDataGridWhereInputToRules (#15320)", () => {
@@ -161,5 +168,23 @@ describe("parseDataGridWhereInputToRules (#15320)", () => {
     // An empty-string rule is complete and migrates: it must not be dropped.
     expect(parseTyped("name = ''")?.[0]).toMatchObject({ rawValue: "''" });
     expect(parseTyped("name = '' AND id = 1")).toHaveLength(2);
+  });
+
+  it("treats double-quoted values as column references where the dialect quotes identifiers that way (#15323 review)", () => {
+    // In PostgreSQL double quotes delimit identifiers, so `name = "other_column"`
+    // compares two columns and must stay manual — rebuilding it against the
+    // string 'other_column' would change the rows it returns.
+    expect(parsePostgres('name = "other_column"')).toBeNull();
+    expect(parsePostgres("status IN ('a', \"b\")")).toBeNull();
+    expect(parsePostgres('age BETWEEN "18" AND 65')).toBeNull();
+    expect(parsePostgres('name LIKE "%ann%"')).toBeNull();
+    // Single-quoted strings are still strings in PostgreSQL.
+    expect(parsePostgres("name = 'other'")?.[0]).toMatchObject({ rawValue: "'other'" });
+    // MySQL writes strings with double quotes by default, so they still parse.
+    expect(parseTyped('name = "other_column"')?.[0]).toMatchObject({ rawValue: '"other_column"' });
+    expect(parseTyped('status IN ("a", "b")')).not.toBeNull();
+    // With no dialect to decide by, equivalence is uncertain: stay manual.
+    expect(parse('name = "other_column"')).toBeNull();
+    expect(parse("name = 'other'")).not.toBeNull();
   });
 });

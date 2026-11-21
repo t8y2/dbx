@@ -7,6 +7,7 @@ pub mod mysql_data_charset_policy;
 #[cfg(test)]
 mod mysql_data_charset_tests;
 pub mod object_cache;
+pub mod oracle_datapump;
 pub mod pl_debug;
 pub mod plugin_data;
 pub mod plugin_plan;

@@ -1387,6 +1387,7 @@ pub enum AgentCapability {
     NativeJobLegacyV1,
     NativeJobSessionV1,
     NativeJobLegacyObV1,
+    DatapumpV1,
     MultiSession,
     StructuredErrorV1,
 }
@@ -1469,7 +1470,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::ZooKeeperEndpointRoutes,
         Self::Connect,
         Self::TestConnection,
@@ -1500,6 +1501,7 @@ impl AgentCapability {
         Self::NativeJobLegacyV1,
         Self::NativeJobSessionV1,
         Self::ExactMetadataIdentityV1,
+        Self::DatapumpV1,
         Self::MultiSession,
         Self::StructuredErrorV1,
         Self::BlobBindStatementsV1,
@@ -1514,6 +1516,7 @@ impl AgentCapability {
             Self::NativeJobLegacyV1 => "native_job_legacy_v1",
             Self::NativeJobSessionV1 => "native_job_session_v1",
             Self::NativeJobLegacyObV1 => "native_job_legacy_ob_v1",
+            Self::DatapumpV1 => "datapump_v1",
             Self::Connect => "connect",
             Self::TestConnection => "test_connection",
             Self::Metadata => "metadata",
@@ -1592,12 +1595,16 @@ pub enum AgentMethod {
     BeginManualTransaction,
     CommitManualTransaction,
     RollbackManualTransaction,
+    OracleDatapumpStart,
+    OracleDatapumpStatus,
+    OracleDatapumpStop,
+    OracleDatapumpClose,
     Disconnect,
     Shutdown,
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 47] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -1639,6 +1646,10 @@ impl AgentMethod {
         Self::BeginManualTransaction,
         Self::CommitManualTransaction,
         Self::RollbackManualTransaction,
+        Self::OracleDatapumpStart,
+        Self::OracleDatapumpStatus,
+        Self::OracleDatapumpStop,
+        Self::OracleDatapumpClose,
         Self::Disconnect,
         Self::Shutdown,
     ];
@@ -1689,6 +1700,10 @@ impl AgentMethod {
             Self::BeginManualTransaction => "begin_manual_transaction",
             Self::CommitManualTransaction => "commit_manual_transaction",
             Self::RollbackManualTransaction => "rollback_manual_transaction",
+            Self::OracleDatapumpStart => "oracle_datapump_start",
+            Self::OracleDatapumpStatus => "oracle_datapump_status",
+            Self::OracleDatapumpStop => "oracle_datapump_stop",
+            Self::OracleDatapumpClose => "oracle_datapump_close",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
         }
@@ -3861,6 +3876,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::MongoBulkWrite
             | AgentCapability::MongoRenameCollection
             | AgentCapability::MongoFindCursor
+            | AgentCapability::DatapumpV1
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -6793,7 +6809,8 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::NativeJobSessionV1.as_str(), "native_job_session_v1");
         assert_eq!(AgentCapability::NativeJobLegacyObV1.as_str(), "native_job_legacy_ob_v1");
         assert_eq!(AgentCapability::ExactMetadataIdentityV1.as_str(), "exact_metadata_identity_v1");
-        assert_eq!(AgentCapability::ALL.len(), 34);
+        assert_eq!(AgentCapability::DatapumpV1.as_str(), "datapump_v1");
+        assert_eq!(AgentCapability::ALL.len(), 35);
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 import { meilisearchManagementEn } from "./meilisearchManagement";
 import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpEn as damengDump } from "./damengDump";
+import { oracleDatapumpEn as oracleDatapump } from "./oracleDatapump";
 
 const consul = {
   ...consulUiMessages,
@@ -8496,6 +8497,7 @@ export default {
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   mongo: {
     documents: "{count} documents",
     addField: "Add Field",

@@ -4,6 +4,7 @@ import { oceanbaseCloneDialogJa as oceanbaseCloneDialog } from "./oceanbaseClone
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpJa as damengDump } from "./damengDump";
+import { oracleDatapumpJa as oracleDatapump } from "./oracleDatapump";
 import docs from "./docs/ja";
 import { dataDictionaryJa as dataDictionary } from "./dataDictionaryMessages";
 import { consulJaMessages } from "./consulJa";
@@ -479,6 +480,7 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   cellTransform: {
     title: "変換プレビュー",
     description: "現在の値を変換して表示またはコピーします。元の値と編集中の内容は変更されません。",

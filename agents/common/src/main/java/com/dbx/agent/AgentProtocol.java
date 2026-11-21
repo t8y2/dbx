@@ -57,6 +57,10 @@ public final class AgentProtocol {
     public static final String METHOD_LEGACY_JOB_STATUS = "legacy_job_status";
     public static final String METHOD_OPEN_NATIVE_JOB_SESSION = "open_native_job_session";
     public static final String METHOD_CLOSE_NATIVE_JOB_SESSION = "close_native_job_session";
+    public static final String METHOD_ORACLE_DATAPUMP_START = "oracle_datapump_start";
+    public static final String METHOD_ORACLE_DATAPUMP_STATUS = "oracle_datapump_status";
+    public static final String METHOD_ORACLE_DATAPUMP_STOP = "oracle_datapump_stop";
+    public static final String METHOD_ORACLE_DATAPUMP_CLOSE = "oracle_datapump_close";
     public static final String METHOD_DISCONNECT = "disconnect";
     public static final String METHOD_SHUTDOWN = "shutdown";
 
@@ -204,6 +208,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_NATIVE_JOB_LEGACY_OB_V1 = "native_job_legacy_ob_v1";
     public static final String CAPABILITY_NATIVE_JOB_SESSION_V1 = "native_job_session_v1";
     public static final String CAPABILITY_EXACT_METADATA_IDENTITY_V1 = "exact_metadata_identity_v1";
+    public static final String CAPABILITY_DATAPUMP_V1 = "datapump_v1";
     public static final String CAPABILITY_ZOOKEEPER_ENDPOINT_ROUTES = "zookeeper_endpoint_routes";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
@@ -245,7 +250,8 @@ public final class AgentProtocol {
         CAPABILITY_MONGO_FIND_CURSOR,
         CAPABILITY_NATIVE_JOB_LEGACY_V1,
         CAPABILITY_NATIVE_JOB_SESSION_V1,
-        CAPABILITY_EXACT_METADATA_IDENTITY_V1
+        CAPABILITY_EXACT_METADATA_IDENTITY_V1,
+        CAPABILITY_DATAPUMP_V1
     ));
 
     public static final List<String> MULTI_SESSION_CAPABILITIES;
@@ -359,6 +365,15 @@ public final class AgentProtocol {
             METHOD_CLOSE_SESSION,
             METHOD_VALIDATE_SESSION,
             METHOD_CANCEL_SESSION
+        ));
+        // Data Pump RPCs only exist in the multi-session (v2) protocol surface;
+        // inserted before disconnect to mirror the v2 contract file order.
+        int datapumpAt = methods.indexOf(METHOD_DISCONNECT);
+        methods.addAll(datapumpAt, Arrays.asList(
+            METHOD_ORACLE_DATAPUMP_START,
+            METHOD_ORACLE_DATAPUMP_STATUS,
+            METHOD_ORACLE_DATAPUMP_STOP,
+            METHOD_ORACLE_DATAPUMP_CLOSE
         ));
         MULTI_SESSION_METHODS = Collections.unmodifiableList(methods);
     }

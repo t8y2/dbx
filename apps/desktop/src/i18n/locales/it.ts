@@ -4,6 +4,7 @@ import { oceanbaseCloneDialogIt as oceanbaseCloneDialog } from "./oceanbaseClone
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpIt as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpIt as damengDump } from "./damengDump";
+import { oracleDatapumpIt as oracleDatapump } from "./oracleDatapump";
 import { meilisearchManagementIt } from "./meilisearchManagement";
 import docs from "./docs/it";
 import { dataDictionaryIt as dataDictionary } from "./dataDictionaryMessages";
@@ -478,6 +479,7 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   cellTransform: {
     title: "Anteprima conversione",
     description: "Converte il valore corrente per visualizzarlo o copiarlo. Il valore originale e la bozza restano invariati.",

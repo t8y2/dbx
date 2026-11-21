@@ -1,4 +1,4 @@
-import { ref, watch } from "vue";
+import { nextTick, ref, watch } from "vue";
 import type { DatabaseExportSelectedObject, SqlFilePreview } from "@/lib/backend/api";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useI18n } from "vue-i18n";
@@ -30,6 +30,10 @@ const showDamengDumpDialog = ref(false);
 const damengDumpPrefillConnectionId = ref("");
 const damengDumpPrefillDatabase = ref("");
 const damengDumpMode = ref<"export" | "import">("export");
+const showOracleDatapumpDialog = ref(false);
+const oracleDatapumpPrefillConnectionId = ref("");
+const oracleDatapumpPrefillDatabase = ref("");
+const oracleDatapumpMode = ref<"export" | "import">("export");
 const showTableDataGenerateDialog = ref(false);
 const tableDataGenerateSessionId = ref<string | null>(null);
 const showFieldLineageDialog = ref(false);
@@ -366,6 +370,28 @@ export function useDialogSources() {
     );
 
     watch(
+      () => connectionStore.oracleDatapumpSource,
+      (source) => {
+        if (!source) return;
+        oracleDatapumpPrefillConnectionId.value = source.connectionId;
+        oracleDatapumpPrefillDatabase.value = source.database;
+        oracleDatapumpMode.value = source.mode;
+        // 已打开（可能处于最小化态）时先脉冲 false→true 强制重挂载，
+        // 否则 open 不变化、resetConfigure 不触发、用户永远进不了新表单。
+        // 任务状态在 composable 里，重挂载不丢失。
+        if (showOracleDatapumpDialog.value) {
+          showOracleDatapumpDialog.value = false;
+          nextTick(() => {
+            showOracleDatapumpDialog.value = true;
+          });
+        } else {
+          showOracleDatapumpDialog.value = true;
+        }
+        connectionStore.oracleDatapumpSource = null;
+      },
+    );
+
+    watch(
       () => connectionStore.tableDataGenerateSource,
       (v) => {
         if (v) {
@@ -645,6 +671,10 @@ export function useDialogSources() {
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
     showDamengDumpDialog,
+    showOracleDatapumpDialog,
+    oracleDatapumpPrefillConnectionId,
+    oracleDatapumpPrefillDatabase,
+    oracleDatapumpMode,
     damengDumpPrefillConnectionId,
     damengDumpPrefillDatabase,
     damengDumpMode,

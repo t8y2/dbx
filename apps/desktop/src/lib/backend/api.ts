@@ -668,6 +668,14 @@ export const cancelDamengDump = forward("cancelDamengDump");
 export const resolveDamengDumpTool = forward("resolveDamengDumpTool");
 export type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
 
+// Oracle Data Pump（agent 调 DBMS_DATAPUMP）
+export const startOracleDatapump = forward("startOracleDatapump");
+export const cancelOracleDatapump = forward("cancelOracleDatapump");
+export const listOracleDatapumpDirectories = forward("listOracleDatapumpDirectories");
+export const createOracleDatapumpDirectory = forward("createOracleDatapumpDirectory");
+export const dropOracleDatapumpDirectory = forward("dropOracleDatapumpDirectory");
+export type { OracleDatapumpRequest, OracleDatapumpProgress, OracleDatapumpDirectory } from "./oracleDatapumpTypes";
+
 // Redis
 export const redisListDatabases = forward("redisListDatabases");
 export const redisScanKeys = forward("redisScanKeys");

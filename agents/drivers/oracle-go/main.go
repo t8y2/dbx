@@ -653,6 +653,7 @@ type server struct {
 	manualConn             *sql.Conn
 	manualTx               *sql.Tx
 	legacyJob              *legacyJobSession
+	datapumps              map[string]*datapumpEntry
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -839,7 +840,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1", "datapump_v1"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -1086,6 +1087,7 @@ func newServer() *server {
 		sessions:          map[string]*querySession{},
 		tableReadSessions: map[string]*querySession{},
 		activeRows:        map[*sql.Rows]context.CancelFunc{},
+		datapumps:         map[string]*datapumpEntry{},
 	}
 }
 
@@ -1115,7 +1117,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]any{
 			"protocolVersion":      protocolVersion,
 			"agentProtocolVersion": protocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1", "datapump_v1"},
 		}, false, nil
 	case "connect":
 		var cp connectParams
@@ -1296,6 +1298,19 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return s.finishLegacyJob(stringParam(params, "operationId"), stringParam(params, "jobId"), method == "commit_legacy_job"), false, nil
 	case "legacy_job_status":
 		return s.legacyJobStatus(stringParam(params, "operationId")), false, nil
+	case "oracle_datapump_start":
+		var request datapumpStartRequest
+		if err := decodeParams(params, &request); err != nil {
+			return nil, false, err
+		}
+		return s.startDatapump(request), false, nil
+	case "oracle_datapump_status":
+		return s.datapumpStatusResultFor(stringParam(params, "operationId")), false, nil
+	case "oracle_datapump_stop":
+		return s.stopDatapump(stringParam(params, "operationId")), false, nil
+	case "oracle_datapump_close":
+		s.closeDatapump()
+		return map[string]bool{"ok": true}, false, nil
 	case "commit_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
 	case "rollback_manual_transaction":
@@ -1528,6 +1543,7 @@ func (s *server) disconnect() error {
 	}
 	s.closeAllQuerySessions()
 	_ = s.rollbackManualTransactionQuiet()
+	s.closeDatapump()
 	jobErr := s.closeLegacyJob()
 	s.dbmsOutput.reset()
 	s.legacyLOBFetchDeferred = false

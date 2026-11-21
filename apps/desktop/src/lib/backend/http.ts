@@ -4,6 +4,7 @@ import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOpt
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
+import type { OracleDatapumpRequest, OracleDatapumpProgress, OracleDatapumpDirectory } from "./oracleDatapumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { McpAccessPolicy, McpAccessRule, McpSubScopeMode, McpToolCatalog, PluginMcpGrant, PluginMcpView } from "@/types/mcpCatalog";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
@@ -3936,6 +3937,29 @@ export async function cancelDamengDump(_taskId: string): Promise<void> {
 
 export async function resolveDamengDumpTool(_binDir: string, _kind: DamengDumpKind): Promise<string> {
   throw new Error(DAMENG_DUMP_WEB_UNSUPPORTED);
+}
+
+// 数据泵依赖桌面端的本地 Oracle agent；Web 部署按设计没有 agent 宿主。
+const ORACLE_DATAPUMP_WEB_UNSUPPORTED = "Oracle Data Pump export/import requires the desktop application.";
+
+export async function startOracleDatapump(_request: OracleDatapumpRequest, _onProgress: (progress: OracleDatapumpProgress) => void): Promise<OracleDatapumpProgress> {
+  throw new Error(ORACLE_DATAPUMP_WEB_UNSUPPORTED);
+}
+
+export async function cancelOracleDatapump(_taskId: string): Promise<void> {
+  throw new Error(ORACLE_DATAPUMP_WEB_UNSUPPORTED);
+}
+
+export async function listOracleDatapumpDirectories(_connectionId: string, _database: string | null): Promise<OracleDatapumpDirectory[]> {
+  throw new Error(ORACLE_DATAPUMP_WEB_UNSUPPORTED);
+}
+
+export async function createOracleDatapumpDirectory(_connectionId: string, _database: string | null, _name: string, _path: string): Promise<void> {
+  throw new Error(ORACLE_DATAPUMP_WEB_UNSUPPORTED);
+}
+
+export async function dropOracleDatapumpDirectory(_connectionId: string, _database: string | null, _name: string): Promise<void> {
+  throw new Error(ORACLE_DATAPUMP_WEB_UNSUPPORTED);
 }
 
 export async function cancelTableExport(exportId: string): Promise<void> {

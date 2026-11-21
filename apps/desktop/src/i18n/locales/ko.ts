@@ -4,6 +4,7 @@ import { oceanbaseCloneDialogKo as oceanbaseCloneDialog } from "./oceanbaseClone
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpKo as damengDump } from "./damengDump";
+import { oracleDatapumpKo as oracleDatapump } from "./oracleDatapump";
 import { meilisearchManagementKo } from "./meilisearchManagement";
 import docs from "./docs/ko";
 import { dataDictionaryKo as dataDictionary } from "./dataDictionaryMessages";
@@ -477,6 +478,7 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   cellTransform: {
     title: "변환 미리보기",
     description: "현재 값을 변환하여 보거나 복사합니다. 원래 값과 편집 초안은 변경되지 않습니다.",

@@ -8,6 +8,7 @@ import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./damengDumpTypes";
+import type { OracleDatapumpRequest, OracleDatapumpProgress, OracleDatapumpDirectory } from "./oracleDatapumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { McpAccessPolicy, McpAccessRule, McpSubScopeMode, McpToolCatalog, PluginMcpGrant, PluginMcpView } from "@/types/mcpCatalog";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
@@ -7138,6 +7139,64 @@ export async function cancelDamengDump(taskId: string): Promise<void> {
 
 export async function resolveDamengDumpTool(binDir: string, kind: DamengDumpKind): Promise<string> {
   return invoke("resolve_dameng_dump_tool", { binDir, kind });
+}
+
+// Oracle Data Pump（agent 调 DBMS_DATAPUMP）——与达梦 dump 相同的
+// "先订阅后调用"编排：进度事件按 taskId 过滤，返回的 Promise 在第一个
+// 终态事件上落定。
+export async function startOracleDatapump(request: OracleDatapumpRequest, onProgress: (progress: OracleDatapumpProgress) => void): Promise<OracleDatapumpProgress> {
+  let unlisten: UnlistenFn | undefined;
+  let settled = false;
+  let resolveTerminal: (progress: OracleDatapumpProgress) => void = () => {};
+  let rejectTerminal: (error: unknown) => void = () => {};
+
+  const terminalProgress = new Promise<OracleDatapumpProgress>((resolve, reject) => {
+    resolveTerminal = resolve;
+    rejectTerminal = reject;
+  });
+
+  const finish = (callback: () => void) => {
+    if (settled) return;
+    settled = true;
+    unlisten?.();
+    callback();
+  };
+
+  try {
+    unlisten = await listen<OracleDatapumpProgress>("oracle-datapump-progress", (event) => {
+      if (event.payload.taskId !== request.taskId) return;
+      onProgress(event.payload);
+      if (event.payload.status === "Error") {
+        finish(() => rejectTerminal(new BackendErrorException(event.payload.error || "Oracle Data Pump task failed")));
+      } else if (event.payload.status === "Done" || event.payload.status === "Cancelled") {
+        finish(() => resolveTerminal(event.payload));
+      }
+    });
+    await invoke("start_oracle_datapump", { request });
+    return await terminalProgress;
+  } catch (error) {
+    if (!settled) {
+      settled = true;
+      unlisten?.();
+    }
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
+  }
+}
+
+export async function cancelOracleDatapump(taskId: string): Promise<void> {
+  await invoke("cancel_oracle_datapump", { taskId });
+}
+
+export async function listOracleDatapumpDirectories(connectionId: string, database: string | null): Promise<OracleDatapumpDirectory[]> {
+  return invoke("list_oracle_datapump_directories", { connectionId, database });
+}
+
+export async function createOracleDatapumpDirectory(connectionId: string, database: string | null, name: string, path: string): Promise<void> {
+  await invoke("create_oracle_datapump_directory", { connectionId, database, name, path });
+}
+
+export async function dropOracleDatapumpDirectory(connectionId: string, database: string | null, name: string): Promise<void> {
+  await invoke("drop_oracle_datapump_directory", { connectionId, database, name });
 }
 
 export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {

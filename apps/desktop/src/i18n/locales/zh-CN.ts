@@ -10,6 +10,7 @@ import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
 import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
+import { oracleDatapumpZhCN as oracleDatapump } from "./oracleDatapump";
 
 export default withEnglishFallback({
   oracleTrigger: {
@@ -8466,6 +8467,7 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   mongo: {
     documents: "{count} 个文档",
     addField: "添加字段",

@@ -188,6 +188,15 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     connectionStore.damengDumpSource = { connectionId: node.connectionId, database: schema, mode };
   }
 
+  function openOracleDatapump(mode: "export" | "import") {
+    const node = activeNode.value;
+    if ((node.type !== "database" && node.type !== "schema") || !node.connectionId || !node.database) return;
+    // Oracle：选中的 schema（库节点则是当前连接用户）作为数据泵
+    // 对话框里导出 schema 的默认值。
+    const schema = node.type === "schema" && node.schema ? node.schema : node.database;
+    connectionStore.oracleDatapumpSource = { connectionId: node.connectionId, database: schema, mode };
+  }
+
   function openStructureEditor() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
@@ -236,6 +245,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
   return {
     openAllDatabasesExport,
     openDamengDump,
+    openOracleDatapump,
     openDataCompare,
     openDatabaseExport,
     openDatabaseSearch,

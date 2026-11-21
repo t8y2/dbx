@@ -548,6 +548,7 @@ const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData,
 const {
   openAllDatabasesExport,
   openDamengDump,
+  openOracleDatapump,
   openDataCompare,
   openDatabaseExport,
   openDatabaseSearch,
@@ -8092,6 +8093,12 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (currentDatabaseType() === "dameng") {
       items.push({ sidebarActionId: "damengDump.menuExport", label: t("damengDump.menuExport"), action: () => openDamengDump("export"), icon: Package });
       items.push({ sidebarActionId: "damengDump.menuImport", label: t("damengDump.menuImport"), action: () => openDamengDump("import"), icon: PackageOpen });
+    }
+    // Oracle 数据泵经 agent 在服务器端执行（DBMS_DATAPUMP），
+    // 本机无需安装 Oracle 客户端；.dmp 落在所选 DIRECTORY 对象里。
+    if (currentDatabaseType() === "oracle") {
+      items.push({ sidebarActionId: "oracleDatapump.menuExport", label: t("oracleDatapump.menuExport"), action: () => openOracleDatapump("export"), icon: Package });
+      items.push({ sidebarActionId: "oracleDatapump.menuImport", label: t("oracleDatapump.menuImport"), action: () => openOracleDatapump("import"), icon: PackageOpen });
     }
     if (canOpenDataDictionary.value) {
       items.push({ sidebarActionId: "dataDictionary.title", label: t("dataDictionary.title"), action: openDataDictionary, icon: FileText });

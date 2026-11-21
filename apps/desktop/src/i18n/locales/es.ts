@@ -4,6 +4,7 @@ import { oceanbaseCloneDialogEs as oceanbaseCloneDialog } from "./oceanbaseClone
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpEs as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpEs as damengDump } from "./damengDump";
+import { oracleDatapumpEs as oracleDatapump } from "./oracleDatapump";
 import { meilisearchManagementEs } from "./meilisearchManagement";
 import { redisGroupingEs as redisGrouping } from "./redisGrouping";
 import docs from "./docs/es";
@@ -480,6 +481,7 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   cellTransform: {
     title: "Vista previa de conversión",
     description: "Convierte el valor actual para verlo o copiarlo. El valor original y el borrador no cambian.",

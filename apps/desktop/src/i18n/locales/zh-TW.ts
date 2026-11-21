@@ -6,6 +6,7 @@ import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhTW as damengDump } from "./damengDump";
+import { oracleDatapumpZhTW as oracleDatapump } from "./oracleDatapump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import docs from "./docs/zh-TW";
 import { dataDictionaryZhTW as dataDictionary } from "./dataDictionaryMessages";
@@ -460,6 +461,7 @@ export default withEnglishFallback({
   },
   mongoDump,
   damengDump,
+  oracleDatapump,
   cellTransform: {
     title: "轉換預覽",
     description: "將目前內容轉換後檢視或複製，不改變原值和編輯草稿。",

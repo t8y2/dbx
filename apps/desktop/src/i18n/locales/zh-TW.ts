@@ -11576,6 +11576,12 @@ export default withEnglishFallback({
     loadFailed: "載入資料庫失敗：{message}",
     defaultCharset: "預設字元集",
     defaultCollation: "預設定序規則",
+    charsetChangeTitle: "預設字元集",
+    charsetChangeConfirm: "修改預設字元集",
+    charsetChangeMessage: "將資料庫 {name} 的預設字元集改為 {charset}（定序規則 {collation}）？現有資料表與欄位不會被轉換。",
+    charsetChangeSuccess: "已將資料庫 {name} 的預設字元集改為 {charset}（{collation}）。",
+    charsetChangeFailed: "修改資料庫字元集失敗：{message}",
+    charsetChangeInvalid: "字元集或定序規則無效，未產生 ALTER 語句。",
   },
   databaseEmpty: {
     menu: "清空所有資料表資料",

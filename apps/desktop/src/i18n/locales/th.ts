@@ -2802,6 +2802,12 @@ export default withEnglishFallback({
     loadFailed: "โหลดฐานข้อมูลไม่สำเร็จ: {message}",
     defaultCharset: "ชุดอักขระ",
     defaultCollation: "Collation",
+    charsetChangeTitle: "ชุดอักขระเริ่มต้น",
+    charsetChangeConfirm: "เปลี่ยนชุดอักขระเริ่มต้น",
+    charsetChangeMessage: "เปลี่ยนชุดอักขระเริ่มต้นของฐานข้อมูล {name} เป็น {charset} (Collation {collation}) หรือไม่? ตารางและคอลัมน์ที่มีอยู่จะไม่ถูกแปลง",
+    charsetChangeSuccess: "เปลี่ยนชุดอักขระเริ่มต้นของฐานข้อมูล {name} เป็น {charset} ({collation}) แล้ว",
+    charsetChangeFailed: "เปลี่ยนชุดอักขระของฐานข้อมูลไม่สำเร็จ: {message}",
+    charsetChangeInvalid: "ชุดอักขระหรือ Collation ไม่ถูกต้อง จึงไม่ได้สร้างคำสั่ง ALTER",
   },
   databaseEmpty: {
     menu: "ล้างข้อมูลตารางทั้งหมด",

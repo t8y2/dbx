@@ -11604,6 +11604,12 @@ export default withEnglishFallback({
     loadFailed: "Impossibile caricare i database: {message}",
     defaultCharset: "Set di caratteri",
     defaultCollation: "Regole di confronto",
+    charsetChangeTitle: "Set di caratteri predefinito",
+    charsetChangeConfirm: "Cambia set di caratteri predefinito",
+    charsetChangeMessage: "Cambiare il set di caratteri predefinito del database {name} in {charset} con regole di confronto {collation}? Le tabelle e le colonne esistenti non verranno convertite.",
+    charsetChangeSuccess: "Il set di caratteri predefinito del database {name} è stato cambiato in {charset} ({collation}).",
+    charsetChangeFailed: "Impossibile cambiare il set di caratteri del database: {message}",
+    charsetChangeInvalid: "Il set di caratteri o le regole di confronto non sono validi, quindi non è stata generata alcuna istruzione ALTER.",
   },
   databaseEmpty: {
     menu: "Svuota i dati di tutte le tabelle",

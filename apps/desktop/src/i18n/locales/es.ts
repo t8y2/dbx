@@ -12060,6 +12060,12 @@ export default withEnglishFallback({
     loadFailed: "No se pudieron cargar las bases de datos: {message}",
     defaultCharset: "Juego de caracteres",
     defaultCollation: "Cotejamiento",
+    charsetChangeTitle: "Juego de caracteres predeterminado",
+    charsetChangeConfirm: "Cambiar juego de caracteres predeterminado",
+    charsetChangeMessage: "¿Cambiar el juego de caracteres predeterminado de la base de datos {name} a {charset} con cotejamiento {collation}? Las tablas y columnas existentes no se convertirán.",
+    charsetChangeSuccess: "Se cambió el juego de caracteres predeterminado de la base de datos {name} a {charset} ({collation}).",
+    charsetChangeFailed: "No se pudo cambiar el juego de caracteres de la base de datos: {message}",
+    charsetChangeInvalid: "El juego de caracteres o el cotejamiento no son válidos, por lo que no se generó ninguna sentencia ALTER.",
   },
   databaseEmpty: {
     menu: "Vaciar los datos de todas las tablas",

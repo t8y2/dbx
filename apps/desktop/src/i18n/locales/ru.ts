@@ -2652,6 +2652,12 @@ export default withEnglishFallback({
     loadFailed: "Не удалось загрузить базы данных: {message}",
     defaultCharset: "Кодировка",
     defaultCollation: "Сортировка",
+    charsetChangeTitle: "Кодировка по умолчанию",
+    charsetChangeConfirm: "Изменить кодировку по умолчанию",
+    charsetChangeMessage: "Изменить кодировку базы данных {name} по умолчанию на {charset} с сортировкой {collation}? Существующие таблицы и столбцы не будут преобразованы.",
+    charsetChangeSuccess: "Кодировка базы данных {name} по умолчанию изменена на {charset} ({collation}).",
+    charsetChangeFailed: "Не удалось изменить кодировку базы данных: {message}",
+    charsetChangeInvalid: "Кодировка или сортировка недействительны, поэтому инструкция ALTER не была создана.",
   },
   databaseEmpty: {
     menu: "Очистить данные всех таблиц",

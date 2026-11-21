@@ -2562,6 +2562,12 @@ export default withEnglishFallback({
     loadFailed: "데이터베이스를 불러올 수 없습니다: {message}",
     defaultCharset: "문자 집합",
     defaultCollation: "데이터 정렬",
+    charsetChangeTitle: "기본 문자 집합",
+    charsetChangeConfirm: "기본 문자 집합 변경",
+    charsetChangeMessage: "데이터베이스 {name}의 기본 문자 집합을 {charset}(데이터 정렬 {collation})로 변경하시겠습니까? 기존 테이블과 열은 변환되지 않습니다.",
+    charsetChangeSuccess: "데이터베이스 {name}의 기본 문자 집합을 {charset}({collation})로 변경했습니다.",
+    charsetChangeFailed: "데이터베이스 문자 집합을 변경하지 못했습니다: {message}",
+    charsetChangeInvalid: "문자 집합 또는 데이터 정렬이 유효하지 않아 ALTER 문을 생성하지 않았습니다.",
   },
   databaseEmpty: {
     menu: "모든 테이블 데이터 비우기",

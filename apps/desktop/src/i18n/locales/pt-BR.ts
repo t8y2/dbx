@@ -11596,6 +11596,12 @@ export default withEnglishFallback({
     loadFailed: "Não foi possível carregar os bancos de dados: {message}",
     defaultCharset: "Conjunto de caracteres",
     defaultCollation: "Agrupamento",
+    charsetChangeTitle: "Conjunto de caracteres padrão",
+    charsetChangeConfirm: "Alterar conjunto de caracteres padrão",
+    charsetChangeMessage: "Alterar o conjunto de caracteres padrão do banco de dados {name} para {charset} com agrupamento {collation}? As tabelas e colunas existentes não serão convertidas.",
+    charsetChangeSuccess: "O conjunto de caracteres padrão do banco de dados {name} foi alterado para {charset} ({collation}).",
+    charsetChangeFailed: "Falha ao alterar o conjunto de caracteres do banco de dados: {message}",
+    charsetChangeInvalid: "O conjunto de caracteres ou o agrupamento não é válido, portanto nenhuma instrução ALTER foi gerada.",
   },
   databaseEmpty: {
     menu: "Esvaziar dados de todas as tabelas",

@@ -11627,6 +11627,12 @@ export default withEnglishFallback({
     loadFailed: "データベースを読み込めませんでした: {message}",
     defaultCharset: "文字セット",
     defaultCollation: "照合順序",
+    charsetChangeTitle: "既定の文字セット",
+    charsetChangeConfirm: "既定の文字セットを変更",
+    charsetChangeMessage: "データベース {name} の既定の文字セットを {charset}（照合順序 {collation}）に変更しますか？既存のテーブルと列は変換されません。",
+    charsetChangeSuccess: "データベース {name} の既定の文字セットを {charset}（{collation}）に変更しました。",
+    charsetChangeFailed: "データベースの文字セットを変更できませんでした: {message}",
+    charsetChangeInvalid: "文字セットまたは照合順序が無効なため、ALTER ステートメントは生成されませんでした。",
   },
   databaseEmpty: {
     menu: "全テーブルのデータを空にする",

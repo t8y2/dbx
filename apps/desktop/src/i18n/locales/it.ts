@@ -3728,6 +3728,7 @@ export default withEnglishFallback({
       "binary-uuid": "Binario in UUID",
       "binary-uuid-swapped": "Binario in UUID (bit temporali scambiati)",
     },
+    queryCanceled: "Query annullata",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

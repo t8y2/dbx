@@ -3811,6 +3811,7 @@ export default withEnglishFallback({
       "binary-uuid": "Бинарные данные в UUID",
       "binary-uuid-swapped": "Бинарные данные в UUID (с перестановкой битов времени)",
     },
+    queryCanceled: "Запрос отменён",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

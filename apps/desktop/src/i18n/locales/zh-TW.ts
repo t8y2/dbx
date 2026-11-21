@@ -3708,6 +3708,7 @@ export default withEnglishFallback({
     structuredFiltersActive: "{count} 個條件篩選",
     mongoJsonPreviewSelected: "選取的文件",
     mongoJsonPreviewPage: "目前頁面",
+    queryCanceled: "查詢已取消",
   },
   exportProgress: {
     recoveryTitle: "刪除尚未確認結束的匯出？",

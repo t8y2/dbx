@@ -8485,6 +8485,9 @@ export default withEnglishFallback({
     openWithDefaultAppFailed: "시스템 기본 앱으로 열기 실패: {message}",
   },
   diff: {
+    additionalSchemas: "다음 스키마도 비교",
+    additionalSchemasHint: "각 스키마는 대상의 같은 이름 스키마와 비교한 뒤 개별적으로 검토하고 배포합니다.",
+    schemaResults: "스키마별 결과",
     progress: {
       loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",
       loadingSourceDetails: "원본 데이터베이스 테이블 구조를 읽는 중",
@@ -10916,6 +10919,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
     shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
     sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
+    globalNumberGrouping: "천 단위 구분 기호 표시",
+    globalNumberGroupingDescription: "그리드에서 숫자를 1,234,567.89 등의 형식으로 표시하며, 개별적으로 구성된 열 형식이 우선합니다.",
     toolbarGroup_left: "주요 작업 표시줄 및 추가 메뉴",
     toolbarPinItem: "툴바에 {item} 고정",
     completionAutoActivationDelay: "자동 완성 자동 활성화 지연(밀리초)",

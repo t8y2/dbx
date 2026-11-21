@@ -51,6 +51,7 @@ const props = defineProps<{
   options: SchemaDiffCompareOptions;
   selectedTables?: string[];
   selectedRoutines?: string[];
+  additionalSchemas?: string[];
   tableListLoader: SchemaDiffTableListLoader;
   loading: boolean;
   recentConfigs: SchemaDiffConfig[];
@@ -79,6 +80,7 @@ const emit = defineEmits<{
   (e: "update:selectedRoutines", value?: string[]): void;
   (e: "update:routineSelection", value: { objectKinds: OracleRoutineKind[]; selectedObjects?: Pick<OracleRoutineIdentity, "name" | "kind">[] }): void;
   (e: "update:compareScope", value: { tables?: boolean; views?: boolean; functions?: boolean }): void;
+  (e: "update:additionalSchemas", value: string[]): void;
 }>();
 
 const sourceDatabases = ref<string[]>([]);
@@ -301,6 +303,34 @@ const sourceRoutineList = ref<string[]>([]);
 const targetRoutineList = ref<string[]>([]);
 const targetRoutineListLoaded = ref(false);
 const restrictRoutines = ref(false);
+
+// Pairs are matched by name, and object selections and mappings belong to the
+// chosen schema, so applying them to another schema would pair the wrong objects.
+const additionalSchemaOptions = computed(() => {
+  if (!isSchemaAware(sourceConfig.value?.db_type) || !isSchemaAware(targetConfig.value?.db_type)) return [];
+  if (restrictTables.value || restrictRoutines.value || props.selectedTables !== undefined || props.selectedRoutines !== undefined || props.options.selectedRoutineObjects !== undefined) return [];
+  if (props.options.tableMappings?.length || props.options.routineMappings?.length || props.options.fieldMappings?.length) return [];
+  const targetNames = new Set(targetSchemas.value);
+  return sourceSchemas.value.filter((schema) => targetNames.has(schema) && schema !== props.sourceSchema && schema !== props.targetSchema);
+});
+
+function pruneAdditionalSchemas() {
+  const selected = props.additionalSchemas ?? [];
+  const kept = selected.filter((schema) => additionalSchemaOptions.value.includes(schema));
+  if (kept.length !== selected.length) emit("update:additionalSchemas", kept);
+}
+
+watch(additionalSchemaOptions, () => {
+  // An empty list on a schema-aware endpoint usually means it is reloading, so keep the selection for now.
+  const reloading = (isSchemaAware(sourceConfig.value?.db_type) && !sourceSchemas.value.length) || (isSchemaAware(targetConfig.value?.db_type) && !targetSchemas.value.length);
+  if (!reloading) pruneAdditionalSchemas();
+});
+
+// Comparing must never include a schema the picker no longer offers.
+function handleCompareClick() {
+  pruneAdditionalSchemas();
+  emit("compare");
+}
 const localSelectedRoutines = ref<string[]>([]);
 const loadingRoutines = ref(false);
 type ProgramSelection = Pick<OracleRoutineIdentity, "name" | "kind">;
@@ -929,6 +959,12 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
       </div>
     </div>
 
+    <!-- Additional Schemas -->
+    <div v-if="additionalSchemaOptions.length" class="space-y-1.5 rounded-lg border bg-muted/20 p-3">
+      <TableMultiSelect :tables="additionalSchemaOptions" :model-value="additionalSchemas ?? []" :title="t('diff.additionalSchemas')" @update:model-value="$emit('update:additionalSchemas', $event)" />
+      <p class="text-[11px] text-muted-foreground">{{ t("diff.additionalSchemasHint") }}</p>
+    </div>
+
     <!-- Comparison Scope -->
     <div class="space-y-3 rounded-lg border bg-muted/20 p-3">
       <div class="space-y-1.5">
@@ -1176,7 +1212,7 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
           <span v-if="activeFieldMappings.length > 0" class="ml-1 inline-flex items-center justify-center rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">{{ activeFieldMappings.length }}</span>
         </Button>
       </div>
-      <Button size="sm" :disabled="!canCompare || loading" @click="$emit('compare')">
+      <Button size="sm" :disabled="!canCompare || loading" @click="handleCompareClick">
         <GitCompareArrows class="w-3.5 h-3.5 mr-1" />
         {{ loading ? t("common.loading") : t("diff.compare") }}
       </Button>

@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'com.sap.cloud.db.jdbc:ngdbc:2.30.11'
+    implementation 'com.sap.cloud.db.jdbc:ngdbc:2.30.12'
 }
 
 tasks.named('shadowJar') {

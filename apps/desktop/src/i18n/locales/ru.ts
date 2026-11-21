@@ -9937,6 +9937,9 @@ export default withEnglishFallback({
     openWithDefaultAppFailed: "Не удалось открыть с помощью системного приложения по умолчанию: {message}",
   },
   diff: {
+    additionalSchemas: "Также сравнить эти схемы",
+    additionalSchemasHint: "Каждая сравнивается со схемой с тем же именем в целевой базе, затем проверяется и развёртывается отдельно.",
+    schemaResults: "Результаты по схемам",
     progress: {
       loadingObjects: "Чтение объектов исходной и целевой баз данных...",
       loadingSourceDetails: "Чтение структур таблиц исходной базы данных",
@@ -12409,6 +12412,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    globalNumberGrouping: "Показывать разделитель тысяч",
+    globalNumberGroupingDescription: "Отображать числа в сетке в виде 1,234,567.89 и т. п.; приоритет имеет формат, настроенный для отдельного столбца.",
     toolbarGroup_left: "Основная панель действий и меню «Дополнительно»",
     toolbarPinItem: "Закрепить {item} на панели инструментов",
     completionAutoActivationDelay: "Задержка автоматической активации автодополнения (мс)",

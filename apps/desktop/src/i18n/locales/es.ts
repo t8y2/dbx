@@ -8606,6 +8606,9 @@ export default withEnglishFallback({
     completedWithErrors: "Ejecución completada: {succeeded} correctos, {failed} fallidos",
   },
   diff: {
+    additionalSchemas: "Comparar también estos esquemas",
+    additionalSchemasHint: "Cada uno se compara con el esquema del mismo nombre en el destino y luego se revisa e implementa por separado.",
+    schemaResults: "Resultados por esquema",
     progress: {
       loadingObjects: "Leyendo los objetos de las bases de datos de origen y destino...",
       loadingSourceDetails: "Leyendo la estructura de tablas de la base de datos de origen",
@@ -11106,6 +11109,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
     shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
+    globalNumberGrouping: "Mostrar separador de miles",
+    globalNumberGroupingDescription: "En la cuadrícula, muestra los números como 1,234,567.89, etc. Los formatos de columna configurados individualmente tienen prioridad.",
     toolbarGroup_left: "Barra de acciones principal y menú Más",
     toolbarPinItem: "Fijar {item} a la barra de herramientas",
     completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",

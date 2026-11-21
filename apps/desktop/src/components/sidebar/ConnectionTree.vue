@@ -76,7 +76,7 @@ import {
   type ActiveTabSidebarTarget,
   type SidebarNodeScrollAlign,
 } from "@/lib/sidebar/sidebarActiveTabTarget";
-import { findLoadedTableTargetForCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
+import { normalizeLocateCandidate, queryContextTargetFromCandidate, queryCursorTableCandidate, resolveConnectionRootLocateSchema, resolveLoadedLocateTarget, type QueryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import { createFlatTreeIndex, flatTreeRowsChanged, getSidebarTreeRowHeight, SIDEBAR_TREE_PRERENDER_COUNT, SIDEBAR_TREE_SCROLL_BUFFER, SIDEBAR_TREE_VIRTUALIZE_HYSTERESIS, SIDEBAR_TREE_VIRTUALIZE_THRESHOLD, flattenTree, shouldVirtualizeFlatTree, type FlatTreeNode } from "@/composables/useFlatTree";
 import { sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
@@ -1959,14 +1959,19 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
   }
 
   const config = connId ? store.getConfig(connId) : undefined;
-  const cursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const rawCursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const cursorCandidate = rawCursorCandidate ? normalizeLocateCandidate(rawCursorCandidate, store.treeNodes, config) : null;
   const tabTableCandidate = locatesSavedSql || cursorCandidate ? null : tableLocateCandidateFromTarget(tabTarget, config);
-  const locateTableCandidate = cursorCandidate ?? tabTableCandidate;
-  const fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget);
+  let locateTableCandidate = cursorCandidate ?? tabTableCandidate;
+  let fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, locateTableCandidate ?? rawCursorCandidate) ?? tabTarget);
+  if (fallbackTarget?.type === "query-context" && connectionUsesConnectionRootSchemaMode(config)) {
+    const schema = resolveConnectionRootLocateSchema(store.treeNodes, connId, fallbackTarget.schema || fallbackTarget.database, config);
+    fallbackTarget = { ...fallbackTarget, database: schema, schema };
+  }
   let initialTarget = locateTableCandidate ? tableTargetFromCandidate(locateTableCandidate) : fallbackTarget;
   if (!initialTarget) return;
   if (initialTarget.type === "query-context" && connectionUsesConnectionRootSchemaMode(config)) {
-    const schema = initialTarget.schema || initialTarget.database;
+    const schema = resolveConnectionRootLocateSchema(store.treeNodes, connId, initialTarget.schema || initialTarget.database, config);
     initialTarget = { ...initialTarget, database: schema, schema };
   }
 
@@ -1984,6 +1989,15 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
       : initialTarget;
   await ensureTreeLoadedForTarget(treeLoadTarget, { requireDatabaseChildren: locatesSavedSql });
 
+  if (!locatesSavedSql && locateTableCandidate && connectionUsesConnectionRootSchemaMode(config)) {
+    const normalizedAfterLoad = normalizeLocateCandidate(locateTableCandidate, store.treeNodes, config);
+    if (normalizedAfterLoad.database !== locateTableCandidate.database || normalizedAfterLoad.schema !== locateTableCandidate.schema) {
+      locateTableCandidate = normalizedAfterLoad;
+      initialTarget = tableTargetFromCandidate(locateTableCandidate);
+      await ensureTreeLoadedForTarget(initialTarget);
+    }
+  }
+
   // Clear any active search filter so the node is visible
   if (isRootListPartial.value) {
     searchQuery.value = "";
@@ -1992,21 +2006,21 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
     clearSearchScopeFilter();
   }
 
-  let target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
+  let target = resolveLoadedLocateTarget(store.treeNodes, initialTarget, locateTableCandidate, config);
   let nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   if (!nodePath && !locatesSavedSql) {
     // The first load may have served a stale schema cache whose async refresh
     // replaced the database node before its tables finished loading, so the
     // table isn't in the tree yet. Force a synchronous reload and retry once so
     // locate reaches the table, not just the database (issue #715).
-    await ensureTreeLoadedForTarget(treeLoadTarget, { force: true });
-    target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
+    await ensureTreeLoadedForTarget(initialTarget, { force: true });
+    target = resolveLoadedLocateTarget(store.treeNodes, initialTarget, locateTableCandidate, config);
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
 
   if (!nodePath && locateTableCandidate) {
     await store.loadTableForLocate(locateTableCandidate);
-    target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
+    target = resolveLoadedLocateTarget(store.treeNodes, initialTarget, locateTableCandidate, config);
     nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
   }
 
@@ -2052,19 +2066,17 @@ function tableTargetFromCandidate(candidate: QueryCursorTableCandidate): ActiveT
 function tableLocateCandidateFromTarget(target: ActiveTabSidebarTarget | null, config: ReturnType<typeof store.getConfig>): QueryCursorTableCandidate | null {
   if (target?.type === "hbase-table") return { connectionId: target.connectionId, database: target.namespace, tableName: target.tableName };
   if (target?.type !== "table") return null;
-  const database = connectionUsesConnectionRootSchemaMode(config) && target.schema ? target.schema : target.database;
-  return {
-    connectionId: target.connectionId,
-    database,
-    catalog: target.catalog,
-    schema: target.schema,
-    tableName: target.tableName,
-  };
-}
-
-function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: QueryCursorTableCandidate | null): ActiveTabSidebarTarget | null {
-  if (!candidate) return target;
-  return findLoadedTableTargetForCandidate(store.treeNodes, candidate);
+  return normalizeLocateCandidate(
+    {
+      connectionId: target.connectionId,
+      database: target.database,
+      catalog: target.catalog,
+      schema: target.schema,
+      tableName: target.tableName,
+    },
+    store.treeNodes,
+    config,
+  );
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean; requireDatabaseChildren?: boolean }) {

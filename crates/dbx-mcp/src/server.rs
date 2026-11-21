@@ -1277,9 +1277,9 @@ impl DbxMcpServer {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                text(serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string()))
+                product_tool_result(serde_json::Value::Array(filtered))
             }
-            Ok(value) => text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())),
+            Ok(value) => product_tool_result(value),
             Err(error) => backend_tool_error("DBX_TOOL_ERROR", error),
         }
     }
@@ -3018,8 +3018,8 @@ impl DbxMcpServer {
             arguments["timeout_secs"] = json!(secs);
         }
         let started_at = Instant::now();
-        let result =
-            self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        let (result, query_result) =
+            self.backend.execute_query_agent_tool(connection, &database, arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
         self.save_mcp_sql_history(
@@ -3033,7 +3033,7 @@ impl DbxMcpServer {
             None,
         )
         .await;
-        agent_result(result)
+        query_tool_result(result, query_result)
     }
 
     #[tool(
@@ -6147,6 +6147,21 @@ fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
 }
 
+/// Product-provider (Nacos/Consul) tools already hold the complete JSON payload.
+/// Return it in `structuredContent` as well as the pretty-printed text block so
+/// MCP clients can consume the data without re-parsing text. Older MCP protocol
+/// revisions require `structuredContent` to be an object (newer ones accept any
+/// JSON), so arrays and scalars are wrapped as `{"result": ...}` - the same shape
+/// `dbx_execute_batch` uses for its per-statement results (see #9069, #15189).
+fn product_tool_result(value: serde_json::Value) -> CallToolResult {
+    let mut result = text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()));
+    result.structured_content = Some(match value {
+        serde_json::Value::Object(_) => value,
+        other => json!({ "result": other }),
+    });
+    result
+}
+
 async fn cancellable_tool_call(
     cancellation: tokio_util::sync::CancellationToken,
     operation: impl std::future::Future<Output = CallToolResult>,
@@ -6185,7 +6200,14 @@ fn transaction_failure_result(session_id: &str, failure: TransactionFailure) -> 
 }
 
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
+    let launch_restriction = if code == "MCP_READ_ONLY" && crate::backend::legacy_mcp_allow_writes() == Some(false) {
+        "This MCP process is forced read-only by the DBX_MCP_ALLOW_WRITES launch setting. \
+         It takes precedence over permissions saved in DBX Settings → MCP. \
+         Check the MCP client's launch configuration.\n"
+    } else {
+        ""
+    };
+    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {launch_restriction}{}", message.into()))])
 }
 
 fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {
@@ -6347,6 +6369,23 @@ fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
     } else {
         text(result.content)
     }
+}
+
+/// Stateless `dbx_execute_query` result: the markdown text stays model-facing
+/// while `structuredContent.result` carries the raw QueryResult, matching the
+/// transaction-session shape so clients can tell NULL from "NULL" and keep
+/// column types (#15149). Errors keep the text-only contract.
+fn query_tool_result(
+    result: dbx_core::agent_events::ToolResult,
+    query_result: Option<dbx_core::db::QueryResult>,
+) -> CallToolResult {
+    let mut call = agent_result(result);
+    if call.is_error != Some(true) {
+        if let Some(query_result) = query_result {
+            call.structured_content = Some(json!({ "result": query_result }));
+        }
+    }
+    call
 }
 
 fn policy_allows_connection(
@@ -7827,6 +7866,9 @@ mod tests {
         product_calls: std::sync::Mutex<Vec<crate::products::ProductCall>>,
         tool_approvals: std::sync::Mutex<Vec<crate::approval::ToolApprovalRequest>>,
         nacos_namespaces: Option<Vec<String>>,
+        /// Returned by `execute_query_agent_tool` so tests can exercise the
+        /// structured `dbx_execute_query` path (#15149).
+        query_result: Option<dbx_core::db::QueryResult>,
     }
 
     impl Default for FakeBackend {
@@ -7864,6 +7906,7 @@ mod tests {
                 product_calls: std::sync::Mutex::new(Vec::new()),
                 tool_approvals: std::sync::Mutex::new(Vec::new()),
                 nacos_namespaces: None,
+                query_result: None,
             }
         }
     }
@@ -8351,6 +8394,17 @@ mod tests {
                 is_error,
                 explain_data: None,
             }
+        }
+
+        async fn execute_query_agent_tool(
+            &self,
+            connection: &ConnectionConfig,
+            database: &str,
+            arguments: serde_json::Value,
+            permissions: dbx_core::agent_tools::AgentSqlPermissions,
+        ) -> (dbx_core::agent_events::ToolResult, Option<dbx_core::db::QueryResult>) {
+            let result = self.execute_agent_tool(connection, database, "execute_query", arguments, permissions).await;
+            (result, self.query_result.clone())
         }
 
         async fn salesforce_current_user(
@@ -9364,6 +9418,28 @@ mod tests {
             .await;
         let values: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
         assert_eq!(values, json!([{ "namespace": "dev" }]));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "result": [{ "namespace": "dev" }] }),
+        );
+    }
+
+    #[test]
+    fn product_tool_result_wraps_arrays_and_passes_objects_through() {
+        let array = product_tool_result(json!([{ "namespace": "" }]));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result_text(&array)).unwrap(),
+            json!([{ "namespace": "" }]),
+        );
+        assert_eq!(array.structured_content.as_ref().unwrap(), &json!({ "result": [{ "namespace": "" }] }));
+
+        let object = product_tool_result(json!({ "pageNo": 1, "namespaces": [] }));
+        assert!(result_text(&object).contains("\"pageNo\": 1"));
+        assert_eq!(object.structured_content.as_ref().unwrap(), &json!({ "pageNo": 1, "namespaces": [] }));
+
+        let null = product_tool_result(serde_json::Value::Null);
+        assert_eq!(result_text(&null), "null");
+        assert_eq!(null.structured_content.as_ref().unwrap(), &json!({ "result": null }));
     }
 
     #[test]
@@ -10037,6 +10113,10 @@ mod tests {
             }))
             .await;
         assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "ok": true, "operation": "kv_delete" }),
+        );
         {
             let approvals = backend.tool_approvals.lock().unwrap();
             assert_eq!(approvals.len(), 1);
@@ -13337,6 +13417,71 @@ mod tests {
         let results = structured["results"].as_array().expect("results must be an array");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["statement_index"], 0);
+    }
+
+    #[tokio::test]
+    async fn execute_query_returns_structured_content() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string(), "n".to_string(), "s".to_string()];
+        query_result.column_types = vec!["bigint".to_string(), "null".to_string(), "varchar".to_string()];
+        query_result.rows = vec![vec![serde_json::json!("1"), serde_json::Value::Null, serde_json::json!("NULL")]];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 AS i, NULL AS n, 'NULL' AS s".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        // The markdown text stays in content…
+        assert!(result_text(&result).contains("ok"));
+        // …and structuredContent.result keeps column types plus the NULL / "NULL"
+        // distinction that markdown rendering loses (#15149).
+        let structured = result.structured_content.as_ref().expect("structured content must be populated");
+        assert!(structured.is_object(), "MCP structuredContent must be a JSON object");
+        assert_eq!(structured["result"]["columns"], serde_json::json!(["i", "n", "s"]));
+        assert_eq!(structured["result"]["column_types"], serde_json::json!(["bigint", "null", "varchar"]));
+        assert_eq!(structured["result"]["rows"], serde_json::json!([["1", null, "NULL"]]));
+        assert!(structured["result"]["rows"][0][1].is_null(), "SQL NULL must stay JSON null");
+        assert_eq!(structured["result"]["rows"][0][2], serde_json::json!("NULL"), "a string 'NULL' must stay a string");
+    }
+
+    #[tokio::test]
+    async fn execute_query_error_keeps_text_only_contract() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string()];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT FAIL_MCP_TEST".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none(), "errors must not carry structuredContent");
     }
 
     #[tokio::test]

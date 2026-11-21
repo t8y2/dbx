@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { uuid } from "@/lib/common/utils";
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,7 @@ const emit = defineEmits<{ "update:open": [open: boolean]; saved: [] }>();
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const safetyStore = useProductionSafetyStore();
-const scopeId = `postgres-sequence-${crypto.randomUUID()}`;
+const scopeId = `postgres-sequence-${uuid()}`;
 const metadata = shallowRef<PostgresSequenceMetadata>();
 const state = shallowRef<ReturnType<typeof parsePostgresSequenceState>>();
 const draft = ref<PostgresSequenceDraft>();

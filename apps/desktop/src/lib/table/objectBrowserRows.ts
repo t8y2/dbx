@@ -164,9 +164,11 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
   return [...legacyIds];
 }
 
-export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
-  const value = type.toUpperCase();
+export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] | null {
+  const value = type.trim().toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  // These objects have their own sidebar paths. They must not fall through as tables.
+  if (normalized === "SYNONYM" || normalized === "JOB") return null;
   if (normalized === "INDEX") return "INDEX";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
@@ -206,6 +208,7 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
       ];
     }
     const type = normalizeObjectBrowserType(object.object_type);
+    if (!type) return [];
     const postgresSequenceIdentity = type === "SEQUENCE" && options.databaseType === "postgres" ? { name: object.name, schema: object.schema ?? options.rowSchema } : undefined;
     const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
     if (!name && !postgresSequenceIdentity?.name) return [];

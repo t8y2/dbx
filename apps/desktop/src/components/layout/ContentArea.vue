@@ -413,6 +413,10 @@ const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
   // action set grows at that point, so the row must be re-measured.
   () => !!dataGridRef.value?.canOpenTableStructureEditor,
   () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+  // Hidden labels remove text without resizing the row; the breadcrumb shows
+  // the connection name, whose width can change on rename.
+  () => hideToolbarLabels.value,
+  () => props.activeConnection?.name,
 ]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
@@ -458,10 +462,10 @@ const activeResultSchema = computed(() => activeResultExecutionTarget.value?.sch
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
 const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
-const showOraclePackageMembers = computed(() => {
+const showPackageMembers = computed(() => {
   const type = effectiveDatabaseTypeForConnection(props.activeConnection);
   const source = props.activeTab.objectSource?.objectType ?? props.activeTab.objectDetails?.objectType;
-  return (type === "oracle" || type === "oceanbase-oracle") && (source === "PACKAGE" || source === "PACKAGE_BODY");
+  return (type === "oracle" || type === "oceanbase-oracle" || type === "dameng") && (source === "PACKAGE" || source === "PACKAGE_BODY");
 });
 const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
 const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
@@ -2417,12 +2421,12 @@ defineExpose({
                   {{ t("common.retry") }}
                 </Button>
               </div>
-              <div v-else :class="showOraclePackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
-                <OraclePackageMembers v-if="showOraclePackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
+              <div v-else :class="showPackageMembers ? 'flex min-h-0 min-w-0 flex-1' : 'contents'">
+                <OraclePackageMembers v-if="showPackageMembers" :key="activeTab.id" :source="activeTab.sql" @navigate="queryEditorRef?.focusPackageMember($event)" />
                 <QueryEditor
                   ref="queryEditorRef"
                   class="relative z-0 flex-1"
-                  :class="{ 'min-w-0': showOraclePackageMembers }"
+                  :class="{ 'min-w-0': showPackageMembers }"
                   :auto-focus="sourceSectionActive && autoFocus !== false"
                   :model-value="activeTab.sql"
                   :tab-id="activeTab.id"
@@ -2452,6 +2456,8 @@ defineExpose({
                   :statement-execution-markers="activeStatementExecutionMarkers"
                   :initial-viewport="activeTab.editorViewport"
                   :initial-selection="activeTab.editorSelection"
+                  :bookmark-lines="activeTab.editorBookmarks"
+                  :bookmark-document="activeTab.editorBookmarksDocument"
                   :reveal-request="activeTab.editorRevealRequest"
                   :force-word-wrap="activeTab.forceWordWrap"
                   :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"
@@ -2466,6 +2472,7 @@ defineExpose({
                   @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
                   @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
                   @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
+                  @bookmarks-change="(lines, tabId) => queryStore.updateEditorBookmarks(tabId ?? activeTab.id, lines)"
                   @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
                   @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
                   @format-error="emit('formatError', activeTab.id)"
@@ -3392,7 +3399,7 @@ defineExpose({
     <!-- Data mode: full-height grid -->
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
-        <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
+        <div ref="dataToolbarRef" data-toolbar-row class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
           <!-- Context breadcrumb. The connection and database segments are
                capped so a long connection name can never eat half the row;
                the table name gets the remaining room and is the only filled

@@ -57,7 +57,7 @@ impl From<&ConnectionConfig> for ConnectionSummary {
     }
 }
 
-fn legacy_mcp_allow_writes() -> Option<bool> {
+pub(crate) fn legacy_mcp_allow_writes() -> Option<bool> {
     parse_legacy_mcp_allow_writes(&std::env::var("DBX_MCP_ALLOW_WRITES").ok()?)
 }
 
@@ -350,6 +350,21 @@ pub trait DbxBackend: Send + Sync {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult;
+    /// Runs the SQL `execute_query` agent tool for the stateless
+    /// `dbx_execute_query` path. Text content and safety gates match
+    /// `execute_agent_tool("execute_query")`; backends may additionally
+    /// return the executed result so the server can attach
+    /// `structuredContent.result` (#15149). The default keeps the text-only
+    /// contract for backends without a structured result.
+    async fn execute_query_agent_tool(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        arguments: Value,
+        permissions: AgentSqlPermissions,
+    ) -> (ToolResult, Option<dbx_core::db::QueryResult>) {
+        (self.execute_agent_tool(connection, database, "execute_query", arguments, permissions).await, None)
+    }
     #[cfg(feature = "mq-admin")]
     async fn send_message(
         &self,
@@ -1427,6 +1442,32 @@ impl DbxBackend for LocalBackend {
         let call =
             ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
         agent_tools::execute_tool(
+            &call,
+            &self.state,
+            &connection.id,
+            database,
+            schema.as_deref(),
+            &connection.db_type,
+            permissions,
+        )
+        .await
+    }
+
+    async fn execute_query_agent_tool(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        arguments: Value,
+        permissions: AgentSqlPermissions,
+    ) -> (ToolResult, Option<dbx_core::db::QueryResult>) {
+        let schema = arguments.get("schema").and_then(|value| value.as_str()).map(ToOwned::to_owned);
+        let call = ToolCall {
+            id: "mcp-execute_query".to_string(),
+            name: "execute_query".to_string(),
+            arguments,
+            provider_payload: None,
+        };
+        agent_tools::execute_query_tool_with_result(
             &call,
             &self.state,
             &connection.id,

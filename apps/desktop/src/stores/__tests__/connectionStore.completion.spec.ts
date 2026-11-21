@@ -220,7 +220,7 @@ describe("connectionStore completion assistant", () => {
     expect(connectDb).toHaveBeenCalledOnce();
     expect(store.connectedIds.has("pg-1")).toBe(true);
     expect(store.activeConnectionId).toBe("already-active");
-    expect(tables).toEqual([{ name: "users", schema: "public", type: "table", detail: "→ Application users" }]);
+    expect(tables).toEqual([{ name: "users", schema: "public", type: "table", detail: "→ Application users", comment: "Application users" }]);
   });
 
   it("preserves materialized view candidates from the remote completion catalog", async () => {
@@ -470,7 +470,7 @@ describe("connectionStore completion assistant", () => {
 
     expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
     expect(listTables).toHaveBeenCalledWith("pg-1", "app", "public", "acc", 20);
-    expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table", detail: "→ Customer accounts" }]);
+    expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table", detail: "→ Customer accounts", comment: "Customer accounts" }]);
   });
 
   it("verifies selected-schema tables when the completion index is stale", async () => {
@@ -498,7 +498,7 @@ describe("connectionStore completion assistant", () => {
 
     expect(completionAssistantSearch.mock.calls.map(([request]) => (request as { match_mode?: string }).match_mode)).toEqual(["prefix", "contains"]);
     expect(listTables).toHaveBeenCalledWith("pg-1", "app", "reporting", "accounts", 200);
-    expect(tables).toEqual([{ name: "accounts", schema: "reporting", type: "table", detail: "→ Customer accounts" }]);
+    expect(tables).toEqual([{ name: "accounts", schema: "reporting", type: "table", detail: "→ Customer accounts", comment: "Customer accounts" }]);
   });
 
   it("widens a sparse prefix search with substring matches", async () => {

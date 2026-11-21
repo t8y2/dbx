@@ -32,13 +32,14 @@ export function completionTablesFromTree(nodes: readonly TreeNode[], connectionI
     // the internal catalog. Keep the two metadata scopes isolated.
     if ((node.catalog?.toLowerCase() ?? undefined) !== preferredCatalog) return;
     if (preferredSchema && node.schema?.toLowerCase() !== preferredSchema) return;
-    const detail = completionTableDetail(node.comment);
+    const comment = node.comment?.trim();
+    const detail = completionTableDetail(comment);
     tables.push({
       name: node.tableName || node.label,
       catalog: node.catalog,
       schema: node.schema,
       type: node.type === "materialized_view" ? "materialized_view" : node.type === "view" ? "view" : "table",
-      ...(detail ? { detail } : {}),
+      ...(detail ? { detail, comment } : {}),
       ...(isTdengineStableTableType(node.tableType) ? { tableType: node.tableType } : {}),
     });
   });

@@ -3119,13 +3119,14 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function tableInfosToCompletionTables(tables: readonly TableInfo[], schema?: string, catalog?: string): SqlCompletionTable[] {
     return tables.map((table) => {
-      const detail = completionTableDetail(table.comment);
+      const comment = table.comment?.trim();
+      const detail = completionTableDetail(comment);
       return {
         name: table.name,
         catalog,
         schema,
         type: sqlObjectNavigationTypeFromTableType(table.table_type),
-        ...(detail ? { detail } : {}),
+        ...(detail ? { detail, comment } : {}),
         ...completionStableTableType(table.table_type),
       };
     });
@@ -9824,12 +9825,13 @@ export const useConnectionStore = defineStore("connection", () => {
     return candidates
       .filter((candidate) => candidate.kind === "table" || candidate.kind === "view" || candidate.kind === "materialized_view")
       .map((candidate) => {
-        const detail = completionTableDetail(candidate.comment);
+        const comment = candidate.comment?.trim();
+        const detail = completionTableDetail(comment);
         const table: SqlCompletionTable = {
           name: candidate.name,
           schema: candidate.schema ?? undefined,
           type: sqlObjectNavigationTypeFromTableType(candidate.data_type || candidate.kind),
-          ...(detail ? { detail } : {}),
+          ...(detail ? { detail, comment } : {}),
           ...completionStableTableType(candidate.data_type),
         };
         if (!withOracleMetadata) return table;

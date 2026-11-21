@@ -231,6 +231,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
           separateIndexes,
         };
         let sqlContent: string | undefined;
+        let tableComment = table.comment?.trim() || undefined;
         const formatDialect = props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType);
         let metadataLoadFailed = false;
 
@@ -260,7 +261,6 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
         if (!sqlContent && !separateIndexes) {
           let fullColumns: ColumnInfo[] = [];
           let fullIndexes: IndexInfo[] = [];
-          let tableComment: string | undefined;
           try {
             const [columnsResult, indexesResult] = await Promise.all([
               loadObjectMetadataFacet(objectMetadataRequest, "columns", () => api.getColumns(props.connectionId!, hoverDatabase, hoverSchema, table.name, hoverScope.catalog)),
@@ -275,7 +275,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
           if (!metadataLoadFailed) {
             try {
               const commentResult = await loadObjectMetadataFacet(objectMetadataRequest, "comment", () => api.getTableComment(props.connectionId!, hoverDatabase, hoverSchema, table.name, hoverScope.catalog));
-              if (commentResult.value) tableComment = commentResult.value;
+              tableComment = commentResult.value?.trim() || tableComment;
             } catch (error) {
               console.warn(`[DBX] Failed to load table comment for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
             }
@@ -304,7 +304,7 @@ export function useQueryEditorHover(options: QueryEditorHoverOptions) {
         return {
           pos: range.from,
           end: range.to,
-          create: () => createHoverDom(table.name, sqlObjectHoverDetail(table), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
+          create: () => createHoverDom(table.name, [sqlObjectHoverDetail(table), tableComment].filter(Boolean).join("\n"), sqlContent, metadataLoadFailed ? ["[DBX] Failed to load table structure — check connection"] : undefined),
         };
       }
 

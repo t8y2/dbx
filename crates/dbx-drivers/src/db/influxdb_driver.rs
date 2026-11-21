@@ -1014,6 +1014,7 @@ mod tests {
         InfluxdbClient {
             http: reqwest::Client::new(),
             base_url: "http://localhost:8086".to_string(),
+            base_path: String::new(),
             username: None,
             password: Some("token-value".to_string()),
             url_params: None,

@@ -3043,7 +3043,7 @@ function applyEditorCompletionExtension() {
 }
 
 watch(
-  () => [settingsStore.editorSettings.snippets, settingsStore.editorSettings.sortCompletionColumnsAlphabetically, settingsStore.editorSettings.selectFirstCompletionOnOpen],
+  () => [settingsStore.editorSettings.snippets, settingsStore.editorSettings.sortCompletionColumnsAlphabetically, settingsStore.editorSettings.selectFirstCompletionOnOpen, settingsStore.editorSettings.completionAutoActivationDelayMs],
   () => {
     applyEditorCompletionExtension();
   },

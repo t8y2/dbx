@@ -11175,6 +11175,8 @@ export default {
     sortCompletionColumnsAlphabeticallyDescription: "Turn off to keep table fields in their original database order",
     selectFirstCompletionOnOpen: "Automatically select the first completion",
     selectFirstCompletionOnOpenDescription: "When enabled, the first candidate is selected when the list opens, and Enter or Tab accepts it. When disabled, Enter inserts a new line and Tab accepts the first candidate.",
+    completionAutoActivationDelay: "Completion auto-activation delay (ms)",
+    completionAutoActivationDelayDescription: "How long to wait after typing before the completion list opens, 500 ms by default. Increase it to keep fast typing uninterrupted; 0 opens the list immediately.",
     completionTriggerMode: "SQL completion trigger mode",
     completionMatchMode: "SQL completion match mode",
     completionMatchModeDescription: "Choose the matching rule used to filter SQL completion candidates.",

@@ -99,6 +99,19 @@ fn saved_mcp_access_policy(
     Ok(Some(access))
 }
 
+fn saved_mcp_result_protection(
+    settings: &serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::mcp_result_protection::McpResultProtectionPolicy, String> {
+    let Some(value) = settings.get(MCP_GLOBAL_POLICY_KEY) else {
+        return Ok(Default::default());
+    };
+    let policy = serde_json::from_value::<McpGlobalPolicy>(value.clone())
+        .map_err(|_| "invalid MCP policy".to_string())?
+        .normalized();
+    policy.result_protection.validate()?;
+    Ok(policy.result_protection)
+}
+
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
@@ -699,6 +712,8 @@ pub struct McpGlobalPolicy {
     pub group_policies: Vec<McpGroupPolicy>,
     #[serde(default)]
     pub query_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub result_protection: crate::mcp_result_protection::McpResultProtectionPolicy,
     #[serde(default = "crate::mcp_access::McpPluginToolsMode::legacy_default")]
     pub plugin_tools_mode: crate::mcp_access::McpPluginToolsMode,
 }
@@ -873,6 +888,8 @@ pub struct McpGlobalPolicyState {
     #[serde(default)]
     pub query_timeout_secs: Option<u64>,
     #[serde(default)]
+    pub result_protection: crate::mcp_result_protection::McpResultProtectionPolicy,
+    #[serde(default)]
     pub plugin_tools_mode: crate::mcp_access::McpPluginToolsMode,
 }
 
@@ -889,6 +906,7 @@ impl McpGlobalPolicyState {
             connection_policies: self.connection_policies.clone(),
             group_policies: self.group_policies.clone(),
             query_timeout_secs: self.query_timeout_secs,
+            result_protection: self.result_protection.clone(),
             plugin_tools_mode: self.plugin_tools_mode,
         }
     }
@@ -1044,6 +1062,7 @@ impl McpGlobalPolicy {
             connection_policies,
             group_policies,
             query_timeout_secs: self.query_timeout_secs,
+            result_protection: self.result_protection.clone(),
             plugin_tools_mode: self.plugin_tools_mode,
         }
     }
@@ -5475,6 +5494,7 @@ impl Storage {
                         connection_policies: policy.connection_policies,
                         group_policies: policy.group_policies,
                         query_timeout_secs: policy.query_timeout_secs,
+                        result_protection: policy.result_protection,
                         plugin_tools_mode: policy.plugin_tools_mode,
                     });
                 };
@@ -5494,12 +5514,14 @@ impl Storage {
                         connection_policies: policy.connection_policies,
                         group_policies: policy.group_policies,
                         query_timeout_secs: policy.query_timeout_secs,
+                        result_protection: policy.result_protection,
                         plugin_tools_mode: policy.plugin_tools_mode,
                     });
                 };
                 let policy = serde_json::from_value::<McpGlobalPolicy>(value.clone())
-                    .map_err(|e| format!("invalid MCP policy: {e}"))?
+                    .map_err(|_| "invalid MCP policy".to_string())?
                     .normalized();
+                policy.result_protection.validate()?;
                 Ok(McpGlobalPolicyState {
                     configured: true,
                     read_only: policy.read_only,
@@ -5512,10 +5534,14 @@ impl Storage {
                     connection_policies: policy.connection_policies,
                     group_policies: policy.group_policies,
                     query_timeout_secs: policy.query_timeout_secs,
+                    result_protection: policy.result_protection,
                     plugin_tools_mode: policy.plugin_tools_mode,
                 })
             })
             .await;
+        if result.as_ref().map_or(true, |policy| policy.result_protection.any_enabled()) {
+            crate::mcp_result_protection::activate_diagnostic_protection();
+        }
         result.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))
     }
 
@@ -5530,6 +5556,11 @@ impl Storage {
         else {
             return self.load_mcp_global_policy().await;
         };
+        let result_protection =
+            saved_mcp_result_protection(&settings).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        if result_protection.any_enabled() {
+            crate::mcp_result_protection::activate_diagnostic_protection();
+        }
         let policy = access.to_v1();
         Ok(McpGlobalPolicyState {
             configured: settings.contains_key(MCP_GLOBAL_POLICY_KEY),
@@ -5543,6 +5574,7 @@ impl Storage {
             connection_policies: policy.connection_policies,
             group_policies: policy.group_policies,
             query_timeout_secs: policy.query_timeout_secs,
+            result_protection,
             plugin_tools_mode: access.plugin_tools_mode,
         })
     }
@@ -5595,9 +5627,14 @@ impl Storage {
     /// write, so v1-only readers can never see a wider policy than v2.
     pub async fn save_mcp_access_policy(&self, policy: &crate::mcp_access::McpAccessPolicy) -> Result<(), String> {
         let access = serde_json::to_value(policy).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
-        let projected = serde_json::to_value(policy.to_v1()).map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
+        let policy = policy.clone();
         self.with_conn(move |conn| {
             let mut settings = app_settings_map_from_conn(conn)?;
+            let result_protection = saved_mcp_result_protection(&settings)?;
+            let mut projected = policy.to_v1();
+            projected.result_protection = result_protection;
+            projected.result_protection.validate()?;
+            let projected = serde_json::to_value(projected).map_err(|e| e.to_string())?;
             settings.insert(MCP_ACCESS_POLICY_KEY.to_string(), access);
             settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), projected);
             write_app_settings_map(conn, &settings)
@@ -5628,6 +5665,7 @@ impl Storage {
             // Read, merge and write under the same storage lock: edits on two
             // connection rows must not overwrite one another's saved rules.
             let mut settings = app_settings_map_from_conn(conn)?;
+            let result_protection = saved_mcp_result_protection(&settings)?;
             let mut access = if let Some(access) = saved_mcp_access_policy(&settings)? {
                 access
             } else {
@@ -5660,12 +5698,16 @@ impl Storage {
             if let Some(mode) = sub_scope {
                 connection.sub_scope = Some(mode);
             }
+            let mut projected = access.to_v1();
+            projected.result_protection = result_protection;
+            projected.result_protection.validate()?;
+            if projected.result_protection.any_enabled() {
+                crate::mcp_result_protection::activate_diagnostic_protection();
+            }
             settings
                 .insert(MCP_ACCESS_POLICY_KEY.to_string(), serde_json::to_value(&access).map_err(|e| e.to_string())?);
-            settings.insert(
-                MCP_GLOBAL_POLICY_KEY.to_string(),
-                serde_json::to_value(access.to_v1()).map_err(|e| e.to_string())?,
-            );
+            settings
+                .insert(MCP_GLOBAL_POLICY_KEY.to_string(), serde_json::to_value(projected).map_err(|e| e.to_string())?);
             write_app_settings_map(conn, &settings)?;
             Ok(access)
         })
@@ -5676,6 +5718,8 @@ impl Storage {
     /// Saves the v1 settings draft while preserving v2-only restrictions.
     /// The merged policy also supplies the conservative v1 compatibility view.
     pub async fn save_mcp_global_policy(&self, policy: &McpGlobalPolicy) -> Result<(), String> {
+        policy.result_protection.validate()?;
+        let protect_diagnostics = policy.result_protection.any_enabled();
         let rebuilt = crate::mcp_access::McpAccessPolicy::from_v1(policy);
         let draft = policy.normalized();
         self.with_conn(move |conn| {
@@ -5696,12 +5740,17 @@ impl Storage {
             };
             // Preserve the v1 representation for ordinary v1 edits. Only a
             // merge of v2-only rules needs a lossy compatibility projection.
-            let policy = if access == rebuilt { draft } else { access.to_v1() };
+            let mut policy = if access == rebuilt { draft.clone() } else { access.to_v1() };
+            policy.result_protection = draft.result_protection.clone();
+            policy.result_protection.validate()?;
             let policy = serde_json::to_value(policy).map_err(|e| e.to_string())?;
             let access = serde_json::to_value(access).map_err(|e| e.to_string())?;
             settings.insert(MCP_GLOBAL_POLICY_KEY.to_string(), policy);
             settings.insert(MCP_ACCESS_POLICY_KEY.to_string(), access);
             let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+            if protect_diagnostics {
+                crate::mcp_result_protection::activate_diagnostic_protection();
+            }
             conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -7112,19 +7161,21 @@ fn load_mcp_global_policy_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<McpGlo
         .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
         .optional()
         .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
-    Ok(match settings_json {
+    let policy = match settings_json {
         Some(json) => {
             let settings = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
                 .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid app settings JSON: {e}"))?;
             match settings.get(MCP_GLOBAL_POLICY_KEY) {
                 Some(value) => serde_json::from_value::<McpGlobalPolicy>(value.clone())
-                    .map_err(|e| format!("MCP_POLICY_UNAVAILABLE: invalid MCP policy: {e}"))?
+                    .map_err(|_| "MCP_POLICY_UNAVAILABLE: invalid MCP policy".to_string())?
                     .normalized(),
                 None => McpGlobalPolicy::default(),
             }
         }
         None => McpGlobalPolicy::default(),
-    })
+    };
+    policy.result_protection.validate()?;
+    Ok(policy)
 }
 
 fn ensure_mcp_connection_change_allowed_in_tx(
@@ -7719,6 +7770,34 @@ impl Storage {
                 .map_err(|error| error.to_string())?;
             }
             copy_sidebar_layout_entry_in_tx(&tx, &source_id, &copy.id)?;
+            let mut policy = load_mcp_global_policy_in_tx(&tx)?;
+            let overrides: Vec<_> = policy
+                .result_protection
+                .overrides
+                .iter()
+                .filter(|scope| scope.connection_id == source_id)
+                .map(|scope| {
+                    let mut scope = scope.clone();
+                    scope.connection_id = copy.id.clone();
+                    scope
+                })
+                .collect();
+            if !overrides.is_empty() {
+                policy.result_protection.overrides.extend(overrides);
+                policy.result_protection.validate()?;
+                let settings_json: String = tx
+                    .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                    .map_err(|error| error.to_string())?;
+                let mut settings: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&settings_json)
+                    .map_err(|_| "MCP_POLICY_UNAVAILABLE: invalid app settings".to_string())?;
+                settings.insert(
+                    MCP_GLOBAL_POLICY_KEY.to_string(),
+                    serde_json::to_value(policy).map_err(|error| error.to_string())?,
+                );
+                let settings_json = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+                tx.execute("UPDATE app_settings SET settings_json = ?1 WHERE id = 1", [settings_json])
+                    .map_err(|error| error.to_string())?;
+            }
             tx.commit().map_err(|error| error.to_string())?;
             Ok(copy)
         })
@@ -13970,6 +14049,7 @@ mod tests {
                 connection_policies: Vec::new(),
                 group_policies: Vec::new(),
                 query_timeout_secs: None,
+                result_protection: Default::default(),
                 plugin_tools_mode: crate::mcp_access::McpPluginToolsMode::Flat,
             }
         );
@@ -14000,6 +14080,7 @@ mod tests {
                 connection_policies: Vec::new(),
                 group_policies: Vec::new(),
                 query_timeout_secs: Some(120),
+                result_protection: Default::default(),
                 plugin_tools_mode: crate::mcp_access::McpPluginToolsMode::Flat,
             }
         );
@@ -14146,6 +14227,32 @@ mod tests {
 
         let error = storage.load_mcp_global_policy().await.unwrap_err();
         assert!(error.starts_with("MCP_POLICY_UNAVAILABLE:"));
+    }
+
+    #[tokio::test]
+    async fn mcp_result_policy_load_fails_closed_on_corrupt_rules_without_echoing_them() {
+        let path = temp_db_path("mcp-result-policy-malformed");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        for rule in [
+            serde_json::json!({ "id": "secret", "columnPattern": "[", "action": "remove" }),
+            serde_json::json!({ "id": "secret", "columnPattern": "phone", "action": "unknown" }),
+        ] {
+            let settings = serde_json::json!({
+                "mcp_global_policy": { "resultProtection": { "default": { "enabled": true, "rules": [rule] } } }
+            })
+            .to_string();
+            storage
+                .with_conn(move |conn| {
+                    conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [settings])
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap();
+            let error = storage.load_mcp_global_policy().await.unwrap_err();
+            assert!(error.starts_with("MCP_POLICY_UNAVAILABLE:"));
+            assert!(!error.contains("secret"));
+        }
     }
 
     #[tokio::test]

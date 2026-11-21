@@ -124,6 +124,7 @@ export interface McpGlobalPolicy {
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+  resultProtection: import("@/lib/mcp/mcpResultProtection").McpResultProtectionPolicy;
   pluginToolsMode: "auto" | "flat" | "lazy";
 }
 
@@ -208,6 +209,7 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
+  resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
   pluginToolsMode: "flat",
 };
 
@@ -282,6 +284,7 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
+    resultProtection: policy?.resultProtection ? { ...policy.resultProtection, groupOverrides: policy.resultProtection.groupOverrides ?? [] } : { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
     // A saved policy without this field used automatic discovery before the
     // default changed. Preserve it; only new configurations start in flat mode.
     pluginToolsMode: policy?.pluginToolsMode === "auto" || policy?.pluginToolsMode === "flat" || policy?.pluginToolsMode === "lazy" ? policy.pluginToolsMode : policy?.configured ? "auto" : "flat",
@@ -2885,6 +2888,7 @@ export const useSettingsStore = defineStore("settings", () => {
         connectionPolicies: next.connectionPolicies,
         groupPolicies: next.groupPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
+        resultProtection: next.resultProtection,
         pluginToolsMode: next.pluginToolsMode,
       });
     } catch (error) {

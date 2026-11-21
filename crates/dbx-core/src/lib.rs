@@ -50,6 +50,7 @@ pub use dbx_sql::database_search_sql;
 pub use dbx_sql::database_structure_search_sql;
 pub use dbx_types::database_manifest;
 pub mod db;
+pub mod mcp_result_protection;
 #[cfg(feature = "mq-admin")]
 pub use admin::mq;
 #[cfg(feature = "mq-admin")]

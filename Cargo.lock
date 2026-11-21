@@ -2298,6 +2298,7 @@ dependencies = [
  "font-kit",
  "fs2",
  "futures",
+ "hmac 0.12.1",
  "jsonwebtoken",
  "keyring",
  "log",

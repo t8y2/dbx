@@ -832,6 +832,7 @@ impl McpAccessPolicy {
             connection_policies: connection_policies.into_values().collect(),
             group_policies,
             query_timeout_secs: self.query_timeout_secs,
+            result_protection: Default::default(),
             plugin_tools_mode: self.plugin_tools_mode,
         }
         .normalized()
@@ -1118,6 +1119,7 @@ mod tests {
             connection_policies,
             group_policies,
             query_timeout_secs: None,
+            result_protection: Default::default(),
             plugin_tools_mode: McpPluginToolsMode::Auto,
         }
         .normalized()

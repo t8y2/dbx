@@ -421,6 +421,7 @@ export interface McpGlobalPolicy {
   groupPolicies: McpGroupPolicy[];
   configured: boolean;
   queryTimeoutSecs: number | null;
+  resultProtection: import("@/lib/mcp/mcpResultProtection").McpResultProtectionPolicy;
   pluginToolsMode: "auto" | "flat" | "lazy";
 }
 
@@ -977,6 +978,10 @@ export async function saveDesktopSettings(settings: DesktopSettings): Promise<vo
 
 export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return invoke("load_mcp_global_policy");
+}
+
+export async function previewMcpResultProtection(request: import("@/lib/mcp/mcpResultProtection").ResultProtectionPreview): Promise<import("@/lib/mcp/mcpResultProtection").ResultProtectionPreviewResult> {
+  return invoke("preview_mcp_result_protection", { request });
 }
 
 export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {

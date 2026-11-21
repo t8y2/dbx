@@ -3301,6 +3301,12 @@ async fn connect_postgres_pool_attempt(
     .await
 }
 
+pub fn database_name_for_result_protection(url: &str) -> Option<String> {
+    let parsed = postgres_connection_url(url).ok()?;
+    let config = tokio_postgres::Config::from_str(&parsed.url).ok()?;
+    config.get_dbname().map(str::to_string)
+}
+
 fn postgres_error_should_retry_without_tls(error: &str) -> bool {
     error.to_ascii_lowercase().contains("tls handshake")
 }
@@ -8685,6 +8691,34 @@ fn column_metadata_tiers(modern_tier_supported: bool) -> Vec<(&'static str, &'st
     } else {
         vec![("compat", POSTGRES_COLUMNS_COMPAT_SQL), ("information_schema", POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL)]
     }
+}
+
+pub async fn get_columns_for_result_protection(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ColumnInfo>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let has_children: bool = client
+        .query_one(
+            "SELECT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_inherits i
+            JOIN pg_catalog.pg_class c ON c.oid = i.inhparent
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1 AND c.relname = $2
+        )",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .get(0);
+    // SELECT on a parent also reads inherited tables and partitions, whose
+    // column provenance cannot be established from the parent's metadata.
+    if has_children {
+        return Err("MCP_RESULT_SOURCE_UNRESOLVED: Result protection cannot verify this query's column sources. Use direct columns from a base table, or review the documented name-only mode limits.".to_string());
+    }
+    // Compatibility tiers omit generated-column flags and cannot verify provenance.
+    get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, schema, table).await.map_err(|error| error.to_string())
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {

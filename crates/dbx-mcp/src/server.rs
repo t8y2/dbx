@@ -40,6 +40,7 @@ use dbx_core::{
     history::HistoryEntry,
     mcp_access::{McpAccessLevel, McpCallDecision, McpConfirmPolicy},
     mcp_policy::connection_allows_salesforce_dml,
+    mcp_result_protection::{self, ResultProjection, ResultProtector},
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
@@ -1344,7 +1345,7 @@ impl DbxMcpServer {
         if refreshed.connection != *connection {
             return Err(tool_error("SQL_BLOCKED", "Connection changed while awaiting approval."));
         }
-        self.resolve_database(Some(database.to_string()), &refreshed)?;
+        self.resolve_database(Some(database.to_string()), &refreshed).await?;
         ensure_sql_database_scope(&refreshed.database_scope, connection, database, sql)?;
         ensure_sql_database_execution_scope(&refreshed.policy, connection, database, sql)?;
         let mut current =
@@ -2439,11 +2440,11 @@ impl DbxMcpServer {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = match self.resolve_schema(request.schema) {
+        let schema = match self.resolve_schema(request.schema, &resolved) {
             Ok(schema) => schema,
             Err(error) => return error,
         };
@@ -2468,14 +2469,20 @@ impl DbxMcpServer {
                 let mut lines = tables
                     .into_iter()
                     .map(|table| {
-                        let local_note = annotations.as_ref().and_then(|annotations| {
-                            docs_notes::table_note(
-                                annotations,
-                                resolved.connection.db_type,
-                                Some(schema.as_str()),
-                                &table.name,
-                            )
-                        });
+                        let metadata_protected =
+                            resolved.policy.result_protection.protects_metadata(&resolved.connection.id, &database);
+                        let local_note = if metadata_protected {
+                            None
+                        } else {
+                            annotations.as_ref().and_then(|annotations| {
+                                docs_notes::table_note(
+                                    annotations,
+                                    resolved.connection.db_type,
+                                    Some(schema.as_str()),
+                                    &table.name,
+                                )
+                            })
+                        };
                         let local_note = note_budget.take(local_note, SCHEMA_NOTE_TABLE_MAX_CHARS);
                         if local_note.is_some() {
                             notes_applied = true;
@@ -2483,6 +2490,7 @@ impl DbxMcpServer {
                         let comment = local_note.map(|note| docs_notes::render_untrusted_note(&note)).or_else(|| {
                             table
                                 .comment
+                                .filter(|_| !metadata_protected)
                                 .map(|comment| comment.trim().to_string())
                                 .filter(|comment| !comment.is_empty())
                         });
@@ -2512,11 +2520,11 @@ impl DbxMcpServer {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = match self.resolve_schema(request.schema) {
+        let schema = match self.resolve_schema(request.schema, &resolved) {
             Ok(schema) => schema,
             Err(error) => return error,
         };
@@ -2534,20 +2542,26 @@ impl DbxMcpServer {
                 text(message)
             }
             Ok(columns) => {
+                let metadata_protected =
+                    resolved.policy.result_protection.protects_metadata(&resolved.connection.id, &database);
                 let mut note_budget = SchemaNoteBudget::new();
                 let mut notes_applied = false;
-                let columns = columns
+                let mut columns = columns
                     .into_iter()
                     .map(|mut column| {
-                        let local_note = annotations.as_ref().and_then(|annotations| {
-                            docs_notes::column_note(
-                                annotations,
-                                resolved.connection.db_type,
-                                Some(schema.as_str()),
-                                &request.table,
-                                &column.name,
-                            )
-                        });
+                        let local_note = if metadata_protected {
+                            None
+                        } else {
+                            annotations.as_ref().and_then(|annotations| {
+                                docs_notes::column_note(
+                                    annotations,
+                                    resolved.connection.db_type,
+                                    Some(schema.as_str()),
+                                    &request.table,
+                                    &column.name,
+                                )
+                            })
+                        };
                         if let Some(note) = note_budget.take(local_note, SCHEMA_NOTE_COLUMN_MAX_CHARS) {
                             column.comment = Some(docs_notes::render_untrusted_note(&note));
                             notes_applied = true;
@@ -2555,6 +2569,10 @@ impl DbxMcpServer {
                         column
                     })
                     .collect::<Vec<_>>();
+                if metadata_protected {
+                    protect_column_metadata(&mut columns);
+                    notes_applied = false;
+                }
                 let mut output = docs_notes::guard_untrusted_note_output(format_columns(&columns), notes_applied);
                 if let Some(warning) = notes_warning {
                     output.push_str("\n\n");
@@ -2579,11 +2597,11 @@ impl DbxMcpServer {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = match self.resolve_schema(request.schema) {
+        let schema = match self.resolve_schema(request.schema, &resolved) {
             Ok(schema) => schema,
             Err(error) => return error,
         };
@@ -2596,7 +2614,15 @@ impl DbxMcpServer {
         };
         match self.backend.list_routines(&resolved.connection, &database, &schema, routine_types.as_deref()).await {
             Ok(routines) if routines.is_empty() => text("No routines found."),
-            Ok(routines) => text(format_routines(&routines)),
+            Ok(mut routines) => {
+                if resolved.policy.result_protection.protects_metadata(&resolved.connection.id, &database) {
+                    for routine in &mut routines {
+                        routine.comment = None;
+                        routine.signature = None;
+                    }
+                }
+                text(format_routines(&routines))
+            }
             Err(error) => tool_error("ROUTINE_LIST_ERROR", error),
         }
     }
@@ -2614,11 +2640,11 @@ impl DbxMcpServer {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = match self.resolve_schema(request.schema) {
+        let schema = match self.resolve_schema(request.schema, &resolved) {
             Ok(schema) => schema,
             Err(error) => return error,
         };
@@ -2626,6 +2652,9 @@ impl DbxMcpServer {
             Ok(kind) => kind,
             Err(error) => return tool_error("ROUTINE_SOURCE_ERROR", error),
         };
+        if resolved.policy.result_protection.protects_metadata(&resolved.connection.id, &database) {
+            return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+        }
         match self
             .backend
             .get_routine_source(
@@ -2739,12 +2768,20 @@ impl DbxMcpServer {
             }
             None => None,
         };
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
         let policy =
             effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, &database);
+        let protector = match resolved.policy.result_protection.compile(&connection.id, &database) {
+            Ok(protector) => protector,
+            Err(error) => return result_protection_error(error),
+        };
+        let database_scoped = resolved.policy.result_protection.has_database_overrides(&connection.id);
+        if database_scoped && session.is_some() {
+            return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+        }
         if let Some(session) = &session {
             if session.database != database {
                 return tool_error(
@@ -2757,6 +2794,9 @@ impl DbxMcpServer {
             }
         }
         if connection.db_type == DatabaseType::MongoDb {
+            if protector.as_ref().is_some_and(ResultProtector::is_strict) {
+                return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+            }
             // max_rows is deliberately ignored here: MongoDB shell commands
             // always return at most 100 rows, and this branch returns before the
             // arguments below are built.
@@ -2822,13 +2862,30 @@ impl DbxMcpServer {
                 }
             }
             return match self.backend.execute_mongo_command(connection, &database, &command).await {
-                Ok(result) => match explicit_cell_window {
-                    Some(window) => match format_query_result_as_text(&result, 100, window) {
-                        Ok(output) => text(output),
-                        Err(error) => backend_tool_error("QUERY_FORMAT_ERROR", error),
-                    },
-                    None => text(format_query_result(&result, 100)),
-                },
+                Ok(mut result) => {
+                    if let Some(protector) = &protector {
+                        let projection = match protector.projection(&request.sql, connection.db_type, &database, "") {
+                            Ok(projection) => projection,
+                            Err(error) => return result_protection_error(error),
+                        };
+                        return protected_query_result(
+                            protector,
+                            &projection,
+                            &mut result,
+                            &connection.id,
+                            &database,
+                            100,
+                            explicit_cell_window.unwrap_or_default(),
+                        );
+                    }
+                    match explicit_cell_window {
+                        Some(window) => match format_query_result_as_text(&result, 100, window) {
+                            Ok(output) => text(output),
+                            Err(error) => backend_tool_error("QUERY_FORMAT_ERROR", error),
+                        },
+                        None => text(format_query_result(&result, 100)),
+                    }
+                }
                 Err(error) => backend_tool_error("QUERY_ERROR", error),
             };
         }
@@ -2873,6 +2930,9 @@ impl DbxMcpServer {
         };
         let max_rows = request.max_rows.map(|value| value.clamp(1, MAX_EXECUTE_QUERY_ROWS as u64)).unwrap_or(100);
         if let Some(session) = session.as_ref().filter(|session| session.transaction_owner.is_some()) {
+            if protector.is_some() {
+                return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+            }
             if let Err(error) = validate_transaction_sql_shape(&request.sql) {
                 return tool_error("TRANSACTION_SQL_BLOCKED", error);
             }
@@ -2995,6 +3055,88 @@ impl DbxMcpServer {
                 }
             };
         }
+        if let Some(protector) = &protector {
+            if confirmed_batch_sql_block_reason(
+                &request.sql,
+                connection.db_type,
+                permissions.confirmed_write_sql.as_deref(),
+            )
+            .is_some()
+            {
+                return result_protection_error(mcp_result_protection::RESULT_DENIED);
+            }
+            if protector.is_strict() && session.is_some() {
+                return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+            }
+            let schema = self.scope.schema.as_deref().or(connection.default_schema.as_deref());
+            let mut projection =
+                match protector.projection(&request.sql, connection.db_type, &database, schema.unwrap_or_default()) {
+                    Ok(projection) => projection,
+                    Err(error) => return result_protection_error(error),
+                };
+            if let Err(error) = self.verify_result_source(protector, &mut projection, connection, &database).await {
+                return result_protection_error(error);
+            }
+            let ephemeral_session = ((protector.is_strict() || database_scoped)
+                && connection.db_type != DatabaseType::Sqlite)
+                .then(|| format!("mcp-protected-{}", Uuid::new_v4()));
+            let options = dbx_core::query::QueryExecutionOptions {
+                max_rows: Some(max_rows as usize),
+                timeout_secs: Some(dbx_core::agent_tools::agent_query_timeout_secs(
+                    resolved.policy.query_timeout_secs,
+                    Some(connection),
+                )),
+                client_session_id: ephemeral_session
+                    .clone()
+                    .or_else(|| session.as_ref().map(|session| session.client_session_id.clone())),
+                ..Default::default()
+            };
+            let sql = protector.execution_sql(&projection, &request.sql);
+            let started_at = Instant::now();
+            let execution = self.backend.execute_query_with_options(connection, &database, schema, sql, options).await;
+            if let Some(session_id) = ephemeral_session {
+                let _ = self.backend.close_client_session(&connection.id, &database, &session_id).await;
+            }
+            return match execution {
+                Ok(mut result) => {
+                    let response = protected_query_result(
+                        protector,
+                        &projection,
+                        &mut result,
+                        &connection.id,
+                        &database,
+                        max_rows as usize,
+                        explicit_cell_window.unwrap_or_default(),
+                    );
+                    self.save_mcp_sql_history(
+                        "dbx_execute_query",
+                        connection,
+                        &database,
+                        &request.sql,
+                        started_at,
+                        response.is_error != Some(true),
+                        (response.is_error == Some(true)).then(|| mcp_result_protection::QUERY_FAILED.to_string()),
+                        Some(result.affected_rows as i64),
+                    )
+                    .await;
+                    response
+                }
+                Err(_) => {
+                    self.save_mcp_sql_history(
+                        "dbx_execute_query",
+                        connection,
+                        &database,
+                        &request.sql,
+                        started_at,
+                        false,
+                        Some(mcp_result_protection::QUERY_FAILED.to_string()),
+                        None,
+                    )
+                    .await;
+                    result_protection_error(mcp_result_protection::QUERY_FAILED)
+                }
+            };
+        }
         let history_sql = request.sql.clone();
         let mut arguments = json!({ "sql": request.sql, "limit": max_rows });
         if let Some(schema) = self.scope.schema.as_deref() {
@@ -3002,6 +3144,11 @@ impl DbxMcpServer {
         }
         if let Some(session) = &session {
             arguments["client_session_id"] = json!(session.client_session_id);
+        }
+        let ephemeral_session = (database_scoped && connection.db_type != DatabaseType::Sqlite)
+            .then(|| format!("mcp-protected-{}", Uuid::new_v4()));
+        if let Some(session_id) = &ephemeral_session {
+            arguments["client_session_id"] = json!(session_id);
         }
         if let Some(offset) = request.cell_char_offset {
             arguments["cell_char_offset"] = json!(offset);
@@ -3020,6 +3167,9 @@ impl DbxMcpServer {
         let started_at = Instant::now();
         let result =
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        if let Some(session_id) = ephemeral_session {
+            let _ = self.backend.close_client_session(&connection.id, &database, &session_id).await;
+        }
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
         self.save_mcp_sql_history(
@@ -3107,7 +3257,7 @@ impl DbxMcpServer {
             }
             None => None,
         };
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -3133,6 +3283,10 @@ impl DbxMcpServer {
         if let Err(error) = ensure_sql_database_execution_scope(&resolved.policy, connection, &database, sql) {
             return error;
         }
+        let protector = match resolved.policy.result_protection.compile(&connection.id, &database) {
+            Ok(protector) => protector,
+            Err(error) => return result_protection_error(error),
+        };
         // Split with the same dialect-aware splitter the core uses, early, so the
         // option-validity checks below only fire for scripts that actually enter
         // transaction mode (more than one statement). A single-statement script
@@ -3141,6 +3295,28 @@ impl DbxMcpServer {
         let execution_plan = self.backend.execution_plan(connection, &database, sql).await;
         let statement_count = execution_plan.statements.len();
         let transactional = request.use_transaction == Some(true) && statement_count > 1;
+        if resolved.policy.result_protection.has_database_overrides(&connection.id)
+            && (session.is_some() || transactional)
+        {
+            return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+        }
+        let mut protected_projections = Vec::new();
+        if let Some(protector) = &protector {
+            if protector.is_strict() && (session.is_some() || transactional) {
+                return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+            }
+            let schema = self.scope.schema.as_deref().or(connection.default_schema.as_deref()).unwrap_or_default();
+            for statement in &execution_plan.statements {
+                let mut projection = match protector.projection(statement, connection.db_type, &database, schema) {
+                    Ok(projection) => projection,
+                    Err(error) => return result_protection_error(error),
+                };
+                if let Err(error) = self.verify_result_source(protector, &mut projection, connection, &database).await {
+                    return result_protection_error(error);
+                }
+                protected_projections.push(projection);
+            }
+        }
         // A transactional batch runs on a pooled connection and returns one
         // merged result, so it cannot preserve session state or yield per-
         // statement results. The core transaction path takes no client session
@@ -3377,9 +3553,22 @@ impl DbxMcpServer {
         // call, so a settings change takes effect without client-config
         // regeneration.
         options.timeout_secs = resolved.policy.query_timeout_secs;
-        let schema = self.scope.schema.as_deref();
+        let schema =
+            self.scope.schema.as_deref().or_else(|| protector.as_ref().and(connection.default_schema.as_deref()));
+        let protected_sql = protector.as_ref().filter(|protector| protector.is_strict()).map(|protector| {
+            execution_plan
+                .statements
+                .iter()
+                .zip(&protected_projections)
+                .map(|(sql, projection)| protector.execution_sql(projection, sql))
+                .collect::<Vec<_>>()
+                .join(";\n")
+        });
         let started_at = Instant::now();
-        let execution = self.backend.execute_batch(connection, &database, schema, sql, options).await;
+        let execution = self
+            .backend
+            .execute_batch(connection, &database, schema, protected_sql.as_deref().unwrap_or(sql), options)
+            .await;
         if let Some(client_session_id) = ephemeral_client_session_id.as_deref() {
             if let Err(error) = self.backend.close_client_session(&connection.id, &database, client_session_id).await {
                 log::warn!("failed to close ephemeral MCP batch session for {}: {error}", connection.id);
@@ -3387,6 +3576,49 @@ impl DbxMcpServer {
         }
         match execution {
             Ok(mut results) => {
+                if let Some(protector) = &protector {
+                    let merged = transactional && results.len() == 1;
+                    for (index, statement) in results.iter_mut().enumerate() {
+                        if statement.execution_error {
+                            statement.result.columns.clear();
+                            statement.result.rows.clear();
+                            statement.result.column_types.clear();
+                            statement.result.column_sortables.clear();
+                            statement.result.spatial_columns.clear();
+                            statement.result.spatial_values.clear();
+                            statement.result.messages.clear();
+                            statement.result.elasticsearch_raw_body = None;
+                            statement.result.session_id = None;
+                            statement.error_message = Some(mcp_result_protection::QUERY_FAILED.to_string());
+                            continue;
+                        }
+                        statement.error_message = None;
+                        let merged_projection;
+                        let projection = if merged {
+                            merged_projection = match protector.projection(
+                                sql,
+                                connection.db_type,
+                                &database,
+                                schema.unwrap_or_default(),
+                            ) {
+                                Ok(projection) => projection,
+                                Err(error) => return result_protection_error(error),
+                            };
+                            &merged_projection
+                        } else {
+                            let Some(projection) =
+                                protected_projections.get(statement.statement_index.unwrap_or(index))
+                            else {
+                                return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+                            };
+                            projection
+                        };
+                        match protector.protect(&mut statement.result, projection) {
+                            Ok(hits) => mcp_result_protection::audit_hits(&connection.id, &database, &hits),
+                            Err(error) => return result_protection_error(error),
+                        }
+                    }
+                }
                 // The core transaction path collapses the whole script into one
                 // merged QueryResult. Mark it so callers can tell a merged
                 // outcome from a per-statement result, and render it distinctly
@@ -3443,7 +3675,11 @@ impl DbxMcpServer {
                     None,
                 )
                 .await;
-                backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error)
+                if protector.is_some() {
+                    result_protection_error(mcp_result_protection::QUERY_FAILED)
+                } else {
+                    backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error)
+                }
             }
         }
     }
@@ -3482,10 +3718,16 @@ impl DbxMcpServer {
                 format!("Sessions are only supported for SQL connections; \"{}\" is not one.", connection.name),
             );
         }
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
+        let protection = resolved.policy.result_protection.effective(&connection.id, &database);
+        if resolved.policy.result_protection.has_database_overrides(&connection.id)
+            || (protection.enabled && protection.mode == mcp_result_protection::ResultProtectionMode::Strict)
+        {
+            return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+        }
         if request.enable_transactions && !transaction_connection_supported(connection) {
             return tool_error(
                 "TRANSACTION_UNSUPPORTED",
@@ -3721,6 +3963,11 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
+        if resolved.policy.result_protection.has_database_overrides(&connection.id)
+            || resolved.policy.result_protection.effective(&connection.id, &database.to_string()).enabled
+        {
+            return result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED);
+        }
         let argv = match parse_command_argv(&request.command) {
             Ok(argv) => argv,
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
@@ -4042,11 +4289,11 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = match self.resolve_schema(request.schema) {
+        let schema = match self.resolve_schema(request.schema, &resolved) {
             Ok(schema) => schema,
             Err(error) => return error,
         };
@@ -4085,9 +4332,14 @@ impl DbxMcpServer {
                 Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
             };
             let mut table = table.clone();
-            let local_note = annotations.as_ref().and_then(|annotations| {
-                docs_notes::table_note(annotations, connection.db_type, Some(schema.as_str()), &table.name)
-            });
+            let metadata_protected = resolved.policy.result_protection.protects_metadata(&connection.id, &database);
+            let local_note = if metadata_protected {
+                None
+            } else {
+                annotations.as_ref().and_then(|annotations| {
+                    docs_notes::table_note(annotations, connection.db_type, Some(schema.as_str()), &table.name)
+                })
+            };
             // Only a local note is rendered as a table comment here. Database
             // table comments were not part of this context before #12497, and
             // this change must not start emitting them for every connection.
@@ -4099,26 +4351,35 @@ impl DbxMcpServer {
                 }
                 None => false,
             };
-            let columns = columns
+            let mut columns = columns
                 .into_iter()
                 .map(|mut column| {
-                    let local_note = annotations.as_ref().and_then(|annotations| {
-                        docs_notes::column_note(
-                            annotations,
-                            connection.db_type,
-                            Some(schema.as_str()),
-                            &table.name,
-                            &column.name,
-                        )
-                    });
+                    let local_note = if metadata_protected {
+                        None
+                    } else {
+                        annotations.as_ref().and_then(|annotations| {
+                            docs_notes::column_note(
+                                annotations,
+                                connection.db_type,
+                                Some(schema.as_str()),
+                                &table.name,
+                                &column.name,
+                            )
+                        })
+                    };
                     if let Some(note) = note_budget.take(local_note, SCHEMA_NOTE_COLUMN_MAX_CHARS) {
                         column.comment = Some(docs_notes::render_untrusted_note(&note));
                         notes_applied = true;
                     }
                     column
                 })
-                .collect();
-            tables.push((table, columns, note_applied));
+                .collect::<Vec<_>>();
+            if metadata_protected {
+                table.comment = None;
+                protect_column_metadata(&mut columns);
+                notes_applied = false;
+            }
+            tables.push((table, columns, note_applied && !metadata_protected));
         }
         let mut output = docs_notes::guard_untrusted_note_output(
             format_schema_context(&connection.name, &database, &schema, &tables, truncated),
@@ -4387,11 +4648,11 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let schema = match self.resolve_schema(request.schema) {
+        let schema = match self.resolve_schema(request.schema, &resolved) {
             Ok(schema) => schema,
             Err(error) => return error,
         };
@@ -4431,7 +4692,7 @@ impl DbxMcpServer {
         if connection.db_type == DatabaseType::Redis {
             return tool_error("REDIS_COMMAND_REQUIRED", "Use dbx_execute_redis_command for Redis connections.");
         }
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -4575,7 +4836,7 @@ impl DbxMcpServer {
                 ),
             );
         }
-        let database = match self.resolve_database(request.database, &resolved) {
+        let database = match self.resolve_database(request.database, &resolved).await {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -4754,6 +5015,25 @@ impl DbxMcpServer {
 }
 
 impl DbxMcpServer {
+    async fn verify_result_source(
+        &self,
+        protector: &ResultProtector,
+        projection: &mut ResultProjection,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+        database: &str,
+    ) -> Result<(), String> {
+        if !protector.is_strict() {
+            return Ok(());
+        }
+        let source = projection.source.as_ref().ok_or_else(|| mcp_result_protection::SOURCE_UNRESOLVED.to_string())?;
+        let metadata = self
+            .backend
+            .result_source_metadata(connection, database, source)
+            .await
+            .map_err(|_| mcp_result_protection::SOURCE_UNRESOLVED.to_string())?;
+        projection.verify_metadata(&metadata.tables, &metadata.columns)
+    }
+
     async fn list_databases_for_resolved(&self, resolved: &ResolvedConnection) -> CallToolResult {
         if resolved.connection.db_type == DatabaseType::Salesforce
             && !matches!(resolved.database_scope, DatabaseScope::None)
@@ -4812,7 +5092,11 @@ impl DbxMcpServer {
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
     #[allow(clippy::result_large_err)]
     async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
-        self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
+        let policy = self.backend.load_mcp_global_policy().await.map_err(|_| {
+            tool_error("MCP_POLICY_UNAVAILABLE", "MCP policy could not be loaded; no data was returned.")
+        })?;
+        policy.result_protection.validate().map_err(result_protection_error)?;
+        Ok(policy)
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -5228,7 +5512,7 @@ impl DbxMcpServer {
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
     #[allow(clippy::result_large_err)]
-    fn resolve_database(
+    async fn resolve_database(
         &self,
         requested: Option<String>,
         resolved: &ResolvedConnection,
@@ -5247,15 +5531,54 @@ impl DbxMcpServer {
         } else {
             requested.or_else(|| resolved.connection.database.clone()).unwrap_or_default()
         };
+        let database = mcp_result_protection::resolve_result_database(
+            &resolved.policy.result_protection,
+            &resolved.connection,
+            &database,
+        )
+        .map_err(result_protection_error)?;
+        self.resolve_schema(None, resolved)?;
         ensure_database_in_scope(&resolved.database_scope, &database)?;
+        if resolved.policy.result_protection.has_database_overrides(&resolved.connection.id) {
+            let databases = self
+                .backend
+                .list_databases(&resolved.connection)
+                .await
+                .map_err(|_| result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED))?;
+            // Driver collation rules may resolve aliases that differ by more
+            // than ASCII case. Both policy scopes and requests must be literal
+            // catalog entries before even a disabled override is selected.
+            if !databases.contains(&database)
+                || resolved.policy.result_protection.overrides.iter().any(|scope| {
+                    scope.connection_id == resolved.connection.id
+                        && scope.database.as_ref().is_some_and(|name| !databases.contains(name))
+                })
+                || (resolved.connection.db_type == DatabaseType::Sqlite && databases.iter().any(|name| name != "main"))
+            {
+                return Err(result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED));
+            }
+        }
         Ok(database)
     }
 
     /// Resolve the schema for scoped CLI agents. A selected schema is a hard
     /// bound, matching the existing database scope behavior.
     #[allow(clippy::result_large_err)]
-    fn resolve_schema(&self, requested: Option<String>) -> Result<String, CallToolResult> {
+    fn resolve_schema(
+        &self,
+        requested: Option<String>,
+        resolved: &ResolvedConnection,
+    ) -> Result<String, CallToolResult> {
         let requested = requested.map(|schema| schema.trim().to_string()).filter(|schema| !schema.is_empty());
+        if resolved.connection.db_type == DatabaseType::Sqlite
+            && resolved.policy.result_protection.has_database_overrides(&resolved.connection.id)
+            && requested
+                .as_deref()
+                .or(self.scope.schema.as_deref())
+                .is_some_and(|schema| !schema.eq_ignore_ascii_case("main"))
+        {
+            return Err(result_protection_error(mcp_result_protection::SOURCE_UNRESOLVED));
+        }
         if let Some(scoped) = self.scope.schema.as_deref() {
             if let Some(requested) = requested.as_deref() {
                 if requested != scoped {
@@ -5870,7 +6193,7 @@ impl ServerHandler for DbxMcpServer {
         let is_plugin_tool = crate::plugin_tools::is_plugin_tool_name(&tool_name);
         CALL_HISTORY.scope(std::sync::Mutex::new(entry), async {
             let cancellation = context.ct.clone();
-            let result: Result<CallToolResponse, rmcp::ErrorData> = if is_plugin_tool {
+            let mut result: Result<CallToolResponse, rmcp::ErrorData> = if is_plugin_tool {
                 tokio::select! {
                     result = self.call_plugin_tool_dispatch(&tool_name, args) => result.map(Into::into),
                     _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.").into()),
@@ -5882,6 +6205,35 @@ impl ServerHandler for DbxMcpServer {
                     _ = cancellation.cancelled() => Ok(tool_error("REQUEST_CANCELLED", "The MCP request was cancelled.").into()),
                 }
             };
+            let protect_errors = self
+                .backend
+                .load_mcp_global_policy()
+                .await
+                .map(|policy| policy.result_protection.any_enabled())
+                .unwrap_or(false);
+            if protect_errors {
+                result = match result {
+                    Ok(CallToolResponse::Complete(result)) if result.is_error == Some(true) => {
+                        let reason = result
+                            .content
+                            .iter()
+                            .filter_map(|content| content.as_text())
+                            .find_map(|content| {
+                                [
+                                    mcp_result_protection::POLICY_INVALID,
+                                    mcp_result_protection::SOURCE_UNRESOLVED,
+                                    mcp_result_protection::RESULT_DENIED,
+                                ]
+                                .into_iter()
+                                .find(|reason| content.text.contains(reason))
+                            })
+                            .unwrap_or(mcp_result_protection::QUERY_FAILED);
+                        Ok(result_protection_error(reason).into())
+                    }
+                    Err(_) => Ok(result_protection_error(mcp_result_protection::QUERY_FAILED).into()),
+                    result => result,
+                };
+            }
             let mut entry = CALL_HISTORY.with(|entry| entry.lock().unwrap().clone());
             entry.execution_time_ms = started.elapsed().as_millis();
             entry.success = result.as_ref().is_ok_and(|response| match response {
@@ -6145,6 +6497,40 @@ fn resource_result_from_tool(uri: String, result: CallToolResult) -> Result<Read
 
 fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
+}
+
+fn result_protection_error(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message)])
+}
+
+fn protected_query_result(
+    protector: &ResultProtector,
+    projection: &ResultProjection,
+    result: &mut dbx_core::db::QueryResult,
+    connection: &str,
+    database: &str,
+    max_rows: usize,
+    window: QueryCellWindow,
+) -> CallToolResult {
+    if result.rows.len() > max_rows {
+        result.rows.truncate(max_rows);
+        result.truncated = true;
+    }
+    match protector.protect(result, projection) {
+        Ok(hits) => mcp_result_protection::audit_hits(connection, database, &hits),
+        Err(error) => return result_protection_error(error),
+    }
+    let output = match format_query_result_as_text(result, max_rows, window) {
+        Ok(output) => output,
+        Err(_) => return result_protection_error(mcp_result_protection::QUERY_FAILED),
+    };
+    let structured = match serde_json::to_value(result) {
+        Ok(structured) => structured,
+        Err(_) => return result_protection_error(mcp_result_protection::QUERY_FAILED),
+    };
+    let mut response = text(output);
+    response.structured_content = Some(structured);
+    response
 }
 
 async fn cancellable_tool_call(
@@ -6608,7 +6994,7 @@ fn database_scope_for_connection(
 }
 
 fn resolved_connection(
-    policy: McpGlobalPolicy,
+    mut policy: McpGlobalPolicy,
     connection: dbx_core::models::connection::ConnectionConfig,
     group_path: Option<&dbx_core::mcp_policy::McpConnectionGroupPath>,
 ) -> ResolvedConnection {
@@ -6619,6 +7005,7 @@ fn resolved_connection(
     });
     let database_scope = database_scope_for_connection(&policy, &connection);
     let group_ids = group_path.map(|path| path.ids.clone()).unwrap_or_default();
+    policy.result_protection = policy.result_protection.for_groups(&group_ids);
     ResolvedConnection { connection, policy, database_scope, group_ids }
 }
 
@@ -7446,6 +7833,18 @@ fn format_routines(routines: &[dbx_core::db::ObjectInfo]) -> String {
     markdown_table(&["Routine", "Type", "Schema", "Signature", "Comment"], &rows)
 }
 
+fn protect_column_metadata(columns: &mut [dbx_core::db::ColumnInfo]) {
+    for column in columns {
+        column.column_default = None;
+        column.comment = None;
+        column.extra = None;
+        column.enum_values = None;
+        if column.data_type.contains(['\'', '"']) {
+            column.data_type = "[REDACTED TYPE]".to_string();
+        }
+    }
+}
+
 fn format_columns(columns: &[dbx_core::db::ColumnInfo]) -> String {
     let rows = columns
         .iter()
@@ -7801,6 +8200,7 @@ mod tests {
 
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
+        databases: Option<Vec<String>>,
         policy: McpGlobalPolicy,
         mcp_policy_configured: bool,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
@@ -7840,6 +8240,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 connections: Vec::new(),
+                databases: None,
                 policy: McpGlobalPolicy::default(),
                 mcp_policy_configured: true,
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
@@ -8239,6 +8640,86 @@ mod tests {
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
+        }
+
+        async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+            Ok(self
+                .databases
+                .clone()
+                .unwrap_or_else(|| vec![connection.effective_database().unwrap_or_default().to_string()]))
+        }
+
+        async fn list_tables(
+            &self,
+            _: &ConnectionConfig,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<dbx_core::db::TableInfo>, String> {
+            Ok(vec![serde_json::from_value(json!({
+                "name": "users", "table_type": "TABLE", "comment": "synthetic-metadata-8361"
+            }))
+            .unwrap()])
+        }
+
+        async fn get_columns(
+            &self,
+            _: &ConnectionConfig,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<dbx_core::db::ColumnInfo>, String> {
+            Ok(vec![dbx_core::db::ColumnInfo {
+                name: "phone".to_string(),
+                data_type: "varchar".to_string(),
+                comment: Some("synthetic-metadata-8361".to_string()),
+                column_default: Some("synthetic-metadata-8361".to_string()),
+                ..Default::default()
+            }])
+        }
+
+        async fn list_routines(
+            &self,
+            _: &ConnectionConfig,
+            _: &str,
+            _: &str,
+            _: Option<&[String]>,
+        ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+            Ok(vec![serde_json::from_value(json!({
+                "name": "example", "object_type": "PROCEDURE", "comment": "synthetic-metadata-8361",
+                "signature": "synthetic-metadata-8361"
+            }))
+            .unwrap()])
+        }
+
+        async fn get_routine_source(
+            &self,
+            _: &ConnectionConfig,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<dbx_core::db::ObjectSource, String> {
+            self.recorded_arguments.lock().unwrap().push(("get_routine_source".to_string(), json!({})));
+            Err("synthetic-metadata-8361".to_string())
+        }
+
+        async fn execute_query_with_options(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            _schema: Option<&str>,
+            sql: &str,
+            options: dbx_core::query::QueryExecutionOptions,
+        ) -> Result<dbx_core::db::QueryResult, String> {
+            self.recorded_arguments.lock().unwrap().push((
+                "execute_query_with_options".to_string(),
+                json!({ "sql": sql, "client_session_id": options.client_session_id }),
+            ));
+            Ok(serde_json::from_value(json!({
+                "columns": ["phone"], "rows": [["13812345678"]], "affected_rows": 0, "execution_time_ms": 1
+            }))
+            .unwrap())
         }
 
         async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
@@ -10927,9 +11408,9 @@ mod tests {
 
         assert_eq!(server.load_scoped_connections().await.unwrap().len(), 1);
         let resolved = resolved_connection_for_test(scoped.clone());
-        assert_eq!(server.resolve_database(None, &resolved).unwrap(), "analytics");
-        assert_eq!(server.resolve_database(Some("analytics".to_string()), &resolved).unwrap(), "analytics");
-        let error = server.resolve_database(Some("production".to_string()), &resolved).unwrap_err();
+        assert_eq!(server.resolve_database(None, &resolved).await.unwrap(), "analytics");
+        assert_eq!(server.resolve_database(Some("analytics".to_string()), &resolved).await.unwrap(), "analytics");
+        let error = server.resolve_database(Some("production".to_string()), &resolved).await.unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
 
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
@@ -10937,8 +11418,8 @@ mod tests {
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
     }
 
-    #[test]
-    fn configured_database_allowlist_is_enforced_for_sql_and_redis_targets() {
+    #[tokio::test]
+    async fn configured_database_allowlist_is_enforced_for_sql_and_redis_targets() {
         let sql = connection("sql", "sql", "mysql", "reporting");
         let selected = ResolvedConnection {
             connection: sql,
@@ -10947,8 +11428,8 @@ mod tests {
             group_ids: Vec::new(),
         };
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
-        assert_eq!(server.resolve_database(Some("reporting".to_string()), &selected).unwrap(), "reporting");
-        let error = server.resolve_database(Some("production".to_string()), &selected).unwrap_err();
+        assert_eq!(server.resolve_database(Some("reporting".to_string()), &selected).await.unwrap(), "reporting");
+        let error = server.resolve_database(Some("production".to_string()), &selected).await.unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
 
         let redis = ResolvedConnection {
@@ -10960,6 +11441,225 @@ mod tests {
         assert_eq!(server.resolve_redis_database(Some(2), &redis).unwrap(), 2);
         let error = server.resolve_redis_database(Some(3), &redis).unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+    }
+
+    #[tokio::test]
+    async fn result_database_overrides_use_driver_defaults() {
+        let mut postgres = connection("pg", "pg", "postgres", "postgres");
+        postgres.database = None;
+        let mut resolved = resolved_connection_for_test(postgres);
+        resolved.policy.result_protection = serde_json::from_value(json!({
+            "overrides": [{ "connectionId": "pg", "database": "postgres", "settings": {
+                "enabled": true, "rules": [{ "id": "phone", "columnPattern": "phone", "action": "mask" }]
+            } }]
+        }))
+        .unwrap();
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        assert_eq!(server.resolve_database(None, &resolved).await.unwrap(), "postgres");
+    }
+
+    fn database_protection_policy(enabled: bool) -> McpGlobalPolicy {
+        serde_json::from_value(json!({
+            "readOnly": true,
+            "resultProtection": {
+                "default": { "enabled": true, "mode": "nameOnly", "rules": [
+                    { "id": "phone", "columnPattern": "phone", "action": "mask" }
+                ] },
+                "overrides": [{ "connectionId": "sql", "database": "app", "settings": {
+                    "enabled": enabled, "mode": "nameOnly", "rules": [
+                        { "id": "phone", "columnPattern": "phone", "action": "mask" }
+                    ]
+                } }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn result_database_overrides_require_actual_catalog_names() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("sql", "sql", "sqlserver", "app")],
+            databases: Some(vec!["app".to_string(), "protected".to_string()]),
+            policy: database_protection_policy(false),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for database in ["missing", "pr\u{00f6}tected"] {
+            let result = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sql"),
+                    database: Some(database.to_string()),
+                    sql: "SELECT phone FROM users".to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_eq!(result.is_error, Some(true), "{result:?}");
+        }
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn result_database_overrides_pin_disabled_and_name_only_queries_to_fresh_sessions() {
+        for enabled in [false, true] {
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("sql", "sql", "sqlserver", "app")],
+                policy: database_protection_policy(enabled),
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let result = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sql"),
+                    database: None,
+                    sql: "SELECT phone FROM users".to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+            let recorded = backend.recorded_arguments.lock().unwrap();
+            let session = recorded[0].1["client_session_id"].as_str().expect("database-scoped query must be isolated");
+            assert!(session.starts_with("mcp-protected-"));
+            assert_eq!(backend.closed_sessions.lock().unwrap().as_slice(), [session]);
+        }
+    }
+
+    #[tokio::test]
+    async fn result_database_overrides_reject_show_create_before_execution() {
+        for enabled in [false, true] {
+            let mut mysql = connection("sql", "sql", "mysql", "app");
+            mysql.host = "localhost".to_string();
+            mysql.port = 3306;
+            mysql.username = "test".to_string();
+            let backend = Arc::new(FakeBackend {
+                connections: vec![mysql],
+                databases: Some(vec!["app".to_string(), "APP".to_string()]),
+                policy: database_protection_policy(enabled),
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let allowed = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sql"),
+                    database: Some("app".to_string()),
+                    sql: "SELECT phone FROM app.users".to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            assert_ne!(allowed.is_error, Some(true), "{allowed:?}");
+            backend.recorded_arguments.lock().unwrap().clear();
+            let sql = "SHOW CREATE TABLE APP.users";
+            let query = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("sql"),
+                    database: Some("app".to_string()),
+                    sql: sql.to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows: None,
+                }))
+                .await;
+            let batch = server
+                .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                    selector: selector("sql"),
+                    database: Some("app".to_string()),
+                    sql: sql.to_string(),
+                    session_id: None,
+                    use_transaction: Some(false),
+                    continue_on_error: None,
+                    cell_window: Default::default(),
+                }))
+                .await;
+            for result in [query, batch] {
+                assert_eq!(result.is_error, Some(true), "{result:?}");
+                assert!(result_text(&result).contains(dbx_core::mcp_result_protection::SOURCE_UNRESOLVED));
+            }
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn result_database_overrides_reject_old_sessions_and_merged_transactions() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("sql", "sql", "sqlserver", "app")],
+            policy: database_protection_policy(false),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let session = server.sessions.open("sql", "app").await.into_parts().0.unwrap();
+        let query = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("sql"),
+                database: None,
+                sql: "SELECT phone FROM users".to_string(),
+                session_id: Some(session.id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert_eq!(query.is_error, Some(true), "{query:?}");
+        for (session_id, use_transaction) in [(Some(session.id), None), (None, Some(true))] {
+            let result = server
+                .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                    selector: selector("sql"),
+                    database: None,
+                    sql: "SELECT phone FROM users; SELECT phone FROM users".to_string(),
+                    session_id,
+                    use_transaction,
+                    continue_on_error: None,
+                    cell_window: Default::default(),
+                }))
+                .await;
+            assert_eq!(result.is_error, Some(true), "{result:?}");
+        }
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn result_database_overrides_sanitize_disabled_scope_metadata() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("sql", "sql", "sqlserver", "app")],
+            policy: database_protection_policy(false),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let results = [
+            server.list_tables(Parameters(serde_json::from_value(json!({ "connection_id": "sql" })).unwrap())).await,
+            server
+                .describe_table(Parameters(
+                    serde_json::from_value(json!({ "connection_id": "sql", "table": "users" })).unwrap(),
+                ))
+                .await,
+            server.list_routines(Parameters(serde_json::from_value(json!({ "connection_id": "sql" })).unwrap())).await,
+            server
+                .get_schema_context(Parameters(serde_json::from_value(json!({ "connection_id": "sql" })).unwrap()))
+                .await,
+        ];
+        for result in results {
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+            assert!(!serde_json::to_string(&result).unwrap().contains("synthetic-metadata-8361"));
+        }
+        let source = server
+            .get_routine_source(Parameters(
+                serde_json::from_value(json!({
+                    "connection_id": "sql", "name": "example", "object_type": "PROCEDURE"
+                }))
+                .unwrap(),
+            ))
+            .await;
+        assert_eq!(source.is_error, Some(true));
+        assert!(!serde_json::to_string(&source).unwrap().contains("synthetic-metadata-8361"));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -11417,7 +12117,6 @@ mod tests {
         assert!(!is_database_discovery_sql("show tables"));
     }
 
-    #[tokio::test]
     async fn v2_none_access_blocks_cached_connection_tools_and_connection_listing() {
         let mut access = dbx_core::mcp_access::McpAccessPolicy {
             default_access: dbx_core::mcp_access::McpAccessLevel::Read,
@@ -11448,8 +12147,8 @@ mod tests {
         assert_eq!(result_text(&connections), "No connections configured in DBX.");
     }
 
-    #[test]
-    fn schema_scope_is_a_hard_bound() {
+    #[tokio::test]
+    async fn schema_scope_is_a_hard_bound() {
         let dameng = connection("dameng-1", "Dameng", "dameng", "APPDB");
         let server = DbxMcpServer::with_runtime_options(
             Arc::new(FakeBackend::default()),
@@ -11462,10 +12161,10 @@ mod tests {
         );
 
         let resolved = resolved_connection_for_test(dameng.clone());
-        assert_eq!(server.resolve_database(None, &resolved).unwrap(), "APPDB");
-        assert_eq!(server.resolve_schema(None).unwrap(), "REPORTING");
-        assert_eq!(server.resolve_schema(Some("REPORTING".to_string())).unwrap(), "REPORTING");
-        let error = server.resolve_schema(Some("APP_USER".to_string())).unwrap_err();
+        assert_eq!(server.resolve_database(None, &resolved).await.unwrap(), "APPDB");
+        assert_eq!(server.resolve_schema(None, &resolved).unwrap(), "REPORTING");
+        assert_eq!(server.resolve_schema(Some("REPORTING".to_string()), &resolved).unwrap(), "REPORTING");
+        let error = server.resolve_schema(Some("APP_USER".to_string()), &resolved).unwrap_err();
         assert!(result_text(&error).contains("SCHEMA_OUT_OF_SCOPE"));
     }
 

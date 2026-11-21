@@ -363,6 +363,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import WebLoginCaptchaSetting from "@/components/settings/WebLoginCaptchaSetting.vue";
 import SettingsTransferPanel from "@/components/settings/SettingsTransferPanel.vue";
+import McpResultProtectionEditor from "@/components/settings/McpResultProtectionEditor.vue";
 import McpCapabilityBrowser from "@/components/settings/McpCapabilityBrowser.vue";
 import McpPluginToolsModeSetting from "@/components/settings/McpPluginToolsModeSetting.vue";
 import { editableDatabaseAccess, mergeDatabaseAccess, type McpDatabaseAccess } from "@/lib/mcp/mcpDatabaseAccess";
@@ -4437,7 +4438,7 @@ async function exportDebugLogs() {
 type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio" | "qoder" | "workbuddy" | "antigravity";
 type McpCopyKind = "install" | "uninstall" | "http-endpoint" | "http-token" | "http-config" | `${McpConfigTab}-config`;
 type McpTransportTab = "stdio" | "http";
-type McpManagementTab = "access" | "capabilities" | "permissions";
+type McpManagementTab = "access" | "capabilities" | "permissions" | "result-protection";
 
 const mcpStatus = ref<McpServerStatus | null>(null);
 const mcpStatusLoading = ref(false);
@@ -4646,6 +4647,16 @@ async function commitMcpPolicyDraft(): Promise<void> {
       pluginToolsMode: snapshot.pluginToolsMode,
     });
     if (mcpPoliciesEqual(mcpPolicyDraft.value, snapshot)) syncMcpPolicyBaseline(settingsStore.mcpGlobalPolicy);
+  } finally {
+    mcpPolicySaving.value = false;
+  }
+}
+
+async function saveMcpResultProtection(resultProtection: import("@/lib/mcp/mcpResultProtection").McpResultProtectionPolicy) {
+  if (mcpPolicyControlsDisabled.value) throw new Error(t("settings.mcpResultUnavailable"));
+  mcpPolicySaving.value = true;
+  try {
+    await settingsStore.updateMcpGlobalPolicy({ resultProtection });
   } finally {
     mcpPolicySaving.value = false;
   }
@@ -13273,10 +13284,11 @@ LIMIT 100;</pre>
               </div>
 
               <Tabs v-model="mcpManagementTab" class="space-y-4">
-                <TabsList class="grid h-9 w-full grid-cols-3">
-                  <TabsTrigger value="access">{{ t("settings.mcpManagementAccess") }}</TabsTrigger>
-                  <TabsTrigger value="capabilities">{{ t("settings.mcpManagementCapabilities") }}</TabsTrigger>
-                  <TabsTrigger value="permissions">{{ t("settings.mcpManagementPermissions") }}</TabsTrigger>
+                <TabsList class="grid h-auto min-h-9 w-full grid-cols-4">
+                  <TabsTrigger value="access" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpManagementAccess") }}</TabsTrigger>
+                  <TabsTrigger value="capabilities" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpManagementCapabilities") }}</TabsTrigger>
+                  <TabsTrigger value="permissions" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpManagementPermissions") }}</TabsTrigger>
+                  <TabsTrigger value="result-protection" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpResultProtectionTitle") }}</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="access" class="m-0 space-y-6">
@@ -13741,6 +13753,18 @@ LIMIT 100;</pre>
                     @set:confirmation="onMcpHighRiskConfirmationChange"
                   />
                   <p class="text-xs text-muted-foreground">{{ t("settings.mcpPermissionsDraftHint") }}</p>
+                </TabsContent>
+                <TabsContent value="result-protection" class="m-0">
+                  <McpResultProtectionEditor
+                    :policy="settingsStore.mcpGlobalPolicy.resultProtection"
+                    :connections="mcpSelectableConnections"
+                    :layout="connectionStore.sidebarLayout"
+                    :allowed-connection-ids="mcpPolicyDraft.allowedConnectionIds"
+                    :allowed-group-ids="mcpPolicyDraft.allowedGroupIds"
+                    :connection-policies="mcpPolicyDraft.connectionPolicies"
+                    :disabled="mcpPolicyControlsDisabled"
+                    :save-policy="saveMcpResultProtection"
+                  />
                 </TabsContent>
                 <div v-if="mcpManagementTab === 'access'" class="space-y-5 border-t border-border/60 pt-5 sm:ml-1">
                   <div data-settings-search-id="mcp-query-timeout" class="space-y-3">

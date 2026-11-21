@@ -79,6 +79,7 @@ argon2 = "0.5"
 # with the same on-disk attribute layout instead.
 keyring = { version = "3.6.3", default-features = false, optional = true, features = ["apple-native", "windows-native", "crypto-rust"] }
 sha2 = "0.10"
+hmac = "0.12"
 async-trait = "0.1"
 bytes = "1"
 font-kit = { version = "0.14.3", optional = true }

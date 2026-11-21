@@ -67,7 +67,7 @@ function configuredPort(value: string | undefined, fallback: number): number {
 const viteBase = normalizeViteBase(configuredBasePath);
 const publicBasePath = viteBase.startsWith("/") ? viteBase.replace(/\/+$/, "") : "";
 const apiProxyPath = publicBasePath ? `${publicBasePath}/api` : "/api";
-const backendUrl = process.env.DBX_BACKEND_URL || "http://localhost:4224";
+const backendUrl = process.env.DBX_BACKEND_URL || "http://127.0.0.1:4224";
 
 export default defineConfig(async () => ({
   root: import.meta.dirname,

@@ -435,6 +435,7 @@ export const loadDesktopSettings = forward("loadDesktopSettings");
 export const saveDesktopSettings = forward("saveDesktopSettings");
 export const loadMcpGlobalPolicy = forward("loadMcpGlobalPolicy");
 export const saveMcpGlobalPolicy = forward("saveMcpGlobalPolicy");
+export const previewMcpResultProtection = forward("previewMcpResultProtection");
 export const loadMcpToolCatalog = forward("loadMcpToolCatalog");
 export const listPluginMcpViews = forward("listPluginMcpViews");
 export const loadMcpAccessPolicy = forward("loadMcpAccessPolicy");

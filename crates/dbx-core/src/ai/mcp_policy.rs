@@ -63,7 +63,7 @@ fn collect_connection_group_paths(
     for entry in entries {
         match entry {
             SidebarOrderEntry::Connection { id } => {
-                paths.insert(id.clone(), path.clone());
+                insert_connection_group_path(paths, id, path)?;
             }
             SidebarOrderEntry::Group { id, children, connection_ids } => {
                 let name =
@@ -74,7 +74,7 @@ fn collect_connection_group_paths(
                     collect_connection_group_paths(children, groups, path, paths)?;
                 } else if let Some(connection_ids) = connection_ids {
                     for connection_id in connection_ids {
-                        paths.insert(connection_id.clone(), path.clone());
+                        insert_connection_group_path(paths, connection_id, path)?;
                     }
                 }
                 path.ids.pop();
@@ -85,8 +85,21 @@ fn collect_connection_group_paths(
     Ok(())
 }
 
+fn insert_connection_group_path(
+    paths: &mut HashMap<String, McpConnectionGroupPath>,
+    connection_id: &str,
+    path: &McpConnectionGroupPath,
+) -> Result<(), String> {
+    if paths.insert(connection_id.to_string(), path.clone()).is_some() {
+        return Err(format!("INVALID_SIDEBAR_LAYOUT: connection '{connection_id}' appears more than once"));
+    }
+    Ok(())
+}
+
 pub fn policy_uses_connection_groups(policy: &McpGlobalPolicy) -> bool {
-    !policy.allowed_group_ids.is_empty() || !policy.group_policies.is_empty()
+    !policy.allowed_group_ids.is_empty()
+        || !policy.group_policies.is_empty()
+        || !policy.result_protection.group_overrides.is_empty()
 }
 
 pub fn policy_allows_connection(
@@ -189,6 +202,18 @@ pub fn ensure_sql_database_execution_scope(
     active_database: &str,
     sql: &str,
 ) -> Result<(), String> {
+    if policy.result_protection.has_database_overrides(&connection.id)
+        && (crate::sql_risk::mcp_sql_has_forbidden_database_switch(sql, connection.db_type)
+            || crate::mcp_result_protection::query_has_unbound_database(sql, connection.db_type, active_database)
+            || sql_references_disallowed_database_for_connection(
+                sql,
+                connection,
+                active_database,
+                &[active_database.to_string()],
+            ))
+    {
+        return Err(crate::mcp_result_protection::SOURCE_UNRESOLVED.to_string());
+    }
     let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection.id) else {
         return Ok(());
     };
@@ -267,10 +292,11 @@ pub fn ensure_mongo_database_execution_scope(
 #[cfg(test)]
 mod tests {
     use super::{
-        connection_allows_salesforce_dml, effective_database_execution_policy, resolve_database,
-        MCP_EXECUTION_POLICY_VERSION,
+        connection_allows_salesforce_dml, connection_group_paths, effective_database_execution_policy,
+        resolve_database, MCP_EXECUTION_POLICY_VERSION,
     };
     use crate::storage::{McpConnectionPolicy, McpDatabasePolicy, McpGlobalPolicy};
+    use serde_json::json;
 
     fn policy(version: Option<u8>) -> McpGlobalPolicy {
         McpGlobalPolicy {
@@ -334,6 +360,23 @@ mod tests {
     fn blank_database_uses_connection_default() {
         assert_eq!(resolve_database("  ", Some("sample")), "sample");
         assert_eq!(resolve_database("analytics", Some("sample")), "analytics");
+    }
+
+    #[test]
+    fn duplicate_sidebar_connection_membership_fails_closed() {
+        let layout = json!({
+            "groups": [
+                { "id": "production", "name": "Production" },
+                { "id": "testing", "name": "Testing" }
+            ],
+            "order": [
+                { "type": "group", "id": "production", "connectionIds": ["conn"] },
+                { "type": "group", "id": "testing", "connectionIds": ["conn"] }
+            ]
+        });
+        let error = connection_group_paths(&layout).unwrap_err();
+        assert!(error.starts_with("INVALID_SIDEBAR_LAYOUT:"));
+        assert!(error.contains("conn"));
     }
 
     #[test]

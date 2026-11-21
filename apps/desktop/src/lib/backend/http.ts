@@ -2628,6 +2628,10 @@ export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return get("/api/app-settings/mcp-policy");
 }
 
+export async function previewMcpResultProtection(request: import("@/lib/mcp/mcpResultProtection").ResultProtectionPreview): Promise<import("@/lib/mcp/mcpResultProtection").ResultProtectionPreviewResult> {
+  return post("/api/app-settings/mcp-policy/preview", request);
+}
+
 export async function loadMcpToolCatalog(): Promise<McpToolCatalog> {
   return get("/api/app-settings/mcp-tool-catalog");
 }

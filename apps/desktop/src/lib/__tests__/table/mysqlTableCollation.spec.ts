@@ -67,6 +67,9 @@ describe("mysqlTableCollation", () => {
     // No database qualifier keeps the current schema; a missing collation leaves the server default.
     expect(mysqlTableCharsetChangeSql({ database: "", table: "orders", charset: "utf8mb4" })).toBe("ALTER TABLE `orders` DEFAULT CHARACTER SET utf8mb4");
     expect(mysqlTableCharsetChangeSql({ database: null, table: "orders", charset: "utf8", collation: "utf8_general_ci" })).toBe("ALTER TABLE `orders` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci");
+    // Quoted identifiers keep leading/trailing spaces; trimming is only for the emptiness check.
+    expect(mysqlTableCharsetChangeSql({ database: " shop ", table: " orders ", charset: "utf8mb4" })).toBe("ALTER TABLE ` shop `.` orders ` DEFAULT CHARACTER SET utf8mb4");
+    expect(mysqlTableCharsetChangeSql({ database: "  ", table: " orders ", charset: "utf8mb4" })).toBe("ALTER TABLE ` orders ` DEFAULT CHARACTER SET utf8mb4");
   });
 
   it("refuses charset/collation names that would need quoting", () => {

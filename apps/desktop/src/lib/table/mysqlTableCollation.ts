@@ -78,11 +78,13 @@ export function mysqlTableCollationBelongsToCharset(collation: string, charset: 
 export function mysqlTableCharsetChangeSql(options: { database?: string | null; table: string; charset: string; collation?: string | null }): string | undefined {
   const charset = options.charset.trim();
   if (!validMysqlCharsetIdentifier(charset)) return undefined;
-  const table = options.table.trim();
-  if (!table) return undefined;
+  // MySQL preserves spaces inside quoted identifiers: trim only for the emptiness
+  // check, otherwise ` orders ` would silently target `orders`.
+  const table = options.table;
+  if (!table.trim()) return undefined;
   const collation = options.collation?.trim() ?? "";
   if (collation && (!validMysqlCharsetIdentifier(collation) || !mysqlTableCollationBelongsToCharset(collation, charset))) return undefined;
-  const database = options.database?.trim();
-  const target = database ? `${quoteMysqlTableIdentifier(database)}.${quoteMysqlTableIdentifier(table)}` : quoteMysqlTableIdentifier(table);
+  const database = options.database;
+  const target = database?.trim() ? `${quoteMysqlTableIdentifier(database)}.${quoteMysqlTableIdentifier(table)}` : quoteMysqlTableIdentifier(table);
   return `ALTER TABLE ${target} DEFAULT CHARACTER SET ${charset}${collation ? ` COLLATE ${collation}` : ""}`;
 }

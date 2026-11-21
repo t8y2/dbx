@@ -38,10 +38,12 @@ export function quoteMysqlTableIdentifier(value: string): string {
 export function mysqlTableEngineChangeSql(options: { database?: string | null; table: string; engine: string }): string | undefined {
   const engine = options.engine.trim();
   if (!/^[A-Za-z0-9_$]+$/.test(engine)) return undefined;
-  const table = options.table.trim();
-  if (!table) return undefined;
-  const database = options.database?.trim();
-  const target = database ? `${quoteMysqlTableIdentifier(database)}.${quoteMysqlTableIdentifier(table)}` : quoteMysqlTableIdentifier(table);
+  // MySQL preserves spaces inside quoted identifiers: trim only for the emptiness
+  // check, otherwise ` orders ` would silently target `orders`.
+  const table = options.table;
+  if (!table.trim()) return undefined;
+  const database = options.database;
+  const target = database?.trim() ? `${quoteMysqlTableIdentifier(database)}.${quoteMysqlTableIdentifier(table)}` : quoteMysqlTableIdentifier(table);
   return `ALTER TABLE ${target} ENGINE = ${engine}`;
 }
 

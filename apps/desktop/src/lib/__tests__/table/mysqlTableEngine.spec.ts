@@ -61,6 +61,9 @@ describe("mysqlTableEngine", () => {
     expect(mysqlTableEngineChangeSql({ database: "app", table: "orders", engine: "InnoDB" })).toBe("ALTER TABLE `app`.`orders` ENGINE = InnoDB");
     expect(mysqlTableEngineChangeSql({ database: "app", table: "or`ders", engine: " MyISAM " })).toBe("ALTER TABLE `app`.`or``ders` ENGINE = MyISAM");
     expect(mysqlTableEngineChangeSql({ table: "orders", engine: "InnoDB" })).toBe("ALTER TABLE `orders` ENGINE = InnoDB");
+    // Quoted identifiers keep leading/trailing spaces; trimming is only for the emptiness check.
+    expect(mysqlTableEngineChangeSql({ database: " app ", table: " orders ", engine: "InnoDB" })).toBe("ALTER TABLE ` app `.` orders ` ENGINE = InnoDB");
+    expect(mysqlTableEngineChangeSql({ database: "  ", table: " orders ", engine: "InnoDB" })).toBe("ALTER TABLE ` orders ` ENGINE = InnoDB");
   });
 
   it("refuses engine values that are not bare engine names", () => {

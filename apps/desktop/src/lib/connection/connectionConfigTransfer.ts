@@ -205,14 +205,19 @@ export function selectConnectionConfigBundle(bundle: ConnectionConfigBundle, sel
   };
 }
 
+export interface PreparedConnectionConfigImport extends ConnectionConfigBundle {
+  /** Source connection ID → ID of the connection this import creates for it. Rows skipped as duplicates are absent. */
+  createdIds: Map<string, string>;
+}
+
 /** Ordinary file imports deduplicate connections while keeping cloud sync's ID merge policy separate. */
-export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, existingConnections: Iterable<Pick<ConnectionConfig, "id" | "name" | "host" | "port"> | string>, existingTunnelProfileIds: Iterable<string>, createId: () => string): ConnectionConfigBundle {
+export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, existingConnections: Iterable<ConnectionConfig | string>, existingTunnelProfileIds: Iterable<string>, createId: () => string): PreparedConnectionConfigImport {
   const existingConnectionList = Array.from(existingConnections);
   const existingConnectionIds = new Set(existingConnectionList.map((connection) => (typeof connection === "string" ? connection : connection.id)));
   const existingByIdentity = new Map<string, string>();
   for (const connection of existingConnectionList) {
     if (typeof connection === "string") continue;
-    existingByIdentity.set(connectionIdentity(connection), connection.id);
+    existingByIdentity.set(connectionImportIdentity(connection), connection.id);
   }
 
   const sourceConnections = bundle.connections.map((connection, index) => ({
@@ -221,6 +226,7 @@ export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, ex
     id: connection.id?.trim() || `__dbx_import_${index}`,
   }));
   const connectionIds = new Map<string, string>();
+  const createdIds = new Map<string, string>();
   const importedConnections: ConnectionConfig[] = [];
   const importedByIdentity = new Map<string, string>();
   const seenSourceIds = new Set<string>();
@@ -230,7 +236,7 @@ export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, ex
     if (seenSourceIds.has(source.id)) throw new Error("DUPLICATE_IMPORT_ID");
     seenSourceIds.add(source.id);
 
-    const identity = connectionIdentity(source);
+    const identity = connectionImportIdentity(source);
     const duplicateId = existingByIdentity.get(identity) ?? importedByIdentity.get(identity);
     if (duplicateId) {
       connectionIds.set(source.id, duplicateId);
@@ -241,6 +247,7 @@ export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, ex
     while (!targetId || occupiedConnectionIds.has(targetId)) targetId = createId();
     occupiedConnectionIds.add(targetId);
     connectionIds.set(source.id, targetId);
+    createdIds.set(source.id, targetId);
     importedByIdentity.set(identity, targetId);
     importedConnections.push({ ...source, id: targetId });
   }
@@ -279,9 +286,16 @@ export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, ex
     })),
     tunnelProfiles: Array.from(importedTunnelProfileIds, (sourceId) => ({ ...sourceProfiles.get(sourceId)!, id: profileIds.get(sourceId)! })),
     layout: bundle.layout ? filterSidebarLayoutByConnectionIds(remapSidebarLayoutConnectionIds(bundle.layout, connectionIds), connectionIds.values()) : undefined,
+    createdIds,
   };
 }
 
-function connectionIdentity(connection: Pick<ConnectionConfig, "name" | "host" | "port">): string {
-  return JSON.stringify([connection.name, connection.host, connection.port]);
+/**
+ * Two connections are the same import target only when every field that selects
+ * the server, account, database and route matches. Secrets are excluded so a
+ * re-import with a changed password still deduplicates.
+ */
+export function connectionImportIdentity(connection: ConnectionConfig): string {
+  const tunnels = (connection.transport_layers ?? []).map((layer) => (layer.type === "ssh" ? [layer.type, layer.host, layer.port, layer.user, layer.auth_method, layer.key_path] : [layer.type]));
+  return JSON.stringify([connection.name, connection.db_type, connection.driver_profile || connection.db_type, connection.host, connection.port, connection.username, connection.database || "", connection.connection_string || "", tunnels]);
 }

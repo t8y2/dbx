@@ -613,6 +613,16 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT /* a; b */ 1", "SELECT 2"]);
   });
 
+  it.each(["saphana", "exasol", "access", "informix", "gbase8s", "sundb", "xugu", "iotdb", "iris"] as const)("keeps %s legacy block comments flat", (databaseType) => {
+    const sql = ["/* outer", "/* inner */", "-- region visible", "SELECT 1;", "-- endregion", "SELECT 2;"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, databaseType))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
+  it("keeps InfluxDB 3 nested comments out of execution ranges", () => {
+    const sql = ["/* outer", "/* inner */", "-- region hidden", "SELECT 1;", "*/", "SELECT 2;"].join("\n");
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "influxdb3"))).toEqual(["SELECT 2"]);
+  });
+
   it("handles Postgres dollar quoting", () => {
     const sql = "SELECT $$ a; b $$;\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT $$ a; b $$", "SELECT 2"]);
@@ -2717,6 +2727,41 @@ describe("hasMultipleExecutionTargets", () => {
   it("does not show multiple targets for MySQL DESC UPDATE joins", () => {
     const sql = "desc update  test_orders a\njoin test_users b\non a.id=b.id \nset a.name = '张三'\nwhere b.id > 10;";
     expect(hasMultipleExecutionTargets(sql, "mysql")).toBe(false);
+  });
+
+  it("uses the selected PostgreSQL comment policy for generic JDBC ranges", () => {
+    const sql = "/* outer /* inner */ SELECT 1; */ SELECT 2;";
+    const parameterOptions = { syntaxDialect: "postgres" as const };
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 2"]);
+    expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 2"), "jdbc", parameterOptions)?.sql.trim()).toBe("SELECT 2");
+  });
+
+  it("uses the selected ClickHouse line-comment policy for generic JDBC ranges", () => {
+    const sql = "// slash; comment\nSELECT 1;\n# hash; comment\nSELECT 2;\n#! bang; comment\nSELECT 3;";
+    const parameterOptions = { syntaxDialect: "clickhouse" as const };
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "jdbc", parameterOptions))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+    expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 2"), "jdbc", parameterOptions)?.sql.trim()).toBe("SELECT 2");
+  });
+
+  it("uses ClickHouse string escaping and ALTER UPDATE boundaries for generic JDBC ranges", () => {
+    const parameterOptions = { syntaxDialect: "clickhouse" as const };
+    const stringSql = String.raw`SELECT 'a\'; SELECT 2;'`;
+    const mutation = "ALTER TABLE events\nUPDATE value = 1\nWHERE id = 42";
+    const mutationSql = `${mutation};\nSELECT * FROM events;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(stringSql, "jdbc", parameterOptions))).toEqual([stringSql]);
+    expect(rangeSqlTexts(executableStatementRanges(mutationSql, "jdbc", parameterOptions))).toEqual([mutation, "SELECT * FROM events"]);
+  });
+
+  it("keeps nested comments in PostgreSQL EXPLAIN prefixes with the target", () => {
+    const sql = "EXPLAIN /* outer /* inner */ note */\nSELECT 1;";
+    const expected = sql.slice(0, -1);
+
+    expect(statementRangeAtCursor(sql, sql.indexOf("SELECT 1"), "postgres")?.sql.trim()).toBe(expected);
   });
 });
 

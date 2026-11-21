@@ -1,7 +1,8 @@
+import { sqlBlockCommentEnd } from "./sqlBlockComments";
 import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
-import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { executableStatementRanges, findSqlBlockCommentEnd, mysqlDelimiterAt, mysqlDelimiterPrefixAt, startsHashLineComment, statementParsingDatabaseType, type MysqlDelimiterCommand, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import type { SqlParameterOptions, SqlStatementSyntaxDialect } from "@/lib/sql/sqlParameters";
+import { executableStatementRanges, mysqlDelimiterAt, mysqlDelimiterPrefixAt, startsLineComment, statementParsingDatabaseType, type MysqlDelimiterCommand, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
@@ -72,7 +73,7 @@ export function executableStatementRangeCacheForDoc(
 ): ExecutableStatementRangeCache {
   const parameterOptions = typeof parameterOptionsOrParse === "function" ? undefined : parameterOptionsOrParse;
   const parse = typeof parameterOptionsOrParse === "function" ? parameterOptionsOrParse : customParse;
-  const parameterSyntaxKey = `${parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*"}|compat=${parameterOptions?.compatibilityMode?.trim().toUpperCase() ?? ""}`;
+  const parameterSyntaxKey = `${parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*"}|compat=${parameterOptions?.compatibilityMode?.trim().toUpperCase() ?? ""}|dialect=${parameterOptions?.syntaxDialect ?? ""}`;
   if (cache?.doc === doc && cache.databaseType === databaseType && cache.parameterSyntaxKey === parameterSyntaxKey) return cache;
 
   const byStart = new Map<number, SqlTextRange>();
@@ -127,21 +128,14 @@ function executableStartAfterLeadingComments(sql: string, range: SqlTextRange, d
     while (/\s/.test(text[offset] ?? "")) offset += 1;
 
     if (text.startsWith("/*", offset)) {
-      const close = findSqlBlockCommentEnd(text, offset, databaseType);
+      const close = sqlBlockCommentEnd(text, offset, databaseType, parameterOptions?.syntaxDialect);
       if (close < 0) return null;
       offset = close + 2;
       continue;
     }
 
-    if (text.startsWith("--", offset)) {
-      const newline = text.indexOf("\n", offset + 2);
-      if (newline < 0) return null;
-      offset = newline + 1;
-      continue;
-    }
-
-    if (startsHashLineComment(sql, range.from + offset, databaseType, parameterOptions)) {
-      const newline = text.indexOf("\n", offset + 1);
+    if (startsLineComment(sql, range.from + offset, databaseType, parameterOptions)) {
+      const newline = text.indexOf("\n", offset);
       if (newline < 0) return null;
       offset = newline + 1;
       continue;
@@ -162,8 +156,13 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   const line = cache.doc.lineAt(pos);
   const lineText = line.text.trim();
   const lineContentStart = line.from + line.text.search(/\S|$/);
-  const startsHashComment = lineText.startsWith("#") && startsHashLineComment(cache.doc.toString(), lineContentStart, statementParsingDatabaseType(cache.databaseType, cache.parameterOptions), cache.parameterOptions);
-  if (!lineText || lineText.startsWith("--") || startsHashComment || isCursorOnLeadingBlockComment(line.text, pos - line.from)) return null;
+  // Only a potentially multiline MyBatis placeholder needs the whole document.
+  // Ordinary cursor movement must not flatten a large document on every lookup.
+  const databaseType = statementParsingDatabaseType(cache.databaseType, cache.parameterOptions);
+  const needsDocument = lineText.startsWith("#{");
+  const commentSource = needsDocument ? cache.doc.toString() : line.text;
+  const commentOffset = needsDocument ? lineContentStart : lineContentStart - line.from;
+  if (!lineText || startsLineComment(commentSource, commentOffset, databaseType, cache.parameterOptions) || isCursorOnLeadingBlockComment(line.text, pos - line.from, databaseType, cache.parameterOptions?.syntaxDialect)) return null;
 
   for (let index = 0; index < cache.ranges.length; index += 1) {
     const range = cache.ranges[index];
@@ -184,11 +183,11 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   return null;
 }
 
-function isCursorOnLeadingBlockComment(lineText: string, lineOffset: number): boolean {
+function isCursorOnLeadingBlockComment(lineText: string, lineOffset: number, databaseType?: DatabaseType, syntaxDialect?: SqlStatementSyntaxDialect): boolean {
   const commentStart = lineText.search(/\S/);
   if (commentStart < 0 || !lineText.startsWith("/*", commentStart)) return false;
 
-  const commentEnd = lineText.indexOf("*/", commentStart + 2);
+  const commentEnd = sqlBlockCommentEnd(lineText, commentStart, databaseType, syntaxDialect);
   if (commentEnd < 0) return true;
   const afterComment = lineText.slice(commentEnd + 2);
   if (!afterComment.trim()) return true;

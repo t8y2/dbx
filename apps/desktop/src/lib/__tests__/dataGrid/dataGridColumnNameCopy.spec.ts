@@ -93,14 +93,14 @@ describe("dataGridColumnNameCopy", () => {
 
   it("escapes backslashes for dialects where a backslash escapes the next character (#14495)", () => {
     const single = (names: string[], databaseType?: DatabaseType) => formatColumnNamesForCopy(names, { separator: "comma", quote: true, quoteStyle: "single", databaseType });
-    for (const databaseType of ["mysql", "doris", "starrocks", "hive", "argo", "transwarp", "impala", "spark", "databend"] as const) {
+    for (const databaseType of ["mysql", "doris", "starrocks", "clickhouse", "hive", "argo", "transwarp", "impala", "spark", "databend"] as const) {
       // \t and \Z would otherwise be read as a tab and as ctrl-Z.
       expect(single(["C:\\tmp", "\\Z"], databaseType)).toBe("'C:\\\\tmp','\\\\Z'");
       // A backslash before the quote must not shift the string boundary.
       expect(single(["a\\'b"], databaseType)).toBe("'a\\\\''b'");
     }
     // Standard-conforming dialects keep the backslash literal, so only quotes double.
-    for (const databaseType of ["postgres", "oracle", "sqlserver", "sqlite", "clickhouse"] as const) {
+    for (const databaseType of ["postgres", "oracle", "sqlserver", "sqlite"] as const) {
       expect(single(["C:\\tmp", "a\\'b"], databaseType)).toBe("'C:\\tmp','a\\''b'");
     }
     // Without a known dialect the safer text is preserved verbatim.

@@ -35,6 +35,7 @@ const props = defineProps<{
   cancelTarget?: MultiDbExecutionAdapter["cancelTarget"];
   cancelPending?: MultiDbExecutionAdapter["cancelPending"];
   sourceOffset?: number;
+  syntaxDialect?: "mysql" | "postgres" | "sqlserver" | "oracle" | "clickhouse" | "soql";
   initialManualTransaction?: boolean;
 }>();
 
@@ -826,7 +827,7 @@ async function startExecution(): Promise<void> {
   if (!valid || !canExecute.value) return;
   if (selectedGroupId.value) targetGroupStore.markGroupUsed(selectedGroupId.value);
   executionStarted.value = true;
-  void execution.start(props.sql, selectedTargets.value, { sourceOffset: props.sourceOffset, manualTransaction: manualTransaction.value && supportsManualTransaction.value }, executionMode.value);
+  void execution.start(props.sql, selectedTargets.value, { sourceOffset: props.sourceOffset, syntaxDialect: props.syntaxDialect, manualTransaction: manualTransaction.value && supportsManualTransaction.value }, executionMode.value);
 }
 
 function removeSelected(target: MultiDbExecutionTarget): void {

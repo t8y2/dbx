@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { DatabaseType } from "@/types/database";
+import type { SqlStatementSyntaxDialect } from "@/lib/sql/sqlParameters";
 
 export interface SqlExecutionDangerRequest {
   sql: string;
@@ -15,6 +16,7 @@ export interface SqlExecutionDangerRequest {
    */
   targets?: string[];
   databaseType?: DatabaseType;
+  syntaxDialect?: SqlStatementSyntaxDialect;
   /** Identifies a cancellable execution batch without coupling this store to its orchestrator. */
   scopeId?: string;
 }

@@ -71,6 +71,7 @@ export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseTy
     .filter(Boolean)
     .join("\n");
   if (!haystack) return undefined;
+  if (/clickhouse/i.test(haystack)) return "clickhouse";
   return JDBC_DIALECT_MATCHERS.find((matcher) => matcher.patterns.some((pattern) => pattern.test(haystack)))?.type;
 }
 

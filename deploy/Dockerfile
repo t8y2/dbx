@@ -6,6 +6,8 @@ WORKDIR /app
 RUN npm i -g pnpm
 # Keep the workspace package available because Vite resolves it directly from source.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm applies the SQL parser patch while installing dependencies.
+COPY patches/ patches/
 COPY packages/mongo-shell/ packages/mongo-shell/
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
@@ -118,7 +120,7 @@ RUN case "$TARGETARCH" in \
     cp "/app/target/$rust_target/release/dbx-web" "/out/linux/$TARGETARCH/"
 
 # Stage 3: Final image
-FROM debian:bookworm-slim
+FROM eclipse-temurin:21-jre-jammy
 ARG TARGETPLATFORM
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -126,13 +128,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-dejavu-core \
     libfreetype6 \
     libssl3 \
-    openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=backend /out/${TARGETPLATFORM}/dbx-web /usr/local/bin/
 COPY --from=frontend /app/dist /app/static
 ENV DBX_STATIC_DIR=/app/static
 ENV DBX_DATA_DIR=/app/data
 ENV DBX_BACKUP_ROOT=/app/backups
-ENV DBX_JAVA_BIN=/usr/bin/java
+ENV DBX_JAVA_BIN=/opt/java/openjdk/bin/java
 EXPOSE 4224
 CMD ["dbx-web"]

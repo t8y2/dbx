@@ -10,6 +10,7 @@ import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/li
 import type { NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobRequest, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest } from "@/lib/database/nativeJobs";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import type { SqlStatementSyntaxDialect } from "@/lib/sql/sqlParameters";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return post("/api/pl-debug/bootstrap", {});
@@ -2009,11 +2010,12 @@ export async function analyzeSqlReferences(sql: string, dialect?: string): Promi
   return post("/api/query/analyze-sql-references", { sql, dialect });
 }
 
-export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType): Promise<string> {
+export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType, syntaxDialect?: SqlStatementSyntaxDialect): Promise<string> {
   return post("/api/query/find-statement-at-cursor", {
     sql,
     cursorPos,
     databaseType,
+    syntaxDialect,
   });
 }
 

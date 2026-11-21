@@ -361,7 +361,7 @@ describe("ObjectBrowser table copy", () => {
     // Clipboard columns follow the displayed order, including MySQL-specific fields.
     await vi.waitFor(() =>
       expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(
-        "objects.name\tobjects.type\tobjects.rows\tobjects.comment\tobjects.size\tgrid.tableInfoAutoIncrement\tstructureEditor.characterSet\tstructureEditor.collation\norders\tobjects.table\t\tsales\t\t\t\t\nusers\tobjects.table\t\taccounts\t\t\t\t",
+        "objects.name\tobjects.type\tgrid.tableInfoEngine\tobjects.rows\tobjects.comment\tobjects.size\tgrid.tableInfoAutoIncrement\tstructureEditor.characterSet\tstructureEditor.collation\norders\tobjects.table\t\t\tsales\t\t\t\t\nusers\tobjects.table\t\t\taccounts\t\t\t\t",
       ),
     );
   });

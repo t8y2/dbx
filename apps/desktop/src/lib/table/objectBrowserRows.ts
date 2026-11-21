@@ -27,6 +27,8 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  /** MySQL storage engine reported by `information_schema.TABLES`. */
+  engine?: string | null;
   /** MySQL AUTO_INCREMENT as returned by the server: a string, since BIGINT UNSIGNED values exceed 2^53. */
   autoIncrement?: string | null;
   characterSet?: string | null;
@@ -43,7 +45,7 @@ export function isForeignTableObjectType(objectType: string | null | undefined):
   return objectType.toUpperCase().replace(/[\s-]+/g, "_") === "FOREIGN_TABLE";
 }
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "engine" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
@@ -207,12 +209,18 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
     }
     const type = normalizeObjectBrowserType(object.object_type);
     if (!type) return [];
-    const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
-    if (!name) return [];
-    const objectSchema = type === "INDEX" ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
+    // Table-like identifiers are DDL targets. MySQL allows leading/trailing
+    // spaces inside quoted names, so the row keeps the driver-reported name and
+    // only the display text is normalized; trimming here would make
+    // `ALTER TABLE` address a different table (#14905).
+    const preserveIdentifier = type === "TABLE" || type === "VIEW" || type === "MATERIALIZED_VIEW";
+    const name = type === "INDEX" || preserveIdentifier ? object.name : normalizeDatabaseObjectName(object.name);
+    if (!name.trim()) return [];
+    const objectSchema = type === "INDEX" || preserveIdentifier ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
     const schema = objectSchema || options.rowSchema;
     const signature = routineSignatureForDisplay(type, object.signature);
-    const displayName = signature === undefined ? name : `${name}(${signature})`;
+    const displayNameBase = preserveIdentifier ? name.trim() : name;
+    const displayName = signature === undefined ? displayNameBase : `${displayNameBase}(${signature})`;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
     const baseId = `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
     const index = seen.get(baseId) ?? 0;

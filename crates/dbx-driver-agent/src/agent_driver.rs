@@ -450,7 +450,7 @@ impl AgentRuntimeClient {
     pub fn decrement_session_count(runtime: &Arc<Self>) -> u64 {
         let previous = runtime
             .active_sessions
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| Some(value.saturating_sub(1)))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| Some(value.saturating_sub(1)))
             .unwrap_or_default();
         let remaining = previous.saturating_sub(1);
         if previous <= 1 {

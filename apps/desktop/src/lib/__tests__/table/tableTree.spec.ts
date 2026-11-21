@@ -34,6 +34,19 @@ describe("case-sensitive database objects", () => {
     }
   });
 
+  it("keeps space-padded table identifiers as separate tree nodes", () => {
+    const nodes = buildTableTreeNodes({
+      ...context,
+      tables: [
+        { name: " orders", table_type: "BASE TABLE" },
+        { name: "orders", table_type: "BASE TABLE" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.tableName)).toEqual(expect.arrayContaining([" orders", "orders"]));
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(2);
+  });
+
   it("publishes each changed partition group once per page while retaining exact identities", () => {
     const current = buildTableTreeNodes({
       ...context,

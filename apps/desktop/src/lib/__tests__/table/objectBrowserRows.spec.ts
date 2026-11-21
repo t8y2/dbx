@@ -43,6 +43,22 @@ describe("buildObjectBrowserRows", () => {
     }
   });
 
+  it("keeps space-padded MySQL table identifiers distinct while trimming only the display name", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: " orders", object_type: "TABLE", schema: " app " },
+        { name: "orders", object_type: "TABLE", schema: " app " },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+    });
+
+    expect(rows.map((row) => row.name)).toEqual([" orders", "orders"]);
+    expect(rows.map((row) => row.displayName)).toEqual(["orders", "orders"]);
+    expect(rows.map((row) => row.schema)).toEqual([" app ", " app "]);
+    expect(new Set(rows.map((row) => row.id)).size).toBe(2);
+  });
+
   it("does not turn synonyms and jobs into table rows", () => {
     const rows = buildObjectBrowserRows({
       objects: [

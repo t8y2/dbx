@@ -2,7 +2,7 @@ use asynchronous_codec::BytesMut;
 use bytes::BufMut;
 
 use crate::{tds::Collation, xml::XmlSchema, Error, SqlReadBytes};
-use std::{convert::TryFrom, sync::Arc, usize};
+use std::{convert::TryFrom, sync::Arc};
 
 use super::Encode;
 

@@ -597,7 +597,16 @@ pub fn build_drop_table_child_object_sql(options: DropTableChildObjectSqlOptions
             if matches!(database_type, Some(DatabaseType::ClickHouse | DatabaseType::Redshift)) {
                 return Err(format!("Dropping indexes is not supported for {}.", database_label(database_type)));
             }
-            if matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::SqlServer)) {
+            if database_type == Some(DatabaseType::Doris) && options.name.trim().eq_ignore_ascii_case("unique key") {
+                return Err(
+                    "The Doris key index is part of the table's UNIQUE KEY and cannot be dropped from this editor."
+                        .to_string(),
+                );
+            }
+            if matches!(
+                database_type,
+                Some(DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::Goldendb | DatabaseType::SqlServer)
+            ) {
                 return Ok(format!("DROP INDEX {name} ON {table};"));
             }
             if matches!(
@@ -2768,6 +2777,19 @@ mod tests {
             })
             .unwrap(),
             "DROP INDEX \"public\".\"idx_orders_status\";"
+        );
+        // Doris follows MySQL for index DDL: the index name must be paired with
+        // its table, a bare `DROP INDEX <name>;` is rejected by the server.
+        assert_eq!(
+            build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                object_type: TableChildObjectType::Index,
+                schema: None,
+                table_name: "orders".to_string(),
+                name: "idx_orders_status".to_string(),
+            })
+            .unwrap(),
+            "DROP INDEX `idx_orders_status` ON `orders`;"
         );
         assert_eq!(
             build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {

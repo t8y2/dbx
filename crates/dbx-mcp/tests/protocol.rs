@@ -484,14 +484,16 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     // Includes the 22 product-provider tools (14 Nacos + 8 Consul).
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 47);
+    assert_eq!(names.len(), 49);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 45);
+    assert_eq!(names.len(), 47);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]
     assert!(!names.contains(&"dbx_peek_messages"));
     assert!(names.contains(&"dbx_list_connections"));
+    assert!(names.contains(&"dbx_list_sidebar_groups"));
+    assert!(names.contains(&"dbx_move_connections_to_group"));
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));

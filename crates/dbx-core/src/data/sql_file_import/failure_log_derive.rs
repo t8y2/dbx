@@ -199,6 +199,7 @@ struct SummaryLine {
     failure_count: usize,
     affected_rows: u64,
     elapsed_ms: u64,
+    finished_at_ms: Option<i64>,
     failed_statements_logged: u64,
     omitted_failures: u64,
     truncated_statements: u64,
@@ -432,6 +433,9 @@ fn write_txt_footer(writer: &mut CountingWriter<'_>, run: &SummaryLine) -> SqlFi
         "Run summary: {} succeeded, {} failed, {} rows affected, {} ms\n",
         run.success_count, run.failure_count, run.affected_rows, run.elapsed_ms
     ));
+    if let Some(finished_at_ms) = run.finished_at_ms {
+        text.push_str(&format!("finished: {}\n", format_timestamp(finished_at_ms)));
+    }
     text.push_str(&format!("failures logged: {}\n", run.failed_statements_logged));
     if run.omitted_failures > 0 || run.truncated_statements > 0 || run.log_truncated {
         text.push_str(&format!(
@@ -512,7 +516,7 @@ mod tests {
             "logTruncated": log_truncated,
             "cancelled": false,
             "logStatus": "available",
-            "finishedAtMs": 1_760_000_001_200_i64
+            "finishedAtMs": 1_760_000_002_400_i64
         })
         .to_string()
     }
@@ -540,11 +544,13 @@ mod tests {
         assert!(text.contains("DBX SQL file execution failure log"));
         assert!(text.contains("connection: MySQL (conn-1)"));
         assert!(text.contains("database: shop"));
+        assert!(text.lines().any(|line| line == "started: 2025-10-09 08:53:20 UTC"));
         assert!(text.contains("[0] a.sql  /tmp/a.sql  10 bytes"));
         assert!(text.contains("#644  a.sql  (statement #644 in file)"));
         assert!(text.contains("INSERT INTO t VALUES (1);"));
         assert!(text.contains("error: ORA-12899: value too large"));
         assert!(text.contains("Run summary: 6 succeeded, 2 failed, 4 rows affected, 1200 ms"));
+        assert!(text.lines().any(|line| line == "finished: 2025-10-09 08:53:22 UTC"));
         assert!(!text.contains("truncation:"));
     }
 
@@ -707,6 +713,20 @@ mod tests {
 
         assert!(text.contains("Run summary: not recorded"));
         assert!(!text.contains("Run summary: 0 succeeded"));
+        assert!(!text.contains("finished:"));
+    }
+
+    #[test]
+    fn txt_export_keeps_a_summary_without_a_finish_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut summary: serde_json::Value = serde_json::from_str(&summary_line(0, 0, false)).unwrap();
+        summary.as_object_mut().unwrap().remove("finishedAtMs");
+        let log = write_log(dir.path(), &format!("{}\n{summary}\n", meta_line()));
+
+        let text = derive_text(&log, SqlFileFailureLogFormat::Txt);
+
+        assert!(text.contains("Run summary: 6 succeeded, 2 failed, 4 rows affected, 1200 ms"));
+        assert!(!text.contains("finished:"));
     }
 
     #[test]

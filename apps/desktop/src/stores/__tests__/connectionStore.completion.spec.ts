@@ -220,7 +220,7 @@ describe("connectionStore completion assistant", () => {
     expect(connectDb).toHaveBeenCalledOnce();
     expect(store.connectedIds.has("pg-1")).toBe(true);
     expect(store.activeConnectionId).toBe("already-active");
-    expect(tables).toEqual([{ name: "users", schema: "public", type: "table", detail: "→ Application users" }]);
+    expect(tables).toEqual([{ name: "users", schema: "public", type: "table", detail: "→ Application users", comment: "Application users" }]);
   });
 
   it("preserves materialized view candidates from the remote completion catalog", async () => {
@@ -470,7 +470,7 @@ describe("connectionStore completion assistant", () => {
 
     expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
     expect(listTables).toHaveBeenCalledWith("pg-1", "app", "public", "acc", 20);
-    expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table", detail: "→ Customer accounts" }]);
+    expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table", detail: "→ Customer accounts", comment: "Customer accounts" }]);
   });
 
   it("verifies selected-schema tables when the completion index is stale", async () => {
@@ -498,7 +498,7 @@ describe("connectionStore completion assistant", () => {
 
     expect(completionAssistantSearch.mock.calls.map(([request]) => (request as { match_mode?: string }).match_mode)).toEqual(["prefix", "contains"]);
     expect(listTables).toHaveBeenCalledWith("pg-1", "app", "reporting", "accounts", 200);
-    expect(tables).toEqual([{ name: "accounts", schema: "reporting", type: "table", detail: "→ Customer accounts" }]);
+    expect(tables).toEqual([{ name: "accounts", schema: "reporting", type: "table", detail: "→ Customer accounts", comment: "Customer accounts" }]);
   });
 
   it("widens a sparse prefix search with substring matches", async () => {
@@ -826,6 +826,31 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
     expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
+  });
+
+  // #14075: a busy metadata pool made completion give up on the first failure,
+  // so one large-schema load left the editor without columns.
+  it("retries a busy metadata pool instead of returning no columns", async () => {
+    const getColumns = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("DBX metadata pool is busy; please retry"))
+      .mockResolvedValueOnce([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const columns = await store.listCompletionColumns("oracle-1", "ORCL", "ORDERS", undefined, { clientSessionId: "tab-a", version: 0 });
+
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS" })]);
   });
 
   it("passes OceanBase synonym lookup context separately and isolates selected schemas", async () => {

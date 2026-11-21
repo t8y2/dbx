@@ -516,6 +516,7 @@ export default withEnglishFallback({
       urlDecode: "Decodificar componente URL",
       radix: "Conversión de base de enteros",
       flattenLines: "Comprimir varias líneas en una sola",
+      unicodeEscape: "Texto → escape Unicode",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -1460,6 +1461,8 @@ export default withEnglishFallback({
     oracleTnsAdminRequired: "El modo Oracle TNS requiere el directorio TNS_ADMIN que contiene tnsnames.ora.",
     oracleTnsTransportUnsupported: "Oracle TNS no se puede combinar con túneles SSH, proxy o HTTP. Elimine la capa de transporte o use Servicio/SID.",
     version: "Versión",
+    influxdbApiPath: "Ruta de la API",
+    influxdbApiPathHint: "Rellénalo cuando un proxy inverso como Nginx sirva InfluxDB bajo una subruta, por ejemplo /influxdb. Déjalo vacío para acceder al servidor en la raíz. La barra final se ignora.",
     victoriametricsApiPath: "Ruta de la API",
     victoriametricsApiPathHint: "Use /prometheus para implementaciones de nodo único o /select/tenantID/prometheus para clústeres.",
     victoriametricsLookback: "Intervalo retrospectivo de metadatos",
@@ -3278,6 +3281,7 @@ export default withEnglishFallback({
     addRow: "Agregar fila",
     insertMultipleRows: "Insertar varias filas…",
     pasteAsNewRows: "Pegar como filas nuevas",
+    pasteAsNewRowsAwaitingPaste: "Este navegador no permite leer el portapapeles directamente. Pulse Ctrl+V (⌘V en macOS) en la tabla para pegar como filas nuevas.",
     insertRowsTitle: "Insertar varias filas",
     insertRowsDescription: "Crea este número de filas de borrador sin guardar. Las filas vacías se ignoran al guardar; después de guardar, el orden de visualización sigue la consulta actual.",
     insertRowCountLabel: "Número de filas",
@@ -5710,6 +5714,7 @@ export default withEnglishFallback({
     scopeFunctions: "funciones",
     stepSkipped: "Omitido porque falló un paso anterior requerido.",
     selectedObjectsCount: "{count} objetos seleccionados",
+    generatePassword: "Generar contraseña",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Las fechas de los trabajos en esta versión de OceanBase solo admiten precisión de microsegundos. Cambie a 0 los dígitos 7–9 de los segundos fraccionarios y vuelva a generar la vista previa; se conservó la entrada original.",
@@ -6261,6 +6266,8 @@ export default withEnglishFallback({
     showPackageMembers: "Expandir miembros del paquete",
     packageFunctionAtLine: "Función {name}, línea {line}",
     packageProcedureAtLine: "Procedimiento {name}, línea {line}",
+    selectedObjects: "Se han seleccionado {count} objetos",
+    dropPackageBodyHint: "Al eliminar la especificación del paquete, también se eliminará el cuerpo del paquete existente.",
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabla",
@@ -7944,7 +7951,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Eventos",
     objectDataOnlyDisabled: "Los objetos que no son tablas no se transfieren en el modo de solo datos",
     objectCrossFamilyDisabled: "La transferencia entre bases de datos solo admite secuencias (DDL simple; los cuerpos de las vistas no se traducen)",
-    xuguPairOnly: "Direcciones compatibles: Xugu a Xugu, o MySQL a Xugu (solo tablas y datos).",
+    xuguPairOnly: "Direcciones compatibles: Xugu a Xugu, o MySQL / Oracle a Xugu (solo tablas y datos).",
     xuguAppendOverwriteOnly: "La primera fase de transferencia de Xugu solo admite agregar y sobrescribir; aún no admite upsert ni reconstrucción.",
     xuguPreserveTableNames: "La transferencia de estructura de Xugu requiere conservar las mayúsculas y minúsculas de los nombres de las tablas de origen para evitar referencias incorrectas en las claves foráneas.",
     crossFamilyViewHint: "Transferencia de vistas entre bases de datos: seleccione también las tablas de las que depende la vista o asegúrese de que ya existen en la base de datos de destino",
@@ -11099,6 +11106,11 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
     shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
+    toolbarGroup_left: "Barra de acciones principal y menú Más",
+    toolbarPinItem: "Fijar {item} a la barra de herramientas",
+    completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",
+    completionAutoActivationDelayDescription:
+      "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

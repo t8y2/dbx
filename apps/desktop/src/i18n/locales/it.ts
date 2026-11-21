@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlDecode: "Decodifica componente URL",
       radix: "Conversione di base degli interi",
       flattenLines: "Comprimi più righe in una riga",
+      unicodeEscape: "Testo → escape Unicode",
     },
     units: {
       auto: "Automatica (10/13 cifre)",
@@ -1450,6 +1451,8 @@ export default withEnglishFallback({
     oracleTnsAdminRequired: "La modalità Oracle TNS richiede la directory TNS_ADMIN contenente tnsnames.ora.",
     oracleTnsTransportUnsupported: "Oracle TNS non può usare tunnel SSH, proxy o HTTP. Rimuovi il livello di trasporto o usa Servizio/SID.",
     version: "Versione",
+    influxdbApiPath: "Percorso API",
+    influxdbApiPathHint: "Compilalo quando un proxy inverso come Nginx pubblica InfluxDB sotto un percorso secondario, ad esempio /influxdb. Lascialo vuoto per raggiungere il server alla radice. La barra finale viene ignorata.",
     victoriametricsApiPath: "Percorso API",
     victoriametricsApiPathHint: "Usa /prometheus per le installazioni a nodo singolo oppure /select/tenantID/prometheus per i cluster.",
     victoriametricsLookback: "Intervallo metadati",
@@ -3171,6 +3174,7 @@ export default withEnglishFallback({
     addRow: "Aggiungi Riga",
     insertMultipleRows: "Inserisci più righe…",
     pasteAsNewRows: "Incolla come nuove righe",
+    pasteAsNewRowsAwaitingPaste: "Questo browser non consente di leggere gli appunti direttamente. Premi Ctrl+V (⌘V su macOS) nella tabella per incollare come nuove righe.",
     insertRowsTitle: "Inserisci più righe",
     insertRowsDescription: "Crea questo numero di righe di bozza non salvate. Le righe vuote vengono ignorate al salvataggio; dopo il salvataggio, l'ordine di visualizzazione segue la query corrente.",
     insertRowCountLabel: "Numero di righe",
@@ -5512,6 +5516,7 @@ export default withEnglishFallback({
     scopeFunctions: "funzioni",
     stepSkipped: "Ignorato perché un passaggio precedente richiesto non è riuscito.",
     selectedObjectsCount: "{count} oggetti selezionati",
+    generatePassword: "Genera password",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Le date dei job in questa versione di OceanBase supportano solo la precisione al microsecondo. Imposta a 0 le cifre 7–9 dei secondi frazionari e genera di nuovo l'anteprima; l'input originale è stato conservato.",
@@ -6063,6 +6068,8 @@ export default withEnglishFallback({
     showPackageMembers: "Espandi membri del package",
     packageFunctionAtLine: "Funzione {name}, riga {line}",
     packageProcedureAtLine: "Procedura {name}, riga {line}",
+    selectedObjects: "{count} oggetti selezionati",
+    dropPackageBodyHint: "Quando si elimina la specifica del package, viene eliminato anche il corpo del package esistente.",
   },
   postgresForeignTable: {
     tableKind: "Tipo di tabella",
@@ -7740,7 +7747,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Eventi",
     objectDataOnlyDisabled: "Gli oggetti non di tabella non vengono trasferiti nella modalità solo dati",
     objectCrossFamilyDisabled: "Il trasferimento tra database supporta solo sequenze (DDL semplice; i corpi delle viste non vengono tradotti)",
-    xuguPairOnly: "Direzioni supportate: da Xugu a Xugu o da MySQL a Xugu (solo tabelle e dati).",
+    xuguPairOnly: "Direzioni supportate: da Xugu a Xugu o da MySQL / Oracle a Xugu (solo tabelle e dati).",
     xuguAppendOverwriteOnly: "La prima fase del trasferimento Xugu supporta solo l'aggiunta e la sovrascrittura; upsert e ricostruzione non sono ancora supportati.",
     xuguPreserveTableNames: "Il trasferimento della struttura Xugu richiede di mantenere maiuscole e minuscole dei nomi delle tabelle di origine per evitare riferimenti errati alle chiavi esterne.",
     crossFamilyViewHint: "Trasferimento di viste tra database: selezionare anche le tabelle da cui la vista dipende, o assicurarsi che esistano già nel database di destinazione",
@@ -10814,6 +10821,11 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleziona la colonna successiva dei dati della tabella",
     shortcutSelectPreviousGridColumn: "Seleziona la colonna precedente dei dati della tabella",
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
+    toolbarGroup_left: "Barra delle azioni principale e menu Altro",
+    toolbarPinItem: "Fissa {item} alla barra degli strumenti",
+    completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
+    completionAutoActivationDelayDescription:
+      "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

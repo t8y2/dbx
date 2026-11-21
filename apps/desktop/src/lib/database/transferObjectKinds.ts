@@ -31,10 +31,10 @@ export function isSameTransferFamily(a?: DatabaseType, b?: DatabaseType): boolea
   return !!fa && fa === fb;
 }
 
-/** Only native MySQL → Xugu tables and native Xugu → Xugu are validated. */
+/** Cross-engine Xugu transfers are table-only and use dedicated pair adapters. */
 export function isTransferPairSupported(source?: DatabaseType, target?: DatabaseType): boolean {
   if (!source || !target) return true;
-  if (source === "xugu" || target === "xugu") return target === "xugu" && (source === "xugu" || source === "mysql");
+  if (source === "xugu" || target === "xugu") return target === "xugu" && (source === "xugu" || source === "mysql" || source === "oracle");
   return true;
 }
 

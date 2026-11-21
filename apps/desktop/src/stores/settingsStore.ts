@@ -1186,6 +1186,8 @@ export interface EditorSettings {
   goToColumnPanelPinned: boolean;
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
+  /** #15365: false hides the docked cell-detail panel; detail buttons open the dialog instead. */
+  cellDetailPanelEnabled: boolean;
   cellDetailJsonFormatted: boolean;
   cellDetailMetadataCollapsed: boolean;
   shortcuts: ShortcutSettings;
@@ -1604,6 +1606,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   goToColumnPanelPinned: false,
   cellDetailDrawerWidth: 380,
   cellDetailPanelLayout: "bottom",
+  cellDetailPanelEnabled: true,
   cellDetailJsonFormatted: false,
   cellDetailMetadataCollapsed: false,
   shortcuts: normalizeShortcutSettings(),
@@ -2377,6 +2380,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     goToColumnPanelPinned: settings.goToColumnPanelPinned === true,
     cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
+    cellDetailPanelEnabled: settings.cellDetailPanelEnabled === false ? false : DEFAULT_EDITOR_SETTINGS.cellDetailPanelEnabled,
     cellDetailJsonFormatted: typeof settings.cellDetailJsonFormatted === "boolean" ? settings.cellDetailJsonFormatted : DEFAULT_EDITOR_SETTINGS.cellDetailJsonFormatted,
     cellDetailMetadataCollapsed: typeof settings.cellDetailMetadataCollapsed === "boolean" ? settings.cellDetailMetadataCollapsed : DEFAULT_EDITOR_SETTINGS.cellDetailMetadataCollapsed,
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
@@ -3413,6 +3417,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.goToColumnPanelPinned !== undefined) editorSettings.value.goToColumnPanelPinned = partial.goToColumnPanelPinned === true;
     if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth);
     if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
+    if (partial.cellDetailPanelEnabled !== undefined) editorSettings.value.cellDetailPanelEnabled = partial.cellDetailPanelEnabled !== false;
     if (partial.cellDetailJsonFormatted !== undefined) editorSettings.value.cellDetailJsonFormatted = partial.cellDetailJsonFormatted === true;
     if (partial.cellDetailMetadataCollapsed !== undefined) editorSettings.value.cellDetailMetadataCollapsed = partial.cellDetailMetadataCollapsed === true;
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);

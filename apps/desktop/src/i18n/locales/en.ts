@@ -10843,6 +10843,8 @@ export default {
     dataGridCellDetailButtonVisibleDescription: "Show the cell detail button when hovering over a cell.",
     dataGridCellDetailDialogDefault: "Open cell details in dialog by default",
     dataGridCellDetailDialogDefaultDescription: "Open cell details in a modal dialog by default instead of the side or bottom panel.",
+    cellDetailPanelEnabled: "Cell detail panel",
+    cellDetailPanelEnabledDescription: "When off, the docked cell detail panel no longer opens; detail buttons and the context menu show a dialog instead.",
     dataGridCrosshairHighlight: "Crosshair row & column highlight",
     dataGridCrosshairHighlightDescription: "When enabled, lightly highlight the entire row and column of the active cell (like Excel). The focused cell keeps its selected style.",
     dataGridCrosshairRowBg: "Row highlight color",

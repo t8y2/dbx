@@ -871,6 +871,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-query-result-max-rows-enabled", category: "data", titleKey: "settings.queryResultMaxRowsEnabled", targetId: "query-result-max-rows" },
   { id: "data-data-grid-cell-detail-button-visible", category: "data", titleKey: "settings.dataGridCellDetailButtonVisible", descriptionKey: "settings.dataGridCellDetailButtonVisibleDescription", targetId: "data" },
   { id: "data-data-grid-cell-detail-dialog-default", category: "data", titleKey: "settings.dataGridCellDetailDialogDefault", descriptionKey: "settings.dataGridCellDetailDialogDefaultDescription", targetId: "data" },
+  { id: "data-grid-cell-detail-panel-enabled", category: "data", titleKey: "settings.cellDetailPanelEnabled", descriptionKey: "settings.cellDetailPanelEnabledDescription", targetId: "data" },
   { id: "data-data-grid-crosshair-highlight", category: "data", titleKey: "settings.dataGridCrosshairHighlight", descriptionKey: "settings.dataGridCrosshairHighlightDescription", targetId: "data-grid-crosshair" },
   { id: "data-data-grid-crosshair-row-bg", category: "data", titleKey: "settings.dataGridCrosshairRowBg", targetId: "data-grid-crosshair" },
   { id: "data-data-grid-crosshair-col-bg", category: "data", titleKey: "settings.dataGridCrosshairColBg", targetId: "data-grid-crosshair" },

@@ -10805,6 +10805,8 @@ export default withEnglishFallback({
     dataGridCellDetailButtonVisibleDescription: "鼠标悬停在单元格上时显示单元格详情按钮。",
     dataGridCellDetailDialogDefault: "单元格详情默认弹窗展示",
     dataGridCellDetailDialogDefaultDescription: "点击单元格详情按钮时，默认使用弹窗展示而非侧边或下方分屏。",
+    cellDetailPanelEnabled: "单元格详情面板",
+    cellDetailPanelEnabledDescription: "关闭后不再固定显示单元格详情面板；点详情按钮或右键菜单改用弹窗展示。",
     dataGridCrosshairHighlight: "行列十字高亮",
     dataGridCrosshairHighlightDescription: "开启后，以当前活动单元格为中心淡色高亮整行和整列（类似 Excel）。焦点单元格仍保留原有的选中样式。",
     dataGridCrosshairRowBg: "行高亮颜色",

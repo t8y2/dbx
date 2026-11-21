@@ -31,6 +31,22 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps the cell detail panel enabled by default and locks the switch polarity (#15365)", async () => {
+    expect(DEFAULT_EDITOR_SETTINGS.cellDetailPanelEnabled).toBe(true);
+    expect(normalizeEditorSettings({}).cellDetailPanelEnabled).toBe(true);
+    expect(normalizeEditorSettings({ cellDetailPanelEnabled: false }).cellDetailPanelEnabled).toBe(false);
+    expect(normalizeEditorSettings({ cellDetailPanelEnabled: true }).cellDetailPanelEnabled).toBe(true);
+    expect(normalizeEditorSettings({ cellDetailPanelEnabled: "false" } as any).cellDetailPanelEnabled).toBe(true);
+    expect(normalizeEditorSettings({ cellDetailPanelEnabled: undefined } as any).cellDetailPanelEnabled).toBe(true);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.updateEditorSettings({ cellDetailPanelEnabled: false });
+    expect(store.editorSettings.cellDetailPanelEnabled).toBe(false);
+    store.updateEditorSettings({ cellDetailPanelEnabled: 0 as any });
+    expect(store.editorSettings.cellDetailPanelEnabled).toBe(true);
+  });
+
   it("defaults sidebar hover to enabled with a 300ms delay and validates saved values", () => {
     const defaults = { sidebarHoverEnabled: true, sidebarHoverDelay: 300 };
     expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);

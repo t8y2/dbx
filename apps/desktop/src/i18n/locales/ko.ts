@@ -7923,6 +7923,13 @@ export default withEnglishFallback({
       saveFailed: "저장 실패: {message}",
       deleteFailed: "삭제 실패: {message}",
     },
+    tableRenameSet: "이름 변경",
+    tableRenameEdit: "대상 테이블 이름",
+    tableRenameClear: "원래 이름으로 복원",
+    tableRenameTitle: "「{table}」의 대상 테이블 이름 설정",
+    tableRenameHint: "대상 측에서 이 이름으로 해당 테이블을 생성하고 기록합니다. 원본 테이블 이름을 입력하면 변경되지 않습니다.",
+    tableRenameCollision: "이미 선택된 다른 테이블이 이 이름을 사용 중입니다: 「{table}」.",
+    tableRenameSave: "저장",
   },
   tableImport: {
     title: "테이블 데이터 가져오기",

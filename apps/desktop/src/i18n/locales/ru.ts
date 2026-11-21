@@ -9362,6 +9362,13 @@ export default withEnglishFallback({
       saveFailed: "Не удалось сохранить: {message}",
       deleteFailed: "Не удалось удалить: {message}",
     },
+    tableRenameSet: "Переименовать",
+    tableRenameEdit: "Имя целевой таблицы",
+    tableRenameClear: "Восстановить исходное имя",
+    tableRenameTitle: "Задать имя целевой таблицы для «{table}»",
+    tableRenameHint: "На целевом узле таблица будет создана и записана под этим именем. Если указать имя исходной таблицы, оно останется прежним.",
+    tableRenameCollision: "Другая выбранная таблица уже использует это имя: «{table}».",
+    tableRenameSave: "Сохранить",
   },
   tableImport: {
     title: "Импорт данных таблицы",

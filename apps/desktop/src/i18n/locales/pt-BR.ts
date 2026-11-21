@@ -7897,6 +7897,13 @@ export default withEnglishFallback({
       saveFailed: "Falha ao salvar: {message}",
       deleteFailed: "Falha ao excluir: {message}",
     },
+    tableRenameSet: "Renomear",
+    tableRenameEdit: "Nome da tabela de destino",
+    tableRenameClear: "Restaurar nome original",
+    tableRenameTitle: "Definir o nome da tabela de destino para \"{table}\"",
+    tableRenameHint: "O destino criará e gravará essa tabela com este nome. Se você preencher o nome da tabela de origem, ele permanecerá inalterado.",
+    tableRenameCollision: "Outra tabela selecionada já usa este nome: \"{table}\".",
+    tableRenameSave: "Salvar",
   },
   tableImport: {
     title: "Importar Dados da Tabela",

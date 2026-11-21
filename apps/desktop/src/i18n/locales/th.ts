@@ -9695,6 +9695,13 @@ export default withEnglishFallback({
       saveFailed: "บันทึกไม่สำเร็จ: {message}",
       deleteFailed: "ลบไม่สำเร็จ: {message}",
     },
+    tableRenameSet: "เปลี่ยนชื่อ",
+    tableRenameEdit: "ชื่อตารางปลายทาง",
+    tableRenameClear: "คืนชื่อเดิม",
+    tableRenameTitle: "ตั้งชื่อตารางปลายทางสำหรับ「{table}」",
+    tableRenameHint: "ฝั่งปลายทางจะสร้างและเขียนตารางนี้ด้วยชื่อนี้ หากกรอกชื่อตารางต้นทาง จะคงไว้ตามเดิม",
+    tableRenameCollision: "ตารางอื่นที่เลือกไว้ใช้ชื่อนี้แล้ว：「{table}」",
+    tableRenameSave: "บันทึก",
   },
   tableImport: {
     title: "นำเข้าข้อมูล Table",

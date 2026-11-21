@@ -10186,10 +10186,12 @@ export default withEnglishFallback({
   },
   settings: {
     toolbarGroup_primary: "主操作栏",
+    toolbarGroup_left: "主操作栏和更多菜单",
     toolbarGroup_menu: "更多菜单",
     toolbarGroup_right: "右侧工具栏",
     toolbarGroup_controls: "系统入口",
-    toolbarOrderHint: "拖拽调整同一区域的顺序。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarOrderHint: "拖拽调整同一区域的顺序。点击图钉可将“更多”中的操作固定到主操作栏。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarPinItem: "将{item}固定到工具栏",
     toolbarReorderItem: "拖拽调整{item}的顺序",
     toolbarExportProgress: "任务进度",
     historyRetentionLimit: "查询历史保留条数",

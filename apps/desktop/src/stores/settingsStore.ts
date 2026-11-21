@@ -1,4 +1,4 @@
-import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizeToolbarItemOrder, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, normalizeToolbarItemOrder, type ToolbarItemKey, type ToolbarMenuItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
@@ -1318,6 +1318,8 @@ export interface ToolbarItems {
   newConnection: boolean;
   newQuery: boolean;
   openSql: boolean;
+  recentClosedTabs: boolean;
+  pinnedMenuItems: ToolbarMenuItemKey[];
   databaseBackups: boolean;
   mcpSettings: boolean;
   exportProgress: boolean;
@@ -1349,6 +1351,8 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   newConnection: true,
   newQuery: true,
   openSql: true,
+  recentClosedTabs: true,
+  pinnedMenuItems: [],
   databaseBackups: true,
   mcpSettings: true,
   exportProgress: true,
@@ -2087,6 +2091,8 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     newConnection: items.newConnection ?? defaults.newConnection,
     newQuery: items.newQuery ?? defaults.newQuery,
     openSql: items.openSql ?? defaults.openSql,
+    recentClosedTabs: items.recentClosedTabs ?? defaults.recentClosedTabs,
+    pinnedMenuItems: normalizePinnedToolbarMenuItems(items.pinnedMenuItems),
     databaseBackups: items.databaseBackups ?? defaults.databaseBackups,
     mcpSettings: items.mcpSettings ?? defaults.mcpSettings,
     exportProgress: items.exportProgress ?? defaults.exportProgress,

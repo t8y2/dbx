@@ -11104,6 +11104,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
     shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
+    toolbarGroup_left: "Barra de acciones principal y menú Más",
+    toolbarPinItem: "Fijar {item} a la barra de herramientas",
     completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",
     completionAutoActivationDelayDescription:
       "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",

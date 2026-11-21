@@ -10819,6 +10819,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleziona la colonna successiva dei dati della tabella",
     shortcutSelectPreviousGridColumn: "Seleziona la colonna precedente dei dati della tabella",
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
+    toolbarGroup_left: "Barra delle azioni principale e menu Altro",
+    toolbarPinItem: "Fissa {item} alla barra degli strumenti",
     completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
     completionAutoActivationDelayDescription:
       "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",

@@ -12769,6 +12769,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "เลือกคอลัมน์ถัดไปของข้อมูลตาราง",
     shortcutSelectPreviousGridColumn: "เลือกคอลัมน์ก่อนหน้าของข้อมูลตาราง",
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
+    toolbarGroup_left: "แถบการดำเนินการหลักและเมนูเพิ่มเติม",
+    toolbarPinItem: "ปักหมุด {item} ไว้บนแถบเครื่องมือ",
     completionAutoActivationDelay: "ดีเลย์การเปิดใช้งานการเติมข้อความอัตโนมัติ (มิลลิวินาที)",
     completionAutoActivationDelayDescription: "ระยะเวลาหน่วงหลังการพิมพ์ก่อนที่รายการเติมข้อความอัตโนมัติจะปรากฏ ค่าเริ่มต้นคือ 500 มิลลิวินาที การเพิ่มค่านี้ช่วยหลีกเลี่ยงไม่ให้รายการเติมข้อความเด้งขึ้นบ่อยครั้งระหว่างการพิมพ์ต่อเนื่องจนรบกวนการแก้ไข โดย 0 หมายถึงแสดงทันที",
   },

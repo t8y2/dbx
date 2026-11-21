@@ -10222,10 +10222,12 @@ export default {
   },
   settings: {
     toolbarGroup_primary: "Primary actions",
+    toolbarGroup_left: "Primary actions and More",
     toolbarGroup_menu: "More menu",
     toolbarGroup_right: "Right toolbar",
     toolbarGroup_controls: "System actions",
-    toolbarOrderHint: "Drag to reorder within each group. Hidden primary and system actions remain available in More.",
+    toolbarOrderHint: "Drag to reorder within each group. Use the pin icon to move an action from More to the toolbar. Hidden primary and system actions remain available in More.",
+    toolbarPinItem: "Pin {item} to the toolbar",
     toolbarReorderItem: "Drag to reorder {item}",
     toolbarExportProgress: "Task progress",
     historyRetentionLimit: "Query history retention",

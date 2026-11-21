@@ -12407,6 +12407,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    toolbarGroup_left: "Основная панель действий и меню «Дополнительно»",
+    toolbarPinItem: "Закрепить {item} на панели инструментов",
     completionAutoActivationDelay: "Задержка автоматической активации автодополнения (мс)",
     completionAutoActivationDelayDescription: "Задержка перед показом вариантов автодополнения после ввода; по умолчанию — 500 мс. Увеличение значения предотвращает частое появление автодополнения при непрерывном вводе, мешающее редактированию; 0 означает показывать сразу.",
   },

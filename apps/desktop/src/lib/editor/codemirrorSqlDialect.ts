@@ -73,6 +73,10 @@ const POSTGRES_PLPGSQL_TYPES = "RECORD JSON JSONB";
 const POSTGRES_PLPGSQL_BUILTIN = "SQLERRM TG_NAME TG_WHEN TG_LEVEL TG_OP TG_RELID TG_RELNAME TG_TABLE_NAME TG_TABLE_SCHEMA TG_NARGS TG_ARGV";
 const POSTGRES_IDENTIFIER_LIKE_KEYWORDS = new Set("COMMENT COUNT DATA DAY HOUR ID KEY LEVEL MINUTE MONTH NAME OWNER PASSWORD POSITION ROLE SECOND TYPE USER VALUE YEAR".split(" "));
 
+const DAMENG_KEYWORDS = "auto_increment identity_insert";
+const DAMENG_TYPES = "bigint byte datetime image tinyint varbinary";
+const DAMENG_BUILTINS = "add_days add_weeks bigdatediff dateadd datediff datepart";
+
 // SQL Server table-valued parameters require READONLY in procedure/function declarations.
 const SQLSERVER_KEYWORDS = "readonly";
 
@@ -395,6 +399,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const isMysql = baseDialect === langSql.MySQL;
   const isSqlServer = baseDialect === langSql.MSSQL;
   const isPlsql = baseDialect === langSql.PLSQL;
+  const isDameng = databaseType === "dameng";
   const isClickHouse = databaseType === "clickhouse" || dialectName === "clickhouse";
   // StandardSQL.spec exposes no vocabulary, so every StandardSQL-based dialect
   // (generic JDBC, IRIS/Caché, H2, DB2, …) needs the reconstructed standard
@@ -407,9 +412,9 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
 
   const dialect = langSql.SQLDialect.define({
     ...baseDialect.spec,
-    keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
-    types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
-    builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
+    keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : "", isDameng ? DAMENG_KEYWORDS : ""].filter(Boolean).join(" "),
+    types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : "", isDameng ? DAMENG_TYPES : ""].filter(Boolean).join(" ") || undefined,
+    builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", isDameng ? DAMENG_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
     // T-SQL temp tables (#local / ##global) otherwise tokenize the leading
     // `#` as a parser error, breaking highlighting for the whole name. The
     // specialVar scanner natively handles the doubled prefix and already

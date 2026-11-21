@@ -8,7 +8,7 @@ import type { SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 
 export type GetObjectSourceFn = (connectionId: string, database: string, schema: string, name: string, objectType: ObjectSourceKind, signature?: string, relationName?: string, options?: MetadataReadOptions) => Promise<ObjectSource>;
 
-export type BuildEditableObjectSourceFn = (input: { databaseType: DatabaseType; objectType: ObjectSourceKind; schema?: string; name: string; source: string }) => Promise<string>;
+export type BuildEditableObjectSourceFn = (input: { databaseType: DatabaseType; objectType: ObjectSourceKind; schema?: string; name: string; source: string; identifierQuote?: string }) => Promise<string>;
 
 export type OracleTriggerSourceInspection = { complete: boolean; prepared?: PreparedOracleTriggerSql; error?: string };
 
@@ -116,6 +116,9 @@ export async function loadEditableObjectSourceForEditor(
     signature?: string;
     relationName?: string;
     metadataReadOptions?: MetadataReadOptions;
+    /** Quote character reported by the connected server, for types whose quote is not fixed by
+     * the database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+    identifierQuote?: string;
   },
 ): Promise<{ raw: ObjectSource; editableSource: string; objectType: ObjectSourceKind; triggerSource?: OracleTriggerSourceInspection }> {
   const { source: raw, objectType: resolvedType } = await loadObjectSourceWithRoutineFallback(getObjectSource, options.connectionId, options.database, options.schema, options.name, options.objectType, options.signature, options.relationName, options.metadataReadOptions);
@@ -130,6 +133,7 @@ export async function loadEditableObjectSourceForEditor(
     schema: options.schema,
     name: options.name,
     source: raw.source,
+    identifierQuote: options.identifierQuote,
   });
   let editableSource = preparedSource.trim() ? preparedSource : raw.source;
   if (options.databaseType === "mysql" && resolvedType === "VIEW" && editableSource.length <= MAX_SQL_FORMAT_CHARS) {

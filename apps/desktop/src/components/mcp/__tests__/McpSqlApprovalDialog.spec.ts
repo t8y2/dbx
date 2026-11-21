@@ -99,6 +99,19 @@ function toolRequest(id: string) {
   });
 }
 
+it.each(["sql", "tool"])("renders the complete long %s payload including its final operation", async (type) => {
+  const detail = `${"中文🙂 <script>alert(1)</script>\n".repeat(2_000)}\nDELETE FROM important;`;
+  if (type === "sql") {
+    bridge.handlers["mcp-sql-approval"]({ payload: { id: "long", connection_name: "Local", database: "app", sql: detail } });
+  } else {
+    bridge.handlers["mcp-tool-approval"]({ payload: { id: "long", kind: "plugin_tool", tool: "dbx_ssh__exec", detail } });
+  }
+  await nextTick();
+  expect(host.querySelector("pre")?.textContent).toBe(detail);
+  expect(host.querySelector("script")).toBeNull();
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
 it("shows the exact SQL and sends a one-time decision for its request ID", async () => {
   request("approval-1");
   await nextTick();

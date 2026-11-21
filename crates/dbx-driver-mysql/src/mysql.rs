@@ -23,7 +23,10 @@ use crate::models::connection::{
     is_mysql_jdbc_tls_param, mysql_jdbc_tls_mode, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
     MysqlJdbcTlsMode,
 };
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword,
+    starts_with_executable_sql_keyword_for_database,
+};
 use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
@@ -54,6 +57,7 @@ pub struct MySqlPool {
     /// pool at creation time so that metadata, DDL, connection-info, cancel and
     /// streaming paths do not fall back to a compile-time constant (#12908).
     checkout_timeout: Duration,
+    stateless_http_tunnel: bool,
 }
 
 impl MySqlPool {
@@ -78,6 +82,7 @@ impl MySqlPool {
             data_charset: None,
             checkout_verifications: Default::default(),
             checkout_timeout: checkout_timeout.max(Duration::from_secs(1)),
+            stateless_http_tunnel: false,
         }
     }
 
@@ -91,7 +96,16 @@ impl MySqlPool {
     /// session state (temporary tables, user variables, selected catalog)
     /// survives across executions in the same tab.
     pub fn is_client_session_pool(&self) -> bool {
-        self.max_connections == 1
+        self.max_connections == 1 && !self.stateless_http_tunnel
+    }
+
+    /// Navicat PHP tunnels open a new MySQL session for every HTTP request.
+    pub fn is_stateless_http_tunnel(&self) -> bool {
+        self.stateless_http_tunnel
+    }
+
+    pub fn set_stateless_http_tunnel(&mut self) {
+        self.stateless_http_tunnel = true;
     }
 
     pub fn data_charset(&self) -> Option<MySqlDataCharset> {
@@ -106,7 +120,6 @@ impl MySqlPool {
     /// generation. Pool options are not an identity: a reconnect creates a new
     /// pool with identical options, and a late health probe for the old pool
     /// must not be allowed to remove that replacement from routing.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn is_same_pool(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.inner.metrics(), &other.inner.metrics())
     }
@@ -2581,6 +2594,13 @@ pub async fn apply_catalog_database_context(
         conn.query_drop(&query).await.map_err(|error| format!("Failed to select query catalog/database: {error}"))?;
     }
     Ok(())
+}
+
+/// Selects a database without resetting the connection or committing a transaction.
+pub async fn select_session_database(conn: &mut mysql_async::Conn, database: &str) -> Result<(), String> {
+    conn.query_drop(format!("USE {}", quote_identifier(database)))
+        .await
+        .map_err(|error| format!("Failed to select query database: {error}"))
 }
 
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {
@@ -7824,6 +7844,12 @@ async fn mysql_add_column_if_not_exists_fallback(
 /// Route it through the existing query path; MySQL servers that do not support
 /// the syntax still return their normal SQL syntax error.
 fn mysql_statement_returns_rows(sql: &str) -> bool {
+    // Every non-SELECT statement reaches this check, including multi-megabyte
+    // INSERTs from SQL dumps. Only parse the statements that can contain a
+    // RETURNING clause at all.
+    if !contains_ascii_case_insensitive(sql, "returning") {
+        return false;
+    }
     let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
         return false;
     };
@@ -8234,6 +8260,17 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stateless_http_pool_does_not_claim_a_persistent_client_session() {
+        let mut pool = super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1);
+        assert!(pool.is_client_session_pool());
+        assert!(!pool.is_stateless_http_tunnel());
+        pool.set_stateless_http_tunnel();
+        assert!(!pool.is_client_session_pool());
+        assert!(pool.clone().is_stateless_http_tunnel());
+        assert!(super::MySqlPool::new("mysql://root@127.0.0.1:3306", 1).is_client_session_pool());
+    }
+
     #[test]
     fn product_version_uses_starrocks_function_only_for_starrocks() {
         assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");
@@ -9063,7 +9100,11 @@ mod tests {
 
         assert!(is_result_set_query("INSERT INTO users (id) VALUES (1) RETURNING id", dialect));
         assert!(is_result_set_query("DELETE FROM users WHERE id = 1 RETURNING id", dialect));
+        assert!(is_result_set_query("insert into users (id) values (1) returning id", dialect));
+        assert!(is_result_set_query("REPLACE INTO users (id) VALUES (1) Returning id", dialect));
         assert!(!is_result_set_query("UPDATE users SET name = 'Ada'", dialect));
+        assert!(!is_result_set_query("INSERT INTO users (id) VALUES (1)", dialect));
+        assert!(!is_result_set_query("INSERT INTO notes (body) VALUES ('returning soon')", dialect));
     }
 
     #[test]

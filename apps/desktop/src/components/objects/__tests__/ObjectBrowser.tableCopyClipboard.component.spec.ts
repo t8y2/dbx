@@ -358,10 +358,10 @@ describe("ObjectBrowser table copy", () => {
     const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.includes("objects.copySelectedAsTable"));
     expect(item).toBeDefined();
     item!.click();
-    // MySQL 连接现在包含 charset/collation/auto-increment 列（空值，与对象列表列定义一致）
+    // Clipboard columns follow the displayed order, including MySQL-specific fields.
     await vi.waitFor(() =>
       expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(
-        "objects.name\tobjects.type\tstructureEditor.characterSet\tstructureEditor.collation\tobjects.rows\tobjects.size\tgrid.tableInfoAutoIncrement\tobjects.comment\norders\tobjects.table\t\t\t\t\t\tsales\nusers\tobjects.table\t\t\t\t\t\taccounts",
+        "objects.name\tobjects.type\tobjects.rows\tobjects.comment\tobjects.size\tgrid.tableInfoAutoIncrement\tstructureEditor.characterSet\tstructureEditor.collation\norders\tobjects.table\t\tsales\t\t\t\t\nusers\tobjects.table\t\taccounts\t\t\t\t",
       ),
     );
   });

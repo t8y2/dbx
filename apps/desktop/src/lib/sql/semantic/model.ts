@@ -797,7 +797,13 @@ function querySourceRanges(tokens: readonly SqlSemanticToken[], cursor: number):
 }
 
 function parseRowSources(state: ParseState, cursor: number): SqlSemanticRowSource[] {
-  const ranges = querySourceRanges(state.tokens, cursor);
+  // Inside a CTE body only that body's query blocks and the CTEs declared before it
+  // are in scope. The CTE being defined is only a source where the body references
+  // it (recursive CTEs), and the outer query's sources are not visible (#14109).
+  const enclosingCteIndex = state.cteSources.findIndex((source) => !!source.bodySpan && cursor > source.bodySpan.start && cursor < source.bodySpan.end);
+  const enclosingBody = enclosingCteIndex >= 0 ? state.cteSources[enclosingCteIndex]?.bodySpan : undefined;
+  const ranges = querySourceRanges(state.tokens, cursor).filter((range) => !enclosingBody || (state.tokens[range.startIndex]?.span.start ?? -1) > enclosingBody.start);
+  const visibleCteSources = enclosingCteIndex >= 0 ? state.cteSources.slice(0, enclosingCteIndex) : state.cteSources;
   const sources: SqlSemanticRowSource[] = [];
   for (const range of ranges) {
     const scopedState = {
@@ -806,7 +812,7 @@ function parseRowSources(state: ParseState, cursor: number): SqlSemanticRowSourc
     };
     sources.push(...parseRowSourcesAtDepth(scopedState, range.depth, sources.length));
   }
-  return dedupeSources([...sources, ...state.cteSources]);
+  return dedupeSources([...sources, ...visibleCteSources]);
 }
 
 function dedupeSources(sources: SqlSemanticRowSource[]): SqlSemanticRowSource[] {

@@ -2163,12 +2163,67 @@ describe("sqlCompletion scoped context classification", () => {
     expect(items.filter((item) => item.type === "table").map((item) => item.label)).not.toContain("tm");
   });
 
-  it("keeps the CTE body's own tables while completing inside that body", () => {
+  it("scopes completion inside a CTE body to that body's own tables (#14109)", () => {
     const sql = "WITH cte AS (SELECT id, na FROM orders) SELECT * FROM cte";
     const cursor = sql.indexOf(" FROM orders");
     const context = getSqlCompletionContext(sql, cursor);
 
-    expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["orders"]);
+  });
+
+  describe("columns inside a CTE body (#14109)", () => {
+    const metadata = {
+      tables: [{ name: "pos_detail" }],
+      columnsByTable: new Map([
+        [
+          "pos_detail",
+          [
+            { name: "serial_no", table: "pos_detail", dataType: "text" },
+            { name: "alipay", table: "pos_detail", dataType: "numeric" },
+          ],
+        ],
+      ]),
+    };
+    const columnApplies = (sql: string, cursor: number) => {
+      const legacy = getSqlCompletionContext(sql, cursor, { databaseType: "postgres" });
+      const semantic = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" }), legacy);
+      return [legacy, semantic].map((context) =>
+        buildSqlCompletionItemsFromContext(context, metadata)
+          .filter((item) => item.type === "column")
+          .map((item) => item.apply ?? item.label),
+      );
+    };
+
+    it.each([
+      ["the select list", "with t as (\nselect serial_no, al from pos_detail\n)", "al from", 2],
+      ["the select list with an outer query", "with t as (\nselect serial_no, al from pos_detail\n)\nselect * from t", "al from", 2],
+      ["the where clause", "with t as (\nselect serial_no from pos_detail where al\n)", "where al", "where al".length],
+    ])("suggests bare columns of the body's single table in %s", (_place, sql, marker, offset) => {
+      const cursor = sql.indexOf(marker) + offset;
+      for (const applies of columnApplies(sql, cursor)) {
+        expect(applies).toEqual(expect.arrayContaining(["alipay", "serial_no"]));
+        expect(applies.some((apply) => apply.startsWith("pos_detail.") || apply.startsWith("t."))).toBe(false);
+      }
+    });
+
+    it("keeps an earlier CTE that the body reads as a row source", () => {
+      const sql = "with a as (select id from orders), b as (select  from a) select * from b";
+      const cursor = sql.indexOf("select  from a") + "select ".length;
+      const context = getSqlCompletionContext(sql, cursor);
+      const semantic = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor), context);
+
+      expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a", columns: ["id"] })]));
+      expect(context.referencedTables.map((table) => table.name)).not.toContain("b");
+      expect(semantic.referencedTables.map((table) => table.name)).not.toContain("b");
+    });
+
+    it("keeps a recursive CTE's self-reference inside its own body", () => {
+      const sql = "with recursive t(n) as (select 1 union all select  from t where n < 5) select * from t";
+      const cursor = sql.indexOf("select  from t") + "select ".length;
+      const context = getSqlCompletionContext(sql, cursor);
+
+      expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "t", columns: ["n"] })]));
+    });
   });
 
   it("keeps the underlying table when a CTE body projects an unresolved star", () => {
@@ -2747,7 +2802,8 @@ describe("line block statement boundary", () => {
     const cursor = sql.length;
     const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
 
-    expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
+    expect(context.referencedTables.map((table) => table.alias ?? table.name)).toEqual(["x"]);
+    expect(context.referencedTables[0].columns).toContain("id");
   });
 
   it("keeps WITH clause in scope when cursor is in the following top-level main query", () => {
@@ -3002,5 +3058,158 @@ describe("Spanner keyword completion (issue #13129)", () => {
     });
 
     expect(items.some((item) => item.label === "CREATE CHANGE STREAM")).toBe(false);
+  });
+});
+
+describe("column completion item cap (#15129)", () => {
+  // buildColumnItems() used to truncate the ranked column candidates to 20 (plain
+  // prefix) / 30 (table qualifier) / 50 (INSERT column list or empty prefix), so a
+  // field beyond the cap was unreachable. It now trims to one
+  // MAX_COLUMN_COMPLETION_ITEMS = 200 pool; these specs pin the old 20/30/50
+  // boundaries and the new 200 ceiling.
+  //
+  // Only `type === "column"` items belong to the table's own column set: keyword,
+  // wildcard, "select all" snippet and run-query items must never inflate the
+  // counts, and the implement kind "text"/"snippet" items are filtered out here.
+  const columnItems = (items: ReturnType<typeof buildSqlCompletionItems>) => items.filter((item) => item.type === "column" && !item.label.endsWith(".*"));
+
+  const prefixedNames = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `${prefix}${String(index + 1).padStart(3, "0")}`);
+
+  const singleTableMetadata = (table: string, names: string[], dataType = "text") => ({
+    databaseType: "mysql" as const,
+    tables: [{ name: table, type: "table" as const }],
+    columnsByTable: new Map([[table, names.map((name) => ({ name, table, dataType }))]]),
+  });
+
+  it("keeps every same-prefix column past the old 20-item plain-prefix cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "SELECT mb FROM wide_table";
+    const cursor = "SELECT mb".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old plain-prefix behavior stopped at 20, dropping mb021..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(20);
+    expect(new Set(labels).size).toBe(80);
+    expect(labels).toEqual(expect.arrayContaining(["mb001", "mb020", "mb021", "mb050", "mb080"]));
+  });
+
+  it("keeps table-alias qualified columns past the old 30-item cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "SELECT w.mb FROM wide_table w";
+    const cursor = "SELECT w.mb".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+    expect(context).toMatchObject({ qualifier: "w", prefix: "mb", suggestColumns: true });
+
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old qualifier behavior stopped at 30, dropping mb031..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(30);
+    expect(labels).toEqual(expect.arrayContaining(["mb030", "mb031", "mb080"]));
+  });
+
+  it("keeps empty-prefix columns past the old 50-item cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "SELECT  FROM wide_table";
+    const cursor = "SELECT ".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old empty-prefix behavior stopped at 50, dropping mb051..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(50);
+    expect(labels).toEqual(expect.arrayContaining(["mb050", "mb051", "mb080"]));
+  });
+
+  it("keeps INSERT column-list completion past the old 50-item cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "INSERT INTO wide_table (";
+    expect(getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" })).toMatchObject({ insertTable: "wide_table", contextKind: "column" });
+
+    const columns = columnItems(buildSqlCompletionItems(sql, sql.length, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old INSERT behavior stopped at 50, dropping mb051..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(50);
+    expect(labels).toEqual(expect.arrayContaining(["mb050", "mb051", "mb080"]));
+  });
+
+  it("caps matching column items at exactly 200", () => {
+    const names = prefixedNames("mx", 250);
+    const sql = "SELECT mx FROM huge_table";
+    const cursor = "SELECT mx".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("huge_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // The ranked pool is trimmed to MAX_COLUMN_COMPLETION_ITEMS: not 201+, not 250.
+    expect(columns).toHaveLength(200);
+    expect(columns.length).toBeLessThan(250);
+    expect(new Set(labels).size).toBe(200);
+    // Every candidate matches equally well, so ranking keeps the earliest 200.
+    expect(labels).toContain("mx001");
+    expect(labels).toContain("mx200");
+    expect(labels).not.toContain("mx201");
+    expect(labels).not.toContain("mx250");
+  });
+
+  it("keeps same-name columns from joined tables qualified, deduped and applicable", () => {
+    const sql = "SELECT  FROM alpha a JOIN beta b ON a.id = b.id";
+    const cursor = "SELECT ".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [
+        { name: "alpha", type: "table" as const },
+        { name: "beta", type: "table" as const },
+      ],
+      columnsByTable: new Map([
+        [
+          "alpha",
+          [
+            { name: "id", table: "alpha", dataType: "int" },
+            { name: "alpha_name", table: "alpha", dataType: "text" },
+          ],
+        ],
+        [
+          "beta",
+          [
+            { name: "id", table: "beta", dataType: "int" },
+            { name: "beta_name", table: "beta", dataType: "text" },
+          ],
+        ],
+      ]),
+    });
+    const columns = columnItems(items);
+    const labels = columns.map((item) => item.label);
+
+    // The shared name stays qualified per table instead of collapsing into one `id`.
+    expect(columns).toHaveLength(4);
+    expect(new Set(labels).size).toBe(4);
+    expect(labels).toEqual(expect.arrayContaining(["a.id", "a.alpha_name", "b.id", "b.beta_name"]));
+    expect(labels).not.toContain("id");
+
+    const aId = columns.find((item) => item.label === "a.id");
+    const bId = columns.find((item) => item.label === "b.id");
+    expect(aId?.apply).toBe("a.id");
+    expect(bId?.apply).toBe("b.id");
+    // Accepting the suggestion at the cursor yields the qualified reference.
+    expect(`${sql.slice(0, cursor)}${aId?.apply ?? ""}`).toBe("SELECT a.id");
+    expect(`${sql.slice(0, cursor)}${bId?.apply ?? ""}`).toBe("SELECT b.id");
+  });
+
+  it("finds a column that sits late in a 300-column table when its exact prefix is typed", () => {
+    const names = Array.from({ length: 300 }, (_, index) => `col_${String(index).padStart(4, "0")}_field`);
+    // The target sits at original index 250, far behind the first 20/50 columns.
+    expect(names[250]).toBe("col_0250_field");
+    const sql = "SELECT col_0250_f FROM wide_300";
+    const cursor = "SELECT col_0250_f".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_300", names)));
+
+    // The per-table candidate prefilter still reaches later columns of a wide table.
+    expect(columns.map((item) => item.label)).toEqual(["col_0250_field"]);
+    expect(columns[0]?.apply).toBe("col_0250_field");
   });
 });

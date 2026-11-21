@@ -6,6 +6,7 @@ pub enum TablePaginationStrategy {
     FetchFirst,
     Db2FetchFirst,
     SqlServerTop,
+    TeradataTop,
     IrisTop,
     InformixFirst,
     FirebirdRows,
@@ -153,10 +154,24 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,
+        // Teradata's ANSI dialect has no LIMIT: it takes either `TOP n` or
+        // `SAMPLE n` (quality-dependent). TOP with an ORDER BY keeps a stable
+        // prefix, matching the previous SQL Server behaviour.
+        Some(DatabaseType::Teradata) => TablePaginationStrategy::TeradataTop,
         Some(DatabaseType::Informix | DatabaseType::Gbase8s) => TablePaginationStrategy::InformixFirst,
         Some(DatabaseType::Firebird) => TablePaginationStrategy::FirebirdRows,
         Some(DatabaseType::OceanbaseOracle) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Questdb) => TablePaginationStrategy::QuestDbLimit,
+        // Trino (and PrestoSQL, same grammar) only accepts OFFSET before the row
+        // limit, so `LIMIT n OFFSET m` is a syntax error and every table data
+        // page after the first fails (#15231). `OFFSET m ROWS FETCH FIRST n ROWS
+        // ONLY` is accepted. User queries keep their current path: the statement
+        // is sent unchanged and later pages come from the result session.
+        Some(DatabaseType::Trino | DatabaseType::PrestoSql)
+            if matches!(context, PaginationContext::TablePreview | PaginationContext::BoundedRead) =>
+        {
+            TablePaginationStrategy::FetchFirst
+        }
         _ => TablePaginationStrategy::LimitOffset,
     }
 }

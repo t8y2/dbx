@@ -166,6 +166,7 @@ public final class KafkaAgent {
             case "mq_update_partitions" -> updatePartitions(params);
             case "mq_get_topic_stats" -> getTopicStats(params);
             case "mq_get_topic_config" -> getTopicConfig(params);
+            case "mq_get_broker_config" -> getBrokerConfig(params);
             case "mq_alter_topic_config" -> alterTopicConfig(params);
             // Consumer groups
             case "mq_list_consumer_groups" -> listConsumerGroups(params, requireAdmin(), KafkaAgent::consumerGroupAdmins);
@@ -945,7 +946,15 @@ public final class KafkaAgent {
             .all().get(timeout, TimeUnit.MILLISECONDS).get(resource));
     }
 
-    static Object topicConfigResult(TopicConfigLoader configLoader) throws Exception {
+    static Map<String, Object> topicConfigResult(ConfigLoader configLoader) throws Exception {
+        return describeConfigResult(configLoader, "Topic");
+    }
+
+    static Map<String, Object> brokerConfigResult(ConfigLoader configLoader) throws Exception {
+        return describeConfigResult(configLoader, "Broker");
+    }
+
+    private static Map<String, Object> describeConfigResult(ConfigLoader configLoader, String resourceLabel) throws Exception {
         Config config;
         try {
             config = configLoader.load();
@@ -958,15 +967,29 @@ public final class KafkaAgent {
             unsupported.put("configSupported", false);
             unsupported.put(
                 "unsupportedReason",
-                "Topic configuration is unavailable because this Kafka broker does not support DescribeConfigs."
+                resourceLabel + " configuration is unavailable because this Kafka broker does not support DescribeConfigs."
             );
             return unsupported;
         }
 
+        return configEntries(config);
+    }
+
+    private static Object getBrokerConfig(JsonObject params) throws Exception {
+        int id = params.get("brokerId").getAsInt();
+        if (id < 0) throw new IllegalArgumentException("Broker ID must be non-negative");
+        var resource = new ConfigResource(ConfigResource.Type.BROKER, Integer.toString(id));
+        int timeout = requestTimeout(params);
+        AdminClient admin = requireAdmin();
+        return brokerConfigResult(() -> admin.describeConfigs(Collections.singletonList(resource))
+            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource));
+    }
+
+    static Map<String, Object> configEntries(Config config) {
         Map<String, Object> configs = new LinkedHashMap<>();
         for (ConfigEntry entry : config.entries()) {
             Map<String, Object> entryMap = new LinkedHashMap<>();
-            entryMap.put("value", entry.value());
+            entryMap.put("value", entry.isSensitive() ? null : entry.value());
             entryMap.put("source", entry.source().name());
             entryMap.put("isSensitive", entry.isSensitive());
             entryMap.put("isReadOnly", entry.isReadOnly());
@@ -977,7 +1000,7 @@ public final class KafkaAgent {
     }
 
     @FunctionalInterface
-    interface TopicConfigLoader {
+    interface ConfigLoader {
         Config load() throws Exception;
     }
 

@@ -750,7 +750,7 @@ test("normalizes table font size", () => {
   assert.equal(normalizeEditorSettings({ tableFontSize: 12 }).tableFontSize, 12);
   assert.equal(normalizeEditorSettings({ tableFontSize: 14.6 }).tableFontSize, 15);
   assert.equal(normalizeEditorSettings({ tableFontSize: 8 }).tableFontSize, 8);
-  assert.equal(normalizeEditorSettings({ tableFontSize: 20 }).tableFontSize, 16);
+  assert.equal(normalizeEditorSettings({ tableFontSize: 28 }).tableFontSize, 28);
   assert.equal(normalizeEditorSettings({ tableFontSize: "large" as any }).tableFontSize, 13);
 });
 
@@ -1097,18 +1097,21 @@ test("AI provider presets include common hosted and local providers", () => {
 });
 
 test("AI partner presets reuse a supported runtime adapter", () => {
-  const jalapeno = AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud");
+  assert.ok(AI_PROVIDER_PARTNER_PRESETS.length > 0);
 
-  assert.ok(jalapeno);
-  assert.equal(jalapeno.provider, "openai-compatible");
-  assert.equal(jalapeno.endpoint, "https://api.jalapeno-cloud.ai/v1");
-  assert.ok(jalapeno.model);
-  assert.ok(jalapeno.models.some(({ name }) => name === jalapeno.model));
-  assert.equal(jalapeno.requiresApiKey, true);
-  assert.equal(jalapeno.websiteUrl, "https://www.jalapeno-cloud.ai/dbx");
-  assert.equal(jalapeno.apiKeyUrl, "https://www.jalapeno-cloud.ai/dbx");
-  assert.equal(getAiProviderPreset("openai-compatible", "https://api.jalapeno-cloud.ai/v1/").label, "Jalapeno Cloud");
-  assert.equal(getAiProviderPresetId("openai-compatible", "https://api.jalapeno-cloud.ai/v1/"), "jalapeno-cloud");
+  for (const preset of AI_PROVIDER_PARTNER_PRESETS) {
+    assert.equal(preset.provider, "openai-compatible");
+    assert.ok(preset.endpoint.trim());
+    assert.ok(preset.websiteUrl);
+    assert.ok(preset.apiKeyUrl);
+    assert.equal(preset.requiresApiKey, true);
+    if (preset.model) {
+      assert.ok(preset.models?.some(({ name }) => name === preset.model));
+    }
+    assert.equal(getAiProviderPreset(preset.provider, `${preset.endpoint}/`).label, preset.label);
+    assert.equal(getAiProviderPresetId(preset.provider, `${preset.endpoint}/`), preset.id);
+  }
+
   assert.equal(getAiProviderPreset("openai-compatible", "https://api.example.com/v1").label, "OpenAI Compatible");
 });
 

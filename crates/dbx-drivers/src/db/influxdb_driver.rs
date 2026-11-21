@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
 
+use super::external_config::{external_string, normalize_base_path};
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
 use crate::sql::starts_with_executable_sql_keyword;
@@ -19,6 +20,10 @@ enum InfluxdbApiVersion {
 pub struct InfluxdbClient {
     http: HttpClient,
     base_url: String,
+    /// Optional path prefix for deployments behind a reverse proxy that
+    /// serves InfluxDB under a sub path (`/influxdb/`). Empty means the
+    /// server is reached at the root of `base_url`.
+    base_path: String,
     username: Option<String>,
     password: Option<String>,
     url_params: Option<String>,
@@ -39,6 +44,7 @@ impl InfluxdbClient {
         Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path: String::new(),
             username,
             password,
             url_params,
@@ -60,6 +66,7 @@ impl InfluxdbClient {
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path: String::new(),
             username,
             password,
             url_params,
@@ -72,6 +79,9 @@ impl InfluxdbClient {
     pub fn new_for_config(url: &str, config: &ConnectionConfig, timeout: Duration) -> Result<Self, String> {
         let version = influxdb_api_version(config.external_config.as_ref());
         let org = influxdb_org(config.external_config.as_ref());
+        let base_path = external_string(config, &["basePath", "base_path"])
+            .map(|value| normalize_base_path(&value))
+            .unwrap_or_default();
         // InfluxDB 2.x authenticates with a token and scopes requests by org/bucket.
         let (username, password) = match version {
             InfluxdbApiVersion::V1 => (
@@ -86,6 +96,7 @@ impl InfluxdbClient {
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path,
             username,
             password,
             url_params: config.url_params.clone(),
@@ -156,6 +167,7 @@ impl Clone for InfluxdbClient {
         Self {
             http: self.http.clone(),
             base_url: self.base_url.clone(),
+            base_path: self.base_path.clone(),
             username: self.username.clone(),
             password: self.password.clone(),
             url_params: self.url_params.clone(),
@@ -187,6 +199,11 @@ struct InfluxQueryResult {
     #[serde(default)]
     #[allow(dead_code)]
     statement_id: usize,
+    /// InfluxDB 2.x answers InfluxQL requests for buckets without a DBRP
+    /// mapping with HTTP 200 and a per-statement `error` in the body.
+    #[serde(default)]
+    #[allow(dead_code)]
+    error: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     series: Vec<InfluxSeries>,
@@ -239,7 +256,7 @@ fn build_query_url(client: &InfluxdbClient, database: Option<&str>, sql: &str) -
     }
     let encoded_sql = utf8_percent_encode(sql, NON_ALPHANUMERIC);
     params.push(format!("q={encoded_sql}"));
-    format!("{}/query?{}", client.base_url, params.join("&").as_str())
+    format!("{}{}/query?{}", client.base_url, client.base_path, params.join("&").as_str())
 }
 
 fn encode_url_param(value: &str) -> String {
@@ -252,12 +269,17 @@ fn quote_influx_identifier(value: &str) -> String {
 
 fn build_v2_buckets_url(client: &InfluxdbClient, offset: usize) -> Result<String, String> {
     let org = client.org.as_deref().ok_or_else(|| "InfluxDB 2.x organization is required".to_string())?;
-    Ok(format!("{}/api/v2/buckets?org={}&limit=100&offset={offset}", client.base_url, encode_url_param(org)))
+    Ok(format!(
+        "{}{}/api/v2/buckets?org={}&limit=100&offset={offset}",
+        client.base_url,
+        client.base_path,
+        encode_url_param(org)
+    ))
 }
 
 fn build_v2_query_url(client: &InfluxdbClient) -> Result<String, String> {
     let org = client.org.as_deref().ok_or_else(|| "InfluxDB 2.x organization is required".to_string())?;
-    Ok(format!("{}/api/v2/query?org={}", client.base_url, encode_url_param(org)))
+    Ok(format!("{}{}/api/v2/query?org={}", client.base_url, client.base_path, encode_url_param(org)))
 }
 
 fn build_request(client: &InfluxdbClient, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -297,8 +319,37 @@ async fn influx_query(client: &InfluxdbClient, sql: &str, database: Option<&str>
         return handle_influx_error(resp).await;
     }
     let response_text = resp.text().await.unwrap_or_default();
-    serde_json::from_str::<InfluxJsonResult>(&response_text)
-        .map_err(|e| format!("InfluxDB parse error: {e}; response: {response_text}"))
+    let json = serde_json::from_str::<InfluxJsonResult>(&response_text)
+        .map_err(|e| format!("InfluxDB parse error: {e}; response: {response_text}"))?;
+    if let Some(message) = influx_query_error_message(client, &json.results) {
+        log::warn!("[influxdb] query failed: {message}");
+        return Err(message);
+    }
+    Ok(json)
+}
+
+/// InfluxDB reports statement-level failures (a rejected InfluxQL query, an
+/// unmapped bucket in 2.x) with HTTP 200 and an `error` field on the result
+/// entry. Dropping that field made the grid report "query executed successfully"
+/// with zero rows, so a real failure looked like a healthy empty table (#14622).
+fn influx_query_error_message(client: &InfluxdbClient, results: &[InfluxQueryResult]) -> Option<String> {
+    let error = results
+        .iter()
+        .find_map(|result| result.error.as_deref().map(str::trim).filter(|message| !message.is_empty()))?;
+    // A multi-statement script can fail one statement while another still
+    // returns rows. Prefer the rows over a hard error so a working query never
+    // turns into a false failure; the statement failure stays in the log.
+    if results.iter().any(|result| !result.series.is_empty()) {
+        log::warn!("[influxdb] statement error alongside returned rows: {error}");
+        return None;
+    }
+    let mut message = format!("InfluxDB query error: {error}");
+    if client.version == InfluxdbApiVersion::V2 && error.to_ascii_lowercase().contains("database not found") {
+        message.push_str(
+            ". InfluxDB 2.x may require a DBRP mapping to serve InfluxQL for a bucket; map the bucket to a database and retention policy, or run a Flux query instead.",
+        );
+    }
+    Some(message)
 }
 
 async fn influx_v2_buckets(client: &InfluxdbClient, timeout: Duration) -> Result<Vec<InfluxBucket>, String> {
@@ -940,6 +991,7 @@ mod tests {
         InfluxdbClient {
             http: reqwest::Client::new(),
             base_url: "http://localhost:8086".to_string(),
+            base_path: String::new(),
             username: None,
             password: None,
             url_params: None,
@@ -955,6 +1007,19 @@ mod tests {
             columns: columns.iter().map(|c| c.to_string()).collect(),
             values,
             tags: BTreeMap::new(),
+        }
+    }
+
+    fn v2_client() -> InfluxdbClient {
+        InfluxdbClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:8086".to_string(),
+            username: None,
+            password: Some("token-value".to_string()),
+            url_params: None,
+            default_database: None,
+            version: InfluxdbApiVersion::V2,
+            org: Some("DBX Org".to_string()),
         }
     }
 
@@ -1145,6 +1210,89 @@ mod tests {
     }
 
     #[test]
+    fn config_applies_base_path_prefix() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx-v1",
+            "name": "InfluxDB 1",
+            "db_type": "influxdb",
+            "host": "127.0.0.1",
+            "port": 8086,
+            "username": "user",
+            "password": "pass",
+            "database": "metrics",
+            "external_config": {
+                "version": "1",
+                "basePath": "/influxdb/"
+            }
+        }))
+        .unwrap();
+
+        let client = InfluxdbClient::new_for_config("http://localhost:8086", &config, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(client.base_path, "/influxdb");
+        assert!(build_query_url(&client, Some("metrics"), "SELECT * FROM cpu")
+            .starts_with("http://localhost:8086/influxdb/query?db=metrics&q="));
+    }
+
+    #[test]
+    fn config_without_base_path_keeps_root_urls() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx-v2",
+            "name": "InfluxDB 2",
+            "db_type": "influxdb",
+            "host": "127.0.0.1",
+            "port": 8086,
+            "username": "",
+            "password": "token-value",
+            "database": "metrics",
+            "external_config": {
+                "version": "2",
+                "org": "DBX Org",
+                "basePath": "/"
+            }
+        }))
+        .unwrap();
+
+        let client = InfluxdbClient::new_for_config("http://localhost:8086", &config, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(client.base_path, "");
+        assert_eq!(
+            build_v2_buckets_url(&client, 0).unwrap(),
+            "http://localhost:8086/api/v2/buckets?org=DBX%20Org&limit=100&offset=0"
+        );
+        assert_eq!(build_v2_query_url(&client).unwrap(), "http://localhost:8086/api/v2/query?org=DBX%20Org");
+    }
+
+    #[test]
+    fn v2_config_applies_base_path_prefix() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx-v2",
+            "name": "InfluxDB 2",
+            "db_type": "influxdb",
+            "host": "127.0.0.1",
+            "port": 8086,
+            "username": "",
+            "password": "token-value",
+            "database": "metrics",
+            "external_config": {
+                "version": "2",
+                "org": "DBX Org",
+                "basePath": "/influxdb"
+            }
+        }))
+        .unwrap();
+
+        let client = InfluxdbClient::new_for_config("http://localhost:8086", &config, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(client.base_path, "/influxdb");
+        assert_eq!(
+            build_v2_buckets_url(&client, 0).unwrap(),
+            "http://localhost:8086/influxdb/api/v2/buckets?org=DBX%20Org&limit=100&offset=0"
+        );
+        assert_eq!(build_v2_query_url(&client).unwrap(), "http://localhost:8086/influxdb/api/v2/query?org=DBX%20Org");
+    }
+
+    #[test]
     fn v2_config_accepts_organization_alias() {
         let config: ConnectionConfig = serde_json::from_value(json!({
             "id": "influx-v2",
@@ -1165,6 +1313,47 @@ mod tests {
 
         assert_eq!(client.version, InfluxdbApiVersion::V2);
         assert_eq!(client.org.as_deref(), Some("alias-org"));
+    }
+
+    #[test]
+    fn surfaces_per_statement_errors_from_a_two_hundred_response() {
+        let body = r#"{"results":[{"statement_id":0,"error":"database not found: \"wpg-表计\""}]}"#;
+        let json: InfluxJsonResult = serde_json::from_str(body).unwrap();
+        let message = influx_query_error_message(&v2_client(), &json.results).expect("statement error must surface");
+        assert!(message.contains("database not found"));
+        assert!(message.contains("DBRP mapping"));
+    }
+
+    #[test]
+    fn accepts_responses_that_carry_no_statement_error() {
+        let with_empty_series: InfluxJsonResult =
+            serde_json::from_str(r#"{"results":[{"statement_id":0,"series":[]}]}"#).unwrap();
+        assert_eq!(influx_query_error_message(&v1_client(), &with_empty_series.results), None);
+        let without_results: InfluxJsonResult = serde_json::from_str(r#"{"results":[]}"#).unwrap();
+        assert_eq!(influx_query_error_message(&v1_client(), &without_results.results), None);
+    }
+
+    #[test]
+    fn keeps_v1_error_messages_free_of_the_v2_mapping_hint() {
+        let json: InfluxJsonResult =
+            serde_json::from_str(r#"{"results":[{"statement_id":0,"error":"  database not found  "}]}"#).unwrap();
+        assert_eq!(
+            influx_query_error_message(&v1_client(), &json.results).as_deref(),
+            Some("InfluxDB query error: database not found")
+        );
+    }
+
+    #[test]
+    fn prefers_returned_rows_over_a_statement_error_in_a_script() {
+        let body = r#"{"results":[{"statement_id":0,"error":"boom"},{"statement_id":1,"series":[{"name":"m","columns":["time"],"values":[["2026-01-01T00:00:00Z"]]}]}]}"#;
+        let json: InfluxJsonResult = serde_json::from_str(body).unwrap();
+        assert_eq!(influx_query_error_message(&v2_client(), &json.results), None);
+    }
+
+    #[test]
+    fn ignores_blank_statement_errors() {
+        let json: InfluxJsonResult = serde_json::from_str(r#"{"results":[{"statement_id":0,"error":"   "}]}"#).unwrap();
+        assert_eq!(influx_query_error_message(&v1_client(), &json.results), None);
     }
 
     #[test]

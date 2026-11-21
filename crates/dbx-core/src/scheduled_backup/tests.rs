@@ -956,3 +956,238 @@ fn live_postgres_worker_exports_selected_tables_across_schemas() {
         cleanup.unwrap();
     });
 }
+
+#[test]
+#[ignore = "requires a disposable PostgreSQL endpoint configured by DBX_LIVE_SQL_FILE_POSTGRES_* variables"]
+fn live_postgres_worker_backs_up_accessible_schemas() {
+    live_backup_runtime().block_on(live_restricted_schema_backup("DBX_LIVE_SQL_FILE_POSTGRES", "postgres"));
+}
+
+#[test]
+#[ignore = "requires a disposable openGauss endpoint configured by DBX_LIVE_BACKUP_OPENGAUSS_* variables"]
+fn live_opengauss_worker_backs_up_accessible_schemas() {
+    live_backup_runtime().block_on(live_restricted_schema_backup("DBX_LIVE_BACKUP_OPENGAUSS", "opengauss"));
+}
+
+#[test]
+#[ignore = "requires a restricted openGauss account configured by DBX_LIVE_BACKUP_OPENGAUSS_* variables; read-only"]
+fn live_opengauss_backup_schema_discovery_uses_effective_privileges() {
+    use crate::database_export::{begin_database_backup_snapshot_core, list_database_backup_schemas_core};
+    use crate::query::{execute_sql_statement, rollback_manual_transaction};
+    live_backup_runtime().block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path(), None).await;
+        let prefix = "DBX_LIVE_BACKUP_OPENGAUSS";
+        let database = std::env::var(format!("{prefix}_DATABASE")).unwrap_or_else(|_| "postgres".into());
+        let config: crate::models::connection::ConnectionConfig = serde_json::from_value(json!({
+            "id": "restricted-schema-discovery", "name": "restricted-schema-discovery", "db_type": "opengauss",
+            "host": std::env::var(format!("{prefix}_HOST")).unwrap(),
+            "port": std::env::var(format!("{prefix}_PORT")).unwrap().parse::<u16>().unwrap(),
+            "username": std::env::var(format!("{prefix}_USER")).unwrap(),
+            "password": std::env::var(format!("{prefix}_PASSWORD")).unwrap(),
+            "database": database, "connect_timeout_secs": 10, "query_timeout_secs": 30
+        }))
+        .unwrap();
+        service.state.configs.write().await.insert(config.id.clone(), config.clone());
+        let rows = execute_sql_statement(
+            &service.state,
+            &config.id,
+            &database,
+            "SELECT n.nspname, pg_catalog.has_schema_privilege(n.oid, 'USAGE') FROM pg_catalog.pg_namespace n \
+             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+             AND n.nspname NOT LIKE 'pg_toast_temp_%' AND n.nspname NOT LIKE 'pg_temp_%' ORDER BY n.nspname",
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .rows;
+        assert!(rows.iter().any(|r| r[1].as_bool() == Some(false)), "fixture needs an inaccessible schema");
+        let expected = rows
+            .into_iter()
+            .filter(|r| r[1].as_bool() == Some(true))
+            .map(|r| r[0].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let discovered = list_database_backup_schemas_core(&service.state, &config.id, &database).await.unwrap();
+        let snapshot = begin_database_backup_snapshot_core(&service.state, &config.id, &database).await.unwrap();
+        rollback_manual_transaction(&service.state, &snapshot.session_id).await.unwrap();
+        service.state.shutdown(Duration::from_secs(3)).await;
+        assert_eq!(discovered, expected);
+        assert_eq!(snapshot.schemas, expected);
+    });
+}
+
+/// Issue #14272: database CONNECT does not imply USAGE on every schema.
+/// Exercise the real worker, including discovery before the snapshot, with
+/// both an owned business schema and a non-owned schema accessible by a grant.
+async fn live_restricted_schema_backup(prefix: &str, db_type: &str) {
+    use crate::database_export::begin_database_backup_snapshot_core;
+    use crate::query::{execute_sql_statement, rollback_manual_transaction};
+    use futures::FutureExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), None).await;
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let database = format!("dbx14272_{}", &suffix[..12]);
+    let role = format!("dbx14272_{}", &suffix[12..24]);
+    let password = format!("Dbx!14272_{suffix}");
+    let admin: crate::models::connection::ConnectionConfig = serde_json::from_value(json!({
+        "id": "backup-admin", "name": "backup-admin", "db_type": db_type,
+        "host": std::env::var(format!("{prefix}_HOST")).unwrap(),
+        "port": std::env::var(format!("{prefix}_PORT")).unwrap().parse::<u16>().unwrap(),
+        "username": std::env::var(format!("{prefix}_USER")).unwrap(),
+        "password": std::env::var(format!("{prefix}_PASSWORD")).unwrap_or_default(),
+        "database": "postgres", "save_password": true, "connect_timeout_secs": 10, "query_timeout_secs": 30
+    }))
+    .unwrap();
+    service.state.configs.write().await.insert(admin.id.clone(), admin.clone());
+    let stop = CancellationToken::new();
+    let worker = service.start(stop.clone());
+    let outcome = std::panic::AssertUnwindSafe(async {
+        execute_sql_statement(
+            &service.state,
+            &admin.id,
+            "postgres",
+            &format!("CREATE DATABASE {database}"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        execute_sql_statement(
+            &service.state,
+            &admin.id,
+            "postgres",
+            &format!("CREATE ROLE {role} LOGIN PASSWORD '{password}'"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        for sql in [
+            "CREATE SCHEMA coverage".to_string(),
+            "CREATE TABLE coverage.proc_coverage (id integer PRIMARY KEY)".to_string(),
+            "INSERT INTO coverage.proc_coverage VALUES (14272)".to_string(),
+            "REVOKE ALL ON SCHEMA coverage FROM PUBLIC".to_string(),
+            format!("CREATE SCHEMA business AUTHORIZATION {role}"),
+            "CREATE TABLE business.records (id integer PRIMARY KEY, payload text)".to_string(),
+            format!("ALTER TABLE business.records OWNER TO {role}"),
+            "INSERT INTO business.records VALUES (1, 'business-sentinel')".to_string(),
+            "CREATE VIEW business.record_view AS SELECT * FROM business.records".to_string(),
+            format!("ALTER VIEW business.record_view OWNER TO {role}"),
+            "CREATE SCHEMA shared".to_string(),
+            "CREATE TABLE shared.records (id integer PRIMARY KEY, payload text)".to_string(),
+            "INSERT INTO shared.records VALUES (2, 'shared-sentinel')".to_string(),
+            format!("GRANT USAGE ON SCHEMA shared TO {role}"),
+            format!("GRANT SELECT ON shared.records TO {role}"),
+        ] {
+            execute_sql_statement(&service.state, &admin.id, &database, &sql, None, None).await.unwrap();
+        }
+        let mut config = admin.clone();
+        config.id = "restricted-backup".into();
+        config.database = Some(database.clone());
+        config.username = role.clone();
+        config.password = password;
+        service.state.storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        service.state.configs.write().await.insert(config.id.clone(), config.clone());
+
+        // Catalog visibility must not be mistaken for schema access.
+        let snapshot = begin_database_backup_snapshot_core(&service.state, &config.id, &database).await.unwrap();
+        let schemas = snapshot.schemas.clone();
+        rollback_manual_transaction(&service.state, &snapshot.session_id).await.unwrap();
+        assert!(schemas.iter().any(|s| s == "business"), "{schemas:?}");
+        assert!(schemas.iter().any(|s| s == "shared"), "{schemas:?}");
+        let admin_snapshot = begin_database_backup_snapshot_core(&service.state, &admin.id, &database).await.unwrap();
+        let admin_schemas = admin_snapshot.schemas.clone();
+        rollback_manual_transaction(&service.state, &admin_snapshot.session_id).await.unwrap();
+        assert!(admin_schemas.iter().any(|s| s == "coverage"));
+
+        for mode in ["all", "include", "exclude", "selected"] {
+            let mut plan = schedule(dir.path()).config;
+            plan.connection_id = config.id.clone();
+            plan.databases = vec![database.clone()];
+            plan.table_filter_mode = mode.into();
+            plan.table_patterns = match mode {
+                "include" => vec!["business.records".into(), "shared.records".into()],
+                "exclude" => vec!["*.record_view".into()],
+                _ => Vec::new(),
+            };
+            if mode == "selected" {
+                plan.selected_tables = ["business", "shared"]
+                    .into_iter()
+                    .map(|schema| BackupTableTarget {
+                        database: database.clone(),
+                        schema: schema.into(),
+                        table: "records".into(),
+                    })
+                    .collect();
+            }
+            let run = service.store.enqueue(request(plan)).await.unwrap();
+            let completed = await_run(&service, &run.id).await;
+            assert_eq!(completed.status, "success", "mode={mode}: {:?}", completed.error);
+            assert!(!schemas.iter().any(|s| s == "coverage"), "{schemas:?}");
+            assert!(!completed.files.iter().any(|f| f.schema == "coverage"));
+            for (schema, sentinel) in [("business", "business-sentinel"), ("shared", "shared-sentinel")] {
+                let file = completed.files.iter().find(|f| f.schema == schema).unwrap();
+                let sql = read_backup(&file.file_path, false);
+                assert!(sql.contains("CREATE TABLE"), "{sql}");
+                assert!(sql.contains(sentinel), "{sql}");
+                if mode == "all" && schema == "business" {
+                    assert!(sql.contains("CREATE VIEW") || sql.contains("CREATE OR REPLACE VIEW"), "{sql}");
+                }
+            }
+        }
+
+        // Permissions on objects within an accessible schema still fail the
+        // backup; do not turn an incomplete dump into a successful run.
+        execute_sql_statement(
+            &service.state,
+            &admin.id,
+            &database,
+            &format!("REVOKE SELECT ON shared.records FROM {role}"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut plan = schedule(dir.path()).config;
+        plan.connection_id = config.id;
+        plan.databases = vec![database.clone()];
+        let run = service.store.enqueue(request(plan)).await.unwrap();
+        let failed = await_run(&service, &run.id).await;
+        assert_eq!(failed.status, "failed");
+        assert!(failed.error.as_deref().unwrap_or_default().contains("permission denied"), "{:?}", failed.error);
+    })
+    .catch_unwind()
+    .await;
+    stop.cancel();
+    worker.await.unwrap();
+    // Closing the worker's pools permits DROP DATABASE on openGauss too,
+    // without PostgreSQL's newer WITH (FORCE) syntax.
+    service.state.close_database_pool("restricted-backup", Some(&database)).await.unwrap();
+    service.state.close_database_pool(&admin.id, Some(&database)).await.unwrap();
+    let cleanup_database = execute_sql_statement(
+        &service.state,
+        &admin.id,
+        "postgres",
+        &format!("DROP DATABASE IF EXISTS {database}"),
+        None,
+        None,
+    )
+    .await;
+    let cleanup_role = execute_sql_statement(
+        &service.state,
+        &admin.id,
+        "postgres",
+        &format!("DROP ROLE IF EXISTS {role}"),
+        None,
+        None,
+    )
+    .await;
+    service.state.shutdown(Duration::from_secs(3)).await;
+    cleanup_database.unwrap();
+    cleanup_role.unwrap();
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

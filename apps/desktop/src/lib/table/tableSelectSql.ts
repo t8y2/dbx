@@ -23,6 +23,8 @@ export interface BuildTableSelectSqlOptions {
   tableType?: string;
   primaryKeys?: string[];
   columns?: string[];
+  /** Select exactly `columns` instead of the engine's default projection. For SQL that is read or copied, not for loading table data. */
+  projectColumns?: boolean;
   columnTypes?: string[];
   largeValuePreviewSize?: number;
   fallbackOrderColumns?: string[];

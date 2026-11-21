@@ -199,6 +199,15 @@ const patterns: [RegExp, string][] = [
   [/^\[damengConnectionRequired\]/, "damengDump.errors.connectionRequired"],
   [/^\[damengPasswordMissing\]/, "damengDump.errors.passwordMissing"],
   [/^\[damengUseridInvalid\]/, "damengDump.errors.useridInvalid"],
+
+  // Android (ADB) connections (crates/dbx-drivers/src/db/adb_transport.rs)
+  [/^adb was not found\. Install the Android SDK platform-tools/, "connection.adbBinaryNotFound"],
+  [/^Package (.+?) is not debuggable\. Install a debug build/, "connection.adbNotDebuggable"],
+  [/^Package (.+?) is not installed on this device\.$/, "connection.adbPackageNotInstalled"],
+  [/^Android device (.+?) is in state "([^"]+)"; authorize USB debugging and retry$/, "connection.adbDeviceState"],
+  [/^Android device (.+?) is not connected\. Check the cable/, "connection.adbDeviceNotConnected"],
+  [/^The Android worker binary is not bundled in this build$/, "connection.adbWorkerNotBundled"],
+  [/^The app uid is not allowed to execute the worker binary on this device/, "connection.adbWorkerExecDenied"],
 ];
 
 // Named placeholders for each pattern's capture groups, in capture order.
@@ -228,6 +237,10 @@ const paramNames: Record<string, string | string[]> = {
   "driverStore.driverUpdateBlocked": "labels",
   "common.fileNotFound": "path",
   "auth.rateLimited": "seconds",
+  "connection.adbNotDebuggable": "package",
+  "connection.adbPackageNotInstalled": "package",
+  "connection.adbDeviceState": ["serial", "state"],
+  "connection.adbDeviceNotConnected": "serial",
 };
 
 function backendErrorMessage(error: unknown): string {

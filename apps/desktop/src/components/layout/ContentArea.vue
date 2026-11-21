@@ -1804,6 +1804,33 @@ function reloadUnavailableDataTab() {
   emit("reload", props.activeTab.id, undefined, undefined, whereInput, orderBy);
 }
 
+// Android (ADB) live observation: periodically refresh the active data tab so
+// in-app writes made by the device app show up without a manual refresh.
+const androidAutoRefreshMs = ref(0);
+const isAndroidAdbDataTab = computed(() => props.activeTab.mode === "data" && connectionStore.getConfig(props.activeTab.connectionId)?.db_type === "android-adb");
+const isAndroidAdbConnection = computed(() => connectionStore.getConfig(props.activeTab.connectionId)?.db_type === "android-adb");
+let androidAutoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+watch([androidAutoRefreshMs, () => props.activeTab.id, isAndroidAdbDataTab], () => {
+  if (androidAutoRefreshTimer) {
+    clearInterval(androidAutoRefreshTimer);
+    androidAutoRefreshTimer = undefined;
+  }
+  if (!isAndroidAdbDataTab.value || androidAutoRefreshMs.value <= 0) return;
+  androidAutoRefreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    // Never clobber in-progress work: skip while a query runs or the user has
+    // unsaved edits in the grid.
+    if (props.activeTab.isExecuting || queryStore.isTabDirty(props.activeTab)) return;
+    refreshData();
+  }, androidAutoRefreshMs.value);
+});
+onUnmounted(() => {
+  if (androidAutoRefreshTimer) {
+    clearInterval(androidAutoRefreshTimer);
+    androidAutoRefreshTimer = undefined;
+  }
+});
+
 watch(
   () => props.activeTab.id,
   () => {
@@ -2360,6 +2387,10 @@ defineExpose({
       <ShieldAlert class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       <span class="font-mono uppercase tracking-normal">{{ t("production.title") }}</span>
       <span v-if="productionSessionDetail" class="min-w-0 truncate rounded-md border border-red-500/25 bg-background/65 px-1.5 py-0.5 font-medium text-red-700 dark:text-red-200">{{ productionSessionDetail }}</span>
+    </div>
+    <div v-else-if="isAndroidAdbConnection" class="flex h-7 shrink-0 items-center gap-2 border-b border-amber-500/35 bg-amber-500/10 px-3 text-xs text-amber-800 dark:text-amber-200">
+      <ShieldAlert class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+      <span class="min-w-0 truncate">{{ t("grid.androidWriteSafety") }}</span>
     </div>
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
@@ -3758,6 +3789,31 @@ defineExpose({
               </div>
               <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
               <DataGridFreezeFirstColumnControl />
+              <div v-if="isAndroidAdbDataTab" class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <RefreshCcw class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.androidAutoRefresh") }}</span>
+                </div>
+                <LightTooltip :text="t('grid.androidAutoRefreshHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                  <div class="grid grid-cols-4 rounded-md border bg-muted/40 p-0.5">
+                    <button
+                      v-for="option in [
+                        { value: 0, label: t('grid.androidAutoRefreshOff') },
+                        { value: 1000, label: '1s' },
+                        { value: 2000, label: '2s' },
+                        { value: 5000, label: '5s' },
+                      ]"
+                      :key="option.value"
+                      type="button"
+                      class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors"
+                      :class="androidAutoRefreshMs === option.value ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                      @click="androidAutoRefreshMs = option.value"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+                </LightTooltip>
+              </div>
               <DataGridStatusSqlControl />
               <DataGridExportOptionsControl />
               <DataGridCopyFormatControl

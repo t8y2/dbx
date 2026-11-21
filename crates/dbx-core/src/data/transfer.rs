@@ -5035,7 +5035,14 @@ pub fn map_column_type(source_type: &str, source_db: &DatabaseType, target_db: &
 /// use SQLite's storage classes, where any column with INTEGER affinity holds a
 /// 64-bit signed integer regardless of the width its declared type suggests.
 fn is_sqlite_transfer_dialect(db_type: &DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    matches!(
+        db_type,
+        DatabaseType::Sqlite
+            | DatabaseType::Rqlite
+            | DatabaseType::Turso
+            | DatabaseType::CloudflareD1
+            | DatabaseType::AndroidAdb
+    )
 }
 
 fn mysql_type_needs_key_prefix(mapped_type: &str) -> bool {
@@ -5154,7 +5161,11 @@ fn generate_create_table_ddl_with_source_profile(
     let inline_identity = !is_mysql_family
         && !matches!(
             target_db,
-            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1
+            DatabaseType::Sqlite
+                | DatabaseType::Rqlite
+                | DatabaseType::Turso
+                | DatabaseType::CloudflareD1
+                | DatabaseType::AndroidAdb
         )
         && (match target_profile.auto_inc {
             // `profile_for` puts Databend/Gbase/ManticoreSearch in the MySQL family

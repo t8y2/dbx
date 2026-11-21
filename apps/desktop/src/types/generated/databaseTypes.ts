@@ -5,6 +5,7 @@ export const DATABASE_TYPES = [
   "sqlite",
   "rqlite",
   "turso",
+  "android-adb",
   "cloudflare-d1",
   "redis",
   "duckdb",

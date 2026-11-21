@@ -7,7 +7,16 @@ const MCP_ARGS_ENV = "DBX_PI_MCP_ARGS";
 const ENABLED_TOOLS_ENV = "DBX_PI_ENABLED_TOOLS";
 const READY_FILE_ENV = "DBX_PI_BRIDGE_READY_FILE";
 const REQUEST_TIMEOUT_MS = 30_000;
-const CONNECTION_SPECIFIC_TOOLS = new Set(["dbx_execute_redis_command", "dbx_salesforce_current_user"]);
+// These entries in the application's allowlist depend on the capabilities of
+// the connections exposed by the MCP server. Only discovery is unconditional.
+const CONNECTION_SPECIFIC_TOOLS = new Set([
+  "dbx_list_tables",
+  "dbx_describe_table",
+  "dbx_get_schema_context",
+  "dbx_execute_query",
+  "dbx_execute_redis_command",
+  "dbx_salesforce_current_user",
+]);
 
 function parseJsonEnv(name, fallback) {
   const value = process.env[name];

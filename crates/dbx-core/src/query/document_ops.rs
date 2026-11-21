@@ -1,5 +1,5 @@
 use crate::connection::{AppState, PoolKind};
-use crate::db::agent_driver::mongo_document_id_params;
+use crate::db::agent_driver::{mongo_document_id_params, AgentDriverClient};
 use crate::db::document_result::DocumentQueryResult;
 use crate::db::{
     couchdb_driver, dynamodb_driver, easysearch_driver, elasticsearch_driver, mongo_driver, solr_driver, vector_driver,
@@ -317,6 +317,371 @@ pub async fn list_collections_core(
     }
 }
 
+fn json_number_to_u64(val: Option<&serde_json::Value>) -> Option<u64> {
+    match val {
+        Some(serde_json::Value::Number(n)) => n.as_u64().or_else(|| n.as_i64().map(|v| v.max(0) as u64)),
+        Some(serde_json::Value::Object(obj)) => {
+            if let Some(s) = obj.get("$numberLong").and_then(|v| v.as_str()) {
+                s.parse::<u64>().ok()
+            } else if let Some(s) = obj.get("$numberInt").and_then(|v| v.as_str()) {
+                s.parse::<u64>().ok()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_number_to_i64(val: Option<&serde_json::Value>) -> Option<i64> {
+    match val {
+        Some(serde_json::Value::Number(n)) => n.as_i64().or_else(|| n.as_u64().map(|v| v as i64)),
+        Some(serde_json::Value::Object(obj)) => {
+            if let Some(s) = obj.get("$numberLong").and_then(|v| v.as_str()) {
+                s.parse::<i64>().ok()
+            } else if let Some(s) = obj.get("$numberInt").and_then(|v| v.as_str()) {
+                s.parse::<i64>().ok()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+async fn mongo_agent_gridfs_bucket_summary(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+) -> Result<MongoGridFsBucketInfo, String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let collection = format!("{bucket}.files");
+    let pipeline = serde_json::json!([
+        {
+            "$group": {
+                "_id": serde_json::Value::Null,
+                "fileCount": { "$sum": 1 },
+                "totalBytes": { "$sum": "$length" },
+            }
+        }
+    ]);
+    let params = serde_json::json!({
+        "database": database,
+        "collection": collection,
+        "pipeline": pipeline.to_string(),
+        "limit": 1,
+    });
+    match client.mongo_aggregate_documents::<DocumentQueryResult>(params).await {
+        Ok(res) => {
+            let doc_opt = res.documents.first().or_else(|| res.extended_documents.as_ref().and_then(|d| d.first()));
+            let (file_count, total_bytes) = if let Some(doc) = doc_opt {
+                let file_count = json_number_to_u64(doc.get("fileCount")).unwrap_or(0);
+                let total_bytes = json_number_to_i64(doc.get("totalBytes")).unwrap_or(0);
+                (file_count, total_bytes)
+            } else {
+                (0, 0)
+            };
+            Ok(MongoGridFsBucketInfo { name: bucket, file_count, total_bytes })
+        }
+        Err(err) => {
+            let count_params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "filter": "{}",
+            });
+            match client.mongo_count_documents::<u64>(count_params).await {
+                Ok(count) => Ok(MongoGridFsBucketInfo { name: bucket, file_count: count, total_bytes: 0 }),
+                Err(_) => Err(err),
+            }
+        }
+    }
+}
+
+async fn mongo_agent_list_gridfs_files(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+    filter: Option<&str>,
+    sort: Option<&str>,
+) -> Result<Vec<MongoGridFsFileInfo>, String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let collection = format!("{bucket}.files");
+    let filter_str = match filter.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) => {
+            let val: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            let doc = mongo_driver::json_filter_to_document(&val)?;
+            mongo_driver::document_to_canonical_extended_json(&doc).to_string()
+        }
+        None => "{}".to_string(),
+    };
+    let sort_str = match sort.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => {
+            let val: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("Invalid sort JSON: {e}"))?;
+            let doc = mongo_driver::json_object_to_document(&val).map_err(|e| format!("Invalid sort: {e}"))?;
+            mongo_driver::document_to_canonical_extended_json(&doc).to_string()
+        }
+        None => r#"{"uploadDate":-1,"_id":-1}"#.to_string(),
+    };
+
+    let params = serde_json::json!({
+        "database": database,
+        "collection": collection,
+        "skip": 0,
+        "limit": 0,
+        "filter": filter_str,
+        "sort": sort_str,
+    });
+
+    let result = match client.mongo_find_documents_extended_json::<DocumentQueryResult>(params.clone()).await {
+        Ok(res) => res,
+        Err(err) if crate::mongo_ops::is_unknown_agent_method_error(&err, "find_documents_extended_json") => {
+            client.mongo_find_documents::<DocumentQueryResult>(params).await?
+        }
+        Err(err) => return Err(err),
+    };
+
+    let raw_docs =
+        if let Some(ext) = result.extended_documents.filter(|d| !d.is_empty()) { ext } else { result.documents };
+
+    let mut files = Vec::with_capacity(raw_docs.len());
+    for raw in raw_docs {
+        let doc = mongo_driver::json_object_to_document_extended_json(&raw)?;
+        files.push(mongo_driver::gridfs_file_info_from_document(&doc));
+    }
+    Ok(files)
+}
+
+async fn mongo_agent_create_gridfs_bucket(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+) -> Result<(), String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let files_name = format!("{bucket}.files");
+    let chunks_name = format!("{bucket}.chunks");
+
+    let _ = client
+        .mongo_create_index::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": files_name,
+            "keys_json": r#"{"filename":1,"uploadDate":1}"#,
+            "options_json": r#"{"name":"filename_1_uploadDate_1"}"#,
+        }))
+        .await?;
+
+    let _ = client
+        .mongo_create_index::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": chunks_name,
+            "keys_json": r#"{"files_id":1,"n":1}"#,
+            "options_json": r#"{"name":"files_id_1_n_1","unique":true}"#,
+        }))
+        .await?;
+
+    Ok(())
+}
+
+async fn mongo_agent_delete_gridfs_bucket(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+) -> Result<(), String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let _ = client
+        .mongo_drop_collection::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.files"),
+        }))
+        .await;
+    let _ = client
+        .mongo_drop_collection::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.chunks"),
+        }))
+        .await;
+    Ok(())
+}
+
+async fn mongo_agent_delete_gridfs_file(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+    file_id: &str,
+) -> Result<(), String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let trimmed = file_id.trim();
+    if trimmed.is_empty() {
+        return Err("GridFS file id is required".to_string());
+    }
+    let bson_id = mongo_driver::parse_gridfs_file_id(trimmed)?;
+    let canonical_id = bson_id.into_canonical_extjson();
+
+    let files_filter = serde_json::json!({ "_id": canonical_id }).to_string();
+    let chunks_filter = serde_json::json!({ "files_id": canonical_id }).to_string();
+
+    let _ = client
+        .mongo_delete_documents::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.files"),
+            "filter": &files_filter,
+            "filter_json": &files_filter,
+            "many": true,
+        }))
+        .await?;
+
+    let _ = client
+        .mongo_delete_documents::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.chunks"),
+            "filter": &chunks_filter,
+            "filter_json": &chunks_filter,
+            "many": true,
+        }))
+        .await?;
+
+    Ok(())
+}
+
+async fn mongo_agent_download_gridfs_file(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+    file_id: &str,
+) -> Result<Vec<u8>, String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let trimmed = file_id.trim();
+    if trimmed.is_empty() {
+        return Err("GridFS file id is required".to_string());
+    }
+    let bson_id = mongo_driver::parse_gridfs_file_id(trimmed)?;
+    let canonical_id = bson_id.into_canonical_extjson();
+
+    let files_filter = serde_json::json!({ "_id": canonical_id }).to_string();
+    let file_params = serde_json::json!({
+        "database": database,
+        "collection": format!("{bucket}.files"),
+        "filter": files_filter,
+    });
+    let file_res = client.mongo_find_one::<DocumentQueryResult>(file_params).await?;
+    let raw_file_doc =
+        file_res.extended_documents.as_ref().and_then(|d| d.first()).or_else(|| file_res.documents.first());
+    if raw_file_doc.is_none() {
+        return Err("GridFS file not found".to_string());
+    }
+    let expected_length = raw_file_doc.and_then(|d| json_number_to_i64(d.get("length"))).unwrap_or(0);
+
+    let chunks_filter = serde_json::json!({ "files_id": canonical_id }).to_string();
+    let chunks_params = serde_json::json!({
+        "database": database,
+        "collection": format!("{bucket}.chunks"),
+        "filter": chunks_filter,
+        "sort": r#"{"n":1}"#,
+        "skip": 0,
+        "limit": 0,
+    });
+
+    let chunks_res = match client.mongo_find_documents_extended_json::<DocumentQueryResult>(chunks_params.clone()).await
+    {
+        Ok(res) => res,
+        Err(err) if crate::mongo_ops::is_unknown_agent_method_error(&err, "find_documents_extended_json") => {
+            client.mongo_find_documents::<DocumentQueryResult>(chunks_params).await?
+        }
+        Err(err) => return Err(err),
+    };
+
+    let raw_chunks = if let Some(ext) = chunks_res.extended_documents.filter(|d| !d.is_empty()) {
+        ext
+    } else {
+        chunks_res.documents
+    };
+
+    let mut bytes = if expected_length > 0 { Vec::with_capacity(expected_length as usize) } else { Vec::new() };
+    for raw in raw_chunks {
+        let doc = mongo_driver::json_object_to_document_extended_json(&raw)?;
+        let chunk_bytes = mongo_driver::extract_gridfs_chunk_bytes(&doc)?;
+        bytes.extend_from_slice(&chunk_bytes);
+    }
+    Ok(bytes)
+}
+
+async fn mongo_agent_upload_gridfs_file(
+    client: &mut AgentDriverClient,
+    database: &str,
+    bucket: &str,
+    file_name: &str,
+    data: &[u8],
+    content_type: Option<&str>,
+) -> Result<String, String> {
+    let bucket = mongo_driver::normalized_gridfs_bucket_name(bucket)?;
+    let file_name = file_name.trim();
+    if file_name.is_empty() {
+        return Err("GridFS file name is required".to_string());
+    }
+
+    mongo_agent_create_gridfs_bucket(client, database, &bucket).await?;
+
+    let object_id = mongodb::bson::oid::ObjectId::new();
+    let file_id_str = object_id.to_hex();
+    let file_id_val = serde_json::json!({ "$oid": &file_id_str });
+
+    const CHUNK_SIZE: usize = 255 * 1024;
+    const INSERT_BATCH_CHUNKS: usize = 16;
+    let chunks: Vec<&[u8]> = if data.is_empty() { vec![] } else { data.chunks(CHUNK_SIZE).collect() };
+
+    use base64::Engine;
+    if !chunks.is_empty() {
+        for (batch_idx, chunk_batch) in chunks.chunks(INSERT_BATCH_CHUNKS).enumerate() {
+            let start_n = batch_idx * INSERT_BATCH_CHUNKS;
+            let chunk_docs: Vec<serde_json::Value> = chunk_batch
+                .iter()
+                .enumerate()
+                .map(|(offset, chunk)| {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(chunk);
+                    serde_json::json!({
+                        "files_id": file_id_val.clone(),
+                        "n": (start_n + offset) as i32,
+                        "data": {
+                            "$binary": {
+                                "base64": b64,
+                                "subType": "00"
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            let _ = client
+                .mongo_insert_documents::<serde_json::Value>(serde_json::json!({
+                    "database": database,
+                    "collection": format!("{bucket}.chunks"),
+                    "docs_json": serde_json::to_string(&chunk_docs).map_err(|e| e.to_string())?,
+                }))
+                .await?;
+        }
+    }
+
+    let mut file_doc = serde_json::json!({
+        "_id": file_id_val,
+        "length": data.len() as i64,
+        "chunkSize": CHUNK_SIZE as i32,
+        "uploadDate": { "$date": chrono::Utc::now().to_rfc3339() },
+        "filename": file_name,
+    });
+    if let Some(content_type) = content_type.map(str::trim).filter(|v| !v.is_empty()) {
+        file_doc["contentType"] = serde_json::json!(content_type);
+    }
+
+    let _ = client
+        .mongo_insert_documents::<serde_json::Value>(serde_json::json!({
+            "database": database,
+            "collection": format!("{bucket}.files"),
+            "docs_json": serde_json::to_string(&vec![file_doc]).map_err(|e| e.to_string())?,
+        }))
+        .await?;
+
+    Ok(file_id_str)
+}
+
 pub async fn list_gridfs_files_core(
     state: &AppState,
     connection_id: &str,
@@ -329,7 +694,10 @@ pub async fn list_gridfs_files_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::list_gridfs_files(client, database, bucket, filter, sort).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file browsing".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            mongo_agent_list_gridfs_files(&mut client, database, bucket, filter, sort).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -353,7 +721,19 @@ pub async fn list_gridfs_buckets_core(
             }
             filter_and_sort_gridfs_bucket_infos(buckets, filter, sort)
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket browsing".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let specs = sort_mongo_collection_specs(mongo_collection_specs_from_agent_response(
+                client.mongo_list_collection_specs(database).await?,
+            )?);
+            let names: Vec<String> = specs.into_iter().map(|spec| spec.name).collect();
+            let bucket_names = mongo_gridfs_bucket_names(&names);
+            let mut buckets = Vec::with_capacity(bucket_names.len());
+            for bucket_name in bucket_names {
+                buckets.push(mongo_agent_gridfs_bucket_summary(&mut client, database, &bucket_name).await?);
+            }
+            filter_and_sort_gridfs_bucket_infos(buckets, filter, sort)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -368,7 +748,10 @@ pub async fn create_gridfs_bucket_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::create_gridfs_bucket(client, database, bucket).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket creation".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            mongo_agent_create_gridfs_bucket(&mut client, database, bucket).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -383,7 +766,10 @@ pub async fn delete_gridfs_bucket_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::delete_gridfs_bucket(client, database, bucket).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket deletion".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            mongo_agent_delete_gridfs_bucket(&mut client, database, bucket).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -399,7 +785,10 @@ pub async fn download_gridfs_file_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::download_gridfs_file(client, database, bucket, file_id).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS download".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            mongo_agent_download_gridfs_file(&mut client, database, bucket, file_id).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -419,7 +808,10 @@ pub async fn upload_gridfs_file_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::upload_gridfs_file(client, database, bucket, file_name, data, content_type).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS uploads".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            mongo_agent_upload_gridfs_file(&mut client, database, bucket, file_name, data, content_type).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -435,7 +827,10 @@ pub async fn delete_gridfs_file_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::delete_gridfs_file(client, database, bucket, file_id).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file deletion".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            mongo_agent_delete_gridfs_file(&mut client, database, bucket, file_id).await
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1346,5 +1741,51 @@ mod tests {
                 kind
             );
         }
+    }
+
+    #[test]
+    fn parses_json_numbers_for_legacy_gridfs() {
+        use super::{json_number_to_i64, json_number_to_u64};
+
+        assert_eq!(json_number_to_u64(Some(&serde_json::json!(42))), Some(42));
+        assert_eq!(json_number_to_u64(Some(&serde_json::json!({"$numberLong": "9999999999"}))), Some(9999999999));
+        assert_eq!(json_number_to_u64(Some(&serde_json::json!({"$numberInt": "100"}))), Some(100));
+        assert_eq!(json_number_to_u64(None), None);
+
+        assert_eq!(json_number_to_i64(Some(&serde_json::json!(-42))), Some(-42));
+        assert_eq!(json_number_to_i64(Some(&serde_json::json!({"$numberLong": "-9999999999"}))), Some(-9999999999));
+        assert_eq!(json_number_to_i64(Some(&serde_json::json!({"$numberInt": "-100"}))), Some(-100));
+        assert_eq!(json_number_to_i64(None), None);
+    }
+
+    #[test]
+    fn extracts_gridfs_chunk_bytes_from_binary_or_base64() {
+        use crate::db::mongo_driver;
+        use mongodb::bson::{doc, spec::BinarySubtype, Binary, Bson};
+
+        let binary_doc = doc! {
+            "data": Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2, 3, 4] })
+        };
+        assert_eq!(mongo_driver::extract_gridfs_chunk_bytes(&binary_doc).unwrap(), vec![1, 2, 3, 4]);
+
+        let base64_doc = doc! {
+            "data": "AQIDBA=="
+        };
+        assert_eq!(mongo_driver::extract_gridfs_chunk_bytes(&base64_doc).unwrap(), vec![1, 2, 3, 4]);
+
+        let invalid_doc = doc! {
+            "data": 123
+        };
+        assert!(mongo_driver::extract_gridfs_chunk_bytes(&invalid_doc).is_err());
+    }
+
+    #[test]
+    fn normalizes_gridfs_bucket_name() {
+        use crate::db::mongo_driver;
+
+        assert_eq!(mongo_driver::normalized_gridfs_bucket_name("  mybucket  ").unwrap(), "mybucket");
+        assert!(mongo_driver::normalized_gridfs_bucket_name("").is_err());
+        assert!(mongo_driver::normalized_gridfs_bucket_name("bucket.files").is_err());
+        assert!(mongo_driver::normalized_gridfs_bucket_name("bucket.chunks").is_err());
     }
 }

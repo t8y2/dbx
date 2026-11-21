@@ -19,6 +19,7 @@ import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
+import java.math.BigDecimal;
 import java.sql.Blob;
 import java.sql.Clob;
 import java.sql.PreparedStatement;
@@ -492,6 +493,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
             if (sqlType == Types.BLOB || sqlType == Types.BINARY || sqlType == Types.VARBINARY || sqlType == Types.LONGVARBINARY) {
                 byte[] value = rs.getBytes(index);
                 return rs.wasNull() ? null : JdbcExecutor.bytesToHex(value);
+            }
+            if (sqlType == Types.DECIMAL || sqlType == Types.NUMERIC) {
+                BigDecimal value = rs.getBigDecimal(index);
+                return value == null ? null : value.toPlainString();
             }
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();

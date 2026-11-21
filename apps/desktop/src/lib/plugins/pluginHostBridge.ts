@@ -10,7 +10,8 @@ import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpd
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
-import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, type PluginConnectionSummary } from "@/types/pluginConnection";
+import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, PLUGIN_CONNECTION_EDIT_CAPABILITY, PLUGIN_CONNECTION_EDIT_PERMISSION, type PluginConnectionEditor, type PluginConnectionEditRequest, type PluginConnectionSummary } from "@/types/pluginConnection";
+import { requirePluginConnectionEditFields } from "@/lib/connection/pluginConnectionEdit";
 import { floatingWindowLabel } from "@/lib/app/windowContext";
 import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
 
@@ -221,6 +222,8 @@ export interface PluginHostBridgeApi {
    */
   listConnections?(pluginId: string, options?: { all?: boolean }): PluginConnectionSummary[];
   listAllConnections?(): PluginConnectionSummary[];
+  /** Host-owned field discovery and edit drafts. Only the user can submit a draft. */
+  connectionEditor?: PluginConnectionEditor;
   /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
@@ -549,6 +552,7 @@ export class PluginHostBridge {
           folderExpansion: !!this.api.receiveOsDrops,
         },
         [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
+        [PLUGIN_CONNECTION_EDIT_CAPABILITY]: !!this.api.connectionEditor && this.hasPermission(PLUGIN_CONNECTION_EDIT_PERMISSION),
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -857,6 +861,17 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.reopenConnection params");
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
+    }
+    if (method === "host.getConnectionEditFields" || method === "host.openConnectionEdit") {
+      this.requirePermission(PLUGIN_CONNECTION_EDIT_PERMISSION);
+      const editor = this.api.connectionEditor;
+      if (!editor) throw new Error("Host connection editing is unavailable");
+      const input = requireRecord(params, "Connection edit request");
+      if (method === "host.getConnectionEditFields") {
+        return editor.getFields(requireConnectionEditId(input.connectionId));
+      }
+      editor.openEdit(requirePluginConnectionEditRequest(input));
+      return { opened: true };
     }
     if (method === "host.getConnections") {
       this.requirePermission(PLUGIN_CONNECTIONS_READ_PERMISSION);
@@ -1533,6 +1548,8 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       connections: Object.freeze({
         list: (options) => request('host.listConnections', options || {}),
         getAll: () => request('host.getConnections', {}),
+        getEditFields: (connectionId) => request('host.getConnectionEditFields', { connectionId }),
+        openEdit: (editRequest) => request('host.openConnectionEdit', editRequest),
       }),
       // Estimated plans only: mode must be sent explicitly so a plugin states
       // its intent, and the host refuses anything other than "estimated".
@@ -1728,6 +1745,23 @@ function requireProtocolName(value: unknown, label: string): string {
 function requireTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(120_000, Math.max(1, Math.round(value)));
+}
+
+function requireConnectionEditId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 256 || /\p{Cc}/u.test(value)) {
+    throw new Error("A valid connection ID is required for editing");
+  }
+  return value;
+}
+
+function requirePluginConnectionEditRequest(input: Record<string, unknown>): PluginConnectionEditRequest {
+  if (Object.keys(input).some((key) => key !== "connectionId" && key !== "fields")) throw new Error("Unsupported connection edit parameter");
+  const connectionId = requireConnectionEditId(input.connectionId);
+  if (input.fields === undefined) return { connectionId, fields: {} };
+  const fields = requireRecord(input.fields, "Connection edit fields");
+  const prototype = Object.getPrototypeOf(fields);
+  if (prototype !== Object.prototype && prototype !== null) throw new Error("Connection edit fields must be a plain object");
+  return { connectionId, fields: requirePluginConnectionEditFields(fields) };
 }
 
 /** A connection id, database, or schema name: bounded, trimmed, never empty. */

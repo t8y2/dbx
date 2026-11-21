@@ -46,7 +46,7 @@ const GEOMETRY_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Must match `minWidth`/`minHeight` and `width`/`height` of the main window in
 /// `tauri.conf.json`. Logical pixels.
-const MIN_WINDOW_SIZE: (u32, u32) = (900, 600);
+const MIN_WINDOW_SIZE: (u32, u32) = (760, 600);
 const DEFAULT_WINDOW_SIZE: (u32, u32) = (1280, 800);
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
@@ -108,12 +108,8 @@ impl WindowGeometry {
 /// physical size that minimum can have) is corrupt and falls back to the default.
 pub(crate) fn sane_window_size(saved: (u32, u32), default_scale: f64) -> (u32, u32) {
     let scale = if default_scale.is_finite() && default_scale >= 1.0 { default_scale } else { 1.0 };
-    let sane = |value: u32, min: u32, default: u32| if value >= min { value } else { default };
-    let (width, height) = (
-        sane((saved.0 as f64 / scale).round() as u32, MIN_WINDOW_SIZE.0, DEFAULT_WINDOW_SIZE.0),
-        sane((saved.1 as f64 / scale).round() as u32, MIN_WINDOW_SIZE.1, DEFAULT_WINDOW_SIZE.1),
-    );
-    (((width as f64) * scale).round() as u32, ((height as f64) * scale).round() as u32)
+    let (width, height) = sane_logical_size((saved.0 as f64 / scale).round(), (saved.1 as f64 / scale).round());
+    ((width * scale).round() as u32, (height * scale).round() as u32)
 }
 
 pub(crate) fn persisted_main_window_state_flags() -> StateFlags {
@@ -311,7 +307,7 @@ fn current_main_window_geometry<R: Runtime>(app: &AppHandle<R>) -> Option<Window
 /// Writes the main window's entry into DBX's geometry file, keeping any other
 /// entries. The plugin never touches this file.
 fn persist_logical_geometry<R: Runtime>(app: &AppHandle<R>, geometry: &WindowGeometry) {
-    let Ok(dir) = app.path().app_config_dir() else {
+    let Some(dir) = geometry_dir(app) else {
         return;
     };
     let path = dir.join(GEOMETRY_FILENAME);
@@ -333,8 +329,17 @@ fn updated_geometry_file(existing: Option<&[u8]>, label: &str, geometry: &Window
 }
 
 fn load_main_window_geometry<R: Runtime>(app: &AppHandle<R>) -> Option<WindowGeometry> {
-    let path = app.path().app_config_dir().ok()?.join(GEOMETRY_FILENAME);
+    let path = geometry_dir(app)?.join(GEOMETRY_FILENAME);
     parse_geometry_file(&fs::read(path).ok()?, MAIN_WINDOW_LABEL)
+}
+
+fn geometry_dir<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
+    if let Some(profile) = app.try_state::<crate::data_dir::DataDirResolution>() {
+        if profile.uses_custom_data_dir() {
+            return Some(profile.data_dir.clone());
+        }
+    }
+    app.path().app_config_dir().ok()
 }
 
 fn parse_geometry_file(bytes: &[u8], label: &str) -> Option<WindowGeometry> {

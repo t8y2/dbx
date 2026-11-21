@@ -144,6 +144,11 @@ pub(super) fn capabilities_for(
             drop_column: true,
             rename_column: true,
             alter_existing_column: true,
+            // Doris 2.x accepts `CREATE INDEX ... ON <table> (<column>)` and
+            // `DROP INDEX <name> ON <table>` for its own (non-unique) indexes;
+            // unique keys are a table-level concept and stay unsupported here.
+            create_index: true,
+            drop_index: true,
             comment: true,
             ..base
         },

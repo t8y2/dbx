@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/database/databaseSearch";
@@ -16,10 +18,11 @@ import { fetchDatabaseSearchColumns, findSearchColumns, type DatabaseSearchColum
 import { nextProbeChunkEnd, probeTables } from "@/lib/database/databaseSearchProbe";
 import { supportsBulkDatabaseSearch } from "@/lib/database/databaseSearchCapabilities";
 import type { ColumnInfo, DatabaseSearchResultItem, DatabaseSearchScope, DatabaseSearchTableTask, DatabaseSearchTabState, DatabaseType, TableInfo } from "@/types/database";
-import { buildDatabaseStructureSearchSql, effectiveDatabaseSearchScope, runDatabaseStructureSearch, structureHitPreview, supportsDatabaseStructureSearchFromManifest } from "@/lib/database/databaseStructureSearch";
+import { buildDatabaseStructureSearchSql, effectiveDatabaseSearchScope, runDatabaseStructureSearch, runObjectMetadataStructureSearch, structureHitPreview, supportsDatabaseStructureSearchFromManifest } from "@/lib/database/databaseStructureSearch";
 import { usesDocumentStructureSearch, usesSqlCatalogStructureSearch } from "@/lib/database/databaseStructureSearchCapabilities";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { isViewTableType } from "@/lib/table/tableEditing";
 
 const props = withDefaults(
   defineProps<{
@@ -51,6 +54,12 @@ const keywordInputRef = ref<any>(null);
 
 const keyword = ref(props.initialState?.keyword ?? "");
 const searchScope = ref<DatabaseSearchScope>(props.initialState?.searchScope ?? "data");
+const selectedObjects = ref<string[]>(props.initialState?.selectedObjects ?? []);
+const scopePickerOpen = ref(false);
+const scopeObjects = ref<DatabaseSearchTableTask[]>([]);
+const loadingScopeObjects = ref(false);
+const scopeLoadError = ref("");
+let scopeLoadId = 0;
 const perTableLimit = ref(props.initialState?.perTableLimit ?? 20);
 const running = ref(false);
 const cancelled = ref(false);
@@ -75,6 +84,8 @@ const canSearch = computed(() => Boolean(props.connectionId && props.database &&
 const structureSearchAvailable = computed(() => supportsDatabaseStructureSearchFromManifest(connection.value?.db_type, connection.value?.driver_profile));
 const effectiveSearchScope = computed(() => effectiveDatabaseSearchScope(searchScope.value, connection.value?.db_type, connection.value?.driver_profile));
 const isStructureMode = computed(() => effectiveSearchScope.value === "structure");
+const scopeObjectKeys = computed(() => scopeObjects.value.map(searchObjectKey));
+const scopeObjectLabels = computed(() => Object.fromEntries(scopeObjects.value.map((task) => [searchObjectKey(task), `${task.schema ? `${task.schema}.` : ""}${task.table.name}`])));
 const progressLabel = computed(() => t("databaseSearch.progress", { done: progressDone.value, total: progressTotal.value }));
 const remainingTableCount = computed(() => Math.max(0, tableTasks.value.length - nextTableIndex.value));
 const nextBatchSize = computed(() => databaseSearchNextBatchSize(nextTableIndex.value, tableTasks.value.length));
@@ -84,6 +95,7 @@ function getCurrentState(): DatabaseSearchTabState {
   return {
     keyword: keyword.value,
     searchScope: searchScope.value,
+    selectedObjects: selectedObjects.value,
     perTableLimit: perTableLimit.value,
     results: results.value,
     tableErrors: tableErrors.value,
@@ -101,7 +113,7 @@ function emitState() {
   emit("update:state", getCurrentState());
 }
 
-watch([keyword, searchScope, perTableLimit], () => {
+watch([keyword, searchScope, selectedObjects, perTableLimit], () => {
   emitState();
 });
 
@@ -111,6 +123,7 @@ watch(
     if (!incoming || running.value) return;
     if (incoming.keyword !== undefined && incoming.keyword !== keyword.value) keyword.value = incoming.keyword;
     if (incoming.searchScope !== undefined && incoming.searchScope !== searchScope.value) searchScope.value = incoming.searchScope;
+    if (incoming.selectedObjects && incoming.selectedObjects !== selectedObjects.value) selectedObjects.value = incoming.selectedObjects;
     if (incoming.perTableLimit !== undefined && incoming.perTableLimit !== perTableLimit.value) perTableLimit.value = incoming.perTableLimit;
     if (incoming.results) results.value = [...incoming.results];
     if (incoming.tableErrors) tableErrors.value = [...incoming.tableErrors];
@@ -144,8 +157,7 @@ function resetSearchState() {
 }
 
 function isSearchableTable(table: TableInfo): boolean {
-  const type = table.table_type.toUpperCase();
-  return type.includes("TABLE") && !type.includes("VIEW");
+  return table.table_type.toUpperCase().includes("TABLE") && !isViewTableType(table.table_type);
 }
 
 function filterSearchSchemas(schemas: string[]): string[] {
@@ -180,25 +192,55 @@ function rowPreview(columns: string[], row: unknown[], matchedColumns: string[])
     .join(" · ");
 }
 
-async function listSearchTables(): Promise<DatabaseSearchTableTask[]> {
+function searchObjectKey(task: DatabaseSearchTableTask): string {
+  return JSON.stringify([task.schema ?? "", task.table.name]);
+}
+
+async function listSearchTables(includeViews = false, shouldAbort?: () => boolean): Promise<DatabaseSearchTableTask[]> {
   if (!connection.value || !props.connectionId || !props.database) return [];
   const databaseType = connection.value.db_type;
   const schemaNames = props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [props.database];
 
   const tasks: DatabaseSearchTableTask[] = [];
   for (const schema of schemaNames) {
-    const tables = await api.listTables(props.connectionId, props.database, schema);
-    for (const table of tables.filter(isSearchableTable)) {
-      tasks.push({ schema, table });
+    if (shouldAbort?.()) break;
+    const tables = includeViews ? await api.listTables(props.connectionId, props.database, schema, undefined, undefined, undefined, ["TABLE", "VIEW", "MATERIALIZED_VIEW"]) : await api.listTables(props.connectionId, props.database, schema);
+    for (const table of tables) {
+      if (!isSearchableTable(table) && !(includeViews && isViewTableType(table.table_type))) continue;
+      tasks.push({ schema: includeViews ? table.schema || schema : schema, table });
     }
   }
 
   return tasks;
 }
 
+async function loadScopeObjects() {
+  const loadId = ++scopeLoadId;
+  loadingScopeObjects.value = true;
+  scopeLoadError.value = "";
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+    if (loadId !== scopeLoadId) return;
+    const tasks = await listSearchTables(true, () => loadId !== scopeLoadId);
+    if (loadId === scopeLoadId) scopeObjects.value = tasks;
+  } catch (error) {
+    if (loadId === scopeLoadId) scopeLoadError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (loadId === scopeLoadId) loadingScopeObjects.value = false;
+  }
+}
+
+watch(scopePickerOpen, (open) => {
+  if (open) void loadScopeObjects();
+  else scopeLoadId++;
+});
+
 async function startSearch() {
   if (!canSearch.value || !connection.value) return;
   const currentRun = ++runId;
+  const objectKeys = new Set(selectedObjects.value);
+  const shouldAbort = () => currentRun !== runId || cancelled.value;
+  scopePickerOpen.value = false;
   resetSearchState();
   running.value = true;
   loadingTables.value = true;
@@ -208,31 +250,42 @@ async function startSearch() {
 
   try {
     await connectionStore.ensureConnected(props.connectionId);
-    if (isStructureMode.value) {
-      const databaseType = connection.value.db_type;
-      let useStructurePath = usesDocumentStructureSearch(databaseType);
-      if (!useStructurePath && usesSqlCatalogStructureSearch(databaseType)) {
-        const catalogSql = await buildDatabaseStructureSearchSql({
-          databaseType,
-          driverProfile: connection.value.driver_profile,
-          database: props.database,
-          schema: props.schema,
-          term: activeKeyword.value,
-          limit: activePerTableLimit.value,
-        });
-        useStructurePath = Boolean(catalogSql?.sql);
-      }
-      if (useStructurePath) {
-        await runStructureSearch(currentRun);
+    if (shouldAbort()) return;
+    if (objectKeys.size) {
+      const tasks = (await listSearchTables(true, shouldAbort)).filter((task) => objectKeys.has(searchObjectKey(task)));
+      if (shouldAbort()) return;
+      if (isStructureMode.value) {
+        await runStructureSearch(currentRun, tasks);
         return;
       }
+      tableTasks.value = tasks;
+    } else {
+      if (isStructureMode.value) {
+        const databaseType = connection.value.db_type;
+        let useStructurePath = usesDocumentStructureSearch(databaseType);
+        if (!useStructurePath && usesSqlCatalogStructureSearch(databaseType)) {
+          const catalogSql = await buildDatabaseStructureSearchSql({
+            databaseType,
+            driverProfile: connection.value.driver_profile,
+            database: props.database,
+            schema: props.schema,
+            term: activeKeyword.value,
+            limit: activePerTableLimit.value,
+          });
+          useStructurePath = Boolean(catalogSql?.sql);
+        }
+        if (useStructurePath) {
+          await runStructureSearch(currentRun);
+          return;
+        }
+      }
+      tableTasks.value = await listSearchTables(false, shouldAbort);
     }
-    tableTasks.value = await listSearchTables();
     if (currentRun !== runId || cancelled.value) return;
     progressTotal.value = tableTasks.value.length;
     loadingTables.value = false;
     emitState();
-    await loadBulkColumns(currentRun);
+    if (!objectKeys.size) await loadBulkColumns(currentRun);
     if (currentRun !== runId || cancelled.value) return;
     // 首轮默认扫完全部表：仍按 DATABASE_SEARCH_TABLE_BATCH_SIZE 分批推进，
     // 批间让出事件循环，保证进度实时刷新且“停止”按钮可响应。
@@ -282,7 +335,7 @@ async function continueSearch(scanAllRemaining: boolean) {
   }
 }
 
-async function runStructureSearch(currentRun: number) {
+async function runStructureSearch(currentRun: number, selectedTasks?: DatabaseSearchTableTask[]) {
   const databaseType = connection.value!.db_type;
   progressTotal.value = 1;
   progressDone.value = 0;
@@ -291,18 +344,20 @@ async function runStructureSearch(currentRun: number) {
   const executionId = makeExecutionId();
   currentExecutionId.value = executionId;
   try {
-    const schemaNames = props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [undefined];
+    const schemaNames = selectedTasks ? [...new Set(selectedTasks.map((task) => task.schema))] : props.schema ? [props.schema] : isSchemaAware(databaseType) ? filterSearchSchemas(await api.listSchemas(props.connectionId, props.database)) : [undefined];
     const limit = Math.min(5000, Math.max(1, activePerTableLimit.value * 10));
     const merged: DatabaseSearchResultItem[] = [];
     const tableTypeByName = new Map<string, string>();
     for (const schema of schemaNames) {
       if (currentRun !== runId || cancelled.value) return;
       const resolvedSchema = schema ?? props.database;
-      const catalogTables = await api.listTables(props.connectionId, props.database, resolvedSchema);
+      const catalogTables = selectedTasks ? selectedTasks.filter((task) => task.schema === schema).map((task) => task.table) : await api.listTables(props.connectionId, props.database, resolvedSchema);
+      tableTypeByName.clear();
       for (const table of catalogTables) {
         tableTypeByName.set(table.name, table.table_type);
       }
-      const hits = await runDatabaseStructureSearch({
+      const searchStructure = selectedTasks ? runObjectMetadataStructureSearch : runDatabaseStructureSearch;
+      const hits = await searchStructure({
         connectionId: props.connectionId,
         databaseType,
         driverProfile: connection.value?.driver_profile,
@@ -313,6 +368,7 @@ async function runStructureSearch(currentRun: number) {
         executionId,
         shouldAbort: () => currentRun !== runId || cancelled.value,
         listTables: async (taskSchema) => {
+          if (selectedTasks) return catalogTables;
           const listSchema = taskSchema || props.database;
           const tables = await api.listTables(props.connectionId, props.database, listSchema);
           return tables.filter(isSearchableTable);
@@ -561,6 +617,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  scopeLoadId++;
   if (running.value) {
     void stopSearch();
   }
@@ -628,6 +685,23 @@ defineExpose({
             {{ t("databaseSearch.stop") }}
           </Button>
         </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <Popover v-model:open="scopePickerOpen">
+          <PopoverTrigger as-child>
+            <Button variant="outline" size="sm" :disabled="running || !props.connectionId || !props.database">
+              <Table2 class="h-4 w-4" />
+              {{ selectedObjects.length ? t("databaseSearch.selectedObjects", { count: selectedObjects.length }) : t("databaseSearch.chooseObjects") }}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" class="w-[min(24rem,calc(100vw-2rem))] p-2">
+            <p v-if="loadingScopeObjects" class="p-2 text-xs text-muted-foreground">{{ t("databaseSearch.loadingTables") }}</p>
+            <p v-else-if="scopeLoadError" role="alert" class="p-2 text-xs text-destructive">{{ scopeLoadError }}</p>
+            <TableMultiSelect v-else v-model="selectedObjects" :tables="scopeObjectKeys" :labels="scopeObjectLabels" :title="t('databaseSearch.chooseObjects')" :disabled="running" />
+          </PopoverContent>
+        </Popover>
+        <Button v-if="selectedObjects.length" variant="ghost" size="sm" :disabled="running" @click="selectedObjects = []">{{ t("databaseSearch.resetObjectScope") }}</Button>
       </div>
 
       <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground shrink-0">

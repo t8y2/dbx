@@ -111,6 +111,8 @@ Pulsar, Kafka, RocketMQ, and RabbitMQ share the message queue console framework,
 
 Pulsar emphasizes tenants, namespaces, and subscriptions; Kafka uses topics, consumer groups, and brokers; RocketMQ adds message and trace workflows; RabbitMQ uses virtual hosts, exchanges/queues, connections, policies, and permissions.
 
+In Kafka's Broker panel, open a broker's configuration to search its effective settings and see each value's source. This read-only operation requires permission to run `DescribeConfigs` on that broker. Older brokers that do not implement `DescribeConfigs` show an unsupported status; permission and connection failures are reported as errors. Sensitive values are not returned to the interface.
+
 <Callout type="info">Message queue panels are capability-driven. Server versions, management APIs, account privileges, or a missing management port can make individual tabs unavailable.</Callout>
 
 ## etcd, ZooKeeper, Nacos, and Consul

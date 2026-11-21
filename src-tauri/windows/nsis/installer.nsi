@@ -104,7 +104,20 @@ Var DbxDirectoryProbeError
 Var DbxFailedFile
 Var DbxWriteFailureAction
 
-Name "${PRODUCTNAME}"
+; The fixed-runtime build advertises the legacy systems it targets. Registry
+; keys, install dir and shortcuts keep using ${PRODUCTNAME}, which stays stable
+; across packages (Tauri rejects "/" in productName, so the bundle-wide name
+; cannot carry "Windows 7 / Server 2008 R2+").
+!if "${INSTALLWEBVIEW2MODE}" != ""
+  !define DBX_WINDOW_TITLE "${PRODUCTNAME}"
+!else if "${ARCH}" == "x64"
+  !define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2+"
+!endif
+!ifndef DBX_WINDOW_TITLE
+  !define DBX_WINDOW_TITLE "${PRODUCTNAME}"
+!endif
+
+Name "${DBX_WINDOW_TITLE}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
 
@@ -529,9 +542,9 @@ LangString dbxFileWriteError ${LANG_TRADCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(db
 LangString dbxManualInstallFallback ${LANG_ENGLISH} "Yes: open the installer folder and exit. No: retry. Cancel: stop installation."
 LangString dbxManualInstallFallback ${LANG_SIMPCHINESE} "“是”：打开安装包目录并退出；“否”：重试；“取消”：停止安装。"
 LangString dbxManualInstallFallback ${LANG_TRADCHINESE} "「是」：開啟安裝套件目錄並結束；「否」：重試；「取消」：停止安裝。"
-LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead.$\r$\n$\r$\nOpen the download now?"
-LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
-LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
+LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer needs Windows 10 or later. For Windows 7 or Windows Server 2008 R2 and later, use the dedicated Windows 7 / Server 2008 R2+ package.$\r$\n$\r$\nOpen the download now?"
+LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包需要 Windows 10 或更高版本。Windows 7 与 Windows Server 2008 R2 及以上请使用 Windows 7 / Server 2008 R2+ 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
+LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件需要 Windows 10 或更新版本。Windows 7 與 Windows Server 2008 R2 及以上請改用 Windows 7 / Server 2008 R2+ 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
 FileErrorText "$(dbxFileWriteErrorNoIgnore)" "$(dbxFileWriteErrorNoIgnore)"
 
 LangString dbxElevationFailed ${LANG_ENGLISH} "Administrator permission is required to install DBX in this folder. Permission was denied or the elevated installer could not be started."
@@ -778,6 +791,7 @@ Function .onInit
   ; install an Evergreen WebView2 runtime to the fixed WebView2 109 bundle.
   !if "${INSTALLWEBVIEW2MODE}" != ""
     ${If} ${IsWin7}
+    ${OrIf} ${IsWin2008R2}
     ${OrIf} ${IsWin2012R2}
       ${If} ${Silent}
       ${OrIf} $PassiveMode = 1
@@ -790,7 +804,11 @@ Function .onInit
       Quit
 
       dbx_open_win7_installer:
-        ExecShell "open" "https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}"
+        ; Derive the releases root from the installer path so installers served
+        ; from mirrors or the GitHub release page download from the same host.
+        ${GetParent} "$EXEPATH" $0
+        ${GetParent} "$0" $0
+        ExecShell "open" "$0/v${VERSION}/DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}"
         SetErrorLevel 1633
         Quit
     ${EndIf}

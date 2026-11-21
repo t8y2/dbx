@@ -88,6 +88,34 @@ macOS 上，Shell 安装器还会在替换二进制前验证官方 Developer ID 
   </Step>
 </Steps>
 
+## 查看本地表结构并查阅数据库公开文档
+
+### 本地表结构
+
+在 DBX 桌面端保存一个名为 `Local SQLite demo` 的 SQLite 连接，指向一个用完即可删除的数据库文件。打开该连接的 SQL 编辑器，运行以下语句创建一张空的示例表。
+
+```sql
+CREATE TABLE notes (id INTEGER, body TEXT);
+```
+
+在 **设置 → MCP → 权限管理 → 访问控制**中选择**仅选中的**，只勾选示例连接，并将权限设为**只读**。在**能力**中停用其他分类和工具组，在表结构工具组中打开**查看详情**，只启用 `dbx_describe_table`，关闭其余工具，然后在设置中点击**应用**。这些设置对所有 DBX MCP 客户端生效。
+
+在仅配置了原生 DBX MCP Server 的客户端配置中，用以下参数调用 `dbx_describe_table`。
+
+```json
+{"connection_name":"Local SQLite demo","table":"notes"}
+```
+
+将返回的列类型记录在**本地表结构**下。此示例应返回 `id INTEGER` 和 `body TEXT`。
+
+### 公开文档
+
+使用浏览器或独立的搜索会话查阅下方的公开问题。如果使用搜索助手，请新建会话，保持 DBX MCP 关闭，并确保会话无法访问本地数据库。只发送公开问题，将表结构、SQL、凭据、数据行和实例 URL 留在本地会话中。
+
+> SQLite 3.45.0 的 JSONB 存储的是什么？请引用 SQLite 官方文档。
+
+将答案及来源链接记录在**公开文档**下。SQLite 3.45.0 引入了 JSONB，可将 SQLite 内部的 JSON 解析树以 BLOB 形式存储。[SQLite 3.45.0 发布说明](https://sqlite.org/releaselog/3_45_0.html) · [SQLite JSONB 参考文档](https://sqlite.org/json1.html#jsonb)
+
 ## 支持的 AI 助手
 
 | AI 助手 | 配置方式 |

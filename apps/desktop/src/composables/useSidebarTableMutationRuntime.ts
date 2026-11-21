@@ -87,6 +87,8 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       identifierQuote: connectionStore.connectionIdentifierQuote?.(activeNode.value.connectionId),
     };
     if (optionsOverride?.cascade) result.cascade = true;
+    // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
+    if (activeNode.value.tableType?.toUpperCase() === "FOREIGN TABLE") result.foreignTable = true;
     return result;
   }
 
@@ -99,6 +101,8 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
     if (optionsOverride?.cascade) result.cascade = true;
+    // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
+    if (node.tableType?.toUpperCase() === "FOREIGN TABLE") result.foreignTable = true;
     return result;
   }
 
@@ -185,6 +189,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       tableName: node.label,
       full,
       analyze,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
   }
 

@@ -1,4 +1,4 @@
-import type { MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
+import type { DatabaseType, MongoCollectionKind, ObjectBrowserFilter, ObjectInfo, TreeNode, TreeNodeType, TriggerInfo } from "@/types/database";
 export type { ObjectBrowserFilter } from "@/types/database";
 import { pinnedTreeNodeIdentityMatches, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { toMongoCollectionKind } from "@/lib/sidebar/mongoCollectionMutation";
@@ -11,6 +11,8 @@ export type ObjectBrowserRow = {
   name: string;
   displayName: string;
   schema?: string;
+  /** Server identifiers retained separately from normalized display names. */
+  postgresSequenceIdentity?: { name: string; schema?: string };
   type: "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
   parentSchema?: string;
   parentName?: string;
@@ -27,11 +29,23 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  /** MySQL AUTO_INCREMENT as returned by the server: a string, since BIGINT UNSIGNED values exceed 2^53. */
+  autoIncrement?: string | null;
   characterSet?: string | null;
   collation?: string | null;
+  /** PostgreSQL foreign table (`relkind = 'f'`). Kept apart from `type` because
+   * `normalizeObjectBrowserType` folds every unknown kind into "TABLE", and a
+   * foreign table must be dropped with `DROP FOREIGN TABLE` (#14717). */
+  foreignTable?: boolean;
 };
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+/** True when the backend-reported object type is a PostgreSQL foreign table. */
+export function isForeignTableObjectType(objectType: string | null | undefined): boolean {
+  if (!objectType) return false;
+  return objectType.toUpperCase().replace(/[\s-]+/g, "_") === "FOREIGN_TABLE";
+}
+
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
@@ -74,10 +88,10 @@ export function objectBrowserRowPinnedTreeNodeIdentity(row: ObjectBrowserRow, co
   return {
     connectionId: context.connectionId,
     database: context.database,
-    schema: row.schema ?? context.schema ?? "",
+    schema: row.postgresSequenceIdentity?.schema ?? row.schema ?? context.schema ?? "",
     catalog: context.catalog || "",
     type: objectBrowserRowTreeNodeType(row.type),
-    name: row.name,
+    name: row.postgresSequenceIdentity?.name ?? row.name,
     signature: row.type === "FUNCTION" || row.type === "PROCEDURE" ? row.signature?.trim() || "" : "",
     id: row.id,
   };
@@ -150,9 +164,11 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
   return [...legacyIds];
 }
 
-export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] {
-  const value = type.toUpperCase();
+export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type"] | null {
+  const value = type.trim().toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  // These objects have their own sidebar paths. They must not fall through as tables.
+  if (normalized === "SYNONYM" || normalized === "JOB") return null;
   if (normalized === "INDEX") return "INDEX";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
@@ -168,7 +184,7 @@ export function normalizeObjectBrowserType(type: string): ObjectBrowserRow["type
   return "TABLE";
 }
 
-export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string }): ObjectBrowserRow[] {
+export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; database: string; fallbackSchema: string; rowSchema?: string; databaseType?: DatabaseType }): ObjectBrowserRow[] {
   const seen = new Map<string, number>();
   const rows = options.objects.flatMap<ObjectBrowserRow>((object) => {
     const exactTrigger = exactOracleTriggerObjectMetadata(object);
@@ -192,14 +208,16 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
       ];
     }
     const type = normalizeObjectBrowserType(object.object_type);
+    if (!type) return [];
+    const postgresSequenceIdentity = type === "SEQUENCE" && options.databaseType === "postgres" ? { name: object.name, schema: object.schema ?? options.rowSchema } : undefined;
     const name = type === "INDEX" ? object.name : normalizeDatabaseObjectName(object.name);
-    if (!name) return [];
+    if (!name && !postgresSequenceIdentity?.name) return [];
     const objectSchema = type === "INDEX" ? object.schema : object.schema ? normalizeDatabaseObjectName(object.schema) : undefined;
     const schema = objectSchema || options.rowSchema;
     const signature = routineSignatureForDisplay(type, object.signature);
     const displayName = signature === undefined ? name : `${name}(${signature})`;
     const signatureIdPart = signature === undefined ? "" : `:${signature}`;
-    const baseId = `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
+    const baseId = postgresSequenceIdentity ? `SEQUENCE:${JSON.stringify([postgresSequenceIdentity.schema ?? options.fallbackSchema, postgresSequenceIdentity.name])}` : `${schema || options.fallbackSchema || options.database}:${name}:${type}${signatureIdPart}`;
     const index = seen.get(baseId) ?? 0;
     seen.set(baseId, index + 1);
     return [
@@ -208,7 +226,9 @@ export function buildObjectBrowserRows(options: { objects: ObjectInfo[]; databas
         name,
         displayName,
         schema,
+        ...(postgresSequenceIdentity ? { postgresSequenceIdentity } : {}),
         type,
+        foreignTable: isForeignTableObjectType(object.object_type) || undefined,
         valid: object.valid,
         signature,
         comment: object.comment,
@@ -432,7 +452,7 @@ export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrows
 }
 
 export function initialObjectBrowserSortDirection(key: ObjectBrowserSortKey): ObjectBrowserSortDirection {
-  return key === "created_at" || key === "updated_at" || key === "estimatedRows" || key === "totalBytes" ? "desc" : "asc";
+  return key === "created_at" || key === "updated_at" || key === "estimatedRows" || key === "totalBytes" || key === "autoIncrement" ? "desc" : "asc";
 }
 
 export function formatObjectBrowserTimestamp(value: string | null | undefined): string {
@@ -447,6 +467,13 @@ export function formatObjectBrowserTimestamp(value: string | null | undefined): 
 export function formatObjectBrowserCount(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
   return new Intl.NumberFormat().format(value);
+}
+
+/** Groups the digits like the row count does, without losing precision on values past 2^53 (BIGINT UNSIGNED). */
+export function formatObjectBrowserAutoIncrement(value: string | null | undefined): string {
+  const text = value?.trim();
+  if (!text) return "";
+  return /^\d+$/.test(text) ? new Intl.NumberFormat().format(BigInt(text)) : text;
 }
 
 export function formatObjectBrowserBytes(value: number | null | undefined): string {

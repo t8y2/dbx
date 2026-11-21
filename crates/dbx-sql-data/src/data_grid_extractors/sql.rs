@@ -232,6 +232,99 @@ pub(super) fn write_sql_updates(
     Ok(sql_metadata(data.omitted_columns))
 }
 
+pub(super) fn write_sql_deletes(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<WriteMetadata, DataGridExtractError> {
+    ensure_sql_builder_budget(context)?;
+    reject_selected_opaque_aggregate_states(context)?;
+    let table_meta = context.request.table_meta.as_ref().ok_or_else(|| {
+        DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingTableMetadata,
+            "SQL Deletes requires table metadata.",
+        )
+    })?;
+    if table_meta.primary_keys.is_empty() {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::MissingPrimaryKey,
+            "SQL Deletes requires at least one primary key column.",
+        ));
+    }
+    if !supports_relational_copy_predicates(context.request.database_type) {
+        return Err(DataGridExtractError::new(
+            DataGridExtractErrorCode::UnsupportedDatabase,
+            "SQL Deletes is not supported for this database type.",
+        ));
+    }
+
+    let mut primary_key_indices = Vec::with_capacity(table_meta.primary_keys.len());
+    for primary_key in &table_meta.primary_keys {
+        let col = context
+            .request
+            .columns
+            .iter()
+            .find(|column| {
+                normalized_name_eq(column.source_name.as_deref().unwrap_or(&column.display_name), primary_key)
+            })
+            .ok_or_else(|| {
+                DataGridExtractError::new(
+                    DataGridExtractErrorCode::MissingPrimaryKey,
+                    format!("Primary key column '{primary_key}' is not present in the result set."),
+                )
+            })?;
+        primary_key_indices.push((primary_key.as_str(), col.source_index));
+    }
+
+    let column_info = table_meta.columns.as_deref().unwrap_or(&[]);
+    let primary_key_info: Vec<Option<&DataGridColumnInfo>> =
+        primary_key_indices.iter().map(|(pk_name, _)| column_info_for(column_info, pk_name)).collect();
+    let table = data_grid_generated_table_name(
+        context.request.database_type,
+        table_meta.catalog.as_deref(),
+        table_meta.schema.as_deref(),
+        table_meta.database.as_deref(),
+        &table_meta.table_name,
+        context.request.identifier_quote.as_deref(),
+        context.request.options.sql.include_database_name,
+    );
+    let table = if context.request.options.sql.quote_identifiers {
+        table
+    } else {
+        identifiers::unquote_optional_identifiers(
+            table,
+            context.request.database_type,
+            context.request.identifier_quote.as_deref(),
+        )
+    };
+
+    let mut delete_statements = Vec::with_capacity(context.request.rows.len());
+    for (row_index, row) in context.request.rows.iter().enumerate() {
+        let mut predicates = Vec::with_capacity(primary_key_indices.len());
+        for (pk_index, (pk_name, src_idx)) in primary_key_indices.iter().enumerate() {
+            let val = row.get(*src_idx).unwrap_or(&Value::Null);
+            if val.is_null() {
+                return Err(DataGridExtractError::new(
+                    DataGridExtractErrorCode::NullPrimaryKey,
+                    format!("Row {row_index} has a NULL value for primary key '{pk_name}'."),
+                ));
+            }
+            let info = primary_key_info[pk_index];
+            let quote = if context.request.options.sql.quote_identifiers {
+                context.request.identifier_quote.as_deref()
+            } else {
+                None
+            };
+            predicates.push(build_column_predicate(context.request.database_type, pk_name, val, info, false, quote));
+        }
+        delete_statements.push(data_grid_statement(
+            context.request.database_type,
+            data_grid_delete_sql(context.request.database_type, &table, &predicates.join(" AND ")),
+        ));
+    }
+    write_bytes(output, delete_statements.join("\n").as_bytes())?;
+    Ok(sql_metadata(Vec::new()))
+}
+
 pub(super) fn write_sql_deletes_inserts(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
@@ -433,7 +526,8 @@ fn ensure_sql_builder_budget(context: &ExtractContext<'_>) -> Result<(), DataGri
     // WHERE-clause output (and SELECT built from a cell selection, which reuses
     // the same predicate builder) repeats every selected column's identifier
     // once per row via OR'd row groups, just like SqlUpdates/row-by-row insert.
-    let repeats_identifiers_per_row = context.request.extractor == super::DataGridExtractorId::SqlUpdates
+    let repeats_identifiers_per_row = context.request.extractor == super::DataGridExtractorId::SqlDeletes
+        || context.request.extractor == super::DataGridExtractorId::SqlUpdates
         || context.request.extractor == super::DataGridExtractorId::SqlDeletesInserts
         || context.request.options.sql.insert_mode == crate::data_grid_sql::DataGridCopyInsertMode::RowByRow
         || context.request.extractor == super::DataGridExtractorId::WhereClause

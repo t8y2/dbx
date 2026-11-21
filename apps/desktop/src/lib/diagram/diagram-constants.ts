@@ -6,6 +6,7 @@ export const DIAGRAM_EDGE_OBSTACLES_KEY = "diagramEdgeObstacles";
 export const CARD_WIDTH = 360;
 export const CARD_HEADER_HEIGHT = 44;
 export const COLUMN_ROW_HEIGHT = 24;
+export const COLLAPSED_DIAGRAM_COLUMNS = 10;
 export const CARD_BOTTOM_PADDING = 12;
 /** Fixed width for the data-type column inside a table card */
 export const COLUMN_TYPE_WIDTH = 112;
@@ -70,6 +71,17 @@ function hasText(value: string | null | undefined): boolean {
 export function diagramVisibleColumns<T extends { name: string }>(table: { columns: readonly T[]; droppedColumnNames?: readonly string[] }): T[] {
   const dropped = table.droppedColumnNames ?? [];
   return table.columns.filter((column) => !dropped.some((name) => name === column.name));
+}
+
+export function diagramCardColumns<T extends { name: string }>(table: { columns: readonly T[]; droppedColumnNames?: readonly string[] }, expanded: boolean) {
+  const columns = diagramVisibleColumns(table);
+  return { total: columns.length, rows: expanded ? columns : columns.slice(0, COLLAPSED_DIAGRAM_COLUMNS), canToggle: columns.length > COLLAPSED_DIAGRAM_COLUMNS };
+}
+
+export function diagramCanvasCardHeight(table: DiagramCommentedTable, expanded: boolean): number {
+  const { rows, canToggle } = diagramCardColumns(table, expanded);
+  const commentLines = Number(hasText(table.comment)) + rows.filter((column) => hasText(column.comment)).length;
+  return tableCardHeight(rows.length + Number(canToggle)) + commentLines * COMMENT_LINE_HEIGHT;
 }
 
 /**

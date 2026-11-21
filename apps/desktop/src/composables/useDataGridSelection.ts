@@ -192,6 +192,21 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   // hasCellSelection 跟随计数语义：仅选中草稿行/草稿单元格时视为无选区
   const hasCellSelection = computed(() => selectedCellCount.value > 0);
 
+  function firstSelectedCellPosition(): CellPosition | null {
+    if (selectedCellKeys.value.size === 0) {
+      const range = selectedRange.value;
+      return range ? { rowIndex: range.startRow, colIndex: range.startCol } : null;
+    }
+
+    let first: CellPosition | null = null;
+    for (const key of selectedCellKeys.value) {
+      const cell = parseCellKey(key);
+      if (!cell || cell.rowIndex >= displayItems.value.length || cell.colIndex >= columns.value.length || displayItems.value[cell.rowIndex]?.isDraft) continue;
+      if (!first || cell.rowIndex < first.rowIndex || (cell.rowIndex === first.rowIndex && cell.colIndex < first.colIndex)) first = cell;
+    }
+    return first;
+  }
+
   function clearCellSelection() {
     selectionAnchor.value = null;
     selectionFocus.value = null;
@@ -725,6 +740,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectedCells,
     selectedCellMatrix,
     selectedCellCount,
+    firstSelectedCellPosition,
     hasCellSelection,
     isSelectingAll,
     selectedCellKeys,

@@ -448,7 +448,10 @@ impl BackendError {
     /// 4xx status instead of 500 so user-side SQL mistakes are not counted as
     /// server faults by gateways and monitoring.
     pub fn is_sql_error(&self) -> bool {
-        self.diagnostics.as_ref().and_then(|diagnostics| diagnostics.category()).is_some_and(|category| category == "sql")
+        self.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.category())
+            .is_some_and(|category| category == "sql")
     }
 
     pub fn error_position(&self) -> Option<crate::sql_error_position::SqlErrorPosition> {

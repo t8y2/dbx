@@ -63,3 +63,14 @@ export function rememberSqlParameterValues(values: Record<string, SqlParameterIn
   }
   return result;
 }
+
+/**
+ * Drop every remembered parameter value (#14894).
+ *
+ * Writes the empty store rather than removing the key: `safeLocalStorageSet` is
+ * the only storage primitive this module uses, and leaving a valid empty document
+ * keeps `readHistory` on its fast path instead of re-parsing `null` every open.
+ */
+export function clearSqlParameterHistory(): void {
+  writeHistory(emptyHistory());
+}

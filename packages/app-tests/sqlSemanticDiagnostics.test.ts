@@ -51,6 +51,31 @@ test("flags confirmed missing tables", () => {
   assert.equal(diagnostics[0]?.severity, "error");
 });
 
+test("flags a table alias that names no relation in scope", () => {
+  const sql = "SELECT a.id, b.id FROM t_tx_demo a";
+  const aliasStart = sql.indexOf("b.id");
+  const analysis: SqlReferenceAnalysis = {
+    tables: [{ name: "t_tx_demo", alias: "a", span: span(sql.indexOf("t_tx_demo") + 1, sql.indexOf("t_tx_demo") + "t_tx_demo".length) }],
+    columns: [{ name: "id", qualifier: "b", span: span(aliasStart + 2, aliasStart + 4) }],
+    unknown_qualifiers: [{ qualifier: "b", span: span(aliasStart + 1, aliasStart + 1) }],
+  };
+
+  const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+    tables: [{ name: "t_tx_demo", type: "table" }],
+    columnsByTable: new Map([["t_tx_demo", [{ name: "id", table: "t_tx_demo" }]]]),
+    sql,
+    databaseType: "mysql",
+  });
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.message),
+    ["Unknown table alias b"],
+  );
+  assert.equal(diagnostics[0]?.severity, "error");
+  // The span covers the alias itself, not the whole `b.id` reference.
+  assert.deepEqual(diagnostics[0]?.span, span(aliasStart + 1, aliasStart + 1));
+});
+
 test("does not flag MySQL DUAL as a missing physical table", () => {
   const analysis: SqlReferenceAnalysis = {
     tables: [{ name: "DUAL", span: span(24, 27) }],

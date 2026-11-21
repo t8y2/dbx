@@ -58,12 +58,15 @@ export interface QueryEditorContextMenuState {
   canExplain?: boolean;
   hasContent?: boolean;
   canDebugPlSql?: boolean;
+  showExecuteScriptFromHere?: boolean;
+  canExecuteScriptFromHere?: boolean;
 }
 
 export interface QueryEditorContextMenuActions {
   debugPlSqlFromContextMenu?: () => void;
   executeFromContextMenu: () => void;
   executeAllFromContextMenu?: () => void;
+  executeScriptFromContextPosition?: () => void;
   executeInNewResultTabFromContextMenu: () => void;
   explainFromContextMenu?: () => void;
   requestPreviewChanges: (sql?: string) => void;
@@ -177,6 +180,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             icon: Play,
             shortcut: shortcuts.executeSql,
           },
+          ...(state.showExecuteScriptFromHere && actions.executeScriptFromContextPosition
+            ? [{ sidebarActionId: "editor.contextMenu.executeScriptFromHere", label: t("editor.contextMenu.executeScriptFromHere"), action: actions.executeScriptFromContextPosition, disabled: !state.canExecuteScriptFromHere, icon: FastForward }]
+            : []),
           ...(actions.executeAllFromContextMenu
             ? [
                 {
@@ -388,6 +394,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       action: actions.openDelimitedListDialog,
       disabled: state.readOnly || !canCopySelectedSql,
       icon: List,
+      shortcut: shortcuts.convertSelectionToDelimited,
     },
     {
       sidebarActionId: "editor.contextMenu.addNextSelectionOccurrence",

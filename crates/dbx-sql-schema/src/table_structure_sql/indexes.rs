@@ -32,6 +32,16 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be dropped from this editor.", original.name));
                 continue;
             }
+            if options.database_type == Some(DatabaseType::Doris) && original.is_unique {
+                // Doris introspection surfaces the table model's `UNIQUE KEY (...)`
+                // clause as a unique index; dropping it is a table-schema change,
+                // not an index drop, so the server rejects `DROP INDEX`.
+                warnings.push(format!(
+                    "The Doris key index \"{}\" is part of the table's UNIQUE KEY and cannot be dropped from this editor.",
+                    original.name
+                ));
+                continue;
+            }
             if is_dameng_constraint_backed(options.database_type, original) {
                 statements.push(build_dameng_drop_constraint_sql(dialect, &table, &original.name));
                 continue;
@@ -552,7 +562,7 @@ pub(super) fn build_drop_index_sql(
     if database_type == Some(DatabaseType::Iris) {
         return format!("DROP INDEX {} ON TABLE {table};", quote_ident(dialect, index_name));
     }
-    if matches!(dialect, StructureDialect::Mysql | StructureDialect::SqlServer) {
+    if matches!(dialect, StructureDialect::Mysql | StructureDialect::Doris | StructureDialect::SqlServer) {
         return format!("DROP INDEX {} ON {table};", quote_ident(dialect, index_name));
     }
     if matches!(
@@ -599,6 +609,23 @@ pub(super) fn build_create_index_statements(
         .collect();
     if name.is_empty() || columns.is_empty() {
         return Vec::new();
+    }
+    if database_type == Some(DatabaseType::Doris) {
+        // Doris has no unique secondary index (uniqueness belongs to the table
+        // model's key columns) and `CREATE INDEX` accepts exactly one column, so
+        // both drafts would be rejected by the server. Refuse them here so every
+        // caller — the structure editor and CREATE TABLE — is covered.
+        if index.is_unique {
+            warnings.push(format!(
+                "Unique indexes are not supported for {} from this editor.",
+                database_label(database_type)
+            ));
+            return Vec::new();
+        }
+        if columns.len() > 1 {
+            warnings.push("Doris supports single-column indexes only from this editor.".to_string());
+            return Vec::new();
+        }
     }
     let oracle_directions = if matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
         if index.original.as_ref().is_some_and(|_| columns.len() != index.columns.len()) {

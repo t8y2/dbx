@@ -659,6 +659,50 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 'GO'\n-- GO\nSELECT 2", "SELECT 3"]);
   });
 
+  it("preserves the SQL Server procedure documentation header in execution ranges", () => {
+    const procedure = `-- =============================================================
+-- 存储过程名 : usp_GetUserById
+-- 功能描述   : 根据用户ID查询单个用户信息
+-- 参数说明   : @UserId  INT  用户唯一标识
+-- 返回值     : 结果集(UserId, UserName, Email, CreatedAt)
+-- 作者       : 张三
+-- 创建日期   : 2026-11-10
+-- 修改记录   : 2026-11-10  张三  初始创建
+-- 备注       : 无
+-- =============================================================
+CREATE PROCEDURE usp_GetUserById
+    @UserId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- 查询用户信息
+    SELECT UserId, UserName, Email, CreatedAt
+    FROM dbo.Users
+    WHERE UserId = @UserId;
+END`;
+    const sql = `SELECT 0;\nGO\n\n${procedure}\nGO\nSELECT 2;`;
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 0", procedure, "SELECT 2"]);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 0", procedure, "SELECT 2"]);
+    for (const marker of ["CREATE PROCEDURE", "SET NOCOUNT", "WHERE UserId"]) {
+      const cursor = sql.indexOf(marker);
+      expect(currentExecutableStatementRange(sql, cursor, "sqlserver")?.sql).toBe(procedure);
+      expect(buildExecutionCandidates(sql, cursor, "sqlserver")[0]?.sql).toBe(procedure);
+    }
+  });
+
+  it.each(["CREATE PROCEDURE", "ALTER PROC", "CREATE OR ALTER PROCEDURE"])("keeps header comments and internal semicolons in a SQL Server %s batch", (operation) => {
+    for (const header of ["-- 作者 : 张三", "/* 根据用户ID查询\nGO\n保留完整注释 */", "/* 说明 /* 内部说明 */\nGO\n保留完整注释 */"]) {
+      const procedure = `${header}\n${operation} dbo.p AS\nBEGIN\n    SELECT 1;\n    SELECT 2;\nEND;`;
+      expect(rangeSqlTexts(executableStatementRanges(`${procedure}\nGO\nSELECT 3;`, "sqlserver"))).toEqual([procedure, "SELECT 3"]);
+    }
+  });
+
+  it("keeps SQL Server nested comment-only batches non-executable", () => {
+    const sql = "/* 说明 /* CREATE PROCEDURE fake AS SELECT 0; */\nGO\n仍是注释 */\nGO\n-- 普通查询说明\nSELECT 1;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["SELECT 1"]);
+  });
+
   it("keeps Oracle PL/SQL blocks together and treats slash lines as delimiters", () => {
     const ranges = splitSqlStatementRanges(oraclePlSqlFixture, "oracle");
     expect(rangeSqlTexts(ranges)).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);

@@ -135,6 +135,9 @@ function getAriaChecked(item: SchemaDiffOptionItem): boolean | "mixed" {
               <span class="select-none">{{ t(item.labelKey) }}</span>
             </button>
           </div>
+          <p v-if="tableStructureOptions.some((item) => item.id === 'compareCharset')" class="mt-2 px-2 text-xs text-muted-foreground">
+            {{ t("schemaDiff.options.compareCharsetHelp") }}
+          </p>
         </section>
 
         <section v-if="behaviorOptions.length" data-section="compare-behavior" class="border-t pt-4">

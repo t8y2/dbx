@@ -78,7 +78,9 @@ test("detects whether table data supports inserted rows", () => {
   assert.equal(canInsertTableRows("postgres"), true);
   assert.equal(canInsertTableRows("mysql"), true);
   assert.equal(canInsertTableRows("hive"), true);
-  assert.equal(canInsertTableRows("jdbc"), false);
+  // Generic JDBC connections allow inserts since #14715; the driver surfaces
+  // anything the backend rejects on save.
+  assert.equal(canInsertTableRows("jdbc"), true);
   assert.equal(canInsertTableRows("clickhouse"), true);
   assert.equal(canInsertTableRows("influxdb"), false);
 });

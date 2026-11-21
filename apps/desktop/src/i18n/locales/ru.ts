@@ -6818,6 +6818,16 @@ export default withEnglishFallback({
     showPackageMembers: "Развернуть элементы пакета",
     packageFunctionAtLine: "Функция {name}, строка {line}",
     packageProcedureAtLine: "Процедура {name}, строка {line}",
+    compileErrorsTitle: "Ошибки компиляции ({count})",
+    compileErrorGoTo: "Перейти к строке {line}, столбцу {column}",
+    compileErrorFixWithAi: "Исправить с помощью ИИ",
+    compileErrorCopy: "Копировать информацию об ошибке",
+    sourceSaveStage: {
+      validating: "Проверка исходного кода",
+      preparing: "Подготовка к сохранению",
+      executing: "Отправка DDL",
+      verifying: "Проверка обратным чтением",
+    },
   },
   postgresForeignTable: {
     tableKind: "Тип таблицы",

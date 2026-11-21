@@ -1366,6 +1366,17 @@ pub struct QueryExecutionOptions {
     /// INVALID. Imports and transfers leave this off, because forward references
     /// legitimately stay invalid until their dependencies exist.
     pub report_compilation_errors: bool,
+    /// Marks a statement DBX issues on its own (never SQL a user typed) whose DBMS_OUTPUT
+    /// nobody reads. The Oracle agent honours it for two shapes only:
+    /// - plain SELECT/WITH dictionary reads: no DBMS_OUTPUT capture, and the session's
+    ///   schema may be reused, which removes three of four round trips per metadata query
+    ///   on a high-latency link;
+    /// - routine definitions (CREATE [OR REPLACE] PROCEDURE/FUNCTION/PACKAGE [BODY]/
+    ///   TRIGGER/TYPE [BODY]): no DBMS_OUTPUT capture only; the schema is still switched
+    ///   and compilation errors are still read back on the same session.
+    ///
+    /// DML, other DDL and PL/SQL blocks always keep the full path even if this is set.
+    pub skip_server_output: bool,
 }
 
 fn validate_query_execution_mode(
@@ -1434,6 +1445,9 @@ pub fn agent_execute_query_params(
     }
     if options.report_compilation_errors {
         params["reportCompilationErrors"] = serde_json::json!(true);
+    }
+    if options.skip_server_output {
+        params["skipServerOutput"] = serde_json::json!(true);
     }
     params
 }
@@ -12923,6 +12937,22 @@ done
         assert_eq!(params["fetchSize"], 250);
         assert_eq!(params["rowOffset"], 100);
         assert_eq!(params["timeoutSecs"], 600);
+    }
+
+    #[test]
+    fn agent_execute_query_params_mark_only_flagged_metadata_reads() {
+        // The Oracle agent skips DBMS_OUTPUT capture and may reuse the session schema only
+        // for flagged reads, so ordinary queries must never carry the flag.
+        let plain =
+            agent_execute_query_params("SELECT 1 FROM DUAL", None, Some("APP"), QueryExecutionOptions::default());
+        assert!(plain.get("skipServerOutput").is_none());
+        let metadata = agent_execute_query_params(
+            "SELECT OWNER FROM ALL_OBJECTS",
+            None,
+            Some("APP"),
+            QueryExecutionOptions { skip_server_output: true, ..Default::default() },
+        );
+        assert_eq!(metadata["skipServerOutput"], serde_json::json!(true));
     }
 
     #[test]

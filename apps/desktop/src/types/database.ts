@@ -1146,6 +1146,16 @@ export interface ObjectStatistics {
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
+/**
+ * 包内某个子程序的身份：打开包源码后用它把光标定位到该子程序上。
+ * `signature` 是数据字典给出的形参文本，仅用于重载消歧。
+ */
+export interface PackageMemberFocus {
+  name: string;
+  kind: "procedure" | "function";
+  signature?: string;
+}
+
 export type RoutineParameterMetadataMode = "IN" | "OUT" | "INOUT" | "RETURN" | "UNKNOWN";
 
 export interface RoutineParameterMetadata {
@@ -2887,6 +2897,39 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /**
+   * 保存对象源码的进行态。保存要先校验、再提交 DDL、最后读回验证，每一步都是一次
+   * 后端往返，合起来能到十几秒；在此期间编辑器原样可见，没有这个字段就完全没有反馈，
+   * 用户只能干等到成功或失败的 toast（issue：保存点下去像没反应）。
+   *
+   * 纯运行期字段，不进 openTabsPersistence 的落盘白名单。
+   */
+  /**
+   * 上一次保存该对象时数据库报回来的编译错误。Oracle 接受 DDL 后对象会变成 INVALID，
+   * 错误带着行列号躺在 readback 里，以前只被拼成一行塞进 toast，一闪而过；留在 tab 上
+   * 才能列出来、点着跳到出错行、交给 AI 修。
+   *
+   * 带上对象标识：tab 可能被复用去看另一个对象，那时旧错误必须丢弃，否则会把错误行
+   * 指到一份无关的源码上。纯运行期字段，不进落盘白名单。
+   */
+  objectSourceCompileErrors?: {
+    name: string;
+    objectType: ObjectSourceKind;
+    messages: { attribute: string; line: number; position: number; text: string }[];
+  };
+  objectSourceSave?: {
+    startedAt: number;
+    /** 当前阶段；`verifying` 覆盖提交 DDL 之后的读回校验。 */
+    stage: "validating" | "preparing" | "executing" | "verifying";
+  };
+  /**
+   * 源码落地后要把光标定位到的包成员（树上点中某个子程序时写入）。编辑区解析出
+   * 它在源码里的偏移、移动光标后立刻清空：这是一次导航意图，不是 tab 的状态，
+   * 留着会让后续的刷新/切回重新跳一次，把用户自己挪过的光标又拽走。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单。
+   */
+  objectSourceFocusMember?: PackageMemberFocus;
   /** Durable TYPE definitions and step records; restored plans require fresh verification. */
   typeManagementDraft?: import("@/lib/table/oracleTypeManagement").OracleTypeManagementDraft;
   /** Explicit edit mode; TYPE source opens read-only and restores read-only. */

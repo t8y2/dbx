@@ -39,7 +39,18 @@ function toZeroBased(value: string | undefined): number | null {
   return parsed - 1;
 }
 
+function parseMysqlSyntaxError(message: string): { excerpt: string; line: number } | null {
+  // The excerpt may itself contain quotes and "at line N". Use the last
+  // closing quote followed by a line number for a MySQL syntax error.
+  const match = /\b(?:ERROR\s+1064|ER_PARSE_ERROR)\b[\s\S]*?\bnear\s+'([\s\S]*)'\s+at\s+line\s+(\d+)\b/i.exec(message);
+  const line = toZeroBased(match?.[2]);
+  return match && line != null ? { excerpt: match[1], line } : null;
+}
+
 export function parseSqlErrorLocation(message: string): SqlErrorLocation | null {
+  const mysqlError = parseMysqlSyntaxError(message);
+  if (mysqlError) return { line: mysqlError.line, column: 0 };
+
   const lineColumn = /\bline\s+(\d+)\s*[,:\s]\s*column\s+(\d+)\b/i.exec(message) ?? /\bline\s+(\d+)\b[\s\S]{0,80}?\bcol(?:umn)?\s+(\d+)\b/i.exec(message);
   if (lineColumn) {
     const line = toZeroBased(lineColumn[1]);
@@ -165,9 +176,8 @@ function oracleMissingObjectRange(sql: string, offset: number): SqlErrorRange | 
 
 function mysqlSyntaxErrorExcerptRange(sql: string, message: string, location: SqlErrorLocation): SqlErrorRange | null {
   // MySQL 1064 gives a line number and an excerpt starting at the offending token.
-  const match = /\b(?:ERROR\s+1064|ER_PARSE_ERROR)\b[\s\S]*?\bnear\s+'([\s\S]*?)'\s+at\s+line\s+(\d+)\b/i.exec(message);
-  const excerpt = match?.[1];
-  if (!excerpt || toZeroBased(match?.[2]) !== location.line) return null;
+  const excerpt = parseMysqlSyntaxError(message)?.excerpt;
+  if (!excerpt) return null;
   const lineStart = lineColumnToOffset(sql, { line: location.line, column: 0 });
   if (lineStart == null) return null;
   const lineEnd = sql.indexOf("\n", lineStart);

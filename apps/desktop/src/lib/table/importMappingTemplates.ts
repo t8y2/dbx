@@ -19,7 +19,7 @@ function defaultStorage(): TemplateStorage | undefined {
 }
 
 function cleanMapping(raw: unknown): Record<string, string> {
-  const mapping: Record<string, string> = {};
+  const mapping: Record<string, string> = Object.create(null);
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return mapping;
   for (const [source, target] of Object.entries(raw)) {
     if (typeof target === "string" && source.trim() && target.trim()) mapping[source] = target;
@@ -76,11 +76,11 @@ export function applyImportMappingTemplate(template: ImportMappingTemplate, sour
     const key = normalizeImportColumnName(source);
     if (!templateTargets.has(key)) templateTargets.set(key, target);
   }
-  const mapping: Record<string, string> = {};
+  const mapping: Record<string, string> = Object.create(null);
   const used = new Set<string>();
   let matched = 0;
   for (const source of sourceColumns) {
-    const wanted = template.mapping[source] ?? templateTargets.get(normalizeImportColumnName(source));
+    const wanted = Object.hasOwn(template.mapping, source) ? template.mapping[source] : templateTargets.get(normalizeImportColumnName(source));
     const target = wanted === undefined ? undefined : targetColumns.includes(wanted) ? wanted : targetsByName.get(normalizeImportColumnName(wanted));
     // Two file columns must not land in the same table column.
     if (target !== undefined && !used.has(target)) {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { IMPORT_SKIP_TARGET } from "@/lib/table/tableImport";
 import { IMPORT_MAPPING_TEMPLATES_STORAGE_KEY, applyImportMappingTemplate, readImportMappingTemplates, withImportMappingTemplate, withoutImportMappingTemplate, writeImportMappingTemplates } from "@/lib/table/importMappingTemplates";
 
 function memoryStorage(initial?: string) {
@@ -62,4 +63,10 @@ describe("importMappingTemplates", () => {
     expect(result.mapping).toEqual({ a: "x", b: "" });
     expect(result.matched).toBe(1);
   });
+});
+
+it("skips source columns without an own mapping even when their names are object methods", () => {
+  const result = applyImportMappingTemplate({ name: "Saved", mapping: { id: "id" } }, ["constructor", "id"], ["id"]);
+  expect(result.mapping["constructor"]).toBe(IMPORT_SKIP_TARGET);
+  expect(result.matched).toBe(1);
 });

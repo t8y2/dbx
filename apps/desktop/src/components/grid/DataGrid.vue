@@ -3006,6 +3006,13 @@ function measureColumnHeaderText(text: string): number | undefined {
 }
 
 let columnFormatterForWidth: ((columnIndex: number) => ColumnFormatterConfig | undefined) | undefined;
+const groupedNumberDisplay: ColumnFormatterConfig = { kind: "number", useGrouping: true };
+
+function displayColumnFormatter(columnIndex: number, configured: ColumnFormatterConfig | undefined): ColumnFormatterConfig | undefined {
+  if (configured || !settingsStore.editorSettings.globalNumberGrouping) return configured;
+  const kind = allColumnTypeVisualKinds.value[columnIndex];
+  return kind === "integer" || kind === "numeric" ? groupedNumberDisplay : undefined;
+}
 const gridViewportWidth = ref(0);
 
 function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellValue {
@@ -6358,7 +6365,7 @@ const {
   formatForeignKeyCellDisplay,
   toast,
 });
-columnFormatterForWidth = columnFormatter;
+columnFormatterForWidth = (columnIndex) => displayColumnFormatter(columnIndex, columnFormatter(columnIndex));
 
 initColumnWidths();
 watch([visibleColumnIndexes, () => renderedColumnWidths.value.length], () => scheduleColumnLayoutRefresh());
@@ -8604,7 +8611,8 @@ const CELL_FORMAT_CACHE_PRUNE_COUNT = 5_000;
 const CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH = 512;
 
 const resolvedColumnFormatters = computed(() => props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)));
-const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
+const displayColumnFormatters = computed(() => resolvedColumnFormatters.value.map((formatter, index) => displayColumnFormatter(index, formatter)));
+const columnFormatterSignatures = computed(() => displayColumnFormatters.value.map(formatterSignature));
 // BSON dates carry their type with each value. Mixed columns and subdocuments
 // may contain dates even when the column itself has no temporal type.
 const mongoDateDisplayFormatter = computed(() => {
@@ -8646,7 +8654,7 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 }
 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number, limitDisplay = true): string {
-  const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
+  const formatter = columnIndex === undefined ? undefined : displayColumnFormatters.value[columnIndex];
   if (usesMongoDocumentGridValues.value) {
     const documentGridText = mongoDocumentGridDisplayText(value, formatter ?? mongoDateDisplayFormatter.value);
     if (documentGridText !== undefined) return documentGridText;

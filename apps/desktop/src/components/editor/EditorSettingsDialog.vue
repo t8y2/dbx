@@ -1096,6 +1096,7 @@ const editCsvWithoutBom = ref(settingsStore.editorSettings.csvWithoutBom);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editQueryResultExportFileNameSource = ref<QueryResultExportFileNameSource>(settingsStore.editorSettings.queryResultExportFileNameSource);
+const editGlobalNumberGrouping = ref(settingsStore.editorSettings.globalNumberGrouping);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
@@ -1506,6 +1507,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     queryResultExportFileNameSource: editQueryResultExportFileNameSource.value,
+    globalNumberGrouping: editGlobalNumberGrouping.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
@@ -2232,6 +2234,7 @@ function syncEditorSettingsDraftFromStore() {
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editQueryResultExportFileNameSource.value = settingsStore.editorSettings.queryResultExportFileNameSource;
+  editGlobalNumberGrouping.value = settingsStore.editorSettings.globalNumberGrouping;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
@@ -2429,6 +2432,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   exportRowLimitEnabled: editExportRowLimitEnabled,
   exportRowLimit: editExportRowLimit,
   queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled,
+  globalNumberGrouping: editGlobalNumberGrouping,
   globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat,
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
@@ -3098,6 +3102,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
+    editGlobalNumberGrouping.value = DEFAULT_EDITOR_SETTINGS.globalNumberGrouping;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -3295,6 +3300,7 @@ function resetAllDefaults() {
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
+  editGlobalNumberGrouping.value = DEFAULT_EDITOR_SETTINGS.globalNumberGrouping;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -11216,6 +11222,14 @@ onUnmounted(() => {
 
                 <Separator />
               </template>
+
+              <div data-settings-search-id="global-number-grouping" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="settingsSearchTargetClass('global-number-grouping')">
+                <div class="min-w-0 space-y-1">
+                  <Label for="global-number-grouping">{{ t("settings.globalNumberGrouping") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.globalNumberGroupingDescription") }}</p>
+                </div>
+                <Switch id="global-number-grouping" v-model="editGlobalNumberGrouping" />
+              </div>
 
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">

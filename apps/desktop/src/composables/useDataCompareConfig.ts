@@ -27,6 +27,10 @@ export interface DataCompareConfig {
   detailPreviewLimit: string;
   /** Explicit match columns per source table; absent entry means "use the primary key". */
   keyColumnsByTable: Record<string, string[]>;
+  /** Columns ignored in every table of the compare (value differences tolerated). */
+  globalIgnoredColumns: string[];
+  /** Additional ignored columns per source table, merged with the global list. */
+  ignoredColumnsByTable: Record<string, string[]>;
 }
 
 export interface DataCompareConfigSnapshot {
@@ -40,6 +44,8 @@ export interface DataCompareConfigSnapshot {
   targetTable: string;
   detailPreviewLimit: string;
   keyColumnsByTable: Record<string, string[]>;
+  globalIgnoredColumns: string[];
+  ignoredColumnsByTable: Record<string, string[]>;
 }
 
 const STORAGE_KEY = "dbx-data-compare-configs";
@@ -60,6 +66,21 @@ function sanitizeKeyColumns(value: unknown): Record<string, string[]> {
     // Keep an explicitly empty array: it means "the user cleared the match
     // columns" and must not silently fall back to the primary key.
     if (Array.isArray(columns)) result[table] = sanitizeStringArray(columns);
+  }
+  return result;
+}
+
+function sanitizeIgnoredColumnsByTable(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Record<string, string[]> = {};
+  for (const [table, columns] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof table !== "string" || !table) continue;
+    // Unlike match columns, an empty ignore list means the same as an absent
+    // one, so empty arrays are dropped to keep stored configs lean.
+    if (Array.isArray(columns)) {
+      const sanitized = sanitizeStringArray(columns);
+      if (sanitized.length > 0) result[table] = sanitized;
+    }
   }
   return result;
 }
@@ -87,6 +108,8 @@ function sanitizeConfig(raw: unknown): DataCompareConfig | undefined {
     targetTable: typeof item.targetTable === "string" ? item.targetTable : "",
     detailPreviewLimit: typeof item.detailPreviewLimit === "string" ? item.detailPreviewLimit : "",
     keyColumnsByTable: sanitizeKeyColumns(item.keyColumnsByTable),
+    globalIgnoredColumns: sanitizeStringArray(item.globalIgnoredColumns),
+    ignoredColumnsByTable: sanitizeIgnoredColumnsByTable(item.ignoredColumnsByTable),
   };
 }
 
@@ -132,6 +155,8 @@ export function useDataCompareConfig() {
       ...snapshot,
       selectedSourceTables: [...snapshot.selectedSourceTables],
       keyColumnsByTable: sanitizeKeyColumns(snapshot.keyColumnsByTable),
+      globalIgnoredColumns: sanitizeStringArray(snapshot.globalIgnoredColumns),
+      ignoredColumnsByTable: sanitizeIgnoredColumnsByTable(snapshot.ignoredColumnsByTable),
       id: uuid(),
       name: uniqueName(name),
       createdAt: now,
@@ -151,6 +176,8 @@ export function useDataCompareConfig() {
       ...patch,
       ...(patch.selectedSourceTables ? { selectedSourceTables: [...patch.selectedSourceTables] } : {}),
       ...(patch.keyColumnsByTable ? { keyColumnsByTable: sanitizeKeyColumns(patch.keyColumnsByTable) } : {}),
+      ...(patch.globalIgnoredColumns ? { globalIgnoredColumns: sanitizeStringArray(patch.globalIgnoredColumns) } : {}),
+      ...(patch.ignoredColumnsByTable ? { ignoredColumnsByTable: sanitizeIgnoredColumnsByTable(patch.ignoredColumnsByTable) } : {}),
       updatedAt: Date.now(),
     };
     configs.value = configs.value.map((config, position) => (position === index ? next : config));
@@ -184,6 +211,8 @@ export function useDataCompareConfig() {
       updatedAt: now,
       selectedSourceTables: [...source.selectedSourceTables],
       keyColumnsByTable: sanitizeKeyColumns(source.keyColumnsByTable),
+      globalIgnoredColumns: sanitizeStringArray(source.globalIgnoredColumns),
+      ignoredColumnsByTable: sanitizeIgnoredColumnsByTable(source.ignoredColumnsByTable),
     };
     configs.value = [copy, ...configs.value].slice(0, MAX_CONFIGS);
     activeConfigId.value = copy.id;

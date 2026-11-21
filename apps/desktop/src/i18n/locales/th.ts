@@ -2616,6 +2616,7 @@ export default withEnglishFallback({
       findReplace: "ค้นหา/แทนที่",
       deleteEmptyLines: "ลบบรรทัดว่าง",
       selectAll: "เลือกทั้งหมด",
+      addSnippet: "เพิ่มสแนปเป็ต",
       executeScriptFromHere: "เรียกใช้สคริปต์ SQL จากที่นี่",
     },
     delimitedList: {
@@ -2677,6 +2678,10 @@ export default withEnglishFallback({
       allStatements: "SQL ทั้งหมด",
       currentCommand: "คำสั่งปัจจุบัน",
       allCommands: "คำสั่งทั้งหมด",
+    },
+    snippetQuickAdd: {
+      prefixUnique: "คีย์ทริกเกอร์ต้องไม่ซ้ำกัน",
+      saved: "เพิ่มสแนปเป็ต {label} แล้ว",
     },
     fullscreenResultsPane: "แสดงผลลัพธ์แบบเต็มหน้าจอ",
     exitFullscreenResultsPane: "ออกจากโหมดเต็มหน้าจอผลลัพธ์",

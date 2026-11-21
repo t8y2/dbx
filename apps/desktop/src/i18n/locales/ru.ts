@@ -2465,6 +2465,7 @@ export default withEnglishFallback({
       findReplace: "Найти/Заменить",
       deleteEmptyLines: "Удалить пустые строки",
       selectAll: "Выбрать всё",
+      addSnippet: "Добавить сниппет",
       executeScriptFromHere: "Выполнить SQL-скрипт отсюда",
     },
     delimitedList: {
@@ -2527,6 +2528,10 @@ export default withEnglishFallback({
       allStatements: "Весь SQL",
       currentCommand: "Текущая команда",
       allCommands: "Все команды",
+    },
+    snippetQuickAdd: {
+      prefixUnique: "Триггерная клавиша должна быть уникальной.",
+      saved: "Сниппет {label} добавлен",
     },
     fullscreenResultsPane: "Показать результаты на весь экран",
     exitFullscreenResultsPane: "Выйти из полноэкранного режима результатов",

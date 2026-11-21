@@ -2458,6 +2458,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Incolla e ripristina SQL sorgente",
       pasteClipboardReadFailed: "Impossibile leggere gli appunti: {message}",
       convertNamingStyle: "Cambia stile di denominazione",
+      addSnippet: "Aggiungi snippet",
       executeScriptFromHere: "Esegui script SQL da qui",
     },
     bookmarks: {
@@ -2528,6 +2529,10 @@ export default withEnglishFallback({
     previewChangesComment: "Anteprima modifiche (prova a secco): istruzione {operation}",
     previewChangesFailed: "Anteprima modifiche non riuscita.",
     previewChangesNoStatement: "Seleziona o posiziona il cursore su un'istruzione UPDATE / INSERT / DELETE per visualizzare l'anteprima delle modifiche.",
+    snippetQuickAdd: {
+      prefixUnique: "Il tasto di attivazione deve essere univoco.",
+      saved: "Snippet aggiunto {label}",
+    },
     fullscreenResultsPane: "Visualizza i risultati a schermo intero",
     exitFullscreenResultsPane: "Esci dallo schermo intero dei risultati",
     executeScriptBoundaryMismatch: "Questa posizione dipende dal delimitatore SQL precedente o dal confine del batch. Avvia l'esecuzione dalla riga del delimitatore oppure seleziona l'intero script da eseguire.",

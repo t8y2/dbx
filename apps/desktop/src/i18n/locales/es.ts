@@ -2548,6 +2548,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Pegar y restaurar SQL de origen",
       pasteClipboardReadFailed: "Error al leer el portapapeles: {message}",
       convertNamingStyle: "Cambiar estilo de nomenclatura",
+      addSnippet: "Agregar fragmento",
       executeScriptFromHere: "Ejecutar script SQL desde aquí",
     },
     bookmarks: {
@@ -2618,6 +2619,10 @@ export default withEnglishFallback({
     previewChangesComment: "Previsualización de cambios (simulación): sentencia {operation}",
     previewChangesFailed: "Error al previsualizar los cambios.",
     previewChangesNoStatement: "Seleccione o coloque el cursor sobre una sentencia UPDATE / INSERT / DELETE para previsualizar los cambios.",
+    snippetQuickAdd: {
+      prefixUnique: "La clave de activación debe ser única.",
+      saved: "Fragmento {label} agregado",
+    },
     fullscreenResultsPane: "Mostrar resultados en pantalla completa",
     exitFullscreenResultsPane: "Salir de resultados en pantalla completa",
     executeScriptBoundaryMismatch: "Esta ubicación depende del delimitador SQL anterior o del límite de lote. Ejecute desde la línea donde se encuentra el delimitador, o seleccione el script completo para ejecutarlo.",

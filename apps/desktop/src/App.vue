@@ -107,6 +107,7 @@ import {
   type SqlObjectNavigationContext,
   type SqlObjectNavigationTarget,
 } from "@/lib/sql/sqlNavigation";
+import { resolveTableClickAction } from "@/lib/sql/tableClickNavigation";
 import { isObjectDependencySection, type ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
 import { buildEditableObjectSource } from "@/lib/table/objectSourceEditor";
 import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
@@ -3723,10 +3724,13 @@ async function onClickTable(table: SqlObjectNavigationTarget, context?: SqlObjec
   }
   const target = tableTargetFromActiveTab(table, context);
   if (!target) return;
-  const objectType = sqlObjectNavigationSourceKind(table);
-  if (objectType) {
-    // Definition navigation for views must not run the view query, which may be expensive or have side effects upstream.
-    queryEditorDdlTarget.value = { ...target, objectType };
+  const action = resolveTableClickAction(sqlObjectNavigationSourceKind(table), settingsStore.editorSettings.clickTableNavigationTarget);
+  if (action.kind === "dialog") {
+    // Definition navigation for routines, sequences and synonyms; views only open their
+    // definition while the navigation setting is "ddl". A view falls back to its data view
+    // when the user explicitly disabled that setting, instead of running the (possibly
+    // expensive) view query behind their back.
+    queryEditorDdlTarget.value = { ...target, objectType: action.objectType };
     showQueryEditorDdlDialog.value = true;
     return;
   }

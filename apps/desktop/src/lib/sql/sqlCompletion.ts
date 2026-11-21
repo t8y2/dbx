@@ -7521,6 +7521,9 @@ export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[],
   return buildSnippetItems(prefix, snippets, keywordCase, databaseType);
 }
 
+/** Match scores at or above this are prefix-tier or better; pinyin substring and subsequence matches stay below it (see computeMatchScore). */
+const SNIPPET_BASE_BOOST_MIN_MATCH_SCORE = 1900;
+
 function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType, matchMode: SqlCompletionMatchMode = "fuzzy"): SqlCompletionItem[] {
   if (!prefix) return [];
   return snippets
@@ -7538,7 +7541,11 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       // When the user types past the snippet prefix (e.g. "sele" vs prefix "sel"),
       // they are likely typing the actual keyword — reduce the base boost so
       // the real keyword can rank higher.
-      const baseBoost = matchesByPrefix ? 4000 : 0;
+      //
+      // Only a literal, initials or pinyin-prefix match earns the base boost. A loose
+      // match (e.g. `wh` hitting the pinyin initials of `企微活码数据`) must not
+      // outrank a real keyword such as WHERE (#15292).
+      const baseBoost = matchesByPrefix && boostByPrefix >= SNIPPET_BASE_BOOST_MIN_MATCH_SCORE ? 4000 : 0;
       // Placeholder replacement runs on the original (UPPER-case) body first,
       // then keyword casing is applied to both variants uniformly.
       const resolvedBody = resolveSqlSnippetBodyForDatabase(snippet, databaseType);

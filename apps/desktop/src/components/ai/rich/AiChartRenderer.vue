@@ -2,9 +2,6 @@
 import { computed, ref } from "vue";
 import { Check, Copy, Download } from "@lucide/vue";
 import { use } from "echarts/core";
-import { CanvasRenderer } from "echarts/renderers";
-import { LineChart, BarChart, PieChart } from "echarts/charts";
-import { AriaComponent, DataZoomComponent, GridComponent, TooltipComponent, LegendComponent, TitleComponent } from "echarts/components";
 import VChart from "vue-echarts";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
@@ -13,10 +10,13 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useI18n } from "vue-i18n";
 import type { AiChartSpec } from "@/lib/ai/richContent/aiChartSpec";
 import { buildAiChartOption } from "@/lib/ai/richContent/aiChartOption";
+import { AI_CHART_ECHARTS_MODULES } from "@/lib/ai/richContent/aiChartEchartsModules";
 
 // Module-level `use([...])` is idempotent, so re-importing this component
-// alongside QueryChart.vue is safe.
-use([CanvasRenderer, LineChart, BarChart, PieChart, AriaComponent, DataZoomComponent, GridComponent, TooltipComponent, LegendComponent, TitleComponent]);
+// alongside QueryChart.vue is safe. The module list lives in
+// `aiChartEchartsModules.ts` so the "which modules does the renderer need" answer
+// has exactly one home — see that file for the two silent-failure traps.
+use([...AI_CHART_ECHARTS_MODULES]);
 
 const props = defineProps<{
   spec: AiChartSpec;

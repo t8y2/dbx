@@ -2442,6 +2442,7 @@ export default withEnglishFallback({
     dismiss: "Kapat",
     addRow: "Satır Ekle",
     insertMultipleRows: "Birden Çok Satır Ekle…",
+    pasteAsNewRowsAwaitingPaste: "Bu tarayıcı panoyu doğrudan okumaya izin vermiyor. Yeni satır olarak yapıştırmak için tabloda Ctrl+V (macOS'te ⌘V) tuşlarına basın.",
     insertRowsTitle: "Birden Çok Satır Ekle",
     insertRowsDescription: "Bu kadar kaydedilmemiş taslak satır oluşturun. Boş satırlar kaydedilirken yok sayılır; kaydettikten sonra görüntülenme sırası geçerli sorguyu izler.",
     insertRowCountLabel: "Satır sayısı",

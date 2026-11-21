@@ -3171,6 +3171,7 @@ export default withEnglishFallback({
     addRow: "Aggiungi Riga",
     insertMultipleRows: "Inserisci più righe…",
     pasteAsNewRows: "Incolla come nuove righe",
+    pasteAsNewRowsAwaitingPaste: "Questo browser non consente di leggere gli appunti direttamente. Premi Ctrl+V (⌘V su macOS) nella tabella per incollare come nuove righe.",
     insertRowsTitle: "Inserisci più righe",
     insertRowsDescription: "Crea questo numero di righe di bozza non salvate. Le righe vuote vengono ignorate al salvataggio; dopo il salvataggio, l'ordine di visualizzazione segue la query corrente.",
     insertRowCountLabel: "Numero di righe",
@@ -6063,6 +6064,8 @@ export default withEnglishFallback({
     showPackageMembers: "Espandi membri del package",
     packageFunctionAtLine: "Funzione {name}, riga {line}",
     packageProcedureAtLine: "Procedura {name}, riga {line}",
+    selectedObjects: "{count} oggetti selezionati",
+    dropPackageBodyHint: "Quando si elimina la specifica del package, viene eliminato anche il corpo del package esistente.",
   },
   postgresForeignTable: {
     tableKind: "Tipo di tabella",
@@ -7740,7 +7743,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Eventi",
     objectDataOnlyDisabled: "Gli oggetti non di tabella non vengono trasferiti nella modalità solo dati",
     objectCrossFamilyDisabled: "Il trasferimento tra database supporta solo sequenze (DDL semplice; i corpi delle viste non vengono tradotti)",
-    xuguPairOnly: "Direzioni supportate: da Xugu a Xugu o da MySQL a Xugu (solo tabelle e dati).",
+    xuguPairOnly: "Direzioni supportate: da Xugu a Xugu o da MySQL / Oracle a Xugu (solo tabelle e dati).",
     xuguAppendOverwriteOnly: "La prima fase del trasferimento Xugu supporta solo l'aggiunta e la sovrascrittura; upsert e ricostruzione non sono ancora supportati.",
     xuguPreserveTableNames: "Il trasferimento della struttura Xugu richiede di mantenere maiuscole e minuscole dei nomi delle tabelle di origine per evitare riferimenti errati alle chiavi esterne.",
     crossFamilyViewHint: "Trasferimento di viste tra database: selezionare anche le tabelle da cui la vista dipende, o assicurarsi che esistano già nel database di destinazione",
@@ -10816,6 +10819,9 @@ export default withEnglishFallback({
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
     toolbarGroup_left: "Barra delle azioni principale e menu Altro",
     toolbarPinItem: "Fissa {item} alla barra degli strumenti",
+    completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
+    completionAutoActivationDelayDescription:
+      "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

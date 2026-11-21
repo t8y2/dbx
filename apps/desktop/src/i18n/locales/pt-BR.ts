@@ -3170,6 +3170,7 @@ export default withEnglishFallback({
     addRow: "Adicionar Linha",
     insertMultipleRows: "Inserir várias linhas…",
     pasteAsNewRows: "Colar como novas linhas",
+    pasteAsNewRowsAwaitingPaste: "Este navegador não permite ler a área de transferência diretamente. Pressione Ctrl+V (⌘V no macOS) na tabela para colar como novas linhas.",
     insertRowsTitle: "Inserir várias linhas",
     insertRowsDescription: "Cria este número de linhas de rascunho não salvas. Linhas vazias são ignoradas ao salvar; após salvar, a ordem de exibição segue a consulta atual.",
     insertRowCountLabel: "Número de linhas",
@@ -6061,6 +6062,8 @@ export default withEnglishFallback({
     showPackageMembers: "Expandir membros do pacote",
     packageFunctionAtLine: "Função {name}, linha {line}",
     packageProcedureAtLine: "Procedimento {name}, linha {line}",
+    selectedObjects: "{count} objetos selecionados",
+    dropPackageBodyHint: "Ao excluir a especificação do pacote, o corpo do pacote existente também será excluído.",
   },
   postgresForeignTable: {
     tableKind: "Tipo de tabela",
@@ -7738,7 +7741,7 @@ export default withEnglishFallback({
     objectTypeEvent: "Eventos",
     objectDataOnlyDisabled: "Objetos que não são tabelas não são transferidos no modo apenas dados",
     objectCrossFamilyDisabled: "A transferência entre bancos suporta apenas sequências (DDL simples; corpos de views não são traduzidos)",
-    xuguPairOnly: "Direções compatíveis: Xugu para Xugu ou MySQL para Xugu (somente tabelas e dados).",
+    xuguPairOnly: "Direções compatíveis: Xugu para Xugu ou MySQL / Oracle para Xugu (somente tabelas e dados).",
     xuguAppendOverwriteOnly: "A primeira fase da transferência do Xugu aceita apenas inclusão e sobrescrita; upsert e reconstrução ainda não são compatíveis.",
     xuguPreserveTableNames: "A transferência de estrutura do Xugu exige preservar maiúsculas e minúsculas nos nomes das tabelas de origem para evitar referências incorretas de chaves estrangeiras.",
     crossFamilyViewHint: "Transferência de views entre bancos: selecione também as tabelas das quais a view depende ou garanta que elas já existam no banco de destino",
@@ -10811,6 +10814,9 @@ export default withEnglishFallback({
     sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
     toolbarGroup_left: "Barra de ações principal e menu Mais",
     toolbarPinItem: "Fixar {item} na barra de ferramentas",
+    completionAutoActivationDelay: "Atraso para ativação automática do autocompletar (milissegundos)",
+    completionAutoActivationDelayDescription:
+      "Tempo de espera após a digitação para exibir as sugestões de autocompletar, padrão de 500 milissegundos; aumentar esse valor pode evitar que o autocompletar apareça com frequência durante a digitação contínua e interfira na edição; 0 significa exibir imediatamente.",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

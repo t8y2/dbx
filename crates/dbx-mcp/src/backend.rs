@@ -4209,6 +4209,7 @@ mod tests {
                     timestamp: None,
                     end_timestamp: None,
                     sort_order: None,
+                    search_query: None,
                 },
             )
             .await

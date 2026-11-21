@@ -78,6 +78,7 @@ import {
   connectionGroupDestinationRows,
   connectionGroupIdForSelection,
   connectionSidebarSearchAliases,
+  findEntryParentGroupId,
   type DropPosition,
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
@@ -234,6 +235,7 @@ import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
 import { clearMetadataRuntimeCacheForConnection, clearMetadataRuntimeCacheForDatabase } from "@/lib/metadata/metadataRuntimeCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
+import { retryCompletionMetadata } from "@/lib/metadata/completionMetadataRetry";
 import { buildCustomTypeTreeChildren } from "@/lib/sidebar/customTypeTree";
 import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/treeNodeLoadHandle";
 import { buildXuguTablespaceChildren } from "@/lib/sidebar/xuguTablespaces";
@@ -9616,7 +9618,18 @@ export const useConnectionStore = defineStore("connection", () => {
   function withCompletionInFlight<T>(key: string, load: () => Promise<T>, limit?: { scope: string; kind: string }): Promise<T> {
     const existing = completionInFlight.get(key) as Promise<T> | undefined;
     if (existing) return existing;
-    const promise = (limit ? completionMetadataLimiter.run(limit.scope, limit.kind, load) : load()).finally(() => {
+    const run = () => (limit ? completionMetadataLimiter.run(limit.scope, limit.kind, load) : load());
+    // A busy metadata pool is transient: retry the read instead of returning an
+    // empty candidate list, which would leave completion dead until the next
+    // keystroke (#14075). Non-busy failures still surface on the first attempt.
+    const promise = (
+      limit
+        ? retryCompletionMetadata(run, {
+            kind: limit.kind,
+            onRetry: (event) => console.debug("[DBX][completion-metadata:retry]", { ...event, scope: limit.scope }),
+          })
+        : run()
+    ).finally(() => {
       if (completionInFlight.get(key) === promise) completionInFlight.delete(key);
     });
     completionInFlight.set(key, promise);
@@ -12522,6 +12535,9 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     groupIdForConnection(connectionId: string): string | null {
       return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;
+    },
+    parentGroupIdForSidebarEntry(entryId: string): string | null {
+      return findEntryParentGroupId(sidebarLayout.value.order, entryId) ?? null;
     },
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
       markSidebarLayoutPlacementsEdited([draggedId]);

@@ -187,7 +187,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return (extractor === "sql-select" || extractor === "where-clause") && (options.contextCell.value?.col ?? -1) >= 0;
   }
 
-  function buildRequest(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): DataGridExtractRequest | null {
+  function buildRequest(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, fullResult?: QueryResult): DataGridExtractRequest | null {
     const visibleIndexes = options.visibleColumnIndexes.value;
     const sourceNames = options.allSourceColumns.value;
     const fullColumns = options.allColumns.value;
@@ -226,7 +226,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // that a right-click creates, just like keyboard copy does.
     const requiresFullRowContext = extractor === "sql-inserts" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
 
-    if (contextPredicateCell) {
+    if (fullResult) {
+      sourceRows = fullResult.rows;
+      selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
+      selectionKind = "rows";
+    } else if (contextPredicateCell) {
       const item = fullItemsById.get(contextPredicateCell.rowId);
       const sourceIndex = visibleIndexes[contextPredicateCell.col];
       if (item && !item.isDraft && sourceIndex !== undefined) {
@@ -286,7 +290,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }
     const compactIndexBySource = new Map(requiredSourceIndexes.map((sourceIndex, compactIndex) => [sourceIndex, compactIndex]));
     const columnTypesBySource = new Map(visibleIndexes.map((sourceIndex, visibleIndex) => [sourceIndex, options.columnTypes.value?.[visibleIndex]]));
-    const columnType = (sourceIndex: number) => options.allColumnTypes?.value?.[sourceIndex] ?? columnTypesBySource.get(sourceIndex);
+    const columnType = (sourceIndex: number) => fullResult?.column_types?.[sourceIndex] ?? options.allColumnTypes?.value?.[sourceIndex] ?? columnTypesBySource.get(sourceIndex);
     const columns = requiredSourceIndexes.map((sourceIndex, compactIndex) => {
       const description = options.allColumnComments?.value?.[sourceIndex] ?? options.columnComments?.value?.[visibleIndexes.indexOf(sourceIndex)];
       return {
@@ -336,14 +340,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
             options.includeDatabaseName?.value === true || extractorOptionValues.sql.includeDatabaseName === true,
           )
         : undefined;
-    const spatialColumns = options.spatialColumns?.value?.flatMap((column) => {
+    const spatialColumns = (fullResult ? fullResult.spatial_columns : options.spatialColumns?.value)?.flatMap((column) => {
       const compactIndex = compactIndexBySource.get(column.column_index);
       return compactIndex === undefined ? [] : [{ column_index: compactIndex, srid: column.srid }];
     });
-    const allSpatialValues = options.spatialValues?.value;
+    const allSpatialValues = fullResult ? fullResult.spatial_values : options.spatialValues?.value;
     const spatialValues = allSpatialValues?.length
-      ? sourceItems.map((item, rowIndex) => {
-          const rowIdx = item.sourceIndex ?? rowIndex;
+      ? sourceRows.map((_, rowIndex) => {
+          const rowIdx = sourceItems[rowIndex]?.sourceIndex ?? rowIndex;
           return requiredSourceIndexes.map((sourceIndex) => allSpatialValues[rowIdx]?.[sourceIndex] ?? null);
         })
       : undefined;
@@ -538,12 +542,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { text, mimeType: "application/javascript", fileExtension: "js", rowCount: rowLimit ?? request.rows.length, columnCount: request.selectedColumnIndexes.length, warnings: undefined, omittedColumns: undefined };
   }
 
-  async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number): Promise<ResolvedDataGridExtraction | null> {
+  async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number, fullResult?: QueryResult): Promise<ResolvedDataGridExtraction | null> {
     if (options.allowExtractor?.(extractor) === false) return null;
-    const initialRequest = buildRequest(extractor, extractorOptions);
+    const initialRequest = buildRequest(extractor, extractorOptions, fullResult);
     if (!initialRequest) return null;
     const rowLimit = maxRows === undefined ? undefined : Math.min(initialRequest.rows.length, maxRows);
-    const request = await resolveRequestSourceValues(initialRequest, rowLimit);
+    const request = fullResult ? initialRequest : await resolveRequestSourceValues(initialRequest, rowLimit);
     const mongoResult = await resolveMongoExtractorResult(extractor, request, rowLimit);
     const result = mongoResult ?? (await api.extractDataGridSelection(request));
     if (!result.text && !extractorAllowsEmptyOutput(extractor)) return null;

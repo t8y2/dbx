@@ -218,6 +218,7 @@ import {
   dataGridColumnDetailTsv,
   dataGridRowDetailJson,
   dataGridRowDetailTsv,
+  resolveCellDetailOpenTarget,
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
@@ -534,7 +535,9 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const cellDetailButtonEnabled = computed(() => settingsStore.editorSettings.dataGridCellDetailButtonVisible);
-const cellDetailDialogDefault = computed(() => settingsStore.editorSettings.dataGridCellDetailDialogDefault);
+const cellDetailPanelEnabled = computed(() => settingsStore.editorSettings.cellDetailPanelEnabled);
+// #15365: 面板开关关闭时，详情按钮与菜单改用弹窗展示，不再固定占用侧栏/底部空间。
+const cellDetailDialogDefault = computed(() => resolveCellDetailOpenTarget(cellDetailPanelEnabled.value, settingsStore.editorSettings.dataGridCellDetailDialogDefault) === "dialog");
 const dataGridCrosshairHighlight = computed(() => settingsStore.editorSettings.dataGridCrosshairHighlight);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 // The DOM rows use a 1.2 line height, eight pixels of padding and a border.
@@ -6991,7 +6994,7 @@ function restoreDetailsAfterRefresh(details: NonNullable<typeof preservedDetails
   // the freshly fetched row and clobber the draft the user is still editing.
   if (!details.sideCellHasPendingDraft) {
     const sideCell = restoreDetailCellAfterRefresh(details.sideCell);
-    if (sideCell) {
+    if (sideCell && cellDetailPanelEnabled.value) {
       detailCell.value = sideCell;
       showCellDetail.value = true;
       hydrateCellDetailTarget(sideCell);

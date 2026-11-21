@@ -282,6 +282,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridAutoTransposeSingleRow",
     "dataGridCellDetailButtonVisible",
     "dataGridCellDetailDialogDefault",
+    "cellDetailPanelEnabled",
     "dataGridCrosshairHighlight",
     "dataGridCrosshairRowBg",
     "dataGridCrosshairColBg",

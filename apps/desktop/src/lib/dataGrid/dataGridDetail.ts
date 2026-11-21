@@ -478,3 +478,12 @@ function previewText(text: string): string {
   if (text.length <= CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH) return text;
   return text.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH);
 }
+
+/**
+ * Decides how a cell-detail request opens (#15365). The docked panel is the
+ * default; the explicit dialog-default preference or a disabled panel
+ * (#15365 switch) routes the same request to the modal dialog instead.
+ */
+export function resolveCellDetailOpenTarget(panelEnabled: boolean, dialogDefault: boolean): "panel" | "dialog" {
+  return panelEnabled && !dialogDefault ? "panel" : "dialog";
+}

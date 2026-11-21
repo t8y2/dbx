@@ -2807,6 +2807,7 @@ export default withEnglishFallback({
     addRow: "Dodaj wiersz",
     insertMultipleRows: "Wstaw wiele wierszy…",
     pasteAsNewRows: "Wklej jako nowe wiersze",
+    pasteAsNewRowsAwaitingPaste: "Ta przeglądarka nie pozwala odczytać schowka bezpośrednio. Naciśnij Ctrl+V (⌘V w macOS) w tabeli, aby wkleić jako nowe wiersze.",
     insertRowsTitle: "Wstaw wiele wierszy",
     insertRowsDescription: "Utwórz tyle niezapisanych wierszy roboczych. Puste wiersze są pomijane przy zapisie; kolejność po zapisie zależy od bieżącego zapytania.",
     insertRowCountLabel: "Liczba wierszy",

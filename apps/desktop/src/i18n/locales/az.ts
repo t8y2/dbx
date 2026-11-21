@@ -2448,6 +2448,7 @@ export default withEnglishFallback({
     dismiss: "Bağla",
     addRow: "Sətir əlavə et",
     insertMultipleRows: "Bir neçə sətir əlavə et…",
+    pasteAsNewRowsAwaitingPaste: "Bu brauzer buferi birbaşa oxumağa icazə vermir. Yeni sətir kimi yapışdırmaq üçün cədvəldə Ctrl+V (macOS-də ⌘V) basın.",
     insertRowsTitle: "Bir neçə sətir əlavə et",
     insertRowsDescription: "Bu sayda yadda saxlanmamış qaralama sətir yaradın. Yadda saxlayarkən boş sətirlər nəzərə alınmır; yadda saxlandıqdan sonra göstərilmə sırası cari sorğuya uyğun olur.",
     insertRowCountLabel: "Sətir sayı",

@@ -3150,6 +3150,7 @@ export default withEnglishFallback({
     addRow: "新增資料",
     insertMultipleRows: "插入多行…",
     pasteAsNewRows: "貼上為新列",
+    pasteAsNewRowsAwaitingPaste: "目前瀏覽器不允許直接讀取剪貼簿。請在表格中按 Ctrl+V（macOS 為 ⌘V）貼上為新列。",
     insertRowsTitle: "新增多行",
     insertRowsDescription: "建立指定數量的未儲存草稿列。儲存時未填寫的空白列會被忽略；儲存後的顯示位置由目前查詢排序決定。",
     insertRowCountLabel: "列數",

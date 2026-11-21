@@ -2749,6 +2749,7 @@ export default withEnglishFallback({
     dismiss: "Tutup",
     addRow: "Tambah Baris",
     insertMultipleRows: "Sisipkan Beberapa Baris…",
+    pasteAsNewRowsAwaitingPaste: "Browser ini tidak mengizinkan pembacaan papan klip langsung. Tekan Ctrl+V (⌘V di macOS) di tabel untuk menempel sebagai baris baru.",
     insertRowsTitle: "Sisipkan Beberapa Baris",
     insertRowsDescription: "Buat baris draf yang belum disimpan sebanyak ini. Baris kosong diabaikan saat menyimpan; setelah disimpan, urutan tampilan mengikuti kueri saat ini.",
     insertRowCountLabel: "Jumlah baris",

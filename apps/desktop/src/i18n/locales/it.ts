@@ -3171,6 +3171,7 @@ export default withEnglishFallback({
     addRow: "Aggiungi Riga",
     insertMultipleRows: "Inserisci più righe…",
     pasteAsNewRows: "Incolla come nuove righe",
+    pasteAsNewRowsAwaitingPaste: "Questo browser non consente di leggere gli appunti direttamente. Premi Ctrl+V (⌘V su macOS) nella tabella per incollare come nuove righe.",
     insertRowsTitle: "Inserisci più righe",
     insertRowsDescription: "Crea questo numero di righe di bozza non salvate. Le righe vuote vengono ignorate al salvataggio; dopo il salvataggio, l'ordine di visualizzazione segue la query corrente.",
     insertRowCountLabel: "Numero di righe",

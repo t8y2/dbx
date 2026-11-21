@@ -378,7 +378,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type DataGridExportSheet, type MongoCopyUpdateTarget, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
-import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
+import { canReadClipboardText, eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
@@ -9832,6 +9832,13 @@ function onGridFocusIn(event: FocusEvent) {
   if (event.target instanceof HTMLElement) lastFocusedWithinGrid = event.target;
 }
 
+function onGridFocusOut(event: FocusEvent) {
+  if (!pendingPasteAsNewRows.value) return;
+  const next = event.relatedTarget as Node | null;
+  if (next && gridRef.value?.contains(next)) return;
+  pendingPasteAsNewRows.value = null;
+}
+
 function restoreGridFocusAfterActivation() {
   if (!lastFocusedWithinGrid) return;
   const activationToken = ++gridFocusActivationToken;
@@ -10863,14 +10870,58 @@ async function pasteClipboardIntoSelection() {
   await pasteTextIntoGrid(text);
 }
 
+interface PasteAsNewRowsContext {
+  operation: ReturnType<typeof dataGridResultLifecycle.beginOperation>;
+  lifecycle: number;
+  columnIndexes: number[];
+}
+
+function beginPasteAsNewRowsContext(): PasteAsNewRowsContext {
+  return {
+    operation: dataGridResultLifecycle.beginOperation(),
+    lifecycle: gridClipboardLifecycle,
+    // Capture the column mapping with the result, before the asynchronous read.
+    columnIndexes: [...visibleColumnIndexes.value],
+  };
+}
+
+// Set while the grid waits for a real paste event because the runtime cannot
+// read the clipboard on demand (plain-HTTP web builds have no
+// `navigator.clipboard`, issue #15158).
+const pendingPasteAsNewRows = ref<PasteAsNewRowsContext | null>(null);
+
+// A new result invalidates the captured generation anyway, but clear the armed
+// state so the next paste is not hijacked after the user switches data.
+watch(
+  () => props.result,
+  () => {
+    pendingPasteAsNewRows.value = null;
+  },
+);
+
 async function pasteClipboardAsNewRows() {
   if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
-  const operation = dataGridResultLifecycle.beginOperation();
-  const lifecycle = gridClipboardLifecycle;
-  // Capture the column mapping with the result, before the asynchronous read.
-  const columnIndexes = [...visibleColumnIndexes.value];
+  const context = beginPasteAsNewRowsContext();
+  if (!canReadClipboardText()) {
+    pendingPasteAsNewRows.value = context;
+    toast(t("grid.pasteAsNewRowsAwaitingPaste"), 8000);
+    gridRef.value?.focus();
+    return;
+  }
+  let text: string;
   try {
-    const text = await readTextFromClipboard();
+    text = await readTextFromClipboard();
+  } catch (error) {
+    if (gridClipboardActive && context.lifecycle === gridClipboardLifecycle && dataGridResultLifecycle.isCurrent(context.operation)) reportGridPasteError(error);
+    return;
+  }
+  await pasteTextAsNewRows(text, context);
+}
+
+async function pasteTextAsNewRows(text: string, context: PasteAsNewRowsContext) {
+  if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
+  const { operation, lifecycle, columnIndexes } = context;
+  try {
     if (!gridClipboardActive || lifecycle !== gridClipboardLifecycle || !dataGridResultLifecycle.isCurrent(operation) || !canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
     if (!clipboardWithinGridCapacity(text)) return;
     const firstNewRowId = -(newRows.value.length + 1);
@@ -11046,6 +11097,16 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
 }
 
 function onGridPaste(event: ClipboardEvent) {
+  if (pendingPasteAsNewRows.value) {
+    const pendingContext = pendingPasteAsNewRows.value;
+    const pendingText = event.clipboardData?.getData("text/plain");
+    // No payload yet: keep waiting instead of silently dropping the armed paste.
+    if (pendingText === undefined) return;
+    pendingPasteAsNewRows.value = null;
+    event.preventDefault();
+    void pasteTextAsNewRows(pendingText, pendingContext);
+    return;
+  }
   const intent = claimDataGridPaste(event, effectiveEditable.value, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
   if (intent === "native") return;
   if (intent === "block") return;
@@ -12189,6 +12250,12 @@ function cancelPendingRowOrRestoreCell(): boolean {
 async function onGridKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
 
+  if (pendingPasteAsNewRows.value) {
+    if (event.key === "Escape" || (!event.ctrlKey && !event.metaKey && !["Shift", "Alt"].includes(event.key))) {
+      pendingPasteAsNewRows.value = null;
+    }
+  }
+
   const target = event.target;
   if (event.key === "Escape" && !event.isComposing && showCellDetail.value && target instanceof Element && (target === gridRef.value || target.closest("[data-cell-detail-panel]"))) {
     if (escapeCellDetails()) {
@@ -12394,6 +12461,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (clipboardShortcut(event, "v")) {
+    // While the grid waits for a real paste (runtimes without the Web Clipboard
+    // API, issue #15158), leave the shortcut alone so the browser performs the
+    // default paste and the `paste` event reaches onGridPaste.
+    if (pendingPasteAsNewRows.value) return;
     const intent = claimDataGridPaste(event, effectiveEditable.value, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
     if (intent === "native") return;
     // A focused grid owns the shortcut even when read-only; otherwise the webview may paste into the previously focused SQL editor.
@@ -14811,6 +14882,7 @@ onActivated(() => {
 onDeactivated(() => {
   gridClipboardActive = false;
   pendingColumnOrder.value = null;
+  pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
   rowPreparationController?.abort();
   autoRefresh.stop();
@@ -14818,6 +14890,7 @@ onDeactivated(() => {
 
 onUnmounted(() => {
   gridClipboardActive = false;
+  pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
   rowPreparationController?.abort();
   syncPendingDataEditorDraft(false);
@@ -15813,6 +15886,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     @keydown="onGridKeydown"
     @paste="onGridPaste"
     @focusin="onGridFocusIn"
+    @focusout="onGridFocusOut"
   >
     <p v-if="compatibilityReadOnly" class="shrink-0 border-b px-3 py-1 text-xs text-muted-foreground" :title="t('connection.mysqlDataCharsetReadOnly')">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
     <CustomContextMenu :items="currentGridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">

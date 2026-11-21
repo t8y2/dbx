@@ -1567,6 +1567,30 @@ impl DbxBackend for LocalBackend {
         max_rows: Option<usize>,
         timeout_secs: Option<u64>,
     ) -> Result<dbx_core::db::QueryResult, String> {
+        let options = dbx_core::query::QueryExecutionOptions { max_rows, timeout_secs, ..Default::default() };
+        // A configured write limit only stops the wait; it must never cancel the
+        // server statement, because then the caller cannot tell whether the rows
+        // landed.
+        let decision =
+            dbx_core::query::connection_statement_timeout(&self.state, &connection.id, sql, timeout_secs).await;
+        if let (Some(wait), false) = (decision.client_wait(), decision.cancels_on_timeout()) {
+            let detached = dbx_core::query::spawn_detached_statement(
+                self.state.clone(),
+                connection.id.clone(),
+                database.to_string(),
+                sql.to_string(),
+                None,
+                None,
+                options,
+                (),
+                None,
+            );
+            return match tokio::time::timeout(wait, detached).await {
+                Ok(Ok(result)) => result.map_err(dbx_core::query::QueryExecutionError::into_legacy_string),
+                Ok(Err(_)) => Err("Statement task stopped unexpectedly".to_string()),
+                Err(_) => Err(dbx_core::query::detached_write_timeout_message(wait)),
+            };
+        }
         dbx_core::query::execute_sql_statement_with_options(
             &self.state,
             &connection.id,
@@ -1574,7 +1598,7 @@ impl DbxBackend for LocalBackend {
             sql,
             None,
             None,
-            dbx_core::query::QueryExecutionOptions { max_rows, timeout_secs, ..Default::default() },
+            options,
         )
         .await
     }

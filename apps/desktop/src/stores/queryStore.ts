@@ -122,7 +122,7 @@ import {
   metadataSchemaForConnection,
   sqlServerQualifiesSqlWithTabSchema,
 } from "@/lib/database/jdbcDialect";
-import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
+import { frontendDeadlineForConnection, frontendQueryTimeoutDelayMs, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceNameParts } from "@/lib/sql/queryResultSource";
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
 import { stripPaginationRowNumber, trimQueryPageProbe } from "@/lib/query/queryPaginationResult";
@@ -9717,7 +9717,11 @@ export const useQueryStore = defineStore("query", () => {
         const current = findExecutionTab(id);
         return current !== tab || current.executionId !== executionId || current.isCancelling === true || (current.cancelRequestCount ?? 0) !== cancelRequestCountAtStart || manualTransactionTargetEpoch(current) !== executionTargetEpoch;
       };
-      const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs, sqlStatementParameterOptions);
+      // DDL and writes must not be abandoned by the client: a production
+      // partition rebuild legitimately outlives any read budget, and giving up
+      // halfway leaves the server rolling back while it holds metadata locks.
+      const frontendDeadline = frontendDeadlineForConnection(sqlToExecute, effectiveDbType, conn, settingsStore.editorSettings.globalQueryTimeoutSecs, sqlStatementParameterOptions);
+      const frontendTimeoutSecs = frontendDeadline.afterSecs;
       if (tab.mode === "data" && effectiveDbType === "oceanbase-oracle") {
         const meta = tableMetaForDataTab(tab);
         useLargeValuePreview = !!meta && /^(?:BASE )?TABLE$/i.test(meta.tableType ?? "") && columnsAllowDeferredLobMarkers(meta.columns) && meta.columns.some((column) => /^(N?CLOB|BLOB)$/i.test(column.data_type.trim()));
@@ -9996,8 +10000,15 @@ export const useQueryStore = defineStore("query", () => {
         if (responseWasAbandoned) void releaseResultLargeValues(...results);
         return results;
       });
-      const responseResults = await withFrontendQueryTimeout(observedExecution, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }), () => {
+      const responseResults = await withFrontendQueryTimeout(observedExecution, frontendTimeoutSecs, frontendDeadline.cancelOnTimeout ? t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }) : t("editor.writeTimeoutDetached", { seconds: frontendTimeoutSecs }), () => {
         responseWasAbandoned = true;
+        // A read-timeout cancel becomes KILL QUERY / pg_cancel_backend on the
+        // server. Doing that to a write aborts it mid-flight, so the caller can
+        // no longer tell whether the rows landed: never cancel those.
+        if (!frontendDeadline.cancelOnTimeout) {
+          queryExecutionLog("warn", "frontend-timeout:skip-cancel-for-write", { traceId });
+          return;
+        }
         void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
       });
       for (const result of responseResults) {

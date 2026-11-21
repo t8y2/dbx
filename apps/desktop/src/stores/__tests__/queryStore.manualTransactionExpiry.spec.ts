@@ -382,7 +382,7 @@ describe("queryStore manual transaction expiry recovery", () => {
     return { ...expiredTransactionError(), code, messageKey: code === "DBX-TXN-1007" ? "backendErrors.transaction.commitUnknown" : "backendErrors.transaction.connectionLost", transactionOutcome: outcome };
   }
 
-  it("SQL Server retains one session across executions and forwards cancellation identity and timeout", async () => {
+  it("SQL Server retains one session across executions and does not bound writes with the read timeout", async () => {
     const { store, id, tab } = await sqlServerTab();
     mocks.beginManualTransaction.mockResolvedValue("sqlserver-txn-fixed");
     mocks.executeInManualTransaction.mockResolvedValue(successfulUpdate());
@@ -393,7 +393,10 @@ describe("queryStore manual transaction expiry recovery", () => {
     for (const call of mocks.executeInManualTransaction.mock.calls) {
       expect(call[0]).toBe("sqlserver-txn-fixed");
       expect(call[9]).toEqual(expect.any(String));
-      expect(call[10]).toBe(30);
+      // A write is not bounded by the read timeout on the client side: cancelling
+      // one would leave the caller unable to tell whether the rows landed. The
+      // server keeps its own decision (see StatementTimeout in dbx-core).
+      expect(call[10]).toBe(0);
     }
     expect(tab.txnStatus).toBe("active");
     expect(tab.autoCommit).toBe(false);

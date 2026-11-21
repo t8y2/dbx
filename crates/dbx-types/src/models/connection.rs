@@ -210,6 +210,13 @@ pub struct ConnectionConfig {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    /// Timeout for data-writing statements (INSERT/UPDATE/DELETE/MERGE/COPY).
+    /// `0` (the default) means no limit. When set, the client stops waiting after
+    /// this long but never cancels the server statement: a write that is cut off
+    /// leaves the caller unable to tell whether the rows landed.
+    /// Schema changes (CREATE/ALTER/DROP/TRUNCATE) are never bounded by it.
+    #[serde(default = "default_write_timeout_secs")]
+    pub write_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_manual_transaction_timeout_secs")]
@@ -642,6 +649,12 @@ pub fn default_query_timeout_secs() -> u64 {
     60
 }
 
+/// Writes are unlimited by default: aborting a write transaction is not a
+/// recovery action, it is an extra failure mode (see `query::StatementTimeout`).
+pub fn default_write_timeout_secs() -> u64 {
+    0
+}
+
 pub fn default_idle_timeout_secs() -> u64 {
     60
 }
@@ -792,6 +805,8 @@ struct ConnectionConfigData {
     pub connect_timeout_secs: u64,
     #[serde(default = "default_query_timeout_secs")]
     pub query_timeout_secs: u64,
+    #[serde(default = "default_write_timeout_secs")]
+    pub write_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
     #[serde(default = "default_manual_transaction_timeout_secs")]
@@ -912,6 +927,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
+            write_timeout_secs: data.write_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
             manual_transaction_timeout_secs: data.manual_transaction_timeout_secs,
             idle_disconnect_secs: data.idle_disconnect_secs,
@@ -1148,6 +1164,12 @@ impl ConnectionConfig {
             self.manual_transaction_timeout_secs
                 .clamp(MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, MAX_MANUAL_TRANSACTION_TIMEOUT_SECS)
         }
+    }
+
+    /// `None` means "no write deadline" (the default). A configured value never
+    /// collapses to zero, so "on" and "off" stay distinguishable.
+    pub fn effective_write_timeout_secs(&self) -> Option<u64> {
+        (self.write_timeout_secs > 0).then(|| self.write_timeout_secs.max(1))
     }
 
     pub fn effective_query_timeout_secs(&self) -> u64 {
@@ -3519,6 +3541,7 @@ mod tests {
             transport_layers: Vec::new(),
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
+            write_timeout_secs: 0,
             idle_timeout_secs: super::default_idle_timeout_secs(),
             manual_transaction_timeout_secs: super::default_manual_transaction_timeout_secs(),
             idle_disconnect_secs: super::default_idle_disconnect_secs(),

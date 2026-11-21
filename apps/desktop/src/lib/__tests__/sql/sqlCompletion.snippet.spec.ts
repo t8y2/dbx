@@ -363,3 +363,43 @@ describe("snippet ranking", () => {
     expect(firstSequence).toBeLessThan(firstNonSequence);
   });
 });
+
+describe("snippets that only match loosely (#15292)", () => {
+  const HAN_SNIPPETS: SqlSnippet[] = [
+    { id: "han-1", label: "cx企微活码数据", prefix: "cx企微活码数据", body: "SELECT 1;" },
+    { id: "han-2", label: "cx企微工作时间欢迎语调整", prefix: "cx企微工作时间欢迎语调整", body: "SELECT 2;" },
+  ];
+
+  it("keeps the real keyword ahead of a snippet matched only by scattered pinyin initials", () => {
+    const items = buildSqlCompletionItems("SELECT * FROM t wh", 18, {
+      snippets: HAN_SNIPPETS,
+      tables: [{ name: "t", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    const keywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === "WHERE");
+    const snippetIndex = items.findIndex((item) => item.type === "snippet");
+    expect(keywordIndex).toBeGreaterThanOrEqual(0);
+    expect(snippetIndex).toBeGreaterThanOrEqual(0);
+    expect(keywordIndex).toBeLessThan(snippetIndex);
+  });
+
+  it("still ranks a snippet first when the typed letters are its pinyin prefix", () => {
+    const items = buildSnippetItemsForTest("qw", [{ id: "han-3", label: "企微活码", prefix: "企微活码", body: "SELECT 3;" }], undefined, "mysql");
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.boost).toBeGreaterThan(4000);
+  });
+
+  it("still ranks a snippet whose prefix starts with the typed letters ahead of keywords", () => {
+    const items = buildSqlCompletionItems("wh", 2, {
+      snippets: [{ id: "wh-1", label: "where helper", prefix: "wh", body: "WHERE 1 = 1" }],
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ type: "snippet", label: "where helper" }));
+  });
+});

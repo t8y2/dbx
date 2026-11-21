@@ -2,7 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useEventListener, useResizeObserver } from "@vueuse/core";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import { databaseOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import { useI18n } from "vue-i18n";
 import { ArrowRightLeft, Loader2 } from "@lucide/vue";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -63,6 +64,8 @@ const targetConnectionId = ref("");
 const targetDatabase = ref("");
 const targetDatabases = ref<string[]>([]);
 const databasesLoading = ref(false);
+const targetSchemas = ref<string[]>([]);
+const schemasLoading = ref(false);
 let dragBounds = { left: 0, right: 0, top: 0, bottom: 0 };
 let dragX = 0;
 let dragY = 0;
@@ -175,6 +178,7 @@ onBeforeUnmount(() => {
 const sqlConnections = computed(() => connections.connections.filter((item) => !mysqlDataCharsetEnabled(item) && supportsQueryResultTransfer(item)));
 const targetConfig = computed<ConnectionConfig | undefined>(() => (targetConnectionId.value ? connections.getConfig(targetConnectionId.value) : undefined));
 const targetDatabaseType = computed(() => queryResultTransferDatabaseType(targetConfig.value));
+const targetRootSchemaMode = computed(() => namespaceOptionsAreSchemas(targetConfig.value));
 const reviewMode = ref<"preview" | "confirm" | null>(null);
 const reviewOpen = computed({
   get: () => reviewMode.value !== null,
@@ -184,7 +188,16 @@ const reviewOpen = computed({
 });
 const compatibilityBlocked = computed(() => mysqlDataCharsetEnabled(connections.getConfig(props.sourceConnectionId)) || mysqlDataCharsetEnabled(targetConfig.value));
 const canTransfer = computed(
-  () => !compatibilityBlocked.value && open.value && !!targetConfig.value && !!targetDatabaseType.value && !!targetDatabase.value.trim() && !!targetTable.value.trim() && (!isSchemaAware(targetDatabaseType.value) || !!targetSchema.value.trim()) && !submitting.value && !databasesLoading.value,
+  () =>
+    !compatibilityBlocked.value &&
+    open.value &&
+    !!targetConfig.value &&
+    !!targetDatabaseType.value &&
+    (targetRootSchemaMode.value || !!targetDatabase.value.trim()) &&
+    !!targetTable.value.trim() &&
+    (!isSchemaAware(targetDatabaseType.value) || !!targetSchema.value.trim()) &&
+    !submitting.value &&
+    !databasesLoading.value,
 );
 const sourceLocation = computed(() => [connections.getConfig(props.sourceConnectionId)?.name || props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, props.sourceTable || props.result.sourceLabel].filter(Boolean).join(" / "));
 const targetLocation = computed(() => [targetConfig.value?.name, targetDatabase.value.trim(), isSchemaAware(targetDatabaseType.value) ? targetSchema.value.trim() : undefined, targetTable.value.trim()].filter(Boolean).join(" / "));
@@ -245,7 +258,7 @@ watch([open, targetConnectionId], async ([isOpen, id], _previous, onCleanup) => 
   databasesLoading.value = true;
   try {
     await connections.ensureConnected(id);
-    if (stale) return;
+    if (stale || namespaceOptionsAreSchemas(config)) return;
     const databases = await api.listDatabases(id);
     if (stale) return;
     targetDatabases.value = databaseOptionsForConnection(
@@ -258,6 +271,29 @@ watch([open, targetConnectionId], async ([isOpen, id], _previous, onCleanup) => 
   } finally {
     if (!stale) databasesLoading.value = false;
   }
+});
+
+async function loadTargetSchemas(config: ConnectionConfig, database: string): Promise<string[]> {
+  await connections.ensureConnected(config.id);
+  if (namespaceOptionsAreSchemas(config)) return fetchNamespaceOptionsForConnection(config.id, config);
+  return schemaOptionsForConnection(await api.listSchemas(config.id, database), config, database);
+}
+
+watch([open, targetConnectionId, targetDatabase], async ([isOpen, id, selectedDatabase], _previous, onCleanup) => {
+  let stale = false;
+  onCleanup(() => {
+    stale = true;
+  });
+  targetSchemas.value = [];
+  schemasLoading.value = false;
+  const config = isOpen && id ? connections.getConfig(id) : undefined;
+  const database = selectedDatabase.trim();
+  if (!config || !isSchemaAware(queryResultTransferDatabaseType(config)) || (!database && !namespaceOptionsAreSchemas(config))) return;
+  schemasLoading.value = true;
+  const schemas = await loadTargetSchemas(config, database).catch(() => []);
+  if (stale) return;
+  targetSchemas.value = schemas;
+  schemasLoading.value = false;
 });
 
 function uniqueColumnNames(columns: string[]): string[] {
@@ -292,7 +328,7 @@ async function transfer() {
   // explicitly name the selected main/attached database in its SQL.
   const schema = databaseType === "sqlite" ? normalizeSqliteNamespace(database, config) : isSchemaAware(databaseType) ? targetSchema.value.trim() : "";
   const tableName = targetTable.value.trim();
-  if (!config || !databaseType || !database || !tableName || (isSchemaAware(databaseType) && !schema) || submitting.value) return;
+  if (!config || !databaseType || (!database && !namespaceOptionsAreSchemas(config)) || !tableName || (isSchemaAware(databaseType) && !schema) || submitting.value) return;
   const target = { config: { ...config }, databaseType, database, schema, tableName, mode: mode.value, createTable: createTable.value };
   const source = { ...props };
   const revision = sourceRevision;
@@ -515,9 +551,9 @@ async function transfer() {
               v-model="targetDatabase"
               :options="targetDatabases"
               :loading="databasesLoading"
-              :disabled="submitting || !targetConnectionId"
+              :disabled="submitting || !targetConnectionId || targetRootSchemaMode"
               allow-custom
-              :placeholder="t('transfer.selectDatabase')"
+              :placeholder="targetRootSchemaMode ? '' : t('transfer.selectDatabase')"
               :search-placeholder="t('transfer.searchDatabase')"
               :empty-text="t('common.noResults')"
               :loading-text="t('common.loading')"
@@ -527,7 +563,19 @@ async function transfer() {
           </div>
           <div class="space-y-1.5">
             <Label>{{ t("transfer.targetSchema") }}{{ isSchemaAware(targetDatabaseType) ? " *" : "" }}</Label
-            ><Input v-model="targetSchema" :disabled="submitting || !isSchemaAware(targetDatabaseType)" class="h-8 text-xs" />
+            ><SearchableSelect
+              v-model="targetSchema"
+              :options="targetSchemas"
+              :loading="schemasLoading"
+              :disabled="submitting || !isSchemaAware(targetDatabaseType)"
+              allow-custom
+              :placeholder="isSchemaAware(targetDatabaseType) ? t('transfer.selectSchema') : ''"
+              :search-placeholder="t('transfer.searchSchema')"
+              :empty-text="t('common.noResults')"
+              :loading-text="t('common.loading')"
+              trigger-class="h-8 w-full justify-between text-xs"
+              content-class="w-[var(--reka-popover-trigger-width)]"
+            />
           </div>
         </div>
         <div class="space-y-1.5">

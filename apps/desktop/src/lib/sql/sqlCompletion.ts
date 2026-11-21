@@ -1862,6 +1862,7 @@ export interface SqlCompletionContext {
   /** The table position being completed is a DML target, where a generated alias can be rejected by the server. */
   tableCompletionTargetAliasUnsafe?: boolean;
   tableAliasAfterCursor?: boolean;
+  suppressSqlServerTableAliasCompletion?: boolean;
   openingParenAfterCursor: boolean;
   followingKeyword?: string;
   contextKind: SqlCompletionContextKind;
@@ -2099,6 +2100,7 @@ class SqlCompletionProvider {
 
   build(): SqlCompletionItem[] {
     const { context } = this;
+    if (context.suppressSqlServerTableAliasCompletion) return [];
     const pendingJoinKeyword = isPendingJoinKeywordContext(context);
     const completionTables = [
       ...this.input.tables.map((table) => {
@@ -2313,6 +2315,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (isAfterJoinModifierContext(beforeCursor, options.databaseType)) return true;
   if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeCursor)) return true;
   const context = precomputedContext ?? getSqlCompletionContext(sql, cursor, options);
+  if (context.suppressSqlServerTableAliasCompletion) return false;
   if (previousChar === "(" && (context.insertTable || context.preferredValueKeywords?.length)) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
   if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
@@ -3348,7 +3351,17 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const enclosingCteIndex = cteDefs.findIndex((cte) => cursorInStatement > cte.bodyStart && cursorInStatement <= cte.bodyEnd);
   const enclosingCte = enclosingCteIndex >= 0 ? cteDefs[enclosingCteIndex] : undefined;
   const scopedStatement = enclosingCte ? keepOnlyCteBody(fullStatement, enclosingCte) : maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs);
-  let referencedTables = extractReferencedTables(scopedStatement, options.databaseType);
+  let aliasAtCursor = false;
+  const trackTableAlias = resolveSqlDialectId(options) === "sqlserver" && !!prefix && !qualifier;
+  let referencedTables = extractReferencedTables(
+    scopedStatement,
+    options.databaseType,
+    trackTableAlias
+      ? (alias) => {
+          aliasAtCursor ||= alias.start < cursorInStatement && cursorInStatement <= alias.end;
+        }
+      : undefined,
+  );
   const visibleCteDefs = enclosingCte ? cteDefs.slice(0, enclosingCteIndex).concat(referencedTables.some((rt) => rt.name.toLowerCase() === enclosingCte.name.toLowerCase()) ? [enclosingCte] : []) : cteDefs;
   for (const cte of visibleCteDefs) {
     const matching = referencedTables.filter((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
@@ -3412,6 +3425,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
   const mysqlVariablesAllowed = (options.databaseType === "mysql" || (!options.databaseType && options.dialect === "mysql")) && !prefix.startsWith("@") && !qualifier && !dataTypeContext && !afterTableTrigger && !insertInfo && !inCallRoutineContext;
   const localVariables = prefix.startsWith("@") ? collectSqlServerLocalVariables(sql, cursor, options) : mysqlVariablesAllowed ? collectMysqlRoutineVariables(sql, cursor) : undefined;
+  // Without AS, a partial clause keyword can look like an alias until it is complete.
+  const suppressSqlServerTableAliasCompletion = aliasAtCursor && statementKind === "select" && !suggestColumns && !exclusiveTableSuggestions && (lastWord === "as" || !SQLSERVER_TABLE_REFERENCE_CONTINUATIONS.some((keyword) => keyword.toLowerCase().startsWith(prefix.toLowerCase())));
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo, options.databaseType, options.driverProfile);
   const contextKind = detectCompletionContextKind({
     qualifier,
@@ -3474,6 +3489,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     oracleTableFunctionContext,
     autoAliasTableCompletions,
     tableAliasAfterCursor,
+    ...(suppressSqlServerTableAliasCompletion ? { suppressSqlServerTableAliasCompletion } : {}),
     openingParenAfterCursor: /^\s*\(/.test(sql.slice(cursor)),
     followingKeyword: getFollowingKeywordAfterCursor(sql, cursor, statementSpan.end),
     contextKind,
@@ -4464,7 +4480,7 @@ function maskSqlLiteralsAndComments(sql: string, databaseType?: DatabaseType): s
   return out;
 }
 
-function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
+function extractReferencedTables(sql: string, databaseType?: DatabaseType, onAlias?: (span: SqlSemanticSpan) => void): SqlCompletionReferencedTable[] {
   // Keywords that should NOT be treated as table aliases
   const ALIAS_BLACKLIST = new Set([
     "where",
@@ -4603,6 +4619,10 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
     }
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
+    if (cleanAlias && onAlias) {
+      const end = match.index + match[0].length;
+      onAlias({ start: end - cleanAlias.length, end });
+    }
     if (isElasticsearchStyleIndexName(rawName)) {
       referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
       continue;
@@ -7815,7 +7835,9 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
 
 // MySQL index hints that follow a table reference (#14431, #14598).
 const MYSQL_INDEX_HINT_KEYWORDS = new Set(["FORCE INDEX", "IGNORE INDEX", "USE INDEX"]);
-const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", ...MYSQL_INDEX_HINT_KEYWORDS]);
+const SELECT_TABLE_CLAUSE_KEYWORDS = ["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT"];
+const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set([...SELECT_TABLE_CLAUSE_KEYWORDS, ...MYSQL_INDEX_HINT_KEYWORDS]);
+const SQLSERVER_TABLE_REFERENCE_CONTINUATIONS = ["AS", "JOIN", ...JOIN_MODIFIER_KEYWORD_PHRASES.filter((keyword) => keyword !== "NATURAL JOIN"), "CROSS APPLY", "OUTER APPLY", "ON", "WITH", "TABLESAMPLE", "PIVOT", "UNPIVOT", "FOR", "OPTION", ...SELECT_TABLE_CLAUSE_KEYWORDS];
 // Enough to outrank a routine's initials match plus the procedure type boost.
 const TABLE_REFERENCE_CLAUSE_KEYWORD_BOOST = 3000;
 

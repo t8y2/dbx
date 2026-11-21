@@ -95,7 +95,7 @@ function replaceMongoRegexLiterals(source: string): string | null {
 
   while (index < source.length) {
     const char = source[index] ?? "";
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       const start = index;
       const quote = char;
       index += 1;
@@ -139,7 +139,7 @@ function isMongoRegexValuePosition(source: string, index: number): boolean {
 
   while (cursor < index) {
     const char = source[cursor] ?? "";
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       const quote = char;
       cursor += 1;
       let escaped = false;
@@ -251,7 +251,7 @@ export function splitTopLevel(source: string): string[] {
       continue;
     }
 
-    if (char === '"' || char === "'") quote = char;
+    if (char === '"' || char === "'" || char === "`") quote = char;
     else if (char === "{" || char === "[" || char === "(") depth += 1;
     else if (char === "}" || char === "]" || char === ")") depth -= 1;
     else if (char === "," && depth === 0) {
@@ -291,7 +291,7 @@ export function findMatchingParen(source: string, openIndex: number): number {
       continue;
     }
 
-    if (char === '"' || char === "'") quote = char;
+    if (char === '"' || char === "'" || char === "`") quote = char;
     else if (char === "(") depth += 1;
     else if (char === ")") {
       depth -= 1;
@@ -325,7 +325,7 @@ export function hasUnclosedMongoDelimiters(source: string): boolean {
       i = regexLiteral.end - 1;
       continue;
     }
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       continue;
     }
@@ -357,7 +357,7 @@ export function stripMongoJsonComments(source: string): string {
       continue;
     }
 
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       result += char;
       continue;
@@ -469,7 +469,7 @@ export function quoteUnquotedObjectKeys(source: string): string {
       continue;
     }
 
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       result += char;
       continue;
@@ -506,7 +506,7 @@ function replaceMongoEjsonDeserialize(source: string): string {
   let index = 0;
   while (index < source.length) {
     const quote = source[index];
-    if (quote === '"' || quote === "'") {
+    if (quote === '"' || quote === "'" || quote === "`") {
       const start = index++;
       while (index < source.length) {
         if (source[index] === "\\") index += 2;
@@ -577,7 +577,7 @@ function replaceMongoShellConstructors(source: string): string {
   let index = 0;
   while (index < source.length) {
     const quote = source[index];
-    if (quote === '"' || quote === "'") {
+    if (quote === '"' || quote === "'" || quote === "`") {
       const start = index++;
       while (index < source.length) {
         if (source[index] === "\\") index += 2;
@@ -728,6 +728,7 @@ function randomHex(bytes: number): string {
   return Array.from(values, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+/** Rewrites '...' and `...` strings as JSON strings; a template literal with `${}` stays unconverted. */
 function convertSingleQuotedStrings(source: string): string {
   let result = "";
   let copiedUntil = 0;
@@ -739,7 +740,7 @@ function convertSingleQuotedStrings(source: string): string {
   for (let i = 0; i < source.length; i += 1) {
     const char = source[i];
     if (!quote) {
-      if (char === "'") {
+      if (char === "'" || char === "`") {
         quote = char;
         start = i;
         value = "";
@@ -762,15 +763,17 @@ function convertSingleQuotedStrings(source: string): string {
       escaped = false;
     } else if (char === "\\") {
       escaped = true;
-    } else if (char === "'") {
+    } else if (char === quote) {
       result += source.slice(copiedUntil, start) + JSON.stringify(value);
       copiedUntil = i + 1;
       quote = null;
+    } else if (quote === "`" && char === "$" && source[i + 1] === "{") {
+      return source;
     } else {
       value += char;
     }
   }
 
-  const converted = quote === "'" ? source : result + source.slice(copiedUntil);
+  const converted = quote === "'" || quote === "`" ? source : result + source.slice(copiedUntil);
   return removeTrailingCommas(converted);
 }

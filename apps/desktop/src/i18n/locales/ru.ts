@@ -9843,6 +9843,11 @@ export default withEnglishFallback({
     totalFiles: "{count} файлов",
     executeSuccess: "SQL-файл успешно выполнен",
     completedWithErrors: "Выполнение завершено: успешно {succeeded}, с ошибкой {failed}",
+    newDatabase: "Создать базу данных",
+    newDatabasePlaceholder: "Имя новой базы данных",
+    newDatabaseCreate: "Создать",
+    newDatabaseCreated: "Создана база данных «{name}»",
+    newDatabaseFailed: "Не удалось создать базу данных: {message}",
   },
   sqlFileTree: {
     searchIncompleteHelp: "Почему результаты поиска неполные:",

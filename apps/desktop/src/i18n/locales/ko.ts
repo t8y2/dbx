@@ -8391,6 +8391,11 @@ export default withEnglishFallback({
     totalFiles: "{count}개 파일",
     executeSuccess: "SQL 파일을 실행했습니다",
     completedWithErrors: "실행 완료: 성공 {succeeded}개, 실패 {failed}개",
+    newDatabase: "새 데이터베이스",
+    newDatabasePlaceholder: "새 데이터베이스 이름",
+    newDatabaseCreate: "만들기",
+    newDatabaseCreated: "데이터베이스 '{name}'이(가) 생성되었습니다",
+    newDatabaseFailed: "데이터베이스를 생성할 수 없습니다: {message}",
   },
   sqlFileTree: {
     searchIncompleteHelp: "이번 검색 결과가 완전하지 않은 이유:",

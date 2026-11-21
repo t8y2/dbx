@@ -7482,6 +7482,11 @@ export default withEnglishFallback({
     executeSuccess: "SQL 檔案執行成功",
     completedWithErrors: "執行完成：成功 {succeeded} 條，失敗 {failed} 條",
     runInBackground: "背景執行",
+    newDatabase: "新增資料庫",
+    newDatabasePlaceholder: "新資料庫名稱",
+    newDatabaseCreate: "建立",
+    newDatabaseCreated: "已建立資料庫「{name}」",
+    newDatabaseFailed: "無法建立資料庫：{message}",
   },
   diff: {
     additionalSchemas: "同時比較這些結構描述",

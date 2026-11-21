@@ -5754,6 +5754,35 @@ function quoteCompletionApplyIdentifier(identifier: string, dialect?: SqlComplet
   return quoteSqlIdentifier(identifier, dialect);
 }
 
+// A plain identifier the user typed bare. Anything outside this shape (spaces,
+// dots, punctuation) could not have been written unquoted in valid SQL, so it
+// keeps the dialect's quoting.
+const BARE_QUALIFIER_PART = /^[\p{L}_][\p{L}\p{Nd}_$#@]*$/u;
+
+// Batch-selected columns repeat the qualifier the user already wrote in the
+// document. Re-quoting it through `quoteCompletionApplyIdentifier` changes its
+// meaning on folding dialects: `FROM orders ap` folds to AP, while `"ap"`
+// addresses a different identifier, so every column after the first came out
+// unreadable (#11330, #15190).
+function completionBatchQualifierPart(part: string, quoted: boolean | undefined, dialect?: SqlCompletionApplyDialect): string {
+  const applied = quoteCompletionApplyIdentifier(part, dialect);
+  // Unknown quoting info, an explicitly quoted part, or a value that never
+  // could have been typed bare: keep the dialect-correct quoting as before.
+  if (quoted !== false || !BARE_QUALIFIER_PART.test(part)) return applied;
+  // A bare reserved word is not valid input, so it stays quoted too.
+  if (POSTGRES_IDENTIFIER_KEYWORDS.has(part.toLowerCase())) return applied;
+  return part;
+}
+
+function completionBatchSelectionQualifier(context: SqlCompletionContext, dialect?: SqlCompletionApplyDialect): string | undefined {
+  const parts = context.qualifierParts ?? context.qualifier?.split(".").filter(Boolean);
+  if (!parts?.length) return undefined;
+  // The semantic layer may rebuild qualifierParts; only trust the quote flags
+  // when they describe the same parts, otherwise fall back to the old behavior.
+  const quoted = context.qualifierQuoted?.length === parts.length ? context.qualifierQuoted : undefined;
+  return parts.map((part, index) => completionBatchQualifierPart(part, quoted?.[index], dialect)).join(".");
+}
+
 function quoteCompletionApplyName(applyName: string, dialect?: SqlCompletionApplyDialect): string {
   if (dialect !== "mysql" && dialect !== "oracle" && dialect !== "sqlserver" && dialect !== "clickhouse") return applyName;
   const parts = splitQualifiedNameRawParts(applyName);
@@ -7002,6 +7031,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
 
   const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
   const quoteBatchColumns = !!batchSelectionMode && quoteIdentifiers !== false && (databaseType === "mysql" || databaseType === "starrocks");
+  // Compute once: every candidate of the same context repeats this qualifier.
+  const batchSelectionQualifier = batchSelectionMode === "select" ? completionBatchSelectionQualifier(context, dialect) : undefined;
 
   return rankedColumns.flatMap(({ column, boost }): SqlCompletionItem[] => {
     const nameMatches = matchesIdentifierSearch(column.name, context.prefix, matchMode) || matchesIdentifierSearch(column.displayLabel, context.prefix, matchMode);
@@ -7017,9 +7048,9 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       batchSelectionMode,
       batchSelectionApply: quoteBatchColumns ? buildColumnApply(column, context, dialect, quoteTableIdentifier(databaseType, column.name)) : undefined,
       // The first selected column keeps the qualifier already present in the
-      // document. Subsequent columns must use that same user-typed qualifier,
+      // document. Subsequent columns repeat that same user-typed qualifier,
       // not a referenced-table alias which may be different from it.
-      batchSelectionQualifier: batchSelectionMode === "select" && context.qualifier ? (context.qualifierParts ?? context.qualifier.split(".").filter(Boolean)).map((part) => quoteCompletionApplyIdentifier(part, dialect)).join(".") : undefined,
+      batchSelectionQualifier,
       comment: column.comment?.trim() || undefined,
     };
     if (!context.mysqlWherePredicateStart || !/^(?:var)?char\b/i.test(column.dataType?.trim() ?? "") || !item.apply) return [item];
@@ -7093,7 +7124,10 @@ function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return columnName;
   }
-  const qualifier = column.sourceQualifierSql ?? quoteCompletionApplyIdentifier(column.sourceAlias ?? column.table, dialect);
+  // `sourceAlias` is the alias as written in the document, so it is reused
+  // verbatim: quoting it would change its meaning on folding dialects
+  // (Oracle `ap` -> AP). Only the metadata table name needs quoting (#11330).
+  const qualifier = column.sourceQualifierSql ?? column.sourceAlias ?? quoteCompletionApplyIdentifier(column.table, dialect);
   return `${qualifier}.${columnName}`;
 }
 

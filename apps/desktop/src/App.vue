@@ -2461,9 +2461,9 @@ function defaultSavedSqlName(title: string) {
 
 function suggestedSavedSqlName(tab: QueryTab): string {
   const name = defaultSavedSqlName(tab.title);
-  if (!/^query_\d+\.sql$/i.test(name)) return name;
+  if (tab.customTitle || !/^query_\d+\.sql$/i.test(name)) return name;
   const connectionName = connectionStore.getConfig(tab.connectionId)?.name.trim();
-  return connectionName ? savedSqlExportFileName(defaultSavedSqlName(`${connectionName}_${name}`)).replace(/_{2,}/g, "_") : name;
+  return connectionName ? savedSqlExportFileName(defaultSavedSqlName(`${connectionName}_${name}`)) : name;
 }
 
 function selectedSaveSqlFolderId(): string | undefined {

@@ -2646,12 +2646,16 @@ function handleWebBeforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = "";
 }
 
+function requestUnsavedTabsCloseConfirmation(action: AppCloseAction): boolean {
+  return action === "quit" ? queryStore.requestAppCloseConfirmation() : queryStore.requestWindowCloseConfirmation();
+}
+
 function continuePendingAppCloseAfterSave() {
   const action = pendingAppCloseAction.value;
   if (!action) return;
   if (queryStore.hasUnsavedWindowTabs) {
     pendingSaveShouldCloseTab.value = false;
-    if (queryStore.requestWindowCloseConfirmation()) return;
+    if (requestUnsavedTabsCloseConfirmation(action)) return;
   }
   finishPendingAppClose(action);
 }
@@ -2666,7 +2670,7 @@ function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions
   if (action !== "hide" && queryStore.hasUnsavedWindowTabs) {
     pendingAppCloseAction.value = action;
     pendingSaveShouldCloseTab.value = false;
-    if (queryStore.requestWindowCloseConfirmation()) return;
+    if (requestUnsavedTabsCloseConfirmation(action)) return;
   }
   finishPendingAppClose(action);
 }

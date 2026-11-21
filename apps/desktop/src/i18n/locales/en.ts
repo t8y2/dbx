@@ -2945,6 +2945,12 @@ export default {
     loadFailed: "Could not load databases: {message}",
     defaultCharset: "Charset",
     defaultCollation: "Collation",
+    charsetChangeTitle: "Default character set",
+    charsetChangeConfirm: "Change default character set",
+    charsetChangeMessage: "Change the default character set of database {name} to {charset} with collation {collation}? Existing tables and columns are not converted.",
+    charsetChangeSuccess: "Changed the default character set of database {name} to {charset} ({collation}).",
+    charsetChangeFailed: "Failed to change the database character set: {message}",
+    charsetChangeInvalid: "The character set or collation is not valid, so no ALTER statement was generated.",
   },
   databaseEmpty: {
     menu: "Empty all table data",

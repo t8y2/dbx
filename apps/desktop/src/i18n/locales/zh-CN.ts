@@ -2875,6 +2875,12 @@ export default withEnglishFallback({
     loadFailed: "加载数据库失败：{message}",
     defaultCharset: "默认字符集",
     defaultCollation: "默认排序规则",
+    charsetChangeTitle: "默认字符集",
+    charsetChangeConfirm: "修改默认字符集",
+    charsetChangeMessage: "将数据库 {name} 的默认字符集改为 {charset}（排序规则 {collation}）？已有表和列不会被转换。",
+    charsetChangeSuccess: "已将数据库 {name} 的默认字符集改为 {charset}（{collation}）。",
+    charsetChangeFailed: "修改数据库字符集失败：{message}",
+    charsetChangeInvalid: "字符集或排序规则无效，未生成 ALTER 语句。",
   },
   databaseEmpty: {
     menu: "清空所有表数据",

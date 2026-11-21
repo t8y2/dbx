@@ -255,6 +255,7 @@ import {
   isToggleTransposeShortcut,
   matchesShortcut,
 } from "@/lib/editor/keyboardShortcuts";
+import { handleTextInputCaseShortcut } from "@/lib/editor/textInputCaseShortcut";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import {
   canFetchNextDataGridSegment,
@@ -12105,6 +12106,7 @@ async function onCellEditKeydown(event: KeyboardEvent) {
     }
     return;
   }
+  if (handleTextInputCaseShortcut(event, settingsStore.editorSettings.shortcuts)) return;
   onEditKeydown(event, cellEditCompositionActive.value);
 }
 

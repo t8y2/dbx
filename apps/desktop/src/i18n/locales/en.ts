@@ -1,3 +1,4 @@
+import { postgresSequenceEn as postgresSequence } from "./postgresSequence";
 import { tableCopyTaskEn as tableCopyTask } from "./tableCopyTask";
 import { tableColumnPasteEn as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
@@ -66,6 +67,7 @@ const consul = {
 };
 
 export default {
+  postgresSequence,
   oracleTrigger: {
     errorPositionUnavailable: "Source opened. The error location could not be verified; check the reported line and column.",
     reconcileStructure: "Reconcile applied changes",

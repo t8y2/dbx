@@ -1,0 +1,101 @@
+{
+  "$schema": "../manifest.schema.json",
+  "manifest_version": 1,
+  "id": "io.xuedinge.pg-fault-lab",
+  "name": "PostgreSQL Fault Lab (experimental)",
+  "version": "0.1.1",
+  "publisher": "xuedinge",
+  "description": "Loopback-only PostgreSQL 17 wire fault lab with pre-execution barriers and truthful transaction outcomes. Synthetic databases only.",
+  "icon": "assets/plugin.svg",
+  "source": "https://github.com/xue-ding-e/dbx",
+  "engines": {
+    "dbx": ">=0.6.29",
+    "host_api": "^1.0"
+  },
+  "permissions": [
+    "host.ai"
+  ],
+  "entrypoints": {
+    "backend": {
+      "executable": "bin/dbx-pg-fault"
+    },
+    "ui": {
+      "root": "ui",
+      "entry": "ui/index.html"
+    }
+  },
+  "contributions": [
+    {
+      "type": "connection-provider",
+      "id": "io.xuedinge.pg-fault-lab.connection",
+      "label": "PostgreSQL Fault Lab",
+      "icon": "assets/plugin.svg",
+      "database_type": "pg-fault-lab",
+      "fields": [
+        {
+          "key": "display_name",
+          "label": "Connection name",
+          "type": "text",
+          "binding": "name",
+          "default": "Disposable PostgreSQL fault lab",
+          "required": true
+        },
+        {
+          "key": "host",
+          "label": "Synthetic PostgreSQL host (numeric loopback only)",
+          "type": "text",
+          "binding": "host",
+          "default": "127.0.0.1",
+          "required": true
+        },
+        {
+          "key": "port",
+          "label": "Synthetic PostgreSQL 17 port",
+          "type": "number",
+          "binding": "port",
+          "default": 55432,
+          "required": true
+        },
+        {
+          "key": "proxy_port",
+          "label": "Proxy listen port (127.0.0.1)",
+          "type": "number",
+          "binding": "config",
+          "default": 55433
+        },
+        {
+          "key": "disposable_lab",
+          "label": "I confirm this database is disposable and contains synthetic data only",
+          "type": "boolean",
+          "binding": "config",
+          "default": false
+        },
+        {
+          "key": "allow_injection",
+          "label": "Enable fault injection for this disposable lab",
+          "type": "boolean",
+          "binding": "config",
+          "default": false
+        }
+      ],
+      "workbench": "io.xuedinge.pg-fault-lab.workbench",
+      "capabilities": [
+        "test",
+        "connect",
+        "disconnect"
+      ]
+    },
+    {
+      "type": "workbench",
+      "id": "io.xuedinge.pg-fault-lab.workbench",
+      "label": "PostgreSQL Fault Lab",
+      "icon": "assets/plugin.svg"
+    },
+    {
+      "type": "mcp",
+      "id": "io.xuedinge.pg-fault-lab.mcp",
+      "ai_tools": true,
+      "external_tools": true
+    }
+  ]
+}

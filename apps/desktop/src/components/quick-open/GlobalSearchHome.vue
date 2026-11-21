@@ -7,6 +7,7 @@ import type { QuickOpenItem } from "@/composables/useQuickOpen";
 const props = defineProps<{
   items: QuickOpenItem[];
   selectedId?: string;
+  showContentSearch?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -52,7 +53,7 @@ function iconFor(item: QuickOpenItem): typeof Table2 {
         <div class="flex items-center gap-2 text-sm font-medium"><Table2 class="h-4 w-4 text-muted-foreground" />{{ t("quickOpen.homeSearchObjects") }}</div>
         <div class="mt-1 text-xs text-muted-foreground">{{ t("quickOpen.homeSearchObjectsHint") }}</div>
       </button>
-      <button class="rounded-lg border bg-background p-3 text-left hover:border-foreground/30 hover:bg-muted/40" @click="emit('content')">
+      <button v-if="props.showContentSearch !== false" class="rounded-lg border bg-background p-3 text-left hover:border-foreground/30 hover:bg-muted/40" @click="emit('content')">
         <div class="flex items-center gap-2 text-sm font-medium"><FileCode class="h-4 w-4 text-muted-foreground" />{{ t("quickOpen.homeSearchContent") }}</div>
         <div class="mt-1 text-xs text-muted-foreground">{{ t("quickOpen.homeSearchContentHint") }}</div>
       </button>

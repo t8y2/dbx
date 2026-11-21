@@ -6,6 +6,7 @@ import type { ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
   contentMode: boolean;
+  showQuickFilters: boolean;
   previewEditing: boolean;
   scopeSelection: string;
   scopeAllValue: string;
@@ -43,7 +44,7 @@ const quickFilters = ["kind:column", "kind:table", "kind:file", "source:remote"]
         <ChevronRight class="h-3 w-3 shrink-0 text-muted-foreground" />
       </button>
       <div v-if="props.connections.length === 0" class="px-1 py-4 text-xs text-muted-foreground">{{ t("quickOpen.noConnections") }}</div>
-      <div class="mt-5 border-t pt-3">
+      <div v-if="props.showQuickFilters" class="mt-5 border-t pt-3">
         <div class="mb-2 px-1 text-[11px] font-medium text-muted-foreground">{{ t("quickOpen.quickFilters") }}</div>
         <button v-for="token in quickFilters" :key="token" class="mb-1 flex w-full items-center rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="props.previewEditing" @click="emit('token', token)">
           {{ token }}

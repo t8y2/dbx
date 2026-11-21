@@ -8360,7 +8360,7 @@ export default withEnglishFallback({
     newDatabase: "Novo banco de dados",
     newDatabasePlaceholder: "Nome do novo banco de dados",
     newDatabaseCreate: "Criar",
-    newDatabaseCreated: "Banco de dados \"{name}\" criado",
+    newDatabaseCreated: 'Banco de dados "{name}" criado',
     newDatabaseFailed: "Não foi possível criar o banco de dados: {message}",
   },
   diff: {

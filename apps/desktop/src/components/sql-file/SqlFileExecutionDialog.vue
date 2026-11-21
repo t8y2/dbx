@@ -705,6 +705,7 @@ async function createTargetDatabase() {
     if (result === undefined) return;
     await store.ensureVisibleDatabase(id, name);
     await store.loadDatabases(id, { force: true });
+    if (!open.value || connectionId.value !== id) return;
     newDatabaseOpen.value = false;
     newDatabaseName.value = "";
     // The reload keeps the current namespace when the list contains it, so select the new database first.

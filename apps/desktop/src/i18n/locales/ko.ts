@@ -513,6 +513,7 @@ export default withEnglishFallback({
       urlDecode: "URL 구성 요소 디코딩",
       radix: "정수 진법 변환",
       flattenLines: "여러 줄을 한 줄로 압축",
+      unicodeEscape: "텍스트 → Unicode 이스케이프",
     },
     units: {
       auto: "자동(10/13자리)",
@@ -1467,6 +1468,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "off by default; enter a regex to enable",
     elasticsearchIndexGroupingPatternHint: "Off by default (naming schemes vary). Enter a regular expression to enable: matched rolling or time-series indices are aggregated into one queryable wildcard pattern, hiding per-day detail.",
     version: "버전",
+    influxdbApiPath: "API 경로",
+    influxdbApiPathHint: "Nginx 등 리버스 프록시가 InfluxDB를 하위 경로(예: /influxdb)로 제공할 때 입력합니다. 서버에 직접 연결할 때는 비워 두세요. 끝의 슬래시는 무시됩니다.",
     victoriametricsApiPath: "API 경로",
     victoriametricsApiPathHint: "단일 노드 배포에는 /prometheus를, 클러스터에는 /select/tenantID/prometheus를 사용하세요.",
     victoriametricsLookback: "메타데이터 조회 범위",
@@ -3295,6 +3298,7 @@ export default withEnglishFallback({
     addRow: "행 추가",
     insertMultipleRows: "여러 행 삽입…",
     pasteAsNewRows: "새 행으로 붙여넣기",
+    pasteAsNewRowsAwaitingPaste: "이 브라우저에서는 클립보드를 직접 읽을 수 없습니다. 표에서 Ctrl+V(macOS는 ⌘V)를 눌러 새 행으로 붙여넣으세요.",
     insertRowsTitle: "여러 행 삽입",
     insertRowsDescription: "저장되지 않은 초안 행을 지정한 개수만큼 만듭니다. 저장 시 비어 있는 행은 무시되며, 저장 후 표시 순서는 현재 쿼리를 따릅니다.",
     insertRowCountLabel: "행 수",
@@ -5804,6 +5808,7 @@ export default withEnglishFallback({
     scopeFunctions: "함수",
     stepSkipped: "필요한 이전 단계가 실패하여 건너뜁니다.",
     selectedObjectsCount: "{count}개 개체 선택됨",
+    generatePassword: "비밀번호 생성",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "이 OceanBase 버전의 작업 날짜는 마이크로초 정밀도만 지원합니다. 소수 초의 7~9번째 자리를 0으로 바꾸고 다시 미리 보세요. 원래 입력은 보존되었습니다.",
@@ -6334,6 +6339,8 @@ export default withEnglishFallback({
     showPackageMembers: "패키지 멤버 펼치기",
     packageFunctionAtLine: "함수 {name}, {line}번째 줄",
     packageProcedureAtLine: "프로시저 {name}, {line}번째 줄",
+    selectedObjects: "{count}개 개체가 선택되었습니다",
+    dropPackageBodyHint: "패키지 사양을 삭제하면 기존 패키지 본문도 삭제됩니다.",
   },
   postgresForeignTable: {
     tableKind: "테이블 유형",
@@ -7768,7 +7775,7 @@ export default withEnglishFallback({
     objectTypeEvent: "이벤트",
     objectDataOnlyDisabled: "데이터 전용 모드에서는 테이블이 아닌 개체는 전송되지 않습니다",
     objectCrossFamilyDisabled: "데이터베이스 간 전송은 시퀀스만 지원합니다(단순 DDL, 뷰 본문은 변환되지 않음)",
-    xuguPairOnly: "지원되는 전송 방향: Xugu에서 Xugu 또는 MySQL에서 Xugu(테이블 구조 및 데이터만).",
+    xuguPairOnly: "지원되는 전송 방향: Xugu에서 Xugu 또는 MySQL / Oracle에서 Xugu(테이블 구조 및 데이터만).",
     xuguAppendOverwriteOnly: "Xugu 전송 1단계에서는 추가와 덮어쓰기만 지원하며, upsert와 재구성은 아직 지원하지 않습니다.",
     xuguPreserveTableNames: "외래 키 참조가 잘못되는 것을 방지하려면 Xugu 구조 전송 시 원본 테이블 이름의 대소문자를 유지해야 합니다.",
     crossFamilyViewHint: "데이터베이스 간 뷰 전송: 뷰가 의존하는 테이블도 선택하거나 대상 DB에 이미 존재하는지 확인하세요",
@@ -8478,6 +8485,9 @@ export default withEnglishFallback({
     openWithDefaultAppFailed: "시스템 기본 앱으로 열기 실패: {message}",
   },
   diff: {
+    additionalSchemas: "다음 스키마도 비교",
+    additionalSchemasHint: "각 스키마는 대상의 같은 이름 스키마와 비교한 뒤 개별적으로 검토하고 배포합니다.",
+    schemaResults: "스키마별 결과",
     progress: {
       loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",
       loadingSourceDetails: "원본 데이터베이스 테이블 구조를 읽는 중",
@@ -10909,6 +10919,12 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
     shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
     sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
+    globalNumberGrouping: "천 단위 구분 기호 표시",
+    globalNumberGroupingDescription: "그리드에서 숫자를 1,234,567.89 등의 형식으로 표시하며, 개별적으로 구성된 열 형식이 우선합니다.",
+    toolbarGroup_left: "주요 작업 표시줄 및 추가 메뉴",
+    toolbarPinItem: "툴바에 {item} 고정",
+    completionAutoActivationDelay: "자동 완성 자동 활성화 지연(밀리초)",
+    completionAutoActivationDelayDescription: "입력 후 자동 완성 후보가 표시되기까지의 지연 시간입니다. 기본값은 500밀리초이며, 값을 높이면 연속 입력 시 자동 완성 후보가 자주 표시되어 편집을 방해하는 것을 방지할 수 있습니다. 0은 즉시 표시를 의미합니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

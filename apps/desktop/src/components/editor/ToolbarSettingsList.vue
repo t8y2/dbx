@@ -1,19 +1,20 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { GripVertical } from "@lucide/vue";
+import { GripVertical, Pin } from "@lucide/vue";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import type { ToolbarItemGroup, ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { isToolbarMenuItem, type ToolbarItemKey, type ToolbarMenuItemKey, type ToolbarSettingsGroup } from "@/lib/settings/toolbarCustomization";
 import { toolbarVisibilityItemLabel, type ToolbarVisibilityItem } from "@/lib/settings/settingsSearch";
 
 const props = defineProps<{
-  group: ToolbarItemGroup;
+  group: ToolbarSettingsGroup;
   items: ToolbarVisibilityItem[];
   order: ToolbarItemKey[];
   visibility: Partial<Record<ToolbarItemKey, boolean>>;
+  pinnedMenuItems: ToolbarMenuItemKey[];
 }>();
-const emit = defineEmits<{ toggle: [key: ToolbarItemKey, visible: boolean]; reorder: [keys: ToolbarItemKey[]] }>();
+const emit = defineEmits<{ toggle: [key: ToolbarItemKey, visible: boolean]; reorder: [keys: ToolbarItemKey[]]; togglePin: [key: ToolbarMenuItemKey] }>();
 const { t } = useI18n();
 function getToolbarVisibilityItemLabel(item: ToolbarVisibilityItem): string {
   return toolbarVisibilityItemLabel(item, t);
@@ -92,6 +93,18 @@ onBeforeUnmount(cancelDrag);
       <span v-if="target?.key === item.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="target.after ? 'bottom-0' : 'top-0'" />
       <Switch :id="`toolbar-${item.key}`" :model-value="visibility[item.key] !== false" @update:model-value="(visible: boolean) => emit('toggle', item.key, visible)" />
       <Label :for="`toolbar-${item.key}`" class="min-w-0 flex-1 cursor-pointer text-sm">{{ getToolbarVisibilityItemLabel(item) }}</Label>
+      <button
+        v-if="isToolbarMenuItem(item.key)"
+        type="button"
+        class="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent"
+        :class="{ 'bg-primary/10 text-primary': pinnedMenuItems.includes(item.key) }"
+        :title="t('settings.toolbarPinItem', { item: getToolbarVisibilityItemLabel(item) })"
+        :aria-label="t('settings.toolbarPinItem', { item: getToolbarVisibilityItemLabel(item) })"
+        :aria-pressed="pinnedMenuItems.includes(item.key)"
+        @click="emit('togglePin', item.key)"
+      >
+        <Pin class="size-3.5" />
+      </button>
       <button
         type="button"
         class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"

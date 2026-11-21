@@ -6,6 +6,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::time::{Duration, Instant};
 
+use super::external_config::{external_string, normalize_base_path};
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
 use crate::models::connection::DatabaseConnectionInfo;
@@ -69,7 +70,7 @@ struct TsdbMetricStatistic {
 impl VictoriaMetricsClient {
     pub fn new_for_config(url: &str, config: &ConnectionConfig, timeout: Duration) -> Result<Self, String> {
         let api_path = external_string(config, &["apiPath", "api_path"])
-            .map(|value| normalize_api_path(&value))
+            .map(|value| normalize_base_path(&value))
             .unwrap_or_else(|| DEFAULT_API_PATH.to_string());
         let lookback = external_string(config, &["lookback"])
             .filter(|value| valid_lookback(value))
@@ -102,27 +103,6 @@ impl VictoriaMetricsClient {
             (Some(username), password) => request.basic_auth(username, password.as_deref()),
             _ => request,
         }
-    }
-}
-
-fn external_string(config: &ConnectionConfig, keys: &[&str]) -> Option<String> {
-    let value = config.external_config.as_ref()?;
-    keys.iter()
-        .find_map(|key| value.get(key))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn normalize_api_path(value: &str) -> String {
-    let trimmed = value.trim().trim_end_matches('/');
-    if trimmed.is_empty() || trimmed == "/" {
-        String::new()
-    } else if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
     }
 }
 
@@ -476,9 +456,9 @@ mod tests {
 
     #[test]
     fn normalizes_api_paths_and_lookbacks() {
-        assert_eq!(normalize_api_path("prometheus/"), "/prometheus");
-        assert_eq!(normalize_api_path("/select/42/prometheus/"), "/select/42/prometheus");
-        assert_eq!(normalize_api_path("/"), "");
+        assert_eq!(normalize_base_path("prometheus/"), "/prometheus");
+        assert_eq!(normalize_base_path("/select/42/prometheus/"), "/select/42/prometheus");
+        assert_eq!(normalize_base_path("/"), "");
         assert!(valid_lookback("15m"));
         assert!(valid_lookback("250ms"));
         assert!(!valid_lookback("0h"));

@@ -1015,6 +1015,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "Domyślnie wyłączone; wpisz wyrażenie regularne, aby włączyć",
     elasticsearchIndexGroupingPatternHint: "Domyślnie wyłączone (schematy nazw się różnią). Wprowadź wyrażenie regularne, aby pogrupować pasujące indeksy rotacyjne lub szeregów czasowych w jeden wzorzec z symbolem wieloznacznym i ukryć podział dzienny.",
     version: "Wersja",
+    influxdbApiPath: "Ścieżka API",
+    influxdbApiPathHint: "Uzupełnij, gdy reverse proxy, np. Nginx, udostępnia InfluxDB pod podścieżką, np. /influxdb. Puste oznacza dostęp do serwera w katalogu głównym. Końcowy ukośnik jest ignorowany.",
     victoriametricsApiPath: "Ścieżka API",
     victoriametricsApiPathHint: "Użyj /prometheus dla instalacji pojedynczego węzła lub /select/tenantID/prometheus dla klastrów.",
     victoriametricsLookback: "Zakres wsteczny metadanych",

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
+import GeometryRawPopover from "@/components/grid/GeometryRawPopover.vue";
 import { computed, nextTick, ref, watch } from "vue";
 import { Code2, Copy, Download, Eye, FileUp, Info, Pencil, WrapText } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
@@ -226,6 +227,7 @@ watch(
                   <canvas v-show="geometryPreviewOpen" ref="geometryCanvas" width="400" height="280" class="block rounded" />
                 </PopoverContent>
               </Popover>
+              <GeometryRawPopover v-if="canPreviewCellGeometry(detail.value, detail.type)" :value="detail.value" :srid="detail.srid ?? null" :database-type="databaseType" size="sm" />
             </div>
           </div>
           <a

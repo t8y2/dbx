@@ -84,8 +84,10 @@ export function isGeometryColumnType(columnType: string | undefined): boolean {
   const base = (columnType ?? "")
     .trim()
     .toLowerCase()
-    .split(/[(:\s]/)[0];
-  return base === "geometry" || base === "geography";
+    .split(/[(:\s]/)[0]
+    .split(".")
+    .pop();
+  return base === "geometry" || base === "geography" || base === "st_geometry";
 }
 
 export function canPreviewCellGeometry(value: unknown, columnType?: string): boolean {

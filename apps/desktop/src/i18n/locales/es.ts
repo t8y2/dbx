@@ -5473,6 +5473,17 @@ export default withEnglishFallback({
     createSequence: "Crear secuencia",
     viewPostgresRowLevelSecurity: "Ver políticas de seguridad a nivel de fila",
     copyGeneratedSql: "Copiar SQL generado",
+    mysqlTableMaintenance: {
+      title: "Mantenimiento de tablas",
+      analyze: "Analizar tabla",
+      check: "Comprobar tabla",
+      optimize: "Optimizar tabla",
+      repair: "Reparar tabla",
+      analyzeSuccess: "Tabla «{name}» ANALYZE TABLE: {message}",
+      checkSuccess: "Tabla «{name}» CHECK TABLE: {message}",
+      optimizeSuccess: "Tabla «{name}» OPTIMIZE TABLE: {message}",
+      repairSuccess: "Tabla «{name}» REPAIR TABLE: {message}",
+    },
   },
   visibleDatabases: {
     title: "Bases de datos visibles",

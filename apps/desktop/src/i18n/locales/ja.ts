@@ -5297,6 +5297,17 @@ export default withEnglishFallback({
     createSequence: "シーケンスの作成",
     viewPostgresRowLevelSecurity: "行レベルセキュリティポリシーを表示",
     copyGeneratedSql: "生成された SQL をコピー",
+    mysqlTableMaintenance: {
+      title: "テーブルメンテナンス",
+      analyze: "テーブルを分析",
+      check: "テーブルを確認",
+      optimize: "テーブルを最適化",
+      repair: "テーブルを修復",
+      analyzeSuccess: "テーブル「{name}」ANALYZE TABLE：{message}",
+      checkSuccess: "テーブル「{name}」CHECK TABLE：{message}",
+      optimizeSuccess: "テーブル「{name}」OPTIMIZE TABLE：{message}",
+      repairSuccess: "テーブル「{name}」REPAIR TABLE：{message}",
+    },
   },
   visibleDatabases: {
     title: "表示するデータベース",

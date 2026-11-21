@@ -5255,6 +5255,17 @@ export default withEnglishFallback({
     duplicateStructureCommentsUnavailable: "表結構已複製，但部分來源表註解無法讀取，可能未被複製。",
     createSequence: "新增序列",
     viewPostgresRowLevelSecurity: "檢視資料列層級安全性原則",
+    mysqlTableMaintenance: {
+      title: "資料表維護",
+      analyze: "分析資料表",
+      check: "檢查資料表",
+      optimize: "最佳化資料表",
+      repair: "修復資料表",
+      analyzeSuccess: "資料表「{name}」ANALYZE TABLE：{message}",
+      checkSuccess: "資料表「{name}」CHECK TABLE：{message}",
+      optimizeSuccess: "資料表「{name}」OPTIMIZE TABLE：{message}",
+      repairSuccess: "資料表「{name}」REPAIR TABLE：{message}",
+    },
   },
   visibleDatabases: {
     title: "顯示資料庫",

@@ -224,6 +224,7 @@ import {
   buildTruncateTableSql,
   buildMysqlAutoIncrementSql,
   kingbaseDuplicateStructureTransaction,
+  MYSQL_TABLE_MAINTENANCE_OPERATIONS,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
   supportsMysqlAutoIncrement as connectionSupportsMysqlAutoIncrement,
@@ -760,6 +761,7 @@ const {
   supportsTruncate,
   supportsVacuum,
   supportsMysqlAutoIncrement,
+  supportsMysqlTableMaintenance,
   canDropTableCascade,
   canTruncateTableCascade,
   refreshDropTablePreviewSql,
@@ -777,6 +779,7 @@ const {
   mysqlAutoIncrement,
   refreshMysqlAutoIncrementPreviewSql,
   confirmMysqlAutoIncrement,
+  mysqlTableMaintenance,
 } = useSidebarTableMutationRuntime({
   activeNode,
   releaseActiveNodeReference,
@@ -8603,6 +8606,14 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       }
       if (supportsMysqlAutoIncrement.value || batchAutoIncrementCount > 1) {
         items.push({ sidebarActionId: "contextMenu.mysqlAutoIncrement", label: autoIncrementMenuLabel(t("contextMenu.mysqlAutoIncrement")), action: autoIncrementMenuAction(mysqlAutoIncrement), icon: Gauge });
+      }
+      if (supportsMysqlTableMaintenance.value) {
+        items.push({
+          sidebarActionId: "contextMenu.mysqlTableMaintenance",
+          label: t("contextMenu.mysqlTableMaintenance.title"),
+          icon: Wrench,
+          children: MYSQL_TABLE_MAINTENANCE_OPERATIONS.map((operation) => ({ label: t(`contextMenu.mysqlTableMaintenance.${operation}`), action: () => mysqlTableMaintenance(operation) })),
+        });
       }
       if (supportsTruncate.value) {
         destructiveActions.push({

@@ -411,6 +411,7 @@ import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader 
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useDataGridCellDetailEdit } from "@/composables/useDataGridCellDetailEdit";
@@ -13733,12 +13734,15 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
   const max = layout === "bottom" ? CELL_DETAIL_PANEL_MAX_HEIGHT : DRAWER_MAX_WIDTH;
   return Math.min(Math.max(value, min), max);
 }
-// Table info drawers are tied to a single grid instance. Keeping this state
-// module-global leaks the drawer into other kept-alive tabs.
-const showTableInfo = ref(false);
+const tableInfoState = useTabUiState<{ open?: boolean; tab?: TableInfoTab }>({}, "tableInfoDrawer");
+const restoreTableInfo = props.context === "table-data" && tableInfoState.initialState.open === true;
+const showTableInfo = ref(restoreTableInfo);
 const { tableInfoHeaderRef, tableInfoActionLabelsCompact, observeTableInfoHeader, disconnectTableInfoHeader } = useTableInfoHeaderLayout();
 void tableInfoHeaderRef;
-const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
+const activeTableInfoTab = ref<TableInfoTab>((restoreTableInfo ? tableInfoState.initialState.tab : undefined) ?? settingsStore.editorSettings.tableInfoActiveTab);
+if (props.context === "table-data") {
+  tableInfoState.track(() => ({ open: showTableInfo.value, tab: showTableInfo.value ? activeTableInfoTab.value : undefined }));
+}
 const canPinTableInfo = computed(() => props.context === "table-data");
 const tableInfoDrawerPinned = computed(() => settingsStore.editorSettings.tableInfoDrawerPinned);
 const rawDdlContent = ref("");
@@ -14201,7 +14205,7 @@ function toggleTableInfoDrawerPinned() {
   settingsStore.updateEditorSettings({ tableInfoDrawerPinned: !tableInfoDrawerPinned.value });
 }
 
-async function selectTableInfoTab(tab: TableInfoTab) {
+async function selectTableInfoTab(tab: TableInfoTab, options: { restore?: boolean } = {}) {
   // The drawer is often opened after the table was already selected, so the
   // partition status may never have been probed; do it here (once) before the
   // tab list is consulted, or the Partitions tab would be missing entirely.
@@ -14210,9 +14214,9 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   const nextTab = tabSupported ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   activeTableInfoTab.value = nextTab;
-  if (tabSupported) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
+  if (tabSupported && !options.restore) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
   if (nextTab === "info") await fetchTableOverview();
-  else if (nextTab === "ddl") await fetchDdl();
+  else if (nextTab === "ddl") await fetchDdl(!options.restore);
   else if (nextTab === "indexes") await fetchIndexes();
   else if (nextTab === "foreignKeys") await fetchForeignKeys();
   else if (nextTab === "constraints") await fetchConstraints();
@@ -14235,7 +14239,7 @@ watch(
     showTableInfo.value = true;
     void selectTableInfoTab(activeTableInfoTab.value);
   },
-  { immediate: true },
+  { immediate: !restoreTableInfo },
 );
 
 async function refreshActiveTableInfo() {
@@ -14603,7 +14607,7 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
 }
 
 if (showTableInfo.value && props.tableMeta && props.connectionId) {
-  selectTableInfoTab(activeTableInfoTab.value);
+  void selectTableInfoTab(activeTableInfoTab.value, { restore: restoreTableInfo });
 }
 
 function copyDdl() {

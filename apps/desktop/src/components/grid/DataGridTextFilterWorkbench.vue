@@ -5,6 +5,8 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridLocalFilterSummary from "@/components/grid/DataGridLocalFilterSummary.vue";
+import type { DataGridLocalFilterSummaryItem } from "@/components/grid/DataGridLocalFilterSummary.vue";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
@@ -22,6 +24,9 @@ const props = defineProps<{
   applyOnlyBusy?: boolean;
   disabled?: boolean;
   valueSuggestions?: DataGridDistinctValueSuggestionState;
+  hasLocalColumnFilters?: boolean;
+  localFilterCount?: number;
+  localFilterSummaries?: DataGridLocalFilterSummaryItem[];
 }>();
 
 const emit = defineEmits<{
@@ -33,6 +38,7 @@ const emit = defineEmits<{
   apply: [];
   reset: [];
   clear: [];
+  clearLocalFilter: [columnIndex?: number];
   copySql: [];
   removeRule: [id: string];
   moveRule: [id: string, targetIndex: number];
@@ -156,6 +162,7 @@ watch(
       @keydown="addRuleFromBlankArea"
       @pointerdown.self="focusRulesArea"
     >
+      <DataGridLocalFilterSummary v-if="hasLocalColumnFilters" class="mb-1.5" :count="localFilterCount ?? 0" :summaries="localFilterSummaries ?? []" @clear-all="emit('clearLocalFilter')" @clear-column="(columnIndex) => emit('clearLocalFilter', columnIndex)" />
       <DataGridFilterBuilder
         class="min-w-[520px]"
         :rules="rules"

@@ -562,22 +562,6 @@ export function aiProviderLabel(provider: AiProvider, t: (key: string) => string
 
 export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
   {
-    id: "aicodemirror",
-    label: "AICodeMirror",
-    iconPath: "/icons/ai/aicodemirror.png",
-    group: "partner",
-    provider: "openai-compatible",
-    endpoint: "https://api.aicodemirror.ai/v1",
-    model: "",
-    apiStyle: "completions",
-    authMethod: "bearer",
-    requiresApiKey: true,
-    websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-    apiKeyUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-    descriptionKey: "ai.aicodemirrorDescription",
-    badgeKey: "ai.aicodemirrorSponsored",
-  },
-  {
     id: "hualong-ai",
     label: "HuaLongAI",
     iconPath: "/icons/ai/hualong-ai.png",
@@ -1039,6 +1023,8 @@ export interface EditorSettings {
   sequenceCompletionEnabled: boolean;
   sortCompletionColumnsAlphabetically: boolean;
   selectFirstCompletionOnOpen: boolean;
+  /** Delay before the completion popup opens after typing, in milliseconds (#15340). */
+  completionAutoActivationDelayMs: number;
   wordWrap: boolean;
   showWhitespace: boolean;
   tableDdlWordWrap: boolean;
@@ -1486,6 +1472,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   snippetTriggerKey: "tab",
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
+  completionAutoActivationDelayMs: 500,
   wordWrap: false,
   showWhitespace: false,
   tableDdlWordWrap: true,
@@ -1738,6 +1725,14 @@ export function normalizeGlobalConnectTimeoutSecs(value: unknown): number {
 function normalizeUiScale(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.uiScale;
   return Math.min(MAX_UI_SCALE, Math.max(MIN_UI_SCALE, Math.round(value * 100) / 100));
+}
+
+export const MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 0;
+export const MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 5000;
+
+function normalizeCompletionAutoActivationDelay(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
+  return Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.round(value)));
 }
 
 function normalizeFontFamily(value: unknown, fallback: string, migrateMonoPresets = false): string {
@@ -2248,6 +2243,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     snippetTriggerKey: settings.snippetTriggerKey === "space" || settings.snippetTriggerKey === "both" ? settings.snippetTriggerKey : DEFAULT_EDITOR_SETTINGS.snippetTriggerKey,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
+    completionAutoActivationDelayMs: normalizeCompletionAutoActivationDelay(settings.completionAutoActivationDelayMs),
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     showWhitespace: typeof settings.showWhitespace === "boolean" ? settings.showWhitespace : DEFAULT_EDITOR_SETTINGS.showWhitespace,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
@@ -3268,6 +3264,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.snippetTriggerKey !== undefined) editorSettings.value.snippetTriggerKey = partial.snippetTriggerKey === "space" || partial.snippetTriggerKey === "both" ? partial.snippetTriggerKey : "tab";
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
+    if (partial.completionAutoActivationDelayMs !== undefined) editorSettings.value.completionAutoActivationDelayMs = normalizeCompletionAutoActivationDelay(partial.completionAutoActivationDelayMs);
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.showWhitespace !== undefined) editorSettings.value.showWhitespace = partial.showWhitespace === true;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;

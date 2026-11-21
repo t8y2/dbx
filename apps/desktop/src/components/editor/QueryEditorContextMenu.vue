@@ -180,6 +180,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             icon: Play,
             shortcut: shortcuts.executeSql,
           },
+          ...(state.showExecuteScriptFromHere && actions.executeScriptFromContextPosition
+            ? [{ sidebarActionId: "editor.contextMenu.executeScriptFromHere", label: t("editor.contextMenu.executeScriptFromHere"), action: actions.executeScriptFromContextPosition, disabled: !state.canExecuteScriptFromHere, icon: FastForward }]
+            : []),
           ...(actions.executeAllFromContextMenu
             ? [
                 {
@@ -192,7 +195,6 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
                 },
               ]
             : []),
-          ...(state.showExecuteScriptFromHere && actions.executeScriptFromContextPosition ? [{ label: t("editor.contextMenu.executeScriptFromHere"), action: actions.executeScriptFromContextPosition, disabled: !state.canExecuteScriptFromHere, icon: FastForward }] : []),
           ...(state.canDebugPlSql && actions.debugPlSqlFromContextMenu ? [{ sidebarActionId: "plDebug.start.title", label: t("plDebug.start.title"), action: actions.debugPlSqlFromContextMenu, icon: Play }] : []),
           {
             sidebarActionId: "settings.shortcutExecuteSqlInNewResultTab",

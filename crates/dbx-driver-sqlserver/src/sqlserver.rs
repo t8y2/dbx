@@ -2849,7 +2849,17 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         ));
     }
     if object_kinds.iter().any(|kind| matches!(kind, crate::types::CompletionAssistantObjectKind::Column)) {
-        let column_like = like_clause.replace("name_expr", "c.name");
+        // The shared object-search clause matches `o.name`/`ep.value`, which do
+        // not exist in the sys.columns query, so the column branch builds its
+        // own predicate and repeats the comment match against MS_Description
+        // when the caller asked for comment search (#15007).
+        let column_like = if like_pattern == "%" {
+            String::new()
+        } else if request.search_in_comments {
+            format!(" AND (LOWER(c.name) LIKE LOWER('{like_pattern}') ESCAPE '\\' OR LOWER(COALESCE(ep.value, '')) LIKE LOWER('{like_pattern}') ESCAPE '\\') ")
+        } else {
+            format!(" AND LOWER(c.name) LIKE LOWER('{like_pattern}') ESCAPE '\\' ")
+        };
         let parent_table_filter = request
             .parent_name
             .as_deref()
@@ -6511,6 +6521,32 @@ mod tests {
         assert!(sql.contains("ep.name = N'MS_Description'"));
         assert!(sql.contains("ORDER BY c.column_id"));
         assert!(!sql.contains("AS dbx_completion ORDER BY name"));
+    }
+
+    #[test]
+    fn sqlserver_completion_assistant_column_search_can_match_comments() {
+        let request = CompletionAssistantRequest {
+            connection_id: "c1".to_string(),
+            database: "app".to_string(),
+            schema: Some("dbo".to_string()),
+            object_kinds: vec![CompletionAssistantObjectKind::Column],
+            mask: "order".to_string(),
+            case_sensitive: false,
+            global_search: false,
+            max_results: Some(50),
+            search_in_comments: true,
+            search_in_definitions: false,
+            parent_schema: Some("dbo".to_string()),
+            parent_name: Some("Users".to_string()),
+            match_mode: Some(CompletionAssistantMatchMode::Contains),
+        };
+
+        let sql = sqlserver_completion_assistant_sql(&request, 50);
+
+        // The comment predicate references the OUTER APPLY alias, so it must be
+        // valid inside the column query too (it previously had no ep source).
+        assert!(sql.contains("LOWER(COALESCE(ep.value, '')) LIKE LOWER('%order%') ESCAPE '\\'"));
+        assert!(sql.contains("OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id AND ep.name = N'MS_Description') ep"));
     }
 
     #[test]

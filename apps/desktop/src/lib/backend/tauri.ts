@@ -1,4 +1,5 @@
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import type { AppThemeMode } from "@/lib/app/appTheme";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
@@ -389,6 +390,7 @@ export interface DriverRuntimeSummary {
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
+  app_theme_mode?: AppThemeMode;
   linux_floating_frame_enabled?: boolean;
   icon_theme: "default" | "black";
   quit_on_close: boolean;
@@ -646,6 +648,9 @@ export interface SortedQuerySqlOptions {
   column: string;
   direction: QuerySortDirection;
   tieBreakerColumnIndexes?: number[];
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+  identifierQuote?: string;
 }
 
 export interface QuerySqlBuildResult {
@@ -1133,8 +1138,8 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
-  return invoke("save_editor_settings", { settings });
+export async function saveEditorSettings(settings: unknown, patch?: unknown): Promise<unknown> {
+  return invoke("save_editor_settings", { settings, ...(patch ? { patch } : {}) });
 }
 
 export interface GlobalSearchSettings {
@@ -1215,8 +1220,12 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   return invoke("save_transfer_task_library", { library });
 }
 
-export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
-  return invoke("complete_app_close", { action });
+export async function completeAppClose(action: "quit" | "hide", quitRequestId?: string): Promise<void> {
+  return invoke("complete_app_close", { action, ...(quitRequestId ? { quitRequestId } : {}) });
+}
+
+export async function completeWindowClose(): Promise<void> {
+  return invoke("complete_window_close");
 }
 
 export async function requestAppClose(): Promise<void> {
@@ -2572,12 +2581,13 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return invoke("build_rename_object_sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return invoke("build_rename_database_sql", {
     databaseType: options.databaseType,
     oldName: options.oldName,
     newName: options.newName,
     terminateConnections: options.terminateConnections,
+    identifierQuote: options.identifierQuote,
   });
 }
 
@@ -6905,6 +6915,8 @@ export interface QueryResultExportRequest {
   timeoutSecs?: number;
   keysetOptimizationEnabled: boolean;
   clientSessionId?: string;
+  /** MySQL source session, borrowed while streaming without transferring ownership. */
+  sourceClientSessionId?: string;
   /** Open manual transaction to read through, so the export sees its uncommitted changes. */
   txnSessionId?: string;
   executionId?: string;

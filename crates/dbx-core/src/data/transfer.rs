@@ -26,6 +26,7 @@ mod db2;
 mod ddl_plan;
 pub(crate) mod mysql_xugu;
 pub(crate) mod oracle_table_contract;
+pub(crate) mod oracle_xugu;
 mod overwrite_clear;
 mod structure_plan;
 pub(crate) mod xugu_objects;
@@ -1229,17 +1230,21 @@ pub fn validate_transfer_database_pair(
         return Ok(());
     }
     let mysql_to_xugu = mysql_xugu::is_pair(source_db_type, target_db_type);
-    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) && !mysql_to_xugu {
-        return Err("虚谷数据传输当前仅支持虚谷到虚谷，以及 MySQL 到虚谷的表传输".to_string());
+    let oracle_to_xugu = oracle_xugu::is_pair(source_db_type, target_db_type);
+    if !matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu))
+        && !mysql_to_xugu
+        && !oracle_to_xugu
+    {
+        return Err("虚谷数据传输当前仅支持虚谷到虚谷，以及 MySQL / Oracle 到虚谷的表传输".to_string());
     }
-    if mysql_to_xugu
+    if (mysql_to_xugu || oracle_to_xugu)
         && request.objects.as_ref().is_some_and(|objects| {
             objects
                 .iter()
                 .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty())
         })
     {
-        return Err("MySQL 到虚谷当前仅支持表结构和表数据".into());
+        return Err("MySQL / Oracle 到虚谷当前仅支持表结构和表数据".into());
     }
     if request.objects.as_ref().is_some_and(|objects| {
         objects.iter().any(|selection| !xugu_objects::supported_kinds().contains(&selection.object_type))
@@ -1709,6 +1714,7 @@ fn mysql_object_replacement_statements(
             schema: Some(target_database.to_string()),
             name: name.to_string(),
             source: ddl.to_string(),
+            identifier_quote: None,
         };
         let statements = match validation_name {
             Some(validation_name) => build_mysql_routine_replacement_statements(input, validation_name)?,
@@ -6544,6 +6550,141 @@ fn normalize_reused_opengauss_table_ddl(
     }
 }
 
+/// Storage engines a stock MySQL server can create tables with (MySQL 8
+/// `INFORMATION_SCHEMA.ENGINES`). MySQL-family vendors add their own — GoldenDB's
+/// distributed tables report `ENGINE=Gstore` — and reusing that DDL on plain MySQL fails
+/// the whole `CREATE TABLE` with `ERROR 1286 (42000): Unknown storage engine 'Gstore'`
+/// (#14635).
+const MYSQL_TARGET_TABLE_ENGINES: &[&str] = &[
+    "archive",
+    "blackhole",
+    "csv",
+    "example",
+    "federated",
+    "innodb",
+    "memory",
+    "mrg_myisam",
+    "myisam",
+    "ndb",
+    "ndbcluster",
+    "performance_schema",
+];
+
+fn is_mysql_target_table_engine(engine: &str) -> bool {
+    let normalized = engine.trim_matches(|ch| matches!(ch, '`' | '"' | '\'')).to_ascii_lowercase();
+    MYSQL_TARGET_TABLE_ENGINES.contains(&normalized.as_str())
+}
+
+/// Replaces a vendor-only `ENGINE=<name>` with `ENGINE=InnoDB` when reused MySQL-family
+/// DDL moves to a stock MySQL server. A same-engine transfer keeps the clause untouched:
+/// `Gstore` is valid on the GoldenDB server that produced it.
+///
+/// Every other table option and the whole column list stay byte-identical, so partitions,
+/// secondary indexes, comments and auto-increment values survive. Literals, comments and
+/// backtick identifiers are masked before the scan, and the paren-depth guard scopes the
+/// match to table options, so neither a column named `engine` nor a `CHECK (engine = ...)`
+/// constraint can be mistaken for the clause.
+fn rewrite_mysql_target_table_engine(
+    ddl: &str,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+) -> String {
+    if source_db_type == target_db_type
+        || !is_mysql_family_target(source_db_type)
+        || !matches!(target_db_type, DatabaseType::Mysql)
+    {
+        return ddl.to_string();
+    }
+    // Mask non-code text with placeholders so the scanner only ever sees table code;
+    // parentheses and `ENGINE` inside a literal or identifier must not count.
+    let spans = sql_non_code_spans_with_mysql_identifiers(ddl, true, true);
+    let mut masked = String::with_capacity(ddl.len());
+    let mut restores = Vec::new();
+    let mut previous = 0;
+    for (start, end) in spans {
+        masked.push_str(&ddl[previous..start]);
+        let placeholder = format!("__DBX_MASKED_{}__", restores.len());
+        masked.push_str(&placeholder);
+        restores.push((placeholder, ddl[start..end].to_string()));
+        previous = end;
+    }
+    masked.push_str(&ddl[previous..]);
+    let rewritten = rewrite_unknown_mysql_table_engine(&masked);
+    restores.into_iter().fold(rewritten, |sql, (placeholder, original)| sql.replace(&placeholder, &original))
+}
+
+fn rewrite_unknown_mysql_table_engine(masked: &str) -> String {
+    let bytes = masked.as_bytes();
+    let mut output = String::with_capacity(masked.len());
+    let mut index = 0;
+    let mut paren_depth = 0usize;
+    let mut saw_column_list_end = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => {
+                paren_depth += 1;
+                output.push('(');
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 {
+                    saw_column_list_end = true;
+                }
+                output.push(')');
+                index += 1;
+            }
+            _ => {
+                let keyword_end = index + "ENGINE".len();
+                let keyword_available = saw_column_list_end
+                    && paren_depth == 0
+                    && bytes[index..].starts_with(b"ENGINE")
+                    && (index == 0 || !is_sql_identifier_byte(bytes[index - 1]))
+                    && bytes.get(keyword_end).is_some_and(|byte| !is_sql_identifier_byte(*byte));
+                if keyword_available {
+                    if let Some((assignment_end, engine)) = mysql_table_engine_assignment(masked, keyword_end) {
+                        // A masked engine name was quoted in the source DDL. It cannot be
+                        // checked here, so it keeps the source text like before.
+                        if !engine.starts_with("__DBX_MASKED_") && !is_mysql_target_table_engine(engine) {
+                            output.push_str("ENGINE=InnoDB");
+                            index = assignment_end;
+                            continue;
+                        }
+                    }
+                }
+                let char_len = masked[index..].chars().next().map_or(1, |ch| ch.len_utf8());
+                output.push_str(&masked[index..index + char_len]);
+                index += char_len;
+            }
+        }
+    }
+    output
+}
+
+/// Parses `ENGINE [=] value` starting right after the keyword. MySQL's table-option
+/// grammar makes the `=` optional; `SHOW CREATE TABLE` always emits it.
+fn mysql_table_engine_assignment(code: &str, keyword_end: usize) -> Option<(usize, &str)> {
+    let bytes = code.as_bytes();
+    let mut cursor = keyword_end;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if bytes.get(cursor) == Some(&b'=') {
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+    } else if cursor == keyword_end {
+        // `ENGINE` must be followed by `=` or whitespace to be a table option.
+        return None;
+    }
+    let mut end = cursor;
+    while end < bytes.len() && is_sql_identifier_byte(bytes[end]) {
+        end += 1;
+    }
+    (end > cursor).then(|| (end, &code[cursor..end]))
+}
+
 fn rewrite_transfer_source_table_ddl(
     sql: &str,
     source_schema: &str,
@@ -6577,11 +6718,14 @@ fn rewrite_transfer_source_table_ddl(
         // CREATE TABLE header when the transfer renames the table (name case conversion).
         // Unparseable heads return None so the caller falls back to generated DDL instead
         // of creating a table under the wrong name.
-        if table == target_table {
+        let renamed = if table == target_table {
             Some(sql.to_string())
         } else {
             rewrite_mysql_create_table_name(sql, target_table)
-        }
+        };
+        // A vendor engine (GoldenDB's `Gstore`) does not exist on a plain MySQL target, so
+        // the cross-engine transfer swaps only that table option (#14635).
+        renamed.map(|ddl| rewrite_mysql_target_table_engine(&ddl, source_db_type, target_db_type))
     } else if matches!((source_db_type, target_db_type), (DatabaseType::Xugu, DatabaseType::Xugu)) {
         // Xugu's Agent DDL contains quoted schema-qualified CREATE/ALTER/INDEX
         // statements. Rewrite only code spans so schema names inside comments
@@ -11466,6 +11610,7 @@ async fn build_rebuild_preview(
                     schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
                     old_name: target_table.clone(),
                     new_name: backup.clone(),
+                    identifier_quote: None,
                 })?;
             rename_statements.push(rename_sql);
             let drop_sql = crate::db_admin_sql::build_drop_table_sql(crate::db_admin_sql::TableAdminSqlOptions {
@@ -11548,6 +11693,9 @@ pub async fn preview_transfer_ownership(
     // PostgreSQL-compatible transfers report role ownership gaps for the confirmation flow.
     if mysql_xugu::is_pair(source_db_type, target_db_type) {
         mysql_xugu::preflight(state, request, source_pool_key, target_pool_key).await?;
+    }
+    if oracle_xugu::is_pair(source_db_type, target_db_type) {
+        oracle_xugu::preflight(state, request, source_pool_key, target_pool_key).await?;
     }
     let (missing_owners, target_owner) =
         if request.create_table && is_postgres_compat_transfer(source_db_type, target_db_type) {
@@ -12823,6 +12971,7 @@ where
                     schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
                     old_name: target_table.clone(),
                     new_name: backup_name.clone(),
+                    identifier_quote: None,
                 })?;
 
             execute_on_pool(state, target_pool_key, &rename_sql).await.map_err(|e| {
@@ -13323,8 +13472,11 @@ where
     }
     ensure_target_column_names_unique(request, table, &columns)?;
     let mysql_to_xugu = mysql_xugu::is_pair(source_db_type, target_db_type);
+    let oracle_to_xugu = oracle_xugu::is_pair(source_db_type, target_db_type);
     let mysql_xugu_types = if mysql_to_xugu {
         Some(columns.iter().map(mysql_xugu::column_type).collect::<Result<Vec<_>, _>>()?)
+    } else if oracle_to_xugu {
+        Some(columns.iter().map(oracle_xugu::column_type).collect::<Result<Vec<_>, _>>()?)
     } else {
         None
     };
@@ -13525,6 +13677,7 @@ where
     // target metadata it stays false — SQL Server then rejects the explicit
     // identity values with 544.
     let needs_target_columns = mysql_to_xugu
+        || oracle_to_xugu
         || default_rows_only
         || target_table_preexisting
         || (request.mode == TransferMode::Upsert && !transfer_upsert_falls_back_to_append(target_db_type))
@@ -13548,7 +13701,7 @@ where
         Vec::new()
     };
 
-    if mysql_to_xugu {
+    if mysql_to_xugu || oracle_to_xugu {
         mysql_xugu::enrich_target_temporal_precision(
             state,
             target_pool_key,
@@ -13566,6 +13719,9 @@ where
         || xugu_rowversion_only_transfer(&target_columns, target_db_type, target_db_type);
     if mysql_to_xugu {
         mysql_xugu::validate_target(&writable_columns, &target_columns)?;
+    }
+    if oracle_to_xugu {
+        oracle_xugu::validate_target(&writable_columns, &target_columns)?;
     }
     if default_rows_only && !target_default_rows_only {
         return Err(format!(
@@ -13825,11 +13981,13 @@ where
     // cursor open across target writes.
     let xugu_same_session = xugu_transfer_shares_agent_session(source_db_type, source_pool_key, target_pool_key);
     let use_agent_cursor = table_filter.is_none()
-        && uses_agent_transfer_cursor(source_db_type)
+        && (uses_agent_transfer_cursor(source_db_type) || oracle_to_xugu)
         && !default_rows_only
         && !xugu_same_session;
     let agent_transfer_sql = use_agent_cursor.then(|| {
-        if *source_db_type == DatabaseType::Xugu {
+        if oracle_to_xugu {
+            oracle_xugu::cursor_sql(&writable_columns, &request.source_schema, table)
+        } else if *source_db_type == DatabaseType::Xugu {
             xugu_transfer_cursor_sql(
                 &writable_columns,
                 &xugu_clob_indexes,
@@ -13977,6 +14135,10 @@ where
             if mysql_to_xugu {
                 mysql_xugu::validate_rows(&writable_columns, &result.rows)?;
             }
+            if oracle_to_xugu {
+                oracle_xugu::normalize_lob_rows(&writable_columns, &mut result.rows)?;
+                oracle_xugu::validate_rows(&writable_columns, &result.rows)?;
+            }
 
             if row_count == 0 {
                 // A `ctid` window can be empty — its rows were deleted, or the
@@ -14022,7 +14184,7 @@ where
                     row.clear();
                 }
             }
-            let write_statements = if mysql_to_xugu {
+            let write_statements = if mysql_to_xugu || oracle_to_xugu {
                 mysql_xugu::write_batches(
                     &write_col_names,
                     &col_types,
@@ -14547,6 +14709,11 @@ where
         table_request.tables = vec![table.to_string()];
         mysql_xugu::preflight(&state, &table_request, source_pool_key, target_pool_key).await?;
     }
+    if oracle_xugu::is_pair(source_db_type, target_db_type) {
+        let mut table_request = request.clone();
+        table_request.tables = vec![table.to_string()];
+        oracle_xugu::preflight(&state, &table_request, source_pool_key, target_pool_key).await?;
+    }
     let request = request.clone();
     let table = table.to_string();
     let source_db_type = *source_db_type;
@@ -14971,6 +15138,7 @@ where
             schema: Some(request.target_schema.clone()),
             name: object.name.clone(),
             source: rewritten_source,
+            identifier_quote: None,
         })?;
         for statement in statements {
             execute_on_pool(state, target_pool_key, &statement)
@@ -16378,16 +16546,33 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             assert!(validate_transfer_database_pair(&request, &DatabaseType::Mysql, &DatabaseType::Xugu).is_ok());
             assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Mysql).is_err());
             assert!(validate_transfer_database_pair(&request, &DatabaseType::Doris, &DatabaseType::Xugu).is_err());
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Oracle, &DatabaseType::Xugu).is_ok());
+            assert!(
+                validate_transfer_database_pair(&request, &DatabaseType::OceanbaseOracle, &DatabaseType::Xugu).is_err()
+            );
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Dameng, &DatabaseType::Xugu).is_err());
+            assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Oracle).is_err());
+
+            for object_type in [TransferObjectKind::View, TransferObjectKind::Procedure, TransferObjectKind::Sequence] {
+                let objects = TransferRequest {
+                    objects: Some(vec![TransferObjectSelection { object_type, names: vec!["O".into()] }]),
+                    ..request.clone()
+                };
+                assert!(validate_transfer_database_pair(&objects, &DatabaseType::Oracle, &DatabaseType::Xugu).is_err());
+            }
 
             for mode in [TransferMode::Append, TransferMode::Overwrite] {
                 let request = TransferRequest { mode, ..request.clone() };
                 assert!(validate_transfer_database_pair(&request, &DatabaseType::Xugu, &DatabaseType::Xugu).is_ok());
+                assert!(validate_transfer_database_pair(&request, &DatabaseType::Oracle, &DatabaseType::Xugu).is_ok());
             }
             let upsert = TransferRequest { mode: TransferMode::Upsert, ..request.clone() };
+            assert!(validate_transfer_database_pair(&upsert, &DatabaseType::Oracle, &DatabaseType::Xugu).is_err());
             assert!(validate_transfer_database_pair(&upsert, &DatabaseType::Xugu, &DatabaseType::Xugu)
                 .unwrap_err()
                 .contains("追加或覆盖"));
             let rebuild = TransferRequest { drop_target_before_create: true, ..request.clone() };
+            assert!(validate_transfer_database_pair(&rebuild, &DatabaseType::Oracle, &DatabaseType::Xugu).is_err());
             assert!(validate_transfer_database_pair(&rebuild, &DatabaseType::Xugu, &DatabaseType::Xugu).is_err());
         }
 
@@ -20325,6 +20510,112 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         assert!(rewritten.contains("PARTITION BY RANGE (TO_DAYS(`created_day`))"));
         assert!(rewritten.contains("ENGINE=InnoDB"));
         assert!(!rewritten.contains("`orders_plain`"));
+    }
+
+    #[test]
+    fn mysql_target_replaces_a_vendor_engine_in_reused_ddl() {
+        // #14635: GoldenDB distributed tables report `ENGINE=Gstore`; MySQL rejected the
+        // reused CREATE TABLE with `ERROR 1286 (42000): Unknown storage engine 'Gstore'`.
+        let ddl = "CREATE TABLE `vote_record` (\n  \
+                   `id` bigint NOT NULL AUTO_INCREMENT,\n  \
+                   `engine` varchar(20) DEFAULT NULL COMMENT 'engine=Gstore demo',\n  \
+                   `payload` text COMMENT 'ENGINE=Gstore',\n  \
+                   PRIMARY KEY (`id`),\n  \
+                   KEY `idx_vote` (`id`) USING BTREE\n\
+                   ) ENGINE=Gstore AUTO_INCREMENT=42 DEFAULT CHARSET=utf8mb4 COMMENT='投票记录表'\n\
+                   PARTITION BY RANGE (`id`)\n\
+                   (PARTITION p0 VALUES LESS THAN (20260101));";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "dbx_src",
+            "dbx_dst",
+            &DatabaseType::Goldendb,
+            &DatabaseType::Mysql,
+            "vote_record",
+            "vote_record",
+        )
+        .unwrap();
+
+        assert!(
+            rewritten.contains(") ENGINE=InnoDB AUTO_INCREMENT=42 DEFAULT CHARSET=utf8mb4 COMMENT='投票记录表'"),
+            "only the engine option may change: {rewritten}"
+        );
+        // Everything else survives byte-for-byte, including the partitions, the index and
+        // the literal text that happens to spell the engine name.
+        assert!(rewritten.contains("KEY `idx_vote` (`id`) USING BTREE"), "{rewritten}");
+        assert!(rewritten.contains("PARTITION BY RANGE (`id`)"), "{rewritten}");
+        assert!(rewritten.contains("`engine` varchar(20) DEFAULT NULL COMMENT 'engine=Gstore demo'"), "{rewritten}");
+        assert_eq!(rewritten.matches("ENGINE=Gstore").count(), 1, "the comment literal keeps its text: {rewritten}");
+    }
+
+    #[test]
+    fn mysql_target_engine_rewrite_keeps_portable_engines_and_same_engine_transfers() {
+        let ddl = "CREATE TABLE `t` (`id` int) ENGINE=Gstore";
+        let rewrite = |source: &DatabaseType, target: &DatabaseType| {
+            rewrite_transfer_source_table_ddl(ddl, "", "", source, target, "t", "t").unwrap()
+        };
+
+        // A portable engine means the target can create the table as written.
+        let myisam = "CREATE TABLE `t` (`id` int) ENGINE=MyISAM";
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(myisam, "", "", &DatabaseType::Goldendb, &DatabaseType::Mysql, "t", "t"),
+            Some(myisam.to_string())
+        );
+        // Same-engine transfers keep the vendor engine: the source server supports it.
+        assert_eq!(rewrite(&DatabaseType::Goldendb, &DatabaseType::Goldendb), ddl);
+        // Every other MySQL-family member is a vendor engine for MySQL 8.
+        for source in [DatabaseType::Goldendb, DatabaseType::Doris, DatabaseType::StarRocks, DatabaseType::Sundb] {
+            assert!(rewrite(&source, &DatabaseType::Mysql).contains("ENGINE=InnoDB"), "{} -> mysql", source.as_str());
+        }
+        // Targets outside MySQL keep the clause: the reuse path never reaches them, and a
+        // MySQL-family target with its own engine grammar must not see InnoDB.
+        for target in [DatabaseType::Doris, DatabaseType::StarRocks, DatabaseType::Goldendb, DatabaseType::Postgres] {
+            assert_eq!(rewrite(&DatabaseType::Goldendb, &target), ddl, "-> {}", target.as_str());
+        }
+    }
+
+    #[test]
+    fn mysql_target_engine_rewrite_covers_the_full_database_type_set() {
+        // AGENTS #11: a membership-based rewrite must be asserted for every enum member,
+        // including the ones outside the MySQL family, so an allow-list cannot silently
+        // flip an unlisted dialect.
+        const MYSQL_FAMILY: &[DatabaseType] = &[
+            DatabaseType::Mysql,
+            DatabaseType::Doris,
+            DatabaseType::StarRocks,
+            DatabaseType::Goldendb,
+            DatabaseType::Sundb,
+        ];
+        let ddl = "CREATE TABLE `t` (`id` int) ENGINE=Gstore";
+        for &source in DatabaseType::ALL {
+            for &target in DatabaseType::ALL {
+                let rewritten = rewrite_mysql_target_table_engine(ddl, &source, &target);
+                let expected =
+                    target == DatabaseType::Mysql && source != DatabaseType::Mysql && MYSQL_FAMILY.contains(&source);
+                assert_eq!(rewritten.contains("ENGINE=InnoDB"), expected, "{} -> {}", source.as_str(), target.as_str());
+                if !expected {
+                    assert_eq!(rewritten, ddl, "{} -> {} must stay byte-identical", source.as_str(), target.as_str());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_target_engine_rewrite_ignores_the_column_list_and_masked_spans() {
+        let ddl = "CREATE TABLE `t` (\n  \
+                   `engine` varchar(20) NOT NULL,\n  \
+                   `note` varchar(20) DEFAULT 'ENGINE=Gstore',\n  \
+                   CONSTRAINT `chk_engine` CHECK (`engine` <> 'InnoDB')\n\
+                   ) ENGINE = Gstore ENGINE_ATTRIBUTE='{\"table\":\"Gstore\"}' COMMENT='ENGINE=Gstore'";
+
+        let rewritten = rewrite_mysql_target_table_engine(ddl, &DatabaseType::Goldendb, &DatabaseType::Mysql);
+
+        assert!(rewritten.contains(") ENGINE=InnoDB ENGINE_ATTRIBUTE='{\"table\":\"Gstore\"}'"), "{rewritten}");
+        assert!(rewritten.contains("`engine` varchar(20) NOT NULL"), "{rewritten}");
+        assert!(rewritten.contains("CHECK (`engine` <> 'InnoDB')"), "{rewritten}");
+        // Only the two literals that spell the engine name keep it.
+        assert_eq!(rewritten.matches("ENGINE=Gstore").count(), 2, "{rewritten}");
     }
 
     #[test]

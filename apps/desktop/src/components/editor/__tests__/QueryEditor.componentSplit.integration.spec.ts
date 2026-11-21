@@ -543,10 +543,15 @@ describe("QueryEditor component split integration", () => {
     const sql = "SELECT * FROM users";
     const { view, connectionStore, onClickTable } = await mountEditor({ modelValue: sql, connectionId: "navigation-test", database: "demo" });
     vi.spyOn(view, "posAtCoords").mockReturnValue(sql.indexOf("users") + 2);
+    // happy-dom has no text layout. The multi-cursor handler also needs the
+    // position and side returned by CodeMirror's mouse-selection hit test.
+    vi.spyOn(view, "posAndSideAtCoords").mockReturnValue({ pos: sql.indexOf("users") + 2, assoc: 1 });
     vi.spyOn(connectionStore, "lookupLocalCompletionTables").mockReturnValue([{ name: "users", schema: "demo" }]);
-    view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { ctrlKey: true, altKey: true, button: 0, bubbles: true, cancelable: true }));
+    view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { ctrlKey: true, altKey: true, button: 0, detail: 1, bubbles: true, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { ctrlKey: true, altKey: true, button: 0, detail: 1, bubbles: true, cancelable: true }));
     await nextTick();
     expect(onClickTable).not.toHaveBeenCalled();
+    expect(view.state.selection.main.head).toBe(sql.indexOf("users") + 2);
     view.dispatch({ selection: { anchor: 0 } });
     view.contentDOM.dispatchEvent(new MouseEvent("mousedown", { ctrlKey: true, button: 0, bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(onClickTable).toHaveBeenCalledWith(expect.objectContaining({ name: "users" })));

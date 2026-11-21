@@ -19,6 +19,7 @@ import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.
 import SidebarTableVGroupDialog from "@/components/sidebar/SidebarTableVGroupDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { tableVGroupScopeKey } from "@/lib/table/tableVGroup";
 import { showTableVGroupDialog, tableVGroupName, tableVGroupDialogScope, tableVGroupDialogParentGroupId, tableVGroupDialogTableNames } from "@/components/sidebar/sidebarTreeDialogState";
 
 const connection = { id: "pg-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgresql", host: "localhost", port: 5432, username: "postgres", password: "" };
@@ -73,6 +74,57 @@ describe("table virtual group context menus and dialog", () => {
   afterEach(() => {
     for (const app of mountedApps.splice(0)) app.unmount();
     document.body.innerHTML = "";
+  });
+
+  it.each(["connection", "doris-catalog"] as const)("can show a persisted hidden empty database group on %s", async (type) => {
+    const host = await mountHost();
+    const store = useConnectionStore();
+    const container: TreeNode = { id: type === "connection" ? connection.id : `${connection.id}:catalog`, type, label: "Container", connectionId: connection.id, ...(type === "doris-catalog" ? { catalog: "external" } : {}), children: [] };
+    store.treeNodes = type === "connection" ? [container] : [{ id: connection.id, type: "connection", label: connection.name, connectionId: connection.id, children: [container] }];
+    const scope = { connectionId: connection.id, catalog: container.catalog, objectType: "databases" as const };
+    // Same state as loading a hidden layout from disk with all databases filtered out.
+    store.tableVGroupLayouts = { [tableVGroupScopeKey(scope)!]: { version: 1, enabled: false, groups: [{ id: "empty", name: "Empty", collapsed: false }], order: [{ type: "group", id: "empty", children: [] }] } };
+    let toggle = host.buildContextMenu(container).find((item) => item.sidebarActionId === "databaseVGroup.toggleGroups");
+    expect(toggle?.label).toBe(tr("tableVGroup.enableGroups"));
+    toggle?.action?.();
+    expect(container.children?.map((node) => node.label)).toEqual(["Empty"]);
+    toggle = host.buildContextMenu(container).find((item) => item.sidebarActionId === "databaseVGroup.toggleGroups");
+    expect(toggle?.label).toBe(tr("tableVGroup.disableGroups"));
+    toggle?.action?.();
+    expect(container.children).toEqual([]);
+    expect(host.buildContextMenu(container).some((item) => item.sidebarActionId === "databaseVGroup.toggleGroups")).toBe(true);
+  });
+
+  it.each(["connection", "database", "redis-db", "mongo-db", "vector-database"] as const)("places database grouping below primary actions and ahead of trailing refresh or danger actions on %s", async (type) => {
+    const host = await mountHost();
+    const store = useConnectionStore();
+    const dbType = type === "redis-db" ? "redis" : type === "mongo-db" ? "mongodb" : type === "vector-database" ? "milvus" : "postgres";
+    store.connections = [{ ...connection, db_type: dbType }];
+    const database: TreeNode = { id: `${connection.id}:app`, type: type === "connection" ? "database" : type, label: "app", connectionId: connection.id, database: "app", children: [] };
+    const root: TreeNode = { id: connection.id, type: "connection", label: connection.name, connectionId: connection.id, children: [database] };
+    store.treeNodes = [root];
+    const items = host.buildContextMenu(type === "connection" ? root : database);
+    const groupIndex = items.findIndex((item) => item.sidebarActionId?.startsWith("databaseVGroup."));
+    const queryIndex = items.findIndex((item) => item.label === tr("contextMenu.newQuery"));
+    const refreshIndex = items.findIndex((item) => item.label === tr("contextMenu.refreshChildren"));
+    expect(queryIndex).toBeGreaterThanOrEqual(0);
+    expect(groupIndex).toBeGreaterThan(queryIndex);
+    if (type === "connection" || type === "database") {
+      expect(refreshIndex).toBeGreaterThan(groupIndex);
+    } else {
+      // Redis/Mongo/Milvus menus have no refresh action; keep dangerous actions last.
+      const dangerIndex = items.findIndex((item) => item.variant === "destructive");
+      expect(dangerIndex).toBeGreaterThan(groupIndex);
+    }
+    expect(items[groupIndex - 1].separator).toBe(true);
+    expect(items[groupIndex + 1].separator).toBe(true);
+  });
+
+  it("does not offer database folders for an empty connection without a database layout", async () => {
+    const host = await mountHost();
+    const node: TreeNode = { id: connection.id, type: "connection", label: connection.name, connectionId: connection.id, children: [] };
+    useConnectionStore().treeNodes = [node];
+    expect(host.buildContextMenu(node).some((item) => item.sidebarActionId?.startsWith("databaseVGroup."))).toBe(false);
   });
 
   it("provides 'New Group' on group-tables container and triggers dialog with empty selection", async () => {

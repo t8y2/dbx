@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import DataGridConditionEditor from "@/components/grid/DataGridConditionEditor.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridLocalFilterSummary from "@/components/grid/DataGridLocalFilterSummary.vue";
+import type { DataGridLocalFilterSummaryItem } from "@/components/grid/DataGridLocalFilterSummary.vue";
 import DataGridSortBuilder from "@/components/grid/DataGridSortBuilder.vue";
 import type { DataGridConditionColumnOption } from "@/composables/useDataGridConditionEditor";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
@@ -19,12 +21,7 @@ import type { DatabaseType } from "@/types/database";
 import { clampSearchSplitWidth, MIN_SEARCH_SPLIT_PANE_WIDTH } from "@/lib/dataGrid/dataGridSearchSplit";
 import { filterModeHasCompleteValue, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 
-type LocalFilterSummary = {
-  columnIndex: number;
-  columnName: string;
-  values: string[];
-  hiddenValueCount: number;
-};
+type LocalFilterSummary = DataGridLocalFilterSummaryItem;
 
 type StructuredFilterSummary = {
   id: string;
@@ -298,26 +295,7 @@ onUnmounted(onResizeEnd);
               </div>
             </div>
 
-            <div v-if="hasLocalColumnFilters" class="space-y-1.5 rounded-md border border-primary/20 bg-primary/5 px-2 py-1.5">
-              <div class="flex items-center justify-between gap-2">
-                <div class="flex min-w-0 items-center gap-2 text-xs font-medium text-primary">
-                  <Filter class="h-3.5 w-3.5 shrink-0" /><span class="truncate">{{ t("grid.localFiltersActive", { count: localFilterCount }) }}</span>
-                </div>
-                <Button variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-xs" @click="emit('clearLocalFilter')"><X class="mr-1 h-3.5 w-3.5" />{{ t("grid.clearLocalFiltersShort") }}</Button>
-              </div>
-              <div class="space-y-0.5">
-                <div v-for="summary in localFilterSummaries" :key="summary.columnIndex" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.6fr)_auto] items-center gap-1.5 rounded border border-primary/10 bg-background/70 px-2 py-0.5 text-xs">
-                  <span class="truncate font-medium text-foreground" :title="summary.columnName">{{ summary.columnName }}</span>
-                  <span class="min-w-0 truncate font-mono text-muted-foreground">
-                    <template v-for="(value, valueIndex) in summary.values" :key="valueIndex"
-                      ><span v-if="valueIndex > 0">, </span><span>{{ value }}</span></template
-                    >
-                    <span v-if="summary.hiddenValueCount">{{ t("grid.localFilterMoreValues", { count: summary.hiddenValueCount }) }}</span>
-                  </span>
-                  <Button variant="ghost" size="icon" class="h-5 w-5 text-muted-foreground hover:text-destructive" :title="t('grid.clearFilter')" @click="emit('clearLocalFilter', summary.columnIndex)"><X class="h-3.5 w-3.5" /></Button>
-                </div>
-              </div>
-            </div>
+            <DataGridLocalFilterSummary v-if="hasLocalColumnFilters" :count="localFilterCount" :summaries="localFilterSummaries" @clear-all="emit('clearLocalFilter')" @clear-column="(columnIndex) => emit('clearLocalFilter', columnIndex)" />
 
             <DataGridFilterBuilder
               ref="filterBuilderRef"

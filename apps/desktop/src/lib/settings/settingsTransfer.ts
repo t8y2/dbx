@@ -1,7 +1,7 @@
 import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX } from "@/lib/sidebar/sidebarHoverSettings";
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey, type EditorSettingsImportPatch } from "./editorSettingsDraft";
-import { DEFAULT_TOOLBAR_ITEM_ORDER, type ToolbarItemKey } from "./toolbarCustomization";
-import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, type ToolbarItemKey } from "./toolbarCustomization";
+import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, isSidebarConnectionIconStyle, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/app/appTheme";
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
@@ -152,7 +152,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition", "sidebarConnectionIconStyle"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -175,6 +175,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sequenceCompletionEnabled",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
+    "completionAutoActivationDelayMs",
     "completionTriggerMode",
     "completionMatchMode",
     "excludedCompletionItems",
@@ -208,6 +209,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "appLayout",
     "tabLayout",
     "tabPlacement",
+    "crossWindowTabDragPreviewEnabled",
     "tabGroupMode",
     "colorizeConnectionTabs",
     "colorizeConnectionTabsScope",
@@ -218,6 +220,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarActivation",
     "sidebarColumnDoubleClickAction",
     "sidebarObjectDisplay",
+    "sidebarSimpleHideIndexes",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",
     "sidebarSearchOpenedDatabasesOnly",
@@ -314,6 +317,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",
+    "globalNumberGrouping",
     "globalDateTimeDisplayFormat",
     "globalDateTimeExportFormat",
     "globalDateTimeImportFormat",
@@ -451,6 +455,7 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   resultTabNamingMode: (value) => value === "source" || value === "ordinal" || value === "comment",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
   sidebarDensity: (value) => value === "default" || value === "compact",
+  sidebarConnectionIconStyle: isSidebarConnectionIconStyle,
   // Each supplied toolbar key must already be the boolean the UI writes. The
   // object may be partial because older and cross-platform files legitimately
   // omit keys introduced later or owned by another runtime.
@@ -566,14 +571,20 @@ function isRawShortcutSettingsShape(value: unknown): boolean {
 }
 
 /**
- * Raw shape: every supplied toolbar key must already be a boolean.
+ * Raw shape: visibility keys are booleans and pinned entries are strings.
  * normalizeToolbarItems coerces `exclusiveRightSidebarPanels` with `!== false`
  * (and fills the rest with nullish defaults), so a non-boolean like "no" would
  * otherwise be silently turned into `true` and pass the normalized round-trip
  * check. Unknown keys are ignored for forward compatibility.
  */
 function isRawToolbarItemsShape(value: unknown): boolean {
-  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean");
+  return (
+    isPlainObject(value) &&
+    Object.entries(value).every(([key, entry]) => {
+      if (key === "pinnedMenuItems") return Array.isArray(entry) && entry.every((item) => typeof item === "string");
+      return !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean";
+    })
+  );
 }
 
 function isRawToolbarItemOrderShape(value: unknown): boolean {
@@ -584,7 +595,8 @@ function normalizeImportedToolbarItems(value: unknown): Partial<EditorSettings["
   const imported: Partial<EditorSettings["toolbarItems"]> = {};
   if (!isPlainObject(value)) return imported;
   for (const [key, entry] of Object.entries(value)) {
-    if (key in DEFAULT_TOOLBAR_ITEMS && typeof entry === "boolean") imported[key as keyof EditorSettings["toolbarItems"]] = entry;
+    if (key === "pinnedMenuItems") imported.pinnedMenuItems = normalizePinnedToolbarMenuItems(entry);
+    else if (key in DEFAULT_TOOLBAR_ITEMS && typeof entry === "boolean") imported[key as Exclude<keyof EditorSettings["toolbarItems"], "pinnedMenuItems">] = entry;
   }
   return imported;
 }

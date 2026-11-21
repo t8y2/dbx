@@ -84,6 +84,52 @@ describe("sqlInListPaste", () => {
     });
   });
 
+  it.each<[string, string, number]>([
+    ["('')", "IN ('')", 1],
+    ['("")', "IN ('')", 1],
+    ["(' alice ', '')", "IN (' alice ', '')", 2],
+    ['(" alice ", "")', "IN (' alice ', '')", 2],
+    ["('   ', '\t')", "IN ('   ', '\t')", 2],
+    ['("   ", "\t")', "IN ('   ', '\t')", 2],
+    [" A \n  \n ' B '\n''", "IN ('A', ' B ', '')", 3],
+    ["(' O''Reilly ', 'null', NULL)", "IN (' O''Reilly ', 'null', NULL)", 3],
+  ])("preserves quoted content in %s", (source, sql, valueCount) => {
+    expect(buildSqlInConditionFromPasteSource(source)).toEqual({
+      ok: true,
+      sql,
+      valueCount,
+    });
+  });
+
+  it.each<[string, string]>([
+    ["('\r')", "IN ('\r')"],
+    ['("\r")', "IN ('\r')"],
+    ["('first\r\nsecond')", "IN ('first\r\nsecond')"],
+    ['("first\r\nsecond")', "IN ('first\r\nsecond')"],
+  ])("preserves quoted line endings in %s", (source, sql) => {
+    expect(buildSqlInConditionFromPasteSource(source)).toEqual({
+      ok: true,
+      sql,
+      valueCount: 1,
+    });
+  });
+
+  it("splits carriage-return and CRLF separated values outside quotes", () => {
+    expect(buildSqlInConditionFromPasteSource(" A\r\n \r\n B\rC")).toEqual({
+      ok: true,
+      sql: "IN ('A', 'B', 'C')",
+      valueCount: 3,
+    });
+  });
+
+  it.each(["A/\rB", "A/\r\nB", "A/\nB"])("keeps slashes in line-separated values in %s", (source) => {
+    expect(buildSqlInConditionFromPasteSource(source)).toEqual({
+      ok: true,
+      sql: "IN ('A/', 'B')",
+      valueCount: 2,
+    });
+  });
+
   it("treats apostrophes inside unquoted values as text", () => {
     expect(buildSqlInConditionFromPasteSource("O'Reilly\nBob")).toEqual({
       ok: true,

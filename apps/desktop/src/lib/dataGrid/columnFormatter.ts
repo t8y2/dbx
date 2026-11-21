@@ -1,4 +1,5 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { formatBinaryColumnValue, isBinaryColumnFormat, type BinaryColumnFormat } from "@/lib/dataGrid/binaryCellDownload";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import dayjs, { Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
@@ -125,6 +126,7 @@ export type ColumnFormatterConfig =
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
   | { kind: "number"; useGrouping: boolean; decimalPlaces?: number }
+  | { kind: BinaryColumnFormat }
   | {
       kind: "foreign-key-display";
       referenceMode?: "foreign-key" | "manual";
@@ -262,6 +264,8 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
     if (config.decimalPlaces !== undefined && (!Number.isInteger(config.decimalPlaces) || config.decimalPlaces < 0 || config.decimalPlaces > 20)) return undefined;
     return { kind: "number", useGrouping: config.useGrouping, decimalPlaces: config.decimalPlaces };
   }
+
+  if (isBinaryColumnFormat(config.kind)) return { kind: config.kind };
 
   if (config.kind === "foreign-key-display") {
     if (typeof config.refTable !== "string" || !config.refTable.trim()) return undefined;
@@ -491,6 +495,7 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
     if (formatter.kind === "json-path") return formatJsonPath(value, formatter.path);
     if (formatter.kind === "mask") return formatMask(value, formatter);
     if (formatter.kind === "number") return formatNumber(value, formatter);
+    if (isBinaryColumnFormat(formatter.kind)) return formatBinaryColumnValue(value, formatter.kind) ?? displayCellValue(value);
     if (formatter.kind === "custom-template") return formatCustomTemplate(value, formatter.template);
     return displayCellValue(value);
   } catch {

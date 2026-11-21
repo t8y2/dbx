@@ -1,6 +1,7 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferColumnNameCase, TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import type { MysqlDelimiterCommand } from "@/lib/sql/sqlStatementRanges";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
@@ -1944,6 +1945,7 @@ export interface BatchStatementExecutionItem {
 export interface BatchSqlExecution {
   executionId: string;
   submittedSql: string;
+  mysqlDelimiterCommands?: readonly MysqlDelimiterCommand[];
   editorFingerprint: string;
   sourceOffset: number;
   completed: number;
@@ -2279,6 +2281,7 @@ export interface TreeNode {
   nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";
@@ -2521,6 +2524,7 @@ export interface TabUiState {
   activeOutputView?: TabOutputView;
   /** Redis query results default to grid; a per-tab override selects command-line output. */
   redisResultViewMode?: RedisResultViewMode;
+  resultTransposeEnabled?: boolean;
   resultPaneOpen?: boolean;
   /** Tracks whether the active output view was auto-switched to "messages" by live server output during execution. */
   autoSwitchedToMessagesDuringExecution?: boolean;
@@ -2559,6 +2563,7 @@ export interface DatabaseSearchTableTask {
 export interface DatabaseSearchTabState {
   keyword: string;
   searchScope?: DatabaseSearchScope;
+  selectedObjects?: string[];
   perTableLimit: number;
   progressDone: number;
   progressTotal: number;
@@ -2703,6 +2708,10 @@ export interface QueryTab {
     scrollTop: number;
     scrollLeft: number;
   };
+  /** One-based bookmarked lines, saved with the open SQL tab. */
+  editorBookmarks?: number[];
+  /** Runtime-only document associated with mapped bookmark lines; not session data. */
+  editorBookmarksDocument?: string;
   editorSelection?: {
     anchor: number;
     head: number;

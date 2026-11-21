@@ -48,6 +48,8 @@ vi.mock("@/components/icons/DatabaseIcon.vue", () => ({
 }));
 
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { TAB_DRAG_SELECTION_CLASS } from "@/lib/tabs/tabDragSelection";
+import { TAB_WINDOW_TRANSFER, type useTabWindowTransfer } from "@/composables/useTabWindowTransfer";
 import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -75,6 +77,7 @@ function mountBar(
   toolbarActions?: EditorToolbarActions,
   onSaveAllTabs?: () => void,
   extraProps: Record<string, unknown> = {},
+  windowTransfer?: ReturnType<typeof useTabWindowTransfer>,
 ): Mounted {
   const store = useQueryStore();
   const host = createHost();
@@ -91,6 +94,7 @@ function mountBar(
   // instance the test drives — otherwise drag validation runs against an
   // empty store and silently early-returns.
   app.use(activePinia);
+  if (windowTransfer) app.provide(TAB_WINDOW_TRANSFER, windowTransfer);
   if (toolbarActions) app.provide(EDITOR_TOOLBAR_ACTIONS, toolbarActions);
   app.use(
     createI18n({
@@ -185,6 +189,58 @@ describe("EditorGroupTabBar behavior", () => {
     vi.restoreAllMocks();
     pinia = createPinia();
     setActivePinia(pinia);
+  });
+
+  it.each(["pointerup", "pointercancel", "blur", "unmount"])("blocks content selection from pointerdown until %s", async (ending) => {
+    const store = useQueryStore();
+    useSettingsStore().editorSettings.tabSortMode = "manual";
+    const tabId = store.createTab("pg-1", "app", "Query");
+    const { app, host } = mountBar(store.groups[0].id, [tabId], tabId, pinia);
+    try {
+      await settle();
+      pointerDownOn(tabPill(host, tabId));
+      expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(true);
+      if (ending === "unmount") app.unmount();
+      else if (ending === "blur") window.dispatchEvent(new Event("blur"));
+      else window.dispatchEvent(new PointerEvent(ending, { bubbles: true, pointerId: 1 }));
+      expect(document.documentElement.classList.contains(TAB_DRAG_SELECTION_CLASS)).toBe(false);
+      const select = new Event("selectstart", { bubbles: true, cancelable: true });
+      document.body.dispatchEvent(select);
+      expect(select.defaultPrevented).toBe(false);
+    } finally {
+      if (ending !== "unmount") app.unmount();
+      host.remove();
+    }
+  });
+
+  it("hands a cross-window drag to the workspace coordinator without reordering the source group", async () => {
+    const store = useQueryStore();
+    useSettingsStore().editorSettings.tabSortMode = "manual";
+    const firstId = store.createTab("pg-1", "app", "Query 1");
+    const secondId = store.createTab("pg-1", "app", "Query 2");
+    const groupId = store.groups[0].id;
+    const coordinator = {
+      move: vi.fn(() => true),
+      end: vi.fn(() => true),
+      cancel: vi.fn(),
+      refreshOtherTabWindows: vi.fn(async () => {}),
+      otherTabWindows: ref([]),
+    } as unknown as ReturnType<typeof useTabWindowTransfer>;
+    const moveTab = vi.spyOn(store, "moveTabToGroup");
+    const { app, host } = mountBar(groupId, [firstId, secondId], secondId, pinia, undefined, undefined, undefined, undefined, {}, coordinator);
+    await settle();
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(fakeDropTarget(secondId, groupId));
+
+    pointerDownOn(tabPill(host, firstId));
+    pointerMoveTo(70, 10);
+    pointerUpAt(70, 10);
+
+    expect(coordinator.move).toHaveBeenCalledWith(firstId, expect.any(PointerEvent), expect.any(Function));
+    expect(coordinator.end).toHaveBeenCalledWith(firstId, expect.any(PointerEvent));
+    expect(moveTab).not.toHaveBeenCalled();
+    expect(store.groups[0].tabIds).toEqual([firstId, secondId]);
+    app.unmount();
+    host.remove();
   });
 
   it("opens a new query through the app action for this editor group", async () => {

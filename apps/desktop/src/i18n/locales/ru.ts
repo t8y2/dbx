@@ -12402,6 +12402,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    cellDetailPanelEnabled: "Панель сведений о ячейке",
+    cellDetailPanelEnabledDescription: "После отключения панель сведений о ячейке больше не отображается постоянно; при нажатии кнопки сведений или выборе пункта контекстного меню она будет открываться во всплывающем окне.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

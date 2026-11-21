@@ -903,6 +903,7 @@ const editDefaultExplainView = ref<DefaultExplainView>(settingsStore.editorSetti
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
 const editDataGridCellDetailDialogDefault = ref(settingsStore.editorSettings.dataGridCellDetailDialogDefault);
+const editCellDetailPanelEnabled = ref(settingsStore.editorSettings.cellDetailPanelEnabled);
 const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
 const editDataGridCrosshairRowBg = ref(settingsStore.editorSettings.dataGridCrosshairRowBg);
 const editDataGridCrosshairColBg = ref(settingsStore.editorSettings.dataGridCrosshairColBg);
@@ -1424,6 +1425,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
     dataGridCellDetailDialogDefault: editDataGridCellDetailDialogDefault.value,
+    cellDetailPanelEnabled: editCellDetailPanelEnabled.value,
     dataGridCrosshairHighlight: editDataGridCrosshairHighlight.value,
     dataGridCrosshairRowBg: editDataGridCrosshairRowBg.value,
     dataGridCrosshairColBg: editDataGridCrosshairColBg.value,
@@ -2150,6 +2152,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
   editDataGridCellDetailDialogDefault.value = settingsStore.editorSettings.dataGridCellDetailDialogDefault;
+  editCellDetailPanelEnabled.value = settingsStore.editorSettings.cellDetailPanelEnabled;
   editDataGridCrosshairHighlight.value = settingsStore.editorSettings.dataGridCrosshairHighlight;
   editDataGridCrosshairRowBg.value = settingsStore.editorSettings.dataGridCrosshairRowBg;
   editDataGridCrosshairColBg.value = settingsStore.editorSettings.dataGridCrosshairColBg;
@@ -2346,6 +2349,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow,
   dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible,
   dataGridCellDetailDialogDefault: editDataGridCellDetailDialogDefault,
+  cellDetailPanelEnabled: editCellDetailPanelEnabled,
   dataGridCrosshairHighlight: editDataGridCrosshairHighlight,
   dataGridCrosshairRowBg: editDataGridCrosshairRowBg,
   dataGridCrosshairColBg: editDataGridCrosshairColBg,
@@ -3066,6 +3070,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
     editDataGridCellDetailDialogDefault.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailDialogDefault;
+    editCellDetailPanelEnabled.value = DEFAULT_EDITOR_SETTINGS.cellDetailPanelEnabled;
     editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     editDataGridCrosshairRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairRowBg;
     editDataGridCrosshairColBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairColBg;
@@ -3214,6 +3219,7 @@ function resetAllDefaults() {
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
   editDataGridCellDetailDialogDefault.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailDialogDefault;
+  editCellDetailPanelEnabled.value = DEFAULT_EDITOR_SETTINGS.cellDetailPanelEnabled;
   editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
   editDataGridCrosshairRowBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairRowBg;
   editDataGridCrosshairColBg.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairColBg;
@@ -11078,6 +11084,15 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="data-grid-cell-detail-dialog-default" v-model="editDataGridCellDetailDialogDefault" />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-cell-detail-panel-enabled">{{ t("settings.cellDetailPanelEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.cellDetailPanelEnabledDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="data-grid-cell-detail-panel-enabled" v-model="editCellDetailPanelEnabled" />
                 </div>
                 <div data-settings-search-id="data-grid-crosshair" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">

@@ -10840,6 +10840,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "テーブルデータの次の列を選択",
     shortcutSelectPreviousGridColumn: "テーブルデータの前の列を選択",
     sidebarSimpleHideIndexes: "テーブルと並んで表示されるインデックスを非表示",
+    cellDetailPanelEnabled: "セル詳細パネル",
+    cellDetailPanelEnabledDescription: "オフにするとセル詳細パネルが固定表示されなくなります。詳細ボタンまたは右クリックメニューからはポップアップで表示されます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

@@ -100,6 +100,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridAutoTransposeSingleRow",
   "dataGridCellDetailButtonVisible",
   "dataGridCellDetailDialogDefault",
+  "cellDetailPanelEnabled",
   "dataGridCrosshairHighlight",
   "dataGridCrosshairRowBg",
   "dataGridCrosshairColBg",

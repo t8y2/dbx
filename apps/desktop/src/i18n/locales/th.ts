@@ -12764,6 +12764,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "เลือกคอลัมน์ถัดไปของข้อมูลตาราง",
     shortcutSelectPreviousGridColumn: "เลือกคอลัมน์ก่อนหน้าของข้อมูลตาราง",
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
+    cellDetailPanelEnabled: "แผงรายละเอียดเซลล์",
+    cellDetailPanelEnabledDescription: "เมื่อปิดแล้วจะไม่แสดงแผงรายละเอียดเซลล์แบบตรึงอีกต่อไป；การคลิกปุ่มรายละเอียดหรือเมนูคลิกขวาจะแสดงเป็นป๊อปอัปแทน",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

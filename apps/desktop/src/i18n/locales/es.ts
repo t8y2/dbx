@@ -11099,6 +11099,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
     shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
+    cellDetailPanelEnabled: "Panel de detalles de celda",
+    cellDetailPanelEnabledDescription: "Cuando está desactivado, el panel de detalles de celda deja de mostrarse de forma fija; al hacer clic en el botón de detalles o en el menú contextual, se mostrará en una ventana emergente.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

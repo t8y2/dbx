@@ -12,6 +12,7 @@ import {
   dataGridRowDetailJson,
   dataGridRowDetailPreviewFields,
   dataGridRowDetailTsv,
+  resolveCellDetailOpenTarget,
   DATA_GRID_JSON_COMMENT_GAP,
   type DataGridColumnDetail,
   type DataGridRowDetail,
@@ -364,5 +365,17 @@ describe("Mongo collection cell detail presentation", () => {
     expect(columnJson).not.toContain("\u0000");
     expect(dataGridRowDetailTsv(rowDetail, undefined, mongoDocumentGridExternalValue)).toBe("");
     expect(dataGridColumnDetailTsv(columnDetail!, undefined, mongoDocumentGridExternalValue)).toBe("");
+  });
+});
+
+describe("resolveCellDetailOpenTarget (#15365)", () => {
+  it("opens the docked panel by default", () => {
+    expect(resolveCellDetailOpenTarget(true, false)).toBe("panel");
+    expect(resolveCellDetailOpenTarget(true, true)).toBe("dialog");
+  });
+
+  it("routes to the dialog while the panel switch is off, regardless of the dialog preference", () => {
+    expect(resolveCellDetailOpenTarget(false, false)).toBe("dialog");
+    expect(resolveCellDetailOpenTarget(false, true)).toBe("dialog");
   });
 });

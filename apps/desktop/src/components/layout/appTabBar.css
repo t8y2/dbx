@@ -349,6 +349,25 @@
   row-gap: 0.375rem;
 }
 
+.app-tab-scroll.wrap-mode.wrap-mode--limited {
+  --wrapped-tab-row-height: 1.75rem;
+  --wrapped-tab-row-gap: 0.375rem;
+  --wrapped-tab-padding: 0.75rem;
+  max-height: calc((var(--wrapped-tab-row-height) + var(--wrapped-tab-row-gap)) * var(--tab-wrap-max-rows) - var(--wrapped-tab-row-gap) + var(--wrapped-tab-padding));
+  overflow: hidden auto !important;
+  scrollbar-width: thin;
+}
+
+.app-tab-scroll.wrap-mode--limited.classic-wrap {
+  --wrapped-tab-row-height: 2rem;
+  --wrapped-tab-row-gap: 0.25rem;
+  --wrapped-tab-padding: 0rem;
+}
+
+.app-tab-scroll.wrap-mode--limited .tab-section--horizontal {
+  row-gap: var(--wrapped-tab-row-gap);
+}
+
 .app-tab-scroll.wrap-mode .tab-section-frame--horizontal {
   align-self: flex-start;
 }
@@ -983,8 +1002,9 @@
 
 /* Long connection names must not eat the whole rail. Respect the user's tab
  * width cap when one is configured; otherwise keep a sane 16rem default. */
-.tab-group-rail .tab-group-header-content {
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-rail .tab-group-header-content {
   max-width: var(--tab-max-width, 16rem);
+  padding-inline-end: 1.75rem;
 }
 
 /* The base ::after pushes the accent 0.2rem past the pill's right edge so a

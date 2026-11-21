@@ -137,6 +137,7 @@ import {
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   normalizeTabMaxWidth,
+  TAB_WRAP_ROW_LIMITS,
   SIDEBAR_INDENT_MIN,
   SIDEBAR_INDENT_MAX,
   SIDEBAR_FONT_SIZE_MIN,
@@ -851,6 +852,7 @@ const editWelcomePageMode = ref<WelcomePageMode>(settingsStore.editorSettings.we
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editWebLogoPosition = ref<WebLogoPosition>(settingsStore.editorSettings.webLogoPosition);
 const editTabLayout = ref(settingsStore.editorSettings.tabLayout);
+const editTabWrapMaxRows = ref(settingsStore.editorSettings.tabWrapMaxRows);
 const editCrossWindowTabDragPreviewEnabled = ref(settingsStore.editorSettings.crossWindowTabDragPreviewEnabled);
 const editTabPlacement = ref<TabPlacement>(settingsStore.editorSettings.tabPlacement);
 const editColorizeConnectionTabs = ref(settingsStore.editorSettings.colorizeConnectionTabs);
@@ -1387,6 +1389,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     appLayout: editAppLayout.value,
     webLogoPosition: editWebLogoPosition.value,
     tabLayout: editTabLayout.value,
+    tabWrapMaxRows: editTabWrapMaxRows.value,
     crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled.value,
     tabPlacement: editTabPlacement.value,
     colorizeConnectionTabs: editColorizeConnectionTabs.value,
@@ -2113,6 +2116,7 @@ function syncEditorSettingsDraftFromStore() {
   editAppLayout.value = settingsStore.editorSettings.appLayout;
   editWebLogoPosition.value = settingsStore.editorSettings.webLogoPosition;
   editTabLayout.value = settingsStore.editorSettings.tabLayout;
+  editTabWrapMaxRows.value = settingsStore.editorSettings.tabWrapMaxRows;
   editCrossWindowTabDragPreviewEnabled.value = settingsStore.editorSettings.crossWindowTabDragPreviewEnabled;
   editTabPlacement.value = settingsStore.editorSettings.tabPlacement;
   editColorizeConnectionTabs.value = settingsStore.editorSettings.colorizeConnectionTabs;
@@ -2309,6 +2313,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   appLayout: editAppLayout,
   webLogoPosition: editWebLogoPosition,
   tabLayout: editTabLayout,
+  tabWrapMaxRows: editTabWrapMaxRows,
   crossWindowTabDragPreviewEnabled: editCrossWindowTabDragPreviewEnabled,
   tabPlacement: editTabPlacement,
   colorizeConnectionTabs: editColorizeConnectionTabs,
@@ -2976,6 +2981,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
     editWebLogoPosition.value = DEFAULT_EDITOR_SETTINGS.webLogoPosition;
     editTabLayout.value = DEFAULT_EDITOR_SETTINGS.tabLayout;
+    editTabWrapMaxRows.value = DEFAULT_EDITOR_SETTINGS.tabWrapMaxRows;
     editCrossWindowTabDragPreviewEnabled.value = DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled;
     editTabPlacement.value = DEFAULT_EDITOR_SETTINGS.tabPlacement;
     editColorizeConnectionTabs.value = DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs;
@@ -9525,6 +9531,15 @@ onUnmounted(() => {
                       </div>
                     </div>
                   </Button>
+                </div>
+                <div v-if="editTabLayout === 'wrap'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <Label for="tab-wrap-max-rows">{{ t("settings.tabWrapMaxRows") }}</Label>
+                  <Select :model-value="String(editTabWrapMaxRows)" @update:model-value="editTabWrapMaxRows = Number($event)">
+                    <SelectTrigger id="tab-wrap-max-rows" class="w-32"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="rows in TAB_WRAP_ROW_LIMITS" :key="rows" :value="String(rows)">{{ rows || t("settings.tabMaxWidthUnlimited") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 

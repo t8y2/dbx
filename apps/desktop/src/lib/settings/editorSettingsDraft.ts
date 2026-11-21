@@ -64,6 +64,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "crossWindowTabDragPreviewEnabled",
   "webLogoPosition",
   "tabLayout",
+  "tabWrapMaxRows",
   "tabPlacement",
   "colorizeConnectionTabs",
   "colorizeConnectionTabsScope",

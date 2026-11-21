@@ -162,6 +162,47 @@ describe("sqlFormatter", () => {
     expect(edited).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
   });
 
+  it("keeps a block comment between VALUES and a Doris bracket list (issue #15321)", async () => {
+    // A comment between the keyword and the bracket used to leave the range
+    // unprotected, so formatting failed instead of masking the list.
+    const sql = 'CREATE TABLE IF NOT EXISTS example_db.my_table (`date` DATE NOT NULL COMMENT "date") ENGINE=OLAP PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES /* bounds */ [("2020-01-01"), ("2020-02-01"))) DISTRIBUTED BY HASH(`date`) BUCKETS 10;';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(formatted).toContain("/* bounds */");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+
+    const edited = await formatSqlForEditing(sql, sqlFormatDialectForDbType("doris"));
+    expect(edited).not.toBe(sql);
+    expect(edited).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(edited).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
+  it("keeps a `#` comment with a paren inside a Doris bracket list (issue #15321)", async () => {
+    // The `)` inside the `#` comment used to be mistaken for the list closer,
+    // truncating the masked range and failing the format.
+    const sql = 'CREATE TABLE IF NOT EXISTS example_db.my_table (`date` DATE NOT NULL COMMENT "date") ENGINE=OLAP PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES [(1), # close )\n (2))) DISTRIBUTED BY HASH(`date`) BUCKETS 10;';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain("[(1), # close )\n (2))");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
+  it("keeps comments with parentheses across multiple Doris partitions (issue #15321)", async () => {
+    // A line comment between VALUES and `[` on one partition and a block
+    // comment with parens inside the range on another must both survive,
+    // with each range restored byte-for-byte.
+    const sql =
+      'CREATE TABLE IF NOT EXISTS example_db.my_table (`date` DATE NOT NULL COMMENT "date") ENGINE=OLAP PARTITION BY RANGE(`date`) (PARTITION p202001 VALUES -- bounds (2020)\n [("2020-01-01"), ("2020-02-01")), PARTITION p202002 VALUES [("2020-02-01"), /* note (x) */ ("2020-03-01"))) DISTRIBUTED BY HASH(`date`) BUCKETS 10;';
+
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+    expect(formatted).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(formatted).toContain('[("2020-02-01"), /* note (x) */ ("2020-03-01"))');
+    expect(formatted).toContain("-- bounds (2020)");
+    expect(formatted).toContain("/* note (x) */");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
   it("maps DuckDB to its scoped formatter dialect", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });

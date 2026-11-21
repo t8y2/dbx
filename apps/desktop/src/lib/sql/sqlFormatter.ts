@@ -541,7 +541,24 @@ function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { 
     const startsValuesKeyword = (ch === "V" || ch === "v") && !isIdentifierChar(sql[index - 1]) && sql.slice(index, index + 6).toUpperCase() === "VALUES" && !isIdentifierChar(sql[index + 6]);
     if (startsValuesKeyword) {
       let cursor = index + 6;
-      while (cursor < sql.length && /\s/.test(sql[cursor])) cursor += 1;
+      // Skip whitespace and comments between VALUES and the bracket opener:
+      // a comment here must not prevent masking the Doris bracket list.
+      for (;;) {
+        while (cursor < sql.length && /\s/.test(sql[cursor])) cursor += 1;
+        if (sql[cursor] === "-" && sql[cursor + 1] === "-") {
+          cursor = scanLineComment(cursor);
+          continue;
+        }
+        if (sql[cursor] === "/" && sql[cursor + 1] === "*") {
+          cursor = scanBlockComment(cursor);
+          continue;
+        }
+        if (dialect === "mysql" && sql[cursor] === "#") {
+          cursor = scanLineComment(cursor);
+          continue;
+        }
+        break;
+      }
       if (sql[cursor] === "[") {
         let bracketDepth = 1;
         let parenDepth = 0;
@@ -556,6 +573,10 @@ function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { 
           }
           if (current === "/" && following === "*") {
             end = scanBlockComment(end);
+            continue;
+          }
+          if (dialect === "mysql" && current === "#") {
+            end = scanLineComment(end);
             continue;
           }
           if (current === "'" || current === '"' || current === "`") {

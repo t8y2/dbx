@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import McpCallSafetyPanel from "../McpCallSafetyPanel.vue";
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("../McpApprovalAiSettings.vue", () => ({ default: { template: "<div />" } }));
 const cleanup: Array<() => void> = [];
 afterEach(() => cleanup.splice(0).forEach((fn) => fn()));
 function mount(mode: "off" | "full" | "high_risk", disabled = false) {

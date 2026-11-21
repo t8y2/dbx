@@ -6,6 +6,7 @@ import { normalizePluginGraphicsEngineIds } from "@/lib/plugins/pluginGraphicsEn
 import { normalizePluginShortcutSettings, type PluginShortcutSettings } from "@/lib/plugins/pluginShortcuts";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { normalizeMcpApprovalAiSettings, type McpApprovalAiSettings } from "@/lib/mcp/mcpApprovalSummary";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { AI_CONVERSATION_FONT_FAMILY_DEFAULT, AI_CONVERSATION_FONT_SIZE_DEFAULT, normalizeAiConversationFontFamily, normalizeAiConversationFontSize } from "@/lib/ai/aiTypography";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, LEGACY_PRESET_FONT_MAP } from "@/lib/app/appFonts";
@@ -987,6 +988,7 @@ export interface EditorSettings {
   uiFontFamily: string;
   aiFontFamily: string;
   aiFontSize: number;
+  mcpApprovalAi: McpApprovalAiSettings;
   uiScale: number;
   /** macOS-style font smoothing (antialiased + grayscale); off keeps the platform default. */
   fontSmoothing: boolean;
@@ -1431,6 +1433,7 @@ export const WELCOME_PAGE_DEFAULT_VERSION = 1;
 export const COMPACT_TAB_TITLE_DEFAULT_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
+  mcpApprovalAi: normalizeMcpApprovalAiSettings(),
   fontFamily: DEFAULT_MONO_FONT_FAMILY,
   fontSize: 13,
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
@@ -2191,6 +2194,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     uiFontFamily: normalizeFontFamily(settings.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily),
     aiFontFamily: normalizeAiConversationFontFamily(settings.aiFontFamily),
     aiFontSize: normalizeAiConversationFontSize(settings.aiFontSize),
+    mcpApprovalAi: normalizeMcpApprovalAiSettings(settings.mcpApprovalAi),
     uiScale: normalizeUiScale(settings.uiScale),
     fontSmoothing: settings.fontSmoothing === true,
     theme: settings.theme && EDITOR_THEME_VALUES.has(settings.theme) ? settings.theme : DEFAULT_EDITOR_SETTINGS.theme,
@@ -3192,6 +3196,7 @@ export const useSettingsStore = defineStore("settings", () => {
   });
 
   function applyEditorSettingsPatch(partial: Partial<EditorSettings>) {
+    if (partial.mcpApprovalAi !== undefined) editorSettings.value.mcpApprovalAi = normalizeMcpApprovalAiSettings(partial.mcpApprovalAi);
     if (partial.fontFamily !== undefined) editorSettings.value.fontFamily = normalizeFontFamily(partial.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily);
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);

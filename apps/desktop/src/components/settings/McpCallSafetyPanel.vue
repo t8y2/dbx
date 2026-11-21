@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, useId } from "vue";
 import { useI18n } from "vue-i18n";
+import McpApprovalAiSettings from "./McpApprovalAiSettings.vue";
 import { Button } from "@/components/ui/button";
 
 const props = defineProps<{ mode: "off" | "full" | "high_risk"; disabled?: boolean }>();
@@ -41,5 +42,6 @@ async function setConfirmation(enabled: boolean) {
       <p :id="hintId" class="text-xs leading-relaxed text-muted-foreground">{{ t("settings.mcpCallSafetyHint") }}</p>
       <p class="text-xs leading-relaxed text-muted-foreground">{{ t("settings.mcpCallSafetyDesktopHint") }}</p>
     </template>
+    <McpApprovalAiSettings v-if="mode !== 'off'" :disabled="disabled" />
   </details>
 </template>

@@ -12402,6 +12402,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    globalNumberGrouping: "Показывать разделитель тысяч",
+    globalNumberGroupingDescription: "Отображать числа в сетке в виде 1,234,567.89 и т. п.; приоритет имеет формат, настроенный для отдельного столбца.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

@@ -11099,6 +11099,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleccionar la siguiente columna de los datos de la tabla",
     shortcutSelectPreviousGridColumn: "Seleccionar la columna anterior de los datos de la tabla",
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
+    globalNumberGrouping: "Mostrar separador de miles",
+    globalNumberGroupingDescription: "En la cuadrícula, muestra los números como 1,234,567.89, etc. Los formatos de columna configurados individualmente tienen prioridad.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

@@ -10809,6 +10809,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Selecionar a próxima coluna dos dados da tabela",
     shortcutSelectPreviousGridColumn: "Selecionar a coluna anterior dos dados da tabela",
     sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
+    globalNumberGrouping: "Mostrar separador de milhares",
+    globalNumberGroupingDescription: "Exibir números na grade como 1,234,567.89 etc.; formatos de coluna configurados individualmente têm prioridade.",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

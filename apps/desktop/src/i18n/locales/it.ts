@@ -10814,6 +10814,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleziona la colonna successiva dei dati della tabella",
     shortcutSelectPreviousGridColumn: "Seleziona la colonna precedente dei dati della tabella",
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
+    globalNumberGrouping: "Mostra separatore delle migliaia",
+    globalNumberGroupingDescription: "Visualizza i numeri nella griglia nel formato 1.234.567,89 o simile; le formattazioni di colonna configurate singolarmente hanno la precedenza.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

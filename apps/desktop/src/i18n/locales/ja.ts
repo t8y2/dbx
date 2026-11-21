@@ -10840,6 +10840,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "テーブルデータの次の列を選択",
     shortcutSelectPreviousGridColumn: "テーブルデータの前の列を選択",
     sidebarSimpleHideIndexes: "テーブルと並んで表示されるインデックスを非表示",
+    globalNumberGrouping: "桁区切り記号を表示",
+    globalNumberGroupingDescription: "グリッド内で数値を 1,234,567.89 などの形式で表示します。個別に設定された列の書式が優先されます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

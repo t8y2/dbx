@@ -65,6 +65,7 @@ const PREPARATION_ALLOWED_COMMANDS = new Set([
   "sync_saved_sql_directory",
   "load_saved_sql_files_for_sync",
   "get_downloaded_update",
+  "get_update_download_state",
   "install_downloaded_update",
   "discard_downloaded_update",
   // The macOS/Linux restart is a frontend command invoked after preparation

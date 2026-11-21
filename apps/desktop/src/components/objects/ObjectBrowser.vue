@@ -158,6 +158,7 @@ import {
 import { confirmOracleTriggerPlan } from "@/lib/database/oracleTriggerActions";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import ObjectSourceDialog from "@/components/objects/ObjectSourceDialog.vue";
+import PostgresSequenceDialog from "@/components/objects/PostgresSequenceDialog.vue";
 import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, freezeSourceIdentities, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
@@ -328,6 +329,48 @@ const refreshTooltip = computed(() => {
 const firebirdManagerOpen = ref(false);
 const schemas = ref<string[]>([]);
 const selectedSchema = ref<string | undefined>(props.schema);
+const postgresSequenceOpen = ref(false);
+type PostgresSequenceTarget = { connectionId: string; database: string; schema: string; name: string; catalog?: string; browserSchema?: string };
+const postgresSequenceTarget = shallowRef<PostgresSequenceTarget>();
+function postgresSequenceTargetForRow(row: ObjectBrowserRow): PostgresSequenceTarget | undefined {
+  const identity = row.postgresSequenceIdentity;
+  const schema = identity?.schema ?? selectedSchema.value;
+  if (props.connection.db_type !== "postgres" || row.type !== "SEQUENCE" || !identity || !schema) return;
+  return { connectionId: props.connection.id, database: props.database, schema, name: identity.name, catalog: props.catalog, browserSchema: selectedSchema.value };
+}
+function openPostgresSequence(target: PostgresSequenceTarget | undefined) {
+  if (!target || props.connection.db_type !== "postgres" || target.connectionId !== props.connection.id || target.database !== props.database || target.catalog !== props.catalog || target.browserSchema !== selectedSchema.value) return;
+  postgresSequenceTarget.value = target;
+  postgresSequenceOpen.value = true;
+}
+watch(
+  [() => props.connection.id, () => props.connection.db_type, () => props.database, () => props.catalog, selectedSchema],
+  () => {
+    postgresSequenceOpen.value = false;
+  },
+  { flush: "sync" },
+);
+watch(postgresSequenceOpen, (open) => {
+  if (!open) postgresSequenceTarget.value = undefined;
+});
+onDeactivated(() => {
+  postgresSequenceOpen.value = false;
+});
+async function refreshPostgresSequence() {
+  const target = postgresSequenceTarget.value;
+  if (!target) return;
+  const scope = { connectionId: target.connectionId, database: target.database, schema: target.schema, tableName: target.name };
+  try {
+    await Promise.all([invalidateObjectMetadataCache(scope), invalidateObjectDdlCache(scope)]);
+    invalidateObjectBrowserRowsCache({ connectionId: target.connectionId, database: target.database, schema: target.schema });
+    await connectionStore.refreshObjectListTreeNode(target.connectionId, target.database, target.schema, target.catalog);
+    if (!objectBrowserUnmounted && props.connection.id === target.connectionId && props.database === target.database && props.catalog === target.catalog && selectedSchema.value === target.browserSchema) {
+      await reload({ preserveExistingRows: true });
+    }
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
 const triggerCreateOpen = ref(false);
 const triggerCreateDialog = ref<InstanceType<typeof ObjectSourceDialog>>();
 const triggerCreateContext = ref<{ connectionId: string; database: string; catalog?: string; schema: string; databaseType: ConnectionConfig["db_type"] }>();
@@ -4734,6 +4777,7 @@ async function fetchAllObjectRowsForCopy(): Promise<ObjectBrowserRow[]> {
     database: copyDatabase,
     fallbackSchema: schema,
     rowSchema,
+    databaseType: copyConnection.db_type,
   });
   return rows.filter((row) => matchesTableNameFilter(row.name, copyNameFilters[row.type]));
 }
@@ -5847,6 +5891,7 @@ async function loadObjectPage(append: boolean, options?: { preserveExistingRows?
       database: request.scope.database,
       fallbackSchema: request.scope.schema,
       rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+      databaseType: props.connection.db_type,
     });
     applyObjectBrowserRows(replaceWindow ? pageRows : [...rows.value, ...pageRows]);
     objectPageOffset = (replaceWindow ? 0 : offset) + page.length;
@@ -5881,6 +5926,7 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
     database: request.scope.database,
     fallbackSchema: request.scope.schema,
     rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+    databaseType: props.connection.db_type,
   });
 }
 
@@ -6483,7 +6529,9 @@ function getEventMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 }
 
 function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const sequenceTarget = postgresSequenceTargetForRow(item);
   return [
+    ...(props.connection.db_type === "postgres" && item.type === "SEQUENCE" ? [{ label: t("postgresSequence.title"), action: () => openPostgresSequence(sequenceTarget), icon: PencilLine, disabled: !sequenceTarget }] : []),
     ...((effectiveDatabaseType.value === "oracle" || effectiveDatabaseType.value === "oceanbase-oracle") && (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") ? [{ label: t("objects.packageSaveAsTitle"), action: () => requestPackageSaveAs(item), icon: CopyPlus }] : []),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openSource(item), icon: PencilLine },
@@ -6603,6 +6651,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     @confirm="cloneDialog.confirm"
   />
   <FirebirdObjectManager v-if="effectiveDatabaseType === 'firebird'" v-model:open="firebirdManagerOpen" :connection-id="connection.id" :database="database" />
+  <PostgresSequenceDialog v-if="postgresSequenceTarget" v-model:open="postgresSequenceOpen" :connection-id="postgresSequenceTarget.connectionId" :database="postgresSequenceTarget.database" :schema="postgresSequenceTarget.schema" :name="postgresSequenceTarget.name" @saved="refreshPostgresSequence" />
   <ObjectSourceDialog
     v-if="triggerCreateContext"
     :key="JSON.stringify(triggerCreateContext)"

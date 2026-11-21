@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><!-- Basic adaptation of ../rocketmq.svg: preserve original foreground geometry and transparent details. -->
+<defs><mask id="rocketmq-mono" x="0.0" y="0.0" width="48.0" height="48.0" maskUnits="userSpaceOnUse" mask-type="luminance"><path xmlns="http://www.w3.org/2000/svg" d="M14 24h20" stroke="white" stroke-width="2" stroke-linecap="round" />
+
+<path xmlns="http://www.w3.org/2000/svg" d="M24 14v20" stroke="white" stroke-width="2" stroke-linecap="round" />
+
+<circle xmlns="http://www.w3.org/2000/svg" cx="24" cy="14" r="3" fill="white" stroke="white" stroke-width="1" />
+
+<circle xmlns="http://www.w3.org/2000/svg" cx="24" cy="34" r="3" fill="white" stroke="white" stroke-width="1" />
+
+<circle xmlns="http://www.w3.org/2000/svg" cx="14" cy="24" r="3" fill="white" stroke="white" stroke-width="1" />
+
+<circle xmlns="http://www.w3.org/2000/svg" cx="34" cy="24" r="3" fill="white" stroke="white" stroke-width="1" />
+</mask></defs><rect x="0.0" y="0.0" width="48.0" height="48.0" fill="white" mask="url(#rocketmq-mono)"/></svg>

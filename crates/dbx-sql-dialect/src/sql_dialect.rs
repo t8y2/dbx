@@ -36,12 +36,13 @@ pub use descriptor::{
     CAP_REORDER_COLUMN, CAP_TEMPORARY_TABLE, CAP_TRANSACTIONAL_DDL, CAP_TRUNCATE_TABLE,
 };
 pub use identifiers::{
-    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
-    uses_backtick_identifier_quoting,
+    is_postgres_reserved_identifier, is_simple_lower_identifier, parse_sqlserver_linked_schema_ref,
+    qualified_transfer_table, quote_gaussdb_jdbc_identifier, quote_iris_identifier, quote_transfer_identifier,
+    transfer_column_identifier,
 };
 pub use identifiers::{
-    parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_gaussdb_jdbc_identifier, quote_iris_identifier,
-    quote_transfer_identifier, transfer_column_identifier,
+    normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
+    uses_backtick_identifier_quoting,
 };
 pub use table_select::{
     build_count_table_sql, build_iris_table_select_sql, build_table_data_select_sql,

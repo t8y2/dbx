@@ -20,6 +20,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -145,6 +146,37 @@ class CacheAgentTablesTest {
         assertEquals("Legacy", fixture.agent.listTables("SQLUser", constraints(null, 1, 0, "TABLE")).get(0).getName());
         assertTrue(fixture.jdbcUsed);
         assertTrue(fixture.statementClosed);
+    }
+
+    @Test
+    void fallsBackToJdbcWhenOnlyTheMessageCarriesTheCacheSqlCode() throws Exception {
+        // #15090: the Caché driver leaves the error code at 0 and the SQLSTATE
+        // empty, so the SQLCODE only appears inside the message.
+        Fixture fixture = new Fixture(List.of(table("Legacy", "TABLE", "")));
+        fixture.queryFailure = new SQLException(
+            "[SQLCODE: <-30>:<Table or View not found>] [Location:<Prepare>] "
+                + "[%msg:<Table 'INFORMATION_SCHEMA.TABLES' not found>]"
+        );
+        fixture.allowJdbc = true;
+
+        assertEquals(0, fixture.queryFailure.getErrorCode());
+        assertNull(fixture.queryFailure.getSQLState());
+        assertEquals("Legacy", fixture.agent.listTables("SQLUser", constraints(null, 1, 0, "TABLE")).get(0).getName());
+        assertTrue(fixture.jdbcUsed);
+        assertTrue(fixture.statementClosed);
+    }
+
+    @Test
+    void keepsFailingForUnrelatedMetadataErrorsWithoutAnInformationSchemaHint() {
+        assertFalse(CacheAgent.isInformationSchemaUnavailable(new SQLException("connection lost", "08006")));
+        assertFalse(CacheAgent.isInformationSchemaUnavailable(new SQLException("permission denied")));
+        assertTrue(CacheAgent.isInformationSchemaUnavailable(new SQLException("Table or View not found")));
+        assertTrue(CacheAgent.isInformationSchemaUnavailable(
+            new SQLException("Table 'INFORMATION_SCHEMA.TABLES' not found")
+        ));
+        assertTrue(CacheAgent.isInformationSchemaUnavailable(
+            new SQLException("[SQLCODE: <-30>:<Table or View not found>] [%msg:<Table 'INFORMATION_SCHEMA.TABLES' not found>]")
+        ));
     }
 
     @Test

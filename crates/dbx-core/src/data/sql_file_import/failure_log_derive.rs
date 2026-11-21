@@ -183,6 +183,10 @@ struct FailureLine {
     file_statement_index: usize,
     statement_index: usize,
     sql: String,
+    /// Present in logs written since the failure-log capture cap was raised;
+    /// absent in older logs, which fall back to the captured text length.
+    #[serde(default)]
+    sql_bytes: Option<usize>,
     #[serde(default)]
     sql_truncated: bool,
     error: String,
@@ -195,6 +199,7 @@ struct SummaryLine {
     failure_count: usize,
     affected_rows: u64,
     elapsed_ms: u64,
+    finished_at_ms: Option<i64>,
     failed_statements_logged: u64,
     omitted_failures: u64,
     truncated_statements: u64,
@@ -346,7 +351,7 @@ fn write_txt_header(writer: &mut CountingWriter<'_>, meta: &MetaLine) -> SqlFile
     }
     text.push_str(&format!("started: {}\n", format_timestamp(meta.started_at_ms)));
     text.push_str(&format!(
-        "limits: statement {} bytes, log {} bytes\n",
+        "limits: statement text {} bytes captured per failure, log {} bytes (execution is never truncated)\n",
         meta.max_statement_bytes, meta.max_total_bytes
     ));
     text.push_str("files:\n");
@@ -378,7 +383,18 @@ fn write_txt_failure(writer: &mut CountingWriter<'_>, failure: &FailureLine) -> 
     }
     text.push_str(&format!("error: {}\n", failure.error));
     if failure.sql_truncated {
-        text.push_str("[statement text truncated at the per-statement limit]\n");
+        // Make the scope unambiguous: only this log line is capped. DBX never
+        // shortens the statement it sends to the database (#14455).
+        match failure.sql_bytes {
+            Some(total) if total > failure.sql.len() => text.push_str(&format!(
+                "[statement text truncated for this failure log: captured {} of {total} bytes; \
+                 the database received the complete statement]\n",
+                failure.sql.len()
+            )),
+            _ => text.push_str(
+                "[statement text truncated for this failure log only; the database received the complete statement]\n",
+            ),
+        }
     }
     writer.write_all(text.as_bytes())
 }
@@ -417,10 +433,13 @@ fn write_txt_footer(writer: &mut CountingWriter<'_>, run: &SummaryLine) -> SqlFi
         "Run summary: {} succeeded, {} failed, {} rows affected, {} ms\n",
         run.success_count, run.failure_count, run.affected_rows, run.elapsed_ms
     ));
+    if let Some(finished_at_ms) = run.finished_at_ms {
+        text.push_str(&format!("finished: {}\n", format_timestamp(finished_at_ms)));
+    }
     text.push_str(&format!("failures logged: {}\n", run.failed_statements_logged));
     if run.omitted_failures > 0 || run.truncated_statements > 0 || run.log_truncated {
         text.push_str(&format!(
-            "truncation: {} statement(s) truncated, {} failure(s) not logged, log truncated: {}\n",
+            "truncation: {} statement(s) logged with truncated text, {} failure(s) not logged, log truncated: {}\n",
             run.truncated_statements,
             run.omitted_failures,
             if run.log_truncated { "yes" } else { "no" }
@@ -497,7 +516,7 @@ mod tests {
             "logTruncated": log_truncated,
             "cancelled": false,
             "logStatus": "available",
-            "finishedAtMs": 1_760_000_001_200_i64
+            "finishedAtMs": 1_760_000_002_400_i64
         })
         .to_string()
     }
@@ -525,12 +544,63 @@ mod tests {
         assert!(text.contains("DBX SQL file execution failure log"));
         assert!(text.contains("connection: MySQL (conn-1)"));
         assert!(text.contains("database: shop"));
+        assert!(text.lines().any(|line| line == "started: 2025-10-09 08:53:20 UTC"));
         assert!(text.contains("[0] a.sql  /tmp/a.sql  10 bytes"));
         assert!(text.contains("#644  a.sql  (statement #644 in file)"));
         assert!(text.contains("INSERT INTO t VALUES (1);"));
         assert!(text.contains("error: ORA-12899: value too large"));
         assert!(text.contains("Run summary: 6 succeeded, 2 failed, 4 rows affected, 1200 ms"));
+        assert!(text.lines().any(|line| line == "finished: 2025-10-09 08:53:22 UTC"));
         assert!(!text.contains("truncation:"));
+    }
+
+    #[test]
+    fn txt_export_calls_out_log_only_truncation_and_original_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let truncated = serde_json::json!({
+            "type": "failure",
+            "fileIndex": 0,
+            "fileName": "a.sql",
+            "fileStatementIndex": 735,
+            "statementIndex": 735,
+            "sql": "INSERT INTO t VALUES ('x')",
+            "sqlBytes": 1_700_000,
+            "sqlTruncated": true,
+            "error": "ERROR 1064 (42000)",
+            "recordedAtMs": 1_760_000_000_100_i64
+        })
+        .to_string();
+        let log = write_log(dir.path(), &format!("{}\n{}\n{}\n", meta_line(), truncated, summary_line(0, 1, false)));
+
+        let text = derive_text(&log, SqlFileFailureLogFormat::Txt);
+
+        // The header and the entry both say the cap applies to the log only, so
+        // "truncated" can never be mistaken for a truncated execution (#14455).
+        assert!(text.contains("captured per failure"));
+        assert!(text.contains("execution is never truncated"));
+        assert!(text.contains("captured 26 of 1700000 bytes; the database received the complete statement"), "{text}");
+        assert!(!text.contains("at the per-statement limit"));
+    }
+
+    #[test]
+    fn txt_export_handles_legacy_truncated_records_without_a_byte_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = serde_json::json!({
+            "type": "failure",
+            "fileIndex": 0,
+            "fileStatementIndex": 1,
+            "statementIndex": 1,
+            "sql": "INSERT INTO t VALUES ('x')",
+            "sqlTruncated": true,
+            "error": "boom",
+            "recordedAtMs": 1_760_000_000_100_i64
+        })
+        .to_string();
+        let log = write_log(dir.path(), &format!("{}\n{}\n", meta_line(), legacy));
+
+        let text = derive_text(&log, SqlFileFailureLogFormat::Txt);
+
+        assert!(text.contains("truncated for this failure log only; the database received the complete statement"));
     }
 
     #[test]
@@ -643,6 +713,20 @@ mod tests {
 
         assert!(text.contains("Run summary: not recorded"));
         assert!(!text.contains("Run summary: 0 succeeded"));
+        assert!(!text.contains("finished:"));
+    }
+
+    #[test]
+    fn txt_export_keeps_a_summary_without_a_finish_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut summary: serde_json::Value = serde_json::from_str(&summary_line(0, 0, false)).unwrap();
+        summary.as_object_mut().unwrap().remove("finishedAtMs");
+        let log = write_log(dir.path(), &format!("{}\n{summary}\n", meta_line()));
+
+        let text = derive_text(&log, SqlFileFailureLogFormat::Txt);
+
+        assert!(text.contains("Run summary: 6 succeeded, 2 failed, 4 rows affected, 1200 ms"));
+        assert!(!text.contains("finished:"));
     }
 
     #[test]
@@ -655,7 +739,9 @@ mod tests {
 
         let text = derive_text(&log, SqlFileFailureLogFormat::Txt);
 
-        assert!(text.contains("truncation: 2 statement(s) truncated, 9 failure(s) not logged, log truncated: yes"));
+        assert!(text.contains(
+            "truncation: 2 statement(s) logged with truncated text, 9 failure(s) not logged, log truncated: yes"
+        ));
     }
 
     #[test]

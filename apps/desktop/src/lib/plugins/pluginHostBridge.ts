@@ -1,5 +1,6 @@
 import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
 import { permittedPluginUrl } from "./pluginOpenUrl";
+import { requirePluginClipboardImage } from "./pluginClipboardImage";
 import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
@@ -9,7 +10,8 @@ import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpd
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
-import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, type PluginConnectionSummary } from "@/types/pluginConnection";
+import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, PLUGIN_CONNECTION_EDIT_CAPABILITY, PLUGIN_CONNECTION_EDIT_PERMISSION, type PluginConnectionEditor, type PluginConnectionEditRequest, type PluginConnectionSummary } from "@/types/pluginConnection";
+import { requirePluginConnectionEditFields } from "@/lib/connection/pluginConnectionEdit";
 import { floatingWindowLabel } from "@/lib/app/windowContext";
 import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
 
@@ -91,6 +93,10 @@ export interface PluginBridgeTheme {
 }
 
 export interface PluginWorkbenchContext {
+  /** Explicit New Query; restore this workspace's state or start with blank input. */
+  newQuery?: boolean;
+  /** Source workspace on the same connection; plugins may inherit its location. */
+  sourceWorkbenchId?: string;
   connectionId?: string;
   database?: string;
   schema?: string;
@@ -216,6 +222,8 @@ export interface PluginHostBridgeApi {
    */
   listConnections?(pluginId: string, options?: { all?: boolean }): PluginConnectionSummary[];
   listAllConnections?(): PluginConnectionSummary[];
+  /** Host-owned field discovery and edit drafts. Only the user can submit a draft. */
+  connectionEditor?: PluginConnectionEditor;
   /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
@@ -282,6 +290,7 @@ export interface PluginHostBridgeApi {
   clipboardRead?(pluginId: string): Promise<string>;
   /** Read and PNG-encode the current clipboard image. Shares the clipboard-read permission and consent gate. */
   clipboardReadImage?(pluginId: string): Promise<PluginClipboardImage>;
+  copyImage?(pluginId: string, data: Uint8Array): Promise<void>;
   /**
    * Session consent prompt for the first clipboard read of a bridge lifetime.
    * Resolves true to allow (and remember for the workbench session), false to
@@ -526,6 +535,7 @@ export class PluginHostBridge {
         clipboardWrite: !!this.api.copyText,
         clipboardRead: !!this.api.clipboardRead,
         clipboardImageRead: !!this.api.clipboardReadImage,
+        clipboardImageWrite: !!this.api.copyImage,
         mediaUrl: !!this.api.openMedia && !!this.api.closeMedia,
         // Floating desktop widget windows: advertised only when the host can both
         // open a window and drive its geometry, so a plugin sees one honest flag.
@@ -542,6 +552,7 @@ export class PluginHostBridge {
           folderExpansion: !!this.api.receiveOsDrops,
         },
         [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
+        [PLUGIN_CONNECTION_EDIT_CAPABILITY]: !!this.api.connectionEditor && this.hasPermission(PLUGIN_CONNECTION_EDIT_PERMISSION),
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -641,7 +652,12 @@ export class PluginHostBridge {
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
     try {
-      enforcePayloadLimit(request.params);
+      // Image base64 has its own bounded limit; keep all other metadata under
+      // the normal bridge cap without serializing the larger image twice.
+      if (request.method === "host.copyImage" && isRecord(request.params)) {
+        const { dataBase64: _image, ...metadata } = request.params;
+        enforcePayloadLimit(metadata);
+      } else enforcePayloadLimit(request.params);
       const result = await this.dispatch(request.method, request.params, request.data);
       this.respond(target, request.id, { result: result ?? null });
     } catch (error) {
@@ -846,6 +862,17 @@ export class PluginHostBridge {
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
     }
+    if (method === "host.getConnectionEditFields" || method === "host.openConnectionEdit") {
+      this.requirePermission(PLUGIN_CONNECTION_EDIT_PERMISSION);
+      const editor = this.api.connectionEditor;
+      if (!editor) throw new Error("Host connection editing is unavailable");
+      const input = requireRecord(params, "Connection edit request");
+      if (method === "host.getConnectionEditFields") {
+        return editor.getFields(requireConnectionEditId(input.connectionId));
+      }
+      editor.openEdit(requirePluginConnectionEditRequest(input));
+      return { opened: true };
+    }
     if (method === "host.getConnections") {
       this.requirePermission(PLUGIN_CONNECTIONS_READ_PERMISSION);
       if (!this.api.listConnections && !this.api.listAllConnections) throw new Error("Connection enumeration is unavailable on this host");
@@ -930,6 +957,12 @@ export class PluginHostBridge {
       if (input.text.length > MAX_BRIDGE_PAYLOAD_BYTES) throw new Error(`Plugin copy payload exceeds ${MAX_BRIDGE_PAYLOAD_BYTES} characters`);
       if (!this.api.copyText) throw new Error("Host clipboard is unavailable");
       await this.api.copyText(this.plugin.manifest.id, input.text);
+      return { success: true };
+    }
+    if (method === "host.copyImage") {
+      if (!this.api.copyImage) throw new Error("Host clipboard image write is unavailable");
+      const bytes = requirePluginClipboardImage(params, binary);
+      await this.api.copyImage(this.plugin.manifest.id, bytes);
       return { success: true };
     }
     if (method === "host.clipboardRead") {
@@ -1147,9 +1180,14 @@ export class PluginHostBridge {
 
 /**
  * Parse `host.network:<origin>` permission entries into CSP connect-src
- * origins. Must stay aligned with `parse_host_network_permission` in
- * crates/dbx-plugin-runtime/src/plugins/manifest.rs.
+ * origins. Must stay aligned with `parse_host_network_permission` and
+ * `MAX_PLUGIN_NETWORK_ORIGINS` in crates/dbx-plugin-runtime/src/plugins/manifest.rs:
+ * the manifest validator rejects a plugin beyond that bound, so this only
+ * mirrors it instead of silently dropping origins a plugin declared legally
+ * (t8y2/dbx#14299 — 8 was too tight for bookmark collections).
  */
+const MAX_PLUGIN_NETWORK_ORIGINS = 64;
+
 export function pluginNetworkOrigins(permissions: readonly string[] | undefined): string[] {
   const origins = new Set<string>();
   for (const permission of permissions || []) {
@@ -1157,7 +1195,7 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
     const origin = permission.slice("host.network:".length);
     if (!/^https:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?$/.test(origin)) continue;
     origins.add(origin);
-    if (origins.size >= 8) break;
+    if (origins.size >= MAX_PLUGIN_NETWORK_ORIGINS) break;
   }
   return [...origins];
 }
@@ -1510,6 +1548,8 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       connections: Object.freeze({
         list: (options) => request('host.listConnections', options || {}),
         getAll: () => request('host.getConnections', {}),
+        getEditFields: (connectionId) => request('host.getConnectionEditFields', { connectionId }),
+        openEdit: (editRequest) => request('host.openConnectionEdit', editRequest),
       }),
       // Estimated plans only: mode must be sent explicitly so a plugin states
       // its intent, and the host refuses anything other than "estimated".
@@ -1527,6 +1567,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      copyImage: (options = {}, data) => {
+        if (data === undefined) return request('host.copyImage', options);
+        if (typeof data === 'string') return request('host.copyImage', { ...options, dataBase64: data });
+        // Copy just the view's bytes, not its unrelated backing-buffer data.
+        const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data).slice().buffer;
+        return request('host.copyImage', options, { transfer: bytes });
+      },
       // System clipboard surface: writeText rides the ungated host.copy path,
       // readText is served by host.clipboardRead and requires the plugin to
       // declare the host.clipboard:read permission (the bridge rejects
@@ -1698,6 +1745,23 @@ function requireProtocolName(value: unknown, label: string): string {
 function requireTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(120_000, Math.max(1, Math.round(value)));
+}
+
+function requireConnectionEditId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 256 || /\p{Cc}/u.test(value)) {
+    throw new Error("A valid connection ID is required for editing");
+  }
+  return value;
+}
+
+function requirePluginConnectionEditRequest(input: Record<string, unknown>): PluginConnectionEditRequest {
+  if (Object.keys(input).some((key) => key !== "connectionId" && key !== "fields")) throw new Error("Unsupported connection edit parameter");
+  const connectionId = requireConnectionEditId(input.connectionId);
+  if (input.fields === undefined) return { connectionId, fields: {} };
+  const fields = requireRecord(input.fields, "Connection edit fields");
+  const prototype = Object.getPrototypeOf(fields);
+  if (prototype !== Object.prototype && prototype !== null) throw new Error("Connection edit fields must be a plain object");
+  return { connectionId, fields: requirePluginConnectionEditFields(fields) };
 }
 
 /** A connection id, database, or schema name: bounded, trimmed, never empty. */

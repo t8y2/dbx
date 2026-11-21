@@ -7,7 +7,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/backend/api";
 import { authorizationPresetPrivileges, authorizationPrivileges, type AuthorizationDatabaseOption, type AuthorizationPreset, type AuthorizationTableSelection, type DatabaseAuthorizationSelection } from "@/lib/database/databaseAuthorizationPlan";
-import type { DatabaseUserAdminProvider } from "@/lib/database/databaseUserAdmin";
+import { normalizeStarrocksCatalog, starrocksViewObjectType, type DatabaseUserAdminProvider } from "@/lib/database/databaseUserAdmin";
+import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 
 /**
  * 数据库授权范围编辑器：数据库多选 + 每库权限预设 + 表级(全部表/指定表)选择 + 自定义权限勾选。
@@ -119,7 +120,8 @@ function toggleDatabase(database: AuthorizationDatabaseOption) {
     commitSelections(currentSelections().filter((selection) => authorizationSelectionKey(selection) !== authorizationOptionKey(database)));
     return;
   }
-  commitSelections([...currentSelections(), { database: database.database, ...(database.catalog ? { catalog: database.catalog } : {}), preset: "readOnly", privileges: ["SELECT"], ...(props.objectScope ? { tables: [] } : {}) }]);
+  const privileges = props.provider?.defaultPrivilegesForScope?.("table") ?? ["SELECT"];
+  commitSelections([...currentSelections(), { database: database.database, ...(database.catalog ? { catalog: database.catalog } : {}), preset: "readOnly", privileges, ...(props.objectScope ? { tables: [] } : {}) }]);
 }
 
 // 表范围下 MySQL 不支持 CREATE ROUTINE / EVENT 等库级权限，需要按目标作用域过滤可选权限
@@ -127,7 +129,7 @@ function privilegesForSelection(selection?: DatabaseAuthorizationSelection): str
   if (props.objectScope) return [...props.objectScope.privileges];
   const userProvider = props.provider;
   if (!userProvider) return [];
-  return authorizationPrivileges(userProvider, selection?.tables === undefined ? "database" : "table");
+  return authorizationPrivileges(userProvider, selection?.tables === undefined ? "database" : "table", selection?.tables);
 }
 
 function usesSelectedTables(database: AuthorizationDatabaseOption): boolean {
@@ -152,6 +154,13 @@ function filteredTables(database: AuthorizationDatabaseOption): AuthorizationTab
   return query ? available.filter((table) => tableLabel(table).toLowerCase().includes(query)) : available;
 }
 
+function selectedTablesLabel(database: AuthorizationDatabaseOption): string {
+  const selected = selectionFor(database)?.tables ?? [];
+  if (props.objectScope) return `${t("oracleSecurity.chooseObjects")} (${selected.length})`;
+  if (selected.some((table) => table.objectType)) return t("userAdmin.selectedObjectsCount", { count: selected.length });
+  return selected.length ? t("userAdmin.selectedTableCount", { count: selected.length }) : t("userAdmin.chooseTables");
+}
+
 async function loadTables(database: AuthorizationDatabaseOption) {
   const key = authorizationOptionKey(database);
   if (tables.value[key] || tablesLoading.value[key]) return;
@@ -171,8 +180,13 @@ async function loadTables(database: AuthorizationDatabaseOption) {
       );
       result = schemaTables.flat();
     } else if (props.provider?.authorizationModel === "starrocks") {
-      const items = await api.listTables(props.connectionId, database.database, "", undefined, undefined, undefined, ["TABLE"], database.catalog);
-      result = items.map((table) => ({ name: table.name }));
+      const catalog = normalizeStarrocksCatalog(database.catalog ?? "");
+      const objectTypes: SidebarObjectKind[] = !catalog || catalog === "default_catalog" ? ["TABLE", "VIEW", "MATERIALIZED_VIEW"] : ["TABLE"];
+      const items = await api.listTables(props.connectionId, database.database, "", undefined, undefined, undefined, objectTypes, database.catalog);
+      result = items.map((table) => {
+        const objectType = starrocksViewObjectType(table.table_type);
+        return { name: table.name, ...(objectType ? { objectType } : {}) };
+      });
     } else {
       const items = await api.listTables(props.connectionId, database.database, "");
       result = items.map((table) => ({ name: table.name }));
@@ -268,7 +282,7 @@ function authorizationTableKey(table: AuthorizationTableSelection): string {
 
 function tableLabel(table: AuthorizationTableSelection): string {
   const name = table.schema ? `${table.schema}.${table.name}` : table.name;
-  return props.objectScope && table.objectType ? `${name} · ${table.objectType}` : name;
+  return table.objectType ? `${name} · ${table.objectType.replace("MATERIALIZED_VIEW", "MATERIALIZED VIEW")}` : name;
 }
 
 function uniqueTableOptions(options: AuthorizationTableSelection[]): AuthorizationTableSelection[] {
@@ -342,7 +356,7 @@ function isPostgresGrantSchema(schema: string): boolean {
               <button type="button" class="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border bg-background px-2 text-left hover:bg-accent" :class="compact ? 'h-9 text-xs' : 'h-7 text-[11px]'">
                 <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span class="min-w-0 flex-1 truncate">
-                  {{ objectScope ? `${t("oracleSecurity.chooseObjects")} (${selectionFor(database)?.tables?.length ?? 0})` : selectionFor(database)?.tables?.length ? t("userAdmin.selectedTableCount", { count: selectionFor(database)?.tables?.length }) : t("userAdmin.chooseTables") }}
+                  {{ selectedTablesLabel(database) }}
                 </span>
                 <Loader2 v-if="tablesLoading[authorizationOptionKey(database)]" class="h-3.5 w-3.5 shrink-0 animate-spin" />
                 <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />

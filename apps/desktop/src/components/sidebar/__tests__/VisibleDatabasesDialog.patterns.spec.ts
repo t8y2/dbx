@@ -118,6 +118,17 @@ async function typePatterns(value: string) {
   await flush();
 }
 
+async function typeSearch(value: string) {
+  const input = root!.querySelector<HTMLInputElement>("[data-visible-database-search]")!;
+  input.value = value;
+  input.dispatchEvent(new Event("input"));
+  await flush();
+}
+
+function rowNames(): string[] {
+  return [...root!.querySelectorAll<HTMLElement>("[data-visible-database-row]")].map((element) => element.getAttribute("data-visible-database-row") ?? "");
+}
+
 async function click(element: HTMLElement) {
   element.click();
   await flush();
@@ -197,5 +208,34 @@ describe("VisibleDatabasesDialog wildcard patterns (#14221)", () => {
     expect(selectedCountText()).toBe('{"selected":1,"total":3}');
     await click(button("visibleDatabases.save"));
     expect(store.setVisibleDatabaseFilter).toHaveBeenCalledWith("conn-1", ["billing"], []);
+  });
+});
+
+describe("VisibleDatabasesDialog wildcard search (#15109)", () => {
+  it("filters with % and selects every match in one click", async () => {
+    await mountDialog({});
+    expect(rowNames()).toEqual(["ak_orders", "ak_users", "billing"]);
+
+    await typeSearch("ak_%");
+    expect(rowNames()).toEqual(["ak_orders", "ak_users"]);
+    expect(root!.textContent).toContain('visibleDatabases.searchMatchCount:{"count":2}');
+
+    await click(button("visibleDatabases.selectFiltered"));
+    expect(selectedCountText()).toBe('{"selected":2,"total":3}');
+
+    await click(button("visibleDatabases.save"));
+    expect(store.setVisibleDatabaseFilter).toHaveBeenCalledWith("conn-1", ["ak_orders", "ak_users"], []);
+  });
+
+  it("keeps substring matching and literal underscores for plain text", async () => {
+    await mountDialog({});
+    await typeSearch("ak_");
+    expect(rowNames()).toEqual(["ak_orders", "ak_users"]);
+
+    await typeSearch("AK_");
+    expect(rowNames()).toEqual(["ak_orders", "ak_users"]);
+
+    await typeSearch("akX");
+    expect(rowNames()).toEqual([]);
   });
 });

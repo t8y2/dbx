@@ -852,7 +852,29 @@ public final class JdbcExecutor {
                 value = normalizeResultValue(rs.getObject(index));
                 break;
         }
-        return rs.wasNull() ? null : value;
+        return rs.wasNull() ? null : normalizeNonFiniteValue(value);
+    }
+
+    /**
+     * JSON has no representation for NaN or infinities. Keep the same text
+     * representation the Oracle Go agent uses ("NaN", "+Inf", "-Inf") so every
+     * agent can return the value instead of failing the whole RPC response.
+     */
+    public static Object normalizeNonFiniteValue(Object value) {
+        if (value instanceof Double number) {
+            return Double.isFinite(number) ? number : nonFiniteText(number);
+        }
+        if (value instanceof Float number) {
+            return Float.isFinite(number) ? number : nonFiniteText(number.doubleValue());
+        }
+        return value;
+    }
+
+    private static String nonFiniteText(double value) {
+        if (Double.isNaN(value)) {
+            return "NaN";
+        }
+        return value > 0 ? "+Inf" : "-Inf";
     }
 
     public static Object stringResultValue(ResultSet rs, int index, int sqlType) throws SQLException {
@@ -907,7 +929,7 @@ public final class JdbcExecutor {
             byte[] bytes = (byte[]) value;
             return bytesToHex(bytes);
         }
-        return value instanceof Number || value instanceof Boolean ? value : value.toString();
+        return value instanceof Number || value instanceof Boolean ? normalizeNonFiniteValue(value) : value.toString();
     }
 
     public static String bytesToHex(byte[] bytes) {
@@ -1088,7 +1110,7 @@ public final class JdbcExecutor {
             } else {
                 value = valueReader.read(rs, i, sqlType);
             }
-            row.add(value);
+            row.add(normalizeNonFiniteValue(value));
         }
         return row;
     }

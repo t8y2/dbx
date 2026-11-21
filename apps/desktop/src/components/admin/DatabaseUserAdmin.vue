@@ -178,7 +178,7 @@ const canDropUser = computed(() => !!provider.value?.dropUserSql);
 const canGrantPrivileges = computed(() => !!actions.value?.grantPrivilegesSql);
 const canRevokePrivileges = computed(() => !!actions.value?.revokePrivilegesSql);
 const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
-const supportsCreateTableGrants = computed(() => !!provider.value?.supportsTableGrantsOnCreate);
+const supportsEditTableGrants = computed(() => provider.value?.supportsTableGrantsOnEdit ?? !!provider.value?.supportsTableGrantsOnCreate);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -199,7 +199,7 @@ const selectedDetail = computed(() => {
 const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noGrants"));
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const createDatabaseAuthorizationsValid = computed(() => authorizationSelectionsValid(createDatabaseAuthorizations.value));
-const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && (isOracle.value ? privilegeScope.value === "table" : supportsCreateTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table")));
+const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && (isOracle.value ? privilegeScope.value === "table" : supportsEditTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table")));
 const oracleObjectScope = computed(() => {
   if (!isOracle.value) return undefined;
   const connectionId = props.connection.id;
@@ -513,8 +513,8 @@ function authorizationSelectionsValid(selections: DatabaseAuthorizationSelection
   return selections.every((selection) => {
     if (selection.tables !== undefined && selection.tables.length === 0) return false;
     const targetScope = selection.tables === undefined && userProvider.authorizationModel !== "starrocks" ? "database" : "table";
-    const available = authorizationPrivileges(userProvider, targetScope);
-    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope).length > 0;
+    const available = authorizationPrivileges(userProvider, targetScope, selection.tables);
+    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope, selection.tables).length > 0;
     return available.some((privilege) => selection.privileges?.includes(privilege));
   });
 }

@@ -11,3 +11,4 @@ pub mod database_search_probe_sql;
 pub mod database_search_sql;
 pub mod database_structure_search_sql;
 pub mod query_result_sql;
+pub mod tdengine_export_sql;

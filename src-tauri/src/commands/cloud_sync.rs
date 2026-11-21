@@ -340,6 +340,7 @@ pub async fn snippet_sync_upload(
     secrets_passphrase: Option<String>,
     selection: Option<SyncSelection>,
     expected_remote_content_hash: Option<String>,
+    automatic: Option<bool>,
 ) -> Result<SnippetSyncSummary, String> {
     resolve_snippet_token(&state.storage, &mut config).await?;
     let snippet_passphrase = resolve_snippet_passphrase(&state.storage, &config, snippet_passphrase.as_deref()).await?;
@@ -371,11 +372,12 @@ pub async fn snippet_sync_upload(
     .await?;
     let client = SnippetSyncClient::new(config)?;
     let mut summary = client
-        .put_snapshot_with_expected_remote_hash(
+        .put_snapshot_guarded(
             &snapshot,
             snippet_passphrase.as_deref(),
             secrets_passphrase,
             expected_remote_content_hash.as_deref(),
+            automatic.unwrap_or(false),
         )
         .await?;
     finalize_snippet_migration(&state.storage, &client, &mut summary).await?;

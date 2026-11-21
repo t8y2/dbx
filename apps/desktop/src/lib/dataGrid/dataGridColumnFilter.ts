@@ -2,6 +2,8 @@ import type { ColumnInfo, DatabaseType } from "@/types/database";
 import type { DataGridColumnInfo, DataGridContextFilterMode, GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import { buildDataGridColumnValueFilterCondition, buildDataGridColumnValuesFilterCondition } from "@/lib/dataGrid/dataGridSql";
 import { normalizeWhereInput } from "@/lib/table/tableSelectSql";
+import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
+import { uuid } from "@/lib/common/utils";
 
 export function buildColumnValueFilterCondition(options: { databaseType?: DatabaseType; identifierQuote?: string; columnName: string; columnInfo?: Pick<ColumnInfo, "data_type">; rawValue: string }): Promise<string | undefined> {
   return buildDataGridColumnValueFilterCondition({
@@ -232,7 +234,10 @@ export function parseFilterValue(rawValue: string, columnInfo?: Pick<DataGridCol
 export function parseFilterValues(rawValue: string, columnInfo?: Pick<DataGridColumnInfo, "data_type">, databaseType?: DatabaseType): GridCellValue[] {
   return splitFilterValues(rawValue).map(({ value, quoted }) => {
     if (!quoted && value.toLowerCase() === "null") return null;
-    return parseFilterValue(value, columnInfo, databaseType);
+    // Re-quote quoted members before parsing: parseFilterValue trims its
+    // input, which would drop the spaces inside a quoted value like ' a '
+    // (#15323 review).
+    return parseFilterValue(quoted ? quoteWhereLiteral(value) : value, columnInfo, databaseType);
   });
 }
 
@@ -334,4 +339,448 @@ function isBooleanType(dataType: string, databaseType?: DatabaseType): boolean {
 function isNumericLiteral(text: string): boolean {
   if (!text || text.trim() !== text) return false;
   return Number.isFinite(Number(text)) && /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(text);
+}
+
+/**
+ * Parse a hand-written WHERE fragment into structured filter rules, so the
+ * filter panel below the grid can show (and edit) the same conditions the
+ * user typed in the WHERE box (#15320). All-or-nothing: any conjunct the
+ * builder cannot represent (functions, subqueries, column-to-column
+ * comparisons, unknown columns, ...) makes the whole parse fail and the
+ * caller must leave the manual input and the existing rules untouched.
+ * The same applies to a literal the rebuild cannot reproduce exactly:
+ * an unquoted number or boolean against a text column would come back
+ * quoted (`code = 1` becoming `code = '1'`), so that condition stays
+ * manual instead of silently changing the comparison (#15323 review).
+ * The same all-or-nothing rule applies to a mode the builder cannot
+ * express for this database (e.g. IN on jdbc) or a rule it treats as
+ * incomplete: either would be dropped by the rebuild, so the whole
+ * input stays manual.
+ * Identifiers may be bare, backtick-quoted (MySQL), double-quoted, or
+ * bracket-quoted, and may carry a table qualifier (`t`.`col`).
+ */
+export type DataGridWhereColumnContext = {
+  /** Column data types by lowercase column name; absent means unknown. */
+  dataTypes?: ReadonlyMap<string, string | undefined>;
+  databaseType?: DatabaseType;
+};
+
+export function parseDataGridWhereInputToRules(whereInput: string | undefined, columns: readonly string[], createId: () => string = uuid, columnContext?: DataGridWhereColumnContext): DataGridStructuredFilterRule[] | null {
+  const normalized = normalizeWhereInput(whereInput);
+  if (!normalized || !columns.length) return null;
+  const segments = splitTopLevelConditions(normalized);
+  if (!segments) return null;
+  const rules: DataGridStructuredFilterRule[] = [];
+  for (const segment of segments) {
+    const parsed = parseDataGridWhereCondition(segment.text, columns, columnContext);
+    if (!parsed) return null;
+    // A parsed rule still cannot move into the panel when the filter builder
+    // cannot express it for this database (e.g. IN on jdbc) or treats it as
+    // incomplete — the rebuild would silently drop the predicate, so the
+    // whole WHERE stays manual (#15323 review).
+    if (!filterModeIsSupportedForDatabase(parsed.mode, columnContext?.databaseType)) return null;
+    if (!filterModeHasCompleteValue(parsed.mode, parsed.rawValue, parsed.rawEndValue)) return null;
+    rules.push({ id: createId(), conjunction: segment.conjunction, ...parsed });
+  }
+  return rules.length ? rules : null;
+}
+
+type DataGridWhereConditionSegment = {
+  text: string;
+  conjunction: "AND" | "OR";
+};
+
+function isAsciiLetter(char: string): boolean {
+  return (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
+}
+
+/**
+ * Split on top-level AND/OR, quote- and paren-aware. The AND inside a
+ * BETWEEN predicate is part of that predicate, not a split point.
+ */
+function splitTopLevelConditions(expression: string): DataGridWhereConditionSegment[] | null {
+  const segments: DataGridWhereConditionSegment[] = [];
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+  let bracketQuoted = false;
+  let awaitingBetweenAnd = false;
+  let conjunction: "AND" | "OR" = "AND";
+  let start = 0;
+
+  for (let index = 0; index < expression.length; index += 1) {
+    const char = expression[index]!;
+    if (bracketQuoted) {
+      if (char === "]") {
+        if (expression[index + 1] === "]") index += 1;
+        else bracketQuoted = false;
+      }
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        if (expression[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuoted = true;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth -= 1;
+      if (depth < 0) return null;
+      continue;
+    }
+    if (depth !== 0 || !isAsciiLetter(char)) continue;
+    let end = index + 1;
+    while (end < expression.length && isAsciiLetter(expression[end]!)) end += 1;
+    const word = expression.slice(index, end).toUpperCase();
+    if (word === "BETWEEN") {
+      awaitingBetweenAnd = true;
+    } else if (word === "AND" || word === "OR") {
+      if (word === "AND" && awaitingBetweenAnd) {
+        awaitingBetweenAnd = false;
+      } else {
+        const text = expression.slice(start, index).trim();
+        if (!text) return null;
+        segments.push({ text, conjunction });
+        conjunction = word;
+        start = end;
+      }
+    }
+    index = end - 1;
+  }
+  if (depth !== 0 || quote || bracketQuoted) return null;
+  const last = expression.slice(start).trim();
+  if (!last) return null;
+  segments.push({ text: last, conjunction });
+  return segments;
+}
+
+function splitTopLevelCommas(source: string): string[] | null {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+  let bracketQuoted = false;
+  let start = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (bracketQuoted) {
+      if (char === "]") {
+        if (source[index + 1] === "]") index += 1;
+        else bracketQuoted = false;
+      }
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        if (source[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuoted = true;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    else if (char === "," && depth === 0) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+    if (depth < 0) return null;
+  }
+  if (depth !== 0 || quote || bracketQuoted) return null;
+  parts.push(source.slice(start));
+  return parts;
+}
+
+/** Find the first top-level AND; the BETWEEN separator, never a split point. */
+function splitTopLevelAndOnce(expression: string): { left: string; right: string } | null {
+  let depth = 0;
+  let quote: "'" | '"' | "`" | null = null;
+  let bracketQuoted = false;
+  for (let index = 0; index < expression.length; index += 1) {
+    const char = expression[index]!;
+    if (bracketQuoted) {
+      if (char === "]") {
+        if (expression[index + 1] === "]") index += 1;
+        else bracketQuoted = false;
+      }
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        if (expression[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "[") {
+      bracketQuoted = true;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    if (depth < 0) return null;
+    if (depth !== 0 || !isAsciiLetter(char)) continue;
+    let end = index + 1;
+    while (end < expression.length && isAsciiLetter(expression[end]!)) end += 1;
+    if (expression.slice(index, end).toUpperCase() === "AND") {
+      return { left: expression.slice(0, index).trim(), right: expression.slice(end).trim() };
+    }
+    index = end - 1;
+  }
+  if (depth !== 0 || quote || bracketQuoted) return null;
+  return null;
+}
+
+/** Unescape a quoted identifier or string literal (doubled quote = one quote). */
+function unescapeDoubledQuotes(text: string, quote: string): string {
+  return text.replaceAll(`${quote}${quote}`, quote);
+}
+
+function matchQuotedIdentifier(text: string): { name: string; rest: string } | null {
+  const quote = text[0]!;
+  if (quote !== "`" && quote !== '"' && quote !== "[") return null;
+  const close = quote === "[" ? "]" : quote;
+  let end = 1;
+  while (end < text.length) {
+    if (text[end] === close) {
+      if (text[end + 1] === close && close !== "]") {
+        end += 2;
+        continue;
+      }
+      return { name: unescapeDoubledQuotes(text.slice(1, end), close), rest: text.slice(end + 1) };
+    }
+    end += 1;
+  }
+  return null;
+}
+
+function resolveWhereColumnName(identifier: string, columns: readonly string[]): string | null {
+  const parts = identifier.split(".");
+  const name = parts[parts.length - 1]!.trim();
+  if (!name) return null;
+  const found = columns.find((column) => column.toLowerCase() === name.toLowerCase());
+  return found ?? null;
+}
+
+/** A single literal the builder can round-trip: quoted string, number, true/false. */
+type ParsedWhereLiteral = {
+  value: string;
+  quoted: boolean;
+  kind: "string" | "number" | "boolean";
+  // The literal as written (including quotes for quoted literals). Kept so a
+  // quoted value round-trips through the panel without losing its exact
+  // contents, e.g. the spaces in ' Alice '.
+  source: string;
+};
+
+/** Quote a literal's contents as it would appear in SQL (single quotes, '' escapes). */
+function quoteWhereLiteral(content: string): string {
+  return `'${content.replaceAll("'", "''")}'`;
+}
+
+/**
+ * Whether a dialect writes string literals with double quotes. MySQL (and its
+ * wire-compatible dialects) does by default; everywhere else — PostgreSQL,
+ * SQLite, Oracle, SQL Server, ... — double quotes delimit identifiers, so a
+ * double-quoted value there names a column, not a string. When the dialect is
+ * unknown the equivalence is uncertain, so it is not a string either
+ * (#15323 review).
+ */
+function doubleQuotedTextIsStringLiteral(databaseType?: DatabaseType): boolean {
+  return databaseType === "mysql" || databaseType === "doris" || databaseType === "starrocks";
+}
+
+function parseWhereLiteral(text: string, databaseType?: DatabaseType): ParsedWhereLiteral | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const first = trimmed[0]!;
+  if (first === "'" || first === '"') {
+    // A double-quoted value is a string only where the dialect writes
+    // strings that way; elsewhere (and when the dialect is unknown) it is a
+    // column reference, so the condition cannot move into the panel.
+    if (first === '"' && !doubleQuotedTextIsStringLiteral(databaseType)) return null;
+    let end = 1;
+    while (end < trimmed.length) {
+      if (trimmed[end] === first) {
+        if (trimmed[end + 1] === first) {
+          end += 2;
+          continue;
+        }
+        if (end !== trimmed.length - 1) return null;
+        return { value: unescapeDoubledQuotes(trimmed.slice(1, end), first), quoted: true, kind: "string", source: trimmed };
+      }
+      end += 1;
+    }
+    return null;
+  }
+  if (/^(true|false)$/i.test(trimmed)) return { value: trimmed, quoted: false, kind: "boolean", source: trimmed };
+  if (isNumericLiteral(trimmed)) return { value: trimmed, quoted: false, kind: "number", source: trimmed };
+  return null;
+}
+
+/**
+ * Whether a literal written in the manual WHERE rebuilds to the same
+ * comparison from its structured rule (#15323 review). A quoted string
+ * always does: the value parser unwraps it and the backend quotes it
+ * back — and a double-quoted one only reaches here for a dialect where
+ * double quotes write strings, since parseWhereLiteral rejects it
+ * elsewhere as a column reference. An unquoted number only does against a
+ * numeric column, where the parser preserves the spelling and the backend
+ * emits it unquoted — or against an untyped column, where the parser keeps
+ * it numeric, except leading-zero spellings and integers past JS safe
+ * range, which it keeps as text and the backend would quote. An unquoted
+ * boolean only does against a boolean column. Anything else (e.g.
+ * `code = 1` on VARCHAR, which would rebuild as `code = '1'`) must stay
+ * manual.
+ */
+function isWhereLiteralRoundTrippable(literal: ParsedWhereLiteral, dataType: string | undefined, databaseType?: DatabaseType): boolean {
+  if (literal.quoted) return true;
+  if (literal.kind === "number") {
+    if (dataType !== undefined) return isNumericType(dataType);
+    if (/^[+-]?0\d/.test(literal.value)) return false;
+    const numeric = Number(literal.value);
+    return Number.isFinite(numeric) && !(Number.isInteger(numeric) && Math.abs(numeric) > Number.MAX_SAFE_INTEGER);
+  }
+  return dataType !== undefined && isBooleanType(dataType, databaseType);
+}
+
+const WHERE_OPERATORS: Array<{ pattern: RegExp; mode: DataGridContextFilterMode }> = [
+  { pattern: /^is\s+not\s+null\b/i, mode: "is-not-null" },
+  { pattern: /^is\s+null\b/i, mode: "is-null" },
+  { pattern: /^not\s+between\b/i, mode: "not-between" },
+  { pattern: /^between\b/i, mode: "between" },
+  { pattern: /^not\s+like\b/i, mode: "not-like" },
+  { pattern: /^like\b/i, mode: "like" },
+  { pattern: /^not\s+in\b/i, mode: "not-in" },
+  { pattern: /^in\b/i, mode: "in" },
+  { pattern: /^!=/, mode: "not-equals" },
+  { pattern: /^<>/, mode: "not-equals" },
+  { pattern: /^>=/, mode: "greater-than-or-equal" },
+  { pattern: /^<=/, mode: "less-than-or-equal" },
+  { pattern: /^=/, mode: "equals" },
+  { pattern: /^>/, mode: "greater-than" },
+  { pattern: /^</, mode: "less-than" },
+];
+
+/**
+ * A LIKE pattern only maps onto a builder mode when its wildcards sit
+ * exactly at the edges; anything else (a bare literal, inner wildcards)
+ * would change meaning if rebuilt, so it stays unparseable.
+ */
+function parseLikePattern(pattern: string, negated: boolean): { mode: DataGridContextFilterMode; rawValue: string } | null {
+  const hasLeading = pattern.startsWith("%");
+  const hasTrailing = pattern.endsWith("%");
+  const inner = pattern.slice(hasLeading ? 1 : 0, hasTrailing ? -1 : undefined);
+  if (!inner || /[%_]/.test(inner)) return null;
+  if (hasLeading && hasTrailing) return { mode: negated ? "not-like" : "like", rawValue: inner };
+  if (hasTrailing) return { mode: negated ? "not-begins-with" : "begins-with", rawValue: inner };
+  if (hasLeading) return { mode: negated ? "not-ends-with" : "ends-with", rawValue: inner };
+  return null;
+}
+
+type ParsedWhereCondition = Omit<DataGridStructuredFilterRule, "id" | "conjunction" | "disabled">;
+
+function parseDataGridWhereCondition(segment: string, columns: readonly string[], columnContext?: DataGridWhereColumnContext): ParsedWhereCondition | null {
+  let text = segment.trim();
+  for (;;) {
+    const unwrapped = unwrapOuterParentheses(text);
+    if (unwrapped === text) break;
+    text = unwrapped;
+  }
+  if (!text) return null;
+
+  const readIdentifier = (source: string): { name: string; rest: string } | null => {
+    const quotedPart = matchQuotedIdentifier(source);
+    if (quotedPart) return quotedPart;
+    const bare = /^[A-Za-z_$\p{L}][\w$]*/u.exec(source);
+    if (!bare) return null;
+    return { name: bare[0], rest: source.slice(bare[0].length) };
+  };
+  const first = readIdentifier(text);
+  if (!first) return null;
+  // A table qualifier (`t`.`col`, t.col) is not part of the column name.
+  let lastName = first.name;
+  let rest = first.rest;
+  while (rest.startsWith(".")) {
+    const next = readIdentifier(rest.slice(1));
+    if (!next) return null;
+    lastName = next.name;
+    rest = next.rest;
+  }
+  const columnName = resolveWhereColumnName(lastName, columns);
+  if (!columnName) return null;
+  const dataType = columnContext?.dataTypes?.get(columnName.toLowerCase());
+  const isLiteralRoundTrippable = (literal: ParsedWhereLiteral): boolean => isWhereLiteralRoundTrippable(literal, dataType, columnContext?.databaseType);
+  rest = rest.trimStart();
+  if (!rest) return null;
+
+  const operator = WHERE_OPERATORS.find((candidate) => candidate.pattern.test(rest));
+  if (!operator) return null;
+  rest = rest.replace(operator.pattern, "").trim();
+  const mode = operator.mode;
+
+  if (mode === "is-null" || mode === "is-not-null") {
+    if (rest) return null;
+    return { columnName, mode, rawValue: "", rawEndValue: "" };
+  }
+
+  if (mode === "in" || mode === "not-in") {
+    const inner = unwrapOuterParentheses(rest);
+    if (inner === rest) return null;
+    const parts = splitTopLevelCommas(inner);
+    if (!parts) return null;
+    const values = parts.map((part) => parseWhereLiteral(part, columnContext?.databaseType));
+    if (!values.length || values.some((value) => value === null || !isLiteralRoundTrippable(value))) return null;
+    return { columnName, mode, rawValue: inner.trim(), rawEndValue: "" };
+  }
+
+  if (mode === "between" || mode === "not-between") {
+    const split = splitTopLevelAndOnce(rest);
+    if (!split) return null;
+    const low = parseWhereLiteral(split.left, columnContext?.databaseType);
+    const high = parseWhereLiteral(split.right, columnContext?.databaseType);
+    if (low === null || high === null || !isLiteralRoundTrippable(low) || !isLiteralRoundTrippable(high)) return null;
+    // Keep the quoted spelling for quoted literals so the spaces inside a
+    // quoted bound survive the round trip through the panel (#15323 review).
+    return { columnName, mode, rawValue: low.quoted ? low.source : low.value, rawEndValue: high.quoted ? high.source : high.value };
+  }
+
+  if (mode === "like" || mode === "not-like") {
+    const value = parseWhereLiteral(rest, columnContext?.databaseType);
+    if (value === null) return null;
+    const mapped = parseLikePattern(value.value, mode === "not-like");
+    if (!mapped) return null;
+    // Keep the quoted spelling of the pattern's inner content so spaces
+    // survive the round trip (#15323 review). rawEndValue is required by
+    // ParsedWhereCondition (this was the frontend typecheck failure).
+    return { columnName, mode: mapped.mode, rawValue: value.quoted ? quoteWhereLiteral(mapped.rawValue) : mapped.rawValue, rawEndValue: "" };
+  }
+
+  const value = parseWhereLiteral(rest, columnContext?.databaseType);
+  if (value === null || !isLiteralRoundTrippable(value)) return null;
+  // Keep the quoted spelling for quoted literals so the spaces inside a
+  // quoted value survive the round trip through the panel (#15323 review).
+  return { columnName, mode, rawValue: value.quoted ? value.source : value.value, rawEndValue: "" };
 }

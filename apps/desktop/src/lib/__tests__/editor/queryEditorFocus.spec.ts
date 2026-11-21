@@ -2,7 +2,7 @@
  * @vitest-environment happy-dom
  */
 import { describe, expect, it, vi } from "vitest";
-import { focusEditorView, type EditorViewLike } from "@/lib/editor/queryEditorFocus";
+import { focusEditorView, shouldFocusQueryEditorOnMount, type EditorViewLike } from "@/lib/editor/queryEditorFocus";
 
 function createMockView(overrides: Partial<EditorViewLike> = {}): EditorViewLike {
   return {
@@ -50,5 +50,23 @@ describe("focusEditorView", () => {
     } finally {
       input.remove();
     }
+  });
+});
+
+describe("shouldFocusQueryEditorOnMount", () => {
+  it("does not steal focus from a result grid during delayed editor autofocus", () => {
+    const grid = document.createElement("div");
+    grid.dataset.gridRoot = "";
+    const editor = document.createElement("input");
+    grid.append(editor);
+    editor.focus();
+
+    expect(shouldFocusQueryEditorOnMount(editor)).toBe(false);
+    grid.remove();
+  });
+
+  it("allows autofocus when focus is not inside a result grid", () => {
+    const editor = document.createElement("input");
+    expect(shouldFocusQueryEditorOnMount(editor)).toBe(true);
   });
 });

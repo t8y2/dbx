@@ -528,12 +528,14 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     attachSelectionInterruptionListeners();
   }
 
-  function finishCellSelection() {
+  function finishCellSelection(event?: MouseEvent) {
+    const restoreGridFocus = isSelectingCells.value && event?.type === "mouseup";
     isSelectingCells.value = false;
     document.removeEventListener("mouseup", finishCellSelection);
     document.removeEventListener("mousemove", handleSelectionPointerMove);
     stopSelectionAutoScroll();
     detachSelectionInterruptionListenersIfIdle();
+    if (restoreGridFocus && !editingCell.value) focusGridWithoutScrolling();
   }
 
   function restoreCellSelectionState(state: RestoredCellSelectionState) {

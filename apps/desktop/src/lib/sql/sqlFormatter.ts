@@ -460,6 +460,11 @@ function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { 
 
   const values: string[] = [];
   const isIdentifierChar = (ch: string | undefined): boolean => ch !== undefined && /[A-Za-z0-9_$]/.test(ch);
+  const isDashCommentAt = (position: number): boolean => {
+    if (sql[position] !== "-" || sql[position + 1] !== "-") return false;
+    const following = sql[position + 2];
+    return dialect !== "mysql" || following === undefined || following.charCodeAt(0) <= 32 || following.charCodeAt(0) === 127;
+  };
 
   const scanQuoted = (start: number): number => {
     const quote = sql[start];
@@ -510,7 +515,7 @@ function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { 
     const ch = sql[index];
     const next = sql[index + 1];
 
-    if (ch === "-" && next === "-") {
+    if (isDashCommentAt(index)) {
       const end = scanLineComment(index);
       protectedSql += sql.slice(index, end);
       index = end;
@@ -545,7 +550,7 @@ function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { 
       // a comment here must not prevent masking the Doris bracket list.
       for (;;) {
         while (cursor < sql.length && /\s/.test(sql[cursor])) cursor += 1;
-        if (sql[cursor] === "-" && sql[cursor + 1] === "-") {
+        if (isDashCommentAt(cursor)) {
           cursor = scanLineComment(cursor);
           continue;
         }
@@ -567,7 +572,7 @@ function protectDorisPartitionValues(sql: string, dialect: SqlFormatDialect): { 
         while (end < sql.length) {
           const current = sql[end];
           const following = sql[end + 1];
-          if (current === "-" && following === "-") {
+          if (isDashCommentAt(end)) {
             end = scanLineComment(end);
             continue;
           }

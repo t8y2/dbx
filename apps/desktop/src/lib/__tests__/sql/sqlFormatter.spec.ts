@@ -188,6 +188,14 @@ describe("sqlFormatter", () => {
     expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
   });
 
+  it("does not treat MySQL subtraction as a comment when protecting Doris partitions", async () => {
+    const sql = "CREATE TABLE t (k INT) PARTITION BY RANGE(k) (PARTITION p VALUES [(1--1), (2)));";
+    const formatted = await formatSqlText(sql, sqlFormatDialectForDbType("doris"));
+
+    expect(formatted).toContain("[(1--1), (2))");
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
   it("keeps comments with parentheses across multiple Doris partitions (issue #15321)", async () => {
     // A line comment between VALUES and `[` on one partition and a block
     // comment with parens inside the range on another must both survive,

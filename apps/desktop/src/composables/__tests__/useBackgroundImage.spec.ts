@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { reactive } from "vue";
-import { BACKGROUND_IMAGE_ACTIVE_CLASS, useBackgroundImage } from "@/composables/useBackgroundImage";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { effectScope, reactive, type EffectScope } from "vue";
+import { BACKGROUND_IMAGE_ACTIVE_CLASS, useBackgroundImage as createBackgroundImage } from "@/composables/useBackgroundImage";
 import { useTheme } from "@/composables/useTheme";
 import { defaultBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 
@@ -13,6 +13,12 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 
+let scope: EffectScope;
+
+function useBackgroundImage(settings: Parameters<typeof createBackgroundImage>[0]) {
+  return scope.run(() => createBackgroundImage(settings))!;
+}
+
 function settingsWith(overrides: Partial<BackgroundImageSettings>) {
   const base = defaultBackgroundImageSettings();
   return { editorSettings: reactive({ backgroundImage: { ...base, ...overrides } }) } as Parameters<typeof useBackgroundImage>[0];
@@ -20,12 +26,15 @@ function settingsWith(overrides: Partial<BackgroundImageSettings>) {
 
 describe("useBackgroundImage", () => {
   beforeEach(() => {
+    scope = effectScope();
     vi.resetModules();
     readBackgroundImageMock.mockReset();
     (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     document.documentElement.className = "";
     document.documentElement.removeAttribute("style");
   });
+
+  afterEach(() => scope.stop());
 
   it("reports no active background without a configured file", () => {
     const bg = useBackgroundImage(settingsWith({}));
@@ -79,6 +88,45 @@ describe("useBackgroundImage", () => {
         expect(document.documentElement.style.getPropertyValue("--background")).toBe("rgb(18 52 86 / 0.5)");
         expect(document.documentElement.style.getPropertyValue("--sidebar")).toBe("rgb(101 67 33 / 0.5)");
       });
+    } finally {
+      theme.setCustomUiColors(originalColors);
+      theme.setThemeMode(originalMode);
+      theme.setThemePalette(originalPalette);
+    }
+  });
+
+  it("keeps an opaque companion for inverted text while the surfaces turn translucent", async () => {
+    const theme = useTheme();
+    const originalMode = theme.themeMode.value;
+    const originalPalette = theme.themePalette.value;
+    const originalColors = { ...theme.customUiColors.value };
+    theme.setThemeMode("light");
+    theme.setCustomUiColors({ ...originalColors, background: "#123456" });
+    theme.setThemePalette("custom");
+    const createObjectURL = vi.fn(() => "blob:bg-solid");
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURL, configurable: true, writable: true });
+    readBackgroundImageMock.mockResolvedValue("aGVsbG8=");
+    try {
+      const settings = settingsWith({ filePath: "/data/background-image.png", opacity: 0.3 });
+      const bg = useBackgroundImage(settings);
+      await vi.waitFor(() => expect(bg.active.value).toBe(true));
+      await vi.waitFor(() => {
+        // The surface itself goes translucent so the wallpaper shows through...
+        expect(document.documentElement.style.getPropertyValue("--background")).toBe("rgb(18 52 86 / 0.3)");
+        // ...but the color used as text on `bg-foreground` widgets stays opaque,
+        // otherwise tooltip/toast glyphs wash out (#8678).
+        expect(document.documentElement.style.getPropertyValue("--background-solid")).toBe("rgb(18 52 86)");
+      });
+      // No other surface grows a companion: only the inverted-text vars do.
+      expect(document.documentElement.style.getPropertyValue("--sidebar-solid")).toBe("");
+
+      settings.editorSettings.backgroundImage = { ...defaultBackgroundImageSettings() };
+      await vi.waitFor(() => expect(bg.active.value).toBe(false));
+      await vi.waitFor(() => {
+        expect(document.documentElement.style.getPropertyValue("--background-solid")).toBe("");
+      });
+      // Inactive: the custom palette's own inline value is restored untouched.
+      expect(document.documentElement.style.getPropertyValue("--background")).toBe("rgb(18 52 86)");
     } finally {
       theme.setCustomUiColors(originalColors);
       theme.setThemeMode(originalMode);

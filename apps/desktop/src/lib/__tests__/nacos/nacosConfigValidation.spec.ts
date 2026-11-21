@@ -58,6 +58,28 @@ describe("Nacos config validation", () => {
     expect(diagnostics[1]).toMatchObject({ line: 16, column: 7, from: content.indexOf("},2") + 2 });
   });
 
+  it("surfaces every YAML diagnostic with its severity, code, and params", () => {
+    const duplicateKeys = validateNacosConfigContent("server:\n  port: 8080\n  port: 9090\nserver:\n  host: localhost\n", "yaml");
+
+    expect(duplicateKeys).toHaveLength(2);
+    expect(duplicateKeys.map((diagnostic) => diagnostic.code)).toEqual(["duplicateKey", "duplicateKey"]);
+    expect(duplicateKeys.map((diagnostic) => diagnostic.severity)).toEqual(["error", "error"]);
+    expect(duplicateKeys.map((diagnostic) => diagnostic.params?.key)).toEqual(["port", "server"]);
+    expect(duplicateKeys.map((diagnostic) => diagnostic.message)).toEqual(["Duplicate mapping key: port", "Duplicate mapping key: server"]);
+    // `validateNacosConfig` keeps its "first diagnostic or null" contract for existing callers.
+    expect(validateNacosConfig("server:\n  port: 8080\n  port: 9090\n", "yaml")).toStrictEqual(duplicateKeys[0]);
+    expect(validateNacosConfig("server:\n  port: 8080\n  port: 9090\n", "yaml")?.params?.key).toBe("port");
+
+    // A parser warning is surfaced but must not be an error, so it cannot block publishing.
+    const [warning] = validateNacosConfigContent("a: !unknownTag bar\n", "yaml");
+    expect(warning?.severity).toBe("warning");
+    expect(warning?.code).toBe("parserWarning");
+    expect(warning?.params?.reason).toBe("Unresolved tag: !unknownTag");
+
+    expect(validateNacosConfigContent("a: 1\n---\nb: 2\n", "yaml")).toEqual([]);
+    expect(validateNacosConfigContent("a: 1\n", "yml")).toEqual([]);
+  });
+
   it("rejects malformed XML, HTML, Properties, and TOML", () => {
     expect(validateNacosConfig("<root><child></root>", "xml")?.message).toContain("XML");
     expect(validateNacosConfig("<div>", "html")?.message).toContain("unclosed tag");

@@ -2,6 +2,26 @@ export interface MessageWithKind {
   kind?: string;
 }
 
+export interface RetryableMessage {
+  role: "user" | "assistant";
+  content: string;
+  mentions?: unknown[];
+  csvAttachments?: unknown[];
+  imageAttachments?: unknown[];
+}
+
+/** Finds the closest preceding user turn that can be submitted again for an
+ * assistant reply in the visible transcript. */
+export function retryableUserMessageIndex(messages: RetryableMessage[], assistantVisibleIndex: number): number {
+  for (let i = assistantVisibleIndex - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "user") continue;
+    if (message.content.trim() || message.mentions?.length || message.csvAttachments?.length || message.imageAttachments?.length) return i;
+    return -1;
+  }
+  return -1;
+}
+
 /**
  * Maps a visible message index (contextSummary messages excluded) to the
  * actual index in the full messages array.

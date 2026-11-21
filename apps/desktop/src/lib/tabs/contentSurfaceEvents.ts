@@ -7,6 +7,10 @@ import type { ContentAreaSurfaceEmits } from "@/components/layout/querySurfaces"
  * four forwarding layers cannot drift apart when the contract changes.
  */
 export const contentSurfaceEventNames = [
+  "closeTab",
+  "locate-tab",
+  "locate-sql-file",
+  "locate-sql-library-file",
   "update:activeOutputView",
   "fixWithAi",
   "sendSelectionToAi",
@@ -21,6 +25,7 @@ export const contentSurfaceEventNames = [
   "editorCursorChange",
   "editorViewportChange",
   "editorSelectionStateChange",
+  "editorStateFlushed",
   "formatError",
   "reload",
   "paginate",
@@ -31,7 +36,9 @@ export const contentSurfaceEventNames = [
   "viewTableDdl",
   "editTableStructure",
   "openObjectSource",
+  "openDependencyObject",
   "openObjectTable",
+  "openDatabaseSearchTarget",
   "objectSchemaChange",
   "objectBrowserViewportChange",
   "objectBrowserSearchChange",
@@ -41,6 +48,7 @@ export const contentSurfaceEventNames = [
   "structureEditorClose",
   "previewStatement",
   "focusStatement",
+  "focusErrorOffset",
   "openSettings",
   "openConnectionSettings",
   "toggleZenMode",

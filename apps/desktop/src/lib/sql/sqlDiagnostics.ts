@@ -1,3 +1,6 @@
+import type { DatabaseType } from "@/types/database";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+
 export interface SqlErrorLocation {
   line: number;
   column: number;
@@ -66,15 +69,21 @@ export function parseSqlErrorLocation(message: string): SqlErrorLocation | null 
 }
 
 export function lineColumnToOffset(sql: string, location: SqlErrorLocation): number | null {
-  const lines = sql.split(/\r?\n/);
-  if (location.line < 0 || location.line >= lines.length) return null;
+  if (location.line < 0) return null;
 
   let offset = 0;
   for (let index = 0; index < location.line; index++) {
-    offset += lines[index].length + 1;
+    const nextNewline = sql.indexOf("\n", offset);
+    if (nextNewline === -1) return null;
+    offset = nextNewline + 1;
   }
 
-  return Math.min(offset + location.column, offset + lines[location.line].length);
+  const nextNewline = sql.indexOf("\n", offset);
+  const rawLineEnd = nextNewline === -1 ? sql.length : nextNewline;
+  const lineEnd = rawLineEnd > offset && sql.charCodeAt(rawLineEnd - 1) === 13 ? rawLineEnd - 1 : rawLineEnd;
+  const lineLength = lineEnd - offset;
+
+  return Math.min(offset + Math.max(0, location.column), offset + lineLength);
 }
 
 function oracleInvalidIdentifierRange(sql: string, message: string, position: number): SqlErrorRange | null {
@@ -104,20 +113,87 @@ function oracleInvalidIdentifierRange(sql: string, message: string, position: nu
   return bestRange;
 }
 
-export function sqlErrorDecorationRange(sql: string, message: string): SqlErrorRange | null {
+/**
+ * A position a driver reported in its error text, without needing the SQL it
+ * refers to. Engines that do not attach a typed position to their error
+ * envelope (Oracle) still name one in the message.
+ */
+export type SqlErrorMessagePosition = { kind: "location"; location: SqlErrorLocation } | { kind: "offset"; offset: number };
+
+const ORACLE_AGENT_POSITION_PATTERN = /\berror\s+occur(?:red)?\s+at\s+position\s*:\s*(\d+)\b/i;
+
+/**
+ * Parse the position carried by a driver error message.
+ *
+ * Textual locations (`line N, column M`, `LINE N:` with a `^` caret, and the
+ * line-only form MySQL emits) win over the Oracle Agent's absolute offset, the
+ * same precedence {@link sqlErrorDecorationRange} has always used.
+ */
+export function sqlErrorMessagePosition(message: string): SqlErrorMessagePosition | null {
   const location = parseSqlErrorLocation(message);
-  if (location) {
-    const offset = lineColumnToOffset(sql, location);
+  if (location) return { kind: "location", location };
+
+  // Oracle Agent reports a zero-based absolute offset into the statement text.
+  const positionMatch = ORACLE_AGENT_POSITION_PATTERN.exec(message);
+  if (!positionMatch?.[1]) return null;
+  const offset = Number.parseInt(positionMatch[1], 10);
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+  return { kind: "offset", offset };
+}
+
+function oracleMissingObjectRange(sql: string, offset: number): SqlErrorRange | null {
+  const tokens = tokenizeSqlSemantic(sql, "oracle");
+  const identifier = (index: number) => {
+    const token = tokens[index];
+    return token?.kind === "word" || (token?.kind === "quoted_identifier" && token.quote === '"' && token.closed === true);
+  };
+  let index = tokens.findIndex((token) => token.span.start <= offset && offset < token.span.end);
+  if (index < 0) index = tokens.findIndex((token, candidate) => token.span.end === offset && identifier(candidate));
+  if (tokens[index]?.text === "." && identifier(index - 1) && identifier(index + 1)) index -= 1;
+  if (!identifier(index)) return null;
+  // An Oracle object reference is a single name or `schema.table`; stop there
+  // instead of walking a column access (`hr.emp.empno`) or a longer chain.
+  let first = index;
+  let last = index;
+  if (tokens[first - 1]?.text === "." && identifier(first - 2)) {
+    first -= 2;
+  } else if (tokens[last + 1]?.text === "." && identifier(last + 2)) {
+    last += 2;
+  }
+  return { from: tokens[first].span.start, to: tokens[last].span.end };
+}
+
+export function sqlErrorDecorationRange(sql: string, message: string, databaseType?: DatabaseType): SqlErrorRange | null {
+  const position = sqlErrorMessagePosition(message);
+  if (!position) return null;
+
+  if (position.kind === "location") {
+    const offset = lineColumnToOffset(sql, position.location);
     if (offset == null || offset >= sql.length) return null;
     return { from: offset, to: offset + 1 };
   }
 
-  // Oracle Agent reports a zero-based absolute offset. For qualified invalid
-  // identifiers it can point later in the selector, so prefer the named token.
-  const positionMatch = /\berror\s+occur(?:red)?\s+at\s+position\s*:\s*(\d+)\b/i.exec(message);
-  if (!positionMatch?.[1]) return null;
-  const position = Number.parseInt(positionMatch[1], 10);
-  if (!Number.isSafeInteger(position) || position < 0 || position >= sql.length) return null;
-
-  return oracleInvalidIdentifierRange(sql, message, position) ?? { from: position, to: position + 1 };
+  let { offset } = position;
+  if (databaseType === "oracle") {
+    let bytes = 0;
+    let utf16 = 0;
+    for (const character of sql) {
+      if (bytes >= offset) break;
+      const point = character.codePointAt(0)!;
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      utf16 += character.length;
+    }
+    if (bytes !== offset) return null;
+    offset = utf16;
+  }
+  // An Oracle Agent offset is a byte offset only for Oracle itself; other
+  // engines that happen to emit ORA-00942 keep their own position units.
+  if (databaseType === "oracle" && /\bORA-00942\b/i.test(message)) {
+    const object = oracleMissingObjectRange(sql, offset);
+    if (object) return object;
+  }
+  if (offset >= sql.length) return null;
+  // For qualified invalid identifiers the offset can point later in the
+  // selector, so prefer the named token.
+  return oracleInvalidIdentifierRange(sql, message, offset) ?? { from: offset, to: offset + 1 };
 }

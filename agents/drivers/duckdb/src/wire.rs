@@ -271,6 +271,9 @@ pub struct DuckDbWorkerExecuteParams {
     pub database: Option<String>,
     #[serde(default)]
     pub max_rows: Option<usize>,
+    /// Temporarily preserve source row order while executing this query.
+    #[serde(default)]
+    pub preserve_insertion_order: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

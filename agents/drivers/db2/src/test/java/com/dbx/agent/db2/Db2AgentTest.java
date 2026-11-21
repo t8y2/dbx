@@ -5,6 +5,7 @@ import com.dbx.agent.ConnectParams;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataSqlFake;
@@ -14,7 +15,9 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
+import java.sql.Blob;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
@@ -24,9 +27,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
@@ -52,6 +57,25 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void formatsDecimalResultsWithoutExponentsOrPrecisionLoss() {
+        Db2Agent agent = new Db2Agent();
+        assertEquals("0.0000000000", agent.resultValue(decimalResult("0E-10"), 1, Types.DECIMAL));
+        assertEquals("-0.0000000001", agent.resultValue(decimalResult("-1E-10"), 1, Types.NUMERIC));
+        assertEquals("123456789012345678901.1234567890", agent.resultValue(
+            decimalResult("123456789012345678901.1234567890"), 1, Types.DECIMAL));
+        assertNull(agent.resultValue(decimalResult(null), 1, Types.DECIMAL));
+    }
+
+    private static ResultSet decimalResult(String text) {
+        BigDecimal value = text == null ? null : new BigDecimal(text);
+        return proxy(ResultSet.class, (method, args) -> switch (method.getName()) {
+            case "getObject", "getBigDecimal" -> value;
+            case "wasNull" -> value == null;
+            default -> throw new AssertionError("Unexpected ResultSet method: " + method.getName());
+        });
+    }
+
+    @Test
     void readsClobValuesAsTextInsteadOfVendorObjectNames() {
         Db2Agent agent = new Db2Agent();
         ResultSet resultSet = proxy(ResultSet.class, new MethodHandler() {
@@ -68,6 +92,81 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
         });
 
         assertEquals("long text value", agent.resultValue(resultSet, 1, Types.CLOB));
+    }
+
+    @Test
+    void readsBlobValuesAsHexInsteadOfVendorObjectNames() {
+        Db2Agent agent = new Db2Agent();
+        ResultSet resultSet = proxy(ResultSet.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getBytes".equals(method.getName())) {
+                    return new byte[] {(byte) 0x89, 0x50, 0x4e};
+                }
+                if ("wasNull".equals(method.getName())) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.BLOB));
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.BINARY));
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.VARBINARY));
+        assertEquals("0x89504e", agent.resultValue(resultSet, 1, Types.LONGVARBINARY));
+    }
+
+    @Test
+    void defersBlobMaterializationWithoutCallingGetBytes() {
+        Db2Agent agent = new Db2Agent();
+        AtomicInteger getBytesCalls = new AtomicInteger();
+        Blob blob = proxy(Blob.class, (method, args) -> defaultValue(method.getReturnType()));
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getBlob".equals(method.getName())) {
+                return blob;
+            }
+            if ("getBytes".equals(method.getName())) {
+                getBytesCalls.incrementAndGet();
+                return new byte[] {1};
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        assertEquals("<BLOB>", agent.deferredResultValue(resultSet, 1, Types.BLOB, "BLOB"));
+        assertEquals(0, getBytesCalls.get());
+    }
+
+    @Test
+    void addsHiddenMarkersForDeferredLobColumns() {
+        QueryResult result = new QueryResult(
+            Arrays.asList("MAFAPPDATAID", "APP", "DESCRIPTION"),
+            Arrays.asList("BIGINT", "BLOB", "CLOB(1M)"),
+            Arrays.asList(
+                Arrays.asList(1, "<BLOB>", "<CLOB>"),
+                Arrays.asList(2, null, null)
+            ),
+            0L,
+            1L,
+            false
+        );
+
+        Db2Agent.addDeferredLobMarkers(result);
+
+        assertEquals(
+            Arrays.asList("MAFAPPDATAID", "APP", "__DBX_LARGE_VALUE_BYTES_L_1", "DESCRIPTION", "__DBX_LARGE_VALUE_BYTES_C_2"),
+            result.getColumns()
+        );
+        assertEquals(Arrays.asList("BIGINT", "BLOB", "VARCHAR", "CLOB(1M)", "VARCHAR"), result.getColumn_types());
+        assertEquals(
+            Arrays.asList(
+                Arrays.asList(1, "<BLOB>", "D:1", "<CLOB>", "D:1"),
+                Arrays.asList(2, null, null, null, null)
+            ),
+            result.getRows()
+        );
     }
 
     @Test

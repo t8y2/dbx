@@ -6,20 +6,19 @@ import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryResultSurfa
 
 defineOptions({ inheritAttrs: false });
 
-const props = defineProps<ContentAreaSurfaceProps>();
-const emit = defineEmits<ContentAreaSurfaceEmits>();
+const props = defineProps<ContentAreaSurfaceProps & { fullscreen?: boolean }>();
+const emit = defineEmits<ContentAreaSurfaceEmits & { toggleResultFullscreen: [button: HTMLElement] }>();
 
 const attrs = useAttrs();
 const resultClass = computed(() => (typeof attrs.class === "string" ? attrs.class : undefined));
 const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
+  keywordCaseRequest: props.keywordCaseRequest,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
@@ -27,17 +26,21 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryResultSurfaceHandle>({
-  focusSearch: () => contentAreaRef.value?.focusSearch() ?? false,
+  copyActiveResult: (isValid?: () => boolean) => contentAreaRef.value?.copyActiveResult(isValid) ?? false,
+  focusResultGrid: () => contentAreaRef.value?.focusResultGrid() ?? false,
+  cancelResultGridFocus: () => contentAreaRef.value?.cancelResultGridFocus(),
+  focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   refreshData: () => contentAreaRef.value?.refreshData() ?? false,
   toggleResultsPane: () => contentAreaRef.value?.toggleResultsPane() ?? false,
   handleModRTarget: (target: Element) => contentAreaRef.value?.handleModRTarget(target) ?? false,
   previewStatementRange: (range: StatementRange | null) => contentAreaRef.value?.previewStatementRange(range) ?? false,
   focusStatementRange: (range: StatementRange | null) => contentAreaRef.value?.focusStatementRange(range) ?? false,
+  focusErrorPosition: (offset: number) => contentAreaRef.value?.focusErrorPosition(offset) ?? false,
 });
 </script>
 
 <template>
   <div class="min-h-0 overflow-hidden" :class="resultClass">
-    <ContentArea ref="contentAreaRef" v-bind="bindings" result-only class="h-full" />
+    <ContentArea ref="contentAreaRef" v-bind="bindings" result-only :result-fullscreen="fullscreen" class="h-full" @toggle-result-fullscreen="emit('toggleResultFullscreen', $event)" />
   </div>
 </template>

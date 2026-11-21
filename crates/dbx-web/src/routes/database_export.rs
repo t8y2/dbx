@@ -36,6 +36,13 @@ pub async fn start_database_export(
     Json(body): Json<StartExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    dbx_core::query::mysql_data_charset_policy::reject_operation(
+        &state.app,
+        &req.connection_id,
+        dbx_core::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await
+    .map_err(AppError::from)?;
     let export_id = req.export_id.clone();
 
     // Web mode: write to a server-side temp file instead of the client-supplied
@@ -44,7 +51,15 @@ pub async fn start_database_export(
     // endpoint after the export completes.
     let tmp_dir = state.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| AppError::from(e.to_string()))?;
-    let extension = if req.output_compression == DatabaseExportOutputCompression::Gzip { "sql.gz" } else { "sql" };
+    let extension = if req.split_max_mb.is_some() {
+        "zip"
+    } else if req.output_compression == DatabaseExportOutputCompression::Gzip {
+        "sql.gz"
+    } else if req.output_compression == DatabaseExportOutputCompression::Nb3 {
+        "nb3"
+    } else {
+        "sql"
+    };
     let tmp_file = tmp_dir.join(format!("database_export_{export_id}.{extension}"));
     let tmp_file_path = tmp_file.to_string_lossy().to_string();
     req.file_path = tmp_file_path.clone();
@@ -170,8 +185,15 @@ pub async fn database_export_download(
     // Clean up temp file
     let _ = tokio::fs::remove_file(&export_file.file_path).await;
 
-    let content_type =
-        if export_file.format == "sql.gz" { "application/gzip" } else { "application/sql; charset=utf-8" };
+    let content_type = if export_file.format == "zip" {
+        "application/zip"
+    } else if export_file.format == "sql.gz" {
+        "application/gzip"
+    } else if export_file.format == "nb3" {
+        "application/x-tar"
+    } else {
+        "application/sql; charset=utf-8"
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)

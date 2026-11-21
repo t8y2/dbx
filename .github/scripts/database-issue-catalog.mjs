@@ -1,36 +1,8 @@
 import fs from "node:fs";
 
 const extraAliases = {
-  mysql: [
-    "mariadb",
-    "percona",
-    "tidb",
-    "greatsql",
-    "oceanbase mysql",
-    "oceanbase mysql mode",
-    "oceanbase mysql 模式",
-    "tdsql mysql",
-    "tdsql-mysql",
-    "polardb mysql",
-    "polardb for mysql",
-    "polardb-x",
-    "polardbx",
-  ],
-  postgres: [
-    "postgresql",
-    "postgres",
-    "pgsql",
-    "pg",
-    "hologres",
-    "cloudberry",
-    "apache cloudberry",
-    "cockroachdb",
-    "cockroach db",
-    "polardb postgresql",
-    "polardb for postgresql",
-    "polardb postgres",
-    "polardb for postgres",
-  ],
+  mysql: ["mariadb", "percona", "tidb", "greatsql", "oceanbase mysql", "oceanbase mysql mode", "oceanbase mysql 模式", "tdsql mysql", "tdsql-mysql", "polardb mysql", "polardb for mysql", "polardb-x", "polardbx"],
+  postgres: ["postgresql", "postgres", "pgsql", "pg", "hologres", "cloudberry", "apache cloudberry", "cockroachdb", "cockroach db", "polardb postgresql", "polardb for postgresql", "polardb postgres", "polardb for postgres"],
   sqlite: ["sqlite3", "sql lite"],
   clickhouse: ["click house", "ch"],
   sqlserver: ["sql server", "mssql", "microsoft sql server", "sqlservice"],
@@ -47,7 +19,7 @@ const extraAliases = {
   saphana: ["hana", "sap hana"],
   opengauss: ["open gauss"],
   "oceanbase-oracle": ["oceanbase oracle", "oceanbase oracle mode", "oceanbase oracle 模式"],
-  gbase: ["gbase 8a", "gbase8a", "gbase 8s", "gbase8s"],
+  gbase: ["gbase 8a", "gbase8a", "gbase 8c", "gbase8c", "gbase 8s", "gbase8s"],
   access: ["microsoft access", "ms access"],
   vastbase: ["vastbase g", "vastbaseg"],
   prestosql: ["presto", "presto sql"],
@@ -104,9 +76,7 @@ const catalogEntries = [
   }),
   ...supplementalDrivers.filter((driver) => !manifestDbTypes.has(driver.dbType)),
 ];
-const duplicateDbTypes = catalogEntries
-  .map((driver) => driver.dbType)
-  .filter((dbType, index, values) => values.indexOf(dbType) !== index);
+const duplicateDbTypes = catalogEntries.map((driver) => driver.dbType).filter((dbType, index, values) => values.indexOf(dbType) !== index);
 
 if (duplicateDbTypes.length > 0) {
   throw new Error(`Duplicate database issue catalog entries: ${[...new Set(duplicateDbTypes)].join(", ")}`);
@@ -115,12 +85,5 @@ if (duplicateDbTypes.length > 0) {
 export const databaseIssueDrivers = catalogEntries.map((driver) => ({
   dbType: driver.dbType,
   label: driver.label,
-  aliases: [
-    ...new Set([
-      driver.dbType,
-      driver.label,
-      ...(driver.aliases || []),
-      ...(extraAliases[driver.dbType] || []),
-    ]),
-  ],
+  aliases: [...new Set([driver.dbType, driver.label, ...(driver.aliases || []), ...(extraAliases[driver.dbType] || [])])],
 }));

@@ -3,6 +3,7 @@ import { apiUrl } from "@/lib/common/webPath";
 import type {
   MqClusterInfo,
   ClusterInfo,
+  KafkaBrokerConfig,
   TenantInfo,
   TenantConfig,
   NamespaceRef,
@@ -11,6 +12,8 @@ import type {
   TopicRef,
   TopicInfo,
   ListTopicsOpts,
+  MqListPage,
+  MqListPageRequest,
   TopicStats,
   SubscriptionInfo,
   KafkaConsumerGroupSnapshot,
@@ -73,6 +76,10 @@ export async function mqTestConnection(connectionId: string): Promise<MqClusterI
 
 export async function mqListExchanges(connectionId: string, ns: NamespaceRef): Promise<MqExchangeInfo[]> {
   return post("/api/mq/exchanges/list", { connectionId, ns });
+}
+
+export async function mqListExchangesPage(connectionId: string, ns: NamespaceRef, pagination: MqListPageRequest): Promise<MqListPage<MqExchangeInfo>> {
+  return post("/api/mq/exchanges/list-page", { connectionId, ns, pagination });
 }
 
 export async function mqCreateExchange(connectionId: string, ns: NamespaceRef, exchange: MqExchangeCreateRequest): Promise<void> {
@@ -192,6 +199,10 @@ export async function mqGetNamespacePolicies(connectionId: string, ns: Namespace
 
 export async function mqListTopics(connectionId: string, ns: NamespaceRef, opts: ListTopicsOpts): Promise<TopicInfo[]> {
   return post("/api/mq/topics/list", { connectionId, ns, opts });
+}
+
+export async function mqListTopicsPage(connectionId: string, ns: NamespaceRef, opts: ListTopicsOpts, pagination: MqListPageRequest): Promise<MqListPage<TopicInfo>> {
+  return post("/api/mq/topics/list-page", { connectionId, ns, opts, pagination });
 }
 
 export async function mqCreateTopic(connectionId: string, topic: TopicRef, partitions?: number): Promise<void> {
@@ -324,6 +335,10 @@ export async function mqAlterConsumerGroupConfig(connectionId: string, groupId: 
 
 export async function mqGetClusterInfo(connectionId: string): Promise<ClusterInfo> {
   return post("/api/mq/monitoring/cluster-info", { connectionId });
+}
+
+export async function mqGetBrokerConfig(connectionId: string, brokerId: number): Promise<KafkaBrokerConfig> {
+  return post("/api/mq/monitoring/broker-config", { connectionId, brokerId });
 }
 
 export async function mqGetTopicRoute(connectionId: string, topic: TopicRef): Promise<unknown> {

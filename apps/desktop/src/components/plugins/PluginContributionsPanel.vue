@@ -1,0 +1,2455 @@
+<script setup lang="ts">
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref, watch, TransitionGroup } from "vue";
+import {
+  ArrowUp,
+  BadgeCheck,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Download,
+  ExternalLink,
+  FileUp,
+  FolderTree,
+  Globe,
+  Info,
+  LayoutGrid,
+  Link2,
+  List,
+  Loader2,
+  PackageCheck,
+  Pencil,
+  Pin,
+  PinOff,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Store,
+  Trash2,
+  X,
+} from "@lucide/vue";
+import { Badge } from "@/components/ui/badge";
+import { isSensitivePluginPermission } from "@/lib/plugins/pluginPermissions";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useToast } from "@/composables/useToast";
+import PluginShortcutSettings from "./PluginShortcutSettings.vue";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import PluginAiAccessSection from "@/components/plugins/PluginAiAccessSection.vue";
+import { installedPluginProvidesMcpTools, marketplacePluginProvidesMcpTools } from "@/lib/plugins/pluginMcpMark";
+import PluginGraphicsEngineSection from "@/components/plugins/PluginGraphicsEngineSection.vue";
+import * as api from "@/lib/backend/api";
+import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
+import { loadPinnedPluginIds, savePinnedPluginIds, sortPluginsPinnedFirst } from "@/lib/plugins/pluginPinning";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
+import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
+import { collectPluginShortcuts, type PluginShortcutEntry } from "@/lib/plugins/pluginShortcuts";
+import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
+import {
+  beaconPluginInstall,
+  buildInstalledUpdateIndex,
+  buildMarketplacePluginListings,
+  compareVersions,
+  fetchPluginInstallCounts,
+  filterMarketplacePluginListings,
+  formatMarketplaceReleasedDate,
+  marketplaceHomepageUrl,
+  pluginSourceChange,
+  resolveMarketplaceReleaseUrl,
+  sortMarketplacePluginListings,
+  type InstalledPluginUpdateEntry,
+  type MarketplacePluginListing,
+  type MarketplacePluginSortMode,
+  type PluginInstallCounts,
+  type PluginSourceChange,
+} from "@/lib/plugins/pluginMarketplace";
+import { isBatchSelectableListing, runBatch, type BatchOutcome } from "@/lib/plugins/pluginBatch";
+import { COMPONENT_PLUGINS_UPDATED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
+import { formatBytes } from "@/lib/database/serverMetrics";
+import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import type { ConnectionConfig, InstalledPlugin, PluginInstallResult, PluginMarketplaceVersion, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
+import { useI18n } from "vue-i18n";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { translateBackendError } from "@/i18n/backend-errors";
+
+const props = defineProps<{
+  focusTarget?: PluginCenterFocus | null;
+  installUrlRequest?: { id: number; url: string } | null;
+}>();
+
+const emit = defineEmits<{
+  newConnection: [pluginId: string, providerId: string];
+  opened: [];
+  pluginRuntimeReplaced: [pluginId: string];
+}>();
+
+// lucide no longer ships brand icons; this stroke glyph keeps the 2px outline style of
+// neighboring lucide icons instead of the heavier filled brand mark.
+const GithubIcon = defineComponent({
+  props: {
+    iconClass: { type: String, default: "size-3" },
+  },
+  render() {
+    return h("svg", { class: this.iconClass, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }, [
+      h("path", {
+        d: "M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4",
+      }),
+      h("path", { d: "M9 18c-4.51 2-5-2-7-2" }),
+    ]);
+  },
+});
+
+const PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY = "dbx-plugin-allow-unsigned";
+const MARKETPLACE_VIEW_MODE_STORAGE_KEY = "dbx-plugin-marketplace-view-mode";
+const MARKETPLACE_SORT_MODE_STORAGE_KEY = "dbx-plugin-marketplace-sort-mode";
+
+type TauriFileDropPayload = { type: "enter"; paths: string[]; position: { x: number; y: number } } | { type: "over"; position: { x: number; y: number } } | { type: "drop"; paths: string[]; position: { x: number; y: number } } | { type: "leave" };
+
+const { t, locale: appLocale } = useI18n();
+const { toast } = useToast();
+const connectionStore = useConnectionStore();
+const queryStore = useQueryStore();
+const settingsStore = useSettingsStore();
+
+// A reinstall must start without consent: drop any graphics-engine (unsafe-eval) grant
+// when the plugin is uninstalled, mirroring the backend's forget_plugin_permissions.
+function forgetGraphicsEngineGrant(pluginId: string) {
+  const granted = settingsStore.editorSettings.pluginGraphicsEngineIds;
+  if (!granted.includes(pluginId)) return;
+  settingsStore.updateEditorSettings({ pluginGraphicsEngineIds: granted.filter((id) => id !== pluginId) });
+}
+const activeSection = ref<"marketplace" | "installed" | "settings">("marketplace");
+const installedPlugins = ref<InstalledPlugin[]>([]);
+const trustedKeys = ref<PluginTrustedKey[]>([]);
+const repositories = ref<PluginRepository[]>([]);
+const catalogResults = ref<PluginRepositoryCatalogResult[]>([]);
+const loading = ref(false);
+const marketplaceLoading = ref(false);
+const installing = ref(false);
+const installUrl = ref("");
+const urlInstalling = ref(false);
+const urlDownloadProgress = ref<{ downloaded: number; total: number | null } | null>(null);
+const marketplaceInstallingKey = ref("");
+const marketplaceUnavailable = ref(false);
+const installedUpdateProgress = ref<{ current: number; total: number } | null>(null);
+const operating = ref(false);
+// Page-level failure banner, split by lifetime. `batchFailures` is keyed by plugin: a later
+// success retires exactly its own line instead of leaving a stale banner behind, and each line
+// records what the failed attempt was trying to do (`kind`), because "no longer pending" means
+// opposite things for an install (never retire a not-installed plugin) and an update.
+type PluginBatchFailureKind = "install" | "update" | "uninstall";
+interface PluginBatchFailure {
+  pluginId: string;
+  name: string;
+  message: string;
+  kind: PluginBatchFailureKind;
+  // Marketplace repository the attempt came from; an update failure may only be reconciled while
+  // that repository's catalog actually loaded (not applicable to uninstall).
+  repositoryId?: string;
+}
+const batchFailures = ref<PluginBatchFailure[]>([]);
+// Load / refresh failures only: their lifecycle is "the next successful state re-read clears them".
+const loadError = ref("");
+const errorBannerText = computed(() => [...batchFailures.value.map((failure) => `${failure.name}: ${failure.message}`), loadError.value].filter(Boolean).join("\n"));
+const selectedPluginId = ref("");
+const selectedContributionId = ref("");
+const selectedConnectionId = ref("");
+const allowUnsigned = ref(
+  ((): boolean => {
+    try {
+      return localStorage.getItem(PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  })(),
+);
+const trustedKeyId = ref("");
+const trustedPublicKey = ref("");
+const repositoryId = ref("");
+const repositoryName = ref("");
+const repositoryCatalogUrl = ref("");
+const marketplaceQuery = ref("");
+const marketplacePublisher = ref("");
+const marketplaceRepositoryId = ref("all");
+const marketplaceDetailKey = ref("");
+const marketplaceDetailOpen = ref(false);
+const marketplaceViewMode = ref<"grid" | "list">(safeLocalStorageGet(MARKETPLACE_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid");
+const MARKETPLACE_SORT_MODES: MarketplacePluginSortMode[] = ["name", "installs", "recently-updated", "recently-listed", "updates-first"];
+// "name" stays the default: the batch specs select listings positionally, so a persisted
+// value must be re-validated against the known modes before it may change the order.
+const marketplaceSortMode = ref<MarketplacePluginSortMode>(
+  ((): MarketplacePluginSortMode => {
+    const stored = safeLocalStorageGet(MARKETPLACE_SORT_MODE_STORAGE_KEY) as MarketplacePluginSortMode;
+    return MARKETPLACE_SORT_MODES.includes(stored) ? stored : "name";
+  })(),
+);
+const webFileInput = ref<HTMLInputElement | null>(null);
+const panelRootRef = ref<HTMLElement | null>(null);
+const draggingPackage = ref(false);
+let webDragDepth = 0;
+
+// Batch operations (install / update on the marketplace tab, uninstall on the installed tab).
+const batchMode = ref(false);
+const selectedListingKeys = ref<Set<string>>(new Set());
+const selectedInstalledIds = ref<Set<string>>(new Set());
+const batchRunning = ref(false);
+const mutationRunning = computed(() => batchRunning.value || !!marketplaceInstallingKey.value || installing.value || urlInstalling.value || operating.value);
+
+const registry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
+const pinnedPluginIds = ref<string[]>(loadPinnedPluginIds());
+// "MCP tools" filter: plugins carrying the provides-MCP-tools mark.
+const installedMcpOnly = ref(false);
+const allDefinitions = computed(() => sortPluginsPinnedFirst(registry.value.listPlugins(), pinnedPluginIds.value));
+const installedMcpCount = computed(() => allDefinitions.value.filter((definition) => installedPluginProvidesMcpTools(definition.plugin)).length);
+const definitions = computed(() => (installedMcpOnly.value ? allDefinitions.value.filter((definition) => installedPluginProvidesMcpTools(definition.plugin)) : allDefinitions.value));
+const isPluginPinned = (pluginId: string) => pinnedPluginIds.value.includes(pluginId);
+const togglePluginPinned = (pluginId: string) => {
+  pinnedPluginIds.value = isPluginPinned(pluginId) ? pinnedPluginIds.value.filter((id) => id !== pluginId) : [...pinnedPluginIds.value, pluginId];
+  savePinnedPluginIds(pinnedPluginIds.value);
+};
+const connectionProviders = computed(() => registry.value.listConnectionProviders());
+const selectedEntry = computed(() => connectionProviders.value.find((entry) => entry.plugin.manifest.id === selectedPluginId.value && entry.contribution.id === selectedContributionId.value) || null);
+const selectedDefinition = computed(() => definitions.value.find((definition) => definition.plugin.manifest.id === selectedPluginId.value) || null);
+const selectedWorkbenches = computed(() => registry.value.listWorkbenches().filter((entry) => entry.plugin.manifest.id === selectedPluginId.value));
+const selectedFilesystems = computed(() => registry.value.listFilesystemProviders().filter((entry) => entry.plugin.manifest.id === selectedPluginId.value));
+// PR-A4: plugins declaring commands drive their quick entries via commands (workbench opens route to the command; the SFTP browse entry is retired).
+const selectedHasCommands = computed(() => registry.value.listCommands().some((entry) => entry.plugin.manifest.id === selectedPluginId.value));
+const providerConnections = computed(() => {
+  const entry = selectedEntry.value;
+  if (!entry) return [];
+  return connectionStore.connections.filter((connection) => connection.db_type === "plugin" && connection.plugin_id === entry.plugin.manifest.id && connection.plugin_connection_provider === entry.contribution.id);
+});
+const selectedConnection = computed(() => providerConnections.value.find((connection) => connection.id === selectedConnectionId.value));
+const marketplaceListings = computed(() => buildMarketplacePluginListings(catalogResults.value, installedPlugins.value, appLocale.value));
+const filteredMarketplaceListings = computed(() => filterMarketplacePluginListings(marketplaceListings.value, marketplaceQuery.value, marketplaceRepositoryId.value).filter((listing) => !marketplacePublisher.value || listing.plugin.publisher === marketplacePublisher.value));
+// Render order only: batch selection and update execution keep the builder's name order.
+const pluginInstallCounts = ref<PluginInstallCounts>({});
+let installCountRequest = 0;
+const sortedMarketplaceListings = computed(() => sortMarketplacePluginListings(filteredMarketplaceListings.value, marketplaceSortMode.value, pluginInstallCounts.value));
+const selectedMarketplaceListing = computed(() => marketplaceListings.value.find((listing) => listing.key === marketplaceDetailKey.value) || null);
+const detailOpening = ref(false);
+const detailChooseEntry = ref(false);
+const detailChooseConnection = ref(false);
+let detailSessionGeneration = 0;
+const detailShortcuts = computed(() => collectPluginShortcuts(registry.value, true).filter((entry) => entry.pluginId === selectedMarketplaceListing.value?.installed?.manifest.id && entry.command?.action.presentation !== "panel"));
+const detailProviders = computed(() => {
+  const installed = selectedMarketplaceListing.value?.installed;
+  if (!installed?.compatibility.compatible) return [];
+  return registry.value.listConnectionProviders().filter((entry) => entry.plugin.manifest.id === installed.manifest.id && (entry.contribution.workbench || entry.contribution.filesystem_provider));
+});
+const detailConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "plugin" && detailProviders.value.some((entry) => entry.plugin.manifest.id === connection.plugin_id && entry.contribution.id === connection.plugin_connection_provider)));
+const detailCanOpen = computed(() => detailShortcuts.value.length > 0 || detailProviders.value.length > 0);
+
+async function launchDetailEntry(entry: PluginShortcutEntry | string) {
+  if (detailOpening.value || mutationRunning.value) return;
+  detailOpening.value = true;
+  const detailKey = marketplaceDetailKey.value;
+  // Close the modal before connecting so password prompts can receive focus.
+  closeMarketplaceDetails("none");
+  const detailSession = detailSessionGeneration;
+  await nextTick();
+  try {
+    if (typeof entry === "string") {
+      if (!detailConnections.value.some((connection) => connection.id === entry)) return;
+      await queryStore.openPluginConnection(entry);
+    } else {
+      const current = detailShortcuts.value.find((item) => item.id === entry.id);
+      if (!current || current.disabled) return;
+      if (current.kind === "command") {
+        const result = executePluginCommand(registry.value, queryStore, current.pluginId, current.targetId);
+        if (result.error) throw new Error(result.error);
+      } else if (current.kind === "workbench") {
+        queryStore.openPluginWorkbench(current.pluginId, current.targetId, { title: current.label });
+      } else {
+        queryStore.openPluginFilesystem(current.pluginId, current.targetId, { title: current.label, rootUri: current.rootUri });
+      }
+    }
+    emit("opened");
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 8000);
+    if (detailSessionGeneration === detailSession && marketplaceDetailKey.value === detailKey && selectedMarketplaceListing.value && activeSection.value === "marketplace") {
+      detailCloseFocus = "trigger";
+      marketplaceDetailOpen.value = true;
+    }
+  } finally {
+    detailOpening.value = false;
+  }
+}
+
+function createDetailConnection(providerId: string) {
+  const entry = detailProviders.value.find((item) => item.contribution.id === providerId);
+  if (!entry || mutationRunning.value || detailOpening.value) return;
+  closeMarketplaceDetails("none");
+  emit("newConnection", entry.plugin.manifest.id, providerId);
+}
+
+const detailOpenLabel = computed(() => {
+  if (detailShortcuts.value.length) return detailShortcuts.value.length === 1 ? "openWorkbench" : "chooseWorkbench";
+  if (!detailConnections.value.length) return "newConnection";
+  return detailConnections.value.length === 1 ? "openWorkbench" : "chooseConnection";
+});
+function openDetailPlugin() {
+  if (detailShortcuts.value.length) {
+    if (detailShortcuts.value.length === 1) {
+      if (!detailShortcuts.value[0].disabled) void launchDetailEntry(detailShortcuts.value[0]);
+    } else detailChooseEntry.value = !detailChooseEntry.value;
+    return;
+  }
+  if (detailConnections.value.length === 1) void launchDetailEntry(detailConnections.value[0].id);
+  else if (!detailConnections.value.length && detailProviders.value.length === 1) createDetailConnection(detailProviders.value[0].contribution.id);
+  else detailChooseConnection.value = !detailChooseConnection.value;
+}
+const selectedMarketplaceVersions = computed(() => {
+  const versions = selectedMarketplaceListing.value?.plugin.versions || [];
+  return [...versions].sort((left, right) => compareVersions(right.version, left.version));
+});
+// Update history keeps every release collapsed by default so a long history stays
+// scannable: only the newest release starts expanded, and users can expand any
+// version's notes. Switching to another plugin re-expands that plugin's newest one.
+const expandedMarketplaceVersions = ref<Set<string>>(new Set());
+watch(
+  selectedMarketplaceVersions,
+  (versions) => {
+    expandedMarketplaceVersions.value = new Set(versions.length ? [versions[0].version] : []);
+  },
+  { immediate: true },
+);
+function isMarketplaceVersionExpanded(version: string): boolean {
+  return expandedMarketplaceVersions.value.has(version);
+}
+function toggleMarketplaceVersion(version: string): void {
+  const next = new Set(expandedMarketplaceVersions.value);
+  if (next.has(version)) next.delete(version);
+  else next.add(version);
+  expandedMarketplaceVersions.value = next;
+}
+function marketplaceVersionPublishedLabel(version: PluginMarketplaceVersion): string {
+  const date = formatMarketplaceReleasedDate(version.releasedAt, appLocale.value);
+  return date ? t("pluginPlatform.pluginDetailsPublishedOn", { date }) : "";
+}
+// The expanded entry links to the release page for that exact version in the
+// plugin's source repository, mirroring the 更新管理 panel's GitHub Release button.
+function marketplaceVersionReleaseUrl(version: PluginMarketplaceVersion): string {
+  return resolveMarketplaceReleaseUrl(selectedMarketplaceListing.value?.plugin.source, version);
+}
+const batchUpdatableListings = computed(() => filteredMarketplaceListings.value.filter((listing) => listing.status === "update"));
+const batchSelectedListings = computed(() => filteredMarketplaceListings.value.filter((listing) => isBatchSelectableListing(listing.status) && selectedListingKeys.value.has(listing.key)));
+const batchSelectedInstalled = computed(() => definitions.value.filter((definition) => selectedInstalledIds.value.has(definition.plugin.manifest.id)));
+const catalogErrors = computed(() => catalogResults.value.filter((result) => result.error));
+// Installed-tab update join: the same marketplace listings the store tab renders, indexed by
+// plugin id so installed rows/detail can show "update available" without a second fetch.
+const installedUpdateIndex = computed(() => buildInstalledUpdateIndex(marketplaceListings.value));
+const installedUpdateCount = computed(() => installedUpdateIndex.value.size);
+const installedUpdateEntries = computed(() => definitions.value.map((definition) => installedUpdateIndex.value.get(definition.plugin.manifest.id)).filter((entry): entry is InstalledPluginUpdateEntry => !!entry));
+const selectedUpdateEntry = computed(() => (selectedDefinition.value && installedUpdateIndex.value.get(selectedDefinition.value.plugin.manifest.id)) || null);
+const repositoriesEnabled = computed(() => repositories.value.some((repository) => repository.enabled));
+// "Checked" means a catalog actually loaded: a failed/missing fetch must never read as up to date.
+const catalogChecked = computed(() => !marketplaceLoading.value && !marketplaceUnavailable.value && repositoriesEnabled.value && catalogResults.value.some((result) => result.catalog));
+// The backend answers a mixed fetch with successful catalogs AND per-repository errors, so
+// "some catalog loaded" is not enough: one failing enabled repository makes the whole check
+// incomplete (plugins whose only source is that repo would read as "not in repositories" /
+// "all up to date").
+const catalogPartialFailure = computed(() => repositoriesEnabled.value && catalogResults.value.some((result) => result.error));
+function installedUpdateEntryFor(pluginId: string): InstalledPluginUpdateEntry | null {
+  return installedUpdateIndex.value.get(pluginId) || null;
+}
+function pluginInCatalog(pluginId: string): boolean {
+  return marketplaceListings.value.some((listing) => listing.plugin.id === pluginId);
+}
+// Catalog listings that do exist for an installed plugin but ship no artifact for this platform:
+// their update status cannot be checked either, so it gets the same visible treatment as the
+// "not in any catalog" case instead of reading as up to date.
+const installedUnsupportedListings = computed(() => {
+  const byId = new Map<string, MarketplacePluginListing>();
+  for (const listing of marketplaceListings.value) {
+    if (listing.status !== "unsupported" || !listing.installed) continue;
+    if (!byId.has(listing.plugin.id)) byId.set(listing.plugin.id, listing);
+  }
+  return byId;
+});
+function installedUnsupportedListingFor(pluginId: string): MarketplacePluginListing | null {
+  if (installedUpdateIndex.value.has(pluginId)) return null;
+  return installedUnsupportedListings.value.get(pluginId) || null;
+}
+const customRepositories = computed(() => repositories.value.filter((repository) => !repository.managed));
+const showCustomRepositoryTrustSettings = computed(() => customRepositories.value.length > 0 || trustedKeys.value.length > 0);
+const pluginDevelopmentDocsUrl = computed(() => `https://dbxio.com/${appLocale.value.startsWith("zh") ? "cn" : "en"}/docs/plugin-development`);
+
+function marketplaceActionClass(listing: MarketplacePluginListing): string {
+  if (listing.status === "update") return "bg-blue-600/10 text-blue-700 hover:bg-blue-600/20 dark:bg-blue-400/10 dark:text-blue-400 dark:hover:bg-blue-400/20";
+  if (listing.status === "install") return "bg-muted text-foreground hover:bg-accent";
+  return "cursor-default bg-muted text-muted-foreground";
+}
+
+let detailTrigger: HTMLElement | null = null;
+let detailCloseFocus: "trigger" | "search" | "none" = "trigger";
+
+function openMarketplaceDetails(listing: MarketplacePluginListing, event?: Event): void {
+  detailSessionGeneration += 1;
+  detailTrigger = event?.currentTarget instanceof HTMLElement ? event.currentTarget : document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  detailCloseFocus = "trigger";
+  detailChooseEntry.value = false;
+  detailChooseConnection.value = false;
+  marketplaceDetailKey.value = listing.key;
+  marketplaceDetailOpen.value = true;
+}
+
+function filterByPublisher(publisher: string): void {
+  marketplacePublisher.value = publisher;
+  marketplaceQuery.value = "";
+  marketplaceRepositoryId.value = "all";
+  activeSection.value = "marketplace";
+  if (marketplaceDetailOpen.value) closeMarketplaceDetails("search");
+  else void nextTick(focusMarketplaceSearch);
+}
+
+function focusMarketplaceSearch(): void {
+  panelRootRef.value?.querySelector<HTMLInputElement>("[data-plugin-marketplace-search]")?.focus({ preventScroll: true });
+}
+
+function closeMarketplaceDetails(focus: "trigger" | "search" | "none" = "trigger"): void {
+  detailSessionGeneration += 1;
+  detailCloseFocus = focus;
+  marketplaceDetailOpen.value = false;
+}
+
+function restoreMarketplaceDetailFocus(event: Event): void {
+  // There is no DialogTrigger: cards open this shared dialog programmatically.
+  event.preventDefault();
+  if (detailCloseFocus === "none" || marketplaceDetailOpen.value) return;
+  if (detailCloseFocus === "trigger" && detailTrigger?.isConnected) detailTrigger.focus({ preventScroll: true });
+  else focusMarketplaceSearch();
+}
+
+function handleMarketplaceCardKeydown(event: KeyboardEvent, listing: MarketplacePluginListing): void {
+  if (event.target !== event.currentTarget) return;
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  openMarketplaceDetails(listing, event);
+}
+
+// Badge row budget: tags first, then permissions, then one trailing "+N" counter. The row must
+// stay single-line; everything past the limit rides in the "+N" tooltip, and when the overflow
+// hides a sensitive permission the "+N" badge itself takes the destructive variant so the risk
+// signal never leaves the card.
+const MARKETPLACE_CARD_BADGE_LIMIT = 3;
+
+type MarketplaceCardBadge = { value: string; kind: "tag" | "permission"; sensitive: boolean };
+
+function marketplaceCardBadges(listing: MarketplacePluginListing): { visible: MarketplaceCardBadge[]; hidden: MarketplaceCardBadge[]; hiddenSensitive: boolean } {
+  const badges: MarketplaceCardBadge[] = [...listing.plugin.tags.map((value) => ({ value, kind: "tag" as const, sensitive: false })), ...listing.plugin.permissions.map((value) => ({ value, kind: "permission" as const, sensitive: isSensitivePluginPermission(value) }))];
+  const visible = badges.slice(0, MARKETPLACE_CARD_BADGE_LIMIT);
+  const hidden = badges.slice(MARKETPLACE_CARD_BADGE_LIMIT);
+  return { visible, hidden, hiddenSensitive: hidden.some((badge) => badge.sensitive) };
+}
+
+// 安装/更新完成后的短促确认窗口：动作按钮上的对勾弹入几百毫秒即退场。
+const recentlyCompletedKey = ref("");
+let recentlyCompletedTimer = 0;
+function markRecentlyCompleted(key: string) {
+  recentlyCompletedKey.value = key;
+  window.clearTimeout(recentlyCompletedTimer);
+  recentlyCompletedTimer = window.setTimeout(() => {
+    if (recentlyCompletedKey.value === key) recentlyCompletedKey.value = "";
+  }, 900);
+}
+
+// --- Batch failure banner lifecycle -------------------------------------------------------------
+// A batch failure is retired from two directions, and both are needed: precisely when this
+// component sees the plugin change successfully, and by reconciliation when the state was changed
+// elsewhere (the update center, another window) so no callback ever reaches this panel.
+
+function retireBatchFailures(pluginIds: Iterable<string>): void {
+  const retired = new Set(pluginIds);
+  if (!retired.size) return;
+  if (!batchFailures.value.some((failure) => retired.has(failure.pluginId))) return;
+  batchFailures.value = batchFailures.value.filter((failure) => !retired.has(failure.pluginId));
+}
+
+function retireBatchFailure(pluginId: string): void {
+  retireBatchFailures([pluginId]);
+}
+
+function dismissErrorBanner(): void {
+  // Explicit escape hatch: the banner has no auto-expiry, and dismissing is purely cosmetic —
+  // no plugin state is touched.
+  batchFailures.value = [];
+  loadError.value = "";
+}
+
+// An update failure may only be reconciled against a catalog check that is actually trustworthy.
+// The panel already refuses to read an incomplete check as "up to date" (catalogChecked /
+// catalogPartialFailure); the same rule applies here, otherwise "we could not check" would silently
+// erase a failure the user still needs to act on.
+function updateCheckTrustworthy(failure: PluginBatchFailure): boolean {
+  if (marketplaceLoading.value) return false;
+  if (marketplaceUnavailable.value) return false;
+  if (!repositoriesEnabled.value) return false;
+  // A repository that errored cannot prove its plugin is up to date. Only the failure's own
+  // repository matters: another repository's error says nothing about this plugin's source.
+  if (failure.repositoryId && catalogErrors.value.some((result) => result.repository.id === failure.repositoryId)) return false;
+  return true;
+}
+
+function reconcileBatchFailures(): void {
+  if (!batchFailures.value.length) return;
+  const installedIds = new Set(installedPlugins.value.map((plugin) => plugin.manifest.id));
+  batchFailures.value = batchFailures.value.filter((failure) => {
+    // A failed uninstall stays until the plugin is actually gone.
+    if (failure.kind === "uninstall") return installedIds.has(failure.pluginId);
+    // A failed install stays while the plugin is not installed: absence from the pending-update
+    // index is the normal state of a not-yet-installed plugin, not evidence the failure is stale.
+    if (failure.kind === "install") return !installedIds.has(failure.pluginId);
+    if (!updateCheckTrustworthy(failure)) return true;
+    // Kept only while the fresh state still asks for the update: installed AND still not latest.
+    return installedIds.has(failure.pluginId) && installedUpdateIndex.value.has(failure.pluginId);
+  });
+}
+
+// Single choke point for assigning a freshly read installed list: every successful re-read clears a
+// stale load failure and reconciles the per-plugin banner, so a new call site cannot forget either.
+function applyInstalledPlugins(plugins: InstalledPlugin[]): void {
+  installedPlugins.value = plugins;
+  loadError.value = "";
+  reconcileBatchFailures();
+}
+
+async function reloadInstalledPlugins(): Promise<void> {
+  applyInstalledPlugins(await api.listPlugins());
+}
+
+function openExternal(url?: string) {
+  const target = url?.trim();
+  if (!target) return;
+  try {
+    const parsed = new URL(target);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  } catch {
+    return;
+  }
+  if (isTauriRuntime()) void import("@tauri-apps/plugin-shell").then(({ open }) => open(target));
+  else window.open(target, "_blank", "noopener,noreferrer");
+}
+
+async function refresh(preferredPluginId = props.focusTarget?.pluginId || selectedPluginId.value) {
+  loading.value = true;
+  loadError.value = "";
+  try {
+    const [plugins, keys, repositoryList] = await Promise.all([api.listPlugins(), api.listPluginTrustedKeys(), api.listPluginRepositories()]);
+    trustedKeys.value = keys;
+    repositories.value = repositoryList;
+    applyInstalledPlugins(plugins);
+    await refreshMarketplace();
+    // Settings navigation is handled immediately by the watcher; replaying it
+    // after loading would overwrite any subsequent navigation by the user.
+    if (props.focusTarget && props.focusTarget.section !== "settings") applyFocusTarget(props.focusTarget);
+    else selectFirstProvider(preferredPluginId);
+  } catch (cause) {
+    loadError.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    loading.value = false;
+  }
+}
+
+function listingInstallCount(pluginId: string): number {
+  const value = pluginInstallCounts.value[pluginId];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function formatInstallCount(count: number): string {
+  try {
+    return new Intl.NumberFormat(appLocale.value).format(count);
+  } catch {
+    return String(count);
+  }
+}
+
+// Stats stay decorative: a slow or failed request must not hold the catalog,
+// and a newer refresh or unmount drops the stale response.
+function loadPluginInstallCounts() {
+  const request = ++installCountRequest;
+  void fetchPluginInstallCounts().then((counts) => {
+    if (request === installCountRequest && counts) pluginInstallCounts.value = counts;
+  });
+}
+
+async function refreshMarketplace() {
+  marketplaceLoading.value = true;
+  loadPluginInstallCounts();
+  let loaded = false;
+  try {
+    catalogResults.value = await api.fetchPluginMarketplaceCatalogs();
+    marketplaceUnavailable.value = false;
+    loaded = true;
+  } catch (cause) {
+    catalogResults.value = [];
+    // Track total failure separately: catalogErrors is derived from catalogResults, which is
+    // empty here, so without this flag the installed tab would silently read as "up to date".
+    marketplaceUnavailable.value = true;
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  } finally {
+    marketplaceLoading.value = false;
+  }
+  // Only a catalog that actually loaded may re-check update failures — and only once the loading
+  // flag is down, so the trust gate does not read this very fetch as still in flight.
+  if (loaded) reconcileBatchFailures();
+}
+
+function applyFocusTarget(focus: PluginCenterFocus) {
+  if (focus.section === "settings") {
+    activeSection.value = "settings";
+    return;
+  }
+  if (!focus.pluginId) {
+    activeSection.value = "installed";
+    return selectFirstProvider();
+  }
+  const installed = installedPlugins.value.some((plugin) => plugin.manifest.id === focus.pluginId);
+  if (!installed) {
+    activeSection.value = "marketplace";
+    marketplaceRepositoryId.value = "all";
+    marketplaceQuery.value = focus.pluginId;
+    return;
+  }
+  activeSection.value = "installed";
+  const provider = connectionProviders.value.find((entry) => entry.plugin.manifest.id === focus.pluginId && (!focus.providerId || entry.contribution.id === focus.providerId));
+  if (!provider) {
+    selectPlugin(focus.pluginId);
+    return;
+  }
+  selectProvider(focus.pluginId, provider.contribution.id);
+}
+
+function notifyPluginRuntimeReplaced(pluginId: string) {
+  if (!isTauriRuntime()) emit("pluginRuntimeReplaced", pluginId);
+}
+
+// A recorded provenance that differs from the candidate listing (repository / publisher / signing
+// key) requires an explicit confirmation before the plugin may be replaced. The backend enforces
+// the same rule and rejects the install without allowSourceChange; this pre-check keeps that
+// rejection out of the user's way by asking up front.
+const pendingSourceChange = ref<{ listing: MarketplacePluginListing; change: PluginSourceChange } | null>(null);
+function confirmUpdateSourceChange(listing: MarketplacePluginListing): boolean {
+  const change = pluginSourceChange(listing);
+  if (!change) return true;
+  pendingSourceChange.value = { listing, change };
+  return false;
+}
+function proceedUpdateSourceChange() {
+  const pending = pendingSourceChange.value;
+  pendingSourceChange.value = null;
+  if (pending) void installMarketplaceListing(pending.listing, { allowSourceChange: true, skipSourceConfirmation: true });
+}
+function cancelUpdateSourceChange() {
+  pendingSourceChange.value = null;
+}
+// 卸载预检：后端守卫（src-tauri/src/commands/plugins.rs）会拒绝卸载仍被已保存连接引用的插件，
+// 这里先把依赖连接交给用户确认，避免撞到原始英文报错。
+const uninstallDependents = ref<{ pluginId: string; pluginName: string; connections: ConnectionConfig[] } | null>(null);
+
+function pluginDependentConnections(pluginId: string): ConnectionConfig[] {
+  return connectionStore.connections.filter((connection) => connection.db_type === "plugin" && connection.plugin_id === pluginId);
+}
+
+async function performUninstall(pluginId: string, pluginName: string) {
+  operating.value = true;
+  try {
+    applyInstalledPlugins(await api.uninstallPlugin(pluginId));
+    forgetGraphicsEngineGrant(pluginId);
+    retireBatchFailure(pluginId);
+    notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+    clearPluginIconCache();
+    toast(t("pluginPlatform.uninstallSuccess", { name: pluginName }));
+    selectFirstProvider();
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 5000);
+    // A failed uninstall can still have changed the store (the container is renamed out of the
+    // plugin store before its physical delete, for instance), so re-read the installed list
+    // instead of leaving the panel on state it may no longer describe.
+    await refreshAfterBatch();
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function confirmUninstallWithDependents() {
+  const pending = uninstallDependents.value;
+  uninstallDependents.value = null;
+  // 整个级联过程（删连接 + 卸载）持有 operating 锁：removeConnections 期间
+  // mutationRunning 必须为真，否则并发的单个/批量卸载会与本次删除竞争。
+  if (!pending || mutationRunning.value) return;
+  operating.value = true;
+  try {
+    const dependentIds = pending.connections.map((connection) => connection.id);
+    await connectionStore.removeConnections(dependentIds);
+    for (const connectionId of dependentIds) {
+      // 与侧边栏删除流程相同的清理契约：页签已由 removeConnections 处理，
+      // 这里只做会话清理，且失败不能把已成功的删除变成失败。
+      connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
+        console.warn("[DBX][plugin:uninstall:dependent-disconnect-failed]", { connectionId, error });
+      });
+    }
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 5000);
+    await refreshAfterBatch();
+    return;
+  } finally {
+    operating.value = false;
+  }
+  await performUninstall(pending.pluginId, pending.pluginName);
+}
+
+function cancelUninstallDependents() {
+  uninstallDependents.value = null;
+}
+
+async function installListing(listing: MarketplacePluginListing, allowSourceChange = false): Promise<PluginInstallResult> {
+  const result = await api.installMarketplacePlugin({
+    repositoryId: listing.repository.id,
+    pluginId: listing.plugin.id,
+    version: listing.plugin.latestVersion,
+    allowSourceChange: allowSourceChange || undefined,
+  });
+  notifyPluginRuntimeReplaced(result.plugin.manifest.id);
+  beaconPluginInstall(listing.plugin.id, listing.plugin.latestVersion, listing.status === "update" ? "update" : "install");
+  return result;
+}
+
+async function installMarketplaceListing(listing: MarketplacePluginListing, options: { allowSourceChange?: boolean; skipSourceConfirmation?: boolean } = {}) {
+  if (mutationRunning.value || !listing.artifact || !isBatchSelectableListing(listing.status)) return;
+  if (!options.skipSourceConfirmation && !confirmUpdateSourceChange(listing)) return;
+  marketplaceInstallingKey.value = listing.key;
+  try {
+    const result = await installListing(listing, options.allowSourceChange === true);
+    // Precise retirement: this plugin just changed successfully, so its own failure line (if any)
+    // is stale. Other plugins' lines are untouched.
+    retireBatchFailure(result.plugin.manifest.id);
+    markRecentlyCompleted(listing.key);
+    toast(t(listing.status === "update" ? "pluginPlatform.updateSuccess" : "pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
+    // The COMPONENT_PLUGINS_UPDATED_EVENT handler does the panel-side refresh (icon cache +
+    // installed list); notifyComponentUpdatesChanged drives the App-level update-center badge.
+    notifyComponentPluginsUpdated();
+    notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+    selectPlugin(result.plugin.manifest.id);
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 8000);
+    // A failed install can still have mutated the store (a partially replaced version directory, for
+    // instance), so re-read the installed list instead of leaving the card on state it may no longer
+    // describe. The fallback keeps the previous list when the re-read itself fails.
+    applyInstalledPlugins(await api.listPlugins().catch(() => installedPlugins.value));
+    notifyComponentUpdatesChanged();
+  } finally {
+    marketplaceInstallingKey.value = "";
+  }
+}
+
+function batchSummaryKey(outcome: { succeeded: unknown[]; failed: { name: string }[] }): string {
+  return outcome.failed.length ? "pluginPlatform.batchSummaryWithFailures" : "pluginPlatform.batchSummary";
+}
+
+/** What a failed batch item was trying to do, and where its update came from. */
+interface BatchFailureDescriptor {
+  pluginId: string;
+  kind: PluginBatchFailureKind;
+  repositoryId?: string;
+}
+
+function reportBatchSummary(outcome: BatchOutcome, descriptors: readonly BatchFailureDescriptor[]) {
+  const failedNames = outcome.failed.map((failure) => failure.name).join("、");
+  const descriptorById = new Map<string, BatchFailureDescriptor>();
+  for (const descriptor of descriptors) descriptorById.set(descriptor.pluginId, descriptor);
+  const reported: PluginBatchFailure[] = outcome.failed.map((failure) => {
+    const descriptor = descriptorById.get(failure.id);
+    return {
+      pluginId: failure.id,
+      name: failure.name,
+      message: translateBackendError(t, failure.error),
+      // Every failed item came from a batch target, so a descriptor is always present; a missing one
+      // (a future call site) falls back to the conservative kind that is never retired by absence.
+      kind: descriptor?.kind ?? "install",
+      repositoryId: descriptor?.repositoryId,
+    };
+  });
+  // One line per plugin: re-running a batch replaces that plugin's previous line instead of stacking.
+  const reportedIds = new Set(reported.map((failure) => failure.pluginId));
+  batchFailures.value = [...batchFailures.value.filter((failure) => !reportedIds.has(failure.pluginId)), ...reported];
+  toast(t(batchSummaryKey(outcome), { success: outcome.succeeded.length, failed: outcome.failed.length, names: failedNames }), outcome.failed.length ? 8000 : 4000);
+}
+
+function succeededIds(outcome: BatchOutcome): string[] {
+  return outcome.results.filter((result) => result.ok).map((result) => result.id);
+}
+
+async function refreshAfterBatch() {
+  try {
+    await reloadInstalledPlugins();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+  } catch (cause) {
+    // A refresh failure is its own lifetime (cleared by the next successful re-read), no longer
+    // appended to the batch summary it would otherwise be indistinguishable from.
+    loadError.value = t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) });
+  }
+}
+
+async function updateInstalledPlugin(pluginId: string) {
+  const entry = installedUpdateEntryFor(pluginId);
+  if (!entry || mutationRunning.value) return;
+  await installMarketplaceListing(entry.listing);
+}
+
+async function runUpdateAllInstalled() {
+  const entries = installedUpdateEntries.value.filter((entry) => !pluginSourceChange(entry.listing));
+  const sourceChanged = installedUpdateEntries.value.filter((entry) => pluginSourceChange(entry.listing));
+  if (sourceChanged.length) toast(t("pluginPlatform.batchSourceChangeSkipped", { names: sourceChanged.map((entry) => entry.listing.name).join("、") }), 8000);
+  if (!entries.length || mutationRunning.value) return;
+  batchRunning.value = true;
+  // A new run retries the state read; its own outcome owns the banner from here (per-plugin
+  // failures are retired individually, never wholesale).
+  loadError.value = "";
+  const descriptors: BatchFailureDescriptor[] = entries.map((entry) => ({ pluginId: entry.listing.plugin.id, kind: "update", repositoryId: entry.listing.repository.id }));
+  installedUpdateProgress.value = { current: 0, total: entries.length };
+  try {
+    const outcome = await runBatch(
+      entries,
+      (entry) => entry.listing.name,
+      async (entry) => {
+        await installListing(entry.listing);
+      },
+      (entry) => entry.listing.plugin.id,
+      (current, total) => {
+        installedUpdateProgress.value = { current, total };
+      },
+    );
+    if (outcome.succeeded.length) {
+      clearPluginIconCache();
+      notifyComponentPluginsUpdated();
+      notifyComponentUpdatesChanged();
+    }
+    reportBatchSummary(outcome, descriptors);
+    retireBatchFailures(succeededIds(outcome));
+    await refreshAfterBatch();
+  } finally {
+    batchRunning.value = false;
+    installedUpdateProgress.value = null;
+  }
+}
+
+async function refreshAfterExternalPluginUpdate() {
+  clearPluginIconCache();
+  try {
+    await reloadInstalledPlugins();
+  } catch (cause) {
+    loadError.value = cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+function handleComponentPluginsUpdated() {
+  void refreshAfterExternalPluginUpdate();
+}
+
+function toggleBatchMode() {
+  if (batchRunning.value) return;
+  batchMode.value = !batchMode.value;
+  if (!batchMode.value) clearBatchSelection();
+}
+
+function clearBatchSelection() {
+  selectedListingKeys.value = new Set();
+  selectedInstalledIds.value = new Set();
+}
+
+function isListingSelected(listing: MarketplacePluginListing): boolean {
+  return selectedListingKeys.value.has(listing.key);
+}
+
+function toggleListingSelection(listing: MarketplacePluginListing) {
+  if (batchRunning.value || !isBatchSelectableListing(listing.status)) return;
+  const next = new Set(selectedListingKeys.value);
+  if (next.has(listing.key)) next.delete(listing.key);
+  else next.add(listing.key);
+  selectedListingKeys.value = next;
+}
+
+function selectAllUpdatable() {
+  if (batchRunning.value) return;
+  const next = new Set(selectedListingKeys.value);
+  for (const listing of batchUpdatableListings.value) next.add(listing.key);
+  selectedListingKeys.value = next;
+}
+
+function isInstalledSelected(pluginId: string): boolean {
+  return selectedInstalledIds.value.has(pluginId);
+}
+
+function toggleInstalledSelection(pluginId: string) {
+  if (batchRunning.value) return;
+  const next = new Set(selectedInstalledIds.value);
+  if (next.has(pluginId)) next.delete(pluginId);
+  else next.add(pluginId);
+  selectedInstalledIds.value = next;
+}
+
+async function runBatchInstallUpdate() {
+  const targets = batchSelectedListings.value;
+  if (!targets.length || mutationRunning.value) return;
+  const pluginIds = new Set<string>();
+  const duplicateIds = new Set<string>();
+  for (const listing of marketplaceListings.value) {
+    if (!selectedListingKeys.value.has(listing.key) || !isBatchSelectableListing(listing.status)) continue;
+    if (pluginIds.has(listing.plugin.id)) duplicateIds.add(listing.plugin.id);
+    pluginIds.add(listing.plugin.id);
+  }
+  if (duplicateIds.size) return toast(t("pluginPlatform.batchDuplicateSources", { names: [...duplicateIds].join("、") }), 8000);
+  const sourceChangedListings = targets.filter((listing) => pluginSourceChange(listing));
+  if (sourceChangedListings.length) return toast(t("pluginPlatform.batchSourceChangeSkipped", { names: sourceChangedListings.map((listing) => listing.name).join("、") }), 8000);
+  batchRunning.value = true;
+  loadError.value = "";
+  // `status` records which attempt this is: an install of a not-yet-installed plugin must stay
+  // visible while it is absent, while a failed update retires once the plugin is up to date.
+  const descriptors: BatchFailureDescriptor[] = targets.map((listing) => ({ pluginId: listing.plugin.id, kind: listing.status === "update" ? "update" : "install", repositoryId: listing.repository.id }));
+  try {
+    const outcome = await runBatch(
+      targets,
+      (listing) => listing.name,
+      async (listing) => {
+        await installListing(listing);
+      },
+      (listing) => listing.plugin.id,
+    );
+    clearBatchSelection();
+    reportBatchSummary(outcome, descriptors);
+    retireBatchFailures(succeededIds(outcome));
+    await refreshAfterBatch();
+    notifyComponentUpdatesChanged();
+  } finally {
+    batchRunning.value = false;
+  }
+}
+
+async function runBatchUninstall() {
+  const targets = batchSelectedInstalled.value;
+  if (!targets.length || mutationRunning.value) return;
+  // 有已保存依赖连接的插件会被后端守卫拒绝；批量里不做静默级联删除，
+  // 跳过并提示用户逐个卸载（走级联确认），与批量更新的 source-change 跳过模式一致。
+  const blocked = targets.filter((definition) => pluginDependentConnections(definition.plugin.manifest.id).length > 0);
+  const runnable = targets.filter((definition) => !blocked.includes(definition));
+  if (blocked.length) toast(t("pluginPlatform.batchUninstallDependentsSkipped", { names: blocked.map((definition) => definition.plugin.manifest.name).join("、") }), 8000);
+  if (!runnable.length) return;
+  const names = runnable.map((definition) => definition.plugin.manifest.name).join("、");
+  if (!window.confirm(t("pluginPlatform.batchUninstallConfirm", { count: runnable.length, names }))) return;
+  batchRunning.value = true;
+  loadError.value = "";
+  const descriptors: BatchFailureDescriptor[] = runnable.map((definition) => ({ pluginId: definition.plugin.manifest.id, kind: "uninstall" }));
+  try {
+    const outcome = await runBatch(
+      runnable,
+      (definition) => definition.plugin.manifest.name,
+      async (definition) => {
+        await api.uninstallPlugin(definition.plugin.manifest.id);
+        forgetGraphicsEngineGrant(definition.plugin.manifest.id);
+      },
+      (definition) => definition.plugin.manifest.id,
+    );
+    clearBatchSelection();
+    reportBatchSummary(outcome, descriptors);
+    retireBatchFailures(succeededIds(outcome));
+    await refreshAfterBatch();
+    notifyComponentUpdatesChanged();
+  } finally {
+    batchRunning.value = false;
+  }
+}
+
+async function saveRepository() {
+  if (mutationRunning.value) return;
+  const id = repositoryId.value.trim();
+  const name = repositoryName.value.trim();
+  const catalogUrl = repositoryCatalogUrl.value.trim();
+  if (!id || !name || !catalogUrl) return toast(t("pluginPlatform.repositoryFieldsRequired"));
+  operating.value = true;
+  try {
+    repositories.value = await api.savePluginRepository({ id, name, catalogUrl, kind: "custom", enabled: true, managed: false });
+    repositoryId.value = "";
+    repositoryName.value = "";
+    repositoryCatalogUrl.value = "";
+    toast(t("pluginPlatform.repositorySaved", { name }));
+    await refreshMarketplace();
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function toggleRepository(repository: PluginRepository) {
+  if (mutationRunning.value || repository.managed) return;
+  operating.value = true;
+  try {
+    repositories.value = await api.savePluginRepository({ ...repository, enabled: !repository.enabled });
+    await refreshMarketplace();
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function removeRepository(repository: PluginRepository) {
+  if (mutationRunning.value || repository.managed || !window.confirm(t("pluginPlatform.removeRepositoryConfirm", { name: repository.name }))) return;
+  operating.value = true;
+  try {
+    repositories.value = await api.removePluginRepository(repository.id);
+    if (marketplaceRepositoryId.value === repository.id) marketplaceRepositoryId.value = "all";
+    toast(t("pluginPlatform.repositoryRemoved", { name: repository.name }));
+    await refreshMarketplace();
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function saveTrustedKey() {
+  if (mutationRunning.value) return;
+  const keyId = trustedKeyId.value.trim();
+  const publicKey = trustedPublicKey.value.trim();
+  if (!keyId || !publicKey) return;
+  operating.value = true;
+  try {
+    trustedKeys.value = await api.savePluginTrustedKey(keyId, publicKey);
+    trustedKeyId.value = "";
+    trustedPublicKey.value = "";
+    toast(t("pluginPlatform.repositoryKeyAdded", { keyId }));
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function removeTrustedKey(keyId: string) {
+  if (mutationRunning.value || !window.confirm(t("pluginPlatform.removeRepositoryKeyConfirm", { keyId }))) return;
+  operating.value = true;
+  try {
+    trustedKeys.value = await api.removePluginTrustedKey(keyId);
+    toast(t("pluginPlatform.repositoryKeyRemoved", { keyId }));
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  } finally {
+    operating.value = false;
+  }
+}
+
+function abbreviatedPublicKey(publicKey: string): string {
+  return publicKey.length <= 24 ? publicKey : `${publicKey.slice(0, 12)}…${publicKey.slice(-8)}`;
+}
+
+function selectFirstProvider(preferredPluginId = "") {
+  const first = connectionProviders.value.find((entry) => entry.plugin.manifest.id === preferredPluginId) || connectionProviders.value[0];
+  if (first) return selectProvider(first.plugin.manifest.id, first.contribution.id);
+  selectedPluginId.value = definitions.value.find((definition) => definition.plugin.manifest.id === preferredPluginId)?.plugin.manifest.id || definitions.value[0]?.plugin.manifest.id || "";
+  selectedContributionId.value = "";
+  selectedConnectionId.value = "";
+}
+
+function selectProvider(pluginId: string, contributionId: string) {
+  selectedPluginId.value = pluginId;
+  selectedContributionId.value = contributionId;
+  const existing = connectionStore.connections.find((connection) => connection.db_type === "plugin" && connection.plugin_id === pluginId && connection.plugin_connection_provider === contributionId);
+  selectedConnectionId.value = existing?.id || "";
+}
+
+function selectPlugin(pluginId: string) {
+  const first = connectionProviders.value.find((entry) => entry.plugin.manifest.id === pluginId);
+  if (first) return selectProvider(pluginId, first.contribution.id);
+  selectedPluginId.value = pluginId;
+  selectedContributionId.value = "";
+  selectedConnectionId.value = "";
+}
+
+function selectConnection(connectionId: string) {
+  selectedConnectionId.value = connectionId;
+}
+
+function editConnection(connectionId: string) {
+  connectionStore.startEditing(connectionId);
+}
+
+function createConnection() {
+  const entry = selectedEntry.value;
+  if (!entry) return toast(t("pluginPlatform.selectConnectionProvider"));
+  emit("newConnection", entry.plugin.manifest.id, entry.contribution.id);
+}
+
+async function openFilesystem(pluginId: string, providerId: string, label: string, rootUri?: string) {
+  const connection = selectedConnection.value;
+  try {
+    if (connection) await connectionStore.ensureConnected(connection.id);
+    queryStore.openPluginFilesystem(pluginId, providerId, {
+      title: connection?.name || label,
+      connectionId: connection?.id,
+      rootUri,
+    });
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+  }
+}
+
+function openWorkbench(pluginId: string, contributionId: string, label: string) {
+  // PR-A4: when the plugin declares a command targeting this workbench, the entry opens through it
+  // host-authored context — the SSH plugin lands directly in the local terminal); otherwise the legacy behavior applies.
+  const command = registry.value.findCommandTargetingWorkbench(pluginId, contributionId);
+  if (command) {
+    const result = executePluginCommand(registry.value, queryStore, pluginId, command.id);
+    if (result.error) toast(result.error, 5000);
+    return;
+  }
+  const connection = selectedConnection.value;
+  queryStore.openPluginWorkbench(pluginId, contributionId, {
+    title: connection?.name || label,
+    connectionId: connection?.id,
+    context: connection
+      ? {
+          connectionId: connection.id,
+          providerId: connection.plugin_connection_provider,
+          connectionType: connection.plugin_connection_type,
+        }
+      : undefined,
+  });
+}
+
+async function choosePluginPackage() {
+  if (mutationRunning.value) return;
+  if (!isTauriRuntime()) {
+    webFileInput.value?.click();
+    return;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const path = await open({ multiple: false, filters: [{ name: t("pluginPlatform.packageFileType"), extensions: ["dbxp"] }] });
+  if (typeof path === "string") await installPlugin(path);
+}
+
+async function handleWebPackage(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (file) await installPlugin(file);
+}
+
+// Fire-and-forget install beacon for the marketplace stats worker
+// (deploy/plugin-stats-worker, POST dbxio.com/api/plugins/install).
+// Decorative counters only: no auth, no PII, failures are never surfaced.
+function reportInstallBeacon(result: PluginInstallResult) {
+  try {
+    void fetch("https://dbxio.com/api/plugins/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: result.plugin.manifest.id, version: result.plugin.manifest.version }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // stats only — ignore beacon failures
+  }
+}
+
+async function finishInstall(result: PluginInstallResult) {
+  notifyPluginRuntimeReplaced(result.plugin.manifest.id);
+  reportInstallBeacon(result);
+  toast(t("pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
+  clearPluginIconCache();
+  notifyComponentPluginsUpdated();
+  // Retire first: this plugin's install already succeeded, so its failure line is stale even if the
+  // re-read below fails (the read only refreshes the panel, it cannot uninstall the plugin).
+  retireBatchFailure(result.plugin.manifest.id);
+  await reloadInstalledPlugins();
+  notifyComponentUpdatesChanged();
+  window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+  selectPlugin(result.plugin.manifest.id);
+  activeSection.value = "installed";
+}
+
+async function installPlugin(source: string | File) {
+  if (mutationRunning.value) return;
+  installing.value = true;
+  try {
+    const result = await api.installPluginPackage(source, allowUnsigned.value);
+    await finishInstall(result);
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 8000);
+  } finally {
+    installing.value = false;
+  }
+}
+
+function isHttpPackageUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function installPluginFromUrl() {
+  const url = installUrl.value.trim();
+  if (!url || mutationRunning.value) return;
+  if (!isHttpPackageUrl(url)) return toast(t("pluginPlatform.invalidPackageUrl"));
+  urlInstalling.value = true;
+  urlDownloadProgress.value = { downloaded: 0, total: null };
+  let unlisten: (() => void) | undefined;
+  try {
+    if (isTauriRuntime()) {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ downloaded: number; total: number | null }>("plugin-url-download-progress", ({ payload }) => {
+        urlDownloadProgress.value = payload;
+      });
+    }
+    const result = await api.installPluginPackageFromUrl(url, allowUnsigned.value);
+    installUrl.value = "";
+    await finishInstall(result);
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 8000);
+  } finally {
+    unlisten?.();
+    urlInstalling.value = false;
+    urlDownloadProgress.value = null;
+  }
+}
+
+const urlProgressPercent = computed(() => {
+  const progress = urlDownloadProgress.value;
+  if (!progress?.total) return null;
+  return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
+});
+
+const urlProgressLabel = computed(() => {
+  const progress = urlDownloadProgress.value;
+  if (!progress) return "";
+  const downloaded = formatBytes(progress.downloaded);
+  return progress.total ? t("pluginPlatform.downloadProgress", { downloaded, total: formatBytes(progress.total) }) : t("pluginPlatform.downloadProgressUnknown", { downloaded });
+});
+
+function isPluginPackagePath(path: string): boolean {
+  return /\.dbxp$/i.test(path);
+}
+
+function webDropPluginPackage(event: DragEvent): File | null {
+  const files = event.dataTransfer?.files;
+  if (!files) return null;
+  for (let i = 0; i < files.length; i++) {
+    if (isPluginPackagePath(files[i].name)) return files[i];
+  }
+  return null;
+}
+
+function onWebDragEnter(event: DragEvent) {
+  if (!webDropPluginPackage(event)) return;
+  event.preventDefault();
+  webDragDepth++;
+  draggingPackage.value = true;
+}
+
+function onWebDragOver(event: DragEvent) {
+  if (!webDropPluginPackage(event)) return;
+  event.preventDefault();
+}
+
+function onWebDragLeave() {
+  if (webDragDepth > 0 && --webDragDepth === 0) draggingPackage.value = false;
+}
+
+function onWebDrop(event: DragEvent) {
+  const claimed = draggingPackage.value;
+  webDragDepth = 0;
+  draggingPackage.value = false;
+  const file = webDropPluginPackage(event);
+  if (!file) {
+    if (claimed) event.preventDefault();
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  if (mutationRunning.value) return;
+  void installPlugin(file);
+}
+
+function dropInsidePanel(payload: Exclude<TauriFileDropPayload, { type: "leave" }>): boolean {
+  const root = panelRootRef.value;
+  if (!root) return false;
+  return physicalDropPositionInsideRect(payload.position, root.getBoundingClientRect(), window.devicePixelRatio);
+}
+
+function onTauriPluginDrop(event: Event) {
+  const routedEvent = event as CustomEvent<TauriFileDropPayload>;
+  const payload = routedEvent.detail;
+  if (!payload) return;
+  if (payload.type === "leave") {
+    draggingPackage.value = false;
+    return;
+  }
+  const inside = dropInsidePanel(payload);
+  if (payload.type === "enter" || payload.type === "over") {
+    const relevant = payload.type === "enter" ? inside && payload.paths.some(isPluginPackagePath) : inside;
+    if (relevant) routedEvent.preventDefault();
+    draggingPackage.value = relevant;
+    return;
+  }
+  draggingPackage.value = false;
+  const path = payload.paths.find(isPluginPackagePath);
+  if (!inside || !path || mutationRunning.value) return;
+  routedEvent.preventDefault();
+  void installPlugin(path);
+}
+
+async function rollbackSelectedPlugin() {
+  if (mutationRunning.value || !selectedPluginId.value || !window.confirm(t("pluginPlatform.rollbackConfirm"))) return;
+  operating.value = true;
+  try {
+    const result = await api.rollbackPlugin(selectedPluginId.value);
+    notifyPluginRuntimeReplaced(result.plugin.manifest.id);
+    toast(t("pluginPlatform.rollbackSuccess", { version: result.plugin.manifest.version }));
+    clearPluginIconCache();
+    // Retire before the re-read for the same reason as finishInstall: the rollback already happened.
+    retireBatchFailure(result.plugin.manifest.id);
+    await reloadInstalledPlugins();
+    notifyComponentUpdatesChanged();
+    window.dispatchEvent(new CustomEvent("dbx:plugins-changed"));
+    selectPlugin(result.plugin.manifest.id);
+  } catch (cause) {
+    toast(translateBackendError(t, cause), 8000);
+  } finally {
+    operating.value = false;
+  }
+}
+
+async function uninstallSelectedPlugin() {
+  const definition = selectedDefinition.value;
+  if (mutationRunning.value || !definition) return;
+  const dependents = pluginDependentConnections(definition.plugin.manifest.id);
+  if (dependents.length) {
+    uninstallDependents.value = { pluginId: definition.plugin.manifest.id, pluginName: definition.plugin.manifest.name, connections: dependents };
+    return;
+  }
+  if (!window.confirm(t("pluginPlatform.uninstallConfirm", { name: definition.plugin.manifest.name }))) return;
+  await performUninstall(definition.plugin.manifest.id, definition.plugin.manifest.name);
+}
+
+watch(connectionProviders, (providers) => {
+  if (!providers.some((entry) => entry.plugin.manifest.id === selectedPluginId.value && entry.contribution.id === selectedContributionId.value)) selectFirstProvider(selectedPluginId.value);
+});
+watch(
+  activeSection,
+  () => {
+    detailSessionGeneration += 1;
+  },
+  { flush: "sync" },
+);
+watch(providerConnections, (connections) => {
+  if (selectedConnectionId.value && connections.some((connection) => connection.id === selectedConnectionId.value)) return;
+  selectedConnectionId.value = connections[0]?.id || "";
+});
+watch(
+  () => props.focusTarget,
+  (focus) => {
+    if (focus && (focus.section === "settings" || installedPlugins.value.length)) applyFocusTarget(focus);
+  },
+  { deep: true, immediate: true },
+);
+let lastHandledInstallRequestId = 0;
+watch(
+  () => props.installUrlRequest,
+  async (request) => {
+    // immediate so a deep link that just opened the Plugin Center is consumed on
+    // mount; the id guard keeps already-handled requests from replaying.
+    if (!request || request.id <= lastHandledInstallRequestId) return;
+    lastHandledInstallRequestId = request.id;
+    installUrl.value = request.url;
+    if (window.confirm(t("pluginPlatform.deepLinkInstallConfirm", { url: request.url }))) {
+      await installPluginFromUrl();
+    }
+  },
+  { immediate: true },
+);
+watch(allowUnsigned, (value) => {
+  try {
+    localStorage.setItem(PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY, value ? "1" : "0");
+  } catch {
+    // storage unavailable (private mode); the flag stays session-only
+  }
+});
+onMounted(() => {
+  void refresh();
+  window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
+  if (isTauriRuntime()) document.addEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
+});
+watch(marketplaceViewMode, (mode) => safeLocalStorageSet(MARKETPLACE_VIEW_MODE_STORAGE_KEY, mode));
+watch(marketplaceSortMode, (mode) => safeLocalStorageSet(MARKETPLACE_SORT_MODE_STORAGE_KEY, mode));
+onBeforeUnmount(() => {
+  installCountRequest += 1;
+  detailSessionGeneration += 1;
+  window.clearTimeout(recentlyCompletedTimer);
+  window.removeEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
+  if (isTauriRuntime()) document.removeEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
+});
+</script>
+
+<template>
+  <div ref="panelRootRef" class="plugin-center-view relative mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-hidden px-6 py-6" @dragenter="onWebDragEnter" @dragover="onWebDragOver" @dragleave="onWebDragLeave" @drop="onWebDrop">
+    <input ref="webFileInput" type="file" accept=".dbxp" class="hidden" @change="handleWebPackage" />
+    <div v-if="errorBannerText" class="flex shrink-0 items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+      <div class="min-w-0 flex-1 whitespace-pre-wrap">{{ errorBannerText }}</div>
+      <!-- The banner has no auto-expiry, so the user needs an explicit way out; dismissing only
+           clears the notice, no plugin state is touched. -->
+      <button type="button" data-plugin-error-dismiss class="shrink-0 rounded p-0.5 transition-colors hover:bg-destructive/10" :title="t('common.close')" :aria-label="t('common.close')" @click="dismissErrorBanner">
+        <X class="size-3.5" />
+      </button>
+    </div>
+
+    <Tabs v-model="activeSection" class="min-h-0 flex-1 gap-3">
+      <TabsList class="grid h-9 w-full grid-cols-3">
+        <TabsTrigger value="marketplace" class="gap-1.5 text-xs"><Store class="size-3.5" />{{ t("pluginPlatform.marketplace") }}</TabsTrigger>
+        <TabsTrigger value="installed" class="gap-1.5 text-xs">
+          <PackageCheck class="size-3.5" />{{ t("pluginPlatform.installed") }}
+          <span v-if="installedUpdateCount" class="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-amber-950 dark:text-amber-950">{{ installedUpdateCount > 99 ? "99+" : installedUpdateCount }}</span>
+        </TabsTrigger>
+        <TabsTrigger value="settings" class="gap-1.5 text-xs"><Settings2 class="size-3.5" />{{ t("pluginPlatform.settings") }}</TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="marketplace" class="@container m-0 min-h-0 flex-1 overflow-y-auto">
+        <div class="flex min-h-full w-full flex-col gap-4 pb-2">
+          <div class="flex items-start gap-2.5 rounded-xl border bg-card/70 px-4 py-3">
+            <Info class="mt-0.5 size-3.5 shrink-0 text-primary" />
+            <div class="min-w-0 flex-1 marketplace-guide-text text-xs leading-5 text-muted-foreground">
+              <span class="font-medium text-foreground">{{ t("pluginPlatform.marketplaceGuideTitle") }}</span>
+              <span class="mx-1.5 text-border">·</span>{{ t("pluginPlatform.marketplaceGuideDescription") }}
+            </div>
+          </div>
+          <!-- Search and controls share a row whenever the panel has room; narrow panes wrap naturally. -->
+          <div data-plugin-marketplace-toolbar class="sticky top-0 z-20 flex w-full flex-wrap items-center gap-2 rounded-xl border bg-background/95 p-3 backdrop-blur-sm">
+            <div class="flex h-8 min-w-0 basis-64 flex-1 items-center gap-1.5 rounded-md border bg-background px-2.5 focus-within:ring-2 focus-within:ring-ring">
+              <Search class="size-3.5 shrink-0 text-muted-foreground" />
+              <Input
+                data-plugin-marketplace-search
+                v-model="marketplaceQuery"
+                class="h-7 min-w-0 flex-1 border-0 bg-transparent px-0 text-xs shadow-none focus-visible:ring-0"
+                :aria-label="t('pluginPlatform.searchMarketplace')"
+                :placeholder="t('pluginPlatform.searchMarketplaceCount', { count: marketplaceLoading || marketplaceUnavailable ? '—' : marketplaceListings.length })"
+              />
+              <Button v-if="marketplacePublisher" variant="secondary" size="sm" class="h-6 max-w-24 shrink-0 gap-1 px-1.5 text-xs" :title="marketplacePublisher" :aria-label="t('common.clear') + ': ' + marketplacePublisher" @click="marketplacePublisher = ''">
+                <span class="truncate">{{ marketplacePublisher }}</span
+                ><X class="size-3 shrink-0" />
+              </Button>
+              <span
+                v-if="marketplaceQuery || marketplacePublisher || marketplaceRepositoryId !== 'all'"
+                class="shrink-0 text-[10px] tabular-nums text-muted-foreground"
+                aria-live="polite"
+                :aria-label="
+                  t('pluginPlatform.marketplaceFiltered', { count: marketplaceLoading || marketplaceUnavailable ? '—' : sortedMarketplaceListings.length }) + ' · ' + t('pluginPlatform.marketplaceTotal', { count: marketplaceLoading || marketplaceUnavailable ? '—' : marketplaceListings.length })
+                "
+              >
+                {{ marketplaceLoading || marketplaceUnavailable ? "—" : sortedMarketplaceListings.length }} / {{ marketplaceLoading || marketplaceUnavailable ? "—" : marketplaceListings.length }}
+              </span>
+            </div>
+            <div data-plugin-marketplace-controls class="flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <Select v-model="marketplaceSortMode">
+                <SelectTrigger data-plugin-marketplace-sort class="h-8 min-w-0 flex-1 text-xs @min-[54rem]:w-32 @min-[54rem]:flex-none" :aria-label="t('pluginPlatform.sortBy')"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="name">{{ t("pluginPlatform.sortByName") }}</SelectItem>
+                  <SelectItem value="installs">{{ t("pluginPlatform.sortByInstalls") }}</SelectItem>
+                  <SelectItem value="recently-updated">{{ t("pluginPlatform.sortByRecentlyUpdated") }}</SelectItem>
+                  <SelectItem value="recently-listed">{{ t("pluginPlatform.sortByRecentlyListed") }}</SelectItem>
+                  <SelectItem value="updates-first">{{ t("pluginPlatform.sortByUpdatesFirst") }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select v-model="marketplaceRepositoryId">
+                <SelectTrigger data-plugin-marketplace-repository class="h-8 min-w-0 flex-1 text-xs @min-[54rem]:w-36 @min-[54rem]:flex-none"><SelectValue :placeholder="t('pluginPlatform.allRepositories')" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{{ t("pluginPlatform.allRepositories") }}</SelectItem>
+                  <SelectItem v-for="repository in repositories.filter((entry) => entry.enabled)" :key="repository.id" :value="repository.id">{{ repository.name }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <div class="flex shrink-0 items-center rounded-md border bg-muted/20 p-0.5">
+                <button
+                  type="button"
+                  class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                  :class="marketplaceViewMode === 'grid' ? 'bg-background text-foreground shadow-sm' : ''"
+                  :aria-label="t('marketplace.viewGrid')"
+                  :aria-pressed="marketplaceViewMode === 'grid'"
+                  @click="marketplaceViewMode = 'grid'"
+                >
+                  <LayoutGrid class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                  :class="marketplaceViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : ''"
+                  :aria-label="t('marketplace.viewList')"
+                  :aria-pressed="marketplaceViewMode === 'list'"
+                  @click="marketplaceViewMode = 'list'"
+                >
+                  <List class="size-3.5" />
+                </button>
+              </div>
+              <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
+              <Button variant="ghost" size="icon-sm" class="shrink-0" :disabled="marketplaceLoading" :title="t('common.refresh')" :aria-label="t('common.refresh')" @click="refreshMarketplace"><RefreshCw class="size-3.5" :class="marketplaceLoading ? 'animate-spin' : ''" /></Button>
+            </div>
+          </div>
+
+          <div v-if="batchMode" class="flex flex-wrap items-center gap-2 rounded-xl border bg-muted/20 px-3 py-2 text-xs">
+            <span class="font-medium text-foreground">{{ t("pluginPlatform.batchSelected", { count: batchSelectedListings.length }) }}</span>
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length || batchRunning" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
+              <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || mutationRunning" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
+              <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
+            </div>
+          </div>
+
+          <div v-for="result in catalogErrors" :key="result.repository.id" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div>
+              <span class="font-medium">{{ result.repository.name }}:</span> {{ result.error }}
+            </div>
+          </div>
+
+          <div v-if="marketplaceLoading" class="flex min-h-[440px] flex-1 items-center justify-center gap-2 rounded-lg border border-dashed p-12 text-xs text-muted-foreground"><Loader2 class="size-4 animate-spin" />{{ t("pluginPlatform.loadingMarketplace") }}</div>
+          <div v-else-if="!sortedMarketplaceListings.length" class="flex min-h-[440px] flex-1 flex-col items-center justify-center rounded-lg border border-dashed p-12 text-center">
+            <Store class="size-7 text-muted-foreground" />
+            <div class="mt-3 text-sm font-medium">{{ t("pluginPlatform.noMarketplacePlugins") }}</div>
+            <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noMarketplacePluginsDescription") }}</div>
+          </div>
+          <TransitionGroup v-else-if="marketplaceViewMode === 'grid'" name="marketplace-cards" tag="div" class="grid w-full grid-cols-[repeat(auto-fill,minmax(min(100%,19rem),1fr))] gap-3">
+            <article
+              v-for="listing in sortedMarketplaceListings"
+              :key="listing.key"
+              class="group marketplace-card flex min-w-0 min-h-48 cursor-pointer flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              role="button"
+              tabindex="0"
+              :aria-label="t('pluginPlatform.openPluginDetails', { name: listing.name })"
+              @click="openMarketplaceDetails(listing, $event)"
+              @keydown="handleMarketplaceCardKeydown($event, listing)"
+            >
+              <div class="flex min-w-0 items-start gap-3">
+                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
+                <div class="min-w-0 flex-1">
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    <div class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</div>
+                    <span v-if="marketplacePluginProvidesMcpTools(listing.plugin)" class="shrink-0 rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-marketplace-mcp-badge>{{
+                      t("pluginPlatform.mcpToolsBadge")
+                    }}</span>
+                  </div>
+                  <div class="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                    <BadgeCheck v-if="listing.verified" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
+                    <span class="min-w-0 truncate"
+                      ><button type="button" class="rounded-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click.stop="filterByPublisher(listing.plugin.publisher)">{{ listing.plugin.publisher }}</button> ·
+                      {{ listing.repository.name }}</span
+                    >
+                  </div>
+                </div>
+                <div class="flex shrink-0 items-center gap-0.5">
+                  <button
+                    v-if="listing.plugin.source"
+                    type="button"
+                    class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                    :title="t('pluginPlatform.sourceRepository')"
+                    :aria-label="t('pluginPlatform.sourceRepository')"
+                    @click.stop="openExternal(listing.plugin.source)"
+                  >
+                    <GithubIcon icon-class="size-3.5" />
+                  </button>
+                  <button
+                    v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
+                    type="button"
+                    class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                    :title="t('pluginPlatform.pluginHomepage')"
+                    :aria-label="t('pluginPlatform.pluginHomepage')"
+                    @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
+                  >
+                    <Globe class="size-3.5" />
+                  </button>
+                  <button
+                    v-if="batchMode && isBatchSelectableListing(listing.status)"
+                    type="button"
+                    class="ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
+                    :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
+                    :aria-pressed="isListingSelected(listing)"
+                    :aria-label="listing.name"
+                    :disabled="batchRunning"
+                    @click.stop="toggleListingSelection(listing)"
+                  >
+                    <Check v-if="isListingSelected(listing)" class="size-3" />
+                  </button>
+                </div>
+              </div>
+              <div v-if="listing.plugin.tags.length || listing.plugin.permissions.length" class="marketplace-tags mt-3 flex min-w-0 items-center gap-1.5 overflow-hidden">
+                <!-- Single clipped badge line: tags, then permissions, then one trailing "+N" whose
+                     tooltip lists the overflow (sensitive permissions highlighted in the tooltip). -->
+                <Tooltip v-for="badge in marketplaceCardBadges(listing).visible" :key="badge.value" :delay-duration="500">
+                  <TooltipTrigger as-child>
+                    <Badge :variant="badge.sensitive ? 'destructive' : 'outline'" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :class="badge.kind === 'permission' ? 'font-mono' : ''" :title="badge.value" :data-sensitive-permission="badge.sensitive ? badge.value : undefined">{{
+                      badge.value
+                    }}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md break-all text-[11px]" :class="badge.kind === 'permission' ? 'font-mono' : ''">{{ badge.value }}</TooltipContent>
+                </Tooltip>
+                <Tooltip v-if="marketplaceCardBadges(listing).hidden.length" :delay-duration="500">
+                  <TooltipTrigger as-child>
+                    <Badge :variant="marketplaceCardBadges(listing).hiddenSensitive ? 'destructive' : 'outline'" class="h-5 shrink-0 px-1.5 text-[10px]">+{{ marketplaceCardBadges(listing).hidden.length }}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">
+                    <div class="flex flex-col gap-0.5 font-mono">
+                      <span v-for="badge in marketplaceCardBadges(listing).hidden" :key="badge.value" :class="badge.sensitive ? 'text-destructive' : ''">{{ badge.value }}</span>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+              <Tooltip :delay-duration="700">
+                <TooltipTrigger as-child>
+                  <p class="marketplace-desc mt-3 line-clamp-3 cursor-help text-xs leading-5 text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
+              </Tooltip>
+              <div class="marketplace-footer mt-auto flex items-center justify-between gap-3 pt-4">
+                <div class="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <div class="flex min-w-0 items-baseline gap-1.5 text-[11px] text-muted-foreground">
+                    <span v-if="listing.status === 'unsupported'" class="min-w-0 truncate">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
+                    <!-- Versions are stated only in this footer (no separate badge above): the update case
+                         keeps installed and catalog latest in one sentence so neither reads as the other,
+                         and the plain install state leads with the full catalog version that never shrinks
+                         while license and release date absorb the truncation. -->
+                    <span v-else-if="listing.installed && listing.status === 'update'" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
+                    <span v-else-if="listing.installed" class="min-w-0 truncate">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
+                    <template v-else>
+                      <span class="shrink-0 font-medium">v{{ listing.plugin.latestVersion }}</span>
+                      <span class="min-w-0 truncate"
+                        >{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}<span v-if="listing.latestVersionReleasedAt"> · {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span></span
+                      >
+                    </template>
+                  </div>
+                  <div v-if="listingInstallCount(listing.plugin.id)" class="text-[11px] tabular-nums text-muted-foreground">{{ t("pluginPlatform.installCount", { count: formatInstallCount(listingInstallCount(listing.plugin.id)) }) }}</div>
+                </div>
+                <button
+                  type="button"
+                  class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
+                  :class="marketplaceActionClass(listing)"
+                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                  @click.stop="installMarketplaceListing(listing)"
+                >
+                  <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
+                  <Check v-else-if="listing.status === 'installed' && recentlyCompletedKey === listing.key" class="marketplace-check-pop size-3.5" />
+                  {{ t(`pluginPlatform.marketplaceStatus.${listing.status}`) }}
+                </button>
+              </div>
+            </article>
+          </TransitionGroup>
+          <TransitionGroup v-else name="marketplace-cards" tag="div" class="flex w-full flex-col gap-2">
+            <article
+              v-for="listing in sortedMarketplaceListings"
+              :key="listing.key"
+              class="flex min-w-0 cursor-pointer flex-wrap items-center gap-3 rounded-xl border bg-card p-3 transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              role="button"
+              tabindex="0"
+              :aria-label="t('pluginPlatform.openPluginDetails', { name: listing.name })"
+              @click="openMarketplaceDetails(listing, $event)"
+              @keydown="handleMarketplaceCardKeydown($event, listing)"
+            >
+              <button
+                v-if="batchMode && isBatchSelectableListing(listing.status)"
+                type="button"
+                class="inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
+                :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
+                :aria-pressed="isListingSelected(listing)"
+                :aria-label="listing.name"
+                :disabled="batchRunning"
+                @click.stop="toggleListingSelection(listing)"
+              >
+                <Check v-if="isListingSelected(listing)" class="size-3" />
+              </button>
+              <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 shrink-0 rounded-lg border bg-background p-1.5" />
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 items-center gap-1">
+                  <span class="truncate text-sm font-semibold" :title="listing.name">{{ listing.name }}</span>
+                  <BadgeCheck v-if="listing.verified" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
+                  <span v-if="marketplacePluginProvidesMcpTools(listing.plugin)" class="shrink-0 rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-marketplace-mcp-badge>{{
+                    t("pluginPlatform.mcpToolsBadge")
+                  }}</span>
+                </div>
+                <div class="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+                  <span class="min-w-0 truncate"
+                    ><button type="button" class="rounded-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click.stop="filterByPublisher(listing.plugin.publisher)">{{ listing.plugin.publisher }}</button> ·
+                    {{ listing.repository.name }}</span
+                  >
+                  <span class="shrink-0">· v{{ listing.plugin.latestVersion }}</span>
+                  <span v-if="listing.latestVersionReleasedAt" class="shrink-0">· {{ formatMarketplaceReleasedDate(listing.latestVersionReleasedAt, appLocale) }}</span>
+                  <span v-if="listingInstallCount(listing.plugin.id)" class="shrink-0 tabular-nums">· {{ t("pluginPlatform.installCount", { count: formatInstallCount(listingInstallCount(listing.plugin.id)) }) }}</span>
+                  <button
+                    v-if="listing.plugin.source"
+                    type="button"
+                    class="shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                    :title="t('pluginPlatform.sourceRepository')"
+                    :aria-label="t('pluginPlatform.sourceRepository')"
+                    @click.stop="openExternal(listing.plugin.source)"
+                  >
+                    <GithubIcon icon-class="size-3.5" />
+                  </button>
+                  <button
+                    v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
+                    type="button"
+                    class="shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-accent hover:text-foreground"
+                    :title="t('pluginPlatform.pluginHomepage')"
+                    :aria-label="t('pluginPlatform.pluginHomepage')"
+                    @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
+                  >
+                    <Globe class="size-3.5" />
+                  </button>
+                </div>
+                <Tooltip :delay-duration="700">
+                  <TooltipTrigger as-child>
+                    <p class="mt-1 cursor-help truncate text-xs text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
+                </Tooltip>
+              </div>
+              <div class="hidden min-w-0 max-w-52 shrink-0 flex-wrap items-center gap-1.5 @min-[64rem]:flex">
+                <Tooltip v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" :delay-duration="500">
+                  <TooltipTrigger as-child>
+                    <Badge variant="outline" class="h-5 min-w-0 max-w-full truncate px-1.5 text-[10px]" :title="tag">{{ tag }}</Badge>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md break-all text-[11px]">{{ tag }}</TooltipContent>
+                </Tooltip>
+                <Badge v-if="listing.plugin.tags.length > 3" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] text-muted-foreground" :title="listing.plugin.tags.slice(3).join(' · ')">+{{ listing.plugin.tags.length - 3 }}</Badge>
+              </div>
+              <button
+                type="button"
+                class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50"
+                :class="marketplaceActionClass(listing)"
+                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                @click.stop="installMarketplaceListing(listing)"
+              >
+                <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
+                <Check v-else-if="listing.status === 'installed' && recentlyCompletedKey === listing.key" class="marketplace-check-pop size-3.5" />
+                <span class="hidden @min-[40rem]:inline">{{ t(`pluginPlatform.marketplaceStatus.${listing.status}`) }}</span>
+              </button>
+            </article>
+          </TransitionGroup>
+        </div>
+      </TabsContent>
+
+      <TabsContent value="installed" class="m-0 min-h-0 flex-1 overflow-y-auto">
+        <div v-if="loading && !installedPlugins.length" class="py-10 text-center text-xs text-muted-foreground">{{ t("common.loading") }}</div>
+        <div v-else-if="!installedPlugins.length" class="rounded-lg border border-dashed p-10 text-center">
+          <PackageCheck class="mx-auto size-7 text-muted-foreground" />
+          <div class="mt-3 text-sm font-medium">{{ t("pluginPlatform.noInstalledPlugins") }}</div>
+          <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noInstalledPluginsDescription") }}</div>
+          <Button class="mt-4 gap-1.5" size="sm" @click="activeSection = 'marketplace'"><Store class="size-3.5" />{{ t("pluginPlatform.browseMarketplace") }}</Button>
+        </div>
+        <div v-else class="flex min-h-[440px] flex-col gap-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" class="h-8 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
+            <template v-if="batchMode">
+              <span class="text-xs font-medium text-foreground">{{ t("pluginPlatform.batchSelected", { count: batchSelectedInstalled.length }) }}</span>
+              <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || mutationRunning" @click="runBatchUninstall">
+                <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" /><Trash2 class="size-3.5" />{{ t("pluginPlatform.batchUninstall") }}
+              </Button>
+              <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
+            </template>
+            <Button variant="ghost" size="icon-sm" class="shrink-0" :class="batchMode ? '' : 'ml-auto'" :disabled="marketplaceLoading" :title="t('pluginPlatform.refresh')" :aria-label="t('pluginPlatform.refresh')" @click="refreshMarketplace"
+              ><RefreshCw class="size-3.5" :class="marketplaceLoading ? 'animate-spin' : ''"
+            /></Button>
+          </div>
+
+          <!-- Partial catalog failure (some enabled repositories errored): the check is incomplete,
+               so it is surfaced on its own and must never degrade into "all up to date". -->
+          <div v-if="catalogPartialFailure" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div>{{ t("pluginPlatform.updateCheckPartialFailure") }}</div>
+          </div>
+          <div v-for="result in catalogErrors" :key="`installed-${result.repository.id}`" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div>
+              <span class="font-medium">{{ result.repository.name }}:</span> {{ result.error }}
+            </div>
+          </div>
+          <!-- Honest update-check states: a failed or missing catalog must never read as "up to date". -->
+          <div v-if="marketplaceUnavailable" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div class="min-w-0 flex-1">
+              <span class="font-medium">{{ t("pluginPlatform.updateCheckUnavailable") }}</span> · {{ t("pluginPlatform.updateCheckUnavailableDescription") }}
+            </div>
+            <Button variant="outline" size="sm" class="h-6 shrink-0 text-xs" :disabled="marketplaceLoading" @click="refreshMarketplace"><RefreshCw class="size-3" :class="marketplaceLoading ? 'animate-spin' : ''" />{{ t("pluginPlatform.refresh") }}</Button>
+          </div>
+          <div v-else-if="!repositoriesEnabled && installedPlugins.length" class="flex items-start gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div>{{ t("pluginPlatform.noRepositoriesEnabled") }}</div>
+          </div>
+          <div v-else-if="installedUpdateCount" class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5">
+            <div class="min-w-0">
+              <div class="text-sm font-semibold">{{ t("pluginPlatform.installedUpdatesAvailableTitle", { count: installedUpdateCount }) }}</div>
+              <p class="text-xs text-muted-foreground">{{ t("pluginPlatform.installedUpdatesAvailableDescription") }}</p>
+            </div>
+            <div class="ml-auto flex shrink-0 items-center gap-2">
+              <Button size="sm" class="h-7 text-xs" :disabled="mutationRunning" @click="runUpdateAllInstalled">
+                <Loader2 v-if="installedUpdateProgress" class="size-3 animate-spin" />
+                <Download v-else class="size-3" />
+                {{ installedUpdateProgress ? t("pluginPlatform.updatingProgress", installedUpdateProgress) : t("pluginPlatform.updateAll") }}
+              </Button>
+            </div>
+          </div>
+          <div v-else-if="catalogChecked && !catalogPartialFailure && installedPlugins.length" class="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
+            <BadgeCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />
+            <div>{{ t("pluginPlatform.allPluginsUpToDate") }}</div>
+          </div>
+          <div v-else-if="marketplaceLoading && installedPlugins.length" class="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 class="size-3.5 animate-spin" />
+            <div>{{ t("pluginPlatform.checkingForUpdates") }}</div>
+          </div>
+          <div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+            <div class="space-y-1 rounded-lg border bg-muted/10 p-2">
+              <label v-if="installedMcpCount || installedMcpOnly" class="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground" data-plugin-mcp-filter>
+                <input v-model="installedMcpOnly" type="checkbox" />
+                {{ t("pluginPlatform.mcpToolsFilter", { count: installedMcpCount }) }}
+              </label>
+              <div
+                v-for="definition in definitions"
+                :key="definition.plugin.manifest.id"
+                :data-plugin-id="definition.plugin.manifest.id"
+                class="group/plugin-row flex w-full items-start rounded-md hover:bg-muted"
+                :class="batchMode ? (isInstalledSelected(definition.plugin.manifest.id) ? 'bg-muted ring-1 ring-primary/30' : '') : selectedPluginId === definition.plugin.manifest.id ? 'bg-muted ring-1 ring-primary/30' : ''"
+              >
+                <button type="button" class="flex min-w-0 flex-1 items-start gap-2 px-2 py-2 text-left" :disabled="batchMode && batchRunning" @click="batchMode ? toggleInstalledSelection(definition.plugin.manifest.id) : selectPlugin(definition.plugin.manifest.id)">
+                  <span
+                    v-if="batchMode"
+                    class="mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded border transition-colors"
+                    :class="isInstalledSelected(definition.plugin.manifest.id) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
+                    ><Check v-if="isInstalledSelected(definition.plugin.manifest.id)" class="size-3"
+                  /></span>
+                  <Check v-else-if="selectedPluginId === definition.plugin.manifest.id" class="mt-0.5 size-3.5 shrink-0 text-primary" /><span v-else class="mt-0.5 size-3.5 shrink-0" />
+                  <PluginIcon :plugin-id="definition.plugin.manifest.id" :icon="definition.plugin.manifest.icon" class="size-8 rounded-md border bg-background p-1" />
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate text-sm font-medium">{{ definition.plugin.manifest.name }}</span>
+                    <span class="mt-1 flex flex-wrap gap-1">
+                      <Badge variant="outline" class="h-4 px-1.5 text-[10px]">v{{ definition.plugin.manifest.version || "-" }}</Badge>
+                      <span
+                        v-if="installedUpdateEntryFor(definition.plugin.manifest.id)"
+                        class="inline-flex h-4 items-center gap-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+                        :title="t('pluginPlatform.installedVersionUpdatable', { installed: definition.plugin.manifest.version || '0.0.0', latest: installedUpdateEntryFor(definition.plugin.manifest.id)?.listing.plugin.latestVersion })"
+                      >
+                        <ArrowUp class="size-2.5" />v{{ installedUpdateEntryFor(definition.plugin.manifest.id)?.listing.plugin.latestVersion }}
+                      </span>
+                      <Badge :variant="definition.plugin.compatibility.compatible ? 'secondary' : 'destructive'" class="h-4 px-1.5 text-[10px]">{{ definition.plugin.compatibility.compatible ? t("pluginPlatform.compatible") : t("pluginPlatform.blocked") }}</Badge>
+                      <Badge v-if="installedPluginProvidesMcpTools(definition.plugin)" variant="outline" class="h-4 border-primary/40 px-1.5 text-[10px] text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')" data-plugin-mcp-badge>{{ t("pluginPlatform.mcpToolsBadge") }}</Badge>
+                      <Badge v-if="catalogChecked && !catalogPartialFailure && !pluginInCatalog(definition.plugin.manifest.id)" variant="outline" class="h-4 border-dashed px-1.5 text-[10px] text-muted-foreground" :title="t('pluginPlatform.notInRepositoriesHint')">{{
+                        t("pluginPlatform.notInRepositories")
+                      }}</Badge>
+                      <Badge
+                        v-else-if="installedUnsupportedListingFor(definition.plugin.manifest.id)"
+                        variant="outline"
+                        class="h-4 border-dashed px-1.5 text-[10px] text-muted-foreground"
+                        :title="t('pluginPlatform.unsupportedTarget', { target: installedUnsupportedListingFor(definition.plugin.manifest.id)?.target })"
+                        >{{ t("pluginPlatform.marketplaceStatus.unsupported") }}</Badge
+                      >
+                    </span>
+                  </span>
+                </button>
+                <button
+                  v-if="!batchMode"
+                  type="button"
+                  class="mr-2 mt-2 inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  :class="isPluginPinned(definition.plugin.manifest.id) ? 'text-primary' : 'opacity-0 group-hover/plugin-row:opacity-100 focus-visible:opacity-100'"
+                  :aria-pressed="isPluginPinned(definition.plugin.manifest.id)"
+                  :aria-label="isPluginPinned(definition.plugin.manifest.id) ? t('pluginPlatform.unpinPlugin') : t('pluginPlatform.pinPlugin')"
+                  :title="isPluginPinned(definition.plugin.manifest.id) ? t('pluginPlatform.unpinPlugin') : t('pluginPlatform.pinPlugin')"
+                  @click.stop="togglePluginPinned(definition.plugin.manifest.id)"
+                  @keydown.enter.stop.prevent="togglePluginPinned(definition.plugin.manifest.id)"
+                  @keydown.space.stop.prevent="togglePluginPinned(definition.plugin.manifest.id)"
+                >
+                  <Pin v-if="isPluginPinned(definition.plugin.manifest.id)" class="size-3.5" />
+                  <PinOff v-else class="size-3.5" />
+                </button>
+                <span v-else class="mr-2 mt-2 size-6 shrink-0" aria-hidden="true" />
+              </div>
+            </div>
+
+            <div class="space-y-4 rounded-lg border p-4">
+              <template v-if="selectedDefinition">
+                <div class="flex flex-wrap items-start justify-between gap-3 border-b pb-4">
+                  <div class="flex min-w-0 items-start gap-3">
+                    <PluginIcon :plugin-id="selectedDefinition.plugin.manifest.id" :icon="selectedDefinition.plugin.manifest.icon" class="size-10 rounded-lg border bg-background p-1.5" />
+                    <div class="min-w-0">
+                      <div class="text-sm font-medium">{{ selectedDefinition.plugin.manifest.name }}</div>
+                      <div class="mt-1 text-xs leading-5 text-muted-foreground">{{ selectedDefinition.plugin.manifest.description }}</div>
+                      <div class="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span class="font-mono text-[10px] text-muted-foreground">{{ selectedDefinition.plugin.manifest.id }}</span>
+                        <button
+                          v-if="selectedDefinition.plugin.manifest.source"
+                          type="button"
+                          class="rounded p-0.5 text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100"
+                          :title="t('pluginPlatform.sourceRepository')"
+                          :aria-label="t('pluginPlatform.sourceRepository')"
+                          @click="openExternal(selectedDefinition.plugin.manifest.source)"
+                        >
+                          <GithubIcon />
+                        </button>
+                        <button
+                          v-if="marketplaceHomepageUrl(selectedDefinition.plugin.manifest.source, selectedDefinition.plugin.manifest.homepage)"
+                          type="button"
+                          class="rounded p-0.5 text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100"
+                          :title="t('pluginPlatform.pluginHomepage')"
+                          :aria-label="t('pluginPlatform.pluginHomepage')"
+                          @click="openExternal(marketplaceHomepageUrl(selectedDefinition.plugin.manifest.source, selectedDefinition.plugin.manifest.homepage))"
+                        >
+                          <Globe class="size-3" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="flex flex-col items-end gap-1.5">
+                    <div class="flex gap-2">
+                      <Button v-if="selectedUpdateEntry" size="sm" class="gap-1.5" :disabled="mutationRunning" @click="updateInstalledPlugin(selectedUpdateEntry.listing.plugin.id)">
+                        <Loader2 v-if="marketplaceInstallingKey === selectedUpdateEntry.listing.key" class="size-3.5 animate-spin" />
+                        <Download v-else class="size-3.5" />{{ t("pluginPlatform.updateToVersion", { version: selectedUpdateEntry.listing.plugin.latestVersion }) }}
+                      </Button>
+                      <Button size="sm" variant="outline" class="gap-1.5" :disabled="mutationRunning" @click="rollbackSelectedPlugin"><RotateCcw class="size-3.5" />{{ t("pluginPlatform.rollback") }}</Button>
+                      <Button size="sm" variant="outline" class="gap-1.5 text-destructive" :disabled="mutationRunning" @click="uninstallSelectedPlugin"><Trash2 class="size-3.5" />{{ t("pluginPlatform.uninstall") }}</Button>
+                    </div>
+                    <span v-if="selectedUpdateEntry" class="text-[11px] text-muted-foreground"
+                      >{{ t("pluginPlatform.installedVersionUpdatable", { installed: selectedDefinition?.plugin.manifest.version || "0.0.0", latest: selectedUpdateEntry.listing.plugin.latestVersion }) }} · {{ selectedUpdateEntry.repositoryName }}</span
+                    >
+                  </div>
+                </div>
+
+                <div v-if="!selectedDefinition.plugin.compatibility.compatible && selectedDefinition.plugin.compatibility.errors?.length" class="space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs" role="alert" data-plugin-compatibility-errors>
+                  <div class="font-medium text-destructive">{{ t("pluginPlatform.compatibilityErrors") }}</div>
+                  <ul class="list-disc space-y-1 pl-5 text-muted-foreground">
+                    <li v-for="error in selectedDefinition.plugin.compatibility.errors" :key="error" class="break-words">{{ error }}</li>
+                  </ul>
+                </div>
+
+                <PluginAiAccessSection :key="selectedDefinition.plugin.manifest.id" :plugin="selectedDefinition.plugin" />
+
+                <PluginGraphicsEngineSection :key="`graphics-${selectedDefinition.plugin.manifest.id}`" :plugin="selectedDefinition.plugin" />
+
+                <div v-if="connectionProviders.some((entry) => entry.plugin.manifest.id === selectedPluginId)" class="space-y-3">
+                  <div class="flex flex-wrap gap-2">
+                    <Button
+                      v-for="entry in connectionProviders.filter((candidate) => candidate.plugin.manifest.id === selectedPluginId)"
+                      :key="entry.contribution.id"
+                      size="sm"
+                      :variant="selectedContributionId === entry.contribution.id ? 'secondary' : 'outline'"
+                      @click="selectProvider(entry.plugin.manifest.id, entry.contribution.id)"
+                      ><PluginIcon :plugin-id="entry.plugin.manifest.id" :icon="pluginConnectionProviderIcon(entry)" class="mr-1 size-3.5" />{{ entry.contribution.label }}</Button
+                    >
+                  </div>
+                  <div v-if="selectedEntry" class="space-y-4 rounded-lg border p-4">
+                    <div class="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div class="text-sm font-medium">{{ selectedEntry.contribution.label }}</div>
+                        <div class="mt-1 text-xs text-muted-foreground">{{ selectedEntry.contribution.description || selectedEntry.contribution.database_type }}</div>
+                      </div>
+                      <Badge variant="outline">{{ t("pluginPlatform.connectionProvider") }}</Badge>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Button size="sm" class="gap-1.5" @click="createConnection"><Plus class="size-3.5" />{{ t("pluginPlatform.newConnection") }}</Button>
+                      <div v-for="connection in providerConnections" :key="connection.id" class="inline-flex items-center">
+                        <Button size="sm" class="rounded-r-none" :variant="selectedConnectionId === connection.id ? 'secondary' : 'outline'" @click="selectConnection(connection.id)">{{ connection.name }}</Button>
+                        <Button size="icon-sm" class="rounded-l-none border-l-0" :variant="selectedConnectionId === connection.id ? 'secondary' : 'outline'" :title="t('common.edit')" :aria-label="t('common.edit')" @click="editConnection(connection.id)"><Pencil class="size-3.5" /></Button>
+                      </div>
+                    </div>
+                    <div class="rounded-md border border-dashed bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">{{ t("pluginPlatform.connectionManagedInDialog") }}</div>
+                  </div>
+                </div>
+
+                <div v-if="selectedWorkbenches.length" class="space-y-2">
+                  <div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">{{ t("pluginPlatform.workbenches") }}</div>
+                  <div v-for="entry in selectedWorkbenches" :key="entry.contribution.id" class="flex items-center justify-between gap-3 rounded-lg border p-3">
+                    <div>
+                      <div class="text-sm font-medium">{{ entry.contribution.label }}</div>
+                      <div class="text-xs text-muted-foreground">{{ entry.contribution.description || entry.contribution.id }}</div>
+                    </div>
+                    <Button size="sm" variant="outline" class="gap-1.5" @click="openWorkbench(entry.plugin.manifest.id, entry.contribution.id, entry.contribution.label)"><ExternalLink class="size-3.5" />{{ t("pluginPlatform.open") }}</Button>
+                  </div>
+                </div>
+
+                <div v-if="selectedFilesystems.length && !selectedHasCommands" class="space-y-2">
+                  <div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">{{ t("pluginPlatform.filesystemProviders") }}</div>
+                  <div v-for="entry in selectedFilesystems" :key="entry.contribution.id" class="flex items-center justify-between gap-3 rounded-lg border p-3">
+                    <div>
+                      <div class="text-sm font-medium">{{ entry.contribution.label }}</div>
+                      <div class="mt-1 text-xs text-muted-foreground">{{ entry.contribution.schemes.join(", ") }} · {{ (entry.contribution.capabilities || []).join(", ") }}</div>
+                    </div>
+                    <Button size="sm" variant="outline" class="gap-1.5" @click="openFilesystem(entry.plugin.manifest.id, entry.contribution.id, entry.contribution.label, entry.contribution.root_uri)"><FolderTree class="size-3.5" />{{ t("pluginPlatform.browse") }}</Button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </TabsContent>
+
+      <TabsContent value="settings" class="@container m-0 min-h-0 flex-1 overflow-y-auto">
+        <div class="space-y-4 pb-2">
+          <PluginShortcutSettings />
+          <section class="space-y-3 rounded-xl border p-4">
+            <div class="flex items-start gap-3">
+              <div class="rounded-md bg-primary/10 p-2 text-primary"><FileUp class="size-4" /></div>
+              <div>
+                <div class="text-sm font-medium">{{ t("pluginPlatform.localInstallTitle") }}</div>
+                <div class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("pluginPlatform.localInstallDescription") }}</div>
+              </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
+              <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><ShieldCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />{{ t("pluginPlatform.signedPackagesVerifiedAutomatically") }}</div>
+              <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><FileUp class="size-3.5" />{{ t("pluginPlatform.dropInstallHint") }}</div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="relative min-w-0 flex-1 sm:max-w-md">
+                <Link2 class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+                <Input v-model="installUrl" class="h-8 pl-8 font-mono text-xs" type="url" :disabled="urlInstalling" :placeholder="t('pluginPlatform.installUrlPlaceholder')" @keyup.enter="installPluginFromUrl" />
+              </div>
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !installUrl.trim()" @click="installPluginFromUrl"><Loader2 v-if="urlInstalling" class="size-3.5 animate-spin" /><Download v-else class="size-3.5" />{{ t("pluginPlatform.installFromUrl") }}</Button>
+            </div>
+            <div v-if="urlInstalling" class="space-y-1.5">
+              <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                <div class="h-full rounded-full bg-primary transition-[width]" :class="urlProgressPercent === null ? 'w-1/3 animate-pulse' : ''" :style="{ width: urlProgressPercent === null ? undefined : `${urlProgressPercent}%` }" />
+              </div>
+              <div class="text-[10px] text-muted-foreground">{{ urlProgressLabel }}</div>
+            </div>
+          </section>
+
+          <section class="space-y-3 rounded-xl border p-4">
+            <div class="flex items-start gap-3">
+              <div class="rounded-md bg-primary/10 p-2 text-primary"><Store class="size-4" /></div>
+              <div>
+                <div class="text-sm font-medium">{{ t("pluginPlatform.repositoriesTitle") }}</div>
+                <div class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("pluginPlatform.repositoriesDescription") }}</div>
+              </div>
+            </div>
+            <div class="divide-y rounded-md border">
+              <div v-for="repository in repositories" :key="repository.id" class="flex flex-wrap items-center gap-3 px-3 py-2.5">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 text-xs font-medium">
+                    <span>{{ repository.name }}</span
+                    ><Badge variant="outline" class="h-4 px-1.5 text-[9px]">{{ t(`pluginPlatform.repositoryKind.${repository.kind}`) }}</Badge>
+                  </div>
+                  <div class="mt-1 truncate font-mono text-[10px] text-muted-foreground">{{ repository.catalogUrl || t("pluginPlatform.repositoryNotConfigured") }}</div>
+                </div>
+                <Badge :variant="repository.enabled ? 'secondary' : 'outline'" class="h-5 px-1.5 text-[10px]">{{ repository.enabled ? t("pluginPlatform.enabled") : t("pluginPlatform.disabled") }}</Badge>
+                <Button v-if="!repository.managed" size="sm" variant="ghost" class="h-7" :disabled="mutationRunning" @click="toggleRepository(repository)">{{ repository.enabled ? t("pluginPlatform.disable") : t("pluginPlatform.enable") }}</Button>
+                <Button v-if="!repository.managed" size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeRepository(repository)"><Trash2 class="size-3.5" /></Button>
+              </div>
+            </div>
+            <!-- 同样按面板宽度切换：四列固定轨道 + 最长语言按钮实测约需 855px（含 pt-BR 标签），
+                 视口断点(lg:)在窄面板下会整行溢出(#10582 同类) -->
+            <div class="grid gap-2 @min-[56rem]:grid-cols-[180px_220px_minmax(260px,1fr)_auto]">
+              <Input v-model="repositoryId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryIdPlaceholder')" />
+              <Input v-model="repositoryName" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryNamePlaceholder')" />
+              <Input v-model="repositoryCatalogUrl" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryCatalogUrlPlaceholder')" />
+              <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveRepository"><Plus class="size-3.5" />{{ t("pluginPlatform.addRepository") }}</Button>
+            </div>
+          </section>
+
+          <details class="group rounded-xl border bg-muted/15" open>
+            <summary class="flex cursor-pointer list-none items-start gap-3 p-4 marker:content-none">
+              <div class="rounded-md bg-muted p-2 text-muted-foreground"><Settings2 class="size-4" /></div>
+              <div class="min-w-0 flex-1">
+                <div class="text-sm font-medium">{{ t("pluginPlatform.developerOptionsTitle") }}</div>
+                <div class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("pluginPlatform.developerOptionsDescription") }}</div>
+              </div>
+              <ChevronRight class="mt-2 size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+            </summary>
+            <div class="space-y-4 border-t p-4">
+              <div class="flex gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-amber-800 dark:text-amber-200">
+                <CircleAlert class="mt-0.5 size-4 shrink-0" />
+                <div class="text-xs leading-5">{{ t("pluginPlatform.developerOptionsWarning") }}</div>
+              </div>
+
+              <div class="flex items-center justify-between gap-4 rounded-lg border bg-background p-3">
+                <div class="min-w-0">
+                  <div class="text-xs font-medium">{{ t("pluginPlatform.pluginDevelopmentDocsTitle") }}</div>
+                  <div class="mt-1 text-[11px] leading-5 text-muted-foreground">{{ t("pluginPlatform.pluginDevelopmentDocsDescription") }}</div>
+                </div>
+                <Button size="sm" variant="outline" class="shrink-0 gap-1.5" @click="openExternal(pluginDevelopmentDocsUrl)"><ExternalLink class="size-3.5" />{{ t("pluginPlatform.pluginDevelopmentDocsOpen") }}</Button>
+              </div>
+
+              <div class="flex items-start justify-between gap-4 rounded-lg border bg-background p-3">
+                <div class="min-w-0">
+                  <Label for="allow-unsigned-plugin-package" class="text-xs font-medium">{{ t("pluginPlatform.allowUnsignedDevelopmentPackage") }}</Label>
+                  <div class="mt-1 text-[11px] leading-5 text-muted-foreground">{{ t("pluginPlatform.allowUnsignedDevelopmentPackageDescription") }}</div>
+                </div>
+                <Switch id="allow-unsigned-plugin-package" v-model="allowUnsigned" size="sm" class="mt-0.5 shrink-0" />
+              </div>
+
+              <template v-if="showCustomRepositoryTrustSettings">
+                <div>
+                  <div class="text-sm font-medium">{{ t("pluginPlatform.repositoryTrustTitle") }}</div>
+                  <div class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("pluginPlatform.repositoryTrustDescription") }}</div>
+                </div>
+                <div v-if="trustedKeys.length" class="divide-y rounded-md border bg-background">
+                  <div v-for="key in trustedKeys" :key="key.keyId" class="flex items-center gap-3 px-3 py-2">
+                    <div class="min-w-0 flex-1">
+                      <div class="text-xs font-medium">{{ key.keyId }}</div>
+                      <div class="truncate font-mono text-[10px] text-muted-foreground" :title="key.publicKey">{{ abbreviatedPublicKey(key.publicKey) }}</div>
+                    </div>
+                    <Button size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeTrustedKey(key.keyId)"><Trash2 class="size-3.5" /></Button>
+                  </div>
+                </div>
+                <div class="grid gap-2 @min-[42rem]:grid-cols-[180px_minmax(260px,1fr)_auto]">
+                  <Input v-model="trustedKeyId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryKeyIdPlaceholder')" />
+                  <Input v-model="trustedPublicKey" class="h-8 font-mono text-xs" :placeholder="t('pluginPlatform.repositoryPublicKeyPlaceholder')" />
+                  <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveTrustedKey"><ShieldCheck class="size-3.5" />{{ t("pluginPlatform.trustRepository") }}</Button>
+                </div>
+              </template>
+            </div>
+          </details>
+        </div>
+      </TabsContent>
+    </Tabs>
+
+    <Dialog :open="marketplaceDetailOpen" @update:open="(open: boolean) => (open ? (marketplaceDetailOpen = true) : closeMarketplaceDetails())">
+      <DialogContent class="max-h-[min(90vh,52rem)] max-w-3xl gap-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-0" @close-auto-focus="restoreMarketplaceDetailFocus">
+        <template v-if="selectedMarketplaceListing">
+          <DialogHeader class="@container border-b px-6 py-3 pr-14 text-left">
+            <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-4 @min-[34rem]:grid-cols-[auto_minmax(0,1fr)_auto]">
+              <PluginIcon :plugin-id="selectedMarketplaceListing.plugin.id" :icon="selectedMarketplaceListing.plugin.icon" class="size-12 shrink-0 rounded-xl border bg-background p-2" />
+              <div class="min-w-0 flex-1">
+                <DialogTitle class="flex min-w-0 items-baseline gap-2 text-base">
+                  <span class="truncate">{{ selectedMarketplaceListing.name }}</span>
+                  <span class="shrink-0 text-xs font-normal text-muted-foreground">v{{ selectedMarketplaceListing.installed?.manifest.version || selectedMarketplaceListing.plugin.latestVersion }}</span>
+                </DialogTitle>
+                <DialogDescription class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                  <BadgeCheck v-if="selectedMarketplaceListing.verified" class="size-3.5 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" />
+                  <span v-if="marketplacePluginProvidesMcpTools(selectedMarketplaceListing.plugin)" class="rounded border border-primary/40 px-1 text-[10px] font-medium leading-4 text-primary" :title="t('pluginPlatform.mcpToolsBadgeHint')">{{ t("pluginPlatform.mcpToolsBadge") }}</span>
+                  <button type="button" class="rounded-sm font-medium text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click.stop="filterByPublisher(selectedMarketplaceListing.plugin.publisher)">
+                    {{ selectedMarketplaceListing.plugin.publisher }}
+                  </button>
+                  <span aria-hidden="true">·</span>
+                  <span>{{ selectedMarketplaceListing.repository.name }}</span>
+                  <span class="font-mono text-[10px]">{{ selectedMarketplaceListing.plugin.id }}</span>
+                </DialogDescription>
+              </div>
+              <div class="col-span-2 flex flex-wrap items-center gap-2 @min-[34rem]:col-span-1 @min-[34rem]:justify-end">
+                <Button v-if="detailCanOpen" size="sm" class="h-8 shrink-0 gap-1.5 rounded-md px-3 text-xs" :disabled="detailOpening || mutationRunning || (detailShortcuts.length === 1 && detailShortcuts[0].disabled)" @click="openDetailPlugin">
+                  <ExternalLink class="size-3.5" />{{ t("pluginPlatform." + detailOpenLabel) }}
+                </Button>
+                <Button v-if="detailProviders.length && (detailShortcuts.length || detailConnections.length === 1)" variant="outline" size="sm" class="h-8 shrink-0 rounded-md px-3 text-xs" :disabled="detailOpening || mutationRunning" @click="detailChooseConnection = !detailChooseConnection">{{
+                  t("pluginPlatform.chooseConnection")
+                }}</Button>
+                <Button
+                  v-if="selectedMarketplaceListing.status !== 'installed'"
+                  size="sm"
+                  class="h-8 shrink-0 gap-1.5 rounded-md px-3 text-xs"
+                  :class="marketplaceActionClass(selectedMarketplaceListing)"
+                  :disabled="selectedMarketplaceListing.status === 'unsupported' || mutationRunning"
+                  @click.stop="installMarketplaceListing(selectedMarketplaceListing)"
+                >
+                  <Loader2 v-if="marketplaceInstallingKey === selectedMarketplaceListing.key" class="size-3.5 animate-spin" />
+                  {{ t(`pluginPlatform.marketplaceStatus.${selectedMarketplaceListing.status}`) }}
+                </Button>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div class="min-h-0 overflow-y-auto px-6 py-4">
+            <div v-if="detailChooseEntry" class="mb-4 flex flex-col gap-2 rounded-lg border p-3">
+              <Button v-for="entry in detailShortcuts" :key="entry.id" variant="outline" class="justify-start" :disabled="entry.disabled || detailOpening || mutationRunning" @click="launchDetailEntry(entry)">{{ entry.label }}</Button>
+            </div>
+            <div v-if="detailChooseConnection" class="mb-4 flex flex-col gap-2 rounded-lg border p-3">
+              <div class="text-sm font-medium">{{ t("pluginPlatform.chooseConnection") }}</div>
+              <Button v-for="connection in detailConnections" :key="connection.id" variant="outline" class="justify-start" :disabled="detailOpening || mutationRunning" @click="launchDetailEntry(connection.id)">{{ connection.name }}</Button>
+              <Button v-for="entry in detailProviders" :key="entry.contribution.id" variant="outline" class="justify-start" :disabled="detailOpening || mutationRunning" @click="createDetailConnection(entry.contribution.id)"
+                ><Plus class="size-3.5" />{{ t("pluginPlatform.newConnection") }} · {{ entry.contribution.label }}</Button
+              >
+            </div>
+            <Tabs default-value="overview" class="w-full">
+              <TabsList class="mb-4 grid h-auto w-full grid-cols-4">
+                <TabsTrigger value="overview" class="text-xs">{{ t("pluginPlatform.pluginDetailsOverview") }}</TabsTrigger>
+                <TabsTrigger value="updates" class="text-xs">{{ t("pluginPlatform.pluginDetailsUpdates") }}</TabsTrigger>
+                <TabsTrigger value="permissions" class="text-xs">{{ t("pluginPlatform.pluginDetailsPermissions") }}</TabsTrigger>
+                <TabsTrigger value="repository" class="text-xs">{{ t("pluginPlatform.pluginDetailsRepository") }}</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="overview" class="mt-0 space-y-4">
+                <section class="space-y-2">
+                  <h3 class="text-sm font-semibold">{{ t("pluginPlatform.pluginDetailsIntroduction") }}</h3>
+                  <p class="whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{{ selectedMarketplaceListing.description || t("pluginPlatform.noDescription") }}</p>
+                </section>
+                <div class="grid grid-cols-2 gap-3 text-xs @min-[40rem]:grid-cols-4">
+                  <div class="rounded-lg border p-3">
+                    <div class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsVersion") }}</div>
+                    <div class="mt-1 font-medium">v{{ selectedMarketplaceListing.plugin.latestVersion }}</div>
+                  </div>
+                  <div class="rounded-lg border p-3">
+                    <div class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsLicense") }}</div>
+                    <div class="mt-1 font-medium">{{ selectedMarketplaceListing.plugin.license || t("pluginPlatform.licenseUnknown") }}</div>
+                  </div>
+                  <div class="rounded-lg border p-3">
+                    <div class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsReleaseDate") }}</div>
+                    <div class="mt-1 font-medium">{{ formatMarketplaceReleasedDate(selectedMarketplaceListing.latestVersionReleasedAt, appLocale) || "—" }}</div>
+                  </div>
+                  <div class="rounded-lg border p-3">
+                    <div class="text-muted-foreground">{{ t("pluginPlatform.sortByInstalls") }}</div>
+                    <div class="mt-1 font-medium tabular-nums">{{ listingInstallCount(selectedMarketplaceListing.plugin.id) ? formatInstallCount(listingInstallCount(selectedMarketplaceListing.plugin.id)) : "—" }}</div>
+                  </div>
+                </div>
+                <div v-if="selectedMarketplaceListing.plugin.tags.length" class="flex flex-wrap gap-1.5">
+                  <Badge v-for="tag in selectedMarketplaceListing.plugin.tags" :key="tag" variant="outline" class="text-[11px]">{{ tag }}</Badge>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <Button v-if="selectedMarketplaceListing.plugin.source" variant="outline" size="sm" class="h-8 gap-1.5 text-xs" @click.stop="openExternal(selectedMarketplaceListing.plugin.source)"><GithubIcon />{{ t("pluginPlatform.sourceRepository") }}</Button>
+                  <Button
+                    v-if="marketplaceHomepageUrl(selectedMarketplaceListing.plugin.source, selectedMarketplaceListing.plugin.homepage)"
+                    variant="outline"
+                    size="sm"
+                    class="h-8 gap-1.5 text-xs"
+                    @click.stop="openExternal(marketplaceHomepageUrl(selectedMarketplaceListing.plugin.source, selectedMarketplaceListing.plugin.homepage))"
+                    ><Globe class="size-3.5" />{{ t("pluginPlatform.pluginHomepage") }}</Button
+                  >
+                </div>
+              </TabsContent>
+
+              <TabsContent value="updates" class="mt-0 space-y-3">
+                <div v-if="!selectedMarketplaceVersions.length" class="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">{{ t("pluginPlatform.noVersionHistory") }}</div>
+                <div v-for="version in selectedMarketplaceVersions" :key="version.version" class="overflow-hidden rounded-lg border">
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    :aria-expanded="isMarketplaceVersionExpanded(version.version)"
+                    @click="toggleMarketplaceVersion(version.version)"
+                  >
+                    <span class="shrink-0 font-medium text-xs">v{{ version.version }}</span>
+                    <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">{{ marketplaceVersionPublishedLabel(version) || "—" }}</span>
+                    <ChevronDown class="size-4 shrink-0 text-muted-foreground transition-transform" :class="isMarketplaceVersionExpanded(version.version) ? 'rotate-180' : ''" />
+                  </button>
+                  <div v-if="isMarketplaceVersionExpanded(version.version)" class="border-t px-3 py-2.5">
+                    <p class="whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{{ version.releaseNotes || t("pluginPlatform.noReleaseNotes") }}</p>
+                    <div v-if="version.artifacts.length" class="mt-2 flex flex-wrap gap-1.5">
+                      <Badge v-for="artifact in version.artifacts" :key="artifact.target" variant="secondary" class="font-mono text-[10px]">{{ artifact.target }}</Badge>
+                    </div>
+                    <Button v-if="marketplaceVersionReleaseUrl(version)" type="button" variant="ghost" size="sm" class="mt-3 h-7 gap-1.5 px-2 text-xs" @click.stop="openExternal(marketplaceVersionReleaseUrl(version))">
+                      <ExternalLink class="size-3" />
+                      {{ t("pluginPlatform.pluginDetailsOpenRelease") }}
+                    </Button>
+                  </div>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="permissions" class="mt-0 space-y-4">
+                <section class="space-y-2">
+                  <h3 class="text-sm font-semibold">{{ t("pluginPlatform.pluginDetailsPermissions") }}</h3>
+                  <div v-if="selectedMarketplaceListing.plugin.permissions.length" class="flex flex-wrap gap-1.5">
+                    <Badge v-for="permission in selectedMarketplaceListing.plugin.permissions" :key="permission" :variant="isSensitivePluginPermission(permission) ? 'destructive' : 'outline'" class="font-mono text-[10px]">{{ permission }}</Badge>
+                  </div>
+                  <p v-else class="text-xs text-muted-foreground">{{ t("pluginPlatform.noPermissions") }}</p>
+                </section>
+                <section class="space-y-2">
+                  <h3 class="text-sm font-semibold">{{ t("pluginPlatform.pluginDetailsCompatibility") }}</h3>
+                  <div class="rounded-lg border p-3 text-xs">
+                    <div class="flex justify-between gap-3">
+                      <span class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsCurrentTarget") }}</span
+                      ><span class="font-mono">{{ selectedMarketplaceListing.target }}</span>
+                    </div>
+                    <div class="mt-2 flex justify-between gap-3">
+                      <span class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsStatus") }}</span
+                      ><span>{{ t(`pluginPlatform.marketplaceStatus.${selectedMarketplaceListing.status}`) }}</span>
+                    </div>
+                  </div>
+                </section>
+              </TabsContent>
+
+              <TabsContent value="repository" class="mt-0 space-y-3">
+                <dl class="divide-y rounded-lg border text-xs">
+                  <div class="flex justify-between gap-3 px-3 py-2.5">
+                    <dt class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsRepository") }}</dt>
+                    <dd class="font-medium">{{ selectedMarketplaceListing.repository.name }}</dd>
+                  </div>
+                  <div class="flex justify-between gap-3 px-3 py-2.5">
+                    <dt class="text-muted-foreground">{{ t("pluginPlatform.pluginDetailsPublisher") }}</dt>
+                    <dd>{{ selectedMarketplaceListing.plugin.publisher }}</dd>
+                  </div>
+                  <div class="flex justify-between gap-3 px-3 py-2.5">
+                    <dt class="text-muted-foreground">{{ t("pluginPlatform.verified") }}</dt>
+                    <dd>{{ selectedMarketplaceListing.verified ? t("pluginPlatform.verified") : t("pluginPlatform.unverified") }}</dd>
+                  </div>
+                </dl>
+                <Button v-if="selectedMarketplaceListing.repositoryHomepage" variant="outline" size="sm" class="h-8 gap-1.5 text-xs" @click.stop="openExternal(selectedMarketplaceListing.repositoryHomepage)"><Globe class="size-3.5" />{{ t("pluginPlatform.pluginDetailsRepositoryHomepage") }}</Button>
+              </TabsContent>
+            </Tabs>
+          </div>
+        </template>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="!!pendingSourceChange"
+      @update:open="
+        (open: boolean) => {
+          if (!open) cancelUpdateSourceChange();
+        }
+      "
+    >
+      <DialogContent class="max-w-md gap-4">
+        <DialogHeader>
+          <DialogTitle class="text-sm">{{ t("pluginPlatform.updateSourceChangeTitle") }}</DialogTitle>
+          <DialogDescription class="text-xs leading-5">{{ t("pluginPlatform.updateSourceChangeBody") }}</DialogDescription>
+        </DialogHeader>
+        <div v-if="pendingSourceChange" class="grid grid-cols-2 gap-2 text-xs">
+          <div class="rounded-lg border p-3">
+            <div class="mb-2 text-[11px] font-semibold text-muted-foreground">{{ t("pluginPlatform.provenanceCurrentInstall") }}</div>
+            <dl class="space-y-1">
+              <div class="flex justify-between gap-2">
+                <dt class="shrink-0 text-muted-foreground">{{ t("pluginPlatform.provenanceRepository") }}</dt>
+                <dd class="truncate">{{ pendingSourceChange.listing.installed?.provenance?.repositoryId || "-" }}</dd>
+              </div>
+              <div class="flex justify-between gap-2">
+                <dt class="shrink-0 text-muted-foreground">{{ t("pluginPlatform.provenancePublisher") }}</dt>
+                <dd class="truncate">{{ pendingSourceChange.listing.installed?.provenance?.publisher || "-" }}</dd>
+              </div>
+              <div class="flex justify-between gap-2">
+                <dt class="shrink-0 text-muted-foreground">{{ t("pluginPlatform.provenanceSigningKey") }}</dt>
+                <dd class="truncate font-mono text-[10px]">{{ pendingSourceChange.listing.installed?.provenance?.signingKeyId || "-" }}</dd>
+              </div>
+            </dl>
+          </div>
+          <div class="rounded-lg border border-amber-500/40 p-3">
+            <div class="mb-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300">{{ t("pluginPlatform.provenanceCandidate") }}</div>
+            <dl class="space-y-1">
+              <div class="flex justify-between gap-2">
+                <dt class="shrink-0 text-muted-foreground">{{ t("pluginPlatform.provenanceRepository") }}</dt>
+                <dd class="truncate">{{ pendingSourceChange.listing.repository.id }}</dd>
+              </div>
+              <div class="flex justify-between gap-2">
+                <dt class="shrink-0 text-muted-foreground">{{ t("pluginPlatform.provenancePublisher") }}</dt>
+                <dd class="truncate">{{ pendingSourceChange.listing.plugin.publisher }}</dd>
+              </div>
+              <div class="flex justify-between gap-2">
+                <dt class="shrink-0 text-muted-foreground">{{ t("pluginPlatform.provenanceSigningKey") }}</dt>
+                <dd class="truncate font-mono text-[10px]">{{ pendingSourceChange.listing.artifact?.signingKeyId || "-" }}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+        <DialogFooter class="gap-2">
+          <Button variant="outline" size="sm" @click="cancelUpdateSourceChange">{{ t("common.cancel") }}</Button>
+          <Button size="sm" :disabled="mutationRunning" @click="proceedUpdateSourceChange">{{ t("pluginPlatform.updateSourceChangeConfirm") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="!!uninstallDependents"
+      @update:open="
+        (open: boolean) => {
+          if (!open) cancelUninstallDependents();
+        }
+      "
+    >
+      <DialogContent class="max-w-md gap-4">
+        <DialogHeader>
+          <DialogTitle class="text-sm">{{ t("pluginPlatform.uninstallDependentsTitle") }}</DialogTitle>
+          <DialogDescription class="text-xs leading-5">{{ t("pluginPlatform.uninstallDependentsBody", { name: uninstallDependents?.pluginName ?? "" }) }}</DialogDescription>
+        </DialogHeader>
+        <div v-if="uninstallDependents" class="max-h-40 overflow-y-auto rounded-md border p-2 text-xs">
+          <div v-for="connection in uninstallDependents.connections" :key="connection.id" class="truncate py-0.5">{{ connection.name }}</div>
+        </div>
+        <DialogFooter class="gap-2">
+          <Button variant="outline" size="sm" @click="cancelUninstallDependents">{{ t("common.cancel") }}</Button>
+          <Button variant="destructive" size="sm" :disabled="mutationRunning" @click="confirmUninstallWithDependents">{{ t("pluginPlatform.uninstallDependentsConfirm") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <div v-if="draggingPackage" class="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary/60 bg-primary/5">
+      <FileUp class="size-8 text-primary" />
+      <div class="text-sm font-medium text-primary">{{ t("pluginPlatform.dropToInstall") }}</div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/*
+ * 商店卡片的补充样式。布局主体走 Tailwind 工具类，这里只放三件事：
+ * TransitionGroup 的 FLIP 过渡、完成对勾弹入、矮窗降密度。
+ * 所有动效集中在 prefers-reduced-motion: no-preference 下，减弱动效的用户自动退化为静态。
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .marketplace-cards-move {
+    /* 与卡片自身 transition-colors 同为 transition 简写，须 !important 保证 FLIP 位移生效 */
+    transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  }
+
+  .marketplace-cards-enter-active {
+    transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .marketplace-cards-leave-active {
+    transition: opacity 0.12s ease-out;
+  }
+
+  .marketplace-check-pop {
+    animation: marketplace-check-pop 0.12s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+.marketplace-cards-enter-from,
+.marketplace-cards-leave-to {
+  opacity: 0;
+}
+
+@keyframes marketplace-check-pop {
+  from {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* 矮窗（窗口高 ≤700px）降密度：描述收 2 行、内边距收紧，更多内容交给滚动区 */
+@media (max-height: 700px) {
+  .marketplace-guide-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .marketplace-card {
+    min-height: 10rem;
+    padding: 0.75rem;
+  }
+
+  .marketplace-tags {
+    margin-top: 0.5rem;
+  }
+
+  .marketplace-desc {
+    margin-top: 0.5rem;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+
+  .marketplace-footer {
+    padding-top: 0.625rem;
+  }
+}
+</style>

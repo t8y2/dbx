@@ -11,6 +11,14 @@ mod token_row;
 mod token_sspi;
 mod token_type;
 
+fn message_line_number_bytes(length: usize, message: &str, server: &str, procedure: &str) -> crate::Result<usize> {
+    let fixed_bytes = 10 + 2 * (message.encode_utf16().count() + server.encode_utf16().count() + procedure.encode_utf16().count());
+    match length.checked_sub(fixed_bytes) {
+        Some(width @ (2 | 4)) => Ok(width),
+        _ => Err(crate::Error::Protocol("Invalid INFO/ERROR token length".into())),
+    }
+}
+
 pub use token_col_metadata::*;
 pub use token_done::*;
 pub use token_env_change::*;

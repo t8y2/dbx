@@ -1,0 +1,851 @@
+// @vitest-environment happy-dom
+
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import i18n from "@/i18n";
+import type { TableImportPreview, TableImportRequest, TableImportProgress, TableImportSummary } from "@/lib/backend/api";
+
+const mocks = vi.hoisted(() => ({
+  ensureConnected: vi.fn().mockResolvedValue(undefined),
+  listTables: vi.fn().mockResolvedValue([
+    { name: "existing_target", table_type: "TABLE" },
+    { name: "archived_target", table_type: "TABLE" },
+  ]),
+  getColumns: vi.fn().mockResolvedValue([
+    { name: "id", data_type: "INTEGER", nullable: false },
+    { name: "name", data_type: "TEXT", nullable: true },
+  ]),
+  listDataTypes: vi.fn().mockResolvedValue(["INTEGER", "TEXT"]),
+  previewTableImportFile: vi.fn(),
+  importTableFile: vi.fn<(request: TableImportRequest, onProgress: (progress: TableImportProgress) => void) => Promise<TableImportSummary>>(),
+  releaseTableImportSource: vi.fn().mockResolvedValue(undefined),
+  previewSqlFile: vi.fn(),
+  refreshDataTabsForTable: vi.fn().mockResolvedValue(1),
+  invalidateMetadataCache: vi.fn(),
+  store: { sqlFileSource: null as unknown, connectedIds: new Set<string>() },
+}));
+
+vi.mock("@/stores/connectionStore", () => ({
+  useConnectionStore: () =>
+    Object.assign(mocks.store, {
+      getConfig: (id: string) => {
+        if (id === "mysql-1") return { id, name: "MySQL", db_type: "mysql" };
+        if (id === "connection-1") return { id, name: "SQLite", db_type: "sqlite" };
+        if (id === "postgres-1") return { id, name: "PostgreSQL", db_type: "postgres" };
+        if (id === "sqlserver-1") return { id, name: "SQL Server", db_type: "sqlserver" };
+        if (id === "duckdb-1") return { id, name: "DuckDB", db_type: "duckdb" };
+        return undefined;
+      },
+      ensureConnected: mocks.ensureConnected,
+      invalidateMetadataCache: mocks.invalidateMetadataCache,
+      refreshObjectListTreeNode: vi.fn().mockResolvedValue(undefined),
+    }),
+}));
+
+vi.mock("@/stores/queryStore", () => ({
+  useQueryStore: () => ({ refreshDataTabsForTable: mocks.refreshDataTabsForTable }),
+}));
+
+vi.mock("@/stores/settingsStore", () => ({
+  useSettingsStore: () => ({ editorSettings: {} }),
+}));
+
+vi.mock("@/lib/backend/api", () => ({
+  listTables: mocks.listTables,
+  getColumns: mocks.getColumns,
+  listDataTypes: mocks.listDataTypes,
+  previewTableImportFile: mocks.previewTableImportFile,
+  releaseTableImportSource: mocks.releaseTableImportSource,
+  importTableFile: mocks.importTableFile,
+  cancelTableImport: vi.fn(),
+}));
+
+vi.mock("@/lib/backend/http", () => ({ previewSqlFile: mocks.previewSqlFile }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+
+vi.mock("@/components/ui/dialog", async () => {
+  const { defineComponent, h } = await import("vue");
+  const passthrough = defineComponent({
+    setup(_props, { attrs, slots }) {
+      return () => h("div", attrs, slots.default?.());
+    },
+  });
+  return {
+    Dialog: passthrough,
+    DialogHeader: passthrough,
+    DialogTitle: passthrough,
+    DialogFooter: passthrough,
+    DialogScrollContent: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/button", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Button: defineComponent({
+      props: { disabled: Boolean },
+      emits: ["click"],
+      setup(props, { attrs, slots, emit }) {
+        return () => h("button", { ...attrs, disabled: props.disabled, onClick: () => emit("click") }, slots.default?.());
+      },
+    }),
+  };
+});
+
+vi.mock("@/components/ui/input", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Input: defineComponent({
+      props: { modelValue: [String, Number], disabled: Boolean },
+      emits: ["update:modelValue"],
+      setup(props, { attrs, emit }) {
+        return () =>
+          h("input", {
+            ...attrs,
+            value: props.modelValue,
+            disabled: props.disabled,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
+          });
+      },
+    }),
+  };
+});
+
+vi.mock("@/components/ui/label", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    Label: defineComponent({
+      setup(_props, { slots }) {
+        return () => h("label", slots.default?.());
+      },
+    }),
+  };
+});
+
+vi.mock("@/components/ui/select", async () => {
+  const { defineComponent, h, inject, provide } = await import("vue");
+  const passthrough = defineComponent({
+    setup(_props, { slots }) {
+      return () => h("div", slots.default?.());
+    },
+  });
+  return {
+    Select: defineComponent({
+      props: { modelValue: String },
+      emits: ["update:modelValue"],
+      setup(_props, { emit, slots }) {
+        provide("selectOption", (value: string) => emit("update:modelValue", value));
+        return () => h("div", slots.default?.());
+      },
+    }),
+    SelectContent: passthrough,
+    SelectItem: defineComponent({
+      props: { value: String },
+      setup(props, { slots }) {
+        const selectOption = inject<(value: string) => void>("selectOption");
+        return () => h("span", { "data-select-option": props.value, onClick: () => selectOption?.(props.value || "") }, slots.default?.());
+      },
+    }),
+    SelectTrigger: passthrough,
+    SelectValue: passthrough,
+  };
+});
+
+vi.mock("@/components/ui/searchable-select", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    SearchableSelect: defineComponent({
+      props: {
+        modelValue: { type: String, default: "" },
+        options: { type: Array<string>, default: () => [] },
+        disabled: Boolean,
+      },
+      emits: ["update:modelValue"],
+      setup(props, { emit }) {
+        return () =>
+          h(
+            "select",
+            {
+              class: "existing-table-select-stub",
+              value: props.modelValue,
+              disabled: props.disabled,
+              onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value),
+            },
+            [h("option", { value: "" }), ...(props.options as string[]).map((option) => h("option", { value: option }, option))],
+          );
+      },
+    }),
+  };
+});
+
+import TableImportDialog from "@/components/import/TableImportDialog.vue";
+
+const mountedApps: App[] = [];
+const sheets = ["First", "Second", "Third"];
+
+function delimitedPreview(): TableImportPreview {
+  return {
+    fileName: "rows.csv",
+    filePath: "/tmp/rows.csv",
+    sourceRef: "delimited-source",
+    fileType: "csv",
+    sizeBytes: 10,
+    columns: ["id", "name"],
+    rows: [[1, "a"]],
+    totalRows: 2,
+    totalRowsExact: true,
+    sourceFingerprint: "rows-csv",
+  };
+}
+
+function workbookPreview(sheetName: string): TableImportPreview {
+  const index = sheets.indexOf(sheetName);
+  return {
+    fileName: "rows.xlsx",
+    filePath: "/tmp/rows.xlsx",
+    sourceRef: "workbook-source",
+    fileType: "excel",
+    sizeBytes: [10, 20, 30][index]!,
+    columns: ["id", "name"],
+    rows: [[index + 1, sheetName]],
+    totalRows: [2, 3, 5][index]!,
+    totalRowsExact: true,
+    sourceFingerprint: `rows-${sheetName}`,
+    sheets,
+  };
+}
+
+async function flushAsyncUpdates() {
+  for (let index = 0; index < 4; index += 1) {
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+async function mountSourceDialog(connectionId = "connection-1", props: Record<string, unknown> = {}) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const app = createApp(defineComponent({ setup: () => () => h(TableImportDialog, { open: true, prefillConnectionId: connectionId, prefillDatabase: "main", ...props }) }));
+  mountedApps.push(app);
+  app.use(i18n);
+  app.mount(container);
+  await flushAsyncUpdates();
+}
+
+async function selectFiles(files: File[]) {
+  const input = document.body.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, "files", { configurable: true, value: files });
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  await flushAsyncUpdates();
+}
+
+async function mountDialog(files = [new File(["workbook"], "rows.xlsx")], connectionId = "connection-1") {
+  await mountSourceDialog(connectionId);
+  await selectFiles(files);
+}
+
+function button(text: string) {
+  const result = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text);
+  expect(result, `button ${text}`).toBeTruthy();
+  return result!;
+}
+
+function taskCheckbox(name: string) {
+  const result = document.body.querySelector<HTMLInputElement>(`input[type="checkbox"][aria-label="Import ${name}"]`);
+  expect(result, `import selection for ${name}`).toBeTruthy();
+  return result!;
+}
+
+async function selectTask(name: string, selected: boolean) {
+  const checkbox = taskCheckbox(name);
+  checkbox.checked = selected;
+  checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+  await flushAsyncUpdates();
+}
+
+async function click(text: string) {
+  button(text).click();
+  await flushAsyncUpdates();
+}
+
+async function editInputWithValue(value: string, replacement: string) {
+  const input = [...document.body.querySelectorAll<HTMLInputElement>("input")].find((item) => item.value === value);
+  expect(input, `input ${value}`).toBeTruthy();
+  input!.value = replacement;
+  input!.dispatchEvent(new Event("input", { bubbles: true }));
+  await flushAsyncUpdates();
+}
+
+async function startImport() {
+  await click("Next");
+  await click("Next");
+  expect(button("Start Import").disabled).toBe(false);
+  await click("Start Import");
+}
+
+beforeEach(() => {
+  i18n.global.locale.value = "en";
+  mocks.listTables.mockReset().mockResolvedValue([]);
+  mocks.previewTableImportFile.mockReset().mockImplementation((_source, options) => Promise.resolve(workbookPreview(options.parseOptions.sheetName || "First")));
+  mocks.importTableFile.mockReset().mockImplementation(async (request, onProgress) => {
+    const rowsImported = request.preparedSource!.totalRows;
+    onProgress({ importId: request.importId, status: "done", phase: "done", rowsImported, totalRows: rowsImported, elapsedMs: 1 });
+    return { importId: request.importId, rowsImported, totalRows: rowsImported, elapsedMs: 1 };
+  });
+  mocks.releaseTableImportSource.mockReset().mockResolvedValue(undefined);
+  mocks.previewSqlFile.mockReset();
+  mocks.refreshDataTabsForTable.mockReset().mockResolvedValue(1);
+  mocks.store.sqlFileSource = null;
+  mocks.store.connectedIds = new Set(["connection-1", "mysql-1", "postgres-1", "sqlserver-1", "duckdb-1"]);
+});
+
+afterEach(() => {
+  for (const app of mountedApps.splice(0)) app.unmount();
+  document.body.textContent = "";
+  vi.clearAllMocks();
+});
+
+describe("TableImportDialog batch selection", () => {
+  it.each([
+    ["mysql-1", "main"],
+    ["postgres-1", "public"],
+  ])("refreshes the existing %s table only after import finishes", async (connectionId, schema) => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    mocks.importTableFile.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    await mountSourceDialog(connectionId, { prefillTable: "existing_target", prefillSchema: schema });
+    await selectFiles([new File(["id,name\n1,a"], "rows.csv")]);
+    await startImport();
+    expect(mocks.refreshDataTabsForTable).not.toHaveBeenCalled();
+
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
+    expect(mocks.refreshDataTabsForTable).toHaveBeenCalledExactlyOnceWith({ connectionId, database: "main", schema, schemaCandidates: connectionId === "mysql-1" ? [schema, undefined] : [schema], name: "existing_target" }, { skipPendingChanges: true });
+    expect(mocks.invalidateMetadataCache).toHaveBeenCalledWith(connectionId, "main", schema, "existing_target");
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it("keeps a successful import successful when refreshing its data tab fails", async () => {
+    mocks.refreshDataTabsForTable.mockRejectedValueOnce(new Error("refresh unavailable"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+      await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+      await startImport();
+      expect(mocks.refreshDataTabsForTable).toHaveBeenCalledTimes(1);
+      expect(document.body.textContent).toContain("Import complete");
+      expect(document.body.textContent).not.toContain("refresh unavailable");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("does not reconnect retained data tabs after the user disconnects during import", async () => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    mocks.importTableFile.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    await mountSourceDialog("mysql-1", { prefillTable: "existing_target" });
+    await selectFiles([new File(["id,name\n1,a"], "rows.csv")]);
+    await startImport();
+    mocks.store.connectedIds.delete("mysql-1");
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
+    expect(mocks.invalidateMetadataCache).toHaveBeenCalledWith("mysql-1", "main", "main", "existing_target");
+    expect(mocks.refreshDataTabsForTable).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it.each([0, 1])("refreshes after a failed import that may have truncated or written rows (rowsImported: %s)", async (rowsImported) => {
+    mocks.previewTableImportFile.mockResolvedValue(delimitedPreview());
+    mocks.importTableFile.mockImplementationOnce(async (request, onProgress) => {
+      onProgress({ importId: request.importId, status: "error", rowsImported, totalRows: 2, elapsedMs: 1 });
+      throw new Error("write failed");
+    });
+    await mountSourceDialog("mysql-1", { prefillTable: "existing_target" });
+    await selectFiles([new File(["id,name\n1,a"], "rows.csv")]);
+    await startImport();
+    expect(mocks.refreshDataTabsForTable).toHaveBeenCalledExactlyOnceWith({ connectionId: "mysql-1", database: "main", schema: "main", schemaCandidates: ["main", undefined], name: "existing_target" }, { skipPendingChanges: true });
+    expect(document.body.textContent).toContain("write failed");
+  });
+
+  it("refreshes only attempted batch targets, including a partially failed task", async () => {
+    mocks.importTableFile.mockImplementationOnce(async (request) => ({ importId: request.importId, rowsImported: 2, totalRows: 2, elapsedMs: 1 }));
+    mocks.importTableFile.mockRejectedValueOnce(new Error("second task failed"));
+    await mountDialog();
+    await startImport();
+    expect(mocks.refreshDataTabsForTable.mock.calls.map(([target]) => target.name)).toEqual(["rows_First", "rows_Second"]);
+    expect(document.body.textContent).toContain("second task failed");
+  });
+
+  it.each([false, true])("blocks import when every sheet is empty (single sheet: %s)", async (singleSheet) => {
+    mocks.previewTableImportFile.mockResolvedValue({ ...workbookPreview("First"), sheets: singleSheet ? ["First"] : sheets, columns: ["id"], rows: [], totalRows: 0 });
+    await mountDialog();
+    expect(button("Next").disabled).toBe(true);
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+  });
+
+  it.each(["First", "Second"])("keeps data sheets importable when %s is empty", async (emptySheet) => {
+    mocks.previewTableImportFile.mockImplementation((_source, options) => {
+      const name = options.parseOptions.sheetName || "First";
+      const preview = workbookPreview(name);
+      if (name === emptySheet) Object.assign(preview, { columns: [], rows: [], totalRows: 0, totalRowsExact: true });
+      return Promise.resolve(preview);
+    });
+    await mountDialog();
+
+    expect(taskCheckbox(`rows_${emptySheet}`).checked).toBe(false);
+    expect(taskCheckbox(`rows_${emptySheet}`).disabled).toBe(true);
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(2);
+    expect(mocks.importTableFile.mock.calls.every(([request]) => request.preparedSource!.totalRows > 0)).toBe(true);
+  });
+
+  it("reloads a single CSV preview and passes the selected decimal separator to import", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(['amount,note\n"12,50",plain'], "rows.csv")]);
+    expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1].parseOptions.decimalSeparator).toBe(".");
+
+    document.body.querySelector<HTMLElement>('[data-select-option=","]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1].parseOptions.decimalSeparator).toBe(",");
+
+    await startImport();
+    expect(mocks.importTableFile.mock.calls[0]![0].parseOptions?.decimalSeparator).toBe(",");
+  });
+
+  it("reloads selected batch CSV previews when the decimal separator changes", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name"], "first.csv"), new File(["id,name"], "second.csv")]);
+    mocks.previewTableImportFile.mockClear();
+    document.body.querySelector<HTMLElement>('[data-select-option=","]')!.click();
+    await flushAsyncUpdates();
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(2);
+    expect(mocks.previewTableImportFile.mock.calls.map(([, options]) => options.parseOptions.decimalSeparator)).toEqual([",", ","]);
+  });
+
+  it("uses all desktop grid columns when Parquet is unavailable", async () => {
+    await mountSourceDialog();
+
+    const formats = document.body.querySelector<HTMLElement>('[data-testid="table-import-format-options"]');
+    expect(formats?.classList.contains("lg:grid-cols-6")).toBe(true);
+    expect(formats?.classList.contains("lg:grid-cols-7")).toBe(false);
+  });
+
+  it.each([
+    ["mysql-1", {}, true],
+    ["postgres-1", {}, true],
+    ["mysql-1", { prefillTable: "orders" }, false],
+    ["connection-1", {}, false],
+  ])("offers the Navicat backup format only at database level of MySQL/PostgreSQL (%s, %o)", async (connectionId, props, offered) => {
+    await mountSourceDialog(connectionId, props);
+
+    expect(!!document.body.querySelector('[data-format="nb3"]')).toBe(offered);
+    expect(document.body.querySelector<HTMLInputElement>('input[type="file"]')?.accept.includes(".nb3")).toBe(offered);
+  });
+
+  it("hands a selected Navicat backup to the SQL file executor targeting this database", async () => {
+    const preview = { fileName: "shop.nb3", filePath: "/server/tmp/shop.nb3", preview: "-- Navicat backup restored by DBX" };
+    mocks.previewSqlFile.mockResolvedValue(preview);
+    const onUpdateOpen = vi.fn();
+    await mountSourceDialog("mysql-1", { prefillSchema: "", "onUpdate:open": onUpdateOpen });
+
+    const archive = new File(["nb3"], "shop.nb3");
+    const input = document.body.querySelector<HTMLInputElement>('[data-testid="table-import-nb3-input"]')!;
+    Object.defineProperty(input, "files", { configurable: true, value: [archive] });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushAsyncUpdates();
+
+    expect(mocks.previewSqlFile).toHaveBeenCalledWith(archive);
+    expect(mocks.previewTableImportFile).not.toHaveBeenCalled();
+    expect(mocks.store.sqlFileSource).toEqual({ connectionId: "mysql-1", database: "main", preview });
+    expect(onUpdateOpen).toHaveBeenCalledWith(false);
+  });
+
+  it("routes a Navicat backup picked from the generic file selector to the restore flow", async () => {
+    mocks.previewSqlFile.mockRejectedValue(new Error("Encrypted Navicat backups are not supported"));
+    const onUpdateOpen = vi.fn();
+    await mountSourceDialog("postgres-1", { "onUpdate:open": onUpdateOpen });
+
+    await selectFiles([new File(["nb3"], "app.NB3")]);
+
+    expect(mocks.previewTableImportFile).not.toHaveBeenCalled();
+    expect(mocks.store.sqlFileSource).toBeNull();
+    expect(onUpdateOpen).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Encrypted Navicat backups are not supported");
+  });
+
+  it("keeps a mixed selection in the table import flow instead of restoring the archive", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+
+    await mountSourceDialog("mysql-1");
+    await selectFiles([new File(["id,name"], "first.csv"), new File(["nb3"], "shop.nb3")]);
+
+    expect(mocks.previewSqlFile).not.toHaveBeenCalled();
+    expect(mocks.previewTableImportFile).toHaveBeenCalledTimes(2);
+    expect(mocks.store.sqlFileSource).toBeNull();
+  });
+
+  it("offers Parquet for DuckDB and forwards the connection context to preview", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve({ ...delimitedPreview(), fileName: "rows.parquet", fileType: "parquet", sourceFingerprint: "rows-parquet" }));
+    await mountSourceDialog("duckdb-1");
+
+    const fileInput = document.body.querySelector<HTMLInputElement>('input[type="file"]');
+    const formats = document.body.querySelector<HTMLElement>('[data-testid="table-import-format-options"]');
+    expect(fileInput?.accept).toContain(".parquet");
+    expect(formats?.classList.contains("lg:grid-cols-7")).toBe(true);
+    await selectFiles([new File(["parquet"], "rows.parquet")]);
+    expect(mocks.previewTableImportFile).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ connectionId: "duckdb-1", database: "main", sourceFormat: "parquet" }));
+  });
+
+  it("lets the import setup dialog be minimized and restored before import starts", async () => {
+    await mountDialog();
+    expect(button("Next").disabled).toBe(false);
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Minimize import"]')!.click();
+    await flushAsyncUpdates();
+
+    expect(document.body.querySelector('button[aria-label="Restore import"]')).toBeTruthy();
+    expect(document.body.querySelector('button[aria-label="Next"]')).toBeNull();
+    expect(document.body.textContent).toContain("Ready to import");
+    expect(document.body.textContent).not.toContain("Writing data");
+
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
+    await flushAsyncUpdates();
+    expect(button("Next").disabled).toBe(false);
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeTruthy();
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+  });
+
+  it("hides the skip-duplicates option for dialects without conflict handling", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")], "sqlserver-1");
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Trim values");
+    expect(document.body.textContent).not.toContain("Skip duplicate rows");
+    expect(document.body.textContent).not.toContain("Update the existing row");
+  });
+
+  it("offers the skip-duplicates option for dialects with conflict handling", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Trim values");
+    expect(document.body.textContent).toContain("Skip duplicate rows");
+  });
+
+  it("serializes the explicit skip policy with the legacy compatibility flag", async () => {
+    mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
+    await mountDialog([new File(["id,name\n1,a"], "rows.csv")]);
+    const policySelect = document.body.querySelector<HTMLSelectElement>('[data-testid="table-import-conflict-policy"]');
+    expect(policySelect).toBeTruthy();
+    if (policySelect) {
+      policySelect.value = "skip";
+      policySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushAsyncUpdates();
+
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({
+      conflictPolicy: "skip",
+      skipDuplicateRows: true,
+    });
+  });
+
+  it("keeps every worksheet selected by default and imports them in workbook order", async () => {
+    await mountDialog();
+    for (const name of ["rows_First", "rows_Second", "rows_Third"]) expect(taskCheckbox(name).checked).toBe(true);
+    await startImport();
+    expect(mocks.importTableFile.mock.calls.map(([request]) => request.table)).toEqual(["rows_First", "rows_Second", "rows_Third"]);
+    expect(mocks.importTableFile.mock.calls.map(([request]) => request.parseOptions?.sheetName)).toEqual([null, "Second", "Third"]);
+  });
+
+  it("imports only the selected worksheet even when the active preview is excluded", async () => {
+    await mountDialog();
+    await selectTask("rows_First", false);
+    await selectTask("rows_Third", false);
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({ table: "rows_Second", parseOptions: { sheetName: "Second" }, preparedSource: { rows: [[2, "Second"]] } });
+    expect(mocks.releaseTableImportSource.mock.calls).toEqual([["workbook-source"]]);
+  });
+
+  it("blocks empty selection and lets selecting one item restore import", async () => {
+    await mountDialog();
+    for (const name of ["rows_First", "rows_Second", "rows_Third"]) await selectTask(name, false);
+    expect(button("Next").disabled).toBe(true);
+    const reviewStep = [...document.body.querySelectorAll<HTMLButtonElement>("nav button")].find((item) => item.textContent?.includes("Review"));
+    expect(reviewStep?.disabled).toBe(true);
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+    await selectTask("rows_Third", true);
+    await startImport();
+    expect(mocks.importTableFile.mock.calls.map(([request]) => request.table)).toEqual(["rows_Third"]);
+  });
+
+  it("shows the actual worksheet name as read-only while switching batch previews", async () => {
+    await mountDialog();
+    const sheetInput = () => document.body.querySelector<HTMLInputElement>('input[aria-label="Sheet"]');
+    expect(sheetInput()?.value).toBe("First");
+    expect(sheetInput()?.readOnly).toBe(true);
+    await click("rows_Third");
+    expect(sheetInput()?.value).toBe("Third");
+  });
+
+  it("preserves table names and mappings while an active task is excluded and reselected", async () => {
+    await mountDialog();
+    await editInputWithValue("rows_First", "custom_first");
+    await click("Next");
+    await editInputWithValue("name", "display_name");
+    await selectTask("custom_first", false);
+    await click("rows_Second");
+    await click("custom_first");
+    expect([...document.body.querySelectorAll<HTMLInputElement>("input")].some((input) => input.value === "display_name")).toBe(true);
+    await selectTask("custom_first", true);
+    await selectTask("rows_Second", false);
+    await selectTask("rows_Third", false);
+    await click("Next");
+    await click("Start Import");
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({
+      table: "custom_first",
+      mappings: [
+        { sourceColumn: "id", targetColumn: "id" },
+        { sourceColumn: "name", targetColumn: "display_name" },
+      ],
+    });
+  });
+
+  it("ignores excluded invalid mappings but rejects invalid selected tasks", async () => {
+    await mountDialog();
+    await click("Next");
+    await editInputWithValue("name", "id");
+    expect(button("Next").disabled).toBe(true);
+    await selectTask("rows_First", false);
+    expect(button("Next").disabled).toBe(false);
+    await click("Next");
+    expect(button("Start Import").disabled).toBe(false);
+    await selectTask("rows_First", true);
+    expect(button("Start Import").disabled).toBe(true);
+    await selectTask("rows_First", false);
+    await click("Start Import");
+    expect(mocks.importTableFile.mock.calls.map(([request]) => request.table)).toEqual(["rows_Second", "rows_Third"]);
+  });
+
+  it("checks duplicate target names only among selected tasks", async () => {
+    await mountDialog();
+    await editInputWithValue("rows_First", "rows_Second");
+    expect(button("Next").disabled).toBe(true);
+    await selectTask("rows_Second", false);
+    await startImport();
+    expect(mocks.importTableFile.mock.calls.map(([request]) => request.table)).toEqual(["rows_Second", "rows_Third"]);
+  });
+
+  it("disables the start button when the last item is deselected on the review step", async () => {
+    await mountDialog();
+    await selectTask("rows_First", false);
+    await selectTask("rows_Third", false);
+    await click("Next");
+    await click("Next");
+    await selectTask("rows_Second", false);
+    expect(button("Start Import").disabled).toBe(true);
+    button("Start Import").click();
+    await flushAsyncUpdates();
+    expect(mocks.importTableFile).not.toHaveBeenCalled();
+    await selectTask("rows_Second", true);
+    expect(button("Start Import").disabled).toBe(false);
+  });
+
+  it("counts only selected rows and keeps the batch running until its last selected task", async () => {
+    const pending: Array<{ request: TableImportRequest; progress: (progress: TableImportProgress) => void; resolve: (summary: TableImportSummary) => void }> = [];
+    mocks.previewTableImportFile.mockImplementation((_source, options) => {
+      const preview = workbookPreview(options.parseOptions.sheetName || "First");
+      if (options.parseOptions.sheetName === "Second") preview.totalRowsExact = false;
+      return Promise.resolve(preview);
+    });
+    mocks.importTableFile.mockImplementation((request, progress) => new Promise((resolve) => pending.push({ request, progress, resolve })));
+    await mountDialog();
+    await selectTask("rows_Second", false);
+    await startImport();
+    expect(pending).toHaveLength(1);
+    expect(taskCheckbox("rows_First").disabled).toBe(true);
+    pending[0]!.progress({ importId: pending[0]!.request.importId, status: "done", phase: "done", rowsImported: 2, totalRows: 2, elapsedMs: 1 });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("2 / 7");
+    expect(document.body.textContent).not.toContain("Import complete");
+    pending[0]!.resolve({ importId: pending[0]!.request.importId, rowsImported: 2, totalRows: 2, elapsedMs: 1 });
+    await flushAsyncUpdates();
+    expect(pending[1]!.request.table).toBe("rows_Third");
+    pending[1]!.resolve({ importId: pending[1]!.request.importId, rowsImported: 5, totalRows: 5, elapsedMs: 1 });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("7 / 7");
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it("keeps the import and its progress active while minimized, then restores the same dialog state", async () => {
+    let finish!: (summary: TableImportSummary) => void;
+    mocks.importTableFile.mockImplementation((request, onProgress) => {
+      onProgress({ importId: request.importId, status: "running", phase: "writing", rowsImported: 1, totalRows: 2, elapsedMs: 1 });
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    await mountDialog();
+    await selectTask("rows_Second", false);
+    await selectTask("rows_Third", false);
+    await startImport();
+
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    const minimizeButton = document.body.querySelector<HTMLButtonElement>('button[aria-label="Minimize import"]');
+    expect(minimizeButton).toBeTruthy();
+    minimizeButton!.click();
+    await flushAsyncUpdates();
+
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeNull();
+    expect(document.body.textContent).toContain("Writing data");
+    expect(document.body.textContent).toMatch(/\d+%/);
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
+    await flushAsyncUpdates();
+    expect(document.body.querySelector('button[aria-label="Minimize import"]')).toBeTruthy();
+    expect(document.body.textContent).toContain("1 / 2");
+    expect(taskCheckbox("rows_First").disabled).toBe(true);
+
+    finish({ importId: "finished-import", rowsImported: 2, totalRows: 2, elapsedMs: 2 });
+    await flushAsyncUpdates();
+    expect(document.body.textContent).toContain("Import complete");
+  });
+
+  it("uses selected source bytes when the selected worksheet has no exact row count", async () => {
+    mocks.previewTableImportFile.mockImplementation((_source, options) => Promise.resolve({ ...workbookPreview(options.parseOptions.sheetName || "First"), totalRowsExact: false }));
+    let finish!: () => void;
+    mocks.importTableFile.mockImplementation((request, onProgress) => {
+      onProgress({ importId: request.importId, status: "running", phase: "reading", rowsImported: 0, totalRows: 0, totalRowsExact: false, bytesRead: 15, totalBytes: 30, elapsedMs: 1 });
+      return new Promise((resolve) => {
+        finish = () => resolve({ importId: request.importId, rowsImported: 5, totalRows: 5, elapsedMs: 1 });
+      });
+    });
+    await mountDialog();
+    await selectTask("rows_First", false);
+    await selectTask("rows_Second", false);
+    await startImport();
+    expect(document.body.textContent).toContain("50%");
+    finish();
+    await flushAsyncUpdates();
+  });
+
+  it("marks the actual failed task after skipping a worksheet", async () => {
+    mocks.importTableFile.mockRejectedValueOnce(new Error("write failed"));
+    await mountDialog();
+    await selectTask("rows_First", false);
+    await selectTask("rows_Second", false);
+    await startImport();
+    expect(mocks.importTableFile.mock.calls[0]![0].table).toBe("rows_Third");
+    expect(taskCheckbox("rows_Third").parentElement?.querySelector("svg.text-destructive")).toBeTruthy();
+    expect(taskCheckbox("rows_First").parentElement?.querySelector("svg.text-destructive")).toBeNull();
+    expect(document.body.textContent).toContain("write failed");
+  });
+
+  it("retains multi-file CSV selection and releases excluded uploaded sources", async () => {
+    mocks.previewTableImportFile.mockImplementation((file: File) => Promise.resolve({ ...workbookPreview("First"), fileName: file.name, filePath: `/tmp/${file.name}`, fileType: "csv", sourceRef: `${file.name}-source`, sheets: [], effectiveEncoding: "utf8" }));
+    await mountDialog([new File(["id,name"], "first.csv"), new File(["id,name"], "second.csv")]);
+    expect(taskCheckbox("first").checked).toBe(true);
+    expect(taskCheckbox("second").checked).toBe(true);
+    await selectTask("first", false);
+    await startImport();
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(1);
+    expect(mocks.importTableFile.mock.calls[0]![0]).toMatchObject({ table: "second", sourceFormat: "csv", parseOptions: { encoding: "utf8", sheetName: null } });
+    expect(mocks.releaseTableImportSource.mock.calls.map(([source]) => source).sort()).toEqual(["first.csv-source", "second.csv-source"]);
+  });
+
+  it("recovers preview and enables next step when data start row is adjusted after an invalid title row (#11689)", async () => {
+    mocks.previewTableImportFile.mockImplementation((_source, options) => {
+      const { titleRow, dataStartRow } = options.parseOptions;
+      if (titleRow !== null && titleRow !== undefined && titleRow >= dataStartRow) {
+        return Promise.reject(new Error("Title row must be before the data start row"));
+      }
+      return Promise.resolve(delimitedPreview());
+    });
+    await mountDialog([new File(["id,name\n1,alice\n2,bob"], "rows.csv")]);
+    expect(button("Next").disabled).toBe(false);
+
+    await editInputWithValue("1", "3");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+
+    expect(document.body.textContent).toContain("Title row must be before the data start row");
+    expect(button("Next").disabled).toBe(true);
+
+    await editInputWithValue("2", "4");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+
+    expect(document.body.textContent).not.toContain("Title row must be before the data start row");
+    expect(button("Next").disabled).toBe(false);
+  });
+
+  it("reloads preview when returning to options step after preview was cleared by error (#11689)", async () => {
+    let failPreview = false;
+    mocks.previewTableImportFile.mockImplementation((_source, _options) => {
+      if (failPreview) {
+        return Promise.reject(new Error("Title row must be before the data start row"));
+      }
+      return Promise.resolve(delimitedPreview());
+    });
+    await mountDialog([new File(["id,name\n1,alice"], "rows.csv")]);
+    expect(button("Next").disabled).toBe(false);
+
+    failPreview = true;
+    await editInputWithValue("1", "3");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+
+    expect(document.body.textContent).toContain("Title row must be before the data start row");
+    expect(button("Next").disabled).toBe(true);
+
+    failPreview = false;
+    await click("Back");
+    expect(button("Next").disabled).toBe(false);
+    await click("Next");
+    await flushAsyncUpdates();
+
+    expect(document.body.textContent).not.toContain("Title row must be before the data start row");
+    expect(button("Next").disabled).toBe(false);
+  });
+
+  it("renders empty string as null option for Excel source and passes it to parse options (#11608)", async () => {
+    let capturedOptions: any = null;
+    mocks.previewTableImportFile.mockImplementation((_source, options) => {
+      capturedOptions = options;
+      return Promise.resolve({
+        fileName: "rows.xlsx",
+        filePath: "/tmp/rows.xlsx",
+        sourceRef: "workbook-source",
+        fileType: "excel",
+        sizeBytes: 10,
+        columns: ["id", "name"],
+        rows: [[1, "test"]],
+        totalRows: 1,
+        totalRowsExact: true,
+        sourceFingerprint: "rows-Sheet1",
+        sheets: ["Sheet1"],
+      });
+    });
+    await mountDialog([new File(["workbook"], "rows.xlsx")]);
+    expect(button("Next").disabled).toBe(false);
+
+    const emptyStringCheckbox = [...document.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((el) => el.parentElement?.textContent?.includes("Empty string as NULL"));
+    expect(emptyStringCheckbox).toBeTruthy();
+    expect(emptyStringCheckbox!.checked).toBe(false);
+
+    emptyStringCheckbox!.click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await flushAsyncUpdates();
+
+    expect(capturedOptions?.parseOptions?.emptyStringAsNull).toBe(true);
+
+    await startImport();
+    expect(mocks.importTableFile.mock.calls.at(-1)?.[0].parseOptions.emptyStringAsNull).toBe(true);
+  });
+});

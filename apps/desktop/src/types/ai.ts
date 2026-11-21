@@ -1,4 +1,24 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "kimi" | "qwen" | "minimax" | "ollama" | "anthropic-compatible" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "opencode-cli" | "cursor-cli" | "grok-cli" | "codebuddy-cli" | "qoder-cli" | "custom";
+export type AiProvider =
+  | "claude"
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "kimi"
+  | "qwen"
+  | "zhipu"
+  | "minimax"
+  | "ollama"
+  | "anthropic-compatible"
+  | "openai-compatible"
+  | "claude-code-cli"
+  | "pi-agent-cli"
+  | "codex-cli"
+  | "opencode-cli"
+  | "cursor-cli"
+  | "grok-cli"
+  | "codebuddy-cli"
+  | "qoder-cli"
+  | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
@@ -55,6 +75,7 @@ export interface AiConfig {
   piAgentCliEnv?: Record<string, string>;
   opencodeCliPath?: string | null;
   opencodeCliEnv?: Record<string, string>;
+  opencodeCliVersion?: string | null;
   cursorCliPath?: string | null;
   cursorCliEnv?: Record<string, string>;
   grokCliPath?: string | null;
@@ -80,6 +101,17 @@ export interface AiConfigItem extends AiConfig {
   isDefault?: boolean;
 }
 
+export interface CcSwitchImportSkipped {
+  appType: string;
+  name: string;
+  reason: string;
+}
+
+export interface CcSwitchImportResult {
+  configs: AiConfigItem[];
+  skipped: CcSwitchImportSkipped[];
+}
+
 export interface AiActiveModelSelection {
   configId: string;
   modelId: string;
@@ -96,8 +128,14 @@ export interface AiChatSelectionState {
   active?: AiActiveModelSelection;
   effortPreferences: AiModelEffortPreference[];
   defaultMode?: AiAssistantMode;
+  /** Whether new AI conversations start with the action picker on `auto` (#9118). */
+  defaultAutoRouting?: boolean;
   /** Whether opening the AI panel restores the most recently updated conversation. */
   restoreLastConversation?: boolean;
+  /** Whether to include query result previews in AI context (#12757). Defaults to false to prevent leaking sensitive row data. */
+  includeQueryResult?: boolean;
+  /** Inverted alias for includeQueryResult (#12757). */
+  excludeQueryResult?: boolean;
   /** Prompt template ids auto-applied when the AI panel opens, keyed by connection db_type. */
   defaultTemplatesByDbType?: Record<string, string[]>;
   /** Prompt template ids from the most recent send, keyed by connection db_type. */

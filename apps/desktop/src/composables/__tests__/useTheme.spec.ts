@@ -51,7 +51,7 @@ async function flushDynamicImport() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-describe("useTheme on Linux", () => {
+describe("useTheme in Tauri", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -69,6 +69,7 @@ describe("useTheme on Linux", () => {
 
   afterEach(() => {
     vi.doUnmock("@/lib/backend/tauriRuntime");
+    vi.doUnmock("@tauri-apps/api/core");
     vi.doUnmock("@tauri-apps/api/window");
     vi.unstubAllGlobals();
   });
@@ -106,6 +107,21 @@ describe("useTheme on Linux", () => {
     theme.setThemeMode("light");
     await flushDynamicImport();
     expect(setTheme).toHaveBeenLastCalledWith("light");
+  });
+
+  it("does not let macOS appearance changes override the selected app icon", async () => {
+    const invoke = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" });
+    vi.doMock("@tauri-apps/api/core", () => ({ invoke }));
+    const theme = await loadTheme("light");
+
+    theme.applyTheme();
+    await flushDynamicImport();
+    theme.setThemeMode("dark");
+    theme.setThemeMode("light");
+    await flushDynamicImport();
+
+    expect(invoke).not.toHaveBeenCalledWith("set_macos_app_icon_appearance", expect.anything());
   });
 
   it("previews a palette without persisting it and restores the saved palette when cancelled", async () => {
@@ -174,5 +190,56 @@ describe("useTheme on Linux", () => {
     expect(document.documentElement.style.getPropertyValue("--background")).toBe("rgb(255 255 255)");
     expect(theme.customUiColors.value.background).toBe("#ffffff");
     expect(theme.customUiColorsDark.value.background).toBe("#1a1b1e");
+  });
+
+  it("bumps the theme revision so out-of-band token writers (font settings) reach plugin bridges", async () => {
+    const theme = await loadTheme("light");
+    const before = theme.themeRevision.value;
+
+    theme.bumpThemeRevision();
+
+    expect(theme.themeRevision.value).toBe(before + 1);
+    // No theme classes are touched: this is a pure revision bump.
+    expect(document.documentElement.classList.contains("disable-transitions")).toBe(false);
+  });
+
+  it("writeRootToken writes the inline override and bumps the revision", async () => {
+    const theme = await loadTheme("light");
+    const before = theme.themeRevision.value;
+
+    theme.writeRootToken("--dbx-test-token", "1px");
+
+    expect(document.documentElement.style.getPropertyValue("--dbx-test-token")).toBe("1px");
+    expect(theme.themeRevision.value).toBe(before + 1);
+    document.documentElement.style.removeProperty("--dbx-test-token");
+  });
+
+  it("writeRootToken coalesces rapid writes into one debounced bump", async () => {
+    const theme = await loadTheme("light");
+    const before = theme.themeRevision.value;
+
+    theme.writeRootToken("--dbx-test-token", "1px", { debounceMs: 30 });
+    theme.writeRootToken("--dbx-test-token", "2px", { debounceMs: 30 });
+    // Neither bump has fired yet, but the write itself is immediate.
+    expect(theme.themeRevision.value).toBe(before);
+    expect(document.documentElement.style.getPropertyValue("--dbx-test-token")).toBe("2px");
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(theme.themeRevision.value).toBe(before + 1);
+    document.documentElement.style.removeProperty("--dbx-test-token");
+  });
+
+  it("writeRootToken with an immediate write supersedes a pending debounced bump", async () => {
+    const theme = await loadTheme("light");
+    const before = theme.themeRevision.value;
+
+    theme.writeRootToken("--dbx-test-token", "1px", { debounceMs: 30 });
+    theme.writeRootToken("--dbx-test-token", "2px");
+    expect(theme.themeRevision.value).toBe(before + 1);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // The superseded timer must not fire a second bump.
+    expect(theme.themeRevision.value).toBe(before + 1);
+    document.documentElement.style.removeProperty("--dbx-test-token");
   });
 });

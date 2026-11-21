@@ -36,6 +36,24 @@ func TestConnectionInfoAndTestConnectionExposeDatabaseInfo(t *testing.T) {
 	assertVastbaseDatabaseInfo(t, result["databaseInfo"])
 }
 
+func TestConnectionInfoAllowsNullCurrentSchema(t *testing.T) {
+	db := openConnectionInfoTestDB(t, true)
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	info, err := server.connectionInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["schema"] != "" {
+		t.Fatalf("unexpected schema: %#v", info["schema"])
+	}
+	if info["identifierQuote"] != "`" {
+		t.Fatalf("unexpected identifier quote: %#v", info["identifierQuote"])
+	}
+}
+
 func assertVastbaseDatabaseInfo(t *testing.T, value any) {
 	t.Helper()
 	info, ok := value.(map[string]string)
@@ -59,23 +77,31 @@ func assertVastbaseDatabaseInfo(t *testing.T, value any) {
 
 var connectionInfoDriverSequence atomic.Uint64
 
-type connectionInfoTestDriver struct{}
-
-func (*connectionInfoTestDriver) Open(string) (driver.Conn, error) {
-	return &connectionInfoTestConn{}, nil
+type connectionInfoTestDriver struct {
+	nullSchema bool
 }
 
-type connectionInfoTestConn struct{}
+func (d *connectionInfoTestDriver) Open(string) (driver.Conn, error) {
+	return &connectionInfoTestConn{nullSchema: d.nullSchema}, nil
+}
+
+type connectionInfoTestConn struct {
+	nullSchema bool
+}
 
 func (*connectionInfoTestConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
 func (*connectionInfoTestConn) Close() error                        { return nil }
 func (*connectionInfoTestConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
 func (*connectionInfoTestConn) Ping(context.Context) error          { return nil }
 
-func (*connectionInfoTestConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c *connectionInfoTestConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	var schema driver.Value = "public"
+	if c.nullSchema {
+		schema = nil
+	}
 	return &connectionInfoTestRows{
 		columns: []string{"current_database", "current_user", "version", "current_schema"},
-		values:  []driver.Value{"postgres", "vbadmin", "Vastbase G100 V3.0.9", "public"},
+		values:  []driver.Value{"postgres", "vbadmin", "Vastbase G100 V3.0.9", schema},
 	}, nil
 }
 
@@ -97,10 +123,10 @@ func (rows *connectionInfoTestRows) Next(destination []driver.Value) error {
 	return nil
 }
 
-func openConnectionInfoTestDB(t *testing.T) *sql.DB {
+func openConnectionInfoTestDB(t *testing.T, nullSchema ...bool) *sql.DB {
 	t.Helper()
 	driverName := fmt.Sprintf("vastbase-connection-info-%d", connectionInfoDriverSequence.Add(1))
-	sql.Register(driverName, &connectionInfoTestDriver{})
+	sql.Register(driverName, &connectionInfoTestDriver{nullSchema: len(nullSchema) > 0 && nullSchema[0]})
 	db, err := sql.Open(driverName, "")
 	if err != nil {
 		t.Fatal(err)

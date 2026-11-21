@@ -7,9 +7,11 @@ import { connectionTypesPlugin } from "./viteConnectionTypesPlugin.ts";
 
 const host = process.env.TAURI_DEV_HOST;
 const isTauri = !!host || !!process.env.TAURI_ENV_ARCH;
+const tauriDevPort = configuredPort(process.env.TAURI_DEV_PORT, 1420);
+const tauriHmrPort = configuredPort(process.env.TAURI_DEV_HMR_PORT, tauriDevPort + 1);
 const configuredBasePath = process.env.VITE_DBX_BASE_PATH || process.env.DBX_PUBLIC_BASE_PATH;
 const manualChunks: Record<string, string[]> = {
-  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/theme-one-dark"],
+  codemirror: ["codemirror", "@codemirror/lang-sql", "@codemirror/view", "@codemirror/state", "@codemirror/autocomplete", "@codemirror/commands", "@codemirror/lint", "@codemirror/theme-one-dark"],
   "vue-echarts": ["vue-echarts"],
   ui: ["reka-ui"],
   marked: ["marked"],
@@ -57,6 +59,11 @@ function normalizeViteBase(value: string | undefined): string {
   return withLeadingSlash.endsWith("/") ? withLeadingSlash : `${withLeadingSlash}/`;
 }
 
+function configuredPort(value: string | undefined, fallback: number): number {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
 const viteBase = normalizeViteBase(configuredBasePath);
 const publicBasePath = viteBase.startsWith("/") ? viteBase.replace(/\/+$/, "") : "";
 const apiProxyPath = publicBasePath ? `${publicBasePath}/api` : "/api";
@@ -64,6 +71,7 @@ const backendUrl = process.env.DBX_BACKEND_URL || "http://localhost:4224";
 
 export default defineConfig(async () => ({
   root: import.meta.dirname,
+  cacheDir: process.env.DBX_DEV_CACHE_DIR,
   base: viteBase,
   plugins: [connectionTypesPlugin(), publicBasePathRedirectPlugin(publicBasePath), vue(), tailwindcss()],
   resolve: {
@@ -71,6 +79,10 @@ export default defineConfig(async () => ({
       "@": path.resolve(import.meta.dirname, "./src"),
       // Prefer package source during app dev so shell parse changes need no rebuild.
       "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "../../packages/mongo-shell/src/index.ts"),
+      // sql-formatter's `exports` map only declares ".", so deep imports into its
+      // bundled parser/tokenizer are rejected by Vite's exports handling. The
+      // The default layout engine needs that AST; see src/lib/sql/layout/internals.ts.
+      "sql-formatter/dist/": `${path.resolve(import.meta.dirname, "../../node_modules/sql-formatter/dist")}/`,
     },
   },
   clearScreen: false,
@@ -86,14 +98,14 @@ export default defineConfig(async () => ({
     },
   },
   server: {
-    port: isTauri ? 1420 : undefined,
+    port: isTauri ? tauriDevPort : undefined,
     strictPort: isTauri,
     host: host || false,
     hmr: host
       ? {
           protocol: "ws",
           host,
-          port: 1421,
+          port: tauriHmrPort,
         }
       : undefined,
     proxy: {

@@ -67,7 +67,7 @@ describe("DataGridInsertRowsDialog", () => {
     expect(onInsert).toHaveBeenCalledWith(1, "end");
   });
 
-  it("accepts a numeric value emitted by the number input", async () => {
+  it.each([3, 1500])("inserts the requested %i rows without truncating the count", async (count) => {
     const onInsert = vi.fn();
     const host = document.createElement("div");
     document.body.append(host);
@@ -81,12 +81,48 @@ describe("DataGridInsertRowsDialog", () => {
     mountedApps.push({ app, host });
 
     const input = host.querySelector("#insert-rows-count") as HTMLInputElement;
-    input.value = "3";
+    input.value = String(count);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await nextTick();
 
     [...host.querySelectorAll("button")].find((button) => button.textContent === "Insert")!.click();
     await nextTick();
-    expect(onInsert).toHaveBeenCalledWith(3, "below");
+    expect(onInsert).toHaveBeenCalledWith(count, "below");
+  });
+
+  it.each(["0", "-1", "1.5", "9007199254740992"])("rejects an invalid row count: %s", async (count) => {
+    const onInsert = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridInsertRowsDialog, { open: true, onInsert });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+
+    const input = host.querySelector("#insert-rows-count") as HTMLInputElement;
+    input.value = count;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    const insert = [...host.querySelectorAll("button")].find((button) => button.textContent === "Insert")!;
+    expect(insert.disabled).toBe(true);
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+    await nextTick();
+    expect(onInsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects a request exceeding the remaining grid capacity instead of truncating it", async () => {
+    const onInsert = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridInsertRowsDialog, { open: true, maxRows: 1200, onInsert });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    const input = host.querySelector("#insert-rows-count") as HTMLInputElement;
+    input.value = "1500";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    expect([...host.querySelectorAll("button")].find((button) => button.textContent === "Insert")!.disabled).toBe(true);
+    expect(onInsert).not.toHaveBeenCalled();
   });
 });

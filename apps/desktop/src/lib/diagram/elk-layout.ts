@@ -1,6 +1,6 @@
 import ELK from "elkjs/lib/elk.bundled.js";
 import type { LayoutOptions, DiagramNode, DiagramEdge, DiagramLayer } from "@/types/diagram";
-import { CARD_WIDTH, COLUMN_ROW_HEIGHT, CARD_HEADER_HEIGHT, CARD_BOTTOM_PADDING, LAYER_PADDING, LAYER_HEADER_HEIGHT } from "./diagram-constants";
+import { CARD_WIDTH, LAYER_PADDING, LAYER_HEADER_HEIGHT, diagramTableCardHeight, tableCardHeight, type DiagramCommentedTable } from "./diagram-constants";
 import { handlesFromWaypoints, type Point } from "./edge-obstacle-router";
 
 const elk = new ELK();
@@ -45,8 +45,9 @@ export interface LayerLayoutInfo {
   height: number;
 }
 
-function calculateTableHeight(tableColumns: unknown[]): number {
-  return CARD_HEADER_HEIGHT + tableColumns.length * COLUMN_ROW_HEIGHT + CARD_BOTTOM_PADDING;
+function calculateTableHeight(table?: DiagramCommentedTable): number {
+  if (!table) return tableCardHeight(0);
+  return diagramTableCardHeight(table);
 }
 
 export async function computeLayout(nodes: DiagramNode[], edges: DiagramEdge[], options: LayoutOptions = {}): Promise<{ nodes: DiagramNode[]; edges: DiagramEdge[] }> {
@@ -121,7 +122,7 @@ export async function computeLayoutWithLayers(nodes: DiagramNode[], edges: Diagr
       const pos = positionMap.get(tableName) || node?.position;
       if (!pos) continue;
       hasAny = true;
-      const height = calculateTableHeight(node?.data?.table?.columns || []);
+      const height = calculateTableHeight(node?.data?.table);
       minX = Math.min(minX, pos.x);
       minY = Math.min(minY, pos.y);
       maxX = Math.max(maxX, pos.x + CARD_WIDTH);
@@ -173,7 +174,7 @@ function buildElkGraph(nodes: DiagramNode[], edges: DiagramEdge[]): ElkGraph {
   const elkNodes: ElkNode[] = nodes.map((node) => ({
     id: node.id,
     width: CARD_WIDTH,
-    height: calculateTableHeight(node.data?.table?.columns || []),
+    height: calculateTableHeight(node.data?.table),
   }));
 
   const elkEdges: ElkEdge[] = edges.map((edge) => ({
@@ -200,7 +201,7 @@ function buildHierarchicalElkGraph(nodes: DiagramNode[], edges: DiagramEdge[], a
     const elkTableNodes = layerTables.map((tableNode) => ({
       id: tableNode.id,
       width: CARD_WIDTH,
-      height: calculateTableHeight(tableNode.data?.table?.columns || []),
+      height: calculateTableHeight(tableNode.data?.table),
     }));
 
     layerTables.forEach((n) => tableIdSet.add(n.id));
@@ -221,7 +222,7 @@ function buildHierarchicalElkGraph(nodes: DiagramNode[], edges: DiagramEdge[], a
   const unassignedElkNodes = unassignedNodes.map((node) => ({
     id: node.id,
     width: CARD_WIDTH,
-    height: calculateTableHeight(node.data?.table?.columns || []),
+    height: calculateTableHeight(node.data?.table),
   }));
 
   return {

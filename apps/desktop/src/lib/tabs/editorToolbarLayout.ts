@@ -56,9 +56,10 @@ export function resolveNextEditorToolbarTier(input: EditorToolbarTierInput): Edi
     return (tier + 1) as EditorToolbarTier;
   }
   if (tier > 0 && expandedTierRequiredWidths) {
+    const grewSinceCondensation = condensedAtWidth <= 0 || availableWidth - condensedAtWidth >= EDITOR_TOOLBAR_STEP_DOWN_MIN_GROWTH_PX;
     for (let candidate = 0; candidate < tier; candidate += 1) {
       const requiredWidth = expandedTierRequiredWidths[candidate as EditorToolbarTier];
-      if (requiredWidth && availableWidth >= requiredWidth + EDITOR_TOOLBAR_STEP_DOWN_SLACK_PX) {
+      if (grewSinceCondensation && requiredWidth && availableWidth >= requiredWidth + EDITOR_TOOLBAR_STEP_DOWN_SLACK_PX) {
         return candidate as EditorToolbarTier;
       }
     }

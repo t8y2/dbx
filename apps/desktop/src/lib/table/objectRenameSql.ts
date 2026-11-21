@@ -9,6 +9,10 @@ export interface BuildRenameObjectSqlOptions {
   schema?: string | null;
   oldName: string;
   newName: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 // openGauss 兼容 PostgreSQL 的 ALTER TABLE/VIEW ... RENAME TO 语法，需与 gaussdb 等 PG 系数据库同等开放重命名能力
@@ -23,6 +27,8 @@ export function supportsObjectRename(databaseType: DatabaseType | undefined, obj
     return false;
   }
   if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1" || databaseType === "duckdb") return objectType === "TABLE";
+  if (databaseType === "transwarp" || databaseType === "starrocks" || databaseType === "saphana") return objectType === "TABLE";
+  if (databaseType === "oceanbase-oracle") return objectType === "TABLE" || objectType === "VIEW";
   if (databaseType === "mysql" || databaseType === "goldendb") return objectType === "TABLE" || objectType === "VIEW";
   if (postgresLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
   if (oracleLikeRenameTypes.has(databaseType)) return objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW";
@@ -51,6 +57,10 @@ export interface BuildRenameDatabaseSqlOptions {
   oldName: string;
   newName: string;
   terminateConnections?: boolean;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export function buildRenameDatabaseSql(options: BuildRenameDatabaseSqlOptions): Promise<string> {

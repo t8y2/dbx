@@ -4,6 +4,8 @@ import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
 import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
+import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
+import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 
 export const DATABASE_EXPORT_ROW_LIMIT = 10_000;
 export const DATABASE_EXPORT_PAGE_SIZE = 500;
@@ -31,6 +33,7 @@ export interface BuildDatabaseSqlExportOptions {
   tables: ExportedTableSql[];
   rowLimitPerTable?: number;
   insertBatchSize?: number;
+  insertDialect?: SqlInsertDialect;
   connectionId?: string;
   database?: string;
   schema?: string;
@@ -47,7 +50,13 @@ export interface BuildExportInsertStatementsOptions {
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
+  /** 生成 INSERT 时需要排除的列名（例如导出时不带主键），忽略大小写匹配。 */
+  excludeColumns?: string[];
   batchSize?: number;
+}
+
+export interface BuildExportSqlInsertOptions extends BuildExportInsertStatementsOptions {
+  insertDialect?: SqlInsertDialect;
 }
 
 export interface BuildExportPageSqlOptions {
@@ -94,6 +103,7 @@ export interface DatabaseBackupSnapshotOptions {
   connectionId: string;
   database: string;
   enabled: boolean;
+  reportCompletion?: boolean;
 }
 
 export function buildInsertStatements(options: BuildExportInsertStatementsOptions): Promise<string[]> {
@@ -120,7 +130,38 @@ export function shouldUseDatabaseBackupSnapshot(databaseType: DatabaseType | und
   return desktopRuntime && includeData && (databaseType === "mysql" || databaseType === "postgres");
 }
 
-export async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: api.ExportProgress) => void): Promise<api.ExportProgress> {
+export async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: api.ExportProgress) => void, reportCompletion = false): Promise<api.ExportProgress> {
+  if (reportCompletion) {
+    const outcome: { terminal?: api.ExportProgress } = {};
+    let complete!: (progress: api.ExportProgress) => void;
+    const terminalProgress = new Promise<api.ExportProgress>((resolve) => {
+      complete = resolve;
+    });
+    try {
+      await api.exportDatabaseSql(
+        request,
+        (progress) => {
+          if (progress.status === "Done" || progress.status === "Cancelled" || progress.status === "Error" || progress.status === "Unknown") {
+            outcome.terminal = progress;
+            complete(progress);
+          }
+          onProgress(progress);
+        },
+        reportCompletion,
+      );
+    } catch (error) {
+      if (!outcome.terminal) {
+        // A failed SnapshotCompletionError proves the native invoke never
+        // started; a generic rejection may still have an export in flight.
+        if (error instanceof SnapshotCompletionError) throw error;
+        throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+      }
+    }
+    const terminal = await terminalProgress;
+    if (terminal.status === "Unknown") throw new SnapshotCompletionError("unknown", terminal.error || "Export cleanup completion was not confirmed");
+    if (terminal.status === "Error") throw new SnapshotCompletionError("failed", terminal.error || "Export failed");
+    return terminal;
+  }
   return new Promise<api.ExportProgress>((resolve, reject) => {
     api
       .exportDatabaseSql(request, (progress) => {
@@ -137,6 +178,32 @@ export async function runDatabaseExportUntilTerminal(request: api.DatabaseExport
 
 export async function runWithDatabaseBackupSnapshot<T>(options: DatabaseBackupSnapshotOptions, operation: (snapshotSessionId: string | undefined) => Promise<T>, shouldPropagateCleanupError: (result: T) => boolean = () => true): Promise<T> {
   if (!options.enabled) return operation(undefined);
+
+  if (options.reportCompletion) {
+    let sessionId: string;
+    try {
+      sessionId = (await api.beginDatabaseBackupSnapshot(options.connectionId, options.database)).sessionId;
+    } catch (error) {
+      throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+    }
+    let result: T | undefined;
+    let operationError: unknown;
+    let failed = false;
+    try {
+      result = await operation(sessionId);
+    } catch (error) {
+      failed = true;
+      operationError = error;
+    }
+    try {
+      await api.rollbackManualTransaction(sessionId);
+    } catch (error) {
+      if (operationError instanceof SnapshotCompletionError && operationError.status === "unknown") throw operationError;
+      throw new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+    }
+    if (failed) throw operationError;
+    return result as T;
+  }
 
   const snapshot = await api.beginDatabaseBackupSnapshot(options.connectionId, options.database);
   let result: T | undefined;

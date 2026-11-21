@@ -25,6 +25,10 @@ export interface DocumentBrowserDataSnapshot {
 export interface DocumentBrowserStateSnapshot {
   /** Manual JSON filter text from the collection filter input. */
   filterInput: string;
+  /** Whether manual and structured query filters are applied; defaults to true. */
+  filterEnabled?: boolean;
+  /** Applied Elasticsearch text search for this index tab. */
+  elasticsearchTextSearch?: string;
   /** Manual JSON sort text from the collection sort input. */
   sortInput: string;
   /** Structured-filter contribution applied on top of the manual filter. */
@@ -33,6 +37,10 @@ export interface DocumentBrowserStateSnapshot {
   documentFilterRules: DocumentFilterRule[];
   /** Zero-based page position; only meaningful for skip-based stores. */
   page: number;
+  /** DataGrid local value filters, keyed by column index. */
+  localColumnFilters?: Record<string, string[]>;
+  /** Column names corresponding to the local filter indexes. */
+  localColumnFilterColumns?: string[];
   /**
    * Rows from the last completed load. Written only by the unmount capture; a
    * conditions-only save (the keystroke path) drops it, which is the whole

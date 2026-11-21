@@ -11,6 +11,7 @@ const getConnectionConfig = vi.fn();
 const lookupLocalCompletionTables = vi.fn();
 const buildSortedQuerySql = vi.fn();
 const buildDataGridCountSql = vi.fn();
+const appendDebugLog = vi.fn();
 const prepareQueryPaginationExecutionPlan = vi.fn(async (options) => ({
   sqlToExecute: options.sql,
   pageSql: undefined,
@@ -23,6 +24,10 @@ const editorSettings = {
   pageSize: 100,
   autoCalculateTotalRows: false,
 };
+
+vi.mock("@/lib/backend/debugLog", () => ({
+  appendDebugLog,
+}));
 
 vi.mock("@/lib/backend/api", () => ({
   analyzeEditableQueryEditability,
@@ -135,5 +140,142 @@ describe("queryStore Doris qualified-table metadata target", () => {
     expect(comments.get("created_at")).toBe("创建时间");
     // Uncommented columns stay empty — no placeholder in the header.
     expect(comments.get("extra_field")).toBeNull();
+  }, 15000);
+
+  it("carries the tab's external catalog for unqualified tables so the column lookup resolves in the federated catalog", async () => {
+    // The engine's internal default database ("yunye") differs from the
+    // catalog database ("mydb"): without the catalog the lookup would search
+    // the internal catalog and find no such database (issue #9776).
+    getConnectionConfig.mockReturnValue({ id: "doris-1", name: "Doris", db_type: "doris", database: "yunye", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        // `SELECT * FROM dbx_comment_test` — nothing qualified in the SQL.
+        schema: undefined,
+        schemaQuoted: false,
+        tableName: "dbx_comment_test",
+        tableNameQuoted: false,
+        tableAlias: undefined,
+        selectStar: true,
+        columns: [],
+        multiSource: false,
+        allowInsertDelete: true,
+      },
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("doris-1", "mydb", "Query", "query", undefined, undefined, "ice");
+
+    await store.executeTabSql(tabId, "SELECT * FROM dbx_comment_test");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toBeDefined(), { timeout: 8000 });
+
+    // The metadata request keeps the execution database and inherits the tab's
+    // external catalog: column comments and editability resolve there.
+    expect(getColumns).toHaveBeenCalledWith("doris-1", "mydb", "mydb", "dbx_comment_test", "ice");
+    const comments = new Map((tab.tableMeta?.columns ?? []).map((c) => [c.name, c.comment]));
+    expect(comments.get("id")).toBe("主键ID");
+    expect(comments.get("user_name")).toBe("用户名称");
+  }, 15000);
+
+  it("keeps the SQL-qualified catalog even when the tab selected a different external catalog", async () => {
+    getConnectionConfig.mockReturnValue({ id: "doris-1", name: "Doris", db_type: "doris", database: "yunye", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        // `SELECT * FROM other_catalog.hivedb.orders` — the SQL names a
+        // different catalog than the tab context; it must win.
+        catalog: "other_catalog",
+        catalogQuoted: false,
+        schema: "hivedb",
+        schemaQuoted: false,
+        tableName: "orders",
+        tableNameQuoted: false,
+        tableAlias: undefined,
+        selectStar: true,
+        columns: [],
+        multiSource: false,
+        allowInsertDelete: true,
+      },
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("doris-1", "mydb", "Query", "query", undefined, undefined, "ice");
+
+    await store.executeTabSql(tabId, "SELECT * FROM other_catalog.hivedb.orders");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toBeDefined(), { timeout: 8000 });
+
+    // Qualified behavior is unchanged: the SQL's database lands in `schema`
+    // (the tab's execution database stays in `database`) and the catalog
+    // parsed from the SQL wins over the tab context.
+    expect(getColumns).toHaveBeenCalledWith("doris-1", "mydb", "hivedb", "orders", "other_catalog");
+  }, 15000);
+
+  it("never forwards a tab catalog to metadata on non-Doris-family connections", async () => {
+    getConnectionConfig.mockReturnValue({ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "sakila", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        schemaQuoted: false,
+        tableName: "actor",
+        tableNameQuoted: false,
+        tableAlias: undefined,
+        selectStar: true,
+        columns: [],
+        multiSource: false,
+        allowInsertDelete: true,
+      },
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    // A stale/foreign catalog on the tab must not leak into metadata requests:
+    // plain MySQL has no catalog federation, so the lookup stays catalog-less.
+    const tabId = store.createTab("mysql-1", "sakila", "Query", "query", undefined, undefined, "legacy");
+
+    await store.executeTabSql(tabId, "SELECT * FROM actor");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toBeDefined(), { timeout: 8000 });
+
+    expect(getColumns).toHaveBeenCalledWith("mysql-1", "sakila", "sakila", "actor", undefined);
+  }, 15000);
+
+  it("records a warn-level debug log with the execution context when the column lookup fails", async () => {
+    getConnectionConfig.mockReturnValue({ id: "doris-1", name: "Doris", db_type: "doris", database: "yunye", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        schemaQuoted: false,
+        tableName: "dbx_comment_test",
+        tableNameQuoted: false,
+        tableAlias: undefined,
+        selectStar: true,
+        columns: [],
+        multiSource: false,
+        allowInsertDelete: true,
+      },
+    });
+    getColumns.mockRejectedValueOnce(new Error("errcode: 1049, Unknown database 'mydb'"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("doris-1", "mydb", "Query", "query", undefined, undefined, "ice");
+
+    await store.executeTabSql(tabId, "SELECT * FROM dbx_comment_test");
+
+    // The failure stays silent for the user (no error result), surfaces as the
+    // metadata-unavailable read-only reason, and is diagnosable from the log.
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("metadata-unavailable"), { timeout: 8000 });
+    expect(tab.result?.error).toBeUndefined();
+    const failure = appendDebugLog.mock.calls.find(([level, message]) => level === "warn" && String(message).includes("metadata:columns:failed"));
+    expect(failure).toBeTruthy();
+    const details = failure?.[2] as Record<string, unknown> | undefined;
+    expect(details?.database).toBe("mydb");
+    expect(details?.catalog).toBe("ice");
   }, 15000);
 });

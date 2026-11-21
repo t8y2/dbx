@@ -11,15 +11,13 @@ const { mqttGetMessagesMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
-  mqttGetBrokerInfo: vi.fn(
-    async (): Promise<MqttBrokerInfo> => ({
-      brokerUrl: "mqtt://localhost:1883",
-      clientId: "dbx-test",
-      connected: true,
-      protocolVersion: "5.0",
-      subscriptionCount: 1,
-    }),
-  ),
+  mqttGetBrokerInfo: vi.fn(async (): Promise<MqttBrokerInfo> => ({
+    brokerUrl: "mqtt://localhost:1883",
+    clientId: "dbx-test",
+    connected: true,
+    protocolVersion: "5.0",
+    subscriptionCount: 1,
+  })),
   mqttListTopics: vi.fn(async () => [["device/status", "atmostonce"]]),
   mqttListSavedTopicConfigs: vi.fn(async () => [{ topic: "device/status", qos: "atmostonce", enabled: true, noLocal: false }]),
   mqttGetMessages: mqttGetMessagesMock,
@@ -86,7 +84,7 @@ describe("MQTT 控制台消息暂停自动滚动 (issue #5615)", () => {
     await nextTick();
     expect(container.textContent).toContain("payload-0");
 
-    vi.advanceTimersByTime(3000);
+    vi.advanceTimersByTime(1000);
     await Promise.resolve();
     expect(mqttGetMessagesMock).toHaveBeenCalledTimes(2);
 
@@ -124,6 +122,30 @@ describe("MQTT 控制台消息暂停自动滚动 (issue #5615)", () => {
     await nextTick();
     await vi.advanceTimersByTimeAsync(3000);
     expect(mqttGetMessagesMock).toHaveBeenCalled();
+  });
+});
+
+describe("MQTT 消息列表刷新后自动回到最新消息 (issue #9373)", () => {
+  it("刷新消息列表后，消息容器的 scrollTop 被重置为 0", async () => {
+    const container = await mountConsole();
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    const messageList = container.querySelector('[data-testid="mqtt-message-list"]') as HTMLElement | null;
+    expect(messageList).toBeTruthy();
+    messageList!.scrollTop = 120;
+    expect(messageList!.scrollTop).toBe(120);
+
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt(1)]);
+    const refreshButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("刷新"));
+    expect(refreshButton).toBeTruthy();
+    refreshButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(messageList!.scrollTop).toBe(0);
   });
 });
 

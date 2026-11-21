@@ -35,6 +35,37 @@ describe("sqlSemanticTokens", () => {
     expect(incomplete?.closed).toBe(false);
   });
 
+  it("preserves Oracle alternative-quoted token boundaries and following parameters", () => {
+    for (const prefix of ["q", "Q", "nq", "NQ", "Nq", "nQ"]) {
+      for (const [opener, closer] of [
+        ["[", "]"],
+        ["'", "'"],
+        ["😀", "😀"],
+      ]) {
+        const literal = `${prefix}'${opener}O'Reilly :hidden${closer}'`;
+        const sql = `SELECT ${literal}, :id`;
+        const tokens = tokenizeSqlSemantic(sql, "oracle");
+        expect(tokens.filter((token) => token.kind === "string")).toMatchObject([{ text: literal, quote: `${prefix.toLowerCase()}'`, span: { start: 7, end: 7 + literal.length }, closed: true }]);
+        expect(tokens.filter((token) => token.kind === "parameter")).toMatchObject([{ text: ":id", span: { start: 9 + literal.length, end: 12 + literal.length } }]);
+      }
+    }
+  });
+
+  it("marks an unterminated Oracle national alternative-quoted token as incomplete", () => {
+    const sql = "SELECT nq'[O'Reilly :hidden";
+    const tokens = tokenizeSqlSemantic(sql, "oracle");
+    expect(tokens.filter((token) => token.kind === "string")).toMatchObject([{ text: "nq'[O'Reilly :hidden", span: { start: 7, end: sql.length }, closed: false }]);
+    expect(tokens.filter((token) => token.kind === "parameter")).toEqual([]);
+  });
+
+  it("keeps national alternative-quote recognition specific to Oracle", () => {
+    for (const dialect of ["mysql", "postgres", "sqlserver"]) {
+      const tokens = tokenizeSqlSemantic("SELECT nq'[O' AS label, :id", dialect);
+      expect(tokens.filter((token) => token.kind === "string").map((token) => token.text)).toEqual(["'[O'"]);
+      expect(tokens.filter((token) => token.kind === "parameter").map((token) => token.text)).toEqual([":id"]);
+    }
+  });
+
   it("handles hash tokens according to the SQL dialect", () => {
     const sqlServerSql = "SELECT * FROM #temp; SELECT * FROM ##global_temp; SELECT * FROM tempdb..#temp";
     const sqlServerTokens = tokenizeSqlSemantic(sqlServerSql, "sqlserver");

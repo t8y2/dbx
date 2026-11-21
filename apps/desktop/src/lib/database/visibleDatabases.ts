@@ -150,6 +150,12 @@ export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | unde
   return Array.isArray(visibleDatabases);
 }
 
+/**
+ * 匹配全部库名的通配符。用于把“显示全部（含系统库）”持久化成动态过滤条件：
+ * 未配置筛选时系统库默认隐藏，而显式库名快照又会让之后新建的库无法自动出现。
+ */
+export const MATCH_ALL_VISIBLE_DATABASE_PATTERN = "%";
+
 const visibleDatabasePatternRegExpCache = new Map<string, RegExp>();
 
 /** SQL LIKE 语义：`%` 匹配任意字符序列、`_` 匹配单个字符，其余按字面匹配（区分大小写）。 */
@@ -173,6 +179,32 @@ export function visibleDatabasePatternsAreEnabled(patterns: string[] | undefined
   return Array.isArray(patterns) && patterns.some((pattern) => pattern.trim() !== "");
 }
 
+const visibleNameSearchRegExpCache = new Map<string, RegExp>();
+
+/**
+ * 选择器搜索框的匹配规则：输入含 `%` 时按通配符整串匹配（`%` 匹配任意文本，
+ * 其余字符按字面匹配，大小写不敏感）；不含 `%` 时保持原有的大小写不敏感子串匹配。
+ * 搜索里的 `_` 按字面处理——schema/库名普遍带下划线，把 `_` 当单字符通配符会让
+ * 常见输入（如 `app_`）反而搜不到 `app_orders`。
+ */
+export function visibleNameMatchesSearch(name: string, query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return true;
+  if (!trimmed.includes("%")) return name.toLowerCase().includes(trimmed.toLowerCase());
+  let regExp = visibleNameSearchRegExpCache.get(trimmed);
+  if (!regExp) {
+    let source = "";
+    for (const ch of trimmed) {
+      if (ch === "%") source += "[\\s\\S]*";
+      else source += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    }
+    regExp = new RegExp(`^${source}$`, "i");
+    if (visibleNameSearchRegExpCache.size > 256) visibleNameSearchRegExpCache.clear();
+    visibleNameSearchRegExpCache.set(trimmed, regExp);
+  }
+  return regExp.test(name);
+}
+
 /** 解析用户输入的模式列表：逗号/分号/换行分隔，去空白、去重。 */
 export function parseVisibleDatabasePatternsInput(value: string): string[] {
   const seen = new Set<string>();
@@ -191,8 +223,9 @@ export function databaseNameMatchesVisiblePatterns(name: string, patterns: strin
   return patterns!.some((pattern) => visibleDatabasePatternRegExp(pattern).test(name));
 }
 
-export function canSaveVisibleDatabaseSelection(selectedNames: string[]): boolean {
-  return selectedNames.length > 0;
+/** 没有勾选时，只要还有通配符就能保存：侧栏只显示命中通配符的库（#14221）。 */
+export function canSaveVisibleDatabaseSelection(selectedNames: string[], patterns: readonly string[] = []): boolean {
+  return selectedNames.length > 0 || visibleDatabasePatternsAreEnabled([...patterns]);
 }
 
 export function filterVisibleDatabaseNames(databaseNames: string[], visibleDatabases: string[] | undefined, visibleDatabasePatterns?: string[]): string[] {
@@ -238,7 +271,7 @@ export function filterDatabaseNamesForConnection(databaseNames: string[], connec
 }
 
 export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
-  if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8s") {
+  if (connection?.db_type === "gbase8s") {
     return databaseNames;
   }
   return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));
@@ -299,4 +332,9 @@ const DRAFT_VISIBLE_SCHEMAS_PREFIX = "__visible_schema_draft_";
 
 export function buildDraftVisibleSchemasConnectionId(seed: string): string {
   return `${DRAFT_VISIBLE_SCHEMAS_PREFIX}${seed}`;
+}
+
+/** 可见 schema 选择器用的临时连接：只存在于弹窗交互期间，不是用户保存的连接。 */
+export function isDraftVisibleSchemasConnectionId(connectionId: string): boolean {
+  return connectionId.startsWith(DRAFT_VISIBLE_SCHEMAS_PREFIX);
 }

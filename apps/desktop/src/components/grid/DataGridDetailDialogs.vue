@@ -1,17 +1,22 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { Copy, ListTree, Search, TableProperties } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { Code2, Copy, ListTree, Search, TableProperties } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { filterDataGridDetailFields, type DataGridCellDetail, type DataGridColumnDetail, type DataGridRowDetail } from "@/lib/dataGrid/dataGridDetail";
+import DataGridRowJsonPreview from "@/components/grid/DataGridRowJsonPreview.vue";
+import { cellDetailPreviewText } from "@/lib/dataGrid/cellDetailPresentation";
+import { dataGridRowDetailPreviewFields, filterDataGridDetailFields, type DataGridCellDetail, type DataGridColumnDetail, type DataGridRowDetail } from "@/lib/dataGrid/dataGridDetail";
+import type { DatabaseType } from "@/types/database";
 import { detailNavigationDelta, shouldIgnoreDataGridDetailNavigation, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
 
 const { t } = useI18n();
 const props = defineProps<{
   rowDetail: DataGridRowDetail | null;
   columnDetail: DataGridColumnDetail | null;
+  canPreviewRowJson?: boolean;
+  databaseType?: DatabaseType;
   typeColorClass: (type: string) => string;
   openImagePreview: (src: string, title: string) => void;
   copyRowDetailFieldValue: (field: DataGridCellDetail) => void;
@@ -32,8 +37,15 @@ const rowOpen = defineModel<boolean>("rowOpen", { default: false });
 const columnOpen = defineModel<boolean>("columnOpen", { default: false });
 const rowSearch = ref("");
 const columnSearch = ref("");
+const rowJsonPreview = ref(false);
+const showRowJsonPreview = computed(() => props.canPreviewRowJson && rowJsonPreview.value);
+const rowJsonFields = computed(() => (showRowJsonPreview.value && props.rowDetail ? dataGridRowDetailPreviewFields(props.rowDetail, props.databaseType) : []));
 const filteredRowFields = computed(() => (props.rowDetail ? filterDataGridDetailFields(props.rowDetail.fields, rowSearch.value) : []));
 const filteredColumnFields = computed(() => (props.columnDetail ? filterDataGridDetailFields(props.columnDetail.fields, columnSearch.value) : []));
+
+watch(rowOpen, (open) => {
+  if (!open) rowJsonPreview.value = false;
+});
 
 // The dialog must be arrow-navigable the moment it opens. FocusScope's default
 // focuses the first tabbable element — the search input — whose arrows move
@@ -72,11 +84,15 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
           ><ListTree class="h-4 w-4 shrink-0 text-muted-foreground" /><span class="min-w-0 truncate">{{ t("grid.rowDetailsFor", { row: rowDetail.rowNumber }) }}</span></DialogTitle
         >
       </DialogHeader>
-      <div class="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-        <span class="whitespace-nowrap">{{ t("grid.columnsCount", { count: rowDetail.fields.length }) }}</span>
-        <div class="relative ml-auto w-56 max-w-full"><Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><Input v-model="rowSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" /></div>
+      <div class="flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span class="mr-auto whitespace-nowrap">{{ t("grid.columnsCount", { count: rowDetail.fields.length }) }}</span>
+        <div v-if="!showRowJsonPreview" class="relative w-56 max-w-full"><Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" /><Input v-model="rowSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" /></div>
+        <Button v-if="canPreviewRowJson" :variant="showRowJsonPreview ? 'secondary' : 'outline'" size="sm" class="h-7 text-xs" :aria-pressed="showRowJsonPreview" @click="rowJsonPreview = !rowJsonPreview"> <Code2 class="mr-1.5 h-3 w-3" />{{ t("grid.rowJsonPreview") }} </Button>
       </div>
-      <div class="min-h-0 flex-1 overflow-auto rounded border">
+      <div v-if="showRowJsonPreview" class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20">
+        <DataGridRowJsonPreview :key="rowDetail.rowId" :fields="rowJsonFields" :preview-hint="(count) => t('grid.largeValuePreviewHint', { count })" />
+      </div>
+      <div v-else class="min-h-0 flex-1 overflow-auto rounded border">
         <table class="w-full min-w-[640px] text-xs">
           <thead class="sticky top-0 z-10 bg-muted text-muted-foreground">
             <tr class="border-b">
@@ -99,7 +115,7 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
                 <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
                   ><img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain"
                 /></a>
-                <pre class="dbx-data-grid-value-font max-h-44 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ field.rawValuePreview }}</pre>
+                <pre class="dbx-data-grid-value-font max-h-44 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ cellDetailPreviewText(field, databaseType) }}</pre>
                 <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}</div>
                 <div v-if="field.formattedJson" class="mt-2 space-y-1">
                   <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
@@ -169,7 +185,7 @@ function onColumnDetailKeydown(event: KeyboardEvent) {
                 <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-40 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)"
                   ><img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-40 w-full object-contain"
                 /></a>
-                <pre class="dbx-data-grid-value-font max-h-36 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ field.rawValuePreview }}</pre>
+                <pre class="dbx-data-grid-value-font max-h-36 overflow-auto rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.isNull ?? field.value === null }">{{ cellDetailPreviewText(field, databaseType) }}</pre>
                 <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}</div>
                 <div v-if="field.formattedJson" class="mt-2 space-y-1">
                   <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>

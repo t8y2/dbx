@@ -1,6 +1,6 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { chunkRedisKeyRaws, collectUniqueRedisKeys, REDIS_DELETE_KEY_BATCH_SIZE } from "../../apps/desktop/src/lib/redis/redisKeyBatch.ts";
+import { chunkRedisKeyRaws, collectUniqueRedisKeys, REDIS_KEY_MUTATION_BATCH_SIZE } from "../../apps/desktop/src/lib/redis/redisKeyBatch.ts";
 import type { RedisKeyInfo } from "../../apps/desktop/src/lib/backend/api.ts";
 
 function makeKey(key: string): RedisKeyInfo {
@@ -41,13 +41,23 @@ test("collectUniqueRedisKeys handles large batches without changing key objects"
   assert.equal(keys.at(-1), input.at(-1));
 });
 
-test("chunkRedisKeyRaws bounds large delete payloads without changing key order", () => {
-  const keyRaws = Array.from({ length: REDIS_DELETE_KEY_BATCH_SIZE * 2 + 1 }, (_, index) => `key:${index}`);
+test("chunkRedisKeyRaws bounds large key mutation payloads without changing key order", () => {
+  const keyRaws = Array.from({ length: REDIS_KEY_MUTATION_BATCH_SIZE * 2 + 1 }, (_, index) => `key:${index}`);
   const batches = [...chunkRedisKeyRaws(keyRaws)];
 
   assert.deepEqual(
     batches.map((batch) => batch.length),
-    [REDIS_DELETE_KEY_BATCH_SIZE, REDIS_DELETE_KEY_BATCH_SIZE, 1],
+    [REDIS_KEY_MUTATION_BATCH_SIZE, REDIS_KEY_MUTATION_BATCH_SIZE, 1],
   );
   assert.deepEqual(batches.flat(), keyRaws);
+});
+
+test("chunkRedisKeyRaws keeps one shared bound for delete and batch expiry payloads", () => {
+  // Deletes and batch expirations must not drift into two different limits.
+  const batches = [...chunkRedisKeyRaws(Array.from({ length: 2_500 }, (_, index) => `key:${index}`))];
+
+  assert.deepEqual(
+    batches.map((batch) => batch.length),
+    [1_000, 1_000, 500],
+  );
 });

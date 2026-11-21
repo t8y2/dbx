@@ -1,7 +1,9 @@
 # Dependencies
+openGauss-server/
 node_modules
 .claude/
 .codex/
+.codegraph/
 .cortexkit/
 .workbuddy/
 .superpowers/
@@ -28,7 +30,11 @@ agents/drivers/etcd-go/etcd-go
 agents/drivers/etcd2-go/etcd2-go
 plugins/jdbc/.gradle/
 plugins/jdbc/build/
+# Java IDE compilation output (keep the launcher scripts in bin/ tracked).
+plugins/jdbc/bin/main/
+plugins/jdbc/bin/test/
 plugins/jdbc/dist/
+packages/plugin-cli/sdk-root/
 docs/.next/
 docs/out/
 docs/.source/
@@ -54,23 +60,30 @@ Thumbs.db
 # GitHub (keep workflows)
 .github/*
 !.github/CODEOWNERS
+!.github/FUNDING.yml
 !.github/workflows/
 !.github/scripts/
+!.github/ui-preview/
 !.github/ISSUE_TEMPLATE/
 
 # Env
 .env
 .env.*
 !.env.example
+.dbx-plugin-signing-key.env
 
 # Temp
 tmp/
+
+# Local issue screenshots (never commit)
+issue-assets/
 
 # AI background-run dev artifacts (never commit)
 .dlp-quarantine/
 outputs/
 target-ai-write-confirmation/
 .serena/
+.mimosa/
 
 # Code review tool artifacts
 review_diff.json
@@ -78,6 +91,7 @@ review_classified.json
 
 # Logs
 *.log
+/.dbx-dev/
 
 
 # Generated changelog data
@@ -96,3 +110,4 @@ dbx-devtest-connections.json
 
 # Real database integration credentials (see docs/TEST_ENVIRONMENTS.md)
 /docs/TEST_ENVIRONMENTS.md
+.wrangler/

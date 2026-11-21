@@ -16,6 +16,8 @@ export const DATABASE_TYPES = [
   "elasticsearch",
   "easysearch",
   "meilisearch",
+  "solr",
+  "couchdb",
   "hbase",
   "qdrant",
   "chromadb",
@@ -45,6 +47,8 @@ export const DATABASE_TYPES = [
   "questdb",
   "oceanbase-oracle",
   "gbase",
+  "gbase8s",
+  "gbase8c",
   "access",
   "h2",
   "snowflake",
@@ -52,11 +56,13 @@ export const DATABASE_TYPES = [
   "prestosql",
   "hive",
   "argo",
+  "transwarp",
   "kyuubi",
   "impala",
   "db2",
   "informix",
   "neo4j",
+  "nebula",
   "cassandra",
   "bigquery",
   "spanner",
@@ -80,6 +86,8 @@ export const DATABASE_TYPES = [
   "victoriametrics",
   "jdbc",
   "spark",
+  "plugin",
+  "salesforce",
 ] as const;
 
-export type DatabaseType = (typeof DATABASE_TYPES)[number];
+export type DatabaseType = (typeof DATABASE_TYPES)[number] | "plugin";

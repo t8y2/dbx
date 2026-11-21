@@ -1,6 +1,17 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, resolveMetadataColumnName, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
+import {
+  allEditableColumnsWriteable,
+  allPrimaryKeysPresent,
+  analyzeEditableQuery,
+  analyzeEditableQueryEditability,
+  analyzeSelectStructureForDisplay,
+  hasTopLevelKeyword,
+  isBinaryType,
+  queryEditabilityMessageKey,
+  resolveMetadataColumnName,
+  sourceColumnsForResult,
+} from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 
 test("recognizes a simple single-table SELECT as editable", () => {
   const result = analyzeEditableQueryEditability("select id, name from public.users where active = true order by id");
@@ -50,6 +61,41 @@ test("ignores MINUS in strings, comments, and nested queries", () => {
 
     assert.equal(result.editable, true, sql);
     assert.equal(result.analysis.tableName, "users", sql);
+  }
+});
+
+test("ignores semicolons inside literals, identifiers, and comments", () => {
+  for (const sql of [
+    "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111'",
+    "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';",
+    "SELECT * FROM users WHERE name = 'a;b'  ",
+    'SELECT * FROM "weird;name"',
+    "SELECT * FROM `weird;name`",
+    "SELECT * FROM [weird;name]",
+    "SELECT * FROM users -- keep; going\nWHERE active = 1",
+    "SELECT * FROM users /* keep; going */ WHERE active = 1",
+  ]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+  }
+
+  const issue = analyzeEditableQueryEditability("SELECT c.*  FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';");
+  assert.equal(issue.editable, true);
+  assert.equal(issue.analysis.tableName, "CONTAINER");
+  assert.equal(issue.analysis.tableAlias, "c");
+  assert.equal(issue.analysis.selectStar, true);
+
+  const display = analyzeSelectStructureForDisplay("SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';");
+  assert.ok(display);
+  assert.equal(display.tableName, "CONTAINER");
+  assert.equal(display.tableAlias, "c");
+});
+
+test("treats top-level semicolons as a complex source", () => {
+  for (const sql of ["SELECT * FROM users; SELECT * FROM orders", "SELECT * FROM users WHERE name = 'a;b'; SELECT 1"]) {
+    assert.deepEqual(analyzeEditableQueryEditability(sql), { editable: false, reason: "complex-source" }, sql);
+    assert.equal(analyzeSelectStructureForDisplay(sql), null, sql);
   }
 });
 
@@ -307,6 +353,50 @@ test("rejects ambiguous case-only result column mapping", () => {
   assert.equal(sourceColumnsForResult(analysis, ["Id"]), undefined);
 });
 
+test("does not bind non-Oracle same-arity label mismatches by projection order", () => {
+  const analysis = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(analysis);
+  assert.equal(sourceColumnsForResult(analysis, ["id", "amount"]), undefined);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "amount"]), false);
+  assert.equal(sourceColumnsForResult(analysis, ["id", "amount"], undefined, "mysql"), undefined);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "amount"], undefined, "mysql"), false);
+});
+
+test("keeps Oracle queries with a NUM column or alias editable when result labels disagree", () => {
+  const byName = analyzeEditableQuery("select id, num from users");
+  assert.ok(byName);
+  assert.deepEqual(byName.columns, [
+    { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
+    { sourceName: "num", sourceNameQuoted: false, resultName: "num", expression: "num" },
+  ]);
+  assert.deepEqual(sourceColumnsForResult(byName, ["ID", "NUM"], undefined, "oracle"), ["id", "num"]);
+  assert.equal(allEditableColumnsWriteable(byName, ["ID", "NUM"], undefined, "oracle"), true);
+  assert.deepEqual(sourceColumnsForResult(byName, ["ID", "ROWNUM"], undefined, "oracle"), ["id", undefined]);
+  assert.equal(sourceColumnsForResult(byName, ["ID", "ROWNUM"], undefined, "oracle")?.[1], undefined);
+
+  const byAlias = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(byAlias);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "AMOUNT"], undefined, "oracle"), ["id", "amount"]);
+  assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "AMOUNT"], undefined, "oracle"), true);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "NUM", "ROWNUM"], undefined, "oracle"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "NUM", "ROWNUM"], undefined, "oracle"), true);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "AMOUNT", "__dbx_row_num"], undefined, "oracle"), ["id", "amount", undefined]);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "AMOUNT", "dbx_rn"], undefined, "oracle"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "AMOUNT", "__dbx_row_num"], undefined, "oracle"), true);
+});
+
+test("tolerates trailing pagination labels for non-Oracle engines", () => {
+  const analysis = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(analysis);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "__dbx_row_num"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "__dbx_row_num"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "dbx_rn"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "dbx_rn"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "ROWNUM"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "ROWNUM"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "rownum"], undefined, "mysql"), ["id", "amount", undefined]);
+});
+
 test("maps ClickHouse simple query results when identifier columns are returned", () => {
   const analysis = analyzeEditableQuery("SELECT id, name, score + 1 AS next_score FROM default.people");
 
@@ -328,4 +418,87 @@ test("recognizes binary type declarations with lengths", () => {
   assert.equal(isBinaryType("binary(16)"), true);
   assert.equal(isBinaryType("VARBINARY(255)"), true);
   assert.equal(isBinaryType("varchar(255)"), false);
+});
+
+test("rejects aggregate queries with aggregation reason (#11672)", () => {
+  assert.deepEqual(analyzeEditableQueryEditability("SELECT COUNT(*) FROM users"), { editable: false, reason: "aggregation" });
+  assert.deepEqual(analyzeEditableQueryEditability("SELECT id, COUNT(0) AS cnt FROM users"), { editable: false, reason: "aggregation" });
+  assert.deepEqual(analyzeEditableQueryEditability("SELECT id, SUM(amount) AS total FROM orders GROUP BY id"), { editable: false, reason: "aggregation" });
+  assert.deepEqual(
+    analyzeEditableQueryEditability(`SELECT 
+  R.P_ID, 
+  R.SUBJECT, 
+  COUNT(0) AS CNT_NUM
+  FROM COMMON.RECORD R
+ WHERE R.CREATE_TIME >= SYSDATE - INTERVAL '1' DAY
+   AND R.SUBJECT = '邮件提醒'
+   AND R.P_ID = '123214512'
+ GROUP BY R.P_ID, R.SUBJECT`),
+    { editable: false, reason: "aggregation" },
+  );
+});
+
+test("handles comments and escaped quotes without quote desync (#11672)", () => {
+  // String literal containing comment markers
+  const withCommentInString = analyzeEditableQueryEditability("SELECT id, name FROM users WHERE name = 'hello -- world' AND active = 1");
+  assert.equal(withCommentInString.editable, true);
+
+  // Doubled single quote inside string literal
+  const withDoubledQuote = analyzeEditableQueryEditability("SELECT id, name FROM users WHERE name = 'don''t stop' GROUP BY id, name");
+  assert.deepEqual(withDoubledQuote, { editable: false, reason: "aggregation" });
+});
+
+test("keeps scalar-subquery aggregates separate from editable outer rows", () => {
+  for (const expression of [
+    "(SELECT COUNT(*) FROM orders)",
+    "(SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id)",
+    "COALESCE((SELECT SUM(amount) FROM orders o WHERE o.user_id = u.id), 0)",
+    "((SELECT COUNT(*) FROM orders))",
+    "(SELECT COUNT(*) FROM orders UNION SELECT COUNT(*) FROM archived_orders)",
+    "(SELECT MAX(amount) FROM orders WHERE amount > (SELECT AVG(amount) FROM orders))",
+    "CASE WHEN (SELECT COUNT(*) FROM orders) > 0 THEN 1 ELSE 0 END",
+    "(SELECT COUNT(*) FROM orders WHERE note = 'don''t stop')",
+  ]) {
+    const result = analyzeEditableQueryEditability(`SELECT u.id, u.name, ${expression} AS total FROM users u`);
+    assert.equal(result.editable, true, expression);
+    if (!result.editable) continue;
+    assert.deepEqual(
+      result.analysis.columns.map((column) => column.sourceName),
+      ["id", "name", undefined],
+    );
+    assert.equal(result.analysis.tableName, "users");
+  }
+});
+
+test("rejects outer aggregates inside scalar expressions after nested queries", () => {
+  for (const expression of ["COUNT(*)", "COALESCE(SUM(amount), 0)", "ABS(MAX(amount)) + 1", "(SUM(amount))", "COALESCE((SELECT COUNT(*) FROM orders), SUM(amount))", "SUM((SELECT COUNT(*) FROM orders))", "CASE WHEN amount > 0 THEN SUM(amount) ELSE 0 END"]) {
+    assert.deepEqual(analyzeEditableQueryEditability(`SELECT ${expression} AS total FROM users`), { editable: false, reason: "aggregation" }, expression);
+  }
+  assert.deepEqual(analyzeEditableQueryEditability("SELECT name FROM users GROUP BY name"), { editable: false, reason: "aggregation" });
+  assert.deepEqual(analyzeEditableQueryEditability("SELECT name FROM users HAVING COUNT(*) > 1"), { editable: false, reason: "aggregation" });
+  assert.equal(analyzeEditableQueryEditability("SELECT DISTINCT id, name FROM users").editable, true);
+  assert.equal(analyzeEditableQueryEditability("SELECT id, name, 'COUNT(*)' AS note FROM users").editable, true);
+  assert.equal(analyzeEditableQueryEditability('SELECT id, "COUNT", name FROM users').editable, true);
+});
+
+test("scans grouping keywords with dialect-aware comments and quotes", () => {
+  const keywords = ["GROUP", "HAVING"];
+  for (const sql of [
+    "SELECT name FROM users /* GROUP BY name HAVING COUNT(*) > 1 */",
+    "SELECT name FROM users -- GROUP BY name\nWHERE active = 1",
+    "SELECT name, 'GROUP BY name HAVING count(*)' AS note FROM users",
+    'SELECT "GROUP", "HAVING", name FROM users',
+    "SELECT name FROM users WHERE id IN (SELECT id FROM orders GROUP BY id HAVING COUNT(*) > 1)",
+  ]) {
+    assert.equal(hasTopLevelKeyword(sql, keywords, "oracle"), false, sql);
+  }
+  assert.equal(hasTopLevelKeyword("SELECT name, q'[don't GROUP BY name]' AS note FROM users", keywords, "oracle"), false);
+  assert.equal(hasTopLevelKeyword("SELECT name, $$GROUP BY name HAVING COUNT(*)$$ AS note FROM users", keywords, "postgres"), false);
+  assert.equal(hasTopLevelKeyword("SELECT name FROM users # GROUP BY name", keywords, "mysql"), false);
+  assert.equal(hasTopLevelKeyword("SELECT `GROUP`, `HAVING` FROM users", keywords, "mysql"), false);
+  assert.equal(hasTopLevelKeyword("SELECT [GROUP], [HAVING] FROM users", keywords, "sqlserver"), false);
+  assert.equal(hasTopLevelKeyword("SELECT name FROM users WHERE note = 'don\\'t GROUP BY name'", keywords, "mysql"), false);
+  assert.equal(hasTopLevelKeyword("SELECT name FROM users WHERE amount = 1--1 GROUP BY name", keywords, "mysql"), true);
+  assert.equal(hasTopLevelKeyword("SELECT name FROM users /* ignored */ GROUP BY name", keywords, "oracle"), true);
+  assert.equal(hasTopLevelKeyword("SELECT name FROM users HAVING COUNT(*) > 1", keywords, "oracle"), true);
 });

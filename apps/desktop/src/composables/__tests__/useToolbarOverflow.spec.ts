@@ -93,12 +93,51 @@ describe("useToolbarOverflow", () => {
     expect(tierRef.value).toBe(0);
   });
 
+  it("restores the full layout after a side panel closes, like the data-grid header toolbar", async () => {
+    const { rootRef, tierRef, measure } = createHarness();
+
+    // The regression behind issue #15107: opening the history panel narrows
+    // the data tab's header row, the row condenses to icon-only buttons, and
+    // closing the panel must restore the labels once the width comes back.
+    const row = fakeRow(900, (tier) => (tier >= 1 ? 520 : 700), tierRef);
+    rootRef.value = row;
+    await flush();
+    expect(tierRef.value).toBe(0);
+
+    // History panel opens: the row loses ~300px and condenses.
+    Object.defineProperty(row, "clientWidth", { value: 600, configurable: true });
+    measure();
+    expect(tierRef.value).toBe(1);
+
+    // History panel closes: the pane regrows by the panel width (well past
+    // the growth hysteresis) and the recorded tier-0 requirement fits again.
+    Object.defineProperty(row, "clientWidth", { value: 900, configurable: true });
+    measure();
+    expect(tierRef.value).toBe(0);
+  });
+
+  it("restores a tier when condensed content shrinks with the viewport", async () => {
+    const { rootRef, tierRef, measure } = createHarness();
+    let availableWidth = 200;
+    const element = document.createElement("div");
+    Object.defineProperty(element, "clientWidth", { configurable: true, get: () => availableWidth });
+    Object.defineProperty(element, "scrollWidth", { configurable: true, get: () => (tierRef.value >= 1 ? availableWidth : 260) });
+
+    rootRef.value = element;
+    await flush();
+    expect(tierRef.value).toBe(1);
+
+    availableWidth = 400;
+    measure();
+    expect(tierRef.value).toBe(0);
+  });
+
   it("re-measures when a revalidate source changes the control set", async () => {
     const flag = ref(0);
     const { rootRef, tierRef } = createHarness([() => flag.value]);
     let contentGrew = false;
 
-    rootRef.value = fakeRow(200, (tier) => (tier >= 1 ? 180 : contentGrew ? 260 : 180), tierRef);
+    rootRef.value = fakeRow(200, (tier) => (tier >= 1 ? 140 : contentGrew ? 260 : 140), tierRef);
     await flush();
     expect(tierRef.value).toBe(0);
 
@@ -109,6 +148,38 @@ describe("useToolbarOverflow", () => {
     flag.value += 1;
     await flush();
     expect(tierRef.value).toBe(1);
+
+    // The conditional control disappeared: content shrunk back to where tier 0
+    // fits with ample slack without the pane resizing.
+    contentGrew = false;
+    flag.value += 1;
+    await flush();
+    expect(tierRef.value).toBe(0);
+  });
+
+  it("restarts from the full tier after a condensed control set changes", async () => {
+    const flag = ref(0);
+    const { rootRef, tierRef, measure } = createHarness([() => flag.value]);
+    let availableWidth = 200;
+    const element = document.createElement("div");
+    Object.defineProperty(element, "clientWidth", { configurable: true, get: () => availableWidth });
+    Object.defineProperty(element, "scrollWidth", { configurable: true, get: () => (tierRef.value >= 1 ? availableWidth : 260) });
+
+    rootRef.value = element;
+    await flush();
+    expect(tierRef.value).toBe(1);
+
+    // The result context changes while the row is condensed. The next
+    // measurement must rebuild the full-width requirement for this context.
+    flag.value += 1;
+    await flush();
+    expect(tierRef.value).toBe(1);
+
+    // The condensed row has no intrinsic slack, so only the captured full-tier
+    // width proves that the text can be restored after the pane grows.
+    availableWidth = 400;
+    measure();
+    expect(tierRef.value).toBe(0);
   });
 
   it("starts from the full layout when a row re-attaches instead of inheriting a stale tier", async () => {

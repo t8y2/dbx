@@ -1,5 +1,7 @@
 import { CLICKHOUSE_AGGREGATE_FUNCTIONS } from "./aggregateFunctions";
 import type { ClickHouseFunctionDefinition, ClickHouseFunctionSignature } from "./functionTypes";
+import type { SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
+import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 
 type CombinatorName = "Array" | "Map" | "ForEach" | "Distinct" | "OrDefault" | "OrNull" | "If" | "Resample" | "SimpleState" | "State" | "Merge" | "MergeState";
 
@@ -94,7 +96,7 @@ function generateDefinition(base: ClickHouseFunctionDefinition, sequence: readon
   };
 }
 
-export function generateAggregateCombinatorCandidates(prefix: string, limit: number): ClickHouseFunctionDefinition[] {
+export function generateAggregateCombinatorCandidates(prefix: string, limit: number, matchMode: SqlCompletionMatchMode = "fuzzy"): ClickHouseFunctionDefinition[] {
   if (limit <= 0) return [];
   const normalized = prefix.toLowerCase();
   const results: ClickHouseFunctionDefinition[] = [];
@@ -102,11 +104,14 @@ export function generateAggregateCombinatorCandidates(prefix: string, limit: num
   for (const base of CLICKHOUSE_AGGREGATE_FUNCTIONS) {
     if (base.combinators === false) continue;
     const baseName = base.name.toLowerCase();
-    if (normalized && !baseName.startsWith(normalized) && !normalized.startsWith(baseName)) continue;
+    // A contains match may start in the base and end in a combinator suffix.
+    // Apply the base-only prefilter exclusively to the existing fuzzy path.
+    if (matchMode !== "contains" && normalized && !baseName.startsWith(normalized) && !normalized.startsWith(baseName)) continue;
 
     for (const sequence of COMBINATOR_SEQUENCES) {
+      const candidateName = `${base.name}${sequence.join("")}`;
+      if (!matchesIdentifierSearch(candidateName, prefix, matchMode)) continue;
       const candidate = generateDefinition(base, sequence);
-      if (!candidate.name.toLowerCase().startsWith(normalized)) continue;
       results.push(candidate);
       if (results.length === limit) return results;
     }

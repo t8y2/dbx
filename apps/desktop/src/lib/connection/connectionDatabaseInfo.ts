@@ -1,10 +1,18 @@
 import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, IdentifierCase } from "@/types/database";
 
-export type DatabaseInfoField = keyof DatabaseConnectionInfo;
+export type DatabaseInfoField = Exclude<keyof DatabaseConnectionInfo, "compatibilityMode">;
 
 export interface DatabaseInfoRow {
   key: DatabaseInfoField;
   value: string;
+}
+
+// These connections have no real database metadata. VictoriaMetrics exposes a
+// configured label as a synthetic database node, not a server database.
+const DATABASE_INFO_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"]);
+
+export function supportsConnectionDatabaseInfo(dbType: ConnectionConfig["db_type"]): boolean {
+  return !DATABASE_INFO_UNSUPPORTED_TYPES.has(dbType);
 }
 
 const DATABASE_INFO_FIELDS: readonly DatabaseInfoField[] = ["productName", "productVersion", "currentDatabase", "serverComment", "serverCharset", "serverCollation", "unquotedIdentifierCase", "quotedIdentifierCase", "driverName", "driverVersion", "jdbcVersion"];
@@ -32,6 +40,7 @@ export function configuredDatabaseProductName(config: Pick<ConnectionConfig, "db
 export function normalizeDatabaseConnectionInfo(value: unknown, fallbackProductName?: string, fallbackCurrentDatabase?: string): DatabaseConnectionInfo | undefined {
   const source = isRecord(value) ? value : {};
   const result: DatabaseConnectionInfo = {
+    compatibilityMode: nonBlankString(source.compatibilityMode),
     productName: nonBlankString(source.productName) ?? nonBlankString(fallbackProductName),
     productVersion: nonBlankString(source.productVersion),
     currentDatabase: nonBlankString(source.currentDatabase) ?? nonBlankString(fallbackCurrentDatabase),
@@ -44,7 +53,7 @@ export function normalizeDatabaseConnectionInfo(value: unknown, fallbackProductN
     driverVersion: nonBlankString(source.driverVersion),
     jdbcVersion: nonBlankString(source.jdbcVersion),
   };
-  return DATABASE_INFO_FIELDS.some((key) => result[key] !== undefined) ? result : undefined;
+  return result.compatibilityMode || DATABASE_INFO_FIELDS.some((key) => result[key] !== undefined) ? result : undefined;
 }
 
 export function normalizeConnectionTestResult(value: unknown, config: ConnectionConfig): ConnectionTestResult {
@@ -86,7 +95,18 @@ function fnv1a(value: string, seed: number): number {
 }
 
 export function connectionConfigFingerprint(config: ConnectionConfig, sourceName = config.name): string {
-  const { database_info: _databaseInfo, default_schema: _defaultSchema, note: _note, ...submittedConfig } = config;
+  const {
+    database_info: _databaseInfo,
+    default_schema: _defaultSchema,
+    note: _note,
+    show_database_links: _showDatabaseLinks,
+    show_native_jobs: _showNativeJobs,
+    show_user_admin: _showUserAdmin,
+    sidebar_auto_load_all_tables: _sidebarAutoLoadAllTables,
+    redis_key_filter: _redisKeyFilter,
+    jdbc_dialect: _jdbcDialect,
+    ...submittedConfig
+  } = config;
   const serialized = JSON.stringify(stableValue({ config: submittedConfig, sourceName }));
   const first = fnv1a(serialized, 0x811c9dc5).toString(16).padStart(8, "0");
   const second = fnv1a(serialized, 0x9e3779b9).toString(16).padStart(8, "0");

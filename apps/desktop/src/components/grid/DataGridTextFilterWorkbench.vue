@@ -5,8 +5,12 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
+import DataGridLocalFilterSummary from "@/components/grid/DataGridLocalFilterSummary.vue";
+import type { DataGridLocalFilterSummaryItem } from "@/components/grid/DataGridLocalFilterSummary.vue";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_MAX, DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_MIN } from "@/lib/dataGrid/dataGridTextFilterPanel";
 
 const props = defineProps<{
@@ -19,6 +23,10 @@ const props = defineProps<{
   columnSearch: string;
   applyOnlyBusy?: boolean;
   disabled?: boolean;
+  valueSuggestions?: DataGridDistinctValueSuggestionState;
+  hasLocalColumnFilters?: boolean;
+  localFilterCount?: number;
+  localFilterSummaries?: DataGridLocalFilterSummaryItem[];
 }>();
 
 const emit = defineEmits<{
@@ -30,10 +38,20 @@ const emit = defineEmits<{
   apply: [];
   reset: [];
   clear: [];
+  clearLocalFilter: [columnIndex?: number];
   copySql: [];
   removeRule: [id: string];
   moveRule: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
+  openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
+  closeValueSuggestions: [];
+  updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
+  selectValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleAllValueSuggestions: [];
+  applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 
 const { t } = useI18n();
@@ -108,6 +126,7 @@ function addRuleFromBlankArea(event: KeyboardEvent) {
 
 onMounted(() => emit("ensureRule"));
 onBeforeUnmount(() => {
+  emit("closeValueSuggestions");
   stopResizeListeners();
   restoreDocumentInteraction();
 });
@@ -143,6 +162,7 @@ watch(
       @keydown="addRuleFromBlankArea"
       @pointerdown.self="focusRulesArea"
     >
+      <DataGridLocalFilterSummary v-if="hasLocalColumnFilters" class="mb-1.5" :count="localFilterCount ?? 0" :summaries="localFilterSummaries ?? []" @clear-all="emit('clearLocalFilter')" @clear-column="(columnIndex) => emit('clearLocalFilter', columnIndex)" />
       <DataGridFilterBuilder
         class="min-w-[520px]"
         :rules="rules"
@@ -153,6 +173,7 @@ watch(
         :mode-options="modeOptions"
         :column-search="columnSearch"
         :disabled="disabled"
+        :value-suggestions="valueSuggestions"
         layout="text"
         :show-header="false"
         :show-footer="false"
@@ -165,6 +186,15 @@ watch(
         @move="(id, targetIndex) => emit('moveRule', id, targetIndex)"
         @update-rule="(id, patch) => emit('updateRule', id, patch)"
         @update:column-search="emit('update:columnSearch', $event)"
+        @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
+        @close-value-suggestions="emit('closeValueSuggestions')"
+        @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+        @update-value-suggestion-source="emit('updateValueSuggestionSource', $event)"
+        @select-value-suggestion="emit('selectValueSuggestion', $event)"
+        @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
+        @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
+        @apply-value-suggestions="emit('applyValueSuggestions')"
+        @custom-mode-order="emit('customModeOrder')"
       />
     </div>
 

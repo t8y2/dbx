@@ -1,0 +1,36 @@
+{
+  "configs": [
+    {
+      "id": "demo-postgres",
+      "name": "演示 · PostgreSQL",
+      "db_type": "postgres",
+      "host": "demo-postgres",
+      "port": 5432,
+      "username": "demo",
+      "password": "demo",
+      "database": "demo",
+      "save_password": true
+    },
+    {
+      "id": "demo-mysql",
+      "name": "演示 · MySQL",
+      "db_type": "mysql",
+      "host": "demo-mysql",
+      "port": 3306,
+      "username": "demo",
+      "password": "demo",
+      "database": "demo",
+      "save_password": true
+    },
+    {
+      "id": "demo-redis",
+      "name": "演示 · Redis",
+      "db_type": "redis",
+      "host": "demo-redis",
+      "port": 6379,
+      "username": "",
+      "password": "",
+      "save_password": true
+    }
+  ]
+}

@@ -71,8 +71,8 @@ test("highlights destructive commands as warning", () => {
   assert.match(diags[0].message, /Dangerous command 'DEL'/);
 });
 
-test("highlights flushall as blocked error but flushdb as confirm warning", () => {
-  // Aligned with the execution safety classification: FLUSHALL=blocked, FLUSHDB=confirm.
+test("highlights flushall and flushdb as blocked errors", () => {
+  // Aligned with the execution safety classification: FLUSHALL/FLUSHDB=blocked.
   const all = buildRedisSyntaxDiagnostics("FLUSHALL");
   assert.equal(all.length, 1);
   assert.equal(all[0].severity, "error");
@@ -80,8 +80,8 @@ test("highlights flushall as blocked error but flushdb as confirm warning", () =
 
   const db = buildRedisSyntaxDiagnostics("FLUSHDB");
   assert.equal(db.length, 1);
-  assert.equal(db[0].severity, "warning");
-  assert.match(db[0].message, /Dangerous command 'FLUSHDB'/);
+  assert.equal(db[0].severity, "error");
+  assert.match(db[0].message, /Blocked command 'FLUSHDB'/);
 });
 
 test("subcommands resolve via MAIN SUB key", () => {
@@ -176,4 +176,44 @@ test("tokenizeRedisLine preserves empty quoted arguments", () => {
     tokenizeRedisLine('SET "" ""').argv.map((token) => token.value),
     ["SET", "", ""],
   );
+});
+
+test("buildRedisSyntaxDiagnostics bounds analysis to lineRanges when provided", () => {
+  const multiLine = "GET a\nDEL b\nGET c\nDEL d\nGET e";
+  // Only inspect lines 2 to 3 (DEL b and GET c)
+  const diags = buildRedisSyntaxDiagnostics(multiLine, [{ startLine: 2, endLine: 3 }]);
+  assert.equal(diags.length, 1);
+  assert.equal(diags[0].span.start_line, 2);
+  assert.match(diags[0].message, /Dangerous command 'DEL'/);
+});
+
+test("buildRedisSyntaxDiagnostics supports document source with line(n)", () => {
+  const doc = {
+    lines: 4,
+    line(n: number) {
+      const content = ["GET a", "DEL b", "INVALIDCOMMAND x", "GET c"];
+      return { text: content[n - 1] ?? "" };
+    },
+  };
+  const diags = buildRedisSyntaxDiagnostics(doc, [{ startLine: 3, endLine: 3 }]);
+  assert.equal(diags.length, 1);
+  assert.equal(diags[0].span.start_line, 3);
+  assert.match(diags[0].message, /Unknown command 'INVALIDCOMMAND'/);
+});
+
+test("shouldRunRedisDiagnostics supports document source", () => {
+  const doc = {
+    length: 10,
+    lineAt(_pos: number) {
+      return { text: "GETT", from: 0 };
+    },
+  };
+  assert.equal(shouldRunRedisDiagnostics(doc, 4), false);
+  const docReady = {
+    length: 10,
+    lineAt(_pos: number) {
+      return { text: "GETT foo", from: 0 };
+    },
+  };
+  assert.equal(shouldRunRedisDiagnostics(docReady, 8), true);
 });

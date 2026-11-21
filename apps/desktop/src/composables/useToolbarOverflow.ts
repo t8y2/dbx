@@ -1,4 +1,5 @@
 import { nextTick, onUnmounted, ref, watch, type Ref, type WatchSource } from "vue";
+import { deferUntilPanelResizeEnd } from "@/lib/app/panelResizeState";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 
 /**
@@ -26,6 +27,11 @@ export function useToolbarOverflow(rootRef: Ref<HTMLElement | null>, revalidateS
   // Available width when the current tier was condensed into; anchors the
   // step-down hysteresis so a static narrow layout cannot oscillate.
   const condensedAtWidth = ref(0);
+  // A condensed flex row can shrink its scrollWidth along with the viewport,
+  // so keep the measured requirement for each expanded tier before hiding its
+  // labels. This lets a widened row restore labels even when the condensed row
+  // reports no slack of its own.
+  let expandedTierRequiredWidths: Partial<Record<EditorToolbarTier, number>> = {};
   let resizeObserver: ResizeObserver | undefined;
 
   function measure() {
@@ -33,14 +39,20 @@ export function useToolbarOverflow(rootRef: Ref<HTMLElement | null>, revalidateS
     if (!element) {
       return;
     }
+    // clientWidth/scrollWidth reads force a document-wide synchronous relayout
+    // on every resize notification; skip them during divider drags and take a
+    // single measurement when the drag ends.
+    if (deferUntilPanelResizeEnd(measure)) return;
     const next = resolveNextEditorToolbarTier({
       tier: tier.value,
       availableWidth: element.clientWidth,
       contentWidth: element.scrollWidth,
       condensedAtWidth: condensedAtWidth.value,
+      expandedTierRequiredWidths,
     });
     if (next !== tier.value) {
       if (next > tier.value) {
+        expandedTierRequiredWidths[tier.value] = Math.max(expandedTierRequiredWidths[tier.value] ?? 0, element.scrollWidth);
         condensedAtWidth.value = element.clientWidth;
       }
       tier.value = next;
@@ -55,6 +67,9 @@ export function useToolbarOverflow(rootRef: Ref<HTMLElement | null>, revalidateS
 
   if (revalidateSources.length > 0) {
     watch(revalidateSources, () => {
+      tier.value = 0;
+      condensedAtWidth.value = 0;
+      expandedTierRequiredWidths = {};
       void nextTick(measure);
     });
   }
@@ -69,6 +84,7 @@ export function useToolbarOverflow(rootRef: Ref<HTMLElement | null>, revalidateS
       // stale tier from whatever was previously measured.
       tier.value = 0;
       condensedAtWidth.value = 0;
+      expandedTierRequiredWidths = {};
       if (element && typeof ResizeObserver !== "undefined") {
         resizeObserver = new ResizeObserver(measure);
         resizeObserver.observe(element);

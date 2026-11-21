@@ -3,7 +3,6 @@ use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{SqlFileRequest, SqlFileStatus};
 use dbx_core::sql_file_import::execute_sql_file_content;
-use dbx_core::storage::Storage;
 use dbx_core::table_import::{
     build_import_insert_batches, import_table_file_core, parse_delimited_file_with_options, TableImportColumnMapping,
     TableImportMode, TableImportParseOptions, TableImportRequest, TableImportSourceFormat, TableImportStatus,
@@ -19,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connection::ConnectionConfig {
     dbx_core::models::connection::ConnectionConfig {
+        oracle_oci_nls_lang: None,
+        oracle_oci_tns_admin: None,
         docs_notes_path: None,
         id: id.to_string(),
         name: id.to_string(),
@@ -44,6 +45,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         connect_timeout_secs: 10,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),
@@ -63,11 +66,16 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         redis_scan_page_size: None,
         redis_database_aliases: Default::default(),
         redis_key_templates: Vec::new(),
+        redis_key_filter: None,
         redis_key_grouping: None,
         etcd_endpoints: String::new(),
         gbase_server: String::new(),
         informix_server: String::new(),
         external_config: None,
+        plugin_id: None,
+        plugin_connection_provider: None,
+        plugin_connection_type: None,
+        connection_secrets: Default::default(),
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
@@ -75,7 +83,12 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
+        sidebar_auto_load_all_tables: false,
+        show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }
@@ -87,7 +100,8 @@ async fn live_sqlserver_import_state(
 ) -> (AppState, String, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-import-{suffix}"));
     std::fs::create_dir_all(&dir).expect("create live import directory");
-    let storage = Storage::open(&dir.join("storage.db")).await.expect("open live import storage");
+    let storage =
+        dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.expect("open live import storage");
     let state = AppState::new(storage);
     let config = live_sqlserver_config(connection_id, database);
     state.configs.write().await.insert(connection_id.to_string(), config);
@@ -101,6 +115,7 @@ fn live_sqlserver_import_mapping(source: &str, target: &str) -> TableImportColum
         source_column: source.to_string(),
         target_column: target.to_string(),
         target_data_type: None,
+        generator: None,
     }
 }
 
@@ -129,6 +144,9 @@ fn live_sqlserver_import_request(
         date_time_format: None,
         prepared_source: None,
         retain_source: false,
+        conflict_policy: None,
+        skip_duplicate_rows: false,
+        continue_on_error: false,
     }
 }
 
@@ -518,6 +536,8 @@ async fn live_sqlserver_bulk_imports_zero_fraction_xlsx_numbers_into_bigint() {
         column_comments: Vec::new(),
         rows: vec![vec![serde_json::json!(1.0), serde_json::json!("xlsx")]],
         numeric_column_right_align: false,
+        auto_filter: None,
+        header_comment_rows: false,
     })
     .expect("build SQL Server XLSX integer fixture");
     let path = dir.join("zero-fraction-integer.xlsx");
@@ -1010,9 +1030,17 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         table_comment: None,
         original_table_comment: None,
         mysql_engine: None,
+        mysql_auto_increment_value: None,
+        transwarp_create: None,
         partitioned: false,
+        foreign_table: false,
+        table_type: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
+        primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);
@@ -1165,7 +1193,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-export-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-sqlserver-export";
     let pool_key = format!("{connection_id}:{database}");
@@ -1205,15 +1233,24 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         timeout_secs: Some(10),
         keyset_optimization_enabled: true,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
+        csv_without_bom: false,
+        null_literal: String::new(),
         export_table_name: None,
+        export_schema: None,
         export_column_types: None,
+        selected_columns: None,
+        export_column_extras: None,
         column_comments: None,
         auto_filter: None,
+        header_comment_rows: false,
         identifier_quote: None,
         numeric_column_right_align: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -1255,7 +1292,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     let procedure = format!("dbx_sql_file_proc_{suffix}");
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-file-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-sqlserver-file";
     let mut config = live_sqlserver_config(connection_id, &database);
@@ -1285,11 +1322,19 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
          GO"
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("live-sqlserver-file-{suffix}"),
         connection_id: connection_id.to_string(),
         database: database.clone(),
+        schema: None,
         file_path: "fixture.sql".to_string(),
         continue_on_error: false,
+        selected_tables: None,
+        part_cooldown_ms: 0,
+        skip_relational_constraints: false,
+        failure_log_enabled: true,
+        resolve_includes: false,
+        encoding: Default::default(),
     };
     let done_seen = AtomicBool::new(false);
 
@@ -1358,7 +1403,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-rowversion-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
     let config = live_sqlserver_config("live-sqlserver-rowversion", &database);
     state.configs.write().await.insert(config.id.clone(), config);
@@ -1369,6 +1414,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         .await
         .expect("connect target transfer pool");
     let request = dbx_core::transfer::TransferRequest {
+        table_filters: std::collections::HashMap::new(),
         transfer_id: format!("live-sqlserver-rowversion-{suffix}"),
         source_connection_id: "live-sqlserver-rowversion".to_string(),
         source_database: database.clone(),
@@ -1382,10 +1428,12 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         create_table: true,
         drop_target_before_create: false,
         drop_target_confirmed: false,
+        oracle_packages: None,
         content: dbx_core::transfer::TransferContent::default(),
-        objects: Vec::new(),
+        objects: Some(Vec::new()),
         mode: dbx_core::transfer::TransferMode::Append,
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
+        target_column_name_case: dbx_core::transfer::TransferColumnNameCase::Preserve,
         quote_target_column_names: true,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         batch_size: 100,
@@ -1554,7 +1602,7 @@ async fn live_sqlserver_cross_database_metadata_and_query() {
 
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-cross-database-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
     let state = AppState::new(storage);
     let connection_id = "live-sqlserver-cross-database";
     let mut config = live_sqlserver_config(connection_id, &default_database);

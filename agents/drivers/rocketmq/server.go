@@ -17,12 +17,13 @@ const (
 
 var capabilities = []string{
 	"mq_connect", "mq_test_connection", "mq_topics", "mq_consumer_groups",
-	"mq_messages", "mq_acl", "mq_config", "mq_monitoring",
+	"mq_messages", "mq_acl", "mq_config", "mq_monitoring", "rocketmq_proxy_grpc",
 }
 
 type rocketMQAgent struct {
 	mu                sync.RWMutex
 	client            *admin.Client
+	messaging         *proxyMessagingClient
 	connection        connectionConfig
 	proxies           *proxyManager
 	clusterName       string
@@ -38,6 +39,11 @@ func (a *rocketMQAgent) dispatch(method string, raw json.RawMessage) (any, error
 	params, err := decodeParams(raw)
 	if err != nil {
 		return nil, err
+	}
+	if strings.HasPrefix(method, "mq_") && method != "mq_send_message" {
+		if _, _, err := a.requireClient(); err != nil {
+			return nil, err
+		}
 	}
 	switch method {
 	case "handshake":
@@ -120,6 +126,9 @@ func (a *rocketMQAgent) requireClient() (*admin.Client, connectionConfig, error)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.client == nil {
+		if a.messaging != nil {
+			return nil, a.connection, errors.New("unsupported: RocketMQ management channel is unavailable")
+		}
 		return nil, connectionConfig{}, errors.New("RocketMQ agent is not connected")
 	}
 	return a.client, a.connection, nil
@@ -133,6 +142,10 @@ func (a *rocketMQAgent) close() {
 	}
 	if a.proxies != nil {
 		a.proxies.Close()
+	}
+	if a.messaging != nil {
+		a.messaging.Close()
+		a.messaging = nil
 	}
 	a.client = nil
 	a.proxies = nil

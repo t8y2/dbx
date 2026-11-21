@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 380
 dbType: teradata
+compareModes: [schema, data]
 rustVariant: Teradata
 label: Teradata
 runtimeMode: agent

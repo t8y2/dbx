@@ -62,3 +62,9 @@ per-connection opt-in in the connection dialog.
 Some high-privilege extensions require optional runtime libraries that JDBCX deliberately does not bundle. Install
 those libraries in the JDBC driver store and select them for the same connection. For JDBCX 0.8.0, MCP requires
 `io.github.jdbcx:io.modelcontextprotocol:1.0.1`; use the dependency version declared by the selected JDBCX release.
+
+## Oracle cancellation
+
+Oracle JDBC connections default to `oracle.net.disableOob=true`, so statement cancellation uses in-band rather than
+out-of-band signaling. This keeps the tested Oracle connection usable after a cancelled query or LOB read. An explicit
+connection property takes precedence. This default does not change OceanBase connections or JVM-wide settings.

@@ -105,6 +105,8 @@ export function sanitizeTabUiState(value: unknown): TabUiState | undefined {
   const state = value as TabUiState;
   const normalized: TabUiState = {};
   if (state.activeOutputView && ["result", "summary", "explain", "chart", "messages", "profile"].includes(state.activeOutputView)) normalized.activeOutputView = state.activeOutputView;
+  if (state.redisResultViewMode === "grid" || state.redisResultViewMode === "console") normalized.redisResultViewMode = state.redisResultViewMode;
+  if (typeof state.resultTransposeEnabled === "boolean") normalized.resultTransposeEnabled = state.resultTransposeEnabled;
   if (typeof state.resultPaneOpen === "boolean") normalized.resultPaneOpen = state.resultPaneOpen;
   const sanitizedPage = sanitizeTabPageUiState(state.page);
   if (sanitizedPage) {

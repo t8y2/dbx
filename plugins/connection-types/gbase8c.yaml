@@ -1,0 +1,38 @@
+schemaVersion: 1
+order: 455
+dbType: gbase8c
+compareModes: [schema, data]
+rustVariant: Gbase8c
+label: 南大通用 GBase 8c
+dialect: PostgreSQL
+runtimeMode: agent
+mcpMode: bridge
+agentKey: gbase8c
+driverStoreVisible: true
+driverStoreOrder: 55
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 5432
+traits:
+  schemaAware: true
+  treeSchema: true
+  pgVacuum: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

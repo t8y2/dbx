@@ -7,9 +7,18 @@ async fn connect_sqlserver() -> sqlserver::SqlServerClient {
     let user = std::env::var("DBX_TEST_SQLSERVER_USER").unwrap_or_else(|_| "sa".to_string());
     let password = std::env::var("DBX_TEST_SQLSERVER_PASSWORD").expect("DBX_TEST_SQLSERVER_PASSWORD");
     let database = std::env::var("DBX_TEST_SQLSERVER_DATABASE").unwrap_or_else(|_| "master".to_string());
-    sqlserver::connect_with_port_explicit(&host, port, true, &user, &password, Some(&database), Duration::from_secs(15))
-        .await
-        .expect("connect to SQL Server")
+    sqlserver::connect_with_port_explicit(
+        &host,
+        port,
+        true,
+        &user,
+        &password,
+        Some(&database),
+        None,
+        Duration::from_secs(15),
+    )
+    .await
+    .expect("connect to SQL Server")
 }
 
 #[tokio::test]

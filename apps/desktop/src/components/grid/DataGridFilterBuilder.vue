@@ -3,13 +3,17 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, Eye, EyeOff, Focus, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import DataGridDistinctValuePopover from "@/components/grid/DataGridDistinctValuePopover.vue";
 import { filterModeNeedsValue, filterModeUsesList, filterModeUsesRange } from "@/lib/dataGrid/dataGridColumnFilter";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { resolveDataGridFilterRuleDropPlacement } from "@/lib/dataGrid/dataGridFilterRuleDrag";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 const { t } = useI18n();
 const VALUE_SHORTCUT_HINT_STORAGE_KEY = "dbx-filter-builder-value-shortcut-hint-days";
@@ -37,6 +41,7 @@ const props = withDefaults(
     showHeader?: boolean;
     showFooter?: boolean;
     layout?: "popover" | "panel" | "text";
+    valueSuggestions?: DataGridDistinctValueSuggestionState;
   }>(),
   { showHeader: true, showFooter: true, layout: "popover" },
 );
@@ -50,6 +55,15 @@ const emit = defineEmits<{
   move: [id: string, targetIndex: number];
   updateRule: [id: string, patch: Partial<DataGridStructuredFilterRule>];
   "update:columnSearch": [value: string];
+  openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
+  closeValueSuggestions: [];
+  updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
+  selectValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleValueSuggestion: [option: DataGridLocalFilterOption];
+  toggleAllValueSuggestions: [];
+  applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 const columnSearchInputs = new Map<string, HTMLInputElement>();
 const filterRuleElements = new Map<string, HTMLElement>();
@@ -57,6 +71,7 @@ const filterBuilderRootRef = ref<HTMLElement>();
 const pendingValueFocus = new Set<string>();
 const pendingKeyboardAddFocus = new Set<string>();
 const openColumnSelectIds = ref(new Set<string>());
+const openModeSelectIds = ref(new Set<string>());
 const activeColumnIndexes = ref<Record<string, number>>({});
 const focusedValueRuleId = ref<string>();
 const valueShortcutHintRuleId = ref<string>();
@@ -92,6 +107,19 @@ const filterBuilderStyle = computed(() => {
 
 function usesExpandedLayout(mode: DataGridContextFilterMode) {
   return filterModeUsesList(mode) || filterModeUsesRange(mode);
+}
+
+function canSuggestValues(rule: DataGridStructuredFilterRule) {
+  return !!props.valueSuggestions && !!rule.columnName && !rule.disabled && filterModeNeedsValue(rule.mode);
+}
+
+function valueSuggestionsOpen(rule: DataGridStructuredFilterRule, target: DataGridDistinctValueSuggestionTarget) {
+  return props.valueSuggestions?.ruleId === rule.id && props.valueSuggestions.target === target;
+}
+
+function updateValueSuggestionsOpen(rule: DataGridStructuredFilterRule, target: DataGridDistinctValueSuggestionTarget, open: boolean) {
+  if (open) emit("openValueSuggestions", rule.id, target);
+  else if (valueSuggestionsOpen(rule, target)) emit("closeValueSuggestions");
 }
 
 function currentLocalDateKey() {
@@ -335,6 +363,22 @@ function setColumnSelectOpen(id: string, open: boolean) {
   openColumnSelectIds.value = next;
 }
 
+function setModeSelectOpen(id: string, open: boolean) {
+  const next = new Set(openModeSelectIds.value);
+  if (open) {
+    next.clear();
+    next.add(id);
+  } else {
+    next.delete(id);
+  }
+  openModeSelectIds.value = next;
+}
+
+function openCustomModeOrder(id: string) {
+  setModeSelectOpen(id, false);
+  emit("customModeOrder");
+}
+
 async function handleColumnSelectOpen(rule: DataGridStructuredFilterRule, open: boolean) {
   setColumnSelectOpen(rule.id, open);
   if (!open) return;
@@ -353,7 +397,7 @@ async function openFirstEmptyRuleColumnSearch() {
   if (rule) await handleColumnSelectOpen(rule, true);
 }
 
-defineExpose({ openFirstEmptyRuleColumnSearch });
+defineExpose({ openFirstEmptyRuleColumnSearch, focusFilterRuleValue });
 
 function handleColumnCloseAutoFocus(id: string, event: Event) {
   if (pendingKeyboardAddFocus.delete(id)) {
@@ -601,13 +645,15 @@ function blurValueRule(id: string) {
               </template>
             </SelectContent>
           </Select>
-          <Select :model-value="rule.mode" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })">
+          <Select :model-value="rule.mode" :open="openModeSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })" @update:open="(open: boolean) => setModeSelectOpen(rule.id, open)">
             <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'"
               ><SelectValue
             /></SelectTrigger>
             <SelectContent
-              ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem></SelectContent
-            >
+              ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem>
+              <div class="my-1 border-t" />
+              <button type="button" class="flex w-full cursor-pointer items-center px-2 py-1.5 text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground" @pointerdown.stop @click="openCustomModeOrder(rule.id)">{{ t("grid.filterModeOrderCustom") }}</button>
+            </SelectContent>
           </Select>
           <div v-if="props.layout === 'text'" class="flex min-w-0 items-center gap-1" :class="rule.disabled ? 'text-muted-foreground' : ''">
             <template v-if="filterModeUsesRange(rule.mode)">
@@ -620,6 +666,23 @@ function blurValueRule(id: string) {
                 @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
                 @keydown="handleValueEditorKeydown($event, `value-start:${rule.id}`)"
               />
+              <DataGridDistinctValuePopover
+                v-if="canSuggestValues(rule) && props.valueSuggestions"
+                compact
+                :open="valueSuggestionsOpen(rule, 'value')"
+                :search="props.valueSuggestions.search"
+                :options="props.valueSuggestions.options"
+                :loading="props.valueSuggestions.loading"
+                :error="props.valueSuggestions.error"
+                :limited="props.valueSuggestions.limited"
+                :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+                @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
+                @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
+                @select="emit('selectValueSuggestion', $event)"
+              />
               <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
               <Input
                 :model-value="rule.rawEndValue"
@@ -629,34 +692,91 @@ function blurValueRule(id: string) {
                 @update:model-value="(value) => emit('updateRule', rule.id, { rawEndValue: String(value ?? '') })"
                 @keydown="handleValueEditorKeydown($event, `value-end:${rule.id}`)"
               />
+              <DataGridDistinctValuePopover
+                v-if="canSuggestValues(rule) && props.valueSuggestions"
+                compact
+                :open="valueSuggestionsOpen(rule, 'end')"
+                :search="props.valueSuggestions.search"
+                :options="props.valueSuggestions.options"
+                :loading="props.valueSuggestions.loading"
+                :error="props.valueSuggestions.error"
+                :limited="props.valueSuggestions.limited"
+                :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+                @update:open="updateValueSuggestionsOpen(rule, 'end', $event)"
+                @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
+                @select="emit('selectValueSuggestion', $event)"
+              />
             </template>
-            <Input
-              v-else-if="filterModeUsesList(rule.mode)"
-              data-filter-value-editor
-              :model-value="rule.rawValue"
-              class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
-              :disabled="rule.disabled"
-              :placeholder="t('grid.filterBuilderValues')"
-              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
-              @keydown="handleValueEditorKeydown($event, `value-list:${rule.id}`)"
-            />
-            <Input
-              v-else-if="filterModeNeedsValue(rule.mode)"
-              data-filter-value-editor
-              :model-value="rule.rawValue"
-              class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
-              :disabled="rule.disabled"
-              :placeholder="t('grid.filterBuilderTextValue')"
-              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
-              @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
-            />
+            <template v-else-if="filterModeUsesList(rule.mode)">
+              <Input
+                data-filter-value-editor
+                :model-value="rule.rawValue"
+                class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+                :disabled="rule.disabled"
+                :placeholder="t('grid.filterBuilderValues')"
+                @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+                @keydown="handleValueEditorKeydown($event, `value-list:${rule.id}`)"
+              />
+              <DataGridDistinctValuePopover
+                v-if="canSuggestValues(rule) && props.valueSuggestions"
+                compact
+                :open="valueSuggestionsOpen(rule, 'value')"
+                :search="props.valueSuggestions.search"
+                :options="props.valueSuggestions.options"
+                :loading="props.valueSuggestions.loading"
+                :error="props.valueSuggestions.error"
+                :limited="props.valueSuggestions.limited"
+                :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+                :multiple="true"
+                :selected-keys="props.valueSuggestions.selectedKeys"
+                @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
+                @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
+                @toggle="emit('toggleValueSuggestion', $event)"
+                @toggle-all="emit('toggleAllValueSuggestions')"
+                @apply="emit('applyValueSuggestions')"
+              />
+            </template>
+            <template v-else-if="filterModeNeedsValue(rule.mode)">
+              <Input
+                data-filter-value-editor
+                :model-value="rule.rawValue"
+                class="h-6 min-w-0 flex-1 rounded-none border-0 border-b border-transparent bg-transparent px-1 text-xs shadow-none focus-visible:border-primary focus-visible:ring-0"
+                :disabled="rule.disabled"
+                :placeholder="t('grid.filterBuilderTextValue')"
+                @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+                @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
+              />
+              <DataGridDistinctValuePopover
+                v-if="canSuggestValues(rule) && props.valueSuggestions"
+                compact
+                :open="valueSuggestionsOpen(rule, 'value')"
+                :search="props.valueSuggestions.search"
+                :options="props.valueSuggestions.options"
+                :loading="props.valueSuggestions.loading"
+                :error="props.valueSuggestions.error"
+                :limited="props.valueSuggestions.limited"
+                :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+                @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
+                @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
+                @select="emit('selectValueSuggestion', $event)"
+              />
+            </template>
             <span v-else class="px-1 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</span>
           </div>
           <div v-else-if="filterModeUsesRange(rule.mode)" class="col-start-2 col-span-3 flex gap-1.5">
             <Input
               data-filter-value-editor
               :model-value="rule.rawValue"
-              class="h-7 text-xs"
+              class="h-7 min-w-0 flex-1 text-xs"
               :disabled="rule.disabled"
               :placeholder="t('grid.filterBuilderRangeStart')"
               @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
@@ -666,9 +786,25 @@ function blurValueRule(id: string) {
               @compositionstart="startImeComposition(`value-start:${rule.id}`)"
               @keydown="handleValueEditorKeydown($event, `value-start:${rule.id}`)"
             />
+            <DataGridDistinctValuePopover
+              v-if="canSuggestValues(rule) && props.valueSuggestions"
+              :open="valueSuggestionsOpen(rule, 'value')"
+              :search="props.valueSuggestions.search"
+              :options="props.valueSuggestions.options"
+              :loading="props.valueSuggestions.loading"
+              :error="props.valueSuggestions.error"
+              :limited="props.valueSuggestions.limited"
+              :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+              @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
+              @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
+              @select="emit('selectValueSuggestion', $event)"
+            />
             <Input
               :model-value="rule.rawEndValue"
-              class="h-7 text-xs"
+              class="h-7 min-w-0 flex-1 text-xs"
               :disabled="rule.disabled"
               :placeholder="t('grid.filterBuilderRangeEnd')"
               @update:model-value="(value) => emit('updateRule', rule.id, { rawEndValue: String(value ?? '') })"
@@ -678,48 +814,111 @@ function blurValueRule(id: string) {
               @compositionstart="startImeComposition(`value-end:${rule.id}`)"
               @keydown="handleValueEditorKeydown($event, `value-end:${rule.id}`)"
             />
+            <DataGridDistinctValuePopover
+              v-if="canSuggestValues(rule) && props.valueSuggestions"
+              :open="valueSuggestionsOpen(rule, 'end')"
+              :search="props.valueSuggestions.search"
+              :options="props.valueSuggestions.options"
+              :loading="props.valueSuggestions.loading"
+              :error="props.valueSuggestions.error"
+              :limited="props.valueSuggestions.limited"
+              :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+              @update:open="updateValueSuggestionsOpen(rule, 'end', $event)"
+              @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
+              @select="emit('selectValueSuggestion', $event)"
+            />
           </div>
-          <textarea
-            v-else-if="filterModeUsesList(rule.mode)"
-            data-filter-value-editor
-            :value="rule.rawValue"
-            rows="2"
-            class="col-start-2 col-span-3 min-h-12 resize-y rounded-md border bg-transparent px-2 py-1 text-xs outline-none"
-            :disabled="rule.disabled"
-            :placeholder="t('grid.filterBuilderValues')"
-            @input="emit('updateRule', rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
-            @keydown.ctrl.enter.prevent="emit('apply')"
-            @keydown.meta.enter.prevent="emit('apply')"
-          />
-          <Input
-            v-else-if="filterModeNeedsValue(rule.mode)"
-            data-filter-value-editor
-            :model-value="rule.rawValue"
-            class="h-7 text-xs"
-            :disabled="rule.disabled"
-            :placeholder="t('grid.filterBuilderValue')"
-            @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
-            @focus="focusValueRule(rule.id, index, rule.mode)"
-            @blur="blurValueRule(rule.id)"
-            @compositionend="endImeComposition(`value:${rule.id}`)"
-            @compositionstart="startImeComposition(`value:${rule.id}`)"
-            @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
-          />
+          <div v-else-if="filterModeUsesList(rule.mode)" class="col-start-2 col-span-3 flex items-start gap-1.5">
+            <textarea
+              data-filter-value-editor
+              :value="rule.rawValue"
+              rows="2"
+              class="min-h-12 min-w-0 flex-1 resize-y rounded-md border bg-transparent px-2 py-1 text-xs outline-none"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderValues')"
+              @input="emit('updateRule', rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
+              @keydown.ctrl.enter.prevent="emit('apply')"
+              @keydown.meta.enter.prevent="emit('apply')"
+            />
+            <DataGridDistinctValuePopover
+              v-if="canSuggestValues(rule) && props.valueSuggestions"
+              :open="valueSuggestionsOpen(rule, 'value')"
+              :search="props.valueSuggestions.search"
+              :options="props.valueSuggestions.options"
+              :loading="props.valueSuggestions.loading"
+              :error="props.valueSuggestions.error"
+              :limited="props.valueSuggestions.limited"
+              :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+              :multiple="true"
+              :selected-keys="props.valueSuggestions.selectedKeys"
+              @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
+              @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
+              @toggle="emit('toggleValueSuggestion', $event)"
+              @toggle-all="emit('toggleAllValueSuggestions')"
+              @apply="emit('applyValueSuggestions')"
+            />
+          </div>
+          <div v-else-if="filterModeNeedsValue(rule.mode)" class="col-start-4 flex min-w-0 gap-1.5">
+            <Input
+              data-filter-value-editor
+              :model-value="rule.rawValue"
+              class="h-7 min-w-0 flex-1 text-xs"
+              :disabled="rule.disabled"
+              :placeholder="t('grid.filterBuilderValue')"
+              @update:model-value="(value) => emit('updateRule', rule.id, { rawValue: String(value ?? '') })"
+              @focus="focusValueRule(rule.id, index, rule.mode)"
+              @blur="blurValueRule(rule.id)"
+              @compositionend="endImeComposition(`value:${rule.id}`)"
+              @compositionstart="startImeComposition(`value:${rule.id}`)"
+              @keydown="handleValueEditorKeydown($event, `value:${rule.id}`)"
+            />
+            <DataGridDistinctValuePopover
+              v-if="canSuggestValues(rule) && props.valueSuggestions"
+              :open="valueSuggestionsOpen(rule, 'value')"
+              :search="props.valueSuggestions.search"
+              :options="props.valueSuggestions.options"
+              :loading="props.valueSuggestions.loading"
+              :error="props.valueSuggestions.error"
+              :limited="props.valueSuggestions.limited"
+              :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
+              @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
+              @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
+              @select="emit('selectValueSuggestion', $event)"
+            />
+          </div>
           <div v-else class="flex h-7 items-center rounded-md border border-dashed px-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoValue") }}</div>
           <div v-if="props.layout !== 'text' && shouldShowValueShortcutHint(rule, index)" class="text-[11px] leading-none text-muted-foreground" :class="usesExpandedLayout(rule.mode) ? 'col-start-2 col-span-3 -mt-0.5' : 'col-start-4 row-start-2 -mt-0.5'">
             {{ t("grid.filterBuilderValueShortcutHint") }}
           </div>
           <div class="flex items-center gap-0.5" :class="props.layout === 'text' ? 'col-start-6 row-start-1' : usesExpandedLayout(rule.mode) ? 'col-start-5 row-start-1 row-span-2' : 'col-start-5 row-start-1'">
-            <Button v-if="props.showApplyOnly" variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled || props.applyOnlyBusy" :title="t('grid.filterBuilderApplyOnly')" :aria-label="t('grid.filterBuilderApplyOnly')" @click="emit('applyOnly', rule.id)"
-              ><Focus class="h-3.5 w-3.5" />
-            </Button>
+            <LightTooltip v-if="props.showApplyOnly" :text="t('grid.filterBuilderApplyOnly')" side="top" :side-offset="4">
+              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled || props.applyOnlyBusy" :aria-label="t('grid.filterBuilderApplyOnly')" @click="emit('applyOnly', rule.id)">
+                <Focus class="h-3.5 w-3.5" />
+              </Button>
+            </LightTooltip>
             <template v-if="props.layout === 'text'">
               <Button variant="ghost" size="icon" class="h-6 w-6" :aria-label="t('grid.filterBuilderAddRule')" @click="emit('add')"><Plus class="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.disabled" :aria-label="t('common.remove')" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
             </template>
             <template v-else>
-              <Button variant="ghost" size="icon" class="h-7 w-7" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })"><EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" /><Eye v-else class="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+              <LightTooltip :text="t(rule.disabled ? 'grid.filterBuilderEnableRule' : 'grid.filterBuilderDisableRule')" side="top" :side-offset="4">
+                <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled" :aria-label="t(rule.disabled ? 'grid.filterBuilderEnableRule' : 'grid.filterBuilderDisableRule')" @click="emit('updateRule', rule.id, { disabled: !rule.disabled })">
+                  <EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" />
+                  <Eye v-else class="h-3.5 w-3.5" />
+                </Button>
+              </LightTooltip>
+              <LightTooltip :text="t('common.remove')" side="top" :side-offset="4">
+                <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled" :aria-label="t('common.remove')" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>
+              </LightTooltip>
             </template>
           </div>
         </div>

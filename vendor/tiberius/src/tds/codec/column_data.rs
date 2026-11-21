@@ -86,6 +86,18 @@ pub enum ColumnData<'a> {
 }
 
 impl<'a> ColumnData<'a> {
+    pub(crate) fn type_name_for_version(&self, version: crate::FeatureLevel) -> Cow<'static, str> {
+        if version < crate::FeatureLevel::SqlServer2005 {
+            match self {
+                Self::String(Some(s)) if s.encode_utf16().count() > 4000 => return "ntext".into(),
+                Self::Binary(None) => return "varbinary(8000)".into(),
+                Self::Binary(Some(b)) if b.len() > 8000 => return "image".into(),
+                _ => {}
+            }
+        }
+        self.type_name()
+    }
+
     pub(crate) fn type_name(&self) -> Cow<'static, str> {
         match self {
             ColumnData::U8(_) => "tinyint".into(),
@@ -96,7 +108,7 @@ impl<'a> ColumnData<'a> {
             ColumnData::F64(_) => "float(53)".into(),
             ColumnData::Bit(_) => "bit".into(),
             ColumnData::String(None) => "nvarchar(4000)".into(),
-            ColumnData::String(Some(ref s)) if s.len() <= 4000 => "nvarchar(4000)".into(),
+            ColumnData::String(Some(ref s)) if s.encode_utf16().count() <= 4000 => "nvarchar(4000)".into(),
             ColumnData::String(Some(ref s)) if s.len() <= MAX_NVARCHAR_SIZE => {
                 "nvarchar(max)".into()
             }
@@ -418,7 +430,7 @@ impl<'a> Encode<BytesMutWithTypeInfo<'a>> for ColumnData<'a> {
                     dst.put_u64_le(0xffffffffffffffff)
                 }
             }
-            (ColumnData::String(Some(ref s)), None) if s.len() <= 4000 => {
+            (ColumnData::String(Some(ref s)), None) if s.encode_utf16().count() <= 4000 => {
                 dst.put_u8(VarLenType::NVarchar as u8);
                 dst.put_u16_le(8000);
                 dst.extend_from_slice(&[0u8; 5][..]);

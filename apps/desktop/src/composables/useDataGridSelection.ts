@@ -192,6 +192,21 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
   // hasCellSelection 跟随计数语义：仅选中草稿行/草稿单元格时视为无选区
   const hasCellSelection = computed(() => selectedCellCount.value > 0);
 
+  function firstSelectedCellPosition(): CellPosition | null {
+    if (selectedCellKeys.value.size === 0) {
+      const range = selectedRange.value;
+      return range ? { rowIndex: range.startRow, colIndex: range.startCol } : null;
+    }
+
+    let first: CellPosition | null = null;
+    for (const key of selectedCellKeys.value) {
+      const cell = parseCellKey(key);
+      if (!cell || cell.rowIndex >= displayItems.value.length || cell.colIndex >= columns.value.length || displayItems.value[cell.rowIndex]?.isDraft) continue;
+      if (!first || cell.rowIndex < first.rowIndex || (cell.rowIndex === first.rowIndex && cell.colIndex < first.colIndex)) first = cell;
+    }
+    return first;
+  }
+
   function clearCellSelection() {
     selectionAnchor.value = null;
     selectionFocus.value = null;
@@ -224,7 +239,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function selectColumns(startCol: number, endCol: number, options?: { merge?: boolean }) {
     const normalizedColumns = normalizeSelectedColumnIndexes(Array.from({ length: Math.abs(endCol - startCol) + 1 }, (_, index) => Math.min(startCol, endCol) + index));
-    if (normalizedColumns.length === 0 || displayItems.value.length <= 0) return;
+    // Column selection is column-based and deliberately independent of the row count, so an
+    // empty result (0 rows, N columns) keeps header multi-select working.
+    if (normalizedColumns.length === 0) return;
     clearRowSelection();
     selectedCellKeys.value = new Set();
     selectionAnchor.value = null;
@@ -689,6 +706,8 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function columnIsSelected(colIndex: number): boolean {
     if (hasColumnSelection.value) return selectedColumnIndexes.value.has(colIndex);
+    // Ctrl/Cmd+A 是"选中数据区"：复制只包含单元格，不含表头与行号，所以表头不跟着高亮。
+    if (isSelectingAll.value) return false;
     const range = selectedRange.value;
     if (!range) return false;
     return range.startCol <= colIndex && range.endCol >= colIndex && range.startRow === 0 && range.endRow >= displayItems.value.length - 1;
@@ -721,6 +740,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectedCells,
     selectedCellMatrix,
     selectedCellCount,
+    firstSelectedCellPosition,
     hasCellSelection,
     isSelectingAll,
     selectedCellKeys,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectionConfig } from "@/types/database";
-import { connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import { connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, isTauriCommandUnavailable, normalizeConnectionTestResult, supportsConnectionDatabaseInfo } from "@/lib/connection/connectionDatabaseInfo";
 
 function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
   return {
@@ -17,6 +17,24 @@ function config(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
 }
 
 describe("connectionDatabaseInfo", () => {
+  it.each(["pg", "oracle", "mysql", "sqlserver", "future_mode"])("preserves %s compatibility metadata across connection testing and persistence", (mode) => {
+    const original = config({ db_type: "kingbase" });
+    const result = normalizeConnectionTestResult({ message: "ok", databaseInfo: { compatibilityMode: ` ${mode} `, productVersion: "V009R001" } }, original);
+    expect(result.databaseInfo?.compatibilityMode).toBe(mode);
+    const stored = JSON.parse(JSON.stringify({ ...original, database_info: result.databaseInfo })) as ConnectionConfig;
+    expect(stored.database_info?.compatibilityMode).toBe(mode);
+    expect(connectionConfigFingerprint(stored)).toBe(connectionConfigFingerprint(original));
+  });
+
+  it("hides database information for connections without database metadata", () => {
+    for (const dbType of ["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"] as const) {
+      expect(supportsConnectionDatabaseInfo(dbType)).toBe(false);
+    }
+    for (const dbType of ["mysql", "redis", "mongodb", "milvus", "turso", "cloudflare-d1", "plugin"] as const) {
+      expect(supportsConnectionDatabaseInfo(dbType)).toBe(true);
+    }
+  });
+
   it("normalizes structured and legacy responses with a configured product fallback", () => {
     expect(normalizeConnectionTestResult("Connection successful", config())).toEqual({
       message: "Connection successful",
@@ -56,7 +74,7 @@ describe("connectionDatabaseInfo", () => {
     });
   });
 
-  it("fingerprints the complete submitted config without depending on object key order", () => {
+  it("fingerprints connection-affecting config without depending on object key order", () => {
     const original = config({ transport_layers: [{ id: "ssh", type: "ssh", host: "jump", port: 22, user: "root", password: "hop-secret" }] });
     const reordered = Object.fromEntries(Object.entries(original).reverse()) as unknown as ConnectionConfig;
     expect(connectionConfigFingerprint(reordered)).toBe(connectionConfigFingerprint(original));
@@ -67,6 +85,10 @@ describe("connectionDatabaseInfo", () => {
     expect(connectionConfigFingerprint({ ...original, database_info: { productName: "MySQL", productVersion: "8.4.0" } })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, note: "Production reporting" })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, default_schema: "archive" })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, sidebar_auto_load_all_tables: true })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, show_database_links: false })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, show_native_jobs: false, show_user_admin: true })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, jdbc_dialect: "oceanbase-oracle" })).toBe(connectionConfigFingerprint(original));
   });
 
   it("formats only database metadata for rows and copied text", () => {

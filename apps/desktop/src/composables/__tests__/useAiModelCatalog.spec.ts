@@ -115,7 +115,10 @@ describe("useAiModelCatalog", () => {
     ).resolves.toEqual([{ id: "first" }]);
     await expect(catalog.loadModels({ ...initial, opencodeCliPath: "/usr/local/bin/opencode" })).resolves.toEqual([{ id: "second" }]);
 
-    expect(apiMock.aiListModels).toHaveBeenCalledTimes(2);
+    apiMock.aiListModels.mockResolvedValueOnce([{ id: "third" }]);
+    await expect(catalog.loadModels({ ...initial, opencodeCliVersion: "v2" })).resolves.toEqual([{ id: "third" }]);
+
+    expect(apiMock.aiListModels).toHaveBeenCalledTimes(3);
   });
 
   it("tracks Cursor executable and environment changes without depending on environment key order", async () => {

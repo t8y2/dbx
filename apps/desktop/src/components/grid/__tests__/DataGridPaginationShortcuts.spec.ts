@@ -1,8 +1,6 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, shallowRef, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -30,7 +28,6 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
 import DataGrid from "../DataGrid.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-const dataGridSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 const shortcutCases = [
   { actionId: "goToFirstPage", key: "F1", offset: 0, functionName: "firstPage" },
@@ -65,6 +62,7 @@ function mountGrid(
     infiniteScroll?: boolean;
     empty?: boolean;
     configurePaginationShortcuts?: boolean;
+    pageSizePreference?: "results" | "table-open";
   } = {},
 ) {
   const pinia = createPinia();
@@ -92,6 +90,7 @@ function mountGrid(
     execution_time_ms: 0,
   });
   const paginate = vi.fn();
+  const gridState = shallowRef<Record<string, unknown>>({});
 
   const host = document.createElement("div");
   document.body.append(host);
@@ -107,11 +106,13 @@ function mountGrid(
                 result,
                 databaseType: "mysql",
                 context: "table-data",
+                pageSizePreference: options.pageSizePreference,
                 pageLimit: 100,
                 pageOffset: options.pageOffset ?? 200,
                 totalRowCount: options.totalRowCount ?? 500,
                 loading: options.loading ?? false,
                 paginationEnabled: options.paginationEnabled ?? true,
+                ...gridState.value,
                 onPaginate: paginate,
               }),
           },
@@ -125,7 +126,7 @@ function mountGrid(
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return { host, paginate };
+  return { host, paginate, settingsStore, gridState };
 }
 
 async function settle() {
@@ -146,6 +147,29 @@ function dispatchShortcut(target: HTMLElement, key: string): KeyboardEvent {
   return event;
 }
 
+function menuActionButton(label: string): HTMLButtonElement {
+  const button = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menu"] button')).find((candidate) => candidate.textContent?.trim() === label);
+  if (!button) throw new Error(`Menu action button not found: ${label}`);
+  return button;
+}
+
+async function openCustomPageSizeMenu(host: HTMLElement): Promise<HTMLInputElement> {
+  const trigger = Array.from(host.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")).find((button) => button.textContent?.includes("100"));
+  expect(trigger).toBeDefined();
+  trigger!.click();
+  await settle();
+  const input = document.querySelector<HTMLInputElement>('[role="menu"] input[type="number"]');
+  expect(input).not.toBeNull();
+  return input!;
+}
+
+async function enterCustomPageSize(host: HTMLElement, size: string): Promise<void> {
+  const input = await openCustomPageSizeMenu(host);
+  input.value = size;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+}
+
 afterEach(() => {
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
@@ -154,6 +178,54 @@ afterEach(() => {
 });
 
 describe("DataGrid pagination shortcuts", () => {
+  it("warns only when the exported page may omit rows and respects the view option", async () => {
+    const { host, gridState, settingsStore } = mountGrid();
+    await settle();
+    const openExport = async () => {
+      host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.export")}"]`)!.click();
+      await settle();
+    };
+    await openExport();
+    expect(document.querySelector('[role="note"]')?.textContent).toContain(i18n.global.t("grid.incompleteExportWarning", { count: 1 }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    gridState.value = { pageOffset: 0, totalRowCount: 1 };
+    await settle();
+    await openExport();
+    expect(document.querySelector('[role="note"]')).toBeNull();
+    gridState.value = { pageOffset: 0, totalRowCount: undefined, result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 0, has_more: true } };
+    await settle();
+    expect(document.querySelector('[role="note"]')).not.toBeNull();
+    settingsStore.updateEditorSettings({ warnIncompleteExport: false });
+    await settle();
+    expect(document.querySelector('[role="note"]')).toBeNull();
+  });
+
+  it("allows pointer focus and editing in the custom page size input", async () => {
+    const { host, paginate } = mountGrid();
+    await settle();
+    const trigger = Array.from(host.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")).find((button) => button.textContent?.includes("100"));
+    expect(trigger).toBeDefined();
+    trigger!.click();
+    await settle();
+
+    const input = document.querySelector<HTMLInputElement>('[role="menu"] input[type="number"]');
+    expect(input).not.toBeNull();
+    const pointer = new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 });
+    input!.dispatchEvent(pointer);
+    // Canceling pointerdown suppresses the browser's native focus behavior.
+    expect(pointer.defaultPrevented).toBe(false);
+    input!.focus();
+    input!.value = "250";
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    expect(document.activeElement).toBe(input);
+    input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle();
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([0, 250]);
+  });
+
   it.each(shortcutCases)("runs $functionName through the configured $actionId shortcut", async ({ key, offset }) => {
     const { host, paginate } = mountGrid();
     await settle();
@@ -250,16 +322,6 @@ describe("DataGrid pagination shortcuts", () => {
     expect(paginate).not.toHaveBeenCalled();
   });
 
-  it("routes shortcuts to the existing pagination functions and preserves PageUp/PageDown navigation", () => {
-    expect(dataGridSource).toMatch(/if \(!targetAllowsNativeClipboard && handleGridPaginationShortcut\(event\)\) return;/);
-    for (const { actionId, functionName } of shortcutCases) {
-      expect(dataGridSource).toContain(`is${actionId[0]!.toUpperCase()}${actionId.slice(1)}Shortcut(event, shortcuts)`);
-      expect(dataGridSource).toContain(`navigate = ${functionName}`);
-    }
-    expect(dataGridSource).toContain('event.key === "PageUp" && navigateSelectedCell("pageUp", event.shiftKey)');
-    expect(dataGridSource).toContain('event.key === "PageDown" && navigateSelectedCell("pageDown", event.shiftKey)');
-  });
-
   it("keeps legacy settings without pagination mappings keyboard-neutral", async () => {
     const { host, paginate } = mountGrid({ configurePaginationShortcuts: false });
     await settle();
@@ -275,5 +337,507 @@ describe("DataGrid pagination shortcuts", () => {
     expect(paginate).not.toHaveBeenCalled();
     const actionIds: ShortcutActionId[] = shortcutCases.map(({ actionId }) => actionId);
     expect(actionIds).toHaveLength(4);
+  });
+});
+
+describe("DataGrid infinite scroll", () => {
+  it("requests the next Dameng table-data segment after dragging the canvas scrollbar to the bottom", async () => {
+    const { host, paginate, gridState } = mountGrid({ infiniteScroll: true, pageOffset: 0, totalRowCount: 300 });
+    gridState.value = {
+      databaseType: "dameng",
+      context: "table-data",
+      pageLimit: 100,
+      pageOffset: 0,
+      totalRowCount: 300,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const scroller = host.querySelector<HTMLElement>(".canvas-grid-scroller");
+    expect(scroller).not.toBeNull();
+    Object.defineProperties(scroller!, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 2600 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    scroller!.dispatchEvent(new Event("scroll"));
+    await settle();
+
+    const scrollbar = host.querySelector<HTMLElement>(".data-grid-vertical-scrollbar");
+    expect(scrollbar).not.toBeNull();
+    vi.spyOn(scrollbar!, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 300,
+      top: 0,
+      right: 10,
+      bottom: 300,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    scrollbar!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientY: 300 }));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(scroller!.scrollTop).toBe(2300);
+
+    scroller!.dispatchEvent(new Event("scroll"));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    await vi.waitFor(() => expect(paginate).toHaveBeenCalledOnce());
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([100, 100]);
+  });
+});
+
+describe("DataGrid custom page size persistence", () => {
+  it("applying a custom page size is temporary and does not write editor settings", async () => {
+    const { host, paginate, settingsStore } = mountGrid();
+    await settle();
+    const updateEditorSettings = vi.spyOn(settingsStore, "updateEditorSettings");
+
+    await enterCustomPageSize(host, "250");
+    menuActionButton(i18n.global.t("grid.applyForThisQuery")).click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([0, 250]);
+    expect(updateEditorSettings).not.toHaveBeenCalled();
+    expect(settingsStore.editorSettings.pageSize).toBe(100);
+    expect(settingsStore.editorSettings.tableOpenPageSize).toBe(100);
+  });
+
+  it("set-as-default persists the table-open page size for table grids", async () => {
+    const { host, paginate, settingsStore } = mountGrid();
+    await settle();
+    const updateEditorSettings = vi.spyOn(settingsStore, "updateEditorSettings");
+
+    await enterCustomPageSize(host, "250");
+    menuActionButton(i18n.global.t("grid.applyAndSetDefault")).click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([0, 250]);
+    expect(updateEditorSettings).toHaveBeenCalledWith({ tableOpenPageSize: 250 });
+    expect(settingsStore.editorSettings.tableOpenPageSize).toBe(250);
+    expect(settingsStore.editorSettings.pageSize).toBe(100);
+  });
+
+  it("set-as-default persists the query page size for results grids", async () => {
+    const { host, paginate, settingsStore } = mountGrid({ pageSizePreference: "results" });
+    await settle();
+    const updateEditorSettings = vi.spyOn(settingsStore, "updateEditorSettings");
+
+    await enterCustomPageSize(host, "250");
+    menuActionButton(i18n.global.t("grid.applyAndSetDefault")).click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([0, 250]);
+    expect(updateEditorSettings).toHaveBeenCalledWith({ pageSize: 250 });
+    expect(settingsStore.editorSettings.pageSize).toBe(250);
+    expect(settingsStore.editorSettings.tableOpenPageSize).toBe(100);
+  });
+});
+
+describe("DataGrid SQL load-all exhaustion", () => {
+  it.each([0, 1])("stops after a %i-row tail and does not probe again", async (tailRows) => {
+    const { host, paginate, gridState } = mountGrid({ pageOffset: 0, totalRowCount: 100 });
+    const result = (count: number, appended?: number) => ({ columns: ["id"], rows: Array.from({ length: count }, (_, i) => [i]), has_more: false, appended_from_row_count: appended, affected_rows: 0, execution_time_ms: 0 });
+    gridState.value = { context: "results", pageSql: "SELECT id FROM items LIMIT 100", executedPageOffset: 0, executedPageLimit: 100, result: result(100) };
+    await settle();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([100, 100]);
+    gridState.value = { ...gridState.value, executedPageOffset: 100, result: result(100 + tailRows, 100) };
+    await settle();
+    button.click();
+    await settle();
+    expect(paginate).toHaveBeenCalledOnce();
+  });
+
+  it("respects the configured result cap when a SQL page is full", async () => {
+    const { host, paginate, settingsStore, gridState } = mountGrid({ pageOffset: 0, totalRowCount: 100 });
+    settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 100 });
+    gridState.value = { context: "results", pageSql: "SELECT id FROM items LIMIT 100", result: { columns: ["id"], rows: Array.from({ length: 100 }, (_, i) => [i]), has_more: false, truncated: true, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+    expect(paginate).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("probes past a cached total and stops at an empty tail (infiniteScroll=%s)", async (infiniteScroll) => {
+    const { host, paginate, settingsStore, gridState } = mountGrid({ infiniteScroll, pageOffset: 0, totalRowCount: 100 });
+    settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 1000 });
+    const rows = Array.from({ length: 100 }, (_, index) => [index]);
+    gridState.value = { context: "results", pageSql: "SELECT id FROM items LIMIT 100", executedPageOffset: 0, executedPageLimit: 100, result: { columns: ["id"], rows, has_more: false, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([100, 100]);
+    expect(paginate.mock.calls[0]?.[4]).toBe(true);
+
+    // COUNT said 100, but the original session has another full page.
+    gridState.value = { ...gridState.value, executedPageOffset: 100, result: { columns: ["id"], rows: [...rows, ...rows], has_more: false, appended_from_row_count: 100, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    expect(paginate).toHaveBeenCalledTimes(2);
+    expect(paginate.mock.calls[1]?.slice(0, 2)).toEqual([200, 100]);
+
+    gridState.value = { ...gridState.value, executedPageOffset: 200, result: { columns: ["id"], rows: [...rows, ...rows], has_more: false, appended_from_row_count: 200, affected_rows: 0, execution_time_ms: 0 } };
+    await settle();
+    button.click();
+    await settle();
+    expect(paginate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("DataGrid load-all on a jumped-to discrete page (#11940)", () => {
+  it("reloads from the first row instead of splicing from the stale page boundary", async () => {
+    // 30-row table, 10 rows/page, jumped to page 9 (offset 80, past the
+    // end): the grid still holds the stale first page. Continuing the run
+    // from rows.length would append rows starting at the wrong offset and
+    // mark the broken set as fully loaded. "Load all" must reload every row
+    // from row 0 in one non-append request instead.
+    const { host, paginate, gridState } = mountGrid({ pageOffset: 80, totalRowCount: 30 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: 30,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    // The reload limit comes from the displayed total, which the #10968
+    // reconcile may have extended past the stale COUNT — it only needs to
+    // cover every row; the server stops at the real end.
+    expect(paginate.mock.calls[0]?.[0]).toBe(0);
+    expect(paginate.mock.calls[0]?.[1]).toBeGreaterThanOrEqual(30);
+    expect(paginate.mock.calls[0]?.[4]).toBe(false);
+  });
+
+  it("reloads through the confirm dialog when the reload is large", async () => {
+    const { host, paginate, gridState } = mountGrid({ pageOffset: 80, totalRowCount: 260_000 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: 260_000,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+    const confirmButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim() === i18n.global.t("grid.loadAllRowsContinue"));
+    expect(confirmButton).toBeDefined();
+    confirmButton!.click();
+    await settle();
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.[0]).toBe(0);
+    expect(paginate.mock.calls[0]?.[1]).toBeGreaterThanOrEqual(260_000);
+    expect(paginate.mock.calls[0]?.[4]).toBe(false);
+  });
+
+  it("a finished reload lands on the last row, reports all loaded, and restarts row numbers at 1", async () => {
+    const { host, settingsStore, gridState } = mountGrid({ pageOffset: 80, totalRowCount: 30 });
+    // DOM rendering so row numbers and the footer are inspectable.
+    settingsStore.updateEditorSettings({ dataGridRenderMode: "dom" });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: 30,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+
+    // The reload replaces the discrete page through the normal (non-append)
+    // path: offset 0, all 30 rows, no appended_from_row_count.
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 30,
+      pageOffset: 0,
+      totalRowCount: 30,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 30 }, (_, index) => [index + 1]),
+        has_more: false,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    const footer = host.textContent || "";
+    expect(footer).toMatch(/all loaded/i);
+    // Row numbers restart at 1 and never run past the reloaded set.
+    const rowNumbers = [...host.querySelectorAll("*")].map((el) => (el.childElementCount === 0 ? Number(el.textContent) : NaN)).filter((n) => Number.isInteger(n) && n > 0 && n <= 999);
+    expect(rowNumbers.length).toBeGreaterThan(0);
+    expect(Math.max(...rowNumbers)).toBeLessThanOrEqual(30);
+    expect(Math.min(...rowNumbers)).toBe(1);
+  });
+
+  it("continues chunking past the cap when total row count is unknown and has_more is true (#12418)", async () => {
+    // Jumped to page 9 (offset 80), unknown total, result cap is 5.
+    const { host, paginate, settingsStore, gridState } = mountGrid({ pageOffset: 80 });
+    settingsStore.updateEditorSettings({ dataGridRenderMode: "dom", queryResultMaxRowsEnabled: true, queryResultMaxRows: 5 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: undefined,
+      result: { columns: ["id"], rows: [[1]], has_more: true, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+
+    // 1st request: reloads from first row (offset: 0, limit: 5, append: false)
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([0, 5]);
+    expect(paginate.mock.calls[0]?.[4]).toBe(false);
+
+    // Backend returns 5 rows with has_more: true
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 5,
+      pageOffset: 0,
+      totalRowCount: undefined,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 5 }, (_, index) => [index + 1]),
+        has_more: true,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    // 2nd request: continues past the cap via append (offset: 5, limit: 5, append: true)
+    expect(paginate).toHaveBeenCalledTimes(2);
+    expect(paginate.mock.calls[1]?.slice(0, 2)).toEqual([5, 5]);
+    expect(paginate.mock.calls[1]?.[4]).toBe(true);
+
+    // Second chunk lands with 3 rows (tail) and has_more: false
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 5,
+      pageOffset: 0,
+      totalRowCount: undefined,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 8 }, (_, index) => [index + 1]),
+        has_more: false,
+        appended_from_row_count: 5,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    // Run terminates after tail chunk
+    expect(paginate).toHaveBeenCalledTimes(2);
+    const footer = host.textContent || "";
+    expect(footer).toMatch(/all loaded/i);
+  });
+
+  it("does not report all loaded if reload lands at cap with unknown total and missing has_more (#12418)", async () => {
+    const { host, settingsStore, gridState } = mountGrid({ pageOffset: 80 });
+    settingsStore.updateEditorSettings({ dataGridRenderMode: "dom", queryResultMaxRowsEnabled: true, queryResultMaxRows: 5 });
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 10,
+      pageOffset: 80,
+      totalRowCount: undefined,
+      result: { columns: ["id"], rows: [[1]], has_more: false, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+    host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!.click();
+    await settle();
+
+    // Reload returned exactly 5 rows (the cap), but has_more is undefined
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 5,
+      pageOffset: 0,
+      totalRowCount: undefined,
+      result: {
+        columns: ["id"],
+        rows: Array.from({ length: 5 }, (_, index) => [index + 1]),
+        has_more: undefined,
+        affected_rows: 0,
+        execution_time_ms: 0,
+      },
+    };
+    await settle();
+
+    const footer = host.textContent || "";
+    expect(footer).not.toMatch(/all loaded/i);
+  });
+});
+
+describe("DataGrid multi-chunk load-all run", () => {
+  it("keeps loading consecutive chunks across multiple post-flush ticks until total is reached (#11230)", async () => {
+    const { host, paginate, settingsStore, gridState } = mountGrid({ infiniteScroll: true, pageOffset: 0, totalRowCount: 260_000 });
+    settingsStore.updateEditorSettings({ queryResultMaxRowsEnabled: true, queryResultMaxRows: 100_000 });
+    const initialRows = Array.from({ length: 500 }, (_, index) => [index]);
+    gridState.value = {
+      context: "table-data",
+      pageLimit: 500,
+      pageOffset: 0,
+      totalRowCount: 260_000,
+      result: { columns: ["id"], rows: initialRows, has_more: true, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("grid.loadAllAndGoToLastRow")}"]`)!;
+    button.click();
+    await settle();
+
+    const confirmButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim() === i18n.global.t("grid.loadAllRowsContinue"));
+    if (confirmButton) {
+      confirmButton.click();
+      await settle();
+    }
+
+    expect(paginate).toHaveBeenCalledOnce();
+    expect(paginate.mock.calls[0]?.slice(0, 2)).toEqual([500, 99_500]);
+    expect(paginate.mock.calls[0]?.[4]).toBe(true);
+
+    const chunk1Rows = [...initialRows, ...Array.from({ length: 99_500 }, (_, index) => [index + 500])];
+    gridState.value = {
+      ...gridState.value,
+      result: { columns: ["id"], rows: chunk1Rows, has_more: true, appended_from_row_count: 500, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    expect(paginate).toHaveBeenCalledTimes(2);
+    expect(paginate.mock.calls[1]?.slice(0, 2)).toEqual([100_000, 99_500]);
+    expect(paginate.mock.calls[1]?.[4]).toBe(true);
+
+    const chunk2Rows = [...chunk1Rows, ...Array.from({ length: 99_500 }, (_, index) => [index + 100_000])];
+    gridState.value = {
+      ...gridState.value,
+      result: { columns: ["id"], rows: chunk2Rows, has_more: true, appended_from_row_count: 100_000, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    expect(paginate).toHaveBeenCalledTimes(3);
+    expect(paginate.mock.calls[2]?.slice(0, 2)).toEqual([199_500, 60_500]);
+    expect(paginate.mock.calls[2]?.[4]).toBe(true);
+
+    const chunk3Rows = [...chunk2Rows, ...Array.from({ length: 60_500 }, (_, index) => [index + 199_500])];
+    gridState.value = {
+      ...gridState.value,
+      result: { columns: ["id"], rows: chunk3Rows, has_more: false, appended_from_row_count: 199_500, affected_rows: 0, execution_time_ms: 0 },
+    };
+    await settle();
+
+    expect(paginate).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("DataGrid result column count", () => {
+  it.each(["results", "table-data"])("shows the returned column count for %s, including empty results", async (context) => {
+    const { host, gridState } = mountGrid();
+    gridState.value = { context, result: { columns: ["id", "name", "email"], rows: [[1, "Alice", "alice@example.test"]], affected_rows: 0, execution_time_ms: 1 } };
+    await settle();
+    const count = () => host.querySelector("[data-grid-column-count]")?.textContent;
+    expect(count()).toBe(i18n.global.t("grid.columnsCount", { count: 3 }));
+    gridState.value = { context, result: { columns: ["id", "name"], rows: [], affected_rows: 0, execution_time_ms: 1 } };
+    await settle();
+    expect(count()).toBe(i18n.global.t("grid.columnsCount", { count: 2 }));
+    gridState.value = { context, result: { columns: [], rows: [], affected_rows: 7, execution_time_ms: 1 } };
+    await settle();
+    expect(host.querySelector("[data-grid-column-count]")).toBeNull();
+    expect(host.textContent).toContain(i18n.global.t("grid.rowsAffected", { count: 7 }));
+  });
+});
+
+describe("total page count in the result footer (#13848)", () => {
+  function pageCount(host: HTMLElement) {
+    return host.querySelector("[data-pagination-total-pages]");
+  }
+
+  it("shows the total before the page-size menu and rounds a partial last page up", async () => {
+    const { host } = mountGrid({ totalRowCount: 251, pageOffset: 0 });
+    await settle();
+    const total = pageCount(host);
+    expect(total?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 3 }));
+    expect(total?.nextElementSibling?.textContent).toContain("100");
+  });
+
+  it("updates when the page size or exact result count changes", async () => {
+    const { host, gridState } = mountGrid({ totalRowCount: 251, pageOffset: 0 });
+    await settle();
+    gridState.value = { pageLimit: 200 };
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 2 }));
+    gridState.value = { pageLimit: 200, totalRowCount: 50 };
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 1 }));
+  });
+
+  it("does not invent a total when more rows exist and the count is unknown", async () => {
+    const { host, gridState } = mountGrid({ pageOffset: 0 });
+    gridState.value = {
+      totalRowCount: undefined,
+      result: markRaw({ columns: ["id"], rows: Array.from({ length: 100 }, (_, i) => [i]), affected_rows: 0, execution_time_ms: 0, has_more: true, page_has_more: true }),
+    };
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+
+  it("does not present an estimated count as an exact total", async () => {
+    const { host, gridState } = mountGrid({ totalRowCount: 1000, pageOffset: 0 });
+    gridState.value = {
+      totalRowCountIsExact: false,
+      result: markRaw({ columns: ["id"], rows: Array.from({ length: 100 }, (_, i) => [i]), affected_rows: 0, execution_time_ms: 0, has_more: true, page_has_more: true }),
+    };
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+
+  it("shows the last page once the backend confirms there are no more pages", async () => {
+    const { host, gridState } = mountGrid({ pageOffset: 200 });
+    gridState.value = {
+      totalRowCount: undefined,
+      result: markRaw({ columns: ["id"], rows: [[201]], affected_rows: 0, execution_time_ms: 0, page_has_more: false }),
+    };
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 3 }));
+  });
+
+  it("keeps empty results consistent with the existing single-page navigation", async () => {
+    const { host } = mountGrid({ totalRowCount: 0, pageOffset: 0, empty: true });
+    await settle();
+    expect(pageCount(host)?.textContent).toBe(i18n.global.t("grid.totalPages", { count: 1 }));
+  });
+
+  it("hides the page count when pagination is disabled", async () => {
+    const { host } = mountGrid({ paginationEnabled: false });
+    await settle();
+    expect(pageCount(host)).toBeNull();
+  });
+
+  it("hides the page count in infinite-scroll mode", async () => {
+    const { host } = mountGrid({ infiniteScroll: true });
+    await settle();
+    expect(pageCount(host)).toBeNull();
   });
 });

@@ -16,6 +16,8 @@ const appBuildScript = readFileSync(resolve(process.cwd(), "src-tauri/build.rs")
 const wryWebView2Source = readFileSync(resolve(process.cwd(), "vendor/wry/src/webview2/mod.rs"), "utf8");
 const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
+const fixedRuntimeConfig = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
+const clientConfig = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8"));
 
 describe("Windows offline installer template", () => {
   it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
@@ -26,18 +28,26 @@ describe("Windows offline installer template", () => {
     expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != ""');
     expect(template).not.toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
     expect(template).toContain("${If} ${IsWin7}");
+    expect(template).toContain("${OrIf} ${IsWin2008R2}");
     expect(template).toContain("${OrIf} ${IsWin2012R2}");
     expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
-    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}");
+    expect(template).toContain('${GetParent} "$EXEPATH" $0');
+    // The fixed-runtime build says which systems it targets in the installer
+    // title; productName must stay path-safe ("/" is rejected by Tauri).
+    expect(template).toContain('!define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2+"');
+    expect(clientConfig.productName).toBe("DBX");
+    expect(fixedRuntimeConfig.productName).toBeUndefined();
+    expect(template).toContain("DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}");
+    expect(template).not.toContain("win7-server2012r2-offline-setup.exe");
     expect(template).toContain("SetErrorLevel 1633");
     expect(template).toContain("${OrIf} $PassiveMode = 1");
   });
 
   it("localizes the Windows 7 package guidance in every installer language", () => {
     expect(template.match(/LangString dbxWin7InstallerRequired/g)).toHaveLength(3);
-    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2012 R2.");
-    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2012 R2。");
-    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。");
+    expect(template).toContain("For Windows 7 or Windows Server 2008 R2 and later, use the dedicated Windows 7 / Server 2008 R2+ package.");
+    expect(template).toContain("Windows 7 与 Windows Server 2008 R2 及以上请使用 Windows 7 / Server 2008 R2+ 专用包。");
+    expect(template).toContain("Windows 7 與 Windows Server 2008 R2 及以上請改用 Windows 7 / Server 2008 R2+ 專用套件。");
   });
 
   it.each([
@@ -140,18 +150,26 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(releaseWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");
   });
 
-  it("keeps compile caching away from the Win7 WebView2 loader patch", () => {
+  it("caches Win7 Rust compilation without wrapping C or C++ compilers", () => {
     const releaseWin7Job = releaseWorkflow.slice(releaseWorkflow.indexOf("  build-windows-7-offline:"), releaseWorkflow.indexOf("  static-browser:"));
     const ciWin7Job = ciWorkflow.slice(ciWorkflow.indexOf("  windows-win7-bundle:"), ciWorkflow.indexOf("  duckdb-windows-driver:"));
 
-    // The loader patch rewrites a file inside the cargo registry, which no
-    // compile cache can see. v0.6.0 linked a >= 1.0.1054.31 loader despite the
-    // patched 1.0.902.49 one being verified on disk, so neither Win7 job may
-    // route rustc through sccache until the loader is vendored into the tree.
-    expect(releaseWin7Job).not.toContain("RUSTC_WRAPPER");
-    expect(releaseWin7Job).not.toContain("sccache-action");
-    expect(ciWin7Job).not.toContain("RUSTC_WRAPPER");
-    expect(ciWin7Job).not.toContain("sccache-action");
+    expect(releaseWin7Job).toContain("swatinem/rust-cache@v2");
+    expect(releaseWin7Job).not.toMatch(/RUSTC_WRAPPER|SCCACHE_|sccache/i);
+    for (const line of [
+      "RUSTC_WRAPPER: sccache",
+      "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}",
+      "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1",
+      'SCCACHE_IDLE_TIMEOUT: "0"',
+      "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba",
+      'version: "v0.16.0"',
+    ]) {
+      expect(ciWin7Job).toContain(line);
+    }
+    expect(ciWin7Job).not.toMatch(/^\s+(?:CC|CXX):/m);
+    expect(releaseWin7Job).not.toContain("CARGO_PROFILE_RELEASE_");
+    expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_LTO: "off"');
+    expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"');
   });
 
   it("probes the fixed runtime through the Win7-compatible loader", () => {
@@ -183,7 +201,8 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(appCargoToml).toContain('custom-protocol = ["tauri/custom-protocol"]');
     expect(appBuildScript).toContain("CARGO_FEATURE_CUSTOM_PROTOCOL");
     expect(appBuildScript).toContain("CARGO_CFG_TARGET_VENDOR");
-    expect(ciWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
+    expect(ciWorkflow).toContain("build --locked --package dbx --release --features custom-protocol");
+    expect(ciWorkflow).toContain("--target x86_64-win7-windows-msvc --timings");
     expect(releaseWorkflow).toContain("--release --features custom-protocol --target x86_64-win7-windows-msvc");
     expect(ciWorkflow).toContain("TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw");
     expect(releaseWorkflow).toContain("TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw");

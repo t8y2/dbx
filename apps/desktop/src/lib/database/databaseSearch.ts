@@ -30,17 +30,20 @@ const NUMBER_TYPES = ["int", "serial", "number", "numeric", "decimal", "float", 
 
 const SKIPPED_TYPES = ["blob", "binary", "bytea", "image", "geometry", "geography"];
 
-function normalizedType(column: ColumnInfo): string {
+/** 文本/数值列判定只读 data_type,兼容批量取列的最小列结构。 */
+type SearchableColumn = Pick<ColumnInfo, "data_type">;
+
+function normalizedType(column: SearchableColumn): string {
   return column.data_type.toLowerCase();
 }
 
-export function isTextSearchColumn(column: ColumnInfo): boolean {
+export function isTextSearchColumn(column: SearchableColumn): boolean {
   const type = normalizedType(column);
   if (SKIPPED_TYPES.some((skipped) => type.includes(skipped))) return false;
   return TEXT_TYPES.some((textType) => type.includes(textType));
 }
 
-export function isNumericSearchColumn(column: ColumnInfo): boolean {
+export function isNumericSearchColumn(column: SearchableColumn): boolean {
   const type = normalizedType(column);
   if (SKIPPED_TYPES.some((skipped) => type.includes(skipped))) return false;
   return NUMBER_TYPES.some((numberType) => type.includes(numberType));
@@ -50,7 +53,7 @@ function cleanTerm(term: string): string {
   return term.trim();
 }
 
-function parseNumericTerm(term: string): string | null {
+export function parseNumericTerm(term: string): string | null {
   const trimmed = cleanTerm(term);
   if (!/^[+-]?(?:\d+|\d+\.\d+|\.\d+)$/.test(trimmed)) return null;
   return trimmed;

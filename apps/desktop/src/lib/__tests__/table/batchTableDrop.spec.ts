@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
-import type { QueryResult } from "@/types/database";
+import { orderObjectBrowserDropRows, runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { buildObjectBrowserRows } from "@/lib/table/objectBrowserRows";
+import type { ForeignKeyInfo, QueryResult } from "@/types/database";
 
 function queryResult(overrides: Partial<QueryResult> = {}): QueryResult {
   return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 1, ...overrides };
@@ -13,6 +14,36 @@ const plan = [
 ];
 
 describe("batch table drop", () => {
+  it("preserves distinct object identities and orders same-schema foreign keys and package pairs", async () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "target", object_type: "TABLE", schema: "second" },
+        { name: "target", object_type: "TABLE", schema: "first" },
+        { name: "target", object_type: "SEQUENCE", schema: "first" },
+        { name: "work", object_type: "PACKAGE", schema: "second" },
+        { name: "work", object_type: "PACKAGE", schema: "first" },
+        { name: "work", object_type: "PACKAGE BODY", schema: "first" },
+        { name: "source", object_type: "TABLE", schema: "first" },
+      ],
+      database: "app",
+      fallbackSchema: "first",
+    });
+    const listForeignKeys = vi.fn(async (row: (typeof rows)[number]): Promise<ForeignKeyInfo[]> => (row.name === "source" ? [{ name: "fk", column: "id", ref_schema: "first", ref_table: "target", ref_column: "id" }] : []));
+
+    const ordered = await orderObjectBrowserDropRows(rows, "first", listForeignKeys);
+
+    expect(ordered.map(({ schema, type, name }) => [schema, type, name])).toEqual([
+      ["second", "TABLE", "target"],
+      ["first", "TABLE", "source"],
+      ["first", "SEQUENCE", "target"],
+      ["second", "PACKAGE", "work"],
+      ["first", "PACKAGE_BODY", "work"],
+      ["first", "PACKAGE", "work"],
+      ["first", "TABLE", "target"],
+    ]);
+    expect(listForeignKeys).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps SQL Server sequential so progress and partial failure stay attributable", async () => {
     const executeStatement = vi.fn(async (sql: string) => {
       if (sql.includes("customers")) throw new Error("permission denied");
@@ -71,5 +102,86 @@ describe("batch table drop", () => {
 
     expect(result.succeeded).toEqual([]);
     expect(result.failed?.message).toBe("Batch drop did not report a result for every statement");
+  });
+
+  it("succeeds for single table drop when backend returns an indexless result", async () => {
+    const singlePlan = [{ target: "platforms", sql: "DROP TABLE `platforms`" }];
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "mysql",
+      plan: singlePlan,
+      executeStatement: vi.fn(),
+      executeBatch: async () => [queryResult()],
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual(["platforms"]);
+    expect(result.failed).toBeUndefined();
+    expect(onProgress).toHaveBeenCalledWith({ completed: 1, total: 1, success: true });
+  });
+
+  it("reports failure for single table drop when execution error occurs", async () => {
+    const singlePlan = [{ target: "platforms", sql: "DROP TABLE `platforms`" }];
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "oceanbase-oracle",
+      plan: singlePlan,
+      executeStatement: vi.fn(),
+      executeBatch: async () => [
+        queryResult({
+          execution_error: true,
+          error: {
+            version: 1,
+            code: "OBE-00942",
+            messageKey: "error.database",
+            messageParams: {},
+            source: "agent",
+            operationOutcome: "unknown",
+            detail: "table or view does not exist",
+          },
+        }),
+      ],
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual([]);
+    expect(result.failed?.message).toBe("table or view does not exist");
+  });
+
+  it("maps 1-to-1 sequential indexless batch results when lengths match", async () => {
+    const twoPlan = [
+      { target: "orders", sql: "DROP TABLE orders" },
+      { target: "customers", sql: "DROP TABLE customers" },
+    ];
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "mysql",
+      plan: twoPlan,
+      executeStatement: vi.fn(),
+      executeBatch: async () => [queryResult(), queryResult({ execution_error: true, rows: [["foreign key constraint fails"]] })],
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual(["orders"]);
+    expect(result.failed?.message).toBe("foreign key constraint fails");
+  });
+
+  it("handles empty drop plan immediately without executing queries", async () => {
+    const executeStatement = vi.fn();
+    const executeBatch = vi.fn();
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "mysql",
+      plan: [],
+      executeStatement,
+      executeBatch,
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual([]);
+    expect(result.failed).toBeUndefined();
+    expect(executeStatement).not.toHaveBeenCalled();
+    expect(executeBatch).not.toHaveBeenCalled();
+    expect(onProgress).not.toHaveBeenCalled();
   });
 });

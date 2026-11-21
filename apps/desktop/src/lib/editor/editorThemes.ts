@@ -1,8 +1,11 @@
 import type { Extension } from "@codemirror/state";
 import type { EditorTheme, CustomThemeColors } from "@/stores/settingsStore";
-import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, type AppThemePalette } from "@/lib/app/appTheme";
+import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/app/appFonts";
+import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
+
+export { editorThemeAppearanceFor } from "@/lib/editor/editorThemeSettings";
 
 // @codemirror/lang-sql tags dialect builtin-list words (COUNT, DATE_FORMAT, ...) as
 // standard(name) — not standard(variableName), which is a *child* tag of name and so never
@@ -10,11 +13,40 @@ import { tags } from "@lezer/highlight";
 // sync with what the SQL tokenizer actually emits.
 export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
 
+// @codemirror/lang-sql tags quoted identifiers (e.g. `col`, "col", [col]) as
+// special(string) by default. In SQL, quoted identifiers represent columns, tables,
+// and database objects — not string literals (#12122). Both the SQL dialect parser
+// configuration and DBX theme highlight styles map this token to identifier/variable
+// color instead of string literal color.
+export const SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG = tags.special(tags.string);
+
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
+type CodeMirrorViewConstructor = typeof import("@codemirror/view").EditorView;
+
+const MAX_CACHED_EDITOR_THEMES = 256;
+const editorThemeCache = new WeakMap<CodeMirrorViewConstructor, Map<string, Extension>>();
+
+// style-mod retains mounted modules on the document after editor destruction.
+// Reuse their identities across tab restores and short-lived editor instances
+// so identical settings do not append another copy of the CSS on every visit.
+function cachedEditorTheme(EditorView: CodeMirrorViewConstructor, key: string, build: () => Extension): Extension {
+  let cache = editorThemeCache.get(EditorView);
+  if (!cache) editorThemeCache.set(EditorView, (cache = new Map()));
+  const existing = cache.get(key);
+  if (existing !== undefined) {
+    cache.delete(key);
+    cache.set(key, existing);
+    return existing;
+  }
+  const extension = build();
+  if (cache.size >= MAX_CACHED_EDITOR_THEMES) cache.delete(cache.keys().next().value!);
+  cache.set(key, extension);
+  return extension;
+}
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
 export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
-export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
+export { EDITOR_FONT_FAMILY_CSS_VAR };
 export const SQL_TABLE_COLOR_CSS_VAR = "--dbx-sql-table-color";
 const EDITOR_SELECTION_BACKGROUND_CSS_VAR = "--dbx-editor-selection-background";
 
@@ -29,26 +61,33 @@ export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HT
 }
 
 export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
-  return EditorView.theme({
-    ".cm-sql-table-name, .cm-sql-table-name *": {
-      color: `var(${SQL_TABLE_COLOR_CSS_VAR}) !important`,
-    },
-  });
+  return cachedEditorTheme(EditorView, "sql-semantic", () =>
+    EditorView.theme({
+      ".cm-sql-table-name, .cm-sql-table-name *": {
+        // Built-in CodeMirror themes do not define the editor-specific table color
+        // variable. Keep semantic table names visible there as well, while custom
+        // and IDE themes continue to use their configured table color.
+        color: `var(${SQL_TABLE_COLOR_CSS_VAR}, #b4530b) !important`,
+      },
+    }),
+  );
 }
 
 // MongoDB and other shell-style editors keep the SQL grammar, so their `//` comments are decorated
 // manually. The decoration carries the active theme's comment highlight class, so it only has to
 // keep the SQL grammar's colours from leaking through on the tokens it wraps.
 export function shellLineCommentTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
-  return EditorView.theme({
-    ".cm-shell-line-comment": {
-      fontStyle: "italic",
-    },
-    ".cm-shell-line-comment *": {
-      color: "inherit !important",
-      fontStyle: "italic",
-    },
-  });
+  return cachedEditorTheme(EditorView, "shell-comment", () =>
+    EditorView.theme({
+      ".cm-shell-line-comment": {
+        fontStyle: "italic",
+      },
+      ".cm-shell-line-comment *": {
+        color: "inherit !important",
+        fontStyle: "italic",
+      },
+    }),
+  );
 }
 
 const SUPPORTS_COLOR_MIX = typeof CSS !== "undefined" && typeof CSS.supports === "function" && CSS.supports("color", "color-mix(in oklch, black 50%, white)");
@@ -89,15 +128,22 @@ const customThemeColors = {
   invalid: "#f38ba8", // 无效字符
 };
 
-export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background">, isDark: boolean = true): { background: string; gutterBackground: string } {
+export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background" | "gutterBackground">, isDark: boolean = true): { background: string; gutterBackground: string } {
   return {
     background: colors?.background ?? (isDark ? "#1e1e2e" : "#fafafa"),
-    gutterBackground: colors?.background ?? customThemeColors.gutterBackground,
+    gutterBackground: colors?.gutterBackground ?? colors?.background ?? customThemeColors.gutterBackground,
   };
 }
 
 /** 创建自定义 CodeMirror 主题 */
 function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorView, colors?: CustomThemeColors, isDark: boolean = true): Extension {
+  const colorEntries = Object.entries(colors ?? {})
+    .filter(([, value]) => value !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return cachedEditorTheme(EditorView, `custom:${JSON.stringify([isDark, colorEntries])}`, () => buildCustomTheme(EditorView, colors, isDark));
+}
+
+function buildCustomTheme(EditorView: CodeMirrorViewConstructor, colors: CustomThemeColors | undefined, isDark: boolean): Extension {
   // 根据系统主题设置默认背景色和前景色
   const backgrounds = resolveCustomThemeBackgrounds(colors, isDark);
   const defaultColors = { background: backgrounds.background, foreground: isDark ? "#cdd6f4" : "#242424" };
@@ -157,7 +203,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.moduleKeyword, color: c.keyword },
     { tag: tags.operatorKeyword, color: c.keyword },
     { tag: tags.string, color: c.string },
-    { tag: tags.special(tags.string), color: c.string },
+    { tag: SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG, color: c.variable },
     { tag: tags.number, color: c.number },
     { tag: tags.integer, color: c.number },
     { tag: tags.float, color: c.number },
@@ -201,7 +247,6 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.namespace, color: c.className },
     { tag: tags.macroName, color: c.function },
     { tag: tags.literal, color: c.string },
-    { tag: tags.special(tags.string), color: c.string },
     { tag: tags.regexp, color: c.string },
     { tag: tags.escape, color: c.string },
     { tag: tags.processingInstruction, color: c.keyword },
@@ -225,7 +270,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
   return [theme, syntaxHighlighting(highlightStyle)];
 }
 
-type IdeEditorThemeColors = {
+export type IdeEditorThemeColors = {
   dark: boolean;
   background: string;
   foreground: string;
@@ -260,7 +305,7 @@ type IdeEditorThemeColors = {
   numberBold?: boolean;
 };
 
-const IDE_EDITOR_THEMES = {
+export const IDE_EDITOR_THEMES = {
   ideaLight: {
     dark: false,
     background: "#ffffff",
@@ -395,7 +440,10 @@ const IDE_EDITOR_THEMES = {
     dark: false,
     background: "#fcfcfc",
     foreground: "#141414eb",
-    selection: "#1414141e",
+    // Cursor/VS Code light `editor.selectionBackground`. The previous translucent
+    // neutral (#1414141e) composited to a near-background #e1e1e1 on the #fcfcfc
+    // canvas, so a mouse selection was barely visible.
+    selection: "#add6ff",
     selectionMatch: "#14141411",
     cursor: "#141414eb",
     gutterBackground: "#fcfcfc",
@@ -426,7 +474,10 @@ const IDE_EDITOR_THEMES = {
     dark: true,
     background: "#181818",
     foreground: "#e4e4e4eb",
-    selection: "#40404099",
+    // Cursor/VS Code dark `editor.selectionBackground`. The previous translucent
+    // neutral (#40404099) composited to #303030 on the #181818 canvas — visually
+    // almost indistinguishable from the editor background.
+    selection: "#264f78",
     selectionMatch: "#404040cc",
     cursor: "#e4e4e4eb",
     gutterBackground: "#181818",
@@ -518,6 +569,10 @@ const IDE_EDITOR_THEMES = {
 } satisfies Record<string, IdeEditorThemeColors>;
 
 function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").EditorView, c: IdeEditorThemeColors): Extension {
+  return cachedEditorTheme(EditorView, `ide:${JSON.stringify(c)}`, () => buildIdeEditorTheme(EditorView, c));
+}
+
+function buildIdeEditorTheme(EditorView: CodeMirrorViewConstructor, c: IdeEditorThemeColors): Extension {
   const theme = EditorView.theme(
     {
       "&": {
@@ -525,9 +580,6 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
         color: c.foreground,
         [EDITOR_SELECTION_BACKGROUND_CSS_VAR]: c.selection,
         [SQL_TABLE_COLOR_CSS_VAR]: c.table,
-      },
-      ".cm-scroller": {
-        backgroundColor: c.background,
       },
       ".cm-content": {
         caretColor: c.cursor,
@@ -563,11 +615,11 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
 
   const highlightStyle = HighlightStyle.define([
     { tag: [tags.keyword, tags.controlKeyword, tags.definitionKeyword, tags.moduleKeyword, tags.operatorKeyword, tags.modifier, tags.bool, tags.null], color: c.keyword, ...(c.keywordBold ? { fontWeight: "bold" } : {}) },
-    { tag: [tags.string, tags.special(tags.string), tags.regexp, tags.escape, tags.inserted], color: c.string, ...(c.stringBold ? { fontWeight: "bold" } : {}) },
+    { tag: [tags.string, tags.regexp, tags.escape, tags.inserted], color: c.string, ...(c.stringBold ? { fontWeight: "bold" } : {}) },
     { tag: [tags.number, tags.integer, tags.float], color: c.number, ...(c.numberBold ? { fontWeight: "bold" } : {}) },
     { tag: [tags.comment, tags.lineComment, tags.blockComment, tags.quote], color: c.comment, fontStyle: "italic" },
     { tag: [tags.typeName, tags.typeOperator, tags.unit], color: c.type },
-    { tag: [tags.name, tags.variableName, tags.definition(tags.variableName)], color: c.variable },
+    { tag: [tags.name, tags.variableName, tags.definition(tags.variableName), SQL_QUOTED_IDENTIFIER_HIGHLIGHT_TAG], color: c.variable },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.function(tags.name), tags.macroName], color: c.function },
     { tag: [SQL_BUILTIN_HIGHLIGHT_TAG, tags.special(tags.name)], color: c.builtin },
     { tag: [tags.propertyName, tags.labelName, tags.annotation], color: c.property },
@@ -629,7 +681,28 @@ const FUNCTION_ICON: LucideIconNode = [
   ["path", { d: "M4 4v7a4 4 0 0 0 4 4h12" }],
 ];
 
+const DATABASE_LINK_ICON: LucideIconNode = [
+  ["path", { d: "M9 17H7A5 5 0 0 1 7 7h2" }],
+  ["path", { d: "M15 7h2a5 5 0 0 1 0 10h-2" }],
+  ["path", { d: "M8 12h8" }],
+];
+
 const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
+
+const SEQUENCE_ICON: LucideIconNode = [
+  ["path", { d: "M8 5h13" }],
+  ["path", { d: "M13 12h8" }],
+  ["path", { d: "M13 19h8" }],
+  ["path", { d: "M3 10a2 2 0 0 0 2 2h3" }],
+  ["path", { d: "M3 5v12a2 2 0 0 0 2 2h3" }],
+];
+
+const VARIABLE_ICON: LucideIconNode = [
+  ["path", { d: "M8 21s-4-3-4-9 4-9 4-9" }],
+  ["path", { d: "M16 3s4 3 4 9-4 9-4 9" }],
+  ["line", { x1: "15", x2: "9", y1: "9", y2: "15" }],
+  ["line", { x1: "9", x2: "15", y1: "9", y2: "15" }],
+];
 
 function encodeSvgIcon(iconNode: LucideIconNode): string {
   const body = iconNode
@@ -690,18 +763,6 @@ export function resolveEditorTheme(theme: EditorTheme, appAppearance: AppThemeAp
     }
   }
   return theme;
-}
-
-/**
- * Effective appearance for the "Follow app theme" editor: with the custom UI
- * palette the mode's light/dark flag is replaced by the custom background's
- * luminance, keeping tokens, selection, cursor, search matches and diagnostics
- * readable on arbitrarily dark/light custom backgrounds. Other palettes keep
- * the previous appearance unchanged.
- */
-export function editorThemeAppearanceFor(appAppearance: AppThemeAppearance, appPalette: AppThemePalette, customUiColors?: AppCustomUiColors): AppThemeAppearance {
-  if (appPalette === "custom" && customUiColors) return customUiAppearance(customUiColors);
-  return appAppearance;
 }
 
 /**
@@ -815,12 +876,26 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ".cm-trimmedSelection-bottomRight": {
       borderBottomRightRadius: "3px",
     },
+    // CodeMirror's base theme gives `.cm-gutter` `min-height: 100%` inside a
+    // `.cm-gutters` box that is itself sized by `height: 100%` of a scroller
+    // whose height comes from the content. That percentage cycle makes WebKit
+    // re-run layout for the whole gutter subtree on every layout pass, which
+    // costs ~160ms per collapse with a few hundred lines selected. The gutter's
+    // own spacers already span the full content height and the background is
+    // painted by `.cm-gutters`, so dropping the cyclic minimum is visually inert.
+    ".cm-gutter": {
+      minHeight: "0",
+    },
     ".cm-gutters": {
       borderRight: "0 !important",
       fontSize: `var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px)`,
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
-      position: "relative",
+      position: "sticky",
       userSelect: "none",
+    },
+    ".cm-scroller[data-scrolled-x] > .cm-gutters, .cm-gutters[data-scrolled-x], .cm-gutters.cm-gutters-scrolled-x": {
+      backgroundColor: `var(--background-solid, var(--background))`,
+      boxShadow: "2px 0 8px rgba(0, 0, 0, 0.18)",
     },
     ".cm-gutters:after": {
       background: "rgba(148, 163, 184, 0.38)",
@@ -844,6 +919,36 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       justifyContent: "flex-end",
       paddingRight: "8px",
       userSelect: "none",
+    },
+    ".cm-foldGutter": {
+      width: "16px",
+    },
+    ".cm-foldGutter .cm-gutterElement": {
+      alignItems: "center",
+      cursor: "pointer",
+      display: "flex",
+      justifyContent: "center",
+      padding: "0",
+      userSelect: "none",
+    },
+    ".cm-foldMarker-svg": {
+      alignItems: "center",
+      color: "var(--muted-foreground)",
+      display: "inline-flex",
+      height: "16px",
+      justifyContent: "center",
+      opacity: "0.65",
+      transition: "opacity 0.15s",
+      verticalAlign: "middle",
+      width: "16px",
+    },
+    ".cm-foldMarker-svg:hover": {
+      opacity: "0.95",
+    },
+    ".cm-foldMarker-svg svg": {
+      display: "block",
+      height: "16px",
+      width: "16px",
     },
     ".cm-run-statement-gutter": {
       minWidth: "28px",
@@ -940,7 +1045,8 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
 
 /** Build a CodeMirror theme extension for font size + font family. */
 export function editorFontTheme(EditorView: typeof import("@codemirror/view").EditorView, size: number, family: string, opts?: { fixedHeight?: boolean; scrollable?: boolean }): Extension {
-  return EditorView.theme(buildEditorFontThemeRules(opts, { size, family }));
+  const key = `font:${JSON.stringify([size, family, !!opts?.fixedHeight, !!opts?.scrollable])}`;
+  return cachedEditorTheme(EditorView, key, () => EditorView.theme(buildEditorFontThemeRules(opts, { size, family })));
 }
 
 export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
@@ -966,6 +1072,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       boxSizing: "border-box",
     },
     ".cm-tooltip.cm-tooltip-autocomplete > ul": {
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       maxHeight: "min(280px, calc(100vh - 32px))",
       minWidth: "min(280px, calc(100vw - 24px))",
       maxWidth: "inherit",
@@ -1064,9 +1171,23 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(FUNCTION_ICON),
     },
+    ".cm-completionIcon-namespace": {
+      color: colorMixValue("var(--sky-500, #0ea5e9)", "color-mix(in oklch, var(--sky-500, #0ea5e9) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(DATABASE_LINK_ICON),
+    },
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
+    },
+    // Sequences previously reused "variable" without any icon mask, which
+    // rendered a blank slot (#12099). Match the sidebar's emerald ListTree.
+    ".cm-completionIcon-sequence": {
+      color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(SEQUENCE_ICON),
+    },
+    ".cm-completionIcon-variable": {
+      color: colorMixValue("var(--rose-500, #f43f5e)", "color-mix(in oklch, var(--rose-500, #f43f5e) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(VARIABLE_ICON),
     },
     // Reuse the table glyph for aliases instead of CodeMirror's default text
     // icon, which is rendered as a solid black square in some themes.
@@ -1093,6 +1214,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     },
     ".cm-completionDetail": {
       color: colorMixValue("var(--muted-foreground)", "color-mix(in oklch, var(--popover-foreground) 68%, var(--popover))"),
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       fontSize: `clamp(11px, calc(var(${EDITOR_FONT_SIZE_CSS_VAR}, 13px) - 1px), 13px)`,
       fontWeight: "500",
       fontStyle: "normal",
@@ -1105,13 +1227,17 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       whiteSpace: "nowrap",
     },
     ".cm-tooltip.cm-completionInfo": {
+      fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, var(--font-mono, monospace))`,
       maxWidth: "min(420px, calc(100vw - 24px))",
       overflowWrap: "anywhere",
       zIndex: "10000",
+    },
+    ".cm-tooltip.cm-completionInfo *": {
+      fontFamily: "inherit",
     },
   };
 }
 
 export function sqlCompletionTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
-  return EditorView.theme(buildSqlCompletionThemeRules());
+  return cachedEditorTheme(EditorView, "sql-completion", () => EditorView.theme(buildSqlCompletionThemeRules()));
 }

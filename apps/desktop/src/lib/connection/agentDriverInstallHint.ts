@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import { supportsDriverManagement } from "@/lib/database/databaseCapabilities";
+import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 
 export interface AgentDriverInstallState {
   db_type: string;
@@ -35,11 +36,21 @@ export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverPr
   if (dbType === "sqlite") return context?.ssh ? "sqlite-worker" : undefined;
   // argo owns its dedicated argo-go agent — only kyuubi/impala still share hive-go.
   if (dbType === "kyuubi" || dbType === "impala") return "hive";
-  if (dbType === "oracle") return "oracle";
+  // Oracle 的 OCI（thick）模式由独立的 oracle-oci agent 承担；其它 Oracle 连接继续用 thin agent。
+  // agentKey 以连接类型声明（connection-types/oracle.yaml）为准，避免两处各写一份映射。
+  if (dbType === "oracle") {
+    const entry = databaseManifestEntry(dbType);
+    return entry?.driverProfiles?.find((profile) => profile.profile === driverProfile)?.agentKey ?? entry?.agentKey;
+  }
   if (dbType === "h2") return "h2";
+  if (dbType === "transwarp") return "transwarp";
+  if (dbType === "nebula") {
+    const entry = databaseManifestEntry(dbType);
+    return entry?.driverProfiles?.find((profile) => profile.profile === driverProfile)?.agentKey ?? entry?.agentKey;
+  }
   if (dbType === "mongodb") return "mongodb";
   if (dbType === "dameng") return "dameng";
-  if (dbType === "gbase") return driverProfile === "gbase8s" ? "gbase8s" : "gbase8a";
+  if (dbType === "gbase") return "gbase8a";
   if (dbType === "mq") {
     if (driverProfile === "kafka") return "kafka";
     if (driverProfile === "rocketmq") return "rocketmq";
@@ -79,6 +90,31 @@ export function appendAgentDriverUpdateHint(message: string, hint: string): stri
 export type DriverStoreTab = "agent" | "jdbc" | "storage" | "runtime";
 
 export type DriverStoreFocus = { target: "driver"; driver?: string } | { target: "jre" } | { target: "tab"; tab: DriverStoreTab };
+
+export function driverStoreFocusElementKey(focus: DriverStoreFocus): string {
+  return focus.target === "driver" ? `driver:${focus.driver ?? ""}` : "jre";
+}
+
+/**
+ * Apply search/category/status reset + scroll only once per focus key, or when
+ * the parent hands us a new focus object (user re-triggered the same hint).
+ * Inventory refreshes must not clobber the status filter.
+ */
+export function shouldApplyDriverStoreFocus(lastAppliedKey: string | null, nextKey: string, focusChanged: boolean): boolean {
+  if (focusChanged) return true;
+  return lastAppliedKey !== nextKey;
+}
+
+/**
+ * Agent list `v-if="drivers.length === 0"` is a loading placeholder that hides
+ * every row, including managed JDBC rows already present in `builtinDriverRows`.
+ * Committing focus before that would mark the key applied and skip the later scroll.
+ */
+export function driverStoreFocusRowIsRenderable(focus: DriverStoreFocus, agentDriverCount: number, builtinRows: readonly { db_type: string }[]): boolean {
+  if (focus.target !== "driver") return true;
+  if (agentDriverCount === 0) return false;
+  return builtinRows.some((row) => row.db_type === focus.driver);
+}
 
 /** Maps a backend connect error to the Driver Store item that can fix it. */
 export function driverStoreFocusForInstallError(message: string, dbType?: DatabaseType, driverProfile?: string): DriverStoreFocus | null {

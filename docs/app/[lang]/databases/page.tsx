@@ -13,25 +13,16 @@ import { resolveLang } from "@/lib/i18n";
 const i18n = {
   en: {
     title: "Supported Databases",
-    desc: "DBX connects to 90+ database engines. Native Rust drivers, MySQL/PostgreSQL-compatible profiles, and JDBC for everything else.",
+    desc: "DBX connects to 100+ database engines. Native Rust drivers, MySQL/PostgreSQL-compatible profiles, and JDBC for everything else.",
     ctaTitle: "Don't see your database?",
     ctaDesc: "Open a GitHub Discussion to request support for a new database engine.",
     ctaLink: "Request on GitHub",
     footer: "Want to learn more about what works with each engine?",
     footerLink: "Read the feature matrix",
   },
-  tr: {
-    title: "Desteklenen Veritabanları",
-    desc: "DBX 90+ veritabanı motorunu destekler: Rust yerel sürücüleri, MySQL/PostgreSQL uyumlu türler ve JDBC uzantıları.",
-    ctaTitle: "Kullandığınız veritabanını göremiyor musunuz?",
-    ctaDesc: "Yeni bir veritabanı motoru için GitHub Discussions'ta bir başlık açın. Üreticiler ve topluluk kullanıcıları katkı verebilir.",
-    ctaLink: "GitHub'da talep edin",
-    footer: "Her motorun hangi özellikleri desteklediğini merak ediyor musunuz?",
-    footerLink: "Özellik matrisine bakın",
-  },
   cn: {
     title: "支持的数据库",
-    desc: "DBX 支持 90+ 种数据库引擎。涵盖 Rust 原生驱动、MySQL/PostgreSQL 兼容类型和 JDBC 扩展。",
+    desc: "DBX 支持 100+ 种数据库引擎。涵盖 Rust 原生驱动、MySQL/PostgreSQL 兼容类型和 JDBC 扩展。",
     ctaTitle: "没看到你用的数据库？",
     ctaDesc: "在 GitHub Discussions 中发起讨论，申请支持新的数据库引擎。厂商和社区用户都可以参与。",
     ctaLink: "在 GitHub 上申请",
@@ -59,7 +50,7 @@ export default async function DatabasesPage({ params }: { params: Promise<{ lang
   const t = i18n[l];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={l} active="databases" />
 
       {/* Hero */}

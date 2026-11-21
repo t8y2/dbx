@@ -8,9 +8,11 @@ export interface MysqlExplainCompatibilityHint {
 const INVALID_EXPLAIN_OPTION_RE = /invalid\s+explain\s+option/i;
 const VALID_EXPLAIN_OPTIONS_RE = /valid\s+options\s+are\s*:\s*\[([^\]]+)\]/i;
 const EXPLAIN_FORMAT_PREFIX_RE = /^EXPLAIN\s+FORMAT\s*=\s*[A-Z_]+\s+/i;
+const UNSUPPORTED_JSON_EXPLAIN_FORMAT_RE = /\bexplain\s+format\s+(['"`]?)json\1\s+is\s+not\s+supported\s+now\b/i;
 
 export function mysqlExplainCompatibilityHint(error: unknown, explainSql: string): MysqlExplainCompatibilityHint | undefined {
   const message = formatError(error);
+  if (UNSUPPORTED_JSON_EXPLAIN_FORMAT_RE.test(message)) return { supportsJson: false };
   if (!INVALID_EXPLAIN_OPTION_RE.test(message)) return undefined;
 
   const optionsMatch = message.match(VALID_EXPLAIN_OPTIONS_RE);

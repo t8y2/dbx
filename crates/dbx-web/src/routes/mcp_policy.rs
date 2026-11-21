@@ -228,11 +228,11 @@ fn mongo_field_predicate_is_exists_true(value: &serde_json::Value) -> bool {
     })
 }
 
-async fn load_policy(state: &Arc<WebState>) -> Result<McpGlobalPolicy, AppError> {
-    state.app.storage.load_mcp_global_policy().await.map(|state| state.policy()).map_err(AppError::from)
+pub(crate) async fn load_policy(state: &Arc<WebState>) -> Result<McpGlobalPolicy, AppError> {
+    state.app.storage.load_enforced_mcp_policy().await.map(|state| state.policy()).map_err(AppError::from)
 }
 
-async fn load_policy_context(
+pub(crate) async fn load_policy_context(
     state: &Arc<WebState>,
 ) -> Result<(McpGlobalPolicy, HashMap<String, McpConnectionGroupPath>), AppError> {
     let policy = load_policy(state).await?;
@@ -250,7 +250,7 @@ async fn load_policy_context(
     }
 }
 
-fn ensure_allowed(
+pub(crate) fn ensure_allowed(
     policy: &McpGlobalPolicy,
     group_path: Option<&McpConnectionGroupPath>,
     connection_id: &str,
@@ -522,6 +522,7 @@ mod tests {
                     read_only: false,
                     allow_dangerous_sql: true,
                 }],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         }

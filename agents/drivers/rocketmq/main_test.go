@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -90,6 +91,19 @@ func TestRocketMQAgentProcessProtocol(t *testing.T) {
 func TestRocketMQAgentHelperProcess(t *testing.T) {
 	if os.Getenv(rocketMQHelperProcessEnv) != "1" {
 		return
+	}
+	if rootFile := os.Getenv("DBX_ROCKETMQ_TEST_ROOTS"); rootFile != "" {
+		// macOS uses its platform verifier and ignores SSL_CERT_FILE. This is
+		// isolated to a test child and never changes the user's keychain.
+		pem, err := os.ReadFile(rootFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			t.Fatal("invalid test roots")
+		}
+		x509.SetFallbackRoots(roots)
 	}
 	main()
 	os.Exit(0)

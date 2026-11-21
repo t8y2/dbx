@@ -2,6 +2,9 @@ import { requestJson } from "./httpJson";
 
 export type LatestReleaseInfo = {
   version: string;
+  // Tag of the Release the stable packages live under; absent in manifests that
+  // predate release channels, whose packages sit in releases/v<version>/.
+  release_tag?: string;
   notes?: string;
   pub_date?: string;
 };

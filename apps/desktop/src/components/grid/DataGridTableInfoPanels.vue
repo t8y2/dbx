@@ -1,13 +1,24 @@
 <script setup lang="ts">
+import { computed, ref, watch } from "vue";
 import { KeyRound, Loader2, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, TableInfoTab, TriggerInfo } from "@/types/database";
+import { sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
+import { formatObjectBrowserBytes, formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
+import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
 
 interface DataGridTableInfoPanelsProps {
   activeTab: TableInfoTab;
   searchQuery: string;
+  tableName: string;
+  tableSchema: string;
+  database: string;
+  tableOwner: string | null;
+  overviewStats: ObjectStatistics | null;
+  overviewComment: string | null;
+  overviewLoading: boolean;
   columns: ColumnInfo[];
   columnsLoading: boolean;
   indexes: IndexInfo[];
@@ -23,6 +34,9 @@ interface DataGridTableInfoPanelsProps {
   constraints: ConstraintInfo[];
   constraintsLoading: boolean;
   constraintsError: string;
+  partitioning: PgTablePartitioning | null;
+  partitionsLoading: boolean;
+  partitionsError: string;
   isProtectedMongoIndex: (index: IndexInfo) => boolean;
   formatColumnType: (dataType: string) => string;
 }
@@ -36,10 +50,59 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const columnSort = ref<ObjectBrowserTableColumnSort | null>(null);
+
+const sortedColumns = computed(() => sortObjectBrowserTableColumns(props.columns, columnSort.value));
+
+watch(
+  () => [props.tableName, props.tableSchema, props.database] as const,
+  () => {
+    columnSort.value = null;
+  },
+);
+
+function toggleColumnSort(key: ObjectBrowserTableColumnSortKey) {
+  columnSort.value = columnSort.value?.key === key ? (columnSort.value.direction === "asc" ? { key, direction: "desc" } : null) : { key, direction: "asc" };
+}
+
+function columnSortDirection(key: ObjectBrowserTableColumnSortKey): ObjectBrowserTableColumnSort["direction"] | undefined {
+  return columnSort.value?.key === key ? columnSort.value.direction : undefined;
+}
+
+function columnSortIndicator(key: ObjectBrowserTableColumnSortKey): string {
+  const direction = columnSortDirection(key);
+  return direction === "asc" ? "▲" : direction === "desc" ? "▼" : "↕";
+}
+
+const overviewRows = computed(() => {
+  const rows: { label: string; value: string; mono?: boolean }[] = [
+    { label: t("common.table"), value: props.tableName },
+    { label: t("common.schema"), value: props.tableSchema },
+    { label: t("common.database"), value: props.database },
+    { label: t("grid.tableOwner"), value: props.tableOwner ?? "", mono: true },
+    { label: t("structureEditor.comment"), value: props.overviewComment ?? "" },
+    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(props.overviewStats?.estimated_rows), mono: true },
+    { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(props.overviewStats?.total_bytes), mono: true },
+    { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(props.overviewStats?.data_length), mono: true },
+    { label: t("grid.tableInfoEngine"), value: props.overviewStats?.engine ?? "", mono: true },
+    { label: t("grid.tableInfoCreatedAt"), value: props.overviewStats?.created_at ?? "", mono: true },
+    { label: t("grid.tableInfoUpdatedAt"), value: props.overviewStats?.updated_at ?? "", mono: true },
+    { label: t("grid.tableInfoCollation"), value: props.overviewStats?.collation ?? "", mono: true },
+    { label: t("grid.tableInfoRowFormat"), value: props.overviewStats?.row_format ?? "", mono: true },
+    { label: t("grid.tableInfoAvgRowLength"), value: formatObjectBrowserBytes(props.overviewStats?.avg_row_length), mono: true },
+    { label: t("grid.tableInfoMaxDataLength"), value: formatObjectBrowserBytes(props.overviewStats?.max_data_length), mono: true },
+    { label: t("grid.tableInfoCheckTime"), value: props.overviewStats?.check_time ?? "", mono: true },
+    { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(props.overviewStats?.index_length), mono: true },
+    { label: t("grid.tableInfoAutoIncrement"), value: props.overviewStats?.auto_increment ?? "", mono: true },
+    { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(props.overviewStats?.data_free), mono: true },
+  ];
+  const query = props.searchQuery.trim().toLowerCase();
+  return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
+});
 </script>
 
 <template>
-  <div v-if="props.activeTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
+  <div v-if="props.activeTab === 'columns'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.columnsLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -50,23 +113,31 @@ const { t } = useI18n();
       <thead class="sticky top-0 bg-muted text-muted-foreground">
         <tr class="border-b">
           <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("grid.columnName") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('name') === 'asc' ? 'ascending' : columnSortDirection('name') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('name')">
+              {{ t("grid.columnName") }} <span class="text-[10px]">{{ columnSortIndicator("name") }}</span>
+            </button>
           </th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("grid.columnType") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('dataType') === 'asc' ? 'ascending' : columnSortDirection('dataType') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('dataType')">
+              {{ t("grid.columnType") }} <span class="text-[10px]">{{ columnSortIndicator("dataType") }}</span>
+            </button>
           </th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("grid.tableInfoNullable") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('nullable') === 'asc' ? 'ascending' : columnSortDirection('nullable') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('nullable')">
+              {{ t("grid.tableInfoNullable") }} <span class="text-[10px]">{{ columnSortIndicator("nullable") }}</span>
+            </button>
           </th>
-          <th class="text-left text-nowrap font-medium px-3 py-2">
-            {{ t("structureEditor.defaultValue") }}
+          <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="columnSortDirection('defaultValue') === 'asc' ? 'ascending' : columnSortDirection('defaultValue') === 'desc' ? 'descending' : 'none'">
+            <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('defaultValue')">
+              {{ t("structureEditor.defaultValue") }} <span class="text-[10px]">{{ columnSortIndicator("defaultValue") }}</span>
+            </button>
           </th>
         </tr>
       </thead>
       <tbody>
         <tr
-          v-for="(column, index) in props.columns"
+          v-for="(column, index) in sortedColumns"
           :key="column.name"
           class="border-b cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800/30"
           role="button"
@@ -109,7 +180,7 @@ const { t } = useI18n();
     </table>
   </div>
 
-  <div v-else-if="props.activeTab === 'indexes'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'indexes'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.indexesLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -133,7 +204,7 @@ const { t } = useI18n();
               <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
             </div>
             <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
-              {{ index.columns.join(", ") }}
+              {{ index.columns.map((column, columnIndex) => column + (index.key_directions?.[columnIndex]?.toUpperCase() === "DESC" ? " DESC" : "")).join(", ") }}
             </div>
           </div>
           <Button v-if="props.canManageMongoIndexes && !props.isProtectedMongoIndex(index)" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive" @click="emit('requestDropMongoIndex', index)">
@@ -145,7 +216,7 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <div v-else-if="props.activeTab === 'foreignKeys'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'foreignKeys'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.foreignKeysLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -166,7 +237,7 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <div v-else-if="props.activeTab === 'triggers'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'triggers'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.triggersLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -187,7 +258,7 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <div v-else-if="props.activeTab === 'constraints'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'constraints'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.constraintsLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -201,12 +272,12 @@ const { t } = useI18n();
       {{ t("grid.tableInfoEmpty") }}
     </div>
     <div v-else class="divide-y">
-      <div v-for="constraint in props.constraints" :key="constraint.name" class="p-3 text-xs" :class="constraint.enabled ? '' : 'opacity-60'">
+      <div v-for="constraint in props.constraints" :key="constraint.name" class="p-3 text-xs" :class="constraint.enabled === false ? 'opacity-60' : ''">
         <div class="flex flex-wrap items-center gap-1.5">
           <span class="font-medium truncate">{{ constraint.name }}</span>
           <span class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ constraint.constraint_type }}</span>
-          <span v-if="!constraint.enabled" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintDisabled") }}</span>
-          <span v-else-if="!constraint.valid" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintNotValidated") }}</span>
+          <span class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t(constraint.enabled === true ? "grid.tableInfoConstraintEnabled" : constraint.enabled === false ? "grid.tableInfoConstraintDisabled" : "grid.tableInfoConstraintEnabledUnknown") }}</span>
+          <span class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t(constraint.valid === true ? "grid.tableInfoConstraintValidated" : constraint.valid === false ? "grid.tableInfoConstraintNotValidated" : "grid.tableInfoConstraintValidationUnknown") }}</span>
         </div>
         <div v-if="constraint.columns.length" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ constraint.columns.join(", ") }}</div>
         <div v-if="constraint.ref_table" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
@@ -214,4 +285,55 @@ const { t } = useI18n();
       </div>
     </div>
   </div>
+  <div v-else-if="props.activeTab === 'info'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
+    <div v-if="props.overviewLoading" class="h-full flex items-center justify-center">
+      <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+    </div>
+    <div v-else-if="props.searchQuery && overviewRows.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+      {{ t("grid.tableInfoNoResults") }}
+    </div>
+    <div v-else class="divide-y">
+      <div v-for="row in overviewRows" :key="row.label" class="flex items-baseline gap-3 px-3 py-2 text-xs">
+        <span class="w-20 shrink-0 text-muted-foreground">{{ row.label }}</span>
+        <span class="min-w-0 flex-1 select-text break-words" :class="row.mono ? 'font-mono text-[11px]' : ''" :title="row.value">{{ row.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <TablePartitionsPanel v-else-if="props.activeTab === 'partitions'" :partitioning="props.partitioning" :loading="props.partitionsLoading" :error="props.partitionsError" :search-query="props.searchQuery" />
 </template>
+
+<style scoped>
+/* Unified scrollbar look for the Table Info panel tabs (matches structure editor). */
+.table-info-scroller::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.table-info-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.table-info-scroller::-webkit-scrollbar-thumb {
+  background: rgba(82, 82, 82, 0.3);
+  background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+.table-info-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(82, 82, 82, 0.48);
+  background: color-mix(in oklab, var(--foreground) 48%, transparent);
+  border-width: 2px;
+  background-clip: padding-box;
+}
+
+html.dbx-legacy-webview.dark .table-info-scroller::-webkit-scrollbar-thumb {
+  background: rgba(212, 212, 216, 0.3);
+}
+
+html.dbx-legacy-webview.dark .table-info-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 212, 216, 0.48);
+}
+</style>

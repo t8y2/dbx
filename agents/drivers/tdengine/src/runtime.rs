@@ -65,6 +65,7 @@ impl AgentSession {
 }
 
 pub async fn run() -> Result<()> {
+    crate::driver::ensure_crypto_provider();
     let runtime = Arc::new(RuntimeServer::new());
     let (responses, mut response_rx) = mpsc::unbounded_channel::<RpcResponse>();
     let writer = tokio::spawn(async move {

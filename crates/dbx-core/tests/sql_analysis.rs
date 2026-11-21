@@ -14,6 +14,37 @@ fn extracts_tables_aliases_and_qualified_columns() {
 }
 
 #[test]
+fn reports_qualifiers_that_name_no_table_or_alias() {
+    let analysis = analyze_sql_references(
+        "SELECT a.id, a.v, b.id FROM t_tx_demo a JOIN t_tx_demo qb ON a.id = b.id",
+        Some("mysql"),
+    )
+    .unwrap();
+
+    // The projection and the join condition both reference the missing alias.
+    let qualifiers: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.qualifier.as_str()).collect();
+    assert_eq!(qualifiers, vec!["b", "b"]);
+    // Each span covers the qualifier itself: "b" starts at column 19 in the
+    // projection and at column 69 in the join condition.
+    let mut columns: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.span.start_column).collect();
+    columns.sort_unstable();
+    assert_eq!(columns, vec![19, 69]);
+    assert!(analysis.unknown_qualifiers.iter().all(|unknown| unknown.span.end_column == unknown.span.start_column));
+}
+
+#[test]
+fn reports_a_qualifier_that_names_no_cte_alias() {
+    let sql = "WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d";
+    let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
+
+    let qualifiers: Vec<_> = analysis.unknown_qualifiers.iter().map(|unknown| unknown.qualifier.as_str()).collect();
+    assert_eq!(qualifiers, vec!["zz"]);
+    // The span covers the qualifier itself, not the whole `zz.id` reference.
+    let span = analysis.unknown_qualifiers[0].span;
+    assert_eq!(&sql[span.start_column - 1..span.end_column], "zz");
+}
+
+#[test]
 fn extracts_nested_query_scopes_for_correlated_subqueries() {
     let sql = "select aa.house_id from mds_base_house aa where exists (select 1 from mds_base_owner where HOUSE_ID = aa.HOUSE_ID)";
     let analysis = analyze_sql_references(sql, Some("mysql")).unwrap();
@@ -83,6 +114,22 @@ fn sqlserver_qualified_table_is_not_hidden_by_same_named_cte() {
 }
 
 #[test]
+fn sqlserver_cross_database_table_keeps_its_database() {
+    let sql = "select top 10 * from mk_passport_api.dbo.orders order by id desc";
+    let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
+
+    let tables: Vec<_> = analysis
+        .tables
+        .iter()
+        .map(|table| (table.database.as_deref(), table.schema.as_deref(), table.name.as_str()))
+        .collect();
+    assert_eq!(tables, vec![(Some("mk_passport_api"), Some("dbo"), "orders")]);
+
+    let analysis = analyze_sql_references("select * from dbo.orders", Some("sqlserver")).unwrap();
+    assert_eq!(analysis.tables[0].database, None);
+}
+
+#[test]
 fn nested_queries_inherit_and_shadow_cte_names() {
     let sql = "WITH source AS (SELECT * FROM dbo.outer_source) SELECT * FROM source WHERE EXISTS (WITH source AS (SELECT * FROM dbo.inner_source) SELECT * FROM source) AND EXISTS (SELECT * FROM source)";
     let analysis = analyze_sql_references(sql, Some("sqlserver")).unwrap();
@@ -114,7 +161,7 @@ fn extracts_mysql_quoted_table_references() {
     assert_eq!(analysis.tables[0].span.start_line, 1);
     assert_eq!(analysis.tables[0].span.start_column, 15);
     assert_eq!(analysis.tables[0].span.end_line, 1);
-    assert_eq!(analysis.tables[0].span.end_column, 24);
+    assert_eq!(analysis.tables[0].span.end_column, 23);
 }
 
 #[test]
@@ -798,4 +845,63 @@ fn generic_dialect_still_rejects_spark_datasource_clauses() {
         .expect_err("Spark datasource clauses must remain dialect-specific");
 
     assert!(error.contains("USING"));
+}
+
+#[test]
+fn oracle_admin_ddl_statements_do_not_raise_syntax_errors() {
+    for sql in [
+        "create user dbx_tmp identified by \"pw\" account unlock;",
+        "alter user dbx_tmp identified by \"pw\";",
+        "alter user dbx_tmp default tablespace dbx_ts;",
+        "create tablespace dbx_ts datafile '/tmp/dbx_ts.dbf' size 10m autoextend on next 1m maxsize unlimited;",
+        "alter tablespace dbx_ts add datafile '/tmp/dbx_ts2.dbf' size 5m;",
+        "drop tablespace dbx_ts including contents and datafiles;",
+        "create profile dbx_prof limit failed_login_attempts 5;",
+        "create directory dbx_dir as '/tmp/dbx_dir';",
+        "create or replace public synonym dbx_syn for dual;",
+        "alter session set nls_date_format='YYYY-MM-DD';",
+        "grant create session to dbx_tmp;",
+        "revoke create session from dbx_tmp;",
+    ] {
+        let analysis = analyze_sql_references(sql, Some("oracle"))
+            .unwrap_or_else(|error| panic!("Oracle admin DDL should analyze: {error} ({sql})"));
+        assert!(analysis.tables.is_empty(), "unexpected table references for {sql}");
+        assert!(analysis.columns.is_empty(), "unexpected column references for {sql}");
+    }
+}
+
+#[test]
+fn oracle_admin_ddl_masking_keeps_following_statement_spans() {
+    let sql =
+        "select 1 from users;\ncreate user dbx_tmp identified by \"pw\" account unlock;\nselect u.id from users u;";
+
+    let analysis = analyze_sql_references(sql, Some("oracle"))
+        .unwrap_or_else(|error| panic!("masked Oracle admin DDL should analyze: {error}"));
+
+    let tables: Vec<_> = analysis.tables.iter().map(|table| (table.name.as_str(), table.scope_id)).collect();
+    assert_eq!(tables, vec![("users", 0), ("users", 1)]);
+    // The trailing statement keeps the exact line/column it had in the unmasked script
+    // ("users" starts after `select u.id from ` on line 3).
+    assert_eq!(analysis.tables[1].span.start_line, 3);
+    assert_eq!(analysis.tables[1].span.start_column, 18);
+
+    let columns: Vec<_> = analysis.columns.iter().map(|column| column.name.as_str()).collect();
+    assert_eq!(columns, vec!["id"]);
+    assert_eq!(analysis.columns[0].span.start_line, 3);
+}
+
+#[test]
+fn oracle_admin_ddl_tolerance_is_scoped_to_oracle_compatible_dialects() {
+    for dialect in [Some("generic"), Some("postgres"), Some("mysql"), None] {
+        let error = analyze_sql_references("create user dbx_tmp identified by \"pw\";", dialect)
+            .expect_err("non Oracle dialects must keep the parser error");
+        assert!(!error.is_empty());
+    }
+}
+
+#[test]
+fn oracle_syntax_errors_are_still_reported() {
+    let error = analyze_sql_references("select from where order;", Some("oracle"))
+        .expect_err("a real Oracle syntax error must still be reported");
+    assert!(error.contains("sql parser error"), "unexpected error: {error}");
 }

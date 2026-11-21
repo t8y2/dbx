@@ -21,6 +21,9 @@ const dataGrid = vi.hoisted(() => ({
   pageOffset: undefined as number | undefined,
   rowCount: undefined as number | undefined,
   columnCount: undefined as number | undefined,
+  localColumnFilters: undefined as Record<string, string[]> | undefined,
+  localColumnFilterColumns: undefined as string[] | undefined,
+  localFiltersChange: undefined as ((filters: Record<string, string[]>) => void) | undefined,
   viewStateKey: undefined as string | undefined,
   viewGeneration: undefined as string | undefined,
 }));
@@ -83,11 +86,13 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         pageSizePreference: { type: String, required: false },
         viewStateKey: { type: String, required: false },
         viewGeneration: { type: String, required: false },
+        localColumnFilterColumns: { type: Array, required: false },
       },
       setup(props, { attrs, expose, slots }) {
         dataGrid.paginate = attrs.onPaginate as typeof dataGrid.paginate;
         dataGrid.sort = attrs.onSort as typeof dataGrid.sort;
         dataGrid.reload = attrs.onReload as typeof dataGrid.reload;
+        dataGrid.localFiltersChange = attrs.onLocalColumnFiltersChange as typeof dataGrid.localFiltersChange;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -114,6 +119,8 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
           dataGrid.viewGeneration = props.viewGeneration;
           dataGrid.rowCount = (props.result as { rows: unknown[] }).rows.length;
           dataGrid.columnCount = (props.result as { columns: unknown[] }).columns.length;
+          dataGrid.localColumnFilters = (props.result as { local_column_filters?: Record<string, string[]> }).local_column_filters;
+          dataGrid.localColumnFilterColumns = props.localColumnFilterColumns as string[] | undefined;
           return h("div", [
             // Rendering the real search-bar slot exposes the filter/sort inputs
             // the same way the actual grid toolbar does.
@@ -163,7 +170,7 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import DocumentBrowser from "@/components/document/DocumentBrowser.vue";
-import { resetBrowserStateCaches } from "@/lib/tabs/documentBrowserStateCache";
+import { resetBrowserStateCaches, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 
 let app: App<Element> | null = null;
 let root: HTMLDivElement | null = null;
@@ -231,6 +238,9 @@ beforeEach(async () => {
   dataGrid.pageOffset = undefined;
   dataGrid.rowCount = undefined;
   dataGrid.columnCount = undefined;
+  dataGrid.localColumnFilters = undefined;
+  dataGrid.localColumnFilterColumns = undefined;
+  dataGrid.localFiltersChange = undefined;
   dataGrid.viewStateKey = undefined;
   dataGrid.viewGeneration = undefined;
   settings.editorSettings.infiniteScroll = false;
@@ -247,6 +257,86 @@ afterEach(() => {
   app = null;
   root = null;
   vi.unstubAllGlobals();
+});
+
+describe("DocumentBrowser filter toggle", () => {
+  function filterCheckbox() {
+    const checkbox = root!.querySelector<HTMLInputElement>('input[type="checkbox"][aria-label="grid.applyFilter"]');
+    expect(checkbox).not.toBeNull();
+    return checkbox!;
+  }
+
+  it("disables and restores a filter without losing the text or sort order", async () => {
+    await mountBrowser();
+    const [filter, sort] = queryTextareas();
+    typeInTextarea(filter, '{"name":"row_1"}');
+    typeInTextarea(sort, '{"name":-1}');
+    pressEnter(filter);
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe('{"name":"row_1"}');
+
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    expect(backend.documentFindDocuments.mock.lastCall![7]).toBe('{"name":-1}');
+    expect(filter.value).toBe('{"name":"row_1"}');
+
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe('{"name":"row_1"}');
+  });
+
+  it("keeps disabled filters disabled after switching tabs and refreshing", async () => {
+    await mountBrowser({ stateKey: "toggle-tab" });
+    typeInTextarea(queryTextareas()[0], '{"name":"row_1"}');
+    filterCheckbox().click();
+    await flushUi();
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await mountBrowser({ stateKey: "toggle-tab" });
+
+    expect(filterCheckbox().checked).toBe(false);
+    expect(queryTextareas()[0].value).toBe('{"name":"row_1"}');
+    await dataGrid.reload!();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe('{"name":"row_1"}');
+  });
+
+  it("does not parse incomplete filter text while the filter is disabled", async () => {
+    await mountBrowser();
+    typeInTextarea(queryTextareas()[0], '{"name":');
+    backend.documentFindDocuments.mockClear();
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments).toHaveBeenCalledOnce();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    expect(queryTextareas()[0].value).toBe('{"name":');
+  });
+
+  it("toggles manual and structured conditions together and resets pagination", async () => {
+    saveDocumentBrowserState("structured-toggle", {
+      filterInput: '{"name":"row_1"}',
+      sortInput: "",
+      appliedDocumentFilter: { active: true },
+      documentFilterRules: [],
+      page: 1,
+    });
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 2, 6));
+    await mountBrowser({ stateKey: "structured-toggle" });
+    const combined = '{"$and":[{"name":"row_1"},{"active":true}]}';
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe(combined);
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![3]).toBe(0);
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBeUndefined();
+    filterCheckbox().click();
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.lastCall![5]).toBe(combined);
+  });
 });
 
 describe("DocumentBrowser tab state (tab switch persistence)", () => {
@@ -352,6 +442,63 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
 
     expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
     expect(dataGrid.rowCount).toBe(2);
+  });
+
+  it("restores mongodb local column filters after a tab switch", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+    expect(dataGrid.localColumnFilterColumns).toEqual(["_id", "name"]);
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-local-filters" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+    expect(dataGrid.localColumnFilterColumns).toEqual(["_id", "name"]);
+  });
+
+  it("clears mongodb local column filters when the query conditions change", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters-query-change" });
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+
+    const [filterTextarea] = queryTextareas();
+    typeInTextarea(filterTextarea, '{"name":"row_1"}');
+    await flushUi();
+    pressEnter(filterTextarea);
+    await flushUi();
+
+    expect(dataGrid.localColumnFilters).toEqual({});
+    expect(dataGrid.localColumnFilterColumns).toBeUndefined();
+  });
+
+  it("keeps mongodb local column filters when the page size changes mid-session", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters-page-size" });
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+
+    // A page-size change reloads rows, but the value filter is about columns, not rows.
+    await dataGrid.paginate!(0, 10);
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+    expect(dataGrid.localColumnFilterColumns).toEqual(["_id", "name"]);
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-local-filters-page-size" });
+
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+    expect(dataGrid.localColumnFilterColumns).toEqual(["_id", "name"]);
   });
 
   it("still forces a real reload from the refresh button after a restore", async () => {

@@ -20,6 +20,7 @@ const dataGrid = vi.hoisted(() => ({
   reload: undefined as (() => Promise<void>) | undefined,
   save: undefined as ((changes: { dirtyRows: Map<number, Map<number, unknown>>; deletedRows: Set<number>; newRows: unknown[][]; newRowMeta: unknown[]; columns: string[]; rows: unknown[][] }) => Promise<void>) | undefined,
   resetInfiniteScrollState: undefined as ReturnType<typeof vi.fn> | undefined,
+  prepareFullReload: undefined as ReturnType<typeof vi.fn> | undefined,
   previousResult: undefined as { rows: readonly unknown[]; appended_from_row_count?: number } | undefined,
   rows: [] as unknown[],
   columns: [] as string[],
@@ -96,6 +97,8 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         dataGrid.save = (props.customSaveHandler as { save?: typeof dataGrid.save } | undefined)?.save;
         const resetInfiniteScrollState = vi.fn();
         dataGrid.resetInfiniteScrollState = resetInfiniteScrollState;
+        const prepareFullReload = vi.fn();
+        dataGrid.prepareFullReload = prepareFullReload;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -115,6 +118,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
           multiRowTranspose: false,
           setMultiRowTranspose: vi.fn(),
           resetInfiniteScrollState,
+          prepareFullReload,
         });
         return () => {
           const result = props.result as { rows: unknown[]; columns?: string[]; appended_from_row_count?: number };
@@ -227,6 +231,7 @@ beforeEach(async () => {
   dataGrid.reload = undefined;
   dataGrid.save = undefined;
   dataGrid.resetInfiniteScrollState = undefined;
+  dataGrid.prepareFullReload = undefined;
   dataGrid.previousResult = undefined;
   dataGrid.rows = [];
   dataGrid.columns = [];
@@ -366,6 +371,42 @@ describe("DocumentBrowser infinite scroll (issue #6455)", () => {
     expect(dataGrid.pageOffset).toBe(0);
     expect(dataGrid.pageLimit).toBe(5);
     expect(dataGrid.resetInfiniteScrollState).toHaveBeenCalledTimes(1);
+  });
+
+  it("prepares the grid's in-place reload before reloading after a save", async () => {
+    settings.editorSettings.infiniteScroll = false;
+    backend.documentFindDocuments.mockResolvedValueOnce(documentResult(1, 2, 4)).mockResolvedValueOnce(documentResult(1, 2, 4, { saved: true }));
+
+    await mountBrowser();
+    backend.documentFindDocuments.mockClear();
+    dataGrid.prepareFullReload!.mockImplementation(() => {
+      expect(backend.documentFindDocuments).not.toHaveBeenCalled();
+    });
+
+    await dataGrid.save!({
+      dirtyRows: new Map([[0, new Map([[1, "row_1_updated"]])]]),
+      deletedRows: new Set(),
+      newRows: [],
+      newRowMeta: [],
+      columns: [...dataGrid.columns],
+      rows: dataGrid.rows as unknown[][],
+    });
+    await flushUi();
+
+    // Without it the reloaded page reads as a new result and the grid jumps to the top (#12649).
+    expect(dataGrid.prepareFullReload).toHaveBeenCalledTimes(1);
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves reload preparation to the grid for its own refresh", async () => {
+    settings.editorSettings.infiniteScroll = false;
+    backend.documentFindDocuments.mockResolvedValueOnce(documentResult(1, 2, 4)).mockResolvedValueOnce(documentResult(1, 2, 4));
+
+    await mountBrowser();
+    await dataGrid.reload!();
+    await flushUi();
+
+    expect(dataGrid.prepareFullReload).not.toHaveBeenCalled();
   });
 
   it("keeps the configured page size when the final capped segment has a smaller limit", async () => {

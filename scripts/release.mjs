@@ -3,13 +3,7 @@ import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
-import {
-  evaluateAgentVersionBump,
-  getAgentVersionChanges,
-  isAgentPublishRelevantFile,
-  parseLegacyStandaloneProjects,
-  resolveAgentReleaseBaseline,
-} from "../.github/scripts/bump-agent-versions.mjs";
+import { evaluateAgentVersionBump, getAgentVersionChanges, isAgentPublishRelevantFile, parseLegacyStandaloneProjects, resolveAgentReleaseBaseline } from "../.github/scripts/bump-agent-versions.mjs";
 
 const REPO = "t8y2/dbx";
 const PACKAGES_WORKFLOW = "mcp-release.yml";
@@ -42,20 +36,19 @@ const PACKAGE_RELEASE_PATHS = [
   "packages/mcp-win32-x64/",
   "crates/dbx-mcp/",
   "crates/dbx-cli/",
-  "crates/dbx-core/src/mongo_shell.rs",
+  // dbx-core (and the crates it forwards) is statically linked into both
+  // binaries, so its changes ship in the next npm release too.
+  "crates/dbx-core/",
+  "crates/dbx-drivers/",
+  "crates/dbx-sql/",
+  "crates/dbx-types/",
+  "skills/dbx/",
+  "crates/dbx-driver-mongodb/src/mongo_shell.rs",
   "Cargo.toml",
   "Cargo.lock",
   ".github/workflows/mcp-release.yml",
 ];
-const AGENT_RELEASE_PATHS = [
-  "agents/build.gradle",
-  "agents/settings.gradle",
-  "agents/versions.json",
-  "agents/common/build.gradle",
-  "agents/common/src/main/",
-  "agents/drivers/",
-  ".github/workflows/agents-release.yml",
-];
+const AGENT_RELEASE_PATHS = ["agents/build.gradle", "agents/settings.gradle", "agents/versions.json", "agents/common/build.gradle", "agents/common/src/main/", "agents/drivers/", ".github/workflows/agents-release.yml"];
 
 const args = process.argv.slice(2);
 let target = null;
@@ -364,17 +357,9 @@ function validateRollbackRelease(rollbackRelease, latestRelease) {
   const version = formatVersion(rollbackVersion);
   // Rollback targets may predate the aarch64 -> arm64 dmg rename, so either
   // asset name satisfies the Apple Silicon requirement.
-  const requiredAssets = [
-    ["latest.json"],
-    [`DBX_${version}_arm64.dmg`, `DBX_${version}_aarch64.dmg`],
-    [`DBX_${version}_x64.dmg`],
-    [`DBX_${version}_x64-setup.exe`],
-    [`DBX_${version}_arm64-setup.exe`],
-  ];
+  const requiredAssets = [["latest.json"], [`DBX_${version}_arm64.dmg`, `DBX_${version}_aarch64.dmg`], [`DBX_${version}_x64.dmg`], [`DBX_${version}_x64-setup.exe`], [`DBX_${version}_arm64-setup.exe`]];
   const assetNames = new Set(rollbackRelease.assets.map((asset) => asset.name));
-  const missingAssets = requiredAssets
-    .filter((candidates) => !candidates.some((asset) => assetNames.has(asset)))
-    .map((candidates) => candidates.join(" or "));
+  const missingAssets = requiredAssets.filter((candidates) => !candidates.some((asset) => assetNames.has(asset))).map((candidates) => candidates.join(" or "));
   if (missingAssets.length > 0) {
     fail(`Rollback target ${rollbackRelease.tagName} is missing required distribution assets: ${missingAssets.join(", ")}`);
   }
@@ -451,8 +436,8 @@ function getLatestAgentTag() {
   });
 
   if (legacyRepoCheck.status === 0) {
-    const legacyTags = run("git", ["-C", legacyRepo, "tag", "--list", "v*"]).stdout
-      .split(/\r?\n/)
+    const legacyTags = run("git", ["-C", legacyRepo, "tag", "--list", "v*"])
+      .stdout.split(/\r?\n/)
       .map((legacyTag) => legacyTag.trim())
       .filter(Boolean)
       .map((legacyTag) => ({ legacyTag, version: parseVersion(legacyTag.replace(/^v/, "")) }))
@@ -481,17 +466,13 @@ function getAgentReleaseStatus(latest = getLatestAgentTag()) {
   }
 
   const effectiveBaseline = resolveAgentReleaseBaseline({ prevTag: latest.tag });
-  const changedFiles = effectiveBaseline.changedFiles
-    .filter((file) => AGENT_RELEASE_PATHS.some((path) => file === path || file.startsWith(path)))
-    .filter(isAgentPublishRelevantFile);
+  const changedFiles = effectiveBaseline.changedFiles.filter((file) => AGENT_RELEASE_PATHS.some((path) => file === path || file.startsWith(path))).filter(isAgentPublishRelevantFile);
   return {
     needed: changedFiles.length > 0,
     baseline: latest.tag,
     changedFiles,
     previousVersions: effectiveBaseline.versions,
-    versionBaseline: effectiveBaseline.syncCommit
-      ? `${effectiveBaseline.syncCommit.slice(0, 10)} (post-release version sync)`
-      : latest.tag,
+    versionBaseline: effectiveBaseline.syncCommit ? `${effectiveBaseline.syncCommit.slice(0, 10)} (post-release version sync)` : latest.tag,
   };
 }
 
@@ -541,8 +522,7 @@ function printAgentVersionChanges(status) {
     legacyStandaloneModules,
     manualVersionsChanged: status.changedFiles.includes("agents/versions.json"),
   });
-  const changes = getAgentVersionChanges(status.previousVersions, result.versions)
-    .map(({ moduleName, previousVersion, nextVersion }) => `${moduleName}: ${previousVersion ?? "new"} -> ${nextVersion}`);
+  const changes = getAgentVersionChanges(status.previousVersions, result.versions).map(({ moduleName, previousVersion, nextVersion }) => `${moduleName}: ${previousVersion ?? "new"} -> ${nextVersion}`);
 
   if (changes.length === 0) {
     console.log(dim("No automatic driver version changes detected."));
@@ -564,8 +544,8 @@ function formatStatusSummary(status) {
 }
 
 function getLatestSemverTag(prefix) {
-  const tags = run("git", ["tag", "--list", `${prefix}*`]).stdout
-    .split(/\r?\n/)
+  const tags = run("git", ["tag", "--list", `${prefix}*`])
+    .stdout.split(/\r?\n/)
     .map((tag) => tag.trim())
     .filter(Boolean)
     .map((tag) => ({ tag, version: parseVersion(tag.replace(prefix, "")) }))
@@ -625,7 +605,10 @@ function resolveReleaseVersion(bump, latestVersion, explicitTagPrefix) {
 }
 
 function normalizeExplicitVersion(value, explicitTagPrefix) {
-  const trimmed = value.trim().replace(new RegExp(`^${escapeRegExp(explicitTagPrefix)}`), "").replace(/^v/, "");
+  const trimmed = value
+    .trim()
+    .replace(new RegExp(`^${escapeRegExp(explicitTagPrefix)}`), "")
+    .replace(/^v/, "");
   const version = parseVersion(trimmed);
   return version ? formatVersion(version) : null;
 }
@@ -677,14 +660,7 @@ function ensureGhWorkflowsReady(workflows) {
 }
 
 function fetchReleaseTags() {
-  run("git", [
-    "fetch",
-    "--quiet",
-    "origin",
-    "+refs/tags/v*:refs/tags/v*",
-    "+refs/tags/packages-v*:refs/tags/packages-v*",
-    "+refs/tags/agents-v*:refs/tags/agents-v*",
-  ]);
+  run("git", ["fetch", "--quiet", "origin", "+refs/tags/v*:refs/tags/v*", "+refs/tags/packages-v*:refs/tags/packages-v*", "+refs/tags/agents-v*:refs/tags/agents-v*"]);
 }
 
 function run(command, commandArgs, options = {}) {

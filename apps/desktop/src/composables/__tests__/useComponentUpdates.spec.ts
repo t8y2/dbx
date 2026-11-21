@@ -1,0 +1,494 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useComponentUpdates } from "@/composables/useComponentUpdates";
+import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
+import { runPendingComponentUpdatePlan, type PendingComponentUpdates } from "@/lib/updates/componentUpdateOrchestration";
+import { showToolbarUpdateAction } from "@/lib/updates/updateBadges";
+
+const mocks = vi.hoisted(() => ({
+  listInstalledAgents: vi.fn(),
+  jdbcPluginStatus: vi.fn(),
+  checkMcpServerStatus: vi.fn(),
+  listPlugins: vi.fn(),
+  fetchPluginMarketplaceCatalogs: vi.fn(),
+  checkAgentUpdateBlockers: vi.fn(),
+  upgradeAllAgents: vi.fn(),
+  listenAgentInstallProgress: vi.fn(),
+  installJdbcPlugin: vi.fn(),
+  installMcpServer: vi.fn(),
+  installMarketplacePlugin: vi.fn(),
+  buildMarketplacePluginListings: vi.fn(),
+}));
+
+const settings = {
+  editorSettings: {
+    autoUpdateDrivers: true,
+    autoUpdateJdbc: true,
+    autoUpdateMcp: true,
+    autoUpdatePlugins: true,
+  },
+};
+
+vi.mock("@/lib/backend/api", () => mocks);
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => settings }));
+vi.mock("@/i18n", () => ({ currentLocale: () => "zh-CN" }));
+vi.mock("@/lib/plugins/pluginMarketplace", async (importOriginal) => ({ ...(await importOriginal<object>()), buildMarketplacePluginListings: mocks.buildMarketplacePluginListings }));
+
+const mcpStatus = {
+  installed: true,
+  installation_source: "npm",
+  npm_available: true,
+  npm_installed: true,
+  current_version: "1.0.0",
+  latest_version: "1.1.0",
+  update_available: true,
+};
+
+const pluginUpdate = {
+  status: "update",
+  artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash" },
+  repository: { id: "official" },
+  plugin: { id: "example", latestVersion: "1.1.0" },
+  name: "Example plugin",
+};
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  Object.assign(settings.editorSettings, {
+    autoUpdateDrivers: true,
+    autoUpdateJdbc: true,
+    autoUpdateMcp: true,
+    autoUpdatePlugins: true,
+  });
+  mocks.listInstalledAgents.mockResolvedValue([{ db_type: "mysql", update_available: true }]);
+  mocks.jdbcPluginStatus.mockResolvedValue({ installed: true, update_available: true });
+  mocks.checkMcpServerStatus.mockResolvedValue(mcpStatus);
+  mocks.listPlugins.mockResolvedValue([]);
+  mocks.fetchPluginMarketplaceCatalogs.mockResolvedValue([]);
+  mocks.buildMarketplacePluginListings.mockReturnValue([pluginUpdate]);
+  mocks.checkAgentUpdateBlockers.mockResolvedValue([]);
+  mocks.upgradeAllAgents.mockResolvedValue({ upgraded: 1, failed: [], cancelled: 0 });
+  mocks.listenAgentInstallProgress.mockResolvedValue(vi.fn());
+  mocks.installJdbcPlugin.mockResolvedValue({ installed: true, update_available: false });
+  mocks.installMcpServer.mockResolvedValue("updated");
+  mocks.installMarketplacePlugin.mockResolvedValue({});
+});
+
+describe("useComponentUpdates", () => {
+  it("counts agent, JDBC, MCP, and plugin updates", async () => {
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    expect(await updates.refresh()).toBe(true);
+    expect(updates.driverUpdateCount.value).toBe(1);
+    expect(updates.jdbcUpdateAvailable.value).toBe(true);
+    expect(updates.mcpUpdateAvailable.value).toBe(true);
+    expect(updates.pluginUpdateCount.value).toBe(1);
+    expect(updates.totalUpdateCount.value).toBe(4);
+  });
+
+  it("forces a fresh snapshot when a management surface changes during an in-flight refresh", async () => {
+    const firstAgents = deferred<Array<{ db_type: string; update_available: boolean }>>();
+    const secondAgents = deferred<Array<{ db_type: string; update_available: boolean }>>();
+    mocks.listInstalledAgents.mockReturnValueOnce(firstAgents.promise).mockReturnValueOnce(secondAgents.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const initialRefresh = updates.refresh();
+    await Promise.resolve();
+    const forcedRefresh = updates.refresh({ force: true });
+    await Promise.resolve();
+
+    secondAgents.resolve([{ db_type: "mysql", update_available: false }]);
+    expect(await forcedRefresh).toBe(true);
+    firstAgents.resolve([{ db_type: "mysql", update_available: true }]);
+    expect(await initialRefresh).toBe(false);
+
+    expect(mocks.listInstalledAgents).toHaveBeenCalledTimes(2);
+    expect(updates.driverUpdateCount.value).toBe(0);
+  });
+
+  it("discards a background refresh that started before an update instead of reusing its stale promise", async () => {
+    const backgroundCatalog = deferred<unknown[]>();
+    mocks.fetchPluginMarketplaceCatalogs.mockReturnValueOnce(backgroundCatalog.promise);
+    let mcpInstallFinished = false;
+    mocks.checkMcpServerStatus.mockImplementation(() => (mcpInstallFinished ? Promise.resolve({ ...mcpStatus, latest_version: mcpStatus.current_version, update_available: false }) : Promise.resolve(mcpStatus)));
+    mocks.installMcpServer.mockImplementation(() => {
+      mcpInstallFinished = true;
+      return Promise.resolve("updated");
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    // 10 秒后台检查先发出，拿到的是升级前快照（这里让插件目录请求悬停住）。
+    // 修复前：更新流程会复用这个在途 promise，拿不到安装后的权威状态。
+    const backgroundRefresh = updates.refresh();
+    await Promise.resolve();
+
+    // 安装流程开始并完成：安装后的刷新确认无更新。
+    await updates.installCategory("mcp");
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+
+    // 升级前的旧快照晚返回，必须被丢弃，不能重新点亮更新入口。
+    backgroundCatalog.resolve([]);
+    expect(await backgroundRefresh).toBe(false);
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+  });
+
+  it("starts a fresh MCP check for an explicit user action instead of reusing a background result", async () => {
+    const backgroundMcp = deferred<typeof mcpStatus>();
+    const userMcp = deferred<typeof mcpStatus>();
+    mocks.checkMcpServerStatus.mockReturnValueOnce(backgroundMcp.promise).mockReturnValueOnce(userMcp.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const backgroundRefresh = updates.refresh();
+    await Promise.resolve();
+    const userRefresh = updates.refresh({ force: true });
+    await Promise.resolve();
+
+    userMcp.resolve(mcpStatus);
+    expect(await userRefresh).toBe(true);
+    expect(updates.mcpUpdateAvailable.value).toBe(true);
+
+    backgroundMcp.resolve({ ...mcpStatus, latest_version: mcpStatus.current_version, update_available: false });
+    expect(await backgroundRefresh).toBe(false);
+    expect(updates.mcpUpdateAvailable.value).toBe(true);
+    expect(mocks.checkMcpServerStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears driver and MCP update state after a successful update and refresh", async () => {
+    mocks.listInstalledAgents.mockResolvedValueOnce([{ db_type: "mysql", update_available: true }]).mockResolvedValueOnce([{ db_type: "mysql", update_available: false }]);
+    mocks.checkMcpServerStatus.mockResolvedValueOnce(mcpStatus).mockResolvedValueOnce({ ...mcpStatus, latest_version: "1.0.0", update_available: false });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    await updates.installCategories(["drivers", "mcp"]);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(updates.driverUpdateCount.value).toBe(0);
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+  });
+
+  it("installs every enabled component category after an app update", async () => {
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.autoUpdateEnabledComponents();
+
+    expect(mocks.checkAgentUpdateBlockers).toHaveBeenCalledWith(["mysql"]);
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledWith({ repositoryId: "official", pluginId: "example", version: "1.1.0" });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
+  });
+
+  it("shares one update operation between automatic and manual callers", async () => {
+    const jdbcInstall = deferred<{ installed: boolean; update_available: boolean }>();
+    mocks.installJdbcPlugin.mockReturnValue(jdbcInstall.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const automatic = updates.autoUpdateEnabledComponents();
+    await vi.waitFor(() => expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce());
+    const manual = updates.installCategory("jdbc");
+
+    expect(updates.updating.value).toBe(true);
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+
+    jdbcInstall.resolve({ installed: true, update_available: false });
+    const [automaticResult, manualResult] = await Promise.all([automatic, manual]);
+
+    expect(manualResult).toEqual(automaticResult);
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(updates.updating.value).toBe(false);
+  });
+
+  it("still detects updates but does not install disabled categories", async () => {
+    Object.assign(settings.editorSettings, {
+      autoUpdateDrivers: false,
+      autoUpdateJdbc: false,
+      autoUpdateMcp: false,
+      autoUpdatePlugins: false,
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.autoUpdateEnabledComponents();
+
+    expect(updates.totalUpdateCount.value).toBe(4);
+    expect(mocks.upgradeAllAgents).not.toHaveBeenCalled();
+    expect(mocks.installJdbcPlugin).not.toHaveBeenCalled();
+    expect(mocks.installMcpServer).not.toHaveBeenCalled();
+    expect(mocks.installMarketplacePlugin).not.toHaveBeenCalled();
+    expect(result).toEqual({ drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
+  });
+
+  it("installs every manually selected category when no DBX update exists and automatic updates are disabled", async () => {
+    Object.assign(settings.editorSettings, {
+      autoUpdateDrivers: false,
+      autoUpdateJdbc: false,
+      autoUpdateMcp: false,
+      autoUpdatePlugins: false,
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategories(["drivers", "jdbc", "mcp", "plugins"]);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
+  });
+
+  it("resumes a persisted manual update-all plan after restart while automatic updates are disabled", async () => {
+    Object.assign(settings.editorSettings, {
+      autoUpdateDrivers: false,
+      autoUpdateJdbc: false,
+      autoUpdateMcp: false,
+      autoUpdatePlugins: false,
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+    const pending: PendingComponentUpdates = {
+      fromVersion: "0.6.16",
+      targetVersion: "0.6.17",
+      plan: { kind: "manual", categories: ["drivers", "jdbc", "mcp", "plugins"] },
+    };
+
+    const result = await runPendingComponentUpdatePlan(pending, updates);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
+  });
+
+  it("keeps the toolbar update action hidden while a persisted restart plan is still installing", async () => {
+    const jdbcInstall = deferred<{ installed: boolean; update_available: boolean }>();
+    mocks.installJdbcPlugin.mockReturnValue(jdbcInstall.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+    const pending: PendingComponentUpdates = {
+      fromVersion: "0.6.18",
+      targetVersion: "0.6.19",
+      plan: { kind: "manual", categories: ["jdbc"] },
+    };
+
+    const updateOperation = runPendingComponentUpdatePlan(pending, updates);
+    await vi.waitFor(() => expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce());
+
+    const toolbarOptions = {
+      appUpdateAvailable: false,
+      driverUpdateCount: updates.driverUpdateCount.value,
+      jdbcUpdateAvailable: updates.jdbcUpdateAvailable.value,
+      mcpUpdateAvailable: updates.mcpUpdateAvailable.value,
+      pluginUpdateCount: updates.pluginUpdateCount.value,
+    };
+    expect(updates.updating.value).toBe(true);
+    expect(showToolbarUpdateAction({ ...toolbarOptions, componentUpdatesRunning: updates.updating.value })).toBe(false);
+
+    jdbcInstall.resolve({ installed: true, update_available: false });
+    await updateOperation;
+
+    expect(updates.updating.value).toBe(false);
+    expect(showToolbarUpdateAction({ ...toolbarOptions, componentUpdatesRunning: updates.updating.value })).toBe(true);
+  });
+
+  it("keeps the toolbar update action hidden when a stale background MCP poll lands after the restart install", async () => {
+    // 本用例只关心 MCP，排除驱动/插件分类的干扰。
+    mocks.listInstalledAgents.mockResolvedValue([]);
+    mocks.jdbcPluginStatus.mockResolvedValue({ installed: true, update_available: false });
+    mocks.buildMarketplacePluginListings.mockReturnValue([]);
+    const backgroundSnapshot = deferred<typeof mcpStatus>();
+    let mcpInstallFinished = false;
+    mocks.checkMcpServerStatus.mockImplementation(() => {
+      if (!mcpInstallFinished) return Promise.resolve(mcpStatus);
+      return Promise.resolve({ ...mcpStatus, latest_version: mcpStatus.current_version, update_available: false });
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+    const badge = useMcpUpdateBadge({
+      isDesktop: true,
+      updateNotificationsEnabled: () => true,
+      shouldDeferRefresh: () => updates.updating.value,
+    });
+
+    // 重启窗口开始前，后台轮询已发出，快照仍是升级前的 update_available=true。
+    mocks.checkMcpServerStatus.mockReturnValueOnce(backgroundSnapshot.promise);
+    const backgroundPoll = badge.refreshMcpUpdateStatus();
+    mocks.installMcpServer.mockImplementation(() => {
+      mcpInstallFinished = true;
+      return Promise.resolve("updated");
+    });
+
+    const pending: PendingComponentUpdates = {
+      fromVersion: "0.6.18",
+      targetVersion: "0.6.19",
+      plan: { kind: "manual", categories: ["mcp"] },
+    };
+    await runPendingComponentUpdatePlan(pending, updates);
+
+    // 安装完成：权威来源确认无更新，并丢弃在途旧快照。
+    badge.applyMcpStatus(updates.mcpUpdateAvailable.value);
+    badge.invalidateMcpUpdateStatus();
+    backgroundSnapshot.resolve(mcpStatus);
+    await backgroundPoll;
+
+    expect(updates.updating.value).toBe(false);
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+    expect(badge.mcpUpdateAvailable.value).toBe(false);
+    expect(
+      showToolbarUpdateAction({
+        appUpdateAvailable: false,
+        driverUpdateCount: updates.driverUpdateCount.value,
+        jdbcUpdateAvailable: updates.jdbcUpdateAvailable.value,
+        mcpUpdateAvailable: badge.mcpUpdateAvailable.value || updates.mcpUpdateAvailable.value,
+        pluginUpdateCount: updates.pluginUpdateCount.value,
+        componentUpdatesRunning: updates.updating.value,
+      }),
+    ).toBe(false);
+  });
+
+  it("skips blocked agent updates while allowing other component updates", async () => {
+    mocks.checkAgentUpdateBlockers.mockResolvedValue([{ db_type: "mysql", label: "MySQL", connections: ["生产 MySQL", "报表 MySQL"] }]);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.autoUpdateEnabledComponents();
+
+    expect(mocks.upgradeAllAgents).not.toHaveBeenCalled();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(result.skippedDrivers).toBe(1);
+    expect(result.blockedDrivers).toEqual([{ db_type: "mysql", label: "MySQL", connections: ["生产 MySQL", "报表 MySQL"] }]);
+  });
+
+  it("does not install from stale state when update detection fails", async () => {
+    mocks.listInstalledAgents.mockRejectedValue(new Error("registry unavailable"));
+    mocks.jdbcPluginStatus.mockRejectedValue(new Error("JDBC registry unavailable"));
+    mocks.checkMcpServerStatus.mockRejectedValue(new Error("MCP registry unavailable"));
+    mocks.listPlugins.mockRejectedValue(new Error("plugin store unavailable"));
+    mocks.fetchPluginMarketplaceCatalogs.mockRejectedValue(new Error("catalog unavailable"));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.autoUpdateEnabledComponents();
+
+    expect(result.failed).toEqual(["drivers: registry unavailable; JDBC: JDBC registry unavailable; MCP: MCP registry unavailable; plugins: plugin store unavailable; plugin catalog: catalog unavailable"]);
+    expect(mocks.upgradeAllAgents).not.toHaveBeenCalled();
+    expect(mocks.installJdbcPlugin).not.toHaveBeenCalled();
+    expect(mocks.installMcpServer).not.toHaveBeenCalled();
+    expect(mocks.installMarketplacePlugin).not.toHaveBeenCalled();
+  });
+
+  it("continues independent updates when the plugin catalog is unavailable", async () => {
+    mocks.fetchPluginMarketplaceCatalogs.mockRejectedValue(new Error("catalog unavailable"));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.autoUpdateEnabledComponents();
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).not.toHaveBeenCalled();
+    expect(result.failed).toEqual(["plugin catalog: catalog unavailable"]);
+  });
+
+  it("allows a category to be installed manually even when automatic updates are disabled", async () => {
+    Object.assign(settings.editorSettings, {
+      autoUpdateDrivers: false,
+      autoUpdateJdbc: false,
+      autoUpdateMcp: false,
+      autoUpdatePlugins: false,
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+    await updates.refresh();
+
+    const result = await updates.installCategory("jdbc");
+
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(result).toEqual({ drivers: 0, jdbc: true, mcp: false, plugins: 0, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
+  });
+
+  it("reports the blocking connections when a K8S plugin update cannot start", async () => {
+    mocks.buildMarketplacePluginListings.mockReturnValue([
+      {
+        ...pluginUpdate,
+        plugin: { id: "io.dbx.k8s", latestVersion: "0.1.3" },
+        name: "Kubernetes 管理",
+      },
+    ]);
+    mocks.installMarketplacePlugin.mockRejectedValue(new Error("Plugin update blocked by active connections: market测试环境"));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategory("plugins");
+
+    expect(result.blockedPlugins).toEqual([{ pluginName: "Kubernetes 管理", reason: "connections", connections: "market测试环境" }]);
+    expect(result.failed).toEqual(["Kubernetes 管理: Plugin update blocked by active connections: market测试环境"]);
+  });
+
+  it("reports active operations separately from connections", async () => {
+    mocks.installMarketplacePlugin.mockRejectedValue(new Error("Plugin update blocked by active operations. Please wait for them to finish."));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategory("plugins");
+
+    expect(result.blockedPlugins).toEqual([{ pluginName: "Example plugin", reason: "operations" }]);
+  });
+
+  it("tracks driver install progress and batch counts during driver update", async () => {
+    let capturedHandler: ((payload: unknown) => void) | null = null;
+    mocks.listenAgentInstallProgress.mockImplementation(async (handler: (payload: unknown) => void) => {
+      capturedHandler = handler;
+      return () => {};
+    });
+
+    const upgradeDeferred = deferred<{ upgraded: number; failed: any[]; cancelled: number }>();
+    mocks.upgradeAllAgents.mockReturnValue(upgradeDeferred.promise);
+
+    const updates = useComponentUpdates({ isDesktop: true });
+    const updatePromise = updates.installCategory("drivers");
+
+    await vi.waitFor(() => expect(mocks.listenAgentInstallProgress).toHaveBeenCalledOnce());
+    expect(capturedHandler).not.toBeNull();
+
+    // Initial batch total is set from updatable drivers count
+    expect(updates.driverBatchTotal.value).toBe(1);
+    expect(updates.driverBatchCompleted.value).toBe(0);
+
+    // Simulate progress event for downloading mysql driver
+    capturedHandler!({
+      step: "driver",
+      db_type: "mysql",
+      downloaded: 40,
+      total: 100,
+      total_drivers: 1,
+    });
+
+    expect(updates.driverProgressMap.value.mysql).toMatchObject({
+      step: "driver",
+      db_type: "mysql",
+      downloaded: 40,
+      total: 100,
+    });
+
+    // Simulate completion of mysql driver
+    capturedHandler!({
+      step: "done",
+      db_type: "mysql",
+    });
+
+    expect(updates.driverBatchCompleted.value).toBe(1);
+    expect(updates.driverProgressMap.value.mysql).toBeNull();
+
+    upgradeDeferred.resolve({ upgraded: 1, failed: [], cancelled: 0 });
+    await updatePromise;
+
+    // After finish, progress map and counters reset
+    expect(updates.driverProgressMap.value).toEqual({});
+    expect(updates.driverBatchCompleted.value).toBe(0);
+    expect(updates.driverBatchTotal.value).toBe(0);
+  });
+});

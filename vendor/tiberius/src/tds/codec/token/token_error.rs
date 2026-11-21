@@ -1,4 +1,4 @@
-use crate::{tds::codec::FeatureLevel, SqlReadBytes};
+use crate::SqlReadBytes;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -22,7 +22,7 @@ impl TokenError {
     where
         R: SqlReadBytes + Unpin,
     {
-        let _length = src.read_u16_le().await? as usize;
+        let length = src.read_u16_le().await? as usize;
 
         let code = src.read_u32_le().await?;
         let state = src.read_u8().await?;
@@ -32,7 +32,8 @@ impl TokenError {
         let server = src.read_b_varchar().await?;
         let procedure = src.read_b_varchar().await?;
 
-        let line = if src.context().version() > FeatureLevel::SqlServer2005 {
+        let width = super::message_line_number_bytes(length, &message, &server, &procedure)?;
+        let line = if width == 4 {
             src.read_u32_le().await?
         } else {
             src.read_u16_le().await? as u32

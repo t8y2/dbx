@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildDatabaseSavedSqlRootNode, decorateDatabaseSavedSqlTreeNodes, indexSavedSqlFilesByDatabase, savedSqlFilesForDatabase, stripDatabaseSavedSqlTreeNodes, withDatabaseSavedSqlRoot } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { expandSidebarLocatePath, findNodePathForTarget, findSidebarNodeForTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
+import { flattenTree } from "@/composables/useFlatTree";
 import type { SavedSqlFile, TreeNode } from "@/types/database";
 
 function file(input: Partial<SavedSqlFile> & Pick<SavedSqlFile, "id" | "name" | "connectionId" | "database">): SavedSqlFile {
@@ -65,6 +67,16 @@ describe("database saved SQL tree", () => {
     expect(root).toMatchObject({ id: "conn-1:app:__queries", label: "tree.queries", type: "saved-sql-root", children: [] });
   });
 
+  it("preserves database schema on the saved-sql-root node", () => {
+    const root = buildDatabaseSavedSqlRootNode({ ...database, schema: "public" }, []);
+    expect(root).toMatchObject({
+      id: "conn-1:app:__queries",
+      type: "saved-sql-root",
+      database: "app",
+      schema: "public",
+    });
+  });
+
   it("collapses the Queries node by default when opening a connection", () => {
     expect(buildDatabaseSavedSqlRootNode(database, files)?.isExpanded).toBe(false);
     expect(buildDatabaseSavedSqlRootNode(database, [])?.isExpanded).toBe(false);
@@ -102,6 +114,20 @@ describe("database saved SQL tree", () => {
     expect(stripDatabaseSavedSqlTreeNodes(decorated)).toEqual([{ ...database, children: [] }]);
   });
 
+  it("strips nested saved SQL nodes without cloning subtrees that have none", () => {
+    const table: TreeNode = { id: "t", label: "t", type: "table", children: [] };
+    const root: TreeNode = { id: "root", label: "SQL", type: "saved-sql-root" };
+    const group: TreeNode = { id: "g", label: "g", type: "group-tables", children: [table, root], hiddenChildren: [table] };
+    const plain: TreeNode = { id: "plain", label: "plain", type: "group-views", children: [table] };
+
+    const stripped = stripDatabaseSavedSqlTreeNodes([group, plain]);
+
+    expect(stripped[0]).toEqual({ ...group, children: [table], hiddenChildren: [table] });
+    expect(stripped[0]).not.toBe(group);
+    expect(group.children).toHaveLength(2);
+    expect(stripped[1]).toBe(plain);
+  });
+
   it("renders a saved SQL only below its exact catalog database", () => {
     const catalogFiles = [file({ id: "hive", name: "hive.sql", connectionId: "conn-1", catalog: "hive", database: "app" })];
     const defaultRoot = buildDatabaseSavedSqlRootNode(database, catalogFiles);
@@ -109,5 +135,34 @@ describe("database saved SQL tree", () => {
 
     expect(defaultRoot?.children).toEqual([]);
     expect(hiveRoot).toMatchObject({ catalog: "hive", children: [{ catalog: "hive", savedSqlId: "hive" }] });
+  });
+});
+
+describe("saved SQL locate expansion", () => {
+  it.each([undefined, "external"])("reveals a saved file through a collapsed runtime Queries node (catalog: %s)", (catalog) => {
+    const saved = file({ id: "saved", name: "report.sql", connectionId: "conn", database: "app", catalog });
+    const database: TreeNode = { id: "db", type: "database", label: "app", connectionId: "conn", database: "app", catalog, isExpanded: false };
+    const queries = buildDatabaseSavedSqlRootNode(database, [saved])!;
+    database.children = [queries];
+    const connection: TreeNode = { id: "conn", type: "connection", label: "Connection", connectionId: "conn", isExpanded: false, children: [database] };
+    const tree = [connection];
+    const target = { type: "saved-sql-file" as const, savedSqlId: saved.id };
+    const path = findNodePathForTarget(target, tree)!;
+    expect(findSidebarNodeForTarget(target, flattenTree(tree))).toBeNull();
+    // Database/connection metadata has loaded; Queries is synthesized locally
+    // and intentionally has no metadata load marker.
+    const loaded = new Set([connection.id, database.id]);
+    expandSidebarLocatePath(path, (node) => loaded.has(node.id));
+    expect(findSidebarNodeForTarget(target, flattenTree(tree))?.node.savedSqlId).toBe(saved.id);
+    expect(queries.isExpanded).toBe(true);
+    expect(path[path.length - 1]!.isExpanded).not.toBe(true);
+  });
+
+  it("keeps unloaded object leaves collapsed when revealing their parent path", () => {
+    const table: TreeNode = { id: "table", type: "table", label: "orders", isExpanded: false };
+    const database: TreeNode = { id: "db", type: "database", label: "app", isExpanded: false, children: [table] };
+    expandSidebarLocatePath([database, table], (node) => node.id === database.id);
+    expect(flattenTree([database]).map((row) => row.id)).toEqual(["db", "table"]);
+    expect(table.isExpanded).toBe(false);
   });
 });

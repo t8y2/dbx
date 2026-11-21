@@ -35,7 +35,9 @@ The following URL parameters are supported:
 - `time_zone`
 - `connect_retry_max`
 - `connect_timeout_ms`
-- `enable_compression=true`
+- `enable_compression=true` (also accepts `rpc_compression` and the IoTDB JDBC
+  alias `rpc_compress`; when conflicting aliases are present, they take
+  precedence in that order)
 - `node_urls=host1:6667,host2:6667` for cluster sessions
 - `ssl=true` and `insecure_skip_verify=true`
 

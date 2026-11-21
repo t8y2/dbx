@@ -28,6 +28,7 @@ export interface TabResultSnapshot {
    */
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
+  resultLocalSortOriginalRawKeyCells?: QueryResult["raw_key_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   resultRuns?: QueryTab["resultRuns"];
@@ -42,6 +43,7 @@ export interface TabResultSnapshot {
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
+  resultColumnTypeLabels?: QueryTab["resultColumnTypeLabels"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
   mongoEditTarget?: QueryTab["mongoEditTarget"];
@@ -49,6 +51,8 @@ export interface TabResultSnapshot {
   resultPageSql?: string;
   resultPageLimit?: number;
   resultPageOffset?: number;
+  resultExecutedPageLimit?: number;
+  resultExecutedPageOffset?: number;
   resultCountSql?: string;
   resultTotalRowCount?: number;
   cachedAt: number;
@@ -56,9 +60,11 @@ export interface TabResultSnapshot {
 
 interface ColumnarQueryResult {
   columns: string[];
+  neo4j_node_cells?: QueryResult["neo4j_node_cells"];
   spatial_columns?: QueryResult["spatial_columns"];
   spatial_values?: QueryResult["spatial_values"];
   large_value_cells?: QueryResult["large_value_cells"];
+  raw_key_cells?: QueryResult["raw_key_cells"];
   execution_error?: true;
   statement_index?: number;
   column_types?: string[];
@@ -67,11 +73,24 @@ interface ColumnarQueryResult {
   rowCount: number;
   mongo_documents?: unknown[];
   mongo_copy_documents?: unknown[];
+  redis_console_output?: string;
   affected_rows: number;
   execution_time_ms: number;
+  server_execute_time_us?: number;
+  client_request_wait_ms?: number;
+  query_timings_ms?: QueryResult["query_timings_ms"];
+  client_prepare_ms?: number;
+  client_result_ms?: number;
+  timing_page_count?: number;
   truncated?: boolean;
   has_more?: boolean;
+  page_has_more?: boolean;
+  sqlPage?: QueryResult["sqlPage"];
+  executedStatement?: string;
   sourceLabel?: string;
+  sourceLabelKind?: QueryResult["sourceLabelKind"];
+  sourceQualifier?: string;
+  sourceName?: string;
   sourceStatement?: string;
   sourceFrom?: number;
   sourceTo?: number;
@@ -343,6 +362,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
   if (!result) return undefined;
   return {
     columns: [...result.columns],
+    neo4j_node_cells: result.neo4j_node_cells ? clonePlain(result.neo4j_node_cells) : undefined,
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
@@ -350,15 +370,29 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
+    raw_key_cells: result.raw_key_cells?.map((cell) => ({ ...cell })),
     rows: result.rows.map((row) => [...row]),
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
+    redis_console_output: result.redis_console_output,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
+    page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
+    sourceLabelKind: result.sourceLabelKind,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
@@ -376,6 +410,7 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
     results: stripResultSessionIds(run.results),
     resultLocalSortOriginalRows: run.resultLocalSortOriginalRows?.map((row) => [...row]),
     resultLocalSortOriginalLargeValueCells: run.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
+    resultLocalSortOriginalRawKeyCells: run.resultLocalSortOriginalRawKeyCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: run.resultLocalSortOriginalMongoDocuments ? clonePlain(run.resultLocalSortOriginalMongoDocuments) : undefined,
     resultLocalSortOriginalMongoCopyDocuments: run.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(run.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultSessionId: undefined,
@@ -384,9 +419,21 @@ function stripResultRunSessionIds(resultRuns: QueryTab["resultRuns"]): QueryTab[
 
 function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult | undefined {
   if (!result) return undefined;
-  const columnValues = result.columns.map((_, colIndex) => result.rows.map((row) => row[colIndex] ?? null));
-  return removeUndefinedFields({
+  const rowCount = result.rows.length;
+  const columnValues = result.columns.map(() => {
+    const values: CellValue[] = [];
+    values.length = rowCount;
+    return values;
+  });
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+    const row = result.rows[rowIndex];
+    for (let columnIndex = 0; columnIndex < columnValues.length; columnIndex++) {
+      columnValues[columnIndex][rowIndex] = row?.[columnIndex] ?? null;
+    }
+  }
+  const metadata = removeUndefinedFields({
     columns: [...result.columns],
+    neo4j_node_cells: result.neo4j_node_cells ? clonePlain(result.neo4j_node_cells) : undefined,
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
@@ -394,19 +441,33 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
-    columnValues,
-    rowCount: result.rows.length,
+    raw_key_cells: result.raw_key_cells?.map((cell) => ({ ...cell })),
+    rowCount,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
+    redis_console_output: result.redis_console_output,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     has_more: result.has_more,
+    page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
+    sourceLabelKind: result.sourceLabelKind,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
   });
+  return { ...metadata, columnValues };
 }
 
 function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResult | undefined {
@@ -414,6 +475,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
   const rows = Array.from({ length: result.rowCount }, (_, rowIndex) => result.columnValues.map((values) => values[rowIndex] ?? null));
   return {
     columns: [...result.columns],
+    neo4j_node_cells: result.neo4j_node_cells ? clonePlain(result.neo4j_node_cells) : undefined,
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
@@ -421,15 +483,29 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
+    raw_key_cells: result.raw_key_cells?.map((cell) => ({ ...cell })),
     rows,
     mongo_documents: result.mongo_documents ? clonePlain(result.mongo_documents) : undefined,
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
+    redis_console_output: result.redis_console_output,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
+    query_timings_ms: result.query_timings_ms ? { ...result.query_timings_ms } : undefined,
+    client_prepare_ms: result.client_prepare_ms,
+    client_result_ms: result.client_result_ms,
+    timing_page_count: result.timing_page_count,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
+    page_has_more: result.page_has_more,
+    sqlPage: result.sqlPage ? { ...result.sqlPage } : undefined,
+    executedStatement: result.executedStatement,
     sourceLabel: result.sourceLabel,
+    sourceLabelKind: result.sourceLabelKind,
+    sourceQualifier: result.sourceQualifier,
+    sourceName: result.sourceName,
     sourceStatement: result.sourceStatement,
     sourceFrom: result.sourceFrom,
     sourceTo: result.sourceTo,
@@ -437,18 +513,17 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
 }
 
 function snapshotToPayload(snapshot: TabResultSnapshot): TabResultSnapshotPayload {
-  return removeUndefinedFields({
-    ...snapshot,
-    result: toColumnarResult(snapshot.result),
-    results: snapshot.results?.map((result) => toColumnarResult(result)!),
-    resultRuns: snapshot.resultRuns?.map((run) =>
-      removeUndefinedFields({
-        ...run,
-        result: toColumnarResult(run.result),
-        results: run.results?.map((result) => toColumnarResult(result)!),
-      }),
-    ),
-  });
+  const { result, results, resultRuns, ...metadata } = snapshot;
+  return {
+    ...removeUndefinedFields(metadata),
+    result: toColumnarResult(result),
+    results: results?.map((result) => toColumnarResult(result)!),
+    resultRuns: resultRuns?.map(({ result, results, ...run }) => ({
+      ...removeUndefinedFields(run),
+      result: toColumnarResult(result),
+      results: results?.map((result) => toColumnarResult(result)!),
+    })),
+  };
 }
 
 function payloadToSnapshot(payload: TabResultSnapshotPayload): TabResultSnapshot {
@@ -717,7 +792,7 @@ export function encodeTabResultSnapshot(snapshot: TabResultSnapshot): Uint8Array
     columnCount: stats.columnCount,
     payload: snapshotToPayload(snapshot),
   };
-  return encode(removeUndefinedFields(envelope));
+  return encode(envelope, { ignoreUndefined: true });
 }
 
 export function decodeTabResultSnapshot(bytes: Uint8Array | ArrayBuffer): TabResultSnapshot | undefined {
@@ -749,6 +824,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     activeResultIndex: tab.activeResultIndex,
     resultEditorFingerprint: tab.resultEditorFingerprint,
     resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows?.map((row) => [...row]),
+    resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell })),
+    resultLocalSortOriginalRawKeyCells: tab.resultLocalSortOriginalRawKeyCells?.map((cell) => ({ ...cell })),
     resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments ? clonePlain(tab.resultLocalSortOriginalMongoDocuments) : undefined,
     resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(tab.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultRuns: stripResultRunSessionIds(tab.resultRuns),
@@ -758,6 +835,7 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
     queryWriteTargets: tab.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),
     resultColumnComments: tab.resultColumnComments ? clonePlain(tab.resultColumnComments) : undefined,
+    resultColumnTypeLabels: tab.resultColumnTypeLabels ? clonePlain(tab.resultColumnTypeLabels) : undefined,
     queryDisplaySourceColumns: tab.queryDisplaySourceColumns ? [...tab.queryDisplaySourceColumns] : undefined,
     queryEditabilityReason: tab.queryEditabilityReason,
     mongoEditTarget: tab.mongoEditTarget ? clonePlain(tab.mongoEditTarget) : undefined,
@@ -765,6 +843,8 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     resultPageSql: tab.resultPageSql,
     resultPageLimit: tab.resultPageLimit,
     resultPageOffset: tab.resultPageOffset,
+    resultExecutedPageLimit: tab.resultExecutedPageLimit,
+    resultExecutedPageOffset: tab.resultExecutedPageOffset,
     resultCountSql: tab.resultCountSql,
     resultTotalRowCount: tab.resultTotalRowCount,
     cachedAt: Date.now(),

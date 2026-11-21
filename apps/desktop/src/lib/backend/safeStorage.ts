@@ -30,3 +30,20 @@ export function safeLocalStorageRemove(key: string) {
     storageWarn("remove", key, error);
   }
 }
+
+export function safeLocalStorageKeys(): string[] {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return [];
+    const keys: string[] = [];
+    const len = storage.length;
+    for (let i = 0; i < len; i++) {
+      const key = storage.key(i);
+      if (key !== null) keys.push(key);
+    }
+    return keys;
+  } catch (error) {
+    storageWarn("keys", "", error);
+    return [];
+  }
+}

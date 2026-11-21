@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
-import { DATA_GRID_MAX_BATCH_INSERT_ROWS, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "../../apps/desktop/src/composables/useDataGridEditor.ts";
+import { DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "../../apps/desktop/src/composables/useDataGridEditor.ts";
 import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 import type { DataGridSaveStatementOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
 import { matchesRowStatusFilter, type RowStatusFilter } from "../../apps/desktop/src/lib/dataGrid/gridRowStatus.ts";
@@ -1155,13 +1155,13 @@ test("addRows ignores invalid counts", () => {
   assert.equal(editor.canUndoPendingChange.value, false);
 });
 
-test("addRows clamps counts above the batch limit", () => {
+test("addRows preserves counts above the old batch limit", () => {
   setActivePinia(createPinia());
   installBrowserTestGlobals();
 
   const editor = createPeopleGridEditor();
-  editor.addRows(DATA_GRID_MAX_BATCH_INSERT_ROWS + 100);
-  assert.equal(editor.newRows.value.length, DATA_GRID_MAX_BATCH_INSERT_ROWS);
+  editor.addRows(1100);
+  assert.equal(editor.newRows.value.length, 1100);
 });
 
 test("addRows records the display placement alongside the pending rows", () => {

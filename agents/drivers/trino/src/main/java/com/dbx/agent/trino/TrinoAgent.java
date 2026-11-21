@@ -4,6 +4,7 @@ import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.DdlBuilder;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcIdentifiers;
@@ -26,6 +27,8 @@ public final class TrinoAgent extends AbstractJdbcAgent {
     private static final Pattern NUMERIC_PRECISION_PATTERN = Pattern.compile("(?i)^(decimal|numeric)\\((\\d+)(?:,\\s*\\d+)?\\)");
     private static final Pattern NUMERIC_SCALE_PATTERN = Pattern.compile("(?i)^(decimal|numeric)\\(\\d+,\\s*(\\d+)\\)");
     private static final Pattern CHARACTER_LENGTH_PATTERN = Pattern.compile("(?i)^(char|varchar)\\((\\d+)\\)");
+    // Custom "GMT+08:00" IDs reported by the JVM when the OS zone has no IANA mapping.
+    private static final Pattern GMT_OFFSET_ZONE_PATTERN = Pattern.compile("GMT(?<sign>[+-])(?<hours>\\d{1,2})(?::(?<minutes>\\d{2}))?", Pattern.CASE_INSENSITIVE);
 
     @Override
     protected String driverClass() {
@@ -158,6 +161,53 @@ public final class TrinoAgent extends AbstractJdbcAgent {
         return Collections.emptyList();
     }
 
+    /**
+     * Trino's {@code SHOW CREATE TABLE} returns the authoritative DDL, including
+     * the {@code WITH (...)} clause that carries a table's connector properties
+     * (format, bucket_count, partitioned_by, ...). The metadata-based fallback
+     * only knows columns, so it silently dropped those properties and the DDL no
+     * longer round-tripped (#11977). A server or connector that rejects the
+     * statement, or returns nothing, keeps the previous metadata-based DDL.
+     */
+    @Override
+    public String getTableDdl(String schema, String table) {
+        try {
+            String tableReference = tableReference(schema, table);
+            try (java.sql.Statement stmt = requireConnected().createStatement();
+                 ResultSet rs = stmt.executeQuery("SHOW CREATE TABLE " + tableReference)) {
+                if (rs.next()) {
+                    String ddl = trimToNull(rs.getString(1));
+                    if (ddl != null) {
+                        return ddl;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // A connector may not implement SHOW CREATE TABLE; the metadata-based
+            // DDL below is a valid (if less complete) fallback.
+        }
+        return DdlBuilder.buildTableDdl(schema, table, getColumns(schema, table), Collections.emptyList(), Collections.emptyList());
+    }
+
+    /**
+     * Qualifies {@code schema.table} for {@code SHOW CREATE TABLE}. Trino resolves
+     * an unqualified schema against the session catalog, so the catalog is only
+     * included when it is known.
+     */
+    private String tableReference(String schema, String table) {
+        String catalog;
+        try {
+            catalog = blankToNull(requireConnected().getCatalog());
+        } catch (java.sql.SQLException error) {
+            catalog = null;
+        }
+        StringBuilder reference = new StringBuilder();
+        if (catalog != null) {
+            reference.append(quoteIdentifier(catalog)).append('.');
+        }
+        return reference.append(quoteIdentifier(schema)).append('.').append(quoteIdentifier(table)).toString();
+    }
+
     @Override
     public String setSchemaSQL(String schema) {
         return "USE " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
@@ -262,6 +312,14 @@ public final class TrinoAgent extends AbstractJdbcAgent {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     private static boolean isNumericType(int sqlType) {
         switch (sqlType) {
             case Types.BIGINT:
@@ -339,7 +397,27 @@ public final class TrinoAgent extends AbstractJdbcAgent {
         return value == null ? "" : value;
     }
 
+    /**
+     * Trino derives the session time zone from the JVM default, but servers built on
+     * Joda-Time reject the custom "GMT+08:00" IDs the JVM reports when the OS zone has
+     * no IANA mapping (#13451). Rewriting whole-hour offsets to the equivalent IANA
+     * {@code Etc/GMT±N} form (note the inverted sign) keeps the same instant while
+     * staying accepted everywhere; java.util.TimeZone would normalize any bare-offset
+     * ID back to the rejected "GMT+08:00" spelling. Fractional offsets have no Etc
+     * equivalent and are left untouched.
+     */
+    static void normalizeDefaultTimeZone() {
+        Matcher customOffset = GMT_OFFSET_ZONE_PATTERN.matcher(java.util.TimeZone.getDefault().getID());
+        boolean wholeHourOnly = customOffset.matches() && (customOffset.group("minutes") == null || customOffset.group("minutes").equals("00"));
+        if (wholeHourOnly) {
+            // POSIX sign inversion: IANA's Etc/GMT-8 means UTC+8.
+            String etcZone = "Etc/GMT" + (customOffset.group("sign").equals("+") ? "-" : "+") + Integer.parseInt(customOffset.group("hours"));
+            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(java.time.ZoneId.of(etcZone)));
+        }
+    }
+
     public static void main(String[] args) {
+        normalizeDefaultTimeZone();
         new MultiSessionJsonRpcServer(TrinoAgent::new).run();
     }
 }

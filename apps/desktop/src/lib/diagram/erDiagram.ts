@@ -17,6 +17,8 @@ export function editableStructureIndexes(table: DiagramTable): EditableStructure
 export interface DiagramTable {
   name: string;
   schema?: string;
+  /** Table description (`TABLE_COMMENT` and friends); rendered under the card title. */
+  comment?: string | null;
   columns: ColumnInfo[];
   foreignKeys: ForeignKeyInfo[];
   /** Unique/PK indexes used for FK cardinality; drafts also sync via buildCreateTableSql */

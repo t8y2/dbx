@@ -17,9 +17,12 @@ const mocks = vi.hoisted(() => ({
   redisStreamAdd: vi.fn(),
   redisSetTtl: vi.fn(),
   redisSetExpireAt: vi.fn(),
+  redisSetKeysTtl: vi.fn(),
+  redisSetKeysExpireAt: vi.fn(),
   redisCheckJsonModule: vi.fn(),
   redisDeleteKey: vi.fn(),
   redisDeleteKeys: vi.fn(),
+  redisDeleteKeysByPattern: vi.fn(),
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   toast: vi.fn(),
@@ -27,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   listRedisCompletionCommandDocs: vi.fn(),
   listRedisCompletionKeys: vi.fn(),
   redisScanPageSize: 100,
+  redisKeyFilter: "",
   infiniteScroll: false,
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: 5000,
@@ -44,9 +48,12 @@ vi.mock("@/lib/backend/api", () => ({
   redisStreamAdd: mocks.redisStreamAdd,
   redisSetTtl: mocks.redisSetTtl,
   redisSetExpireAt: mocks.redisSetExpireAt,
+  redisSetKeysTtl: mocks.redisSetKeysTtl,
+  redisSetKeysExpireAt: mocks.redisSetKeysExpireAt,
   redisCheckJsonModule: mocks.redisCheckJsonModule,
   redisDeleteKey: mocks.redisDeleteKey,
   redisDeleteKeys: mocks.redisDeleteKeys,
+  redisDeleteKeysByPattern: mocks.redisDeleteKeysByPattern,
   redisExecuteCommand: mocks.redisExecuteCommand,
   saveHistory: mocks.saveHistory,
 }));
@@ -54,7 +61,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: vi.fn().mockResolvedValue(undefined),
-    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
+    getConfig: () => ({ name: "Redis", redis_key_filter: mocks.redisKeyFilter, redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
     listRedisCompletionCommandDocs: mocks.listRedisCompletionCommandDocs,
     listRedisCompletionKeys: mocks.listRedisCompletionKeys,
@@ -294,6 +301,7 @@ function unmountBrowser(host: HTMLElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.redisKeyFilter = "";
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   clearRedisKeyBrowserState("tab-redis-filter");
   clearRedisKeyBrowserState("tab-a");
@@ -357,5 +365,24 @@ describe("RedisKeyBrowser tab state (tab switch persistence)", () => {
     expect((hostA.querySelector("[data-redis-search-input]") as HTMLInputElement).value).toBe("alpha:*");
     const tabACalls = mocks.redisScanKeysBatch.mock.calls;
     expect(tabACalls[tabACalls.length - 1]![3]).toBe("alpha:*");
+  });
+
+  it("snapshots the default scope per tab while keeping the user input separate", async () => {
+    mocks.redisKeyFilter = "order:*";
+    const hostA = mountBrowser("tab-a");
+    await settle();
+    expect((hostA.querySelector("[data-redis-search-input]") as HTMLInputElement).value).toBe("");
+    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[3]).toBe("order:*");
+    unmountBrowser(hostA);
+    mocks.redisKeyFilter = "session:*";
+    const restoredA = mountBrowser("tab-a");
+    await settle();
+    expect((restoredA.querySelector("[data-redis-search-input]") as HTMLInputElement).value).toBe("");
+    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[3]).toBe("order:*");
+    unmountBrowser(restoredA);
+    const hostB = mountBrowser("tab-b");
+    await settle();
+    expect((hostB.querySelector("[data-redis-search-input]") as HTMLInputElement).value).toBe("");
+    expect(mocks.redisScanKeysBatch.mock.calls[mocks.redisScanKeysBatch.mock.calls.length - 1]?.[3]).toBe("session:*");
   });
 });

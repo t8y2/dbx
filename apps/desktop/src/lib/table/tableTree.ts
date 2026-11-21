@@ -10,8 +10,11 @@ export function normalizeDatabaseObjectName(name: string): string {
 
 export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog, includeSchemaInId = false }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string; includeSchemaInId?: boolean }): TreeNode[] {
   const entries = tables.flatMap((table) => {
-    const name = normalizeDatabaseObjectName(table.name);
-    if (!name) return [];
+    // Keep the driver-reported table identifier: MySQL permits leading or
+    // trailing spaces, and trimming would merge two distinct tables into one
+    // node and send later actions to the wrong table.
+    const name = table.name;
+    if (!name.trim()) return [];
     const objectType = normalizeObjectType(table.table_type);
     const childSchema = table.schema ?? schema;
     return [

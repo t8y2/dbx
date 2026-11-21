@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
+import { buildObjectBrowserRows } from "@/lib/table/objectBrowserRows";
 import { mysqlTableCharsetChangeSql, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset, mysqlTableCollationSql, parseMysqlTableCharset, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
@@ -70,6 +71,15 @@ describe("mysqlTableCollation", () => {
     // Quoted identifiers keep leading/trailing spaces; trimming is only for the emptiness check.
     expect(mysqlTableCharsetChangeSql({ database: " shop ", table: " orders ", charset: "utf8mb4" })).toBe("ALTER TABLE ` shop `.` orders ` DEFAULT CHARACTER SET utf8mb4");
     expect(mysqlTableCharsetChangeSql({ database: "  ", table: " orders ", charset: "utf8mb4" })).toBe("ALTER TABLE ` orders ` DEFAULT CHARACTER SET utf8mb4");
+  });
+
+  it("keeps the raw list-row identifier when the picked charset becomes ALTER TABLE", () => {
+    const [row] = buildObjectBrowserRows({
+      objects: [{ name: " orders ", object_type: "TABLE", schema: " shop " }],
+      database: "shop",
+      fallbackSchema: "shop",
+    });
+    expect(mysqlTableCharsetChangeSql({ database: row.schema, table: row.name, charset: "utf8mb4" })).toBe("ALTER TABLE ` shop `.` orders ` DEFAULT CHARACTER SET utf8mb4");
   });
 
   it("refuses charset/collation names that would need quoting", () => {

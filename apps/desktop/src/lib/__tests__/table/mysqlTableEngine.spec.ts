@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
+import { buildObjectBrowserRows } from "@/lib/table/objectBrowserRows";
 import { mysqlTableEngineDraft, mysqlTableEngineSqlOption, mysqlTableEngineSql, mysqlTableEngineChangeSql, parseMysqlTableEngineMetadata, refreshMysqlTableEngineDraft, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
@@ -64,6 +65,15 @@ describe("mysqlTableEngine", () => {
     // Quoted identifiers keep leading/trailing spaces; trimming is only for the emptiness check.
     expect(mysqlTableEngineChangeSql({ database: " app ", table: " orders ", engine: "InnoDB" })).toBe("ALTER TABLE ` app `.` orders ` ENGINE = InnoDB");
     expect(mysqlTableEngineChangeSql({ database: "  ", table: " orders ", engine: "InnoDB" })).toBe("ALTER TABLE ` orders ` ENGINE = InnoDB");
+  });
+
+  it("keeps the raw list-row identifier when the picked engine becomes ALTER TABLE", () => {
+    const [row] = buildObjectBrowserRows({
+      objects: [{ name: " orders ", object_type: "TABLE", schema: " app " }],
+      database: "app",
+      fallbackSchema: "app",
+    });
+    expect(mysqlTableEngineChangeSql({ database: row.schema, table: row.name, engine: "InnoDB" })).toBe("ALTER TABLE ` app `.` orders ` ENGINE = InnoDB");
   });
 
   it("refuses engine values that are not bare engine names or exceed MySQL's length limit", () => {

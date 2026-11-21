@@ -118,8 +118,11 @@ const groupNodeObjectBrowserFilters: Partial<Record<TreeNodeType, ObjectBrowserF
   "group-events": "events",
 };
 
-/** 分组节点对应的对象浏览器分类：双击分组行时对象浏览器直接选中该分类。 */
-export function objectBrowserFilterForGroupNode(type: TreeNodeType): ObjectBrowserFilter | undefined {
+/** 分组节点对应的对象浏览器分类：双击分组行时对象浏览器直接选中该分类。
+ *  `group-triggers` 同时用于数据库级与表级分组；表级分组属于具体表节点，
+ *  双击时应保持展开行为，而不是跳转到数据库范围的对象浏览器。 */
+export function objectBrowserFilterForGroupNode(type: TreeNodeType, tableName?: string | null): ObjectBrowserFilter | undefined {
+  if (type === "group-triggers" && tableName) return undefined;
   return groupNodeObjectBrowserFilters[type];
 }
 

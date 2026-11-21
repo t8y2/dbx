@@ -3730,8 +3730,10 @@ pub async fn list_tables_filtered(
     let tables: Vec<TableInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(TableInfo {
+            // MySQL identifiers may contain leading/trailing spaces inside
+            // backticks; only use trim() to reject blank rows.
+            let name = get_str_by_name(row, "TABLE_NAME");
+            (!name.trim().is_empty()).then_some(TableInfo {
                 name,
                 table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
                 valid: None,
@@ -4345,8 +4347,9 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
     let mut tables = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str(row, 0).trim().to_string();
-            if name.is_empty() {
+            // SHOW TABLES returns the exact identifier; keep surrounding spaces.
+            let name = get_str(row, 0);
+            if name.trim().is_empty() {
                 return None;
             }
             let table_type = normalize_mysql_table_type(&get_str(row, 1));
@@ -9596,6 +9599,22 @@ mod tests {
             vec![("active_users", "VIEW"), ("normal_table", "BASE TABLE"), ("t_order", "BASE TABLE")]
         );
         assert!(tables.iter().all(|table| table.comment.is_none()));
+    }
+
+    #[test]
+    fn show_rows_preserve_space_padded_table_identifiers() {
+        let rows = vec![
+            mysql_test_row(vec![Value::Bytes(b" orders ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"orders".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+            mysql_test_row(vec![Value::Bytes(b"   ".to_vec()), Value::Bytes(b"BASE TABLE".to_vec())]),
+        ];
+
+        let tables = table_infos_from_show_rows(&rows);
+
+        assert_eq!(
+            tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            vec![" orders ", "orders"]
+        );
     }
 
     #[test]

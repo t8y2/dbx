@@ -1887,7 +1887,8 @@ function onDoubleClick(event: MouseEvent) {
     return;
   }
   // 双击对象分组行：打开对象浏览器并直接选中该分组的分类。
-  const groupObjectFilter = objectBrowserFilterForGroupNode(activeNode.value.type);
+  // 表级触发器分组带 tableName，属于表节点自身，继续走后面的展开逻辑。
+  const groupObjectFilter = objectBrowserFilterForGroupNode(activeNode.value.type, activeNode.value.tableName);
   if (groupObjectFilter) {
     beginNavigationRequest();
     void openObjectBrowser(false, false, false, groupObjectFilter);

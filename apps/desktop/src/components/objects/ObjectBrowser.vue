@@ -2,7 +2,7 @@
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { createDatabaseCollationOptionsForCharset, parseCreateDatabaseCharsetMetadata, type CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { MYSQL_CHARACTER_SETS_SQL, MYSQL_COLLATIONS_SQL, mysqlTableCharsetChangeSql, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset } from "@/lib/table/mysqlTableCollation";
-import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineChangeSql, parseMysqlTableEngineMetadata, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
+import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineChangeSql, parseMysqlTableEngineMetadata, quoteMysqlTableIdentifier, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -6061,6 +6061,8 @@ const mysqlEngineChangeSql = computed(() => {
   if (!target) return "";
   return mysqlTableEngineChangeSql({ database: target.row.schema || props.database, table: target.row.name, engine: target.engine }) ?? "";
 });
+/** 确认弹窗展示带反引号的原始标识符，首尾空格不会被 HTML 折叠。 */
+const mysqlEngineChangeTableLabel = computed(() => (mysqlEngineChangeTarget.value ? quoteMysqlTableIdentifier(mysqlEngineChangeTarget.value.row.name) : ""));
 
 async function loadMysqlEngineOptions(force = false) {
   if (!canChangeMysqlTableMetadata.value) return;
@@ -6136,6 +6138,7 @@ const mysqlCharsetChangeSql = computed(() => {
   if (!target) return "";
   return mysqlTableCharsetChangeSql({ database: target.row.schema || props.database, table: target.row.name, charset: target.charset, collation: target.collation }) ?? "";
 });
+const mysqlCharsetChangeTableLabel = computed(() => (mysqlCharsetChangeTarget.value ? quoteMysqlTableIdentifier(mysqlCharsetChangeTarget.value.row.name) : ""));
 
 function mysqlCollationOptionsForCharset(charset: string): string[] {
   const metadata = mysqlCharsetMetadata.value;
@@ -8184,7 +8187,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   <DangerConfirmDialog
     v-model:open="showMysqlEngineChangeConfirm"
     :title="t('objects.engineChangeTitle')"
-    :message="t('objects.engineChangeMessage', { name: mysqlEngineChangeTarget?.row.name ?? '', from: mysqlEngineChangeTarget?.row.engine || '—', to: mysqlEngineChangeTarget?.engine ?? '' })"
+    :message="t('objects.engineChangeMessage', { name: mysqlEngineChangeTableLabel, from: mysqlEngineChangeTarget?.row.engine || '—', to: mysqlEngineChangeTarget?.engine ?? '' })"
     :sql="mysqlEngineChangeSql"
     :loading="mysqlEngineChangeExecuting"
     :confirm-label="t('objects.engineChangeConfirm')"
@@ -8194,7 +8197,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   <DangerConfirmDialog
     v-model:open="showMysqlCharsetChangeConfirm"
     :title="t('objects.charsetChangeTitle')"
-    :message="t('objects.charsetChangeMessage', { name: mysqlCharsetChangeTarget?.row.name ?? '', charset: mysqlCharsetChangeTarget?.charset ?? '', collation: mysqlCharsetChangeTarget?.collation || '—' })"
+    :message="t('objects.charsetChangeMessage', { name: mysqlCharsetChangeTableLabel, charset: mysqlCharsetChangeTarget?.charset ?? '', collation: mysqlCharsetChangeTarget?.collation || '—' })"
     :sql="mysqlCharsetChangeSql"
     :loading="mysqlCharsetChangeExecuting"
     :confirm-label="t('objects.charsetChangeConfirm')"

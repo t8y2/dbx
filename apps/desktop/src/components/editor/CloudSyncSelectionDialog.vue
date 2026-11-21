@@ -87,6 +87,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   customThemeColors: "appearance",
   appLayout: "appearance",
   tabLayout: "appearance",
+  tabWrapMaxRows: "appearance",
   tabPlacement: "appearance",
   tabGroupMode: "appearance",
   tabGroupCustomizations: "appearance",

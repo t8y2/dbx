@@ -227,6 +227,7 @@ const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacemen
 // Meaningless without grouping, so it silently falls back to the single row.
 const isTwoRowLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabGroupRows === "two-row" && settingsStore.editorSettings.tabGroupMode !== "none");
 const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const hasWrapRowLimit = computed(() => isWrapLayout.value && settingsStore.editorSettings.tabWrapMaxRows > 0);
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
@@ -243,6 +244,7 @@ const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value && settingsStore.editorSettings.tabMaxWidth > 0) {
     styles["--tab-max-width"] = `${settingsStore.editorSettings.tabMaxWidth}px`;
   }
+  if (hasWrapRowLimit.value) styles["--tab-wrap-max-rows"] = settingsStore.editorSettings.tabWrapMaxRows;
   return Object.keys(styles).length > 0 ? styles : undefined;
 });
 const tabBarCollapseIcon = computed(() => {
@@ -2062,7 +2064,7 @@ watch(
       }
     }
     nextTick(() => {
-      if (!isWrapLayout.value) {
+      if (!isWrapLayout.value || hasWrapRowLimit.value) {
         const container = tabsContainerRef.value;
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
@@ -2104,6 +2106,7 @@ watch(
     props.specialPageTabs?.settingsOpen,
     props.specialPageTabs?.driverStoreOpen,
     settingsStore.editorSettings.tabLayout,
+    settingsStore.editorSettings.tabWrapMaxRows,
     settingsStore.editorSettings.tabGroupMode,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
@@ -2235,25 +2238,27 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           @wheel="onRailWheel"
         >
           <CustomContextMenu v-for="group in twoRowGroupItems" :key="group.key" :items="() => getTwoRowGroupMenuItems(group)" v-slot="{ onContextMenu }">
-            <button
-              type="button"
-              class="tab-group-header"
-              :class="{ 'tab-group-header--active': twoRowSelectedKey === group.key }"
-              :style="group.colorStyle"
-              :title="group.label"
-              :aria-pressed="twoRowSelectedKey === group.key"
-              @click="selectTwoRowGroup(group)"
-              @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
-            >
-              <span class="tab-group-header-content">
-                <span class="tab-group-marker" aria-hidden="true" />
-                <PlugZap v-if="isPluginTabGroup(group.tab)" class="tab-group-database-icon text-violet-600 dark:text-violet-400" aria-hidden="true" />
-                <ConnectionIcon v-else-if="group.key && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(group.tab.connectionId)" class="tab-group-database-icon" aria-hidden="true" />
-                <DatabaseIcon v-else :db-type="tabDatabaseIconType(group.tab)" class="tab-group-database-icon" aria-hidden="true" />
-                <span class="tab-group-label">{{ group.label }}</span>
-                <span class="tab-group-count">{{ group.count }}</span>
-              </span>
-            </button>
+            <div class="relative flex shrink-0 items-center" @contextmenu="openTabGroupContextMenu($event, onContextMenu)">
+              <button type="button" class="tab-group-header" :class="{ 'tab-group-header--active': twoRowSelectedKey === group.key }" :style="group.colorStyle" :title="group.label" :aria-pressed="twoRowSelectedKey === group.key" @click="selectTwoRowGroup(group)">
+                <span class="tab-group-header-content">
+                  <span class="tab-group-marker" aria-hidden="true" />
+                  <PlugZap v-if="isPluginTabGroup(group.tab)" class="tab-group-database-icon text-violet-600 dark:text-violet-400" aria-hidden="true" />
+                  <ConnectionIcon v-else-if="group.key && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(group.tab.connectionId)" class="tab-group-database-icon" aria-hidden="true" />
+                  <DatabaseIcon v-else :db-type="tabDatabaseIconType(group.tab)" class="tab-group-database-icon" aria-hidden="true" />
+                  <span class="tab-group-label">{{ group.label }}</span>
+                  <span class="tab-group-count">{{ group.count }}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                class="absolute end-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground"
+                :aria-label="`${t('contextMenu.closeTabGroup')} · ${group.label}`"
+                :title="t('contextMenu.closeTabGroup')"
+                @click="closeTabsByIds(group.tabIds)"
+              >
+                <X class="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            </div>
           </CustomContextMenu>
           <!-- App surfaces are rail-level contexts, not tabs of the selected group: they trail the group pills in the same scroll row. -->
           <CustomContextMenu v-for="page in railSpecialPageItems" :key="page.surface" :items="() => getSpecialPageTabMenuItems(page.surface)" v-slot="{ onContextMenu }">
@@ -2322,11 +2327,12 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-0 overflow-x-auto py-1.5',
             isWrapLayout ? 'wrap-mode' : '',
             isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+            hasWrapRowLimit ? 'wrap-mode--limited' : '',
             hasHorizontalFixedRows ? 'horizontal-fixed-tabs-scroll' : '',
           ]"
-          :style="tabsContainerStyle"
+          :style="hasWrapRowLimit ? undefined : tabsContainerStyle"
           @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
-          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && onTabsWheel($event)"
+          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !hasWrapRowLimit && onTabsWheel($event)"
         >
           <template v-for="section in stripSections" :key="section.key">
             <div

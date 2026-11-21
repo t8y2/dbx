@@ -10909,6 +10909,7 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
     shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
     sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
+    tabWrapMaxRows: "탭 최대 타일 행 수",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

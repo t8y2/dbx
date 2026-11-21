@@ -12402,6 +12402,7 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Выбрать следующий столбец данных таблицы",
     shortcutSelectPreviousGridColumn: "Выбрать предыдущий столбец данных таблицы",
     sidebarSimpleHideIndexes: "Скрыть индексы рядом с таблицами",
+    tabWrapMaxRows: "Максимальное количество строк для вкладок",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

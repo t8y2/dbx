@@ -1054,6 +1054,7 @@ export interface EditorSettings {
   /** 重名标签页的区分方式：序号或连接名。见 {@link DuplicateTabTitleMode}。 */
   duplicateTabTitleMode: DuplicateTabTitleMode;
   tabLayout: TabLayoutMode;
+  tabWrapMaxRows: number;
   tabPlacement: TabPlacement;
   colorizeConnectionTabs: boolean;
   colorizeConnectionTabsScope: ConnectionTabColorScope;
@@ -1497,6 +1498,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   crossWindowTabDragPreviewEnabled: true,
   duplicateTabTitleMode: "ordinal",
   tabLayout: "scroll",
+  tabWrapMaxRows: 0,
   tabPlacement: "top",
   colorizeConnectionTabs: true,
   colorizeConnectionTabsScope: "all",
@@ -1745,6 +1747,12 @@ function normalizeColumnWidthDensity(value: unknown): ColumnWidthDensity {
 
 function normalizeDataGridColumnWidthMode(value: unknown): DataGridColumnWidthMode {
   return DATA_GRID_COLUMN_WIDTH_MODES.includes(value as DataGridColumnWidthMode) ? (value as DataGridColumnWidthMode) : DEFAULT_EDITOR_SETTINGS.dataGridColumnWidthMode;
+}
+
+export const TAB_WRAP_ROW_LIMITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+function normalizeTabWrapMaxRows(value: unknown): number {
+  return typeof value === "number" && TAB_WRAP_ROW_LIMITS.includes(value) ? value : DEFAULT_EDITOR_SETTINGS.tabWrapMaxRows;
 }
 
 function normalizeTabLayout(value: unknown): TabLayoutMode {
@@ -2258,6 +2266,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     compactTabTitleDefaultVersion,
     crossWindowTabDragPreviewEnabled: typeof settings.crossWindowTabDragPreviewEnabled === "boolean" ? settings.crossWindowTabDragPreviewEnabled : DEFAULT_EDITOR_SETTINGS.crossWindowTabDragPreviewEnabled,
     tabLayout: normalizeTabLayout(settings.tabLayout),
+    tabWrapMaxRows: normalizeTabWrapMaxRows(settings.tabWrapMaxRows),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
     colorizeConnectionTabs: typeof settings.colorizeConnectionTabs === "boolean" ? settings.colorizeConnectionTabs : DEFAULT_EDITOR_SETTINGS.colorizeConnectionTabs,
     colorizeConnectionTabsScope: normalizeConnectionTabColorScope(settings.colorizeConnectionTabsScope),
@@ -3284,6 +3293,7 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.crossWindowTabDragPreviewEnabled !== undefined) editorSettings.value.crossWindowTabDragPreviewEnabled = partial.crossWindowTabDragPreviewEnabled === true;
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
+    if (partial.tabWrapMaxRows !== undefined) editorSettings.value.tabWrapMaxRows = normalizeTabWrapMaxRows(partial.tabWrapMaxRows);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
     if (partial.colorizeConnectionTabs !== undefined) editorSettings.value.colorizeConnectionTabs = partial.colorizeConnectionTabs === true;
     if (partial.colorizeConnectionTabsScope !== undefined) editorSettings.value.colorizeConnectionTabsScope = normalizeConnectionTabColorScope(partial.colorizeConnectionTabsScope);

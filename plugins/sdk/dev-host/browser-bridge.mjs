@@ -6,7 +6,7 @@ function installBridge(channel) {
     locale = "zh-CN",
     theme;
   const pending = new Map(),
-    listeners = { context: new Set(), init: new Set(), event: new Set(), binary: new Set() };
+    listeners = { context: new Set(), init: new Set(), event: new Set(), binary: new Set(), hostevent: new Set(), hosteventgap: new Set() };
   let resolveReady;
   const ready = new Promise((resolve) => {
     resolveReady = resolve;
@@ -160,6 +160,13 @@ function installBridge(channel) {
     onContext: (fn) => listen("context", fn),
     onEvent: (fn) => listen("event", fn),
     onBinary: (fn) => listen("binary", fn),
+    // Host observation stream (host.observe:* permissions). The dev host has
+    // no real DBX activity, so events are simulated through
+    // POST /api/observations/publish.
+    onHostEvent: (fn) => listen("hostevent", fn),
+    // Explicit drop notices from the host observation bus. The dev host never
+    // drops events itself, so this is API parity with the desktop bridge.
+    onHostGap: (fn) => listen("hosteventgap", fn),
     onInit: (fn) => {
       const off = listen("init", fn);
       if (initialized) fn(context);
@@ -196,6 +203,14 @@ function installBridge(channel) {
     if (m.type === "event") {
       for (const fn of listeners.event) fn(m);
       dispatchEvent(new CustomEvent("dbx-plugin-event", { detail: m }));
+    }
+    if (m.type === "hostevent") {
+      for (const fn of listeners.hostevent) fn(m);
+      dispatchEvent(new CustomEvent("dbx-plugin-host-event", { detail: m }));
+    }
+    if (m.type === "hosteventgap") {
+      for (const fn of listeners.hosteventgap) fn({ skipped: typeof m.skipped === "number" ? m.skipped : 0 });
+      dispatchEvent(new CustomEvent("dbx-plugin-host-gap", { detail: { skipped: m.skipped } }));
     }
     if (m.type === "binary") {
       const payload = { channel: m.binaryChannel, data: decode(m.dataBase64) };

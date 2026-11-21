@@ -9,13 +9,38 @@ use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
 use dbx_core::sql::split_sql_statements;
 
+/// Mirror driver query messages onto the observation bus. Split from the
+/// Tauri callback so the payload contract is unit-testable without an
+/// `AppHandle`; the caller keeps the subscriber check so the non-observed
+/// hot path stays allocation-free.
+fn publish_query_message_events(
+    bus: &dbx_core::observability::HostObservationBus,
+    execution_id: &str,
+    messages: &[impl serde::Serialize],
+) {
+    for message in messages {
+        if let Ok(mut payload) = serde_json::to_value(message) {
+            payload["executionId"] = serde_json::Value::String(execution_id.to_string());
+            bus.publish(dbx_core::models::observability::KIND_QUERY_MESSAGE, None, None, payload);
+        }
+    }
+}
+
 fn query_messages_callback(
     app: &AppHandle,
+    state: &AppState,
     execution_id: Option<&str>,
 ) -> Option<dbx_core::query::query_messages::QueryMessagesCallback> {
     let execution_id = execution_id?.to_string();
     let app = app.clone();
+    // The driver sink already coalesces messages (~100ms); mirror each one
+    // onto the observability bus so plugins see server notices/warnings tied
+    // to the same executionId as query.started/finished.
+    let observations = state.host_observations.clone();
     Some(Arc::new(move |messages| {
+        if observations.subscriber_count() > 0 {
+            publish_query_message_events(&observations, &execution_id, &messages);
+        }
         let _ = app.emit("query-messages", serde_json::json!({ "executionId": execution_id, "messages": messages }));
     }))
 }
@@ -81,7 +106,7 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let messages = query_messages_callback(&app, &state, execution_id.as_deref());
     let result = dbx_core::query::query_messages::with_query_messages(
         messages,
         dbx_core::query::execute_sql_statement_with_options_typed(
@@ -288,7 +313,7 @@ pub async fn execute_multi(
         schema
     );
 
-    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let messages = query_messages_callback(&app, &state, execution_id.as_deref());
     let result = dbx_core::query::query_messages::with_query_messages(
         messages,
         dbx_core::query::batch_progress::with_coalesced_execute_multi_progress(progress, |progress| {
@@ -706,7 +731,7 @@ pub async fn execute_in_manual_transaction(
     defer_lobs: Option<bool>,
     report_compilation_errors: Option<bool>,
 ) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, ManualTransactionCommandError> {
-    let messages = query_messages_callback(&app, execution_id.as_deref());
+    let messages = query_messages_callback(&app, &state, execution_id.as_deref());
     dbx_core::query::query_messages::with_query_messages(
         messages,
         dbx_core::query::execute_in_manual_transaction_with_options(
@@ -1579,5 +1604,30 @@ mod tests {
             Some("destructive_confirmation_required")
         );
         assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn query_message_events_carry_execution_id() {
+        let bus = dbx_core::observability::HostObservationBus::new();
+        let mut receiver = bus.subscribe();
+        let messages = vec![
+            serde_json::json!({ "severity": "NOTICE", "message": "done" }),
+            serde_json::json!({ "severity": "WARNING", "message": "truncated", "code": "01000" }),
+        ];
+        super::publish_query_message_events(&bus, "exec-1", &messages);
+        let first = receiver.recv().await.expect("first query.message event");
+        assert_eq!(first.kind, dbx_core::models::observability::KIND_QUERY_MESSAGE);
+        assert_eq!(first.payload["executionId"], "exec-1");
+        assert_eq!(first.payload["severity"], "NOTICE");
+        let second = receiver.recv().await.expect("second query.message event");
+        assert_eq!(second.payload["code"], "01000");
+    }
+
+    #[test]
+    fn query_message_events_are_dropped_without_subscribers() {
+        let bus = dbx_core::observability::HostObservationBus::new();
+        // No subscriber attached: publish must be a cheap no-op, not a panic.
+        super::publish_query_message_events(&bus, "exec-2", &[serde_json::json!({ "severity": "INFO" })]);
+        assert_eq!(bus.subscriber_count(), 0);
     }
 }

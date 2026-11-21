@@ -136,6 +136,7 @@ export const readPluginAsset = forward("readPluginAsset");
 export const readPluginUiEntry = forward("readPluginUiEntry");
 export const readPluginUiAsset = forward("readPluginUiAsset");
 export const subscribePluginEvents = forward("subscribePluginEvents");
+export const subscribeHostObservations = forward("subscribeHostObservations");
 export const listJdbcDrivers = forward("listJdbcDrivers");
 export const listJdbcMavenBundles = forward("listJdbcMavenBundles");
 export const listJdbcLocalBundles = forward("listJdbcLocalBundles");

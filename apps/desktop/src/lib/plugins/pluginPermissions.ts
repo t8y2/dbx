@@ -6,7 +6,12 @@
  * code without an interaction per call (or open a direct environment channel),
  * so they are highlighted instead of blended into the outline badge row.
  */
-export const SENSITIVE_PLUGIN_PERMISSIONS: readonly string[] = ["host.clipboard:read"];
+export const SENSITIVE_PLUGIN_PERMISSIONS: readonly string[] = [
+  "host.clipboard:read",
+  // Observation permissions expose SQL text, tool arguments and AI content.
+  "host.observe:queries",
+  "host.observe:ai",
+];
 
 export function isSensitivePluginPermission(permission: string): boolean {
   return SENSITIVE_PLUGIN_PERMISSIONS.includes(permission);

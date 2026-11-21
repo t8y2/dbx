@@ -449,6 +449,27 @@ export async function createMockHost(options) {
         }
         case "/api/backend/restart":
           return restartBackend();
+        case "/api/observations/publish": {
+          // Simulation helper: DBX desktop is the real source of observation
+          // events; the dev host lets plugin authors feed fixtures through the
+          // same kind → permission gate the real bridge applies.
+          const event = p.event;
+          if (!event || typeof event !== "object" || typeof event.kind !== "string" || !event.kind) {
+            throw new Error("Invalid observation event");
+          }
+          const permissionByCategory = {
+            query: "host.observe:queries",
+            connection: "host.observe:connections",
+            ai: "host.observe:ai",
+            transfer: "host.observe:transfers",
+            plugin: "host.observe:plugins",
+          };
+          const permission = permissionByCategory[event.kind.split(".", 1)[0]];
+          const delivered = Boolean(permission && manifest.permissions?.includes(permission));
+          if (delivered) broadcast("hostevent", event);
+          diagnostics.record("debug", "event", delivered ? "宿主观测事件已模拟" : "缺少对应 host.observe 权限，事件被丢弃", { kind: event.kind });
+          return { delivered };
+        }
         default:
           throw new Error("Unknown mock host endpoint");
       }
@@ -515,6 +536,7 @@ export async function createMockHost(options) {
         "/api/connections/import",
         "/api/frames/close",
         "/api/backend/restart",
+        "/api/observations/publish",
       ];
       route = known.includes(path) ? path.replace("/api/", "") || "/" : "unknown";
       if (path === "/api/diagnostics") {

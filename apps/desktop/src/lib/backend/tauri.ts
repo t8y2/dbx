@@ -16,6 +16,7 @@ import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWir
 import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 import type { PlDebugBootstrap, PlDebugSessionRef, PlDebugStartIntent, PlDebugOperationRequest, PlDebugReadRequest, PlDebugReceipt, PlDebugSnapshot } from "@/lib/debug/plDebugProtocol";
 import type { PlDebugInspectRequest, PlDebugInspectResult, PlDebugCompileIntent, PlDebugCompileRef, PlDebugCompileReceipt } from "@/lib/debug/plDebugProtocol";
+import { HOST_OBSERVATION_EVENT, HOST_OBSERVATION_GAP_EVENT, type PluginHostObservationEvent, type PluginHostObservationGap } from "@/types/pluginObservation";
 
 export function plDebugBootstrap(): Promise<PlDebugBootstrap> {
   return invoke("pl_debug_bootstrap");
@@ -3402,6 +3403,24 @@ export async function subscribePluginEvents(onEvent: (event: PluginEvent) => voi
   return () => {
     unlistenEvent();
     unlistenBinary();
+  };
+}
+
+/**
+ * Subscribe to host observation events (`host.observe:*`). The plugin bridge
+ * filters each event by the workbench plugin's declared permissions; the
+ * sidecar fan-out lives in the Rust shell.
+ *
+ * `onGap` receives the host's explicit drop notices when the bus could not
+ * keep up. Event `id` gaps are not drop signals: ids are host-global while
+ * delivery is permission-filtered.
+ */
+export async function subscribeHostObservations(onEvent: (event: PluginHostObservationEvent) => void, onGap?: (gap: PluginHostObservationGap) => void): Promise<UnlistenFn> {
+  const unlistenEvent = await listen<PluginHostObservationEvent>(HOST_OBSERVATION_EVENT, (event) => onEvent(event.payload));
+  const unlistenGap = onGap ? await listen<PluginHostObservationGap>(HOST_OBSERVATION_GAP_EVENT, (event) => onGap(event.payload)) : undefined;
+  return () => {
+    unlistenEvent();
+    unlistenGap?.();
   };
 }
 

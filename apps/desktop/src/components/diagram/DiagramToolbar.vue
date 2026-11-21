@@ -42,6 +42,7 @@ const props = defineProps<{
   isFullscreen?: boolean;
   draftTableCount?: number;
   canCreateTable?: boolean;
+  canAddTables?: boolean;
   canSyncToDatabase?: boolean;
 }>();
 
@@ -63,6 +64,7 @@ const emit = defineEmits<{
   (e: "toggle-fullscreen"): void;
   (e: "auto-layout"): void;
   (e: "create-table"): void;
+  (e: "add-tables"): void;
   (e: "sync-to-database"): void;
 }>();
 
@@ -140,6 +142,10 @@ function connectionIconType(id: string) {
       </Button>
     </div>
 
+    <Button v-if="canAddTables" variant="outline" size="sm" class="h-8 shrink-0 px-2 text-xs" :disabled="loadingDiagram" @click="emit('add-tables')">
+      <Plus class="mr-1 h-3.5 w-3.5" />
+      {{ t("diagram.addTables") }}
+    </Button>
     <Button variant="outline" size="sm" class="h-8 px-2 text-xs" :disabled="!diagramReady || canCreateTable === false" :title="canCreateTable === false ? t('diagram.createTableNotSupported') : t('diagram.createTable')" @click="emit('create-table')">
       <Plus class="mr-1 h-3.5 w-3.5" />
       {{ t("diagram.createTable") }}

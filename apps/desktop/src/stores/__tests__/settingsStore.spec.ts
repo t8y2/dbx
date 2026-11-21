@@ -477,6 +477,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarDensity: 123 } as any).sidebarDensity).toBe("default");
   });
 
+  it("keeps original connection icons for missing or invalid saved preferences", () => {
+    expect(normalizeEditorSettings({}).sidebarConnectionIconStyle).toBe("classic");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "badge" }).sidebarConnectionIconStyle).toBe("badge");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "unknown" } as any).sidebarConnectionIconStyle).toBe("classic");
+  });
+
   it("uses inline comments by default and preserves legacy comment visibility", () => {
     expect(normalizeEditorSettings({}).sidebarObjectInfoMode).toBe("comment-inline");
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-aligned" }).sidebarObjectInfoMode).toBe("comment-aligned");
@@ -1566,14 +1572,6 @@ describe("settingsStore AI API key normalization", () => {
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],
-    });
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "aicodemirror")).toMatchObject({
-      endpoint: "https://api.aicodemirror.ai/v1",
-      provider: "openai-compatible",
-      authMethod: "bearer",
-      requiresApiKey: true,
-      websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-      badgeKey: "ai.aicodemirrorSponsored",
     });
   });
 

@@ -56,6 +56,7 @@ vi.mock("@/stores/queryStore", () => ({
 }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ locale: ref("en"), t: (key: string) => key }) }));
 
+import { PLUGIN_CONNECTION_EDITOR } from "@/lib/connection/pluginConnectionEdit";
 import { clearPluginUiHtmlCache } from "@/lib/plugins/pluginUiHtmlCache";
 import PluginWorkbenchHost from "./PluginWorkbenchHost.vue";
 
@@ -414,6 +415,29 @@ describe("PluginWorkbenchHost initialization", () => {
       getBoundingClientRect.mockRestore();
       elementFromPoint.mockRestore();
     }
+  });
+
+  it("routes field discovery and edit requests to the injected editor", async () => {
+    const pluginWithEdit = { ...plugin, manifest: { ...plugin.manifest, permissions: ["host.connections:edit"] } };
+    const fields = [{ key: "name", type: "text", maxLength: 256, allowEmpty: false }] as const;
+    const editor = { getFields: vi.fn(() => [...fields]), openEdit: vi.fn() };
+    app = createApp(PluginWorkbenchHost, { plugin: pluginWithEdit, contribution, context: { connectionId: "conn-mysql" } });
+    app.provide(PLUGIN_CONNECTION_EDITOR, editor);
+    app.mount(root);
+    await flushWorkbenchLoad();
+    const target = root.querySelector("iframe")!.contentWindow!;
+    const postMessage = vi.spyOn(target, "postMessage").mockImplementation(() => {});
+
+    function request(method: string, params: unknown) {
+      window.dispatchEvent(new MessageEvent("message", { source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: method, method, params } }));
+    }
+    request("host.getConnectionEditFields", { connectionId: "conn-mysql" });
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "host.getConnectionEditFields", result: fields }), "*"));
+    expect(editor.getFields).toHaveBeenCalledExactlyOnceWith("conn-mysql");
+
+    request("host.openConnectionEdit", { connectionId: "conn-mysql" });
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "host.openConnectionEdit", result: { opened: true } }), "*"));
+    expect(editor.openEdit).toHaveBeenCalledExactlyOnceWith({ connectionId: "conn-mysql", fields: {} });
   });
 
   it("serves all connections with connected status when plugin has host.connections:read", async () => {

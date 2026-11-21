@@ -754,14 +754,15 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
     }
     const objectType = normalizeObjectType(obj.object_type);
     const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
+    const postgresSequence = objectType === "SEQUENCE" && databaseType === "postgres";
     if (!schemaIndex && !["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"].includes(objectType)) {
       continue;
     }
 
-    const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
+    const name = schemaIndex || postgresSequence ? obj.name : normalizeDatabaseObjectName(obj.name);
     if (!name) continue;
 
-    const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+    const childSchema = schemaIndex || postgresSequence ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
     const signature = obj.signature?.trim() || "";
     const triggerParentName = schemaIndex ? (obj.parent_name ?? undefined) : objectType === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : undefined;
     const triggerParentSchema = schemaIndex ? (obj.parent_schema ?? undefined) : objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
@@ -792,9 +793,10 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
           : objectType === "VIEW" || objectType === "MATERIALIZED_VIEW"
             ? entry.node.id
             : `${nodeId}:${childSchema ? `${childSchema}:` : ""}${name}:${signature}:${triggerParentName || ""}:${objectType}`,
-        label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${name}(${signature})` : triggerParentName ? `${name} (${triggerParentName})` : name,
+        label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${name}(${signature})` : triggerParentName ? `${name} (${triggerParentName})` : postgresSequence ? normalizeDatabaseObjectName(name) || name : name,
         type: simpleNodeType,
         objectName: name,
+        ...(postgresSequence ? { postgresSequenceExactIdentity: true as const } : {}),
         objectScope: schemaIndex ? "schema" : undefined,
         signature: objectType === "FUNCTION" || objectType === "PROCEDURE" ? (obj.signature == null ? undefined : signature) : signature || undefined,
         customTypeKind: obj.custom_type_kind ?? undefined,
@@ -1086,16 +1088,17 @@ export function buildGroupedObjectTreeNodes({
     }
     const t = normalizeObjectType(obj.object_type);
     const schemaIndex = t === "INDEX" && supportsSchemaIndexManagement(databaseType);
-    const name = schemaIndex ? obj.name : normalizeDatabaseObjectName(obj.name);
+    const postgresSequence = t === "SEQUENCE" && databaseType === "postgres";
+    const name = schemaIndex || postgresSequence ? obj.name : normalizeDatabaseObjectName(obj.name);
     if (!name) continue;
-    const objectSchema = schemaIndex ? (obj.schema ?? schema ?? "") : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
+    const objectSchema = schemaIndex || postgresSequence ? (obj.schema ?? schema ?? "") : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema || "";
     const signature = (obj.signature ?? "").trim();
     const triggerParentName = t === "TRIGGER" && obj.parent_name ? normalizeDatabaseObjectName(obj.parent_name) : "";
     const key = `${exactObjectIdentityKey(t, objectSchema, name, signature)}\0${triggerParentName}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const arr = buckets.get(t) ?? [];
-    arr.push({ ...obj, name, schema: schemaIndex ? obj.schema : obj.schema ? normalizeDatabaseObjectName(obj.schema) : obj.schema });
+    arr.push({ ...obj, name, schema: schemaIndex || postgresSequence ? obj.schema : obj.schema ? normalizeDatabaseObjectName(obj.schema) : obj.schema });
     buckets.set(t, arr);
   }
 
@@ -1119,7 +1122,8 @@ export function buildGroupedObjectTreeNodes({
           if (exactTrigger) return exactTriggerTreeNode(`${nodeId}:${def.key}`, connectionId, database, obj, exactTrigger, catalog);
           const objectType = normalizeObjectType(obj.object_type);
           const schemaIndex = objectType === "INDEX" && supportsSchemaIndexManagement(databaseType);
-          const childSchema = schemaIndex ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
+          const postgresSequence = objectType === "SEQUENCE" && databaseType === "postgres";
+          const childSchema = schemaIndex || postgresSequence ? (obj.schema ?? schema) : obj.schema ? normalizeDatabaseObjectName(obj.schema) : schema;
           const childType = typeof def.childType === "function" ? def.childType(objectType) : def.childType;
           const objectTypeSuffix = objectType === "PACKAGE" || objectType === "PACKAGE_BODY" || objectType === "TYPE" || objectType === "TYPE_BODY" ? `:${objectType}` : "";
           const signature = obj.signature?.trim() || "";
@@ -1128,9 +1132,10 @@ export function buildGroupedObjectTreeNodes({
           const triggerParentSchema = schemaIndex ? (obj.parent_schema ?? undefined) : objectType === "TRIGGER" && obj.parent_schema ? normalizeDatabaseObjectName(obj.parent_schema) : undefined;
           return {
             id: schemaIndex ? `${nodeId}:${def.key}:${JSON.stringify([childSchema, obj.name, triggerParentSchema, triggerParentName])}` : `${nodeId}:${def.key}:${childSchema ? `${childSchema}:` : ""}${obj.name}${signatureIdPart}${triggerParentName ? `:${triggerParentName}` : ""}${objectTypeSuffix}`,
-            label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${obj.name}(${signature})` : triggerParentName ? `${obj.name} (${triggerParentName})` : obj.name,
+            label: signature && (objectType === "FUNCTION" || objectType === "PROCEDURE") ? `${obj.name}(${signature})` : triggerParentName ? `${obj.name} (${triggerParentName})` : postgresSequence ? normalizeDatabaseObjectName(obj.name) || obj.name : obj.name,
             type: childType,
             objectName: obj.name,
+            ...(postgresSequence ? { postgresSequenceExactIdentity: true as const } : {}),
             objectScope: schemaIndex ? ("schema" as const) : undefined,
             signature: objectType === "FUNCTION" || objectType === "PROCEDURE" ? (obj.signature == null ? undefined : signature) : signature || undefined,
             customTypeKind: obj.custom_type_kind ?? undefined,

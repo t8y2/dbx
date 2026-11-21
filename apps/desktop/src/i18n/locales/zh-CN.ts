@@ -1,3 +1,4 @@
+import { postgresSequenceZhCN as postgresSequence } from "./postgresSequence";
 import { tableCopyTaskZhCN as tableCopyTask } from "./tableCopyTask";
 import { tableColumnPasteZhCN as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuZhCN as sidebarMenu } from "./sidebarMenuMessages";
@@ -12,6 +13,7 @@ import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 import { damengDumpZhCN as damengDump } from "./damengDump";
 
 export default withEnglishFallback({
+  postgresSequence,
   oracleTrigger: {
     errorPositionUnavailable: "源码已打开，但无法核实错误位置，请按原行列检查。",
     reconcileStructure: "核对已执行改动",
@@ -656,6 +658,7 @@ export default withEnglishFallback({
       urlDecode: "URL 组件解码",
       radix: "整数进制转换",
       flattenLines: "多行压缩为一行",
+      unicodeEscape: "文本 → Unicode 转义",
     },
     units: {
       auto: "自动（10/13 位）",
@@ -1664,6 +1667,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "默认关闭，填正则表达式开启",
     elasticsearchIndexGroupingPatternHint: "默认关闭（命名格式因环境而异）。填入正则表达式即可开启：将匹配到的滚动或时间序列索引聚合成一个可查询的通配 pattern，隐藏每日明细。",
     version: "版本",
+    influxdbApiPath: "API 路径",
+    influxdbApiPathHint: "通过 Nginx 等反向代理以子路径部署时填写，例如 /influxdb；直连官方端口留空。末尾斜杠会被忽略。",
     victoriametricsApiPath: "API 路径",
     victoriametricsApiPathHint: "单机版通常为 /prometheus；集群版可填写 /select/租户ID/prometheus。",
     victoriametricsLookback: "元数据回看范围",
@@ -2654,6 +2659,7 @@ export default withEnglishFallback({
     contextMenu: {
       executeSelection: "执行选中 SQL",
       executeCurrent: "执行 SQL",
+      executeScriptFromHere: "从此处执行 SQL 脚本",
       export: "导出",
       exportQueryResultTo: "导出当前查询结果集到 {format}",
       copySelection: "复制选中内容",
@@ -2707,6 +2713,14 @@ export default withEnglishFallback({
       drag: "拖动面板",
       empty: "暂无字段",
     },
+    bookmarks: {
+      workspaceTitle: "书签",
+      workspaceSearch: "搜索文件名、SQL 内容或行号",
+      workspaceEmpty: "所有已打开 SQL 标签页的书签会显示在这里。点击编辑器行号左侧的书签栏即可添加。",
+      line: "第 {line} 行",
+      emptyLine: "（空白行）",
+      noMatches: "没有匹配的书签",
+    },
     gotoLine: {
       placeholder: "行号",
       total: "共 {total} 行",
@@ -2733,6 +2747,7 @@ export default withEnglishFallback({
       inSelection: "选区内",
     },
     noExecutableStatementAtCursor: "光标所在位置没有可执行语句",
+    executeScriptBoundaryMismatch: "此处依赖前面的 SQL 分隔符或批次边界。请从分隔符所在行开始执行，或选中完整脚本执行。",
     executionPicker: {
       title: "执行目标",
       currentStatement: "当前 SQL",
@@ -3657,6 +3672,7 @@ export default withEnglishFallback({
     addRow: "新增行",
     insertMultipleRows: "插入多行…",
     pasteAsNewRows: "粘贴为新行",
+    pasteAsNewRowsAwaitingPaste: "当前浏览器不允许直接读取剪贴板。请在表格中按 Ctrl+V（macOS 为 ⌘V）粘贴为新行。",
     insertRowsTitle: "新增多行",
     insertRowsDescription: "创建指定数量的未保存草稿行。保存时未填写的空行会被忽略；保存后的显示位置由当前查询排序决定。",
     insertRowCountLabel: "行数",
@@ -4582,9 +4598,7 @@ export default withEnglishFallback({
     builtinProviders: "内置支持",
     partnerProviders: "优质赞助商",
     hualongSponsored: "$1 免费额度",
-    aicodemirrorSponsored: "8 元免费额度",
     hualongDescription: "🐉 面向重度 AI 开发者的官方直连中转！Codex/Claude 系列 100% 官方源直供，Token 级账单逐笔可核验，支持企业合同与发票。\n🎉用优惠码 DBX&HUALONG 注册即得 $1 额度！",
-    aicodemirrorDescription: "⚡ AICodeMirror 支持企业级高并发、极速开票、7×24 专属技术支持，新人免费领 8 元额度和首充 8 折。",
     astraflowDescription: "UCloud 优刻得旗下星图 AstraFlow 大模型平台，一个 API Key 即可调用 200+ 主流大模型，兼容 OpenAI API。\n🎁 50 元免费额度，[立即领取](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)！",
     astraflowSponsored: "50 元免费额度",
     packyapiSponsored: "$1 免费额度",
@@ -6440,6 +6454,7 @@ export default withEnglishFallback({
     title: "用户与权限",
     unsupported: "当前支持 MySQL 兼容与 PostgreSQL 兼容连接。SQL Server、Oracle 等会按各自权限模型继续扩展。",
     newUser: "新建用户",
+    generatePassword: "生成密码",
     anonymous: "匿名用户",
     roleName: "角色名",
     allowLogin: "允许登录",
@@ -7150,6 +7165,8 @@ export default withEnglishFallback({
     selectedTables: "已选择 {count} 张表",
     exportSelected: "导出所选",
     dropSelected: "删除所选",
+    selectedObjects: "已选择 {count} 个对象",
+    dropPackageBodyHint: "删除包规范时，也会删除已有的包体。",
     truncateSelected: "截断所选",
     clearSelection: "清空选择",
     confirmBatchDropTitle: "删除所选表",
@@ -7541,6 +7558,9 @@ export default withEnglishFallback({
     sqlServerIdentityTypeHint: "SQL Server 自增仅支持 tinyint、smallint、int、bigint、decimal/numeric(小数位为 0)",
   },
   diagram: {
+    addTables: "添加表",
+    showMoreFields: "展开其余 {count} 个字段",
+    collapseFields: "收起字段",
     title: "关系图",
     open: "查看关系图",
     selectConnection: "选择连接",
@@ -8939,7 +8959,7 @@ export default withEnglishFallback({
     objectTypeEvent: "事件",
     objectDataOnlyDisabled: "仅数据模式不传输非表对象",
     objectCrossFamilyDisabled: "跨库仅支持序列传输（纯DDL；视图查询体无法翻译）",
-    xuguPairOnly: "虚谷支持的传输方向：虚谷到虚谷，或 MySQL 到虚谷（仅表结构和数据）。",
+    xuguPairOnly: "虚谷支持的传输方向：虚谷到虚谷，或 MySQL / Oracle 到虚谷（仅表结构和数据）。",
     xuguAppendOverwriteOnly: "虚谷一期仅支持追加或覆盖；暂不支持更新插入和重建。",
     xuguPreserveTableNames: "虚谷结构传输暂要求保留源表名大小写，以避免外键引用错位。",
     crossFamilyViewHint: "跨库视图传输：请同时选择视图依赖的表，或确保目标库已存在这些表",
@@ -9713,6 +9733,9 @@ export default withEnglishFallback({
     warnings: "警告",
   },
   diff: {
+    additionalSchemas: "同时比较这些模式",
+    additionalSchemasHint: "每个模式都会与目标端同名模式比较，并分别审查和部署。",
+    schemaResults: "模式比较结果",
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",
       loadingSourceDetails: "正在读取源数据库表结构",
@@ -10170,10 +10193,12 @@ export default withEnglishFallback({
   },
   settings: {
     toolbarGroup_primary: "主操作栏",
+    toolbarGroup_left: "主操作栏和更多菜单",
     toolbarGroup_menu: "更多菜单",
     toolbarGroup_right: "右侧工具栏",
     toolbarGroup_controls: "系统入口",
-    toolbarOrderHint: "拖拽调整同一区域的顺序。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarOrderHint: "拖拽调整同一区域的顺序。点击图钉可将“更多”中的操作固定到主操作栏。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarPinItem: "将{item}固定到工具栏",
     toolbarReorderItem: "拖拽调整{item}的顺序",
     toolbarExportProgress: "任务进度",
     historyRetentionLimit: "查询历史保留条数",
@@ -10865,6 +10890,10 @@ export default withEnglishFallback({
     sidebarIndentDescription: "每个树层级缩进的像素偏移量。",
     sidebarFontSize: "侧边栏字体大小",
     sidebarFontSizeDescription: "侧边栏对象树的字体大小（像素），独立于编辑器字体大小。",
+    sidebarConnectionIconStyle: "导航栏连接徽标样式",
+    sidebarConnectionIconStyleDescription: "彩色徽标便于快速辨认连接状态：彩底白标表示已连接，灰底白标表示未连接。插件沿用自己的图标。",
+    sidebarConnectionIconStyle_classic: "旧版徽标",
+    sidebarConnectionIconStyle_badge: "彩色徽标",
     sidebarDensity: "侧边栏行高密度",
     sidebarDensityDescription: "侧边栏对象导航树的行高密度。",
     sidebarDensity_default: "默认",
@@ -11132,6 +11161,8 @@ export default withEnglishFallback({
     sortCompletionColumnsAlphabeticallyDescription: "关闭后，表字段将保持数据库中的原始顺序",
     selectFirstCompletionOnOpen: "自动选中首个补全候选",
     selectFirstCompletionOnOpenDescription: "开启后，候选列表弹出时会选中第一项，可用 Enter 或 Tab 接受；关闭后，Enter 换行，Tab 接受第一项。",
+    completionAutoActivationDelay: "补全自动激活延迟（毫秒）",
+    completionAutoActivationDelayDescription: "输入后延迟多久弹出补全候选，默认 500 毫秒；调大可避免连续输入时补全频繁弹出干扰编辑，0 表示立即弹出。",
     completionTriggerMode: "SQL 补全触发方式",
     completionMatchMode: "SQL 补全匹配方式",
     completionMatchModeDescription: "选择 SQL 补全候选的匹配过滤规则。",
@@ -11252,6 +11283,8 @@ export default withEnglishFallback({
     redisDatabaseDisplayLimitOption: "{count} 个数据库",
     exportBatchSize: "导出批次大小",
     dateTimeSection: "日期与时间",
+    globalNumberGrouping: "显示千分位分隔符",
+    globalNumberGroupingDescription: "在网格中将数字显示为 1,234,567.89 等形式，单独配置的列格式优先。",
     globalDateTimeDisplayFormat: "全局显示格式",
     globalDateTimeDisplayFormatDescription: "应用于所有数据库中未单独配置列格式的日期时间字段。",
     globalDateTimeExportFormat: "全局导出格式",
@@ -13483,6 +13516,13 @@ export default withEnglishFallback({
     expiryMustBePositive: "有效期必须大于 0 天",
   },
   mqBroker: {
+    searchConfigurations: "搜索配置项名称",
+    configuration: "Broker 配置",
+    noConfigurations: "没有匹配的配置项",
+    configurationUnsupported: "此 Kafka Broker 不支持查询配置。",
+    configName: "名称",
+    configValue: "值",
+    configSource: "来源",
     title: "Broker 集群",
     autoRefresh: "自动刷新",
     refreshInterval5s: "5秒",

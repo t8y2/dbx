@@ -1123,6 +1123,33 @@ async fn execute_execute_query(
     db_type: &DatabaseType,
     sql_permissions: AgentSqlPermissions,
 ) -> Result<String, String> {
+    execute_execute_query_with_result(
+        tool_call,
+        state,
+        connection_id,
+        database,
+        default_schema,
+        db_type,
+        sql_permissions,
+    )
+    .await
+    .map(|(text, _)| text)
+}
+
+/// Shared core of the `execute_query` agent tool. Safety gates, session
+/// pinning, and text formatting are identical to the tool executed through
+/// `execute_tool`; the raw result rides along so the MCP server can emit
+/// `structuredContent` without executing the query twice (#15149). The
+/// MongoDB shell branch carries no SQL result.
+async fn execute_execute_query_with_result(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    default_schema: Option<&str>,
+    db_type: &DatabaseType,
+    sql_permissions: AgentSqlPermissions,
+) -> Result<(String, Option<QueryResult>), String> {
     let sql = tool_call.arguments.get("sql").and_then(|v| v.as_str()).ok_or("Missing required parameter: sql")?.trim();
 
     if sql.is_empty() {
@@ -1134,7 +1161,9 @@ async fn execute_execute_query(
     let cell_window = QueryCellWindow::from_arguments(&tool_call.arguments);
 
     if *db_type == DatabaseType::MongoDb {
-        return execute_mongo_query(state, connection_id, database, sql, limit.max(1), cell_window).await;
+        return execute_mongo_query(state, connection_id, database, sql, limit.max(1), cell_window)
+            .await
+            .map(|text| (text, None));
     }
 
     // Classify SQL risk using the concrete database dialect.
@@ -1211,7 +1240,59 @@ async fn execute_execute_query(
     )
     .await?;
 
-    format_query_result_as_text(&result, limit, cell_window)
+    let text = format_query_result_as_text(&result, limit, cell_window)?;
+    Ok((text, Some(result)))
+}
+
+/// Runs the `execute_query` agent tool with the same database-tool lock,
+/// safety gates, and text formatting as `execute_tool("execute_query", ...)`,
+/// and additionally returns the executed result so the MCP server can attach
+/// `structuredContent.result` (#15149). The result is `None` for MongoDB
+/// shell commands and for errors — those keep the text-only contract.
+pub async fn execute_query_tool_with_result(
+    tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    default_schema: Option<&str>,
+    db_type: &DatabaseType,
+    sql_permissions: AgentSqlPermissions,
+) -> (ToolResult, Option<QueryResult>) {
+    // Same database-tool lock as `execute_tool_scoped`: agent loops may share
+    // one physical connection, so only one database tool future runs at a time.
+    let _connection_guard = connection_tool_lock(connection_id).lock_owned().await;
+    match execute_execute_query_with_result(
+        tool_call,
+        state,
+        connection_id,
+        database,
+        default_schema,
+        db_type,
+        sql_permissions,
+    )
+    .await
+    {
+        Ok((content, result)) => (
+            ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                content,
+                is_error: false,
+                explain_data: None,
+            },
+            result,
+        ),
+        Err(err) => (
+            ToolResult {
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                content: format!("Error: {err}"),
+                is_error: true,
+                explain_data: None,
+            },
+            None,
+        ),
+    }
 }
 
 async fn execute_mongo_query(

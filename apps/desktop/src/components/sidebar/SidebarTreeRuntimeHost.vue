@@ -585,6 +585,7 @@ const emit = defineEmits<{
   "peek-structure": [node: TreeNode];
   "open-elasticsearch-index-metadata": [node: TreeNode, kind: ElasticsearchIndexMetadataKind];
   "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection, createTrigger?: SidebarActionRequest<OracleTriggerSqlBinding>];
+  "open-postgres-sequence": [node: TreeNode];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
   "open-connection-settings": [connectionId: string];
@@ -3224,6 +3225,7 @@ function dropTableChildObjectSqlOptionsForNode(node: TreeNode): DropTableChildOb
     schema: node.schema,
     tableName: node.tableName,
     name,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   };
 }
 
@@ -4359,6 +4361,7 @@ async function refreshRenameObjectPreviewSql() {
         databaseType: currentDatabaseType(),
         oldName: node.label,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
     } catch {
@@ -4429,6 +4432,7 @@ async function refreshRenameObjectPreviewSql() {
       schema: node.schema,
       oldName: node.label,
       newName,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     if (requestId === renameObjectPreviewRequestId) renameObjectPreviewSql.value = sql;
   } catch (error) {
@@ -4700,6 +4704,7 @@ async function confirmRenameObject() {
         oldName: node.label,
         newName,
         terminateConnections: activeConnections > 0,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
         database: maintenanceDatabase,
@@ -4803,6 +4808,7 @@ async function confirmRenameObject() {
         name: node.objectName || node.label,
         newName,
         source: source.source,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       const executed = await executeTreeNodeSqlWithProductionGuard(node, statements.join(";\n"), {
         database: node.database,
@@ -4820,6 +4826,7 @@ async function confirmRenameObject() {
         schema: node.schema,
         oldName: node.label,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       });
       const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, {
         database: node.database,
@@ -5454,6 +5461,7 @@ async function refreshDropDatabasePreviewSql() {
   dropDatabasePreviewSql.value = await buildDropDatabaseSql({
     databaseType: currentDatabaseType(),
     name: node.label,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   }).catch(() => "");
 }
 
@@ -5463,6 +5471,7 @@ async function refreshDropSchemaPreviewSql() {
   dropSchemaPreviewSql.value = await buildDropSchemaSql({
     databaseType: currentDatabaseType(),
     name: node.label,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   }).catch(() => "");
 }
 
@@ -5493,6 +5502,7 @@ function databasePropertyEditOptions() {
     driverProfile: activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId)?.driver_profile : undefined,
     target: "database" as const,
     name: databasePropertyName(),
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(activeNode.value.connectionId),
   };
   if (canEditDatabaseCharsetCollation.value) {
     return {
@@ -5577,6 +5587,7 @@ async function confirmEditDatabaseProperties() {
       driverProfile: config?.driver_profile,
       target: "database" as const,
       name: node.database || node.label,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
     const options = propertyGroups.includes("charsetCollation") ? { ...base, charset: editDatabaseCharset.value, collation: editDatabaseCollation.value } : propertyGroups.includes("databaseComment") ? { ...base, comment: editDatabaseCommentText.value } : null;
     if (!options) return;
@@ -5607,6 +5618,7 @@ async function refreshSchemaCommentPreviewSql() {
     target: "schema",
     name: node.schema || node.label,
     comment: schemaCommentText.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
   }).catch(() => "");
 }
 
@@ -5652,6 +5664,7 @@ async function confirmEditSchemaComment() {
       target: "schema",
       name: node.schema || node.label,
       comment: schemaCommentText.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
     toast(t("contextMenu.editSchemaCommentSuccess", { name: node.label }), 3000);
@@ -6002,6 +6015,7 @@ async function confirmCreateDatabase() {
       name,
       charset: createDatabaseCharset.value,
       collation: createDatabaseCollation.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     const provider = resolveDatabaseUserAdminProviderForConnection(config);
     const plan: AuthorizationPlan = provider
@@ -6129,6 +6143,7 @@ async function confirmDropDatabase() {
       (await buildDropDatabaseSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       }));
     const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
     if (!executed) return;
@@ -6173,6 +6188,7 @@ async function confirmCreateSchema() {
     const sql = await buildCreateSchemaSql({
       databaseType: effectiveDatabaseTypeForConnection(config),
       name,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     });
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: targetDatabase || "" });
     toast(t("contextMenu.createSchemaSuccess", { name }), 3000);
@@ -6214,6 +6230,7 @@ async function confirmDropSchema() {
       (await buildDropSchemaSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       }));
     await executeTreeNodeSqlWithProductionGuard(node, sql, { database: node.database, schema: dropExecutionSchema });
     toast(t("contextMenu.dropSchemaSuccess", { name: node.label }), 3000);
@@ -8831,6 +8848,18 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "sequence" || (node.type === "synonym" && supportsOracleObjectExport(databaseTypeForNode(node), "SYNONYM"))) {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (node.type === "sequence" && connectionStore.getConfig(node.connectionId || "")?.db_type === "postgres") {
+      const sequenceTarget = createSidebarActionTarget(node);
+      const exactIdentity = sequenceTarget.postgresSequenceExactIdentity === true && !!sequenceTarget.objectName && !!sequenceTarget.schema;
+      items.push({
+        label: t("postgresSequence.title"),
+        action: () => {
+          if (exactIdentity) emit("open-postgres-sequence", sequenceTarget);
+        },
+        icon: Pencil,
+        disabled: !exactIdentity,
+      });
+    }
     if (currentDatabaseType() === "oceanbase-oracle") {
       items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
     }

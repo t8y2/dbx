@@ -21,6 +21,19 @@ function collapseSqlEditorMenuGroups(items: ContextMenuItem[], t: (key: string) 
     else secondary.push({ label: "", separator: true });
     secondary.push(...item.children);
   }
+
+  const executionActionIds = ["editor.contextMenu.executeScriptFromHere", "toolbar.executeAllSql"];
+  const executionActions = executionActionIds.flatMap((id) => {
+    const action = secondary.find((item) => item.sidebarActionId === id);
+    return action ? [action] : [];
+  });
+  if (executionActions.length > 0) {
+    const executionActionIdSet = new Set(executionActions.map((item) => item.sidebarActionId));
+    const remaining = secondary.filter((item) => !executionActionIdSet.has(item.sidebarActionId));
+    if (remaining.length > 0 && !remaining[remaining.length - 1]?.separator) remaining.push({ label: "", separator: true });
+    secondary.splice(0, secondary.length, ...remaining, ...executionActions);
+  }
+
   return result;
 }
 

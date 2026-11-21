@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 346.42 400">
+<!-- Monochrome sidebar adaptation of ../qdrant.svg. Original vector geometry retained; foreground extraction / transparent detail treatment only. -->
+<defs><mask id="qdrant-mono" x="0.0" y="0.0" width="346.42" height="400.0" maskUnits="userSpaceOnUse" mask-type="luminance">
+<defs xmlns="http://www.w3.org/2000/svg">
+    <style>
+      .cls-1 {
+        fill:white;
+      }
+
+      .cls-2 {
+        fill:white;
+      }
+
+      .cls-3 {
+        fill:white;
+      }
+    </style>
+  </defs>
+
+<g xmlns="http://www.w3.org/2000/svg" id="Vectors">
+    <g>
+      <g>
+        <polygon class="cls-2" points="173.21 0 0 100 0 300 173.21 400 238.16 362.5 238.16 287.5 173.21 325 64.96 262.5 64.96 137.5 173.21 75 281.46 137.5 281.46 387.5 346.42 350 346.42 100 173.21 0" fill="white" />
+        <polygon class="cls-2" points="108.26 162.5 108.26 237.5 173.21 275 238.16 237.5 238.16 162.5 173.21 125 108.26 162.5" fill="white" />
+      </g>
+      <g>
+        <polygon class="cls-1" points="238.16 287.5 238.16 362.5 173.21 400 173.21 325 238.16 287.5" fill="white" />
+        <polygon class="cls-1" points="346.42 100 346.42 350 281.46 387.5 281.46 137.5 346.42 100" fill="white" />
+        <polygon class="cls-3" points="346.42 100 281.46 137.5 173.21 75 64.96 137.5 0 100 173.21 0 346.42 100" fill="white" />
+        <polygon class="cls-2" points="173.21 325 173.21 400 0 300 0 100 64.96 137.5 64.96 262.5 173.21 325" fill="white" />
+        <polygon class="cls-3" points="238.16 162.5 173.21 200 108.26 162.5 173.21 125 238.16 162.5" fill="white" />
+        <polygon class="cls-2" points="173.21 200 173.21 275 108.26 237.5 108.26 162.5 173.21 200" fill="white" />
+        <polygon class="cls-1" points="238.16 162.5 238.16 237.5 173.21 275 173.21 200 238.16 162.5" fill="white" />
+      </g>
+    </g>
+  </g>
+
+</mask></defs><rect x="0.0" y="0.0" width="346.42" height="400.0" fill="white" mask="url(#qdrant-mono)"/>
+</svg>

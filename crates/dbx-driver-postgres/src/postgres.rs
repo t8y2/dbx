@@ -34,7 +34,9 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence,
+};
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
@@ -1235,6 +1237,26 @@ fn pg_text_fallback_value(value: &str, col_type: Option<PgColType>) -> (serde_js
     (value, srid)
 }
 
+/// The binary numeric decoder emits a leading zero for values below one, but
+/// PostgreSQL's text protocol prints them as `.7`. Servers that only answer
+/// with text results (TBase/GaussDB) and queries forced onto the text protocol
+/// by another column would otherwise show a different string for the same
+/// value. Only add the missing zero; never touch signs, exponents or other
+/// numeric spellings.
+fn normalize_pg_numeric_text(value: &str) -> String {
+    let unsigned = value.strip_prefix('-').or_else(|| value.strip_prefix('+')).unwrap_or(value);
+    if unsigned.starts_with('.') && unsigned.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        let sign_len = value.len() - unsigned.len();
+        let mut normalized = String::with_capacity(value.len() + 1);
+        normalized.push_str(&value[..sign_len]);
+        normalized.push('0');
+        normalized.push_str(unsigned);
+        normalized
+    } else {
+        value.to_string()
+    }
+}
+
 fn pg_text_fallback_value_with_spatial(
     value: &str,
     col_type: Option<PgColType>,
@@ -1254,6 +1276,7 @@ fn pg_text_fallback_value_with_spatial(
             Some(parsed) => (serde_json::Value::Bool(parsed), None, false),
             None => (serde_json::Value::String(value.to_string()), None, false),
         },
+        Some(PgColType::Numeric) => (serde_json::Value::String(normalize_pg_numeric_text(value)), None, false),
         Some(_) => (serde_json::Value::String(value.to_string()), None, false),
         None => decode_pg_text_wkb(value)
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
@@ -9219,6 +9242,14 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
     // keep the row-returning assumption whenever parsing does not say otherwise.
     let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
 
+    // INSERT/UPDATE/DELETE only return rows through RETURNING. Skip the full
+    // parse of statements without it, such as large multi-row INSERT batches.
+    if starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"])
+        && !contains_ascii_case_insensitive(sql, "returning")
+    {
+        return false;
+    }
+
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
         return leads_with_cte;
     };
@@ -12984,6 +13015,8 @@ mod tests {
             "INSERT INTO users (id) VALUES (1) RETURNING id",
             "UPDATE users SET name = 'Ada' RETURNING id, name",
             "DELETE FROM users WHERE id = 1 RETURNING id",
+            "insert into users (id) values (1) returning id",
+            "-- audit\nUpdate users SET name = 'Ada' Returning id",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
             "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
         ] {
@@ -13180,6 +13213,40 @@ mod tests {
         assert_eq!(pg_text_fallback_value("maybe", Some(PgColType::Bool)), (serde_json::json!("maybe"), None));
         // Without a classified column type nothing is coerced.
         assert_eq!(pg_text_fallback_value("f", None), (serde_json::json!("f"), None));
+    }
+
+    #[test]
+    fn postgres_text_fallback_adds_leading_zero_to_fractional_numeric() {
+        // The binary decoder already emits these with a leading zero; text
+        // results from TBase/GaussDB must agree (issue #15198).
+        for (text, expected) in [(".70000000", "0.70000000"), ("-.7", "-0.7"), ("+.7", "+0.7"), (".0", "0.0")] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(expected), None));
+        }
+    }
+
+    #[test]
+    fn postgres_text_fallback_preserves_other_numeric_text() {
+        // Values that already carry an integer digit, special values, and
+        // exponent notation must pass through byte-for-byte.
+        for text in [
+            "0.00",
+            "-0.0012300",
+            "12345.6789",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "1e-3",
+            ".",
+            "-.",
+            "",
+            "not a number",
+            ".中",
+        ] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(text), None));
+        }
+        // Without a classified type nothing is reinterpreted, so an ordinary
+        // text column containing ".7" is left alone.
+        assert_eq!(pg_text_fallback_value(".7", None), (serde_json::json!(".7"), None));
     }
 
     #[test]

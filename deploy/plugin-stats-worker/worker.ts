@@ -352,6 +352,12 @@ export function applyWindow(doc: ArchiveDoc, counts: WindowCount[], uniques: Dai
   for (const count of counts) {
     const key = `${count.kind}:${count.plugin}:${count.version}`;
     doc.total[key] = (doc.total[key] ?? 0) + count.events;
+    // Keep the per-plugin rollup in step with its versioned counters. The old
+    // aggregator wrote versions first and the rollup in a later phase, so every
+    // mid-pass failure left the rollup behind (dl was ~11% short by 2026-11-10).
+    // Both are now advanced from the same `counts` entry.
+    const rollupKey = `${count.kind}:${count.plugin}`;
+    doc.total[rollupKey] = (doc.total[rollupKey] ?? 0) + count.events;
   }
   for (const unique of uniques) {
     // Overwrite, not add: reruns converge to the full-day value and

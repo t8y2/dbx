@@ -89,12 +89,45 @@ function readMongoRegexLiteral(source: string, index: number): MongoRegexLiteral
   return { end: cursor, pattern, options: options.join("") };
 }
 
+// Shell arguments are data. Only a substitution-free template has a value here.
+function readMongoTemplate(source: string, start: number): { value: string; end: number } | null {
+  let value = "";
+  const escapes: Record<string, string> = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", v: "\v", "\\": "\\", "`": "`", "$": "$", "'": "'", '"': '"', "/": "/" };
+  for (let i = start + 1; i < source.length; i++) {
+    const ch = source[i]!;
+    if (ch === "`") return { value, end: i + 1 };
+    if (ch === "$" && source[i + 1] === "{") return null;
+    if (ch === "\\") {
+      const next = source[++i];
+      if (next === "\r" || next === "\n") {
+        if (next === "\r" && source[i + 1] === "\n") i++;
+        continue;
+      }
+      if (next === undefined || !Object.hasOwn(escapes, next)) return null;
+      value += escapes[next];
+    } else if (ch === "\r") {
+      if (source[i + 1] === "\n") i++;
+      value += "\n";
+    } else {
+      value += ch;
+    }
+  }
+  return null;
+}
+
 function replaceMongoRegexLiterals(source: string): string | null {
   let result = "";
   let index = 0;
 
   while (index < source.length) {
     const char = source[index] ?? "";
+    if (char === "`") {
+      const template = readMongoTemplate(source, index);
+      if (!template) return null;
+      result += JSON.stringify(template.value);
+      index = template.end;
+      continue;
+    }
     if (char === '"' || char === "'") {
       const start = index;
       const quote = char;
@@ -139,7 +172,7 @@ function isMongoRegexValuePosition(source: string, index: number): boolean {
 
   while (cursor < index) {
     const char = source[cursor] ?? "";
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       const quote = char;
       cursor += 1;
       let escaped = false;
@@ -197,16 +230,16 @@ export function parseCollectionMethodTarget(source: string, method: string): { c
   const escapedMethod = escapeRegExp(method);
   const direct = new RegExp(`^db\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
   if (direct) {
-    return { collection: direct[1]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
+    return { collection: direct[1]!, methodCallIndex: direct[0].lastIndexOf(".") };
   }
   const getCollection = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(["'])(.*?)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
   if (getCollection) {
-    return { collection: getCollection[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
+    return { collection: getCollection[2]!, methodCallIndex: getCollection[0].lastIndexOf(".") };
   }
   // db["orders-2024"] reaches names that are not valid identifiers, the same way the shell does.
   const bracket = new RegExp(`^db\\s*\\[\\s*(["'])(.*?)\\1\\s*\\]\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
   if (bracket) {
-    return { collection: bracket[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
+    return { collection: bracket[2]!, methodCallIndex: bracket[0].lastIndexOf(".") };
   }
   return null;
 }
@@ -251,7 +284,7 @@ export function splitTopLevel(source: string): string[] {
       continue;
     }
 
-    if (char === '"' || char === "'") quote = char;
+    if (char === '"' || char === "'" || char === "`") quote = char;
     else if (char === "{" || char === "[" || char === "(") depth += 1;
     else if (char === "}" || char === "]" || char === ")") depth -= 1;
     else if (char === "," && depth === 0) {
@@ -291,7 +324,7 @@ export function findMatchingParen(source: string, openIndex: number): number {
       continue;
     }
 
-    if (char === '"' || char === "'") quote = char;
+    if (char === '"' || char === "'" || char === "`") quote = char;
     else if (char === "(") depth += 1;
     else if (char === ")") {
       depth -= 1;
@@ -325,7 +358,7 @@ export function hasUnclosedMongoDelimiters(source: string): boolean {
       i = regexLiteral.end - 1;
       continue;
     }
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       continue;
     }
@@ -357,7 +390,7 @@ export function stripMongoJsonComments(source: string): string {
       continue;
     }
 
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       result += char;
       continue;
@@ -469,7 +502,7 @@ export function quoteUnquotedObjectKeys(source: string): string {
       continue;
     }
 
-    if (char === '"' || char === "'") {
+    if (char === '"' || char === "'" || char === "`") {
       quote = char;
       result += char;
       continue;

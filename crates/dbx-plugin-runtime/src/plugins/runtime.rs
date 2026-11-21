@@ -397,6 +397,13 @@ impl PluginSidecarSession {
         self.status.borrow().clone()
     }
 
+    pub(super) fn has_pending_requests(&self) -> bool {
+        match self.pending.try_lock() {
+            Ok(pending) => !pending.is_empty(),
+            Err(_) => true,
+        }
+    }
+
     pub async fn handshake(&self) -> Option<PluginHandshake> {
         self.handshake.read().await.clone()
     }

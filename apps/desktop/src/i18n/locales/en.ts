@@ -1,3 +1,4 @@
+import { postgresSequenceEn as postgresSequence } from "./postgresSequence";
 import { tableCopyTaskEn as tableCopyTask } from "./tableCopyTask";
 import { tableColumnPasteEn as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuEn as sidebarMenu } from "./sidebarMenuMessages";
@@ -66,6 +67,7 @@ const consul = {
 };
 
 export default {
+  postgresSequence,
   oracleTrigger: {
     errorPositionUnavailable: "Source opened. The error location could not be verified; check the reported line and column.",
     reconcileStructure: "Reconcile applied changes",
@@ -711,6 +713,7 @@ export default {
       urlDecode: "URL component decode",
       radix: "Integer base conversion",
       flattenLines: "Collapse lines to one",
+      unicodeEscape: "Text → Unicode escapes",
     },
     units: {
       auto: "Auto (10/13 digits)",
@@ -1728,6 +1731,8 @@ export default {
     elasticsearchIndexGroupingPatternPlaceholder: "off by default; enter a regex to enable",
     elasticsearchIndexGroupingPatternHint: "Off by default (naming schemes vary). Enter a regular expression to enable: matched rolling or time-series indices are aggregated into one queryable wildcard pattern, hiding per-day detail.",
     version: "Version",
+    influxdbApiPath: "API Path",
+    influxdbApiPathHint: "Set this when a reverse proxy such as Nginx serves InfluxDB under a sub path, for example /influxdb. Leave it empty to reach the server at the root. A trailing slash is ignored.",
     victoriametricsApiPath: "API Path",
     victoriametricsApiPathHint: "Use /prometheus for single-node deployments, or /select/tenantID/prometheus for clusters.",
     victoriametricsLookback: "Metadata Lookback",
@@ -2722,6 +2727,7 @@ export default {
     contextMenu: {
       executeSelection: "Execute selection",
       executeCurrent: "Execute SQL",
+      executeScriptFromHere: "Execute Script from Here",
       export: "Export",
       exportQueryResultTo: "Export current query result to {format}",
       copySelection: "Copy selection",
@@ -2775,6 +2781,14 @@ export default {
       drag: "Drag to move",
       empty: "No columns",
     },
+    bookmarks: {
+      workspaceTitle: "Bookmarks",
+      workspaceSearch: "Search files, SQL text or line numbers",
+      workspaceEmpty: "Bookmarks from all open SQL tabs appear here. Click the bookmark gutter beside a line number to add one.",
+      line: "Line {line}",
+      emptyLine: "(blank line)",
+      noMatches: "No matching bookmarks",
+    },
     gotoLine: {
       placeholder: "Line number",
       total: "{total} lines",
@@ -2801,6 +2815,7 @@ export default {
       inSelection: "In selection",
     },
     noExecutableStatementAtCursor: "There is no executable statement at the cursor.",
+    executeScriptBoundaryMismatch: "This position depends on a SQL delimiter or batch boundary. Start at the delimiter line, or select the complete script to execute.",
     executionPicker: {
       title: "Execution Target",
       currentStatement: "Current SQL",
@@ -3728,6 +3743,7 @@ export default {
     addRow: "Add Row",
     insertMultipleRows: "Insert Multiple Rows…",
     pasteAsNewRows: "Paste as new rows",
+    pasteAsNewRowsAwaitingPaste: "Clipboard access is unavailable in this browser. Press Ctrl+V (⌘V on macOS) to paste as new rows.",
     insertRowsTitle: "Insert Multiple Rows",
     insertRowsDescription: "Create this many unsaved draft rows. Empty rows are ignored when saving; after saving, the display order follows the current query.",
     insertRowCountLabel: "Row count",
@@ -4656,9 +4672,7 @@ export default {
     builtinProviders: "Built-in support",
     partnerProviders: "Premium sponsors",
     hualongSponsored: "$1 free credit",
-    aicodemirrorSponsored: "¥8 free credit",
     hualongDescription: "🐉 Official-source model relay for heavy AI developers! 100% genuine Codex and Claude series with verifiable token-level billing, enterprise contracts, and invoicing.\n🎉Sign up with promo code DBX&HUALONG for $1 free credit!",
-    aicodemirrorDescription: "⚡ AICodeMirror delivers enterprise-grade concurrency, fast invoicing, and 7×24 dedicated support; new users get ¥8 in free credit plus 20% off their first top-up.",
     astraflowDescription: "AstraFlow by UCloud provides access to 200+ mainstream AI models with a single API key, compatible with the OpenAI API.\n🎁 ¥50 free credit — [claim it now](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
     astraflowSponsored: "¥50 free credit",
     packyapiSponsored: "$1 free credit",
@@ -6468,6 +6482,7 @@ export default {
     title: "Users & Privileges",
     unsupported: "MySQL-compatible and PostgreSQL-compatible connections are supported. SQL Server, Oracle, and other permission models can be added next.",
     newUser: "New User",
+    generatePassword: "Generate password",
     anonymous: "Anonymous",
     roleName: "Role name",
     allowLogin: "Allow login",
@@ -7179,6 +7194,8 @@ export default {
     selectedTables: "{count} tables selected",
     exportSelected: "Export selected",
     dropSelected: "Drop selected",
+    selectedObjects: "{count} objects selected",
+    dropPackageBodyHint: "Dropping a package specification also drops its body, if present.",
     truncateSelected: "Truncate selected",
     clearSelection: "Clear selection",
     confirmBatchDropTitle: "Drop Selected Tables",
@@ -7571,6 +7588,9 @@ export default {
     sqlServerIdentityTypeHint: "SQL Server identity only supports tinyint, smallint, int, bigint, and decimal/numeric with scale 0",
   },
   diagram: {
+    addTables: "Add tables",
+    showMoreFields: "Show {count} more fields",
+    collapseFields: "Collapse fields",
     title: "Relationship Diagram",
     open: "View Diagram",
     selectConnection: "Select connection",
@@ -8975,7 +8995,7 @@ export default {
     objectTypeEvent: "Events",
     objectDataOnlyDisabled: "Non-table objects are not transferred in data-only mode",
     objectCrossFamilyDisabled: "Cross-database transfer supports sequences only (plain DDL; view query bodies cannot be translated)",
-    xuguPairOnly: "Supported Xugu directions: Xugu to Xugu, or MySQL to Xugu (tables and data only).",
+    xuguPairOnly: "Supported Xugu directions: Xugu to Xugu, or MySQL / Oracle to Xugu (tables and data only).",
     xuguAppendOverwriteOnly: "The first Xugu transfer phase supports append and overwrite only; upsert and rebuild are not supported yet.",
     xuguPreserveTableNames: "Xugu structure transfer currently requires preserving source table-name casing to avoid mismatched foreign-key references.",
     crossFamilyViewHint: "Cross-database view transfer: select the tables the view depends on as well, or make sure they already exist in the target database",
@@ -9749,6 +9769,9 @@ export default {
     warnings: "Warnings",
   },
   diff: {
+    additionalSchemas: "Also compare these schemas",
+    additionalSchemasHint: "Each one is compared with the schema of the same name on the target, then reviewed and deployed separately.",
+    schemaResults: "Schema results",
     progress: {
       loadingObjects: "Reading source and target database objects...",
       loadingSourceDetails: "Reading source database table structures",
@@ -10206,10 +10229,12 @@ export default {
   },
   settings: {
     toolbarGroup_primary: "Primary actions",
+    toolbarGroup_left: "Primary actions and More",
     toolbarGroup_menu: "More menu",
     toolbarGroup_right: "Right toolbar",
     toolbarGroup_controls: "System actions",
-    toolbarOrderHint: "Drag to reorder within each group. Hidden primary and system actions remain available in More.",
+    toolbarOrderHint: "Drag to reorder within each group. Use the pin icon to move an action from More to the toolbar. Hidden primary and system actions remain available in More.",
+    toolbarPinItem: "Pin {item} to the toolbar",
     toolbarReorderItem: "Drag to reorder {item}",
     toolbarExportProgress: "Task progress",
     historyRetentionLimit: "Query history retention",
@@ -10901,6 +10926,10 @@ export default {
     sidebarIndentDescription: "Horizontal offset added per tree depth level, in pixels.",
     sidebarFontSize: "Sidebar font size",
     sidebarFontSizeDescription: "Font size for the sidebar object tree, in pixels. Independent of the editor font size.",
+    sidebarConnectionIconStyle: "Sidebar connection badge style",
+    sidebarConnectionIconStyleDescription: "Colored badges make connection status easy to see at a glance. A white mark on a colored background means connected, and a white mark on gray means disconnected. Plugins keep their own icons.",
+    sidebarConnectionIconStyle_classic: "Legacy badges",
+    sidebarConnectionIconStyle_badge: "Colored badges",
     sidebarDensity: "Sidebar density",
     sidebarDensityDescription: "Row height density for the sidebar navigation tree.",
     sidebarDensity_default: "Default",
@@ -11171,6 +11200,8 @@ export default {
     sortCompletionColumnsAlphabeticallyDescription: "Turn off to keep table fields in their original database order",
     selectFirstCompletionOnOpen: "Automatically select the first completion",
     selectFirstCompletionOnOpenDescription: "When enabled, the first candidate is selected when the list opens, and Enter or Tab accepts it. When disabled, Enter inserts a new line and Tab accepts the first candidate.",
+    completionAutoActivationDelay: "Completion auto-activation delay (ms)",
+    completionAutoActivationDelayDescription: "How long to wait after typing before the completion list opens, 500 ms by default. Increase it to keep fast typing uninterrupted; 0 opens the list immediately.",
     completionTriggerMode: "SQL completion trigger mode",
     completionMatchMode: "SQL completion match mode",
     completionMatchModeDescription: "Choose the matching rule used to filter SQL completion candidates.",
@@ -11291,6 +11322,8 @@ export default {
     redisDatabaseDisplayLimitOption: "{count} databases",
     exportBatchSize: "Export batch size",
     dateTimeSection: "Date and time",
+    globalNumberGrouping: "Show thousands separators",
+    globalNumberGroupingDescription: "Show numbers such as 1,234,567.89 in the grid. Column-specific formatters take precedence.",
     globalDateTimeDisplayFormat: "Global display format",
     globalDateTimeDisplayFormatDescription: "Applies to temporal columns without a column-specific formatter in every database.",
     globalDateTimeExportFormat: "Global export format",
@@ -13523,6 +13556,13 @@ export default {
     expiryMustBePositive: "Expiry must be greater than 0 days",
   },
   mqBroker: {
+    searchConfigurations: "Search configuration names",
+    configuration: "Broker configuration",
+    noConfigurations: "No matching configuration entries",
+    configurationUnsupported: "This Kafka broker does not support configuration lookup.",
+    configName: "Name",
+    configValue: "Value",
+    configSource: "Source",
     title: "Broker cluster",
     autoRefresh: "Auto refresh",
     refreshInterval5s: "5s",

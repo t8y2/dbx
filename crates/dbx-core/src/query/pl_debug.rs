@@ -1791,7 +1791,8 @@ pub(crate) use lifecycle::{begin_shutdown, drain_connection, drain_transport};
 use lifecycle::{confirm_exit, request_close, spawn_watchdog};
 pub use mutation::pl_debug_claim_mutation_core;
 pub(crate) use transport::{
-    adopt_published_transport, current_transport, reserve_transport, retire_transport, transport_publication_guard,
+    adopt_published_transport, current_transport, reserve_transport, retire_transport,
+    retire_unpublished_zookeeper_transport, transport_publication_guard,
 };
 
 #[cfg(test)]

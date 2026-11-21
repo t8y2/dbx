@@ -1,4 +1,5 @@
 import type { EditorView as EditorViewType } from "@codemirror/view";
+import { syntaxTree } from "@codemirror/language";
 import { type QueryCompletionOption } from "./useQueryEditorBatchSelection";
 import { insertQueryEditorNewline } from "@/lib/editor/queryEditorNewline";
 import { isBatchColumnSelectionCompletionActive } from "@/lib/editor/batchColumnSelection";
@@ -9,6 +10,10 @@ import type { QueryEditorCodeMirrorRuntime } from "./queryEditorCodeMirrorRuntim
 import type { useSettingsStore } from "@/stores/settingsStore";
 import type { useQueryEditorCompletion } from "./useQueryEditorCompletion";
 import type { useQueryEditorBatchSelection } from "./useQueryEditorBatchSelection";
+
+// Only unambiguous T-SQL clause words can be recased before suggestions arrive.
+// The editor's syntax vocabulary also contains words that can be identifiers.
+const SQL_SERVER_SPACE_KEYWORDS = new Set("SELECT FROM WHERE JOIN INNER OUTER LEFT RIGHT FULL CROSS ON GROUP ORDER BY ASC DESC HAVING INSERT INTO VALUES UPDATE SET DELETE AS AND OR NOT DISTINCT TOP WITH UNION ALL EXISTS IN IS LIKE BETWEEN CASE WHEN THEN ELSE END".split(" "));
 
 interface QueryEditorCompletionKeysOptions {
   props: Readonly<QueryEditorProps>;
@@ -184,8 +189,22 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     const target = selected ?? getTargetCompletion(view);
     const completionType = target?.type;
     if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
+    if (!target) return false;
     // Batch-selection rows own Space for checkbox toggling; this Prec.highest binding outranks their keymap.
     if (target?.dbxBatchColumnSelection || target?.dbxBatchColumnSelectionAction) return false;
+    // Space confirms what the user is typing, not an unrelated fuzzy match the popup
+    // happened to rank first (#14698): typing the JOIN keyword `on` opens the list with
+    // fuzzy matches like `tbml.FMEMONICCODE`, and committing the first row silently
+    // rewrites the statement. Only the segment after the last `.` is compared, so
+    // qualified columns (`tbml.` + `f` → `tbml.FMEMONICCODE`), an empty segment right
+    // after a dot, the original `select␣` → `SELECT` flow, and completions without a
+    // textual label keep accepting.
+    const typedLine = view.state.doc.lineAt(view.state.selection.main.head);
+    const typedSegment = /[\p{L}\p{N}_$#]+$/u.exec(typedLine.text.slice(0, view.state.selection.main.head - typedLine.from))?.[0] ?? "";
+    const completionText = typeof target.apply === "string" && target.apply ? target.apply : typeof target.label === "string" ? target.label : "";
+    const completionSegment = completionText.split(".").pop() ?? "";
+    const typedWordContinues = typedSegment === "" || completionSegment === "" || completionSegment.toLowerCase().startsWith(typedSegment.toLowerCase());
+    if (!typedWordContinues) return false;
     const accepted = selected ? (codeMirrorRuntime.codeMirrorAcceptCompletion?.(view) ?? false) : acceptSelectedOrFirstCompletion(view, codeMirrorRuntime.codeMirrorAcceptCompletion, codeMirrorRuntime.codeMirrorSelectedCompletionIndex, codeMirrorRuntime.codeMirrorSelectFirstCompletion);
     if (!accepted) return false;
 
@@ -195,8 +214,15 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     const previousCharacter = cursor > 0 ? view.state.sliceDoc(cursor - 1, cursor) : "";
     if (/\s/.test(previousCharacter)) return true;
 
+    // Skipping an already-present space keeps the accepted keyword from doubling
+    // the one the user just typed, but only horizontally: inserting a statement
+    // above existing code puts the newline in front of the old statement directly
+    // after the accepted keyword, and `/\s/` matched it — the typed space was
+    // swallowed and the cursor dropped onto the next line (#15241). Mirror
+    // appendSqlCompletionSpace, which treats only a space/tab as existing spacing
+    // and still appends one before newlines and statement boundaries (#12948).
     const nextCharacter = view.state.sliceDoc(cursor, cursor + 1);
-    if (/\s/.test(nextCharacter)) {
+    if (/^[ \t]/.test(nextCharacter)) {
       view.dispatch({ selection: { anchor: cursor + 1 }, scrollIntoView: true });
     } else {
       view.dispatch({
@@ -208,11 +234,37 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     return true;
   }
 
+  function applySqlServerKeywordCaseOnSpace(view: EditorViewType): boolean {
+    const { state } = view;
+    const keywordCase = settingsStore.editorSettings.sqlFormatter.keywordCase;
+    if (props.databaseType !== "sqlserver" || !settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || keywordCase === "preserve" || state.readOnly || state.selection.ranges.length !== 1) return false;
+
+    const cursor = state.selection.main.head;
+    const token = syntaxTree(state).resolveInner(cursor, -1);
+    if (token.name !== "Keyword" || token.to !== cursor || token.parent?.name === "CompositeIdentifier") return false;
+
+    const lineStart = state.doc.lineAt(token.from).from;
+    if (state.sliceDoc(lineStart, token.from).trimEnd().endsWith(".")) return false;
+    const word = state.sliceDoc(token.from, token.to);
+    const upper = word.toUpperCase();
+    if (!SQL_SERVER_SPACE_KEYWORDS.has(upper)) return false;
+
+    const cased = keywordCase === "upper" ? upper : word.toLowerCase();
+    if (word === cased) return false;
+    view.dispatch({
+      changes: { from: token.from, to: cursor, insert: cased + " " },
+      selection: { anchor: cursor + 1 },
+      scrollIntoView: true,
+      userEvent: "input.type",
+    });
+    return true;
+  }
+
   function handleSpace(view: EditorViewType): boolean {
     if (isEditorComposing(view)) return false;
     if (!view.state.selection.main.empty) return false;
     if (acceptSnippetCompletionOnSpace(view)) return true;
-    return acceptSqlServerCompletionOnSpace(view);
+    return acceptSqlServerCompletionOnSpace(view) || applySqlServerKeywordCaseOnSpace(view);
   }
 
   function clearPendingCompletionTab() {

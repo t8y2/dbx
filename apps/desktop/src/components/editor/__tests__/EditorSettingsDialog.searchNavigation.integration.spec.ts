@@ -87,6 +87,7 @@ afterEach(() => {
   apps.splice(0).forEach((app) => app.unmount());
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 // Compile the real navigation functions; rendering only the relevant views avoids booting
@@ -151,20 +152,30 @@ function navigationHarness(initialCategory = "appearance") {
   });
   const start = dialogSource.indexOf("function applySettingsSearchRoute(");
   const end = dialogSource.indexOf("function onSettingsSearchKeydown(", start);
+  const highlightStateStart = dialogSource.indexOf("let highlightedSettingsSearchElement:");
+  const highlightStateEnd = dialogSource.indexOf("let pendingSettingsSearchResult:", highlightStateStart);
+  const highlightConfigStart = dialogSource.indexOf("let settingsSearchHighlightTimer:", highlightStateEnd);
+  const highlightConfigEnd = dialogSource.indexOf("const settingsSearchCategoryLabels", highlightConfigStart);
+  const clearHighlightStart = dialogSource.indexOf("function clearSettingsSearchHighlight(");
+  const clearHighlightEnd = dialogSource.indexOf("function resetSettingsSearchState(", clearHighlightStart);
   const watcherStart = dialogSource.indexOf("  const result = pendingSettingsSearchResult;", dialogSource.indexOf("watch(activeSettingsTab,"));
   const watcherEnd = dialogSource.indexOf("\n});", watcherStart);
   expect(start).toBeGreaterThan(0);
+  expect(highlightStateStart).toBeGreaterThan(0);
+  expect(highlightStateEnd).toBeGreaterThan(highlightStateStart);
+  expect(highlightConfigStart).toBeGreaterThan(highlightStateEnd);
+  expect(highlightConfigEnd).toBeGreaterThan(highlightConfigStart);
+  expect(clearHighlightStart).toBeGreaterThan(0);
+  expect(clearHighlightEnd).toBeGreaterThan(clearHighlightStart);
   expect(watcherStart).toBeGreaterThan(0);
+  // Keep highlight state, classes and cleanup in sync with the component rather
+  // than replacing cleanup with a stub that could hide styling regressions.
   const code = ts.transpileModule(
     `
     let pendingSettingsSearchResult = null;
-    let highlightedSettingsSearchElement = null;
-    let settingsSearchHighlightTimer = null;
-    let settingsSearchHighlightAnimationHandler = null;
-    const settingsSearchHighlightClasses = ["settings-search-highlight-breathe"];
-    function clearSettingsSearchHighlight() {
-      highlightedSettingsSearchElement?.classList.remove(...settingsSearchHighlightClasses);
-    }
+    ${dialogSource.slice(highlightStateStart, highlightStateEnd)}
+    ${dialogSource.slice(highlightConfigStart, highlightConfigEnd)}
+    ${dialogSource.slice(clearHighlightStart, clearHighlightEnd)}
     ${dialogSource.slice(start, end)}
     watchSettingsSearchNavigation();
     watch(activeSettingsTab, async () => { ${dialogSource.slice(watcherStart, watcherEnd)} });
@@ -239,6 +250,45 @@ function indexedMcpEntry(id: string) {
 }
 
 describe("settings search navigation", () => {
+  it.each(["rounded-md border", "rounded-md border bg-primary/5 duration-200", "border"])("restores original classes after repeated highlighting and animation completion: %s", async (originalClasses) => {
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    const harness = navigationHarness();
+    const target = harness.root.querySelector<HTMLElement>('[data-settings-search-id="appearance-settings"]')!;
+    target.className = originalClasses;
+    const result = entry("appearance", "appearance-settings");
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await harness.selectSettingsSearchResult(result);
+      await flush();
+      expect(target.classList.contains("rounded-md")).toBe(true);
+      expect(target.classList.contains("settings-search-highlight-breathe")).toBe(true);
+    }
+
+    target.dispatchEvent(Object.assign(new Event("animationend"), { animationName: "unrelated-animation" }));
+    expect(target.classList.contains("settings-search-highlight-breathe")).toBe(true);
+
+    target.dispatchEvent(Object.assign(new Event("animationend"), { animationName: "settings-search-highlight-breathe" }));
+    expect(new Set(target.classList)).toEqual(new Set(originalClasses.split(" ")));
+    expect(harness.highlightedSettingsSearchTargetId.value).toBe("");
+  });
+
+  it("preserves the original rounded class when reduced-motion highlighting times out", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    vi.spyOn(window, "matchMedia").mockReturnValue({ matches: true } as MediaQueryList);
+    const harness = navigationHarness();
+    const target = harness.root.querySelector<HTMLElement>('[data-settings-search-id="appearance-settings"]')!;
+    target.className = "rounded-md border";
+
+    await harness.selectSettingsSearchResult(entry("appearance", "appearance-settings"));
+    await flush();
+    expect(target.classList.contains("settings-search-highlight-breathe")).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(new Set(target.classList)).toEqual(new Set(["rounded-md", "border"]));
+    expect(harness.highlightedSettingsSearchTargetId.value).toBe("");
+  });
+
   it.each(["access", "permissions"])("waits for real capability tab content when navigating from MCP %s", async (initialTab) => {
     vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
     const harness = navigationHarness("mcp");

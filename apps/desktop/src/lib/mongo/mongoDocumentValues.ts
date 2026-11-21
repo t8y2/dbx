@@ -354,7 +354,13 @@ function validMongoDisplayTimeZone(timeZone: string | undefined): boolean {
 
 function formatMongoDocumentDates(value: unknown, formatter: MongoDateTimeFormatter): { value: unknown; changed: boolean } {
   const date = mongoExtendedJsonDateValue(value);
-  if (date !== undefined) return { value: applyColumnFormatter(date, formatter), changed: true };
+  if (date !== undefined) {
+    // Canonical Extended JSON stores dates as epoch milliseconds, even near
+    // the epoch where generic timestamp detection would infer seconds.
+    const epochMilliseconds = typeof date === "number" || /^-?\d+$/.test(date);
+    const dateFormatter = formatter.unit === "auto" && epochMilliseconds ? { ...formatter, unit: "milliseconds" as const } : formatter;
+    return { value: applyColumnFormatter(date, dateFormatter), changed: true };
+  }
   if (Array.isArray(value)) {
     let changed = false;
     const items = value.map((item) => {
@@ -681,16 +687,24 @@ export function buildMongoCopyDocumentFromOriginal(original: unknown, row: Mongo
   return document;
 }
 
-export function formatMongoShellLiteral(value: unknown): string {
+export function formatMongoShellLiteral(value: unknown, options?: { pretty?: boolean }): string {
+  return renderMongoShellLiteral(value, options?.pretty === true, 0);
+}
+
+function renderMongoShellLiteral(value: unknown, pretty: boolean, depth: number): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (typeof value === "string") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(formatMongoShellLiteral).join(",")}]`;
+  if (Array.isArray(value)) {
+    const items = value.map((item) => renderMongoShellLiteral(item, pretty, depth + 1));
+    return `[${joinMongoShellLiteralItems(items, pretty, depth)}]`;
+  }
   if (typeof value === "object") {
     const object = value as Record<string, unknown>;
     const keys = Object.keys(object);
-    if (keys.length === 1 && typeof object.$date === "string") {
-      return `ISODate(${JSON.stringify(object.$date)})`;
+    if (keys.length === 1 && "$date" in object && (pretty || typeof object.$date === "string")) {
+      const formattedDate = mongoShellDateWrapperDisplayText(object.$date);
+      if (formattedDate !== undefined && (typeof object.$date === "string" || !/^ISODate\("[+-]/.test(formattedDate))) return formattedDate;
     }
     if (keys.length === 1 && typeof object.$oid === "string" && MONGO_OBJECT_ID_PATTERN.test(object.$oid)) {
       return `ObjectId(${JSON.stringify(object.$oid)})`;
@@ -701,9 +715,17 @@ export function formatMongoShellLiteral(value: unknown): string {
     if ((keys.length === 1 && MONGO_EXTENDED_JSON_VALUE_KEYS.has(keys[0] ?? "")) || (keys.length === 2 && keys.includes("$code") && keys.includes("$scope"))) {
       return `EJSON.deserialize(${JSON.stringify(object)})`;
     }
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${formatMongoShellLiteral(object[key])}`).join(",")}}`;
+    const separator = pretty ? ": " : ":";
+    const items = keys.map((key) => `${JSON.stringify(key)}${separator}${renderMongoShellLiteral(object[key], pretty, depth + 1)}`);
+    return `{${joinMongoShellLiteralItems(items, pretty, depth)}}`;
   }
   return JSON.stringify(String(value));
+}
+
+function joinMongoShellLiteralItems(items: string[], pretty: boolean, depth: number): string {
+  if (!pretty || items.length === 0) return items.join(",");
+  const indent = "  ".repeat(depth);
+  return `\n${indent}  ${items.join(`,\n${indent}  `)}\n${indent}`;
 }
 
 export function serializeMongoDocumentId(value: unknown): string {

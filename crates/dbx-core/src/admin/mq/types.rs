@@ -868,7 +868,8 @@ pub enum PeekStartPosition {
 /// `start_position: Offset` requires a non-negative offset. When no partition
 /// is supplied, Kafka reads forward from that offset in every topic partition.
 /// `start_position: Timestamp` requires a non-negative epoch-millisecond
-/// `timestamp` and reads from the first record at or after it.
+/// `timestamp` and reads from the first record at or after it. An optional
+/// `end_timestamp` bounds that read to records at or before the given time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {
@@ -884,6 +885,14 @@ pub struct PeekMessagesOptions {
     /// the agent resolves the first offset at or after this time per partition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<i64>,
+    /// Epoch milliseconds; optional inclusive upper bound for
+    /// `start_position: Timestamp`. Records after this time are not returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_timestamp: Option<i64>,
+    /// `newest` or `oldest`; only honored with `start_position: Timestamp`,
+    /// where `newest` makes the agent read backward from the end timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -975,13 +984,23 @@ fn default_backlog_quota_type() -> String {
     "destination_storage".to_string()
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionPolicy {
     /// Retention time in minutes. `-1` = infinite.
     pub retention_time_in_minutes: i32,
     /// Retention size in MB. `-1` = infinite.
     pub retention_size_in_mb: i32,
+    /// Whether to submit the time field. Defaults to true so existing callers keep writing both fields.
+    #[serde(default = "retention_write_default")]
+    pub write_retention_time: bool,
+    /// Whether to submit the size field. Defaults to true so existing callers keep writing both fields.
+    #[serde(default = "retention_write_default")]
+    pub write_retention_size: bool,
+}
+
+fn retention_write_default() -> bool {
+    true
 }
 
 /// Authorization actions that can be granted to a role on a namespace/topic.
@@ -1629,20 +1648,26 @@ mod tests {
 
     #[test]
     fn peek_options_round_trip_timestamp_start_position() {
-        let timestamp: super::PeekMessagesOptions =
-            serde_json::from_str(r#"{"startPosition":"timestamp","timestamp":1700000000000}"#)
-                .expect("timestamp peek options");
+        let timestamp: super::PeekMessagesOptions = serde_json::from_str(
+            r#"{"startPosition":"timestamp","timestamp":1700000000000,"endTimestamp":1700000060000,"sortOrder":"newest"}"#,
+        )
+        .expect("timestamp peek options");
         assert_eq!(timestamp.start_position, Some(super::PeekStartPosition::Timestamp));
         assert_eq!(timestamp.timestamp, Some(1_700_000_000_000));
+        assert_eq!(timestamp.end_timestamp, Some(1_700_000_060_000));
+        assert_eq!(timestamp.sort_order.as_deref(), Some("newest"));
         let json = serde_json::to_value(&timestamp).expect("serialize timestamp peek options");
         assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("timestamp"));
         assert_eq!(json.get("timestamp").and_then(|value| value.as_i64()), Some(1_700_000_000_000));
+        assert_eq!(json.get("endTimestamp").and_then(|value| value.as_i64()), Some(1_700_000_060_000));
+        assert_eq!(json.get("sortOrder").and_then(|value| value.as_str()), Some("newest"));
 
         // Every other start position still parses and carries no timestamp.
         let earliest: super::PeekMessagesOptions =
             serde_json::from_str(r#"{"startPosition":"earliest"}"#).expect("earliest peek options");
         assert_eq!(earliest.start_position, Some(super::PeekStartPosition::Earliest));
         assert_eq!(earliest.timestamp, None);
+        assert_eq!(earliest.sort_order, None);
 
         // Requests without a timestamp keep omitting the field, and unknown
         // start positions still fail here instead of reaching the agent.
@@ -1650,6 +1675,8 @@ mod tests {
             serde_json::from_str(r#"{"partition":1}"#).expect("legacy peek options");
         let json = serde_json::to_value(&legacy).expect("serialize legacy peek options");
         assert!(json.get("timestamp").is_none());
+        assert!(json.get("endTimestamp").is_none());
+        assert!(json.get("sortOrder").is_none());
         assert!(serde_json::from_str::<super::PeekMessagesOptions>(r#"{"startPosition":"whenever"}"#).is_err());
     }
 

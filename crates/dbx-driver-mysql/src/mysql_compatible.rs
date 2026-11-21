@@ -26,31 +26,35 @@ pub async fn list_indexes_with_ddl_fallback(
     table: &str,
 ) -> Result<Vec<IndexInfo>, String> {
     let statistics_result = list_indexes(pool, database, table).await;
-    let mut indexes = match &statistics_result {
-        Ok(indexes) => indexes.clone(),
-        Err(err) => {
-            log::debug!(
-                "Falling back to SHOW CREATE TABLE for MySQL-compatible distributed indexes on `{database}`.`{table}` after information_schema.STATISTICS failed: {err}"
-            );
-            Vec::new()
-        }
-    };
+    if let Err(err) = &statistics_result {
+        log::debug!(
+            "Falling back to SHOW CREATE TABLE for MySQL-compatible distributed indexes on `{database}`.`{table}` after information_schema.STATISTICS failed: {err}"
+        );
+    }
+    let ddl_result = show_create_table_ddl(pool, database, table).await;
+    combine_statistics_and_ddl_indexes(statistics_result, ddl_result)
+}
 
-    match show_create_table_ddl(pool, database, table).await {
-        Ok(ddl) => {
+// Doris and StarRocks keep secondary indexes (BITMAP, INVERTED, NGRAM_BF) and table keys out of
+// information_schema.STATISTICS, so an empty STATISTICS answer is normal and the DDL is the only
+// source. A failed DDL read must surface as an error, not as "no indexes" (t8y2/dbx#14067).
+fn combine_statistics_and_ddl_indexes(
+    statistics_result: Result<Vec<IndexInfo>, String>,
+    ddl_result: Result<String, String>,
+) -> Result<Vec<IndexInfo>, String> {
+    match (statistics_result, ddl_result) {
+        (statistics_result, Ok(ddl)) => {
+            let mut indexes = statistics_result.unwrap_or_default();
             merge_index_infos(&mut indexes, indexes_from_create_table_ddl(&ddl));
             Ok(indexes)
         }
-        Err(ddl_err) => {
-            if indexes.is_empty() {
-                if let Err(statistics_err) = statistics_result {
-                    return Err(format!(
-                        "{statistics_err}; SHOW CREATE TABLE fallback failed for MySQL-compatible distributed indexes: {ddl_err}"
-                    ));
-                }
-            }
-            Ok(indexes)
+        (Ok(indexes), Err(_)) if !indexes.is_empty() => Ok(indexes),
+        (Ok(_), Err(ddl_err)) => {
+            Err(format!("SHOW CREATE TABLE failed for MySQL-compatible distributed indexes: {ddl_err}"))
         }
+        (Err(statistics_err), Err(ddl_err)) => Err(format!(
+            "{statistics_err}; SHOW CREATE TABLE fallback failed for MySQL-compatible distributed indexes: {ddl_err}"
+        )),
     }
 }
 
@@ -610,6 +614,81 @@ DISTRIBUTED BY HASH(`id`) BUCKETS 3
         assert!(indexes[0].is_unique);
         assert!(!indexes[0].is_primary);
         assert_eq!(indexes[0].index_type.as_deref(), Some("UNIQUE KEY"));
+    }
+
+    const STARROCKS_BITMAP_DDL: &str = r#"
+CREATE TABLE `t` (
+  `id` bigint(20) NOT NULL COMMENT "",
+  `comm_id` varchar(65533) NULL COMMENT "",
+  INDEX idx_comm_id (`comm_id`) USING BITMAP COMMENT ''
+) ENGINE=OLAP
+PRIMARY KEY(`id`)
+DISTRIBUTED BY HASH(`id`) BUCKETS 1
+"#;
+
+    fn index_names(indexes: &[IndexInfo]) -> Vec<&str> {
+        indexes.iter().map(|index| index.name.as_str()).collect()
+    }
+
+    #[test]
+    fn starrocks_create_table_ddl_indexes_include_bitmap_and_primary_key() {
+        let indexes = indexes_from_create_table_ddl(STARROCKS_BITMAP_DDL);
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+        assert_eq!(indexes[0].columns, vec!["comm_id"]);
+        assert_eq!(indexes[0].index_type.as_deref(), Some("BITMAP"));
+        assert!(indexes[1].is_primary);
+        assert_eq!(indexes[1].columns, vec!["id"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_uses_ddl_when_statistics_is_empty() {
+        let indexes = combine_statistics_and_ddl_indexes(Ok(Vec::new()), Ok(STARROCKS_BITMAP_DDL.to_string())).unwrap();
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_reports_ddl_failure_instead_of_empty_indexes() {
+        // StarRocks returns no STATISTICS rows, so an empty list here would hide every index
+        // whenever the DDL read fails (t8y2/dbx#14067).
+        let error =
+            combine_statistics_and_ddl_indexes(Ok(Vec::new()), Err("Pool was disconnected".to_string())).unwrap_err();
+
+        assert!(error.contains("SHOW CREATE TABLE failed"), "{error}");
+        assert!(error.contains("Pool was disconnected"), "{error}");
+    }
+
+    #[test]
+    fn ddl_index_merge_keeps_statistics_indexes_when_ddl_fails() {
+        let statistics = indexes_from_create_table_ddl(STARROCKS_BITMAP_DDL);
+
+        let indexes =
+            combine_statistics_and_ddl_indexes(Ok(statistics), Err("Pool was disconnected".to_string())).unwrap();
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_uses_ddl_when_statistics_fails() {
+        let indexes = combine_statistics_and_ddl_indexes(
+            Err("Unknown table 'STATISTICS'".to_string()),
+            Ok(STARROCKS_BITMAP_DDL.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(index_names(&indexes), vec!["idx_comm_id", "PRIMARY"]);
+    }
+
+    #[test]
+    fn ddl_index_merge_reports_both_failures() {
+        let error = combine_statistics_and_ddl_indexes(
+            Err("statistics unavailable".to_string()),
+            Err("Pool was disconnected".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("statistics unavailable; SHOW CREATE TABLE fallback failed"), "{error}");
     }
 
     fn catalog_info(name: &str, catalog_type: &str, is_current: bool) -> crate::db::CatalogInfo {

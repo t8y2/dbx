@@ -1,4 +1,4 @@
-import { reactive, computed } from "vue";
+import { reactive, computed, watch } from "vue";
 import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import { uuid } from "@/lib/common/utils";
@@ -6,6 +6,7 @@ import { formatQueryDuration } from "@/lib/format/duration";
 import { autoRevealExportedPathIfConfigured } from "@/lib/export/exportPath";
 import { releaseManualExport, submitManualExport, type ManualExportMode } from "@/lib/export/manualExportQueue";
 import { acceptOraclePackageTransferApproval, acceptOraclePackageTransferPreflight, acceptOracleRoutineDeploymentOperation, type OracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
+import { loadPersistedExportTasks, savePersistedExportTasks } from "@/lib/export/exportTaskPersistence";
 
 export type BackgroundTaskKind = "table-export" | "table-copy" | "database-export" | "data-dictionary" | "sql-file" | "data-transfer" | "data-generation" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Queued" | "Unknown" | "PreparingSnapshot" | "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
@@ -117,6 +118,8 @@ export interface ExportTask {
   canCancel?: boolean;
   canRemove?: boolean;
   canRecoverCancellation?: boolean;
+  /** Restored from the previous session's snapshot (#14696); no live handle exists. */
+  restored?: boolean;
   manualExportRootId?: string;
   removed?: boolean;
   copyPhase?: "preparing" | "structure" | "data" | "refreshing" | "cancelling" | "succeeded" | "failed" | "cancelled" | "unknown";
@@ -234,6 +237,47 @@ function clearCancellationRecovery(exportId: string) {
 const transferFailureStates = new Map<string, TransferFailureState>();
 const sqlFileFailureStates = new Map<string, SqlFileFailureState>();
 const textEncoder = new TextEncoder();
+
+let exportTaskPersistenceStarted = false;
+let exportTaskPersistQueued = false;
+
+/**
+ * Coalesce the burst of progress updates produced by one IPC tick into a single
+ * write, without owning a timer: the export progress popover asserts on the
+ * number of pending timers, and a long-lived debounce timer would both leak
+ * into those assertions and keep running after the last task finished.
+ */
+function scheduleExportTaskPersist() {
+  if (exportTaskPersistQueued) return;
+  exportTaskPersistQueued = true;
+  queueMicrotask(() => {
+    exportTaskPersistQueued = false;
+    void savePersistedExportTasks([...taskMap.values()]);
+  });
+}
+
+function ensureExportTaskPersistence() {
+  if (exportTaskPersistenceStarted) return;
+  exportTaskPersistenceStarted = true;
+  watch(taskMap, scheduleExportTaskPersist, { deep: true });
+}
+
+/**
+ * Restore the background tasks left behind by the previous session (#14696).
+ * Tasks that were running when the page went away come back as `Unknown` with
+ * their execution log, because the reload has no handle on the original run.
+ */
+export async function restoreExportTasksFromStorage(): Promise<void> {
+  ensureExportTaskPersistence();
+  const restored = await loadPersistedExportTasks();
+  let changed = false;
+  for (const task of restored) {
+    if (taskMap.has(task.exportId)) continue;
+    taskMap.set(task.exportId, task);
+    changed = true;
+  }
+  if (changed) scheduleExportTaskPersist();
+}
 
 function utf8ByteLength(value: string): number {
   return textEncoder.encode(value).length;
@@ -476,9 +520,13 @@ function findActiveOverlappingTransfer(request: api.TransferRequest): string[] {
 }
 
 export function useExportTracker() {
+  ensureExportTaskPersistence();
   const tasks = computed(() => Array.from(taskMap.values()));
 
-  const activeCount = computed(() => tasks.value.filter((t) => t.status === "Queued" || t.status === "Unknown" || t.status === "PreparingSnapshot" || t.status === "Running" || t.status === "Writing" || t.status === "Cancelling").length);
+  // Restored tasks have no live handle: they must not count as active, or the
+  // "tasks are running, wait before updating" guard would block app updates
+  // forever after a crash (#14696).
+  const activeCount = computed(() => tasks.value.filter((t) => !t.restored && (t.status === "Queued" || t.status === "Unknown" || t.status === "PreparingSnapshot" || t.status === "Running" || t.status === "Writing" || t.status === "Cancelling")).length);
 
   const hasActive = computed(() => activeCount.value > 0);
 

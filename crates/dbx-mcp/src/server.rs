@@ -19,7 +19,9 @@ use serde_json::{json, Value};
 use url::Url;
 use uuid::Uuid;
 
-use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
+use crate::backend::{
+    format_query_result, new_connection_config_with_external_config, parse_database_type, ConnectionSummary, DbxBackend,
+};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::runtime::McpTransport;
 use crate::session::{McpSession, McpSessionStore};
@@ -42,8 +44,8 @@ use dbx_core::{
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
-        is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
-        targets_production_database,
+        is_production_database, mongo_pipeline_targets_production_database,
+        sql_references_disallowed_database_for_connection, targets_production_database,
     },
     query_execution_sql::{classify_salesforce_statement_risk, is_write_sql_for_database, SalesforceStatementRisk},
     sql_risk::{
@@ -472,6 +474,12 @@ pub struct AddConnectionRequest {
     pub ssl: bool,
     #[schemars(extend("type" = "string"))]
     pub driver_profile: Option<String>,
+    /// Dialect-specific external configuration. Nacos: camelCase admin config
+    /// (`implementation`, `versionMode`, `contextPath`, `serverAddr`,
+    /// `namespace`, `auth`, …). Omitted Nacos fields are filled from
+    /// host/port/username/password/database with the desktop defaults
+    /// (`implementation=nacos`, `versionMode=v2`, `contextPath=/nacos`).
+    pub external_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1355,9 +1363,9 @@ impl DbxMcpServer {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                text(serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "[]".to_string()))
+                product_tool_result(serde_json::Value::Array(filtered))
             }
-            Ok(value) => text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())),
+            Ok(value) => product_tool_result(value),
             Err(error) => backend_tool_error("DBX_TOOL_ERROR", error),
         }
     }
@@ -3100,8 +3108,8 @@ impl DbxMcpServer {
             arguments["timeout_secs"] = json!(secs);
         }
         let started_at = Instant::now();
-        let result =
-            self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        let (result, query_result) =
+            self.backend.execute_query_agent_tool(connection, &database, arguments, permissions).await;
         let success = !result.is_error;
         let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
         self.save_mcp_sql_history(
@@ -3115,7 +3123,7 @@ impl DbxMcpServer {
             None,
         )
         .await;
-        agent_result(result)
+        query_tool_result(result, query_result)
     }
 
     #[tool(
@@ -4005,6 +4013,8 @@ impl DbxMcpServer {
                 partition: request.partition,
                 offset: request.offset,
                 timestamp: None,
+                end_timestamp: None,
+                sort_order: None,
             };
             match self.backend.peek_messages(&resolved.connection, topic, count, options).await {
                 Ok(result) => text(format_peek_messages_result(result, count as usize)),
@@ -4453,7 +4463,7 @@ impl DbxMcpServer {
             Some(port) => port,
             None => return text("Port is required for this database type."),
         };
-        let config = match new_connection_config(
+        let config = match new_connection_config_with_external_config(
             Uuid::new_v4().to_string(),
             request.name,
             db_type,
@@ -4464,6 +4474,7 @@ impl DbxMcpServer {
             request.database,
             request.ssl,
             request.driver_profile,
+            request.external_config,
         ) {
             Ok(config) => config,
             Err(error) => return tool_error("INVALID_CONNECTION", error),
@@ -6429,6 +6440,21 @@ fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
 }
 
+/// Product-provider (Nacos/Consul) tools already hold the complete JSON payload.
+/// Return it in `structuredContent` as well as the pretty-printed text block so
+/// MCP clients can consume the data without re-parsing text. Older MCP protocol
+/// revisions require `structuredContent` to be an object (newer ones accept any
+/// JSON), so arrays and scalars are wrapped as `{"result": ...}` - the same shape
+/// `dbx_execute_batch` uses for its per-statement results (see #9069, #15189).
+fn product_tool_result(value: serde_json::Value) -> CallToolResult {
+    let mut result = text(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()));
+    result.structured_content = Some(match value {
+        serde_json::Value::Object(_) => value,
+        other => json!({ "result": other }),
+    });
+    result
+}
+
 async fn cancellable_tool_call(
     cancellation: tokio_util::sync::CancellationToken,
     operation: impl std::future::Future<Output = CallToolResult>,
@@ -6467,7 +6493,14 @@ fn transaction_failure_result(session_id: &str, failure: TransactionFailure) -> 
 }
 
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
+    let launch_restriction = if code == "MCP_READ_ONLY" && crate::backend::legacy_mcp_allow_writes() == Some(false) {
+        "This MCP process is forced read-only by the DBX_MCP_ALLOW_WRITES launch setting. \
+         It takes precedence over permissions saved in DBX Settings → MCP. \
+         Check the MCP client's launch configuration.\n"
+    } else {
+        ""
+    };
+    CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {launch_restriction}{}", message.into()))])
 }
 
 /// Sidebar helpers report `CODE: message` so the caller keeps a precise error code instead of a
@@ -6645,6 +6678,23 @@ fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
     } else {
         text(result.content)
     }
+}
+
+/// Stateless `dbx_execute_query` result: the markdown text stays model-facing
+/// while `structuredContent.result` carries the raw QueryResult, matching the
+/// transaction-session shape so clients can tell NULL from "NULL" and keep
+/// column types (#15149). Errors keep the text-only contract.
+fn query_tool_result(
+    result: dbx_core::agent_events::ToolResult,
+    query_result: Option<dbx_core::db::QueryResult>,
+) -> CallToolResult {
+    let mut call = agent_result(result);
+    if call.is_error != Some(true) {
+        if let Some(query_result) = query_result {
+            call.structured_content = Some(json!({ "result": query_result }));
+        }
+    }
+    call
 }
 
 fn policy_allows_connection(
@@ -6939,7 +6989,7 @@ fn ensure_sql_database_scope(
     let DatabaseScope::Selected(allowed_databases) = scope else {
         return Ok(());
     };
-    if sql_references_disallowed_database(sql, &connection.db_type, active_database, allowed_databases) {
+    if sql_references_disallowed_database_for_connection(sql, connection, active_database, allowed_databases) {
         return Err(tool_error(
             "DATABASE_OUT_OF_SCOPE",
             "SQL references a database that is not allowed by DBX MCP settings for this connection.",
@@ -8129,6 +8179,9 @@ mod tests {
         product_calls: std::sync::Mutex<Vec<crate::products::ProductCall>>,
         tool_approvals: std::sync::Mutex<Vec<crate::approval::ToolApprovalRequest>>,
         nacos_namespaces: Option<Vec<String>>,
+        /// Returned by `execute_query_agent_tool` so tests can exercise the
+        /// structured `dbx_execute_query` path (#15149).
+        query_result: Option<dbx_core::db::QueryResult>,
     }
 
     impl Default for FakeBackend {
@@ -8168,6 +8221,7 @@ mod tests {
                 product_calls: std::sync::Mutex::new(Vec::new()),
                 tool_approvals: std::sync::Mutex::new(Vec::new()),
                 nacos_namespaces: None,
+                query_result: None,
             }
         }
     }
@@ -8684,6 +8738,17 @@ mod tests {
                 is_error,
                 explain_data: None,
             }
+        }
+
+        async fn execute_query_agent_tool(
+            &self,
+            connection: &ConnectionConfig,
+            database: &str,
+            arguments: serde_json::Value,
+            permissions: dbx_core::agent_tools::AgentSqlPermissions,
+        ) -> (dbx_core::agent_events::ToolResult, Option<dbx_core::db::QueryResult>) {
+            let result = self.execute_agent_tool(connection, database, "execute_query", arguments, permissions).await;
+            (result, self.query_result.clone())
         }
 
         async fn salesforce_current_user(
@@ -9697,6 +9762,28 @@ mod tests {
             .await;
         let values: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
         assert_eq!(values, json!([{ "namespace": "dev" }]));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "result": [{ "namespace": "dev" }] }),
+        );
+    }
+
+    #[test]
+    fn product_tool_result_wraps_arrays_and_passes_objects_through() {
+        let array = product_tool_result(json!([{ "namespace": "" }]));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(result_text(&array)).unwrap(),
+            json!([{ "namespace": "" }]),
+        );
+        assert_eq!(array.structured_content.as_ref().unwrap(), &json!({ "result": [{ "namespace": "" }] }));
+
+        let object = product_tool_result(json!({ "pageNo": 1, "namespaces": [] }));
+        assert!(result_text(&object).contains("\"pageNo\": 1"));
+        assert_eq!(object.structured_content.as_ref().unwrap(), &json!({ "pageNo": 1, "namespaces": [] }));
+
+        let null = product_tool_result(serde_json::Value::Null);
+        assert_eq!(result_text(&null), "null");
+        assert_eq!(null.structured_content.as_ref().unwrap(), &json!({ "result": null }));
     }
 
     #[test]
@@ -10370,6 +10457,10 @@ mod tests {
             }))
             .await;
         assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured content must be populated"),
+            &json!({ "ok": true, "operation": "kv_delete" }),
+        );
         {
             let approvals = backend.tool_approvals.lock().unwrap();
             assert_eq!(approvals.len(), 1);
@@ -11798,18 +11889,35 @@ mod tests {
 
     #[test]
     fn configured_database_allowlist_blocks_qualified_sql_references() {
-        let connection = connection("sql", "sql", "mysql", "reporting");
+        // PostgreSQL query blocks need the connection profile: a compatible
+        // engine can use the same database type with different qualifier rules.
+        let mut connection = connection("sql", "sql", "mysql", "reporting");
         let scope = DatabaseScope::Selected(vec!["reporting".to_string()]);
 
         assert!(ensure_sql_database_scope(&scope, &connection, "reporting", "SELECT * FROM reporting.users").is_ok());
         let error =
             ensure_sql_database_scope(&scope, &connection, "reporting", "SELECT * FROM production.users").unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+
+        connection.db_type = DatabaseType::Postgres;
+        let cte = "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c";
+        assert!(ensure_sql_database_scope(&scope, &connection, "reporting", cte).is_ok());
+        connection.driver_profile = Some("cockroachdb".to_string());
+        let error = ensure_sql_database_scope(
+            &scope,
+            &connection,
+            "reporting",
+            "WITH c AS (SELECT id FROM reporting.public.users) SELECT c.id, 2 FROM c, production.public.secrets s",
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
     }
 
     #[test]
     fn database_execution_policy_overrides_connection_and_global_defaults_and_blocks_cross_database_sql() {
-        let connection = connection("sql", "sql", "mysql", "operations");
+        // Database-specific execution policy must apply the same profile-aware
+        // scope check as the explicit database allowlist.
+        let mut connection = connection("sql", "sql", "mysql", "operations");
         let policy = McpGlobalPolicy {
             connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
                 connection_id: "sql".to_string(),
@@ -11852,6 +11960,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(result_text(&error).contains("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"));
+
+        connection.db_type = DatabaseType::Postgres;
+        let cte = "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c";
+        assert!(ensure_sql_database_execution_scope(&policy, &connection, "operations", cte).is_ok());
+        connection.driver_profile = Some("cockroachdb".to_string());
+        let error = ensure_sql_database_execution_scope(
+            &policy,
+            &connection,
+            "operations",
+            "WITH c AS (SELECT id FROM operations.public.users) SELECT c.id, 2 FROM c, reporting.public.secrets s",
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"));
+    }
+
+    #[tokio::test]
+    async fn postgres_query_scope_preserves_legacy_rejections_for_unreviewed_calls() {
+        // Exercise both permission gates through the tool entry point: these
+        // query shapes retain their original rejection before reaching the backend.
+        let cases = [
+            (
+                "WITH samples(state) AS (VALUES ('new'), ('other')), compared AS (SELECT CASE WHEN state = 'new' THEN CAST(1 AS integer) ELSE 0 END AS changed FROM samples) SELECT COUNT(*), SUM(changed) FROM compared",
+                true,
+            ),
+            (
+                "WITH c(x) AS (VALUES (1), (2)), compared AS (SELECT x FROM c) SELECT COUNT(*), SUM(x) FROM compared",
+                true,
+            ),
+            ("WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1, 2 FROM compared", true),
+            (
+                "WITH c AS (SELECT id FROM public.users) SELECT dblink_connect('remote', 'dbname=production'), 2 FROM c",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT id FROM public.users) SELECT dblink_exec('dbname=production', 'SET application_name = ''scope_review'''), 2 FROM c",
+                false,
+            ),
+            ("WITH c AS (SELECT id FROM public.users) SELECT public.read_remote_value(), 2 FROM c", false),
+            (r#"WITH c AS (SELECT id FROM public.users) SELECT "COUNT"(id), 2 FROM c"#, false),
+        ];
+        for database_policy in [false, true] {
+            let rule = dbx_core::storage::McpConnectionPolicy {
+                connection_id: "sql".to_string(),
+                read_only: true,
+                allow_dangerous_sql: false,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: if database_policy { McpDatabaseScope::All } else { McpDatabaseScope::Selected },
+                allowed_databases: vec!["reporting".to_string()],
+                database_policies: if database_policy {
+                    vec![dbx_core::storage::McpDatabasePolicy {
+                        database_name: "reporting".to_string(),
+                        read_only: true,
+                        allow_dangerous_sql: false,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                allow_salesforce_dml: false,
+            };
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("sql", "sql", "postgres", "reporting")],
+                policy: McpGlobalPolicy { connection_policies: vec![rule], ..Default::default() },
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            for (sql, allowed) in cases {
+                backend.recorded_arguments.lock().unwrap().clear();
+                let result = server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("sql"),
+                        database: Some("reporting".to_string()),
+                        sql: sql.to_string(),
+                        session_id: None,
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                        max_rows: Some(5),
+                    }))
+                    .await;
+                let recorded = backend.recorded_arguments.lock().unwrap();
+                if allowed {
+                    assert!(!result.is_error.unwrap_or(false), "{}: {sql}", result_text(&result));
+                    assert_eq!(recorded.len(), 1, "allowed SQL must reach the backend: {sql}");
+                    assert_eq!(recorded[0].0, "execute_query");
+                    assert_eq!(recorded[0].1["sql"], sql);
+                } else {
+                    let code = if database_policy {
+                        "DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"
+                    } else {
+                        "DATABASE_OUT_OF_SCOPE"
+                    };
+                    assert_eq!(result.is_error, Some(true), "rejected SQL returned success: {sql}");
+                    assert!(result_text(&result).contains(code), "{}: {sql}", result_text(&result));
+                    assert!(recorded.is_empty(), "rejected SQL reached the backend: {sql}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -13823,6 +14028,71 @@ mod tests {
         let results = structured["results"].as_array().expect("results must be an array");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["statement_index"], 0);
+    }
+
+    #[tokio::test]
+    async fn execute_query_returns_structured_content() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string(), "n".to_string(), "s".to_string()];
+        query_result.column_types = vec!["bigint".to_string(), "null".to_string(), "varchar".to_string()];
+        query_result.rows = vec![vec![serde_json::json!("1"), serde_json::Value::Null, serde_json::json!("NULL")]];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 AS i, NULL AS n, 'NULL' AS s".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        // The markdown text stays in content…
+        assert!(result_text(&result).contains("ok"));
+        // …and structuredContent.result keeps column types plus the NULL / "NULL"
+        // distinction that markdown rendering loses (#15149).
+        let structured = result.structured_content.as_ref().expect("structured content must be populated");
+        assert!(structured.is_object(), "MCP structuredContent must be a JSON object");
+        assert_eq!(structured["result"]["columns"], serde_json::json!(["i", "n", "s"]));
+        assert_eq!(structured["result"]["column_types"], serde_json::json!(["bigint", "null", "varchar"]));
+        assert_eq!(structured["result"]["rows"], serde_json::json!([["1", null, "NULL"]]));
+        assert!(structured["result"]["rows"][0][1].is_null(), "SQL NULL must stay JSON null");
+        assert_eq!(structured["result"]["rows"][0][2], serde_json::json!("NULL"), "a string 'NULL' must stay a string");
+    }
+
+    #[tokio::test]
+    async fn execute_query_error_keeps_text_only_contract() {
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let mut query_result = empty_query_result();
+        query_result.columns = vec!["i".to_string()];
+        let backend = Arc::new(FakeBackend {
+            connections: vec![postgres],
+            query_result: Some(query_result),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT FAIL_MCP_TEST".to_string(),
+                session_id: None,
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.structured_content.is_none(), "errors must not carry structuredContent");
     }
 
     #[tokio::test]

@@ -53,6 +53,10 @@ use crate::persistence::task_history::{
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
+#[path = "credential_reset.rs"]
+mod credential_reset;
+pub use credential_reset::{CredentialResetFailure, CredentialResetPreparation, CredentialResetReport};
+
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 const URL_PARAMS_SECRET_KEY: &str = "url_params";
@@ -66,6 +70,10 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+/// Beta build version the app was told is the promoted stable release. Kept in
+/// app_state (not renderer localStorage) because the native About panel is
+/// built before the webview could report it again on a cold start.
+const APP_STATE_PROMOTED_BUILD_KEY: &str = "promoted_build";
 const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 /// Policy v2 (`dbx_core::mcp_access::McpAccessPolicy`). Written next to the
@@ -94,6 +102,7 @@ fn saved_mcp_access_policy(
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const WEB_LOGIN_CAPTCHA_KEY: &str = "web_login_captcha";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
@@ -273,6 +282,8 @@ pub struct Storage {
     /// Without this, each consumer can prompt a locked Secret Service again.
     secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+    desktop_credential_recovery: bool,
+    credential_reset_confirmation: Arc<Mutex<Option<credential_reset::Confirmation>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -367,6 +378,12 @@ pub struct MigrationPreflight {
     pub state: MigrationState,
     pub needs_migration: bool,
     pub key_recovery_required: bool,
+    #[serde(default)]
+    pub encrypted_record_count: usize,
+    #[serde(default)]
+    pub credential_reset_allowed: bool,
+    #[serde(default)]
+    pub credential_reset_blocked_reason: Option<String>,
     pub key_provider_available: bool,
     pub key_status: MigrationKeyStatus,
     /// Desktop may provision a new local key only for plaintext-only data.
@@ -517,6 +534,9 @@ pub struct TabRuntimeCachePruneResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopSettings {
     pub show_tray_icon: bool,
+    /// Exposed to sync snapshots. The value is stored with app appearance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_theme_mode: Option<String>,
     #[serde(default = "default_linux_floating_frame_enabled")]
     pub linux_floating_frame_enabled: bool,
     pub icon_theme: DesktopIconTheme,
@@ -1150,6 +1170,7 @@ impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
             show_tray_icon: true,
+            app_theme_mode: None,
             linux_floating_frame_enabled: true,
             icon_theme: DesktopIconTheme::Default,
             quit_on_close: false,
@@ -1565,6 +1586,8 @@ impl Storage {
             secret_codec_cache: Arc::new(Mutex::new(None)),
             secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
+            desktop_credential_recovery: false,
+            credential_reset_confirmation: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -2129,11 +2152,14 @@ impl Storage {
                 self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
             }
         }
-        let preflight = MigrationPreflight {
+        let mut preflight = MigrationPreflight {
             migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
             state,
             needs_migration,
             key_recovery_required,
+            encrypted_record_count: encrypted.max(0) as usize,
+            credential_reset_allowed: false,
+            credential_reset_blocked_reason: None,
             key_provider_available,
             key_status,
             key_creation_allowed,
@@ -2157,6 +2183,8 @@ impl Storage {
             persistent_key_configured: key_provider_available,
             key_source,
         };
+        preflight.credential_reset_blocked_reason = self.credential_reset_blocked_reason(&preflight);
+        preflight.credential_reset_allowed = preflight.credential_reset_blocked_reason.is_none();
         Ok(preflight)
     }
 
@@ -6002,6 +6030,12 @@ impl Storage {
     pub async fn load_desktop_settings(&self) -> Result<DesktopSettings, String> {
         let settings = self.load_app_settings_json().await?;
         Ok(DesktopSettings {
+            app_theme_mode: settings
+                .get(APP_APPEARANCE_SETTINGS_KEY)
+                .and_then(|appearance| appearance.get("themeMode"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|mode| is_app_theme_mode(mode))
+                .map(str::to_owned),
             linux_floating_frame_enabled: settings
                 .get("linux_floating_frame_enabled")
                 .and_then(|value| value.as_bool())
@@ -6093,6 +6127,20 @@ impl Storage {
         self.save_app_settings_json(&settings).await
     }
 
+    /// Captcha policy chosen in the Web settings dialog (`设置 → 安全`).
+    /// Stored in the shared app settings map so it travels with the data
+    /// directory, but read-modify-write keeps every other key intact.
+    pub async fn save_web_login_captcha_mode(&self, mode: &str) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert(WEB_LOGIN_CAPTCHA_KEY.to_string(), serde_json::Value::String(mode.to_string()));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_web_login_captcha_mode(&self) -> Result<Option<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings.get(WEB_LOGIN_CAPTCHA_KEY).and_then(|value| value.as_str()).map(str::to_string))
+    }
+
     pub async fn load_pinned_tree_node_ids(&self) -> Result<Vec<String>, String> {
         let settings = self.load_app_settings_json().await?;
         let Some(value) = settings.get("pinned_tree_node_ids") else {
@@ -6154,6 +6202,22 @@ impl Storage {
     /// Load open tabs from an isolated state key.
     pub async fn load_open_tabs_state_with_key(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
         self.load_app_state_value(key).await
+    }
+
+    /// Store the promoted-build marker. Only the native About panel reads it,
+    /// and only for the build recorded here — a stale marker from another build
+    /// is ignored by its reader rather than rewritten during startup.
+    pub async fn save_promoted_build(&self, build_version: &str) -> Result<(), String> {
+        let value = serde_json::Value::String(build_version.trim().to_string());
+        self.save_app_state_value(APP_STATE_PROMOTED_BUILD_KEY, &value).await
+    }
+
+    pub async fn load_promoted_build(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .load_app_state_value(APP_STATE_PROMOTED_BUILD_KEY)
+            .await?
+            .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+            .filter(|value| !value.is_empty()))
     }
 
     pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
@@ -10040,6 +10104,10 @@ fn merge_json_object_fields(
     serde_json::Value::Object(merged)
 }
 
+fn is_app_theme_mode(mode: &str) -> bool {
+    matches!(mode, "light" | "dark" | "system" | "soft-light" | "soft-dark" | "soft-system")
+}
+
 fn apply_desktop_settings_in_tx(
     tx: &Transaction<'_>,
     settings: &DesktopSettings,
@@ -10103,6 +10171,14 @@ fn apply_desktop_settings_in_tx(
             continue;
         }
         merged.insert(key, value);
+    }
+    let theme = settings.app_theme_mode.as_deref().filter(|mode| is_app_theme_mode(mode));
+    if let Some(theme) =
+        theme.filter(|_| selected_keys.is_none_or(|keys| keys.iter().any(|key| key == "app_theme_mode")))
+    {
+        let previous = merged.remove(APP_APPEARANCE_SETTINGS_KEY).unwrap_or_default();
+        let appearance = merge_json_object_fields(previous, serde_json::json!({"themeMode": theme}), None);
+        merged.insert(APP_APPEARANCE_SETTINGS_KEY.to_string(), appearance);
     }
     tx.execute(
         "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
@@ -14436,6 +14512,7 @@ mod tests {
         storage
             .save_desktop_settings(&DesktopSettings {
                 show_tray_icon: false,
+                app_theme_mode: None,
                 linux_floating_frame_enabled: true,
                 icon_theme: DesktopIconTheme::Black,
                 quit_on_close: true,
@@ -14461,6 +14538,7 @@ mod tests {
             storage.load_desktop_settings().await.unwrap(),
             DesktopSettings {
                 show_tray_icon: false,
+                app_theme_mode: None,
                 linux_floating_frame_enabled: true,
                 icon_theme: DesktopIconTheme::Black,
                 quit_on_close: true,
@@ -15183,6 +15261,21 @@ mod tests {
             DesktopSettings { icon_theme: DesktopIconTheme::Black, ..DesktopSettings::default() }
         );
         assert_eq!(storage.load_app_settings_json().await.unwrap().get("open_tabs"), None);
+    }
+
+    #[tokio::test]
+    async fn promoted_build_marker_roundtrips_in_local_app_state() {
+        let path = temp_db_path("promoted-build");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_promoted_build().await.unwrap(), None);
+
+        storage.save_promoted_build(" 0.6.67-beta.20261105.1 ").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.67-beta.20261105.1"));
+
+        // Overwriting replaces the marker instead of accumulating values.
+        storage.save_promoted_build("0.6.68-beta.20261106.1").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.68-beta.20261106.1"));
     }
 
     #[tokio::test]

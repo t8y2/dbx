@@ -1,4 +1,48 @@
-import type { DatabaseType, QueryResult } from "@/types/database";
+import type { DatabaseType, ForeignKeyInfo, QueryResult } from "@/types/database";
+import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
+import { sortTablesByFkDependency } from "@/lib/table/tableDependencySort";
+
+export async function orderObjectBrowserDropRows(rows: readonly ObjectBrowserRow[], fallbackSchema: string | undefined, listForeignKeys: (row: ObjectBrowserRow) => Promise<ForeignKeyInfo[]>): Promise<ObjectBrowserRow[]> {
+  if (rows.length <= 1) return [...rows];
+
+  const key = (schema: string | null | undefined, name: string) => JSON.stringify([schema || fallbackSchema, name]);
+  const tables = rows.filter((row) => row.type === "TABLE");
+  const tableIds = new Map(tables.map((row) => [key(row.schema, row.name), row.id]));
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  const sortedTables =
+    tables.length <= 1
+      ? tables
+      : sortTablesByFkDependency(
+          await Promise.all(
+            tables.map(async (row) => ({
+              name: row.id,
+              foreignKeys: (await listForeignKeys(row)).map((fk) => ({
+                ...fk,
+                ref_table: tableIds.get(key(fk.ref_schema || row.schema, fk.ref_table)) ?? "",
+              })),
+            })),
+          ),
+        ).map((table) => rowsById.get(table.name)!);
+
+  const bodies = new Map(rows.filter((row) => row.type === "PACKAGE_BODY").map((row) => [key(row.schema, row.name), row]));
+  const ordered: ObjectBrowserRow[] = [];
+  const emitted = new Set<string>();
+  let tableIndex = 0;
+  for (const row of rows) {
+    if (emitted.has(row.id)) continue;
+    if (row.type === "PACKAGE") {
+      // Dropping a specification also drops its body. Run an explicitly selected body first.
+      const body = bodies.get(key(row.schema, row.name));
+      if (body && !emitted.has(body.id)) {
+        ordered.push(body);
+        emitted.add(body.id);
+      }
+    }
+    ordered.push(row.type === "TABLE" ? sortedTables[tableIndex++]! : row);
+    emitted.add(row.id);
+  }
+  return ordered;
+}
 
 export interface BatchTableDropPlanItem<T> {
   target: T;

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   highlight: vi.fn(),
   highlighterState: undefined as undefined | { ready: boolean; appearance: string },
   listenSqlFileProgress: vi.fn(),
+  listSchemas: vi.fn(),
   openFileDialog: vi.fn(),
   previewSqlFile: vi.fn(),
   refreshSqlFilePreview: vi.fn(),
@@ -112,6 +113,7 @@ vi.mock("@/lib/backend/api", () => ({
   refreshSqlFilePreview: mocks.refreshSqlFilePreview,
   releaseSqlFilePreview: mocks.releaseSqlFilePreview,
   inspectSqlFileTables: mocks.inspectSqlFileTables,
+  listSchemas: mocks.listSchemas,
 }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
@@ -288,6 +290,7 @@ beforeEach(() => {
     { database: "archive", name: "users" },
   ]);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
+  mocks.listSchemas.mockReset().mockResolvedValue([]);
   mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
   mocks.treeNodes = reactive<TreeNode[]>([]);
   mocks.editorSettings = reactive({ sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" });
@@ -1421,5 +1424,92 @@ describe("SqlFileExecutionDialog progress visibility", () => {
 
     expect(scrollTopValues.length).toBe(afterUserScroll);
     gate.resolve();
+  });
+});
+
+describe("SqlFileExecutionDialog schema target", () => {
+  function schemaSection() {
+    return root!.querySelector("[data-sql-file-schema]");
+  }
+
+  function selectSchemaOption(schema: string) {
+    const item = Array.from(root!.querySelectorAll<HTMLElement>("[data-select-item]")).find((element) => element.dataset.selectItem === schema);
+    expect(item, `schema option ${schema}`).toBeDefined();
+    item!.click();
+  }
+
+  beforeEach(() => {
+    mocks.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", database: "app" }];
+    mocks.queryStore.tabs = [{ id: "pg-tab", connectionId: "pg-1", database: "app" }];
+    mocks.queryStore.activeTabId = "pg-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["app", "archive"]);
+    mocks.listSchemas.mockResolvedValue(["audit", "public"]);
+  });
+
+  it("lists the database's schemas and executes in the picked one (#14584)", async () => {
+    await mountReadyDialog();
+
+    expect(mocks.listSchemas).toHaveBeenCalledWith("pg-1", "app", true);
+    expect(schemaSection()).not.toBeNull();
+
+    selectSchemaOption("public");
+    await nextTick();
+
+    mocks.executeSqlFiles.mockImplementationOnce(() => new Promise(() => {}));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+
+    const request = mocks.executeSqlFiles.mock.calls[0]![0] as { database: string; schema?: string };
+    expect(request.database).toBe("app");
+    expect(request.schema).toBe("public");
+  });
+
+  it("preselects the schema the caller came from", async () => {
+    mocks.queryStore.tabs = [{ id: "pg-tab", connectionId: "pg-1", database: "app", schema: "audit" }];
+    await mountReadyDialog();
+
+    await vi.waitFor(() => expect(mocks.listSchemas).toHaveBeenCalled());
+    await vi.waitFor(() => expect(schemaSection()!.textContent).toContain("audit"));
+
+    mocks.executeSqlFiles.mockImplementationOnce(() => new Promise(() => {}));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+    expect((mocks.executeSqlFiles.mock.calls[0]![0] as { schema?: string }).schema).toBe("audit");
+  });
+
+  it("falls back to the connection default when the schema list is unavailable", async () => {
+    mocks.listSchemas.mockRejectedValue(new Error("not supported"));
+    await mountReadyDialog();
+
+    mocks.executeSqlFiles.mockImplementationOnce(() => new Promise(() => {}));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("schema");
+  });
+
+  it("keeps a single namespace level for engines where schema is the database", async () => {
+    mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+    mocks.queryStore.tabs = [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }];
+    mocks.queryStore.activeTabId = "mysql-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["app"]);
+
+    await mountReadyDialog();
+
+    expect(schemaSection()).toBeNull();
+  });
+
+  it("calls the single picker a schema picker for connection-root schema engines (#14584)", async () => {
+    mocks.connections = [{ id: "ora-1", name: "Oracle", db_type: "oracle", driver_profile: "oracle", database: "ORCL" }];
+    mocks.queryStore.tabs = [{ id: "ora-tab", connectionId: "ora-1", database: "ORCL" }];
+    mocks.queryStore.activeTabId = "ora-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["HR", "SCOTT"]);
+
+    await mountReadyDialog();
+
+    const labels = [...root!.querySelectorAll("label")].map((element) => element.textContent?.trim());
+    expect(labels).toContain("sqlFile.schema");
+    expect(labels).not.toContain("sqlFile.database");
+    // The picker already lists schemas, so no second one is added.
+    expect(schemaSection()).toBeNull();
   });
 });

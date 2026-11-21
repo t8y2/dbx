@@ -230,7 +230,7 @@ fn append_to_group(entries: &mut [Value], target: &str, ids: &[String]) -> bool 
             let legacy = entry.as_object_mut().and_then(|entry| entry.remove("connectionIds"));
             // `children: null` means "no children yet" to the desktop, so the legacy
             // members must still be migrated and the moved ids appended.
-            if entry.get("children").map_or(true, Value::is_null) {
+            if entry.get("children").is_none_or(Value::is_null) {
                 // No modern children yet: the legacy list is the only record of the members.
                 let members = dedup(
                     legacy

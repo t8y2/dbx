@@ -288,6 +288,7 @@ function printRuleElement(writer: Writer, nodes: AstNode[], baseColumn: number, 
       printRuleComments(writer, node.trailingComments, writer.column, ctx);
       index += 1;
     } else if (node.type === "property_access") {
+      writer.space();
       printRuleComments(writer, node.leadingComments, writer.column, ctx);
       printRuleElement(writer, [node.object], baseColumn, ctx);
       writer.write(node.operator);

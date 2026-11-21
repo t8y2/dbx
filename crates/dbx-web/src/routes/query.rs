@@ -197,6 +197,7 @@ pub struct BuildRenameDatabaseSqlRequest {
     pub old_name: String,
     pub new_name: String,
     pub terminate_connections: bool,
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1275,6 +1276,7 @@ pub async fn build_rename_database_sql(
         &req.old_name,
         &req.new_name,
         req.terminate_connections,
+        req.identifier_quote.as_deref(),
     )
     .map(Json)
     .map_err(AppError::from)
@@ -1403,6 +1405,12 @@ pub async fn build_executable_object_source_sql(
 
 pub async fn build_editable_object_source(Json(req): Json<BuildExecutableObjectSourceRequest>) -> Json<String> {
     Json(dbx_core::object_source_sql::build_editable_object_source(req.input))
+}
+
+pub async fn build_oracle_object_export_sql(
+    Json(req): Json<BuildExecutableObjectSourceRequest>,
+) -> Result<Json<String>, AppError> {
+    dbx_core::object_source_sql::build_oracle_object_export_sql(req.input).map(Json).map_err(AppError::from)
 }
 
 pub async fn build_routine_rename_object_source_statements(

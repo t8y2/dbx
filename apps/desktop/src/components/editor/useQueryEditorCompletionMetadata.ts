@@ -254,8 +254,25 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const scopedDatabase = scope && scope.database !== props.database ? scope.database : undefined;
     const database = supportsDatabaseSchemaQualifierCompletion() ? (table.database ?? scopedDatabase) : undefined;
     const baseKey = schema ? `${database ? `${database}.` : ""}${schema}.${table.name}` : table.name;
-    if (props.databaseType !== "postgres" || (!table.nameQuoted && !table.schemaQuoted)) return baseKey;
+    if ((props.databaseType !== "postgres" && props.databaseType !== "dameng") || (!table.nameQuoted && !table.schemaQuoted)) return baseKey;
     return `${baseKey}:quoted:s=${table.schemaQuoted ? "1" : "0"}:t=${table.nameQuoted ? "1" : "0"}`;
+  }
+
+  /**
+   * Look up cached columns for a referenced table, matching unquoted Oracle-family
+   * identifiers across casing variations while preserving exact matching for quoted names.
+   */
+  function getCachedColumnsForTable(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, scope?: CompletionMetadataScope): SqlCompletionColumn[] | undefined {
+    const exactKey = completionCacheKey(table, scope);
+    const exact = cachedColumnsByTable.get(exactKey);
+    if (exact) return exact;
+    if ((props.databaseType !== "oracle" && props.databaseType !== "dameng") || table.nameQuoted || table.schemaQuoted) return undefined;
+    const normalizedExactKey = exactKey.toLowerCase();
+    for (const [key, columns] of cachedColumnsByTable.entries()) {
+      if (key.includes(":quoted:")) continue;
+      if (key.toLowerCase() === normalizedExactKey) return columns;
+    }
+    return undefined;
   }
 
   function completionPrefixCacheKey(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, scope: CompletionMetadataScope | undefined, prefix: string) {
@@ -381,7 +398,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     return isSqlVirtualTableReference(table, props.databaseType);
   }
 
-  function completionQualifiedTableTarget(completionContext: ReturnType<typeof getSqlCompletionContext>): { name: string; database?: string; schema: string } | null {
+  function completionQualifiedTableTarget(completionContext: ReturnType<typeof getSqlCompletionContext>): { name: string; database?: string; schema: string; nameQuoted?: boolean; schemaQuoted?: boolean } | null {
     if (!completionContext.suggestColumns) return null;
     const parts = completionContext.qualifierParts ?? completionContext.qualifier?.split(".").filter(Boolean) ?? [];
     if (parts.length < 2) return null;
@@ -389,7 +406,10 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const schema = parts[parts.length - 2];
     if (!name || !schema) return null;
     const database = supportsDatabaseSchemaQualifierCompletion() && parts.length >= 3 ? parts[parts.length - 3] : undefined;
-    return { name, database, schema };
+    const quoted = completionContext.qualifierQuoted;
+    const nameQuoted = quoted ? !!quoted[parts.length - 1] : undefined;
+    const schemaQuoted = quoted ? !!quoted[parts.length - 2] : undefined;
+    return { name, database, schema, ...(nameQuoted !== undefined ? { nameQuoted } : {}), ...(schemaQuoted !== undefined ? { schemaQuoted } : {}) };
   }
 
   function completionTablesMatch(left: { name: string; catalog?: string | null; database?: string | null; schema?: string | null }, right: { name: string; catalog?: string | null; database?: string | null; schema?: string | null }) {
@@ -401,6 +421,15 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   async function findExactSemanticDiagnosticTable(table: SqlTableReference, scope?: CompletionMetadataScope): Promise<SqlCompletionTable | null> {
+    const match = await findScopedSemanticDiagnosticTable(table, scope);
+    if (match || table.schema || table.database || (props.databaseType !== "oracle" && props.databaseType !== "oceanbase-oracle")) return match;
+
+    // Bare Oracle names fall back to public synonyms after the current schema.
+    // Searching arbitrary schemas would accept inaccessible unqualified names.
+    return findScopedSemanticDiagnosticTable({ ...table, schema: "PUBLIC" }, scope);
+  }
+
+  async function findScopedSemanticDiagnosticTable(table: SqlTableReference, scope?: CompletionMetadataScope): Promise<SqlCompletionTable | null> {
     if (!props.connectionId || props.database == null) return null;
     const target = completionMetadataTarget(table, scope);
     if (!target) return null;
@@ -420,8 +449,9 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
 
   async function ensureColumnsForTable(table: { name: string; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, reference: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted"> = table, scope?: CompletionMetadataScope): Promise<boolean> {
     if (isVirtualCompletionTableReference(table)) return false;
-    const cacheKey = completionCacheKey({ ...table, ...reference }, scope);
-    if (cachedColumnsByTable.has(cacheKey)) return true;
+    const cacheTable = { ...table, ...reference };
+    const cacheKey = completionCacheKey(cacheTable, scope);
+    if (getCachedColumnsForTable(cacheTable, scope)) return true;
     if (!props.connectionId || props.database == null) return false;
     const target = completionMetadataTarget(table, scope);
     if (!target) return false;
@@ -656,6 +686,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     ensureColumnsForTable,
     cachedColumnsByTable,
     completionCacheKey,
+    getCachedColumnsForTable,
     getEditorSemanticModel,
     completionMetadataTarget,
     mergeCompletionTables,

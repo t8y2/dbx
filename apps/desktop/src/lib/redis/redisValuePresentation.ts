@@ -1,6 +1,7 @@
 import type { BinaryHexViewRow } from "@/lib/dataGrid/binaryHexViewer";
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
 import { decodeJsonUnicodeEscapes, formatJsonSource, isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
+import { formatLooseJsonText } from "@/lib/common/looseJsonFormat";
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { decodeMsgpack, decodePhpSerialized, decodePickle, isPickleMagic, parseJavaSerializedDetail, type RedisJavaSerializedDetail, type RedisMsgpackDetail, type RedisPhpSerializedDetail, type RedisPickleDetail } from "@/lib/redis/codec";
 
@@ -43,6 +44,12 @@ export interface RedisMemberDetail {
   binaryText: string;
   format: RedisMemberDetailFormat;
   json?: RedisJsonDetail;
+  /**
+   * JSON-shaped text that strict JSON rejects (e.g. Fastjson `1L`, issue #14384),
+   * re-indented for a read-only view. Set only when `json` is not; it has no
+   * parsed value, so it cannot be edited or converted to YAML/XML.
+   */
+  looseJsonText?: string;
   javaSerialized?: RedisJavaSerializedDetail;
   pickle?: RedisPickleDetail;
   msgpack?: RedisMsgpackDetail;
@@ -117,12 +124,22 @@ export function redisBlobDisplayText(blob: RedisBlob): string {
   return sanitizeRedisDisplayText(redisBlobRawText(blob));
 }
 
+export function redisBlobDisplayPreview(blob: RedisBlob): string {
+  // Decode only a base64-aligned prefix for a single-line collection preview.
+  const maxBase64Chars = 512;
+  if (blob.raw_base64.length <= maxBase64Chars) return redisBlobDisplayText(blob);
+  const bytes = base64ToBytes(blob.raw_base64.slice(0, maxBase64Chars));
+  const text = blob.encoding === "binary" ? null : decodeUtf8Bytes(bytes, true);
+  return `${sanitizeRedisDisplayText(text ?? escapeRedisBytes(bytes))}…`;
+}
+
 export function formatRedisMemberDetail(value: unknown, options: RedisMemberDetailOptions = {}): RedisMemberDetail {
   if (isRedisBlob(value)) return formatRedisBlobDetail(value, options);
 
   if (typeof value === "string") {
     const bytes = new TextEncoder().encode(value);
     const json = options.allowJsonText ? (parseRedisJsonDetail(value) ?? undefined) : undefined;
+    const looseJsonText = options.allowJsonText && !json ? (formatLooseJsonText(value) ?? undefined) : undefined;
     const extra = detectStructuredCodecs(bytes);
     const textFormats: RedisValueFormat[] = ["utf8", "ascii", "binary"];
     const extraFormats: RedisValueFormat[] = json ? JSON_DERIVED_FORMATS : [];
@@ -135,6 +152,7 @@ export function formatRedisMemberDetail(value: unknown, options: RedisMemberDeta
       binaryText: binaryBytesToText(bytes),
       format: "text",
       json,
+      looseJsonText,
       javaSerialized: extra.javaSerialized,
       pickle: extra.pickle,
       msgpack: extra.msgpack,
@@ -504,7 +522,7 @@ export function preferredRedisValueFormat(value: unknown, preferred?: RedisValue
  */
 export function autoRedisValueFormat(detail: RedisMemberDetail, stored: RedisValueFormat | null): RedisValueFormat {
   if (stored != null && shouldReuseRedisValueFormatPreference(detail, stored)) return stored;
-  if (stored == null && isRedisJsonContainerValue(detail.json?.value)) return "json";
+  if (stored == null && (isRedisJsonContainerValue(detail.json?.value) || detail.looseJsonText != null)) return "json";
   return detail.defaultFormat;
 }
 
@@ -666,7 +684,7 @@ export function redisValuePreview(value: RedisValue): string {
     }
     case "hash": {
       const first = value.data.items[0];
-      return first ? previewText(`${redisBlobRawText(first.field)} ${redisBlobRawText(first.value)}`) : "";
+      return first ? previewText(`${redisBlobDisplayPreview(first.field)} ${redisBlobDisplayPreview(first.value)}`) : "";
     }
     case "zset": {
       const first = value.data.items[0];
@@ -778,6 +796,7 @@ function formatRedisBlobDetail(blob: RedisBlob, options: RedisMemberDetailOption
   const extra = detectStructuredCodecs(bytes);
   const defaultFormat: RedisValueFormat = strictUtf8Text != null ? "utf8" : "hex";
   const json = options.allowJsonText && strictUtf8Text != null ? (parseRedisJsonDetail(strictUtf8Text) ?? undefined) : undefined;
+  const looseJsonText = options.allowJsonText && strictUtf8Text != null && !json ? (formatLooseJsonText(strictUtf8Text) ?? undefined) : undefined;
   const textFormats: RedisValueFormat[] = strictUtf8Text != null ? ["utf8", "ascii", "binary"] : ["binary"];
   const extraFormats: RedisValueFormat[] = json ? JSON_DERIVED_FORMATS : [];
   return {
@@ -789,6 +808,7 @@ function formatRedisBlobDetail(blob: RedisBlob, options: RedisMemberDetailOption
     binaryText,
     format: "text",
     json,
+    looseJsonText,
     javaSerialized: extra.javaSerialized,
     pickle: extra.pickle,
     msgpack: extra.msgpack,
@@ -862,9 +882,9 @@ function escapeRedisBytes(bytes: Uint8Array): string {
   return output;
 }
 
-function decodeUtf8Bytes(bytes: Uint8Array): string | null {
+function decodeUtf8Bytes(bytes: Uint8Array, stream = false): string | null {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream });
   } catch {
     return null;
   }

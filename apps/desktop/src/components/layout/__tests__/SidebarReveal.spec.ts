@@ -105,6 +105,8 @@ describe("sidebar hover preview", () => {
     expect(preview()).toBe(true);
     expect(props.pinned).toBe(false);
     expect(panel().classList.contains("sidebar-reveal-overlay")).toBe(true);
+    // 壁纸模式下悬停浮出面板必须保持不透明（--background-solid，#14219）。
+    expect(panel().classList.contains("bg-background-solid")).toBe(true);
   });
 
   it("closes after 300ms outside and cancels closing on re-entry", async () => {

@@ -206,6 +206,7 @@ mod tests {
     /// fail with `missing field db_type` instead of exercising the notes logic.
     fn postgres_config(id: &str, docs_notes_path: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             docs_notes_path: docs_notes_path.map(str::to_string),
             id: id.to_string(),
             name: "Postgres".to_string(),

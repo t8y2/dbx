@@ -27,7 +27,7 @@ export function createQueryEditorHoverContent(options: QueryEditorHoverContentOp
     dom.appendChild(heading);
 
     const detailNode = document.createElement("div");
-    detailNode.className = "mt-1 text-muted-foreground";
+    detailNode.className = "mt-1 max-h-24 max-w-sm overflow-auto whitespace-pre-wrap wrap-break-word text-muted-foreground";
     detailNode.textContent = detail;
     dom.appendChild(detailNode);
 

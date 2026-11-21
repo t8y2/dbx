@@ -1,0 +1,100 @@
+---
+title: Web 审计日志
+description: 在 DBX Web 与 Docker 部署中以 JSON Lines 文件记录谁做了什么：查询、连接变更、SFTP 操作、下载、登录和 MCP 工具调用。
+---
+
+DBX Web 可以把审计记录追加写入一个文件：每一个会修改状态或把数据带出服务器的操作写成一行 JSON。**默认关闭**，仅作用于 DBX Web / Docker，桌面端不受影响。
+
+## 开启
+
+把 `DBX_WEB_AUDIT_LOG` 设置为文件路径。父目录必须已存在；文件以 `0600` 权限创建。
+
+```bash
+docker run -d --name dbx -p 4224:4224 \
+  -v dbx-data:/app/data \
+  -v /var/log/dbx:/app/audit \
+  -e DBX_PASSWORD=your-password \
+  -e DBX_WEB_AUDIT_LOG=/app/audit/dbx-audit.jsonl \
+  t8y2/dbx:latest
+```
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `DBX_WEB_AUDIT_LOG` | 未设置（关闭） | JSON Lines 审计文件路径 |
+| `DBX_WEB_AUDIT_USER_HEADER` | 未设置 | 由认证反向代理设置的用户名请求头，例如 `X-Forwarded-Email`，记录为 `user` |
+| `DBX_WEB_AUDIT_SQL` | `full` | `full` 记录 SQL / 命令文本（前 16 KiB）及其 SHA-256；`hash` 只记录 SHA-256 和长度 |
+
+如果文件无法打开、是符号链接或不是普通文件，DBX 会拒绝启动，避免在配置错误时悄悄失去审计。
+
+## 记录的内容
+
+- 所有会改变状态的 Web API 请求（`POST`、`PUT`、`DELETE`）：执行查询、连接/断开、保存连接、插件操作、SFTP 文件操作、导入、备份、设置。
+- 进入密码校验的登录尝试（成功与密码错误）、登出、首次设置和修改密码。
+- 下载：表/库导出、备份文件、大字段值、SQL 文件失败日志，以及读取 `~/.ssh/config` 主机列表。
+- 使用有效令牌调用原生 `/mcp` 端点：JSON-RPC 方法、工具名及工具的标识参数。
+
+每一行形如：
+
+```json
+{"ts":"2026-11-06T09:14:03.512Z","channel":"api","action":"query/execute","method":"POST","status":200,"outcome":"ok","duration_ms":38,"peer":"172.18.0.4","forwarded_for":"10.0.8.21","user":"alice@example.com","session":"9f2c1d0b7a6e4c13","details":{"connection_id":"pg-prod","database":"sales","sql":"delete from orders where id = 42","sql_sha256":"…"}}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `ts` | UTC 时间戳 |
+| `channel` | `api` 或 `mcp` |
+| `action` | API 路由（`query/execute`、`connection/save`、`plugins/filesystem/delete` 等）或 `mcp/<方法>` |
+| `status`、`outcome` | HTTP 状态码与 `ok` / `denied`（401、403）/ `error` |
+| `duration_ms` | 发出响应头所用时间 |
+| `peer` | 建立 TCP 连接的客户端地址（有反向代理时为代理地址） |
+| `forwarded_for` | 原样记录的 `X-Forwarded-For`。**未经验证**：只有代理会覆盖该头时才可信 |
+| `user` | 配置了 `DBX_WEB_AUDIT_USER_HEADER` 时该请求头的值 |
+| `session` | 会话 Cookie 的 SHA-256 前 16 位十六进制（MCP 为 `mcp:` + 令牌指纹），用于关联同一次登录的操作，凭据本身不会写入 |
+| `details` | 白名单字段：连接 id、`target`（被打开连接的 id、名称、类型、主机、端口、用户）、数据库、schema、`sql` / `statements` / `command` / `query`、插件 id 与方法、文件 `uri` / `source_uri` / `target_uri`、保存或删除的连接 id |
+
+## 不会记录的内容
+
+请求体按白名单过滤，因此日志中不会出现密码、令牌、SSH 密钥、完整连接配置、插件 `params`、上传或写入的文件内容、终端按键（`plugins/binary`）以及查询结果。
+
+为保持日志可读，以下内容被有意跳过：
+
+- 只读浏览（下载以外的 `GET` 路由）以及只生成或解析 SQL 的编辑器辅助接口（`query/build-*`、`query/analyze-*`、`dialect/*`、补全、缓存）。其效果会在生成的 SQL 被执行时记录。
+- 认证前被拒绝的请求、验证码失败和锁定响应，防止匿名客户端写满磁盘。这类请求请查看反向代理访问日志。
+- 交互式 SSH 终端输入。打开会话会被记录；终端中输入的命令请在目标主机上开启命令审计（例如 `auditd` 或 `sudo` 日志）。
+
+语句中内联的凭据（`IDENTIFIED BY …`、`PASSWORD '…'`、`PASSWORD = '…'`、`--password=…`）会在记录或计算摘要前替换为 `***`。该遮蔽为尽力而为。
+
+<Callout type="warn">SQL 和命令文本仍可能以无法识别的形式包含个人数据或密钥。请限制文件访问权限并设定保留期限。`DBX_WEB_AUDIT_SQL=hash` 只保留摘要，但短小、可预测文本的摘要可被猜测，因此不等于匿名化。</Callout>
+
+## 在登录代理后按用户归属
+
+DBX Web 只有一个共享密码，单独使用时日志只能区分会话而不能区分人。要记录具体用户，请在 DBX 前放置认证反向代理（oauth2-proxy、Authelia、Authentik、Keycloak Gatekeeper 等），并把 `DBX_WEB_AUDIT_USER_HEADER` 设为它转发的请求头：
+
+```bash
+-e DBX_WEB_AUDIT_USER_HEADER=X-Forwarded-Email
+```
+
+该请求头仅用于归属，不改变认证方式。只有满足以下条件时才可信：
+
+- DBX **只能**通过代理访问（不要发布 4224 端口；使用内部网络或 `DBX_BIND_ADDR=127.0.0.1`）；
+- 代理在每个请求上**覆盖**该请求头，而不是透传浏览器发来的值。
+
+如果客户端设法发送了两次该请求头，所有值会以逗号拼接后记录，冲突一目了然。名称看起来像凭据的请求头（包含 `cookie`、`authorization`、`token`、`secret`、`password` 或 `api-key`，例如 oauth2-proxy 的 `X-Forwarded-Access-Token`）会在启动时被拒绝。
+
+## 轮转与外发
+
+文件以追加模式打开，DBX 不会自行轮转。请使用 `logrotate` 并开启 `copytruncate`：
+
+```text
+/var/log/dbx/dbx-audit.jsonl {
+    daily
+    rotate 90
+    compress
+    copytruncate
+    create 0600 root root
+}
+```
+
+如需防篡改，请把文件发送到集中日志或 SIEM（Vector、Fluent Bit、Filebeat 等），不要只依赖与 DBX 容器放在一起的副本。
+
+日志由后台线程写入，并在每批写入后刷新；DBX 关闭时会刷新仍在队列中的记录。写入失败（例如磁盘已满）时，DBX 继续处理请求，并在进程日志中报告一次错误。

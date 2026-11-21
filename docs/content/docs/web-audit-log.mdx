@@ -1,0 +1,100 @@
+---
+title: Web Audit Log
+description: Record who did what in DBX Web and Docker deployments — queries, connection changes, SFTP operations, downloads, logins and MCP tool calls — in a JSON Lines file.
+---
+
+DBX Web can append an audit trail to a file: one JSON object per line for every action that changes something or moves data out of the server. It is **off by default** and only applies to DBX Web / Docker; the desktop app is unaffected.
+
+## Enable it
+
+Set `DBX_WEB_AUDIT_LOG` to a file path. The parent directory must exist; the file is created with mode `0600`.
+
+```bash
+docker run -d --name dbx -p 4224:4224 \
+  -v dbx-data:/app/data \
+  -v /var/log/dbx:/app/audit \
+  -e DBX_PASSWORD=your-password \
+  -e DBX_WEB_AUDIT_LOG=/app/audit/dbx-audit.jsonl \
+  t8y2/dbx:latest
+```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DBX_WEB_AUDIT_LOG` | Not set (off) | Path of the JSON Lines audit file |
+| `DBX_WEB_AUDIT_USER_HEADER` | Not set | Request header holding the user name set by an authenticating reverse proxy, for example `X-Forwarded-Email`. Recorded as `user` |
+| `DBX_WEB_AUDIT_SQL` | `full` | `full` records SQL / command text (first 16 KiB) and its SHA-256; `hash` records only the SHA-256 and length |
+
+DBX refuses to start if the file cannot be opened, is a symbolic link or is not a regular file, so a misconfiguration never results in a server without the audit trail you asked for.
+
+## What is recorded
+
+- Every Web API request that changes state (`POST`, `PUT`, `DELETE`): query execution, connect/disconnect, saving connections, plugin actions, SFTP file operations, imports, backups, settings.
+- Login attempts that reached the password check (success and wrong password), logout, first-time setup and password changes.
+- Downloads: table/database exports, backup files, large values, SQL file failure logs, plus reading `~/.ssh/config` hosts.
+- Calls to the native `/mcp` endpoint with a valid token: JSON-RPC method, tool name and the tool's identifying arguments.
+
+Each line looks like this:
+
+```json
+{"ts":"2026-11-06T09:14:03.512Z","channel":"api","action":"query/execute","method":"POST","status":200,"outcome":"ok","duration_ms":38,"peer":"172.18.0.4","forwarded_for":"10.0.8.21","user":"alice@example.com","session":"9f2c1d0b7a6e4c13","details":{"connection_id":"pg-prod","database":"sales","sql":"delete from orders where id = 42","sql_sha256":"…"}}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ts` | UTC timestamp |
+| `channel` | `api` or `mcp` |
+| `action` | API route (`query/execute`, `connection/save`, `plugins/filesystem/delete`…) or `mcp/<method>` |
+| `status`, `outcome` | HTTP status and `ok` / `denied` (401, 403) / `error` |
+| `duration_ms` | Time until the response headers were sent |
+| `peer` | Address of the client that opened the TCP connection (your reverse proxy, when there is one) |
+| `forwarded_for` | `X-Forwarded-For` as received. **Unverified**: trust it only if your proxy overwrites it |
+| `user` | Value of `DBX_WEB_AUDIT_USER_HEADER`, when configured |
+| `session` | First 16 hex characters of the SHA-256 of the session cookie (`mcp:` + fingerprint of the bearer token for MCP). Links the actions of one login; the credential itself is never written |
+| `details` | Allowlisted request fields: connection id, `target` (id, name, type, host, port, user of the connection being opened), database, schema, `sql` / `statements` / `command` / `query`, plugin id and method, file `uri` / `source_uri` / `target_uri`, saved or removed connection ids |
+
+## What is never recorded
+
+Request bodies are filtered by an allowlist, so the log cannot contain passwords, tokens, SSH keys, full connection configurations, plugin `params`, uploaded or written file contents, terminal keystrokes (`plugins/binary`) or query results.
+
+To keep the log useful, these are skipped on purpose:
+
+- Read-only browsing (`GET` routes other than downloads) and editor helpers that only build or parse SQL (`query/build-*`, `query/analyze-*`, `dialect/*`, completion, caches). Their effect is recorded when the generated SQL is executed.
+- Requests rejected before authentication, captcha failures and lockout replies, so an anonymous client cannot fill the disk. Use the reverse proxy access log for those.
+- Interactive SSH terminal input. Opening a session is recorded; for the commands typed into it, enable command auditing on the target hosts (for example `auditd` or `sudo` logging).
+
+Credentials written inline in statements — `IDENTIFIED BY …`, `PASSWORD '…'`, `PASSWORD = '…'`, `--password=…` — are replaced with `***` before the text is logged or hashed. This masking is best-effort.
+
+<Callout type="warn">SQL text and commands can still contain personal data or secrets in forms the masking does not recognise. Restrict access to the file and define a retention period. `DBX_WEB_AUDIT_SQL=hash` keeps only a digest, but a digest of short, predictable text can be guessed, so it is not anonymisation.</Callout>
+
+## Per-user attribution behind a login proxy
+
+DBX Web has a single shared password, so on its own the log identifies sessions, not people. To record who each person is, put an authenticating reverse proxy (oauth2-proxy, Authelia, Authentik, Keycloak Gatekeeper…) in front of DBX and set `DBX_WEB_AUDIT_USER_HEADER` to the header it forwards:
+
+```bash
+-e DBX_WEB_AUDIT_USER_HEADER=X-Forwarded-Email
+```
+
+This header is used for attribution only and does not change authentication. It is only trustworthy if:
+
+- DBX is reachable **only** through the proxy (do not publish port 4224; use an internal network or `DBX_BIND_ADDR=127.0.0.1`);
+- the proxy **overwrites** the header on every request instead of passing through a value sent by the browser.
+
+If a client manages to send the header twice, all values are recorded, joined by commas, so the conflict stays visible. Header names that look like credentials (containing `cookie`, `authorization`, `token`, `secret`, `password` or `api-key`, such as oauth2-proxy's `X-Forwarded-Access-Token`) are refused at startup.
+
+## Rotation and shipping
+
+The file is opened in append mode and never rotated by DBX. Use `logrotate` with `copytruncate`:
+
+```text
+/var/log/dbx/dbx-audit.jsonl {
+    daily
+    rotate 90
+    compress
+    copytruncate
+    create 0600 root root
+}
+```
+
+For tamper resistance, ship the file to a central log store or SIEM (Vector, Fluent Bit, Filebeat…) instead of relying on the copy that sits next to the DBX container.
+
+Lines are written by a background thread and flushed after each burst. Lines still queued are flushed when DBX shuts down. If a write fails (for example a full disk), DBX keeps serving requests and reports the error once in its process log.

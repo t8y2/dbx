@@ -5273,6 +5273,17 @@ export default withEnglishFallback({
     createSequence: "Crea sequenza",
     viewPostgresRowLevelSecurity: "Visualizza criteri di sicurezza a livello di riga",
     copyGeneratedSql: "Copia SQL generato",
+    mysqlTableMaintenance: {
+      title: "Manutenzione tabella",
+      analyze: "Analizza tabella",
+      check: "Controlla tabella",
+      optimize: "Ottimizza tabella",
+      repair: "Ripara tabella",
+      analyzeSuccess: "Tabella «{name}» ANALYZE TABLE: {message}",
+      checkSuccess: "Tabella «{name}» CHECK TABLE: {message}",
+      optimizeSuccess: "Tabella «{name}» OPTIMIZE TABLE: {message}",
+      repairSuccess: "Tabella «{name}» REPAIR TABLE: {message}",
+    },
   },
   visibleDatabases: {
     title: "Database Visibili",

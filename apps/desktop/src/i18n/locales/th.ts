@@ -5567,6 +5567,17 @@ export default withEnglishFallback({
     createSequence: "สร้างซีเควนซ์",
     viewPostgresRowLevelSecurity: "ดูนโยบายความปลอดภัยระดับแถว",
     copyGeneratedSql: "คัดลอก SQL ที่สร้างขึ้น",
+    mysqlTableMaintenance: {
+      title: "การบำรุงรักษาตาราง",
+      analyze: "วิเคราะห์ตาราง",
+      check: "ตรวจสอบตาราง",
+      optimize: "ปรับแต่งตาราง",
+      repair: "ซ่อมแซมตาราง",
+      analyzeSuccess: "ตาราง「{name}」ANALYZE TABLE: {message}",
+      checkSuccess: "ตาราง「{name}」CHECK TABLE: {message}",
+      optimizeSuccess: "ตาราง「{name}」OPTIMIZE TABLE: {message}",
+      repairSuccess: "ตาราง「{name}」REPAIR TABLE: {message}",
+    },
   },
   visibleDatabases: {
     title: "ฐานข้อมูลที่มองเห็นได้",

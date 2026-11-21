@@ -5392,6 +5392,17 @@ export default withEnglishFallback({
     createSequence: "Создать последовательность",
     viewPostgresRowLevelSecurity: "Просмотреть политики безопасности на уровне строк",
     copyGeneratedSql: "Копировать сгенерированный SQL",
+    mysqlTableMaintenance: {
+      title: "Обслуживание таблицы",
+      analyze: "Анализировать таблицу",
+      check: "Проверить таблицу",
+      optimize: "Оптимизировать таблицу",
+      repair: "Восстановить таблицу",
+      analyzeSuccess: "Таблица «{name}» ANALYZE TABLE: {message}",
+      checkSuccess: "Таблица «{name}» CHECK TABLE: {message}",
+      optimizeSuccess: "Таблица «{name}» OPTIMIZE TABLE: {message}",
+      repairSuccess: "Таблица «{name}» REPAIR TABLE: {message}",
+    },
   },
   visibleDatabases: {
     title: "Видимые базы данных",

@@ -5206,6 +5206,17 @@ export default withEnglishFallback({
     createSequence: "시퀀스 만들기",
     viewPostgresRowLevelSecurity: "행 수준 보안 정책 보기",
     copyGeneratedSql: "생성된 SQL 복사",
+    mysqlTableMaintenance: {
+      title: "테이블 유지 관리",
+      analyze: "테이블 분석",
+      check: "테이블 검사",
+      optimize: "테이블 최적화",
+      repair: "테이블 복구",
+      analyzeSuccess: "테이블 '{name}' ANALYZE TABLE: {message}",
+      checkSuccess: "테이블 '{name}' CHECK TABLE: {message}",
+      optimizeSuccess: "테이블 '{name}' OPTIMIZE TABLE: {message}",
+      repairSuccess: "테이블 '{name}' REPAIR TABLE: {message}",
+    },
   },
   visibleDatabases: {
     title: "표시할 데이터베이스",

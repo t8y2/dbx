@@ -66,8 +66,10 @@ fn collect_connection_group_paths(
                 paths.insert(id.clone(), path.clone());
             }
             SidebarOrderEntry::Group { id, children, connection_ids } => {
-                let name =
-                    groups.get(id).ok_or_else(|| format!("INVALID_SIDEBAR_LAYOUT: group '{id}' has no metadata"))?;
+                // The id is not echoed: the caller may not be allowed to see that group.
+                let name = groups.get(id).ok_or_else(|| {
+                    "INVALID_SIDEBAR_LAYOUT: order entry references a group without metadata".to_string()
+                })?;
                 path.ids.push(id.clone());
                 path.names.push(name.clone());
                 if let Some(children) = children {

@@ -10909,6 +10909,8 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "테이블 데이터의 다음 열 선택",
     shortcutSelectPreviousGridColumn: "테이블 데이터의 이전 열 선택",
     sidebarSimpleHideIndexes: "테이블과 함께 표시되는 인덱스 숨기기",
+    cellDetailPanelEnabled: "셀 상세 정보 패널",
+    cellDetailPanelEnabledDescription: "비활성화하면 셀 상세 정보 패널이 더 이상 고정 표시되지 않으며, 상세 버튼을 클릭하거나 마우스 오른쪽 버튼 메뉴에서 팝업으로 표시됩니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

@@ -298,6 +298,12 @@ fn persist_transport_layer_secrets(
                 &transport_layer_ssh_key_passphrase_key(index, layer),
                 &ssh.key_passphrase,
             )?;
+            // Three-state: `None` means "leave whatever is stored alone" (the
+            // caller never saw the secret), `Some("")` means the user cleared
+            // the field, and a value replaces it.
+            if let Some(secret) = ssh.totp_secret.as_deref() {
+                persist_secret(store, connection_id, &transport_layer_ssh_totp_secret_key(index, layer), secret)?;
+            }
         }
         TransportLayerConfig::Proxy(proxy) => {
             persist_secret(store, connection_id, &transport_layer_proxy_password_key(index, layer), &proxy.password)?;
@@ -344,6 +350,21 @@ fn hydrate_transport_layer_secrets(
                 } else {
                     store.set_secret(&config.id, &passphrase_key, &ssh.key_passphrase)?;
                     *needs_rewrite = true;
+                }
+
+                // Scrubbing leaves `None` behind, so an absent or empty value
+                // means "not loaded" rather than "cleared": read the stored
+                // secret back here, otherwise headless hosts (dbx-mcp), which
+                // only ever see configs that went through persistence, would
+                // never receive the code. A user clearing the field sends
+                // `Some("")`, which `persist_transport_layer_secrets` turns
+                // into a delete, so there is nothing to resurrect.
+                if ssh.totp_secret.as_deref().is_none_or(str::is_empty) {
+                    if let Some(secret) =
+                        store.get_secret(&config.id, &transport_layer_ssh_totp_secret_key(index, &layer_for_key))?
+                    {
+                        ssh.totp_secret = Some(secret);
+                    }
                 }
             }
             TransportLayerConfig::Proxy(proxy) => {
@@ -959,6 +980,10 @@ fn transport_layer_ssh_password_key(index: usize, layer: &TransportLayerConfig) 
     format!("{}{}.ssh_password", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
+fn transport_layer_ssh_totp_secret_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_totp_secret", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
 fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerConfig) -> String {
     format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
@@ -994,6 +1019,9 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
                     TransportLayerConfig::Ssh(ssh) => {
                         ssh.password.clear();
                         ssh.key_passphrase.clear();
+                        if ssh.totp_secret.is_some() {
+                            ssh.totp_secret = None;
+                        }
                     }
                     TransportLayerConfig::Proxy(proxy) => {
                         proxy.password.clear();
@@ -1194,6 +1222,7 @@ mod tests {
             auth_method: "key".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
+            totp_secret: None,
         }
     }
 

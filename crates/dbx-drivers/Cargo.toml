@@ -67,6 +67,8 @@ portpicker = "0.1.1"
 csv = "1"
 base64 = "0.22"
 sha2 = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
 bytes = "1"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 flate2 = "1"

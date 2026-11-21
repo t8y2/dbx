@@ -2467,6 +2467,9 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
             TransportLayerConfig::Ssh(ssh) => {
                 ssh.password.clear();
                 ssh.key_passphrase.clear();
+                if ssh.totp_secret.is_some() {
+                    ssh.totp_secret = None;
+                }
             }
             TransportLayerConfig::Proxy(proxy) => {
                 proxy.password.clear();
@@ -2578,6 +2581,9 @@ fn collect_connection_secrets(
                     &transport_layer_ssh_key_passphrase_key(index, layer),
                     &ssh.key_passphrase,
                 );
+                if let Some(secret) = ssh.totp_secret.as_deref() {
+                    push_secret(secrets, &config.id, &transport_layer_ssh_totp_secret_key(index, layer), secret);
+                }
             }
             TransportLayerConfig::Proxy(proxy) => {
                 push_secret(secrets, &config.id, &transport_layer_proxy_password_key(index, layer), &proxy.password);
@@ -2973,6 +2979,10 @@ fn transport_layer_ssh_password_key(index: usize, layer: &TransportLayerConfig) 
 
 fn transport_layer_ssh_key_passphrase_key(index: usize, layer: &TransportLayerConfig) -> String {
     format!("{}{}.ssh_key_passphrase", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
+}
+
+fn transport_layer_ssh_totp_secret_key(index: usize, layer: &TransportLayerConfig) -> String {
+    format!("{}{}.ssh_totp_secret", TRANSPORT_LAYER_SECRET_PREFIX, transport_layer_secret_segment(index, layer))
 }
 
 fn transport_layer_proxy_password_key(index: usize, layer: &TransportLayerConfig) -> String {
@@ -4217,6 +4227,7 @@ mod tests {
                     auth_method: "password".to_string(),
                     allow_exec_channel_proxy: false,
                     proxy_command: String::new(),
+                    totp_secret: None,
                 }),
                 TransportLayerConfig::HttpTunnel(crate::models::connection::HttpTunnelConfig {
                     profile_id: String::new(),
@@ -5906,6 +5917,7 @@ mod tests {
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
+            totp_secret: None,
             profile_id: String::new(),
         });
         storage.save_tunnel_profiles(std::slice::from_ref(&profile)).await.unwrap();

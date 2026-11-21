@@ -685,6 +685,7 @@ async fn open_final_hop_session(
             ssh_tunnel::effective_hop_timeout(final_ssh),
             tunnels.known_hosts_path(),
             &final_ssh.proxy_command,
+            final_ssh.totp_secret.as_deref(),
         )
         .await;
     }
@@ -706,6 +707,7 @@ async fn open_final_hop_session(
         ssh_tunnel::effective_hop_timeout(final_ssh),
         tunnels.known_hosts_path(),
         &final_ssh.proxy_command,
+        final_ssh.totp_secret.as_deref(),
     )
     .await
 }
@@ -1202,6 +1204,7 @@ mod tests {
             5,
             &known_hosts,
             "",
+            None,
         )
         .await
         .unwrap();
@@ -1243,6 +1246,7 @@ mod tests {
                 5,
                 &known_hosts,
                 "",
+                None,
             )
             .await
         });

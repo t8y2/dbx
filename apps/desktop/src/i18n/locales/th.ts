@@ -12764,6 +12764,7 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "เลือกคอลัมน์ถัดไปของข้อมูลตาราง",
     shortcutSelectPreviousGridColumn: "เลือกคอลัมน์ก่อนหน้าของข้อมูลตาราง",
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
+    tabWrapMaxRows: "จำนวนแถวสูงสุดสำหรับการเรียงแท็บ",
   },
   driverStore: {
     jreDirRemoveFailed: "ลบไดเรกทอรี JRE เก่าไม่สำเร็จ: {path} (ข้อผิดพลาดเดิม: {error})",

@@ -10809,6 +10809,7 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Selecionar a próxima coluna dos dados da tabela",
     shortcutSelectPreviousGridColumn: "Selecionar a coluna anterior dos dados da tabela",
     sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
+    tabWrapMaxRows: "Número máximo de linhas lado a lado das abas",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

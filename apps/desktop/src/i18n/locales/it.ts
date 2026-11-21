@@ -10814,6 +10814,7 @@ export default withEnglishFallback({
     shortcutSelectNextGridColumn: "Seleziona la colonna successiva dei dati della tabella",
     shortcutSelectPreviousGridColumn: "Seleziona la colonna precedente dei dati della tabella",
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
+    tabWrapMaxRows: "Numero massimo di righe per l'affiancamento delle schede",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

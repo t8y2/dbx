@@ -516,6 +516,7 @@ export default withEnglishFallback({
       urlDecode: "Decodificar componente URL",
       radix: "Conversión de base de enteros",
       flattenLines: "Comprimir varias líneas en una sola",
+      unicodeEscape: "Texto → escape Unicode",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -5713,6 +5714,7 @@ export default withEnglishFallback({
     scopeFunctions: "funciones",
     stepSkipped: "Omitido porque falló un paso anterior requerido.",
     selectedObjectsCount: "{count} objetos seleccionados",
+    generatePassword: "Generar contraseña",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Las fechas de los trabajos en esta versión de OceanBase solo admiten precisión de microsegundos. Cambie a 0 los dígitos 7–9 de los segundos fraccionarios y vuelva a generar la vista previa; se conservó la entrada original.",
@@ -11106,6 +11108,8 @@ export default withEnglishFallback({
     sidebarSimpleHideIndexes: "Ocultar los índices junto a las tablas",
     globalNumberGrouping: "Mostrar separador de miles",
     globalNumberGroupingDescription: "En la cuadrícula, muestra los números como 1,234,567.89, etc. Los formatos de columna configurados individualmente tienen prioridad.",
+    toolbarGroup_left: "Barra de acciones principal y menú Más",
+    toolbarPinItem: "Fijar {item} a la barra de herramientas",
     completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",
     completionAutoActivationDelayDescription:
       "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",

@@ -474,6 +474,7 @@ export default withEnglishFallback({
       urlDecode: "ถอดรหัสส่วนประกอบ URL",
       radix: "การแปลงฐานจำนวนเต็ม",
       flattenLines: "บีบอัดหลายบรรทัดให้เป็นบรรทัดเดียว",
+      unicodeEscape: "ข้อความ → การ escape เป็น Unicode",
     },
     units: {
       auto: "อัตโนมัติ (10/13 หลัก)",
@@ -6445,6 +6446,7 @@ export default withEnglishFallback({
     scopeFunctions: "Functions",
     stepSkipped: "ข้ามเนื่องจากขั้นตอนก่อนหน้าที่จำเป็นล้มเหลว",
     selectedObjectsCount: "เลือกแล้ว {count} รายการ",
+    generatePassword: "สร้างรหัสผ่าน",
   },
   xuguUserPermissions: {
     title: "ผู้ใช้และสิทธิ์ของ Xugu",
@@ -12771,6 +12773,8 @@ export default withEnglishFallback({
     sidebarSimpleHideIndexes: "ซ่อนดัชนีที่แสดงควบคู่กับตาราง",
     globalNumberGrouping: "แสดงตัวคั่นหลักพัน",
     globalNumberGroupingDescription: "แสดงตัวเลขในตารางในรูปแบบ 1,234,567.89 เป็นต้น โดยรูปแบบคอลัมน์ที่กำหนดค่าแยกไว้จะมีความสำคัญกว่า",
+    toolbarGroup_left: "แถบการดำเนินการหลักและเมนูเพิ่มเติม",
+    toolbarPinItem: "ปักหมุด {item} ไว้บนแถบเครื่องมือ",
     completionAutoActivationDelay: "ดีเลย์การเปิดใช้งานการเติมข้อความอัตโนมัติ (มิลลิวินาที)",
     completionAutoActivationDelayDescription: "ระยะเวลาหน่วงหลังการพิมพ์ก่อนที่รายการเติมข้อความอัตโนมัติจะปรากฏ ค่าเริ่มต้นคือ 500 มิลลิวินาที การเพิ่มค่านี้ช่วยหลีกเลี่ยงไม่ให้รายการเติมข้อความเด้งขึ้นบ่อยครั้งระหว่างการพิมพ์ต่อเนื่องจนรบกวนการแก้ไข โดย 0 หมายถึงแสดงทันที",
   },

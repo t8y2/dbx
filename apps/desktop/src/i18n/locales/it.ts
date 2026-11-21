@@ -514,6 +514,7 @@ export default withEnglishFallback({
       urlDecode: "Decodifica componente URL",
       radix: "Conversione di base degli interi",
       flattenLines: "Comprimi più righe in una riga",
+      unicodeEscape: "Testo → escape Unicode",
     },
     units: {
       auto: "Automatica (10/13 cifre)",
@@ -5515,6 +5516,7 @@ export default withEnglishFallback({
     scopeFunctions: "funzioni",
     stepSkipped: "Ignorato perché un passaggio precedente richiesto non è riuscito.",
     selectedObjectsCount: "{count} oggetti selezionati",
+    generatePassword: "Genera password",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "Le date dei job in questa versione di OceanBase supportano solo la precisione al microsecondo. Imposta a 0 le cifre 7–9 dei secondi frazionari e genera di nuovo l'anteprima; l'input originale è stato conservato.",
@@ -10821,6 +10823,8 @@ export default withEnglishFallback({
     sidebarSimpleHideIndexes: "Nascondi gli indici affiancati alle tabelle",
     globalNumberGrouping: "Mostra separatore delle migliaia",
     globalNumberGroupingDescription: "Visualizza i numeri nella griglia nel formato 1.234.567,89 o simile; le formattazioni di colonna configurate singolarmente hanno la precedenza.",
+    toolbarGroup_left: "Barra delle azioni principale e menu Altro",
+    toolbarPinItem: "Fissa {item} alla barra degli strumenti",
     completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
     completionAutoActivationDelayDescription:
       "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",

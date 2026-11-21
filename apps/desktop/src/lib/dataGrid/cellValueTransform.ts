@@ -7,7 +7,7 @@ export const CELL_TRANSFORM_MAX_OUTPUT = 200_000;
 export const CELL_TRANSFORM_MAX_RADIX_DIGITS = 4_096;
 /** Base64 二进制转换的输入字符上限（约 7.5MB 解码字节），与 BLOB 下载路径的量级一致。 */
 export const CELL_TRANSFORM_MAX_BINARY_INPUT = 10_000_000;
-export const CELL_TRANSFORM_KINDS = ["timestamp", "json", "jsonCompact", "xml", "html", "base64Encode", "base64Decode", "base64Image", "base64File", "urlEncode", "urlDecode", "radix", "flattenLines"] as const;
+export const CELL_TRANSFORM_KINDS = ["timestamp", "json", "jsonCompact", "xml", "html", "base64Encode", "base64Decode", "base64Image", "base64File", "urlEncode", "urlDecode", "unicodeEscape", "radix", "flattenLines"] as const;
 export type CellTransformKind = (typeof CELL_TRANSFORM_KINDS)[number];
 export const BINARY_CELL_TRANSFORM_KINDS: readonly CellTransformKind[] = ["base64Image", "base64File"];
 export type CellTransformError = "tooLarge" | "invalid" | "invalidTimestamp" | "ambiguousUnit" | "invalidInteger" | "invalidBase64";
@@ -155,6 +155,11 @@ export function transformCellValue(source: string, options: CellTransformOptions
       case "urlDecode":
         text = decodeURIComponent(source);
         break;
+      case "unicodeEscape": {
+        // Each escape represents one UTF-16 code unit, including both halves of an emoji.
+        text = source.replace(/[\u0080-\uffff]/g, (character) => "\\u" + character.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0"));
+        break;
+      }
       case "base64Encode": {
         // Reject lone surrogates rather than silently replacing them during UTF-8 encoding.
         encodeURIComponent(source);

@@ -83,6 +83,7 @@ export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
   { key: "newConnection", titleKey: "toolbar.newConnection" },
   { key: "newQuery", titleKey: "toolbar.newQuery" },
   { key: "openSql", titleKey: "toolbar.openSql" },
+  { key: "recentClosedTabs", titleKey: "tabs.recentClosedTitle" },
   { key: "databaseBackups", titleKey: "databaseBackup.title" },
   { key: "mcpSettings", titleKey: "settings.openMcpSettings" },
   { key: "exportProgress", titleKey: "settings.toolbarExportProgress" },

@@ -515,6 +515,7 @@ export default withEnglishFallback({
       urlDecode: "Decodificar componente URL",
       radix: "Conversão de base de inteiros",
       flattenLines: "Compactar várias linhas em uma linha",
+      unicodeEscape: "Texto → escape Unicode",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -5513,6 +5514,7 @@ export default withEnglishFallback({
     scopeFunctions: "funções",
     stepSkipped: "Ignorado porque uma etapa anterior obrigatória falhou.",
     selectedObjectsCount: "{count} objetos selecionados",
+    generatePassword: "Gerar senha",
   },
   nativeJobs: {
     datePrecisionMicroseconds: "As datas de jobs nesta versão do OceanBase aceitam apenas precisão de microssegundos. Defina como 0 os dígitos 7–9 dos segundos fracionários e gere a prévia novamente; a entrada original foi mantida.",
@@ -10816,6 +10818,8 @@ export default withEnglishFallback({
     sidebarSimpleHideIndexes: "Ocultar índices ao lado das tabelas",
     globalNumberGrouping: "Mostrar separador de milhares",
     globalNumberGroupingDescription: "Exibir números na grade como 1,234,567.89 etc.; formatos de coluna configurados individualmente têm prioridade.",
+    toolbarGroup_left: "Barra de ações principal e menu Mais",
+    toolbarPinItem: "Fixar {item} na barra de ferramentas",
     completionAutoActivationDelay: "Atraso para ativação automática do autocompletar (milissegundos)",
     completionAutoActivationDelayDescription:
       "Tempo de espera após a digitação para exibir as sugestões de autocompletar, padrão de 500 milissegundos; aumentar esse valor pode evitar que o autocompletar apareça com frequência durante a digitação contínua e interfira na edição; 0 significa exibir imediatamente.",

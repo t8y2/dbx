@@ -1,22 +1,41 @@
 export const TOOLBAR_ITEM_GROUPS = {
   primary: ["newConnection", "newQuery", "dataTransfer", "driverManager", "pluginCenter"],
-  menu: ["openSql", "sqlFile", "schemaDiff", "dataCompare", "databaseBackups", "mcpSettings"],
+  menu: ["recentClosedTabs", "openSql", "sqlFile", "schemaDiff", "dataCompare", "databaseBackups", "mcpSettings"],
   right: ["checkUpdates", "immediateSync", "alwaysOnTop", "exportProgress", "sqlLibrary", "sqlFileTree", "history", "ai", "theme", "github"],
   controls: ["settings", "logout"],
 } as const;
 
 export type ToolbarItemGroup = keyof typeof TOOLBAR_ITEM_GROUPS;
 export type ToolbarItemKey = (typeof TOOLBAR_ITEM_GROUPS)[ToolbarItemGroup][number];
+export type ToolbarMenuItemKey = (typeof TOOLBAR_ITEM_GROUPS.menu)[number];
+export const TOOLBAR_SETTINGS_GROUPS = ["left", "right", "controls"] as const;
+export type ToolbarSettingsGroup = (typeof TOOLBAR_SETTINGS_GROUPS)[number];
 export const DEFAULT_TOOLBAR_ITEM_ORDER: readonly ToolbarItemKey[] = Object.values(TOOLBAR_ITEM_GROUPS).flat();
+
+export function isToolbarMenuItem(value: unknown): value is ToolbarMenuItemKey {
+  return typeof value === "string" && (TOOLBAR_ITEM_GROUPS.menu as readonly string[]).includes(value);
+}
+
+export function normalizePinnedToolbarMenuItems(value: unknown): ToolbarMenuItemKey[] {
+  return Array.isArray(value) ? [...new Set(value.filter(isToolbarMenuItem))] : [];
+}
 
 export function normalizeToolbarItemOrder(value: unknown): ToolbarItemKey[] {
   const known = new Set<string>(DEFAULT_TOOLBAR_ITEM_ORDER);
   const saved = Array.isArray(value) ? value.filter((key): key is ToolbarItemKey => typeof key === "string" && known.has(key)) : [];
+  if (!saved.includes("recentClosedTabs")) {
+    const firstMenuItem = saved.findIndex(isToolbarMenuItem);
+    if (firstMenuItem >= 0) saved.splice(firstMenuItem, 0, "recentClosedTabs");
+  }
   return [...new Set([...saved, ...DEFAULT_TOOLBAR_ITEM_ORDER])];
 }
 
-export function toolbarGroupOrder(value: unknown, group: ToolbarItemGroup): ToolbarItemKey[] {
-  const keys = new Set<ToolbarItemKey>(TOOLBAR_ITEM_GROUPS[group]);
+function toolbarGroupKeys(group: ToolbarItemGroup | ToolbarSettingsGroup): readonly ToolbarItemKey[] {
+  return group === "left" ? [...TOOLBAR_ITEM_GROUPS.primary, ...TOOLBAR_ITEM_GROUPS.menu] : TOOLBAR_ITEM_GROUPS[group];
+}
+
+export function toolbarGroupOrder(value: unknown, group: ToolbarItemGroup | ToolbarSettingsGroup): ToolbarItemKey[] {
+  const keys = new Set(toolbarGroupKeys(group));
   return normalizeToolbarItemOrder(value).filter((key) => keys.has(key));
 }
 
@@ -24,7 +43,7 @@ export function toolbarGroupOrder(value: unknown, group: ToolbarItemGroup): Tool
 export function replaceToolbarItemOrder(value: unknown, reorderedKeys: ToolbarItemKey[]): ToolbarItemKey[] {
   const order = normalizeToolbarItemOrder(value);
   const keys = new Set(reorderedKeys);
-  if (keys.size !== reorderedKeys.length || !Object.values(TOOLBAR_ITEM_GROUPS).some((group) => reorderedKeys.every((key) => (group as readonly string[]).includes(key)))) return order;
+  if (keys.size !== reorderedKeys.length || !TOOLBAR_SETTINGS_GROUPS.some((group) => reorderedKeys.every((key) => toolbarGroupKeys(group).includes(key)))) return order;
   let index = 0;
   return order.map((key) => (keys.has(key) ? reorderedKeys[index++]! : key));
 }

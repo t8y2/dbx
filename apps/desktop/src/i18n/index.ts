@@ -141,6 +141,13 @@ export async function setLocale(locale: Locale) {
   i18nGlobal.locale.value = locale;
 }
 
+export async function applySharedLocale(value: string) {
+  const locale = normalizeLocale(value);
+  if (!locale) return;
+  persistedLocale = locale;
+  await applyTransientLocale(locale);
+}
+
 export function currentLocale(): Locale {
   return i18nGlobal.locale.value;
 }

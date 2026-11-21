@@ -284,6 +284,9 @@ pub struct TableStructureSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
+    /// Object kind used by dialects with distinct table/view comment syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_type: Option<String>,
     #[serde(default)]
     pub columns: Vec<EditableStructureColumn>,
     #[serde(default)]

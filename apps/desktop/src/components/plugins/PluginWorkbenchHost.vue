@@ -6,6 +6,7 @@ import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard, readImageFromClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { canWritePluginClipboardImage, writePluginClipboardImage } from "@/lib/plugins/pluginClipboardImage";
 import {
   PluginHostBridge,
   pluginSandboxDocument,
@@ -36,6 +37,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { createPluginAiCompletion, type PluginAiConfirmDecision, type PluginAiPromptPreview } from "@/lib/plugins/pluginAiCompletion";
 import { useQueryStore } from "@/stores/queryStore";
 import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
+import { PLUGIN_CONNECTION_EDITOR } from "@/lib/connection/pluginConnectionEdit";
 
 const props = withDefaults(
   defineProps<{
@@ -62,6 +64,7 @@ const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
 const urlDialog = ref<InstanceType<typeof PluginOpenUrlDialog>>();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
+const connectionEditor = inject(PLUGIN_CONNECTION_EDITOR, undefined);
 // Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
 // sandbox document (and must not reuse a doc cached under the other setting).
 const graphicsEngineEnabled = computed(() => isPluginGraphicsEngineEnabled(settingsStore.editorSettings.pluginGraphicsEngineIds, props.plugin.manifest.id));
@@ -550,6 +553,7 @@ function createBridge() {
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
       openAiConversation,
+      connectionEditor,
       ...(isTauriRuntime() ? aiCompletion : {}),
       setAiRecommendations: (update) => emit("recommendations", update),
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
@@ -689,6 +693,7 @@ function createBridge() {
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       openUrl: (url) => (urlDialog.value ? urlDialog.value.request(url) : Promise.reject(new Error("Host URL consent is unavailable"))),
       copyText: (_pluginId, text) => copyToClipboard(text),
+      copyImage: canWritePluginClipboardImage() ? (_pluginId, data) => writePluginClipboardImage(data) : undefined,
       // Permission-gated in the bridge (host.clipboard:read); the helper
       // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
       clipboardRead: (_pluginId) => readTextFromClipboard(),

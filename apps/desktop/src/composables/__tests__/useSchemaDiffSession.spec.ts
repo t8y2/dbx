@@ -19,7 +19,7 @@ const trackerMock = vi.hoisted(() => ({
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/composables/useDialogSources", () => ({ openSchemaDiffSession: openMock }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => trackerMock }));
-vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn().mockResolvedValue([]) }));
+vi.mock("@/lib/schema/schemaDiffMetadataLoad", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/schema/schemaDiffMetadataLoad")>()), loadSchemaDetails: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/metadata/objectMetadataCache", () => ({ invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined) }));
 
 const { replaceSchemaDiffSessionInGroup, startSchemaDiffSession, startSchemaDiffSessions } = await import("../useSchemaDiffSession.ts");
@@ -119,6 +119,42 @@ test("swaps a recompared session into its group's place", async () => {
   replaceSchemaDiffSessionInGroup(dbo, rerun);
   assert.deepEqual(audit.group, [rerun.id, audit.id]);
   assert.equal(rerun.group, audit.group);
+  vi.clearAllMocks();
+});
+
+test("defers DDL per side, only for SQL Server endpoints and tables on both sides", async () => {
+  const { loadSchemaDetails } = await import("@/lib/schema/schemaDiffMetadataLoad");
+  vi.clearAllMocks();
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: "ddl-source",
+      sourceDatabase: "app",
+      sourceSchema: "dbo",
+      targetConnectionId: "ddl-target",
+      targetDatabase: "app",
+      targetSchema: "public",
+      sourceDbType: "sqlserver",
+      targetDbType: "postgres",
+      options: {},
+      ignoreComments: false,
+      label: "deferred ddl",
+    },
+    {
+      tableListLoader: {
+        load: vi.fn(
+          async ({ schema }: { schema: string }) =>
+            [
+              { name: "shared", table_type: "BASE TABLE" },
+              { name: schema === "dbo" ? "added" : "removed", table_type: "BASE TABLE" },
+            ] as never[],
+        ),
+      },
+    },
+  );
+  await waitForSession(session);
+  const [sourceCall, targetCall] = vi.mocked(loadSchemaDetails).mock.calls;
+  assert.deepEqual([...(sourceCall?.[1].deferredDdlTables ?? [])], ["shared"]);
+  assert.deepEqual([...(targetCall?.[1].deferredDdlTables ?? [])], []);
   vi.clearAllMocks();
 });
 

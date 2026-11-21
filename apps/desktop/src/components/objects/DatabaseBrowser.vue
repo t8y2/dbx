@@ -2,19 +2,22 @@
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, Database, FilePlus2, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
+import TableStructurePeekDialog from "@/components/editor/TableStructurePeekDialog.vue";
+import { useTableStructurePeek } from "@/composables/useTableStructurePeek";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -29,6 +32,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type DatabaseRow = {
@@ -75,6 +79,7 @@ const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
+const { target: tableStructureTarget, columns: tableStructureColumns, loading: tableStructureLoading, error: tableStructureError, open: openTableStructurePeek, close: closeTableStructurePeek } = useTableStructurePeek();
 const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
@@ -133,7 +138,9 @@ function setCompactCardWidth(width: ObjectBrowserCompactWidth) {
 // controls into the overflow menu, tier 2 drops the connection chip (the tab
 // title already carries it). See useToolbarOverflow for the tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => settingsStore.editorSettings.objectBrowserViewMode]);
+// The connection chip renders `connection.name`, so a rename changes the row's
+// content extent without changing its width — track the name, not just the id.
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => props.connection.name, () => settingsStore.editorSettings.objectBrowserViewMode]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showConnectionChip = computed(() => toolbarTier.value < 2);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
@@ -232,12 +239,19 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         },
         icon: Copy,
       },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      {
+        sidebarActionId: "contextMenu.newQuery",
+        label: t("contextMenu.newQuery"),
+        action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }),
+        icon: FilePlus2,
+        shortcut: settingsStore.editorSettings.shortcuts.newQuery,
+      },
       { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
       { label: "", separator: true },
       {
         label: isDefault ? t("contextMenu.clearDefaultDatabase") : t("contextMenu.setDefaultDatabase"),
         action: () => (isDefault ? connectionStore.clearDefaultDatabase(props.connection.id) : connectionStore.setDefaultDatabase(props.connection.id, row.name)),
+        disabled: isDefault && !canClearDefaultDatabase(props.connection.db_type),
         icon: Database,
       },
       { label: "", separator: true },
@@ -265,6 +279,11 @@ function openDatabaseFromSidebar(node: TreeNode) {
   if (node.database) openDatabase(node.database);
 }
 
+function openSidebarTableStructure(node: TreeNode) {
+  if (!node.connectionId) return;
+  void openTableStructurePeek(node);
+}
+
 function columnLabel(key: DatabaseBrowserColumnKey): string {
   if (key === "name") return t("objects.name");
   if (key === "sizeBytes") return t("objects.size");
@@ -283,6 +302,33 @@ function displayValue(row: DatabaseRow, key: DatabaseBrowserColumnKey): string {
   if (key === "defaultCharset") return row.defaultCharset || "";
   if (key === "defaultCollation") return row.defaultCollation || "";
   return row.comment || "";
+}
+
+function databaseBrowserCopyColumns() {
+  return visibleColumns.value.map((key) => ({
+    label: columnLabel(key),
+    value: (row: DatabaseRow) => displayValue(row, key),
+  }));
+}
+
+async function copyDatabaseNames() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(visibleRows.value.map((row) => row.name).join("\n"));
+    toast(t("objects.copyNamesSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyDatabasesAsTable() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(formatRowsAsSpreadsheetTsv(visibleRows.value, databaseBrowserCopyColumns()));
+    toast(t("objects.copyTableDataSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function compareRows(left: DatabaseRow, right: DatabaseRow, key: DatabaseBrowserSortKey, direction: SortDirection): number {
@@ -598,7 +644,7 @@ defineExpose({ focusSearch, refresh });
 
 <template>
   <section class="flex h-full min-h-0 min-w-0 flex-col bg-background">
-    <div ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <span v-if="showConnectionChip" class="inline-flex max-w-[14rem] min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="connection.name">
         {{ connection.name }}
       </span>
@@ -644,6 +690,25 @@ defineExpose({ focusSearch, refresh });
         >
           <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
         </select>
+      </div>
+      <div class="flex h-7 shrink-0 items-center">
+        <Button variant="ghost" size="sm" class="h-7 rounded-r-none px-2 text-xs" :disabled="visibleRows.length === 0" @click="copyDatabaseNames">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          {{ t("objects.copyNames") }}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-6 rounded-l-none border-l border-border/60" :aria-label="t('objects.copyOptions')" :title="t('objects.copyOptions')" data-database-copy-menu>
+              <ChevronDown class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-56">
+            <DropdownMenuItem :disabled="visibleRows.length === 0" @select="copyDatabasesAsTable">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copyCurrentPageAsTable") }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
@@ -795,7 +860,26 @@ defineExpose({ focusSearch, refresh });
       </div>
     </div>
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
+    <SidebarTreeRuntimeHost
+      ref="sidebarRuntimeHost"
+      :node="sidebarRuntimeNode"
+      :depth="0"
+      @open-danger-dialog="openSidebarDangerDialog"
+      @open-data="openDatabaseFromSidebar"
+      @open-ddl="openDatabaseFromSidebar"
+      @peek-structure="openSidebarTableStructure"
+      @open-dialog-controller="sidebarDialogController = $event"
+    />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
+    <TableStructurePeekDialog
+      v-if="tableStructureTarget"
+      :table-name="tableStructureTarget.objectName || tableStructureTarget.label"
+      :schema="tableStructureTarget.schema"
+      :columns="tableStructureColumns"
+      :loading="tableStructureLoading"
+      :error="tableStructureError"
+      :insert-enabled="false"
+      @close="closeTableStructurePeek"
+    />
   </section>
 </template>

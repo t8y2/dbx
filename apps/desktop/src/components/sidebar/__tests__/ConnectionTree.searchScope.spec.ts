@@ -6,13 +6,24 @@ import { connectionShouldDiscoverJdbcSchemas, connectionUsesDatabaseObjectTreeMo
 import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { collectSidebarRemoteSearchResults, type SidebarRemoteSearchResult } from "@/lib/sidebar/sidebarRemoteSearch";
-import { findNodePathByIdentity, type SidebarRegexIndexScope } from "@/lib/sidebar/sidebarSearchTree";
+import { findNodePathByIdentity, splitQualifiedTableQuery, type SidebarRegexIndexScope } from "@/lib/sidebar/sidebarSearchTree";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import type { TableInfo, TreeNode } from "@/types/database";
 import { runSidebarSearchTasks } from "../sidebarSearchTaskRunner";
 import { compileConnectionTreeTestScript } from "./connectionTreeTestScript";
 
-const compiled = compileConnectionTreeTestScript(["globalSearchConnectionRoots", "globalSearchContext", "globalTableSearchScopes", "remoteSearchResults", "loadGlobalTableSearchIndexes", "loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren"]);
+const compiled = compileConnectionTreeTestScript([
+  "globalSearchConnectionRoots",
+  "globalSearchContext",
+  "qualifiedGlobalSearch",
+  "globalIndexSearchQuery",
+  "globalTableSearchScopes",
+  "remoteSearchResults",
+  "loadGlobalTableSearchIndexes",
+  "loadGlobalRemoteSearchResults",
+  "isGlobalTableIndexParent",
+  "discoverGlobalSearchChildren",
+]);
 const cleanups: Array<() => void> = [];
 
 beforeEach(() => vi.useFakeTimers());
@@ -58,6 +69,7 @@ function fixture(display: "grouped" | "simple" = "grouped") {
     runSidebarSearchTasks,
     collectSidebarRemoteSearchResults,
     findNodePathByIdentity,
+    splitQualifiedTableQuery,
     sidebarIndexedObjectGroupTypes,
     resolveSidebarSearchDatabaseScope,
     connectionShouldDiscoverJdbcSchemas,

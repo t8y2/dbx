@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
-    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
     TableWithJoins,
 };
 use sqlparser::dialect::{
@@ -27,6 +27,16 @@ static CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static POSTGRES_DEFAULT_PRIVILEGES_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*ALTER\s+DEFAULT\s+PRIVILEGES\b").expect("valid PostgreSQL default privileges regex")
+});
+
+/// PostgreSQL's `DROP INDEX CONCURRENTLY [IF EXISTS] name`: sqlparser 0.62's generic
+/// `parse_drop` has no `CONCURRENTLY` slot for `INDEX`, so `CONCURRENTLY` is consumed
+/// as the index name and the trailing `IF EXISTS ...` starts a second statement whose
+/// parse fails at `IF` — a bogus syntax error for a statement PostgreSQL (and the
+/// PG-compatible engines DBX routes through the postgres dialect, e.g. Kingbase) runs
+/// fine (issue #14829).
+static POSTGRES_DROP_INDEX_CONCURRENTLY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*DROP\s+INDEX\s+CONCURRENTLY\b").expect("valid PostgreSQL DROP INDEX CONCURRENTLY regex")
 });
 
 /// Oracle administrative DDL that sqlparser has no grammar for: Oracle and the
@@ -179,14 +189,21 @@ struct Analyzer {
     scope_stack: Vec<usize>,
     cte_scope_stack: Vec<HashSet<String>>,
     next_scope_id: usize,
+    is_mysql: bool,
     is_sqlserver: bool,
     is_spark: bool,
     group_by_violations: Vec<SqlGroupByViolation>,
     /// Two-part column references, kept for the unknown-qualifier check.
     qualified_columns: Vec<QualifiedColumnRef>,
-    /// Scopes holding a relation the analyzer does not model as a physical
-    /// table (CTE references, derived tables, table functions). Their aliases
-    /// stay invisible here, so the unknown-qualifier check skips them.
+    /// Relation names of the current scope that are not physical tables: CTE
+    /// names and their aliases, derived-table aliases, the alias of a
+    /// parenthesized join. A qualifier may name any of them, so the
+    /// unknown-qualifier check resolves against them too.
+    relation_names: Vec<(usize, String)>,
+    /// Scopes holding a relation the analyzer cannot even name (table
+    /// functions, `UNNEST`, `PIVOT`, ...). A qualifier that does not resolve
+    /// there would be a guess, so the unknown-qualifier check skips those
+    /// scopes.
     non_plain_scopes: HashSet<usize>,
     projection_items: Vec<ProjectionItemAcc>,
     current_projection_item: Option<ProjectionItemAcc>,
@@ -256,6 +273,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
 
     let mut analyzer = Analyzer {
+        is_mysql: normalized_dialect.id == "mysql",
         is_sqlserver: normalized_dialect.id == "sqlserver",
         is_spark: normalized_dialect.id == "spark",
         ..Analyzer::default()
@@ -1214,7 +1232,7 @@ fn blank_out_statement_text(statement: &str) -> String {
 }
 
 fn starts_with_postgres_parser_gap_sql(sql: &str) -> bool {
-    POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql)
+    POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql) || POSTGRES_DROP_INDEX_CONCURRENTLY_RE.is_match(sql)
 }
 
 struct PostgresCreateProcedureLayout {
@@ -1791,25 +1809,41 @@ impl Analyzer {
                         self.current_scope_id(),
                     ) {
                         Some(table) => self.tables.push(table),
-                        // A name the analyzer cannot turn into a table reference
-                        // leaves its alias invisible; skip the scope.
+                        // Not a plain object name, so it cannot become a table
+                        // reference. Its alias is still a name a qualifier may
+                        // use; without one the scope stays unexplained.
+                        None => {
+                            if !self.record_alias(alias.as_ref()) {
+                                self.mark_scope_non_plain();
+                            }
+                        }
+                    }
+                } else if args.is_none() {
+                    // A CTE reference. `is_visible_cte` only accepts a
+                    // single-part identifier, so the CTE name is always
+                    // readable here; the alias, when present, is the other
+                    // name a qualifier may use.
+                    match object_name_last_ident(name) {
+                        Some(ident) => {
+                            self.record_relation_name(ident);
+                        }
                         None => self.mark_scope_non_plain(),
                     }
+                    self.record_alias(alias.as_ref());
                 } else {
-                    // A CTE reference or a table function is not recorded as a
-                    // physical table, so its alias stays invisible to the
-                    // unknown-qualifier check. Mark the scope instead of
-                    // guessing which relation the qualifier meant.
+                    // A table-valued function. Its relation name is engine
+                    // specific, so the scope stays unexplained for now.
                     self.mark_scope_non_plain();
                 }
             }
-            TableFactor::Derived { subquery, .. } => {
-                self.mark_scope_non_plain();
+            TableFactor::Derived { subquery, alias, .. } => {
+                self.record_alias(alias.as_ref());
                 self.visit_child_query(subquery);
             }
-            TableFactor::NestedJoin { table_with_joins, .. } => {
-                // The alias of a parenthesized join is not recorded either.
-                self.mark_scope_non_plain();
+            TableFactor::NestedJoin { table_with_joins, alias, .. } => {
+                // The parenthesized join may carry its own alias; the aliases
+                // inside it are recorded by the recursion below.
+                self.record_alias(alias.as_ref());
                 self.visit_table_with_joins(table_with_joins);
             }
             TableFactor::TableFunction { expr, .. } => {
@@ -1955,10 +1989,12 @@ impl Analyzer {
 
     fn visit_function_call_args(&mut self, name: &ObjectName, args: &FunctionArguments) {
         let sqlserver_datepart_function = self.is_sqlserver.then(|| sqlserver_datepart_function_name(name)).flatten();
+        let mysql_timestamp_function = self.is_mysql && is_mysql_timestamp_function(name);
         self.visit_function_args_skipping(args, |index, arg| {
             index == 0
-                && sqlserver_datepart_function
-                    .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg))
+                && ((mysql_timestamp_function && is_mysql_timestamp_unit(arg))
+                    || sqlserver_datepart_function
+                        .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg)))
         });
     }
 
@@ -2033,8 +2069,28 @@ impl Analyzer {
         });
     }
 
-    /// Mark the current scope as holding a relation the analyzer does not model
-    /// as a physical table.
+    /// Remember a relation name of the current scope that is not a physical
+    /// table, so the unknown-qualifier check can resolve it. Returns whether a
+    /// name was recorded.
+    fn record_relation_name(&mut self, ident: &Ident) -> bool {
+        let Some(scope_id) = self.current_scope_id() else {
+            return false;
+        };
+        self.relation_names.push((scope_id, ident.value.to_ascii_lowercase()));
+        true
+    }
+
+    /// Record the alias of a non-physical relation. Returns whether the factor
+    /// carried one.
+    fn record_alias(&mut self, alias: Option<&TableAlias>) -> bool {
+        match alias {
+            Some(alias) => self.record_relation_name(&alias.name),
+            None => false,
+        }
+    }
+
+    /// Mark the current scope as holding a relation whose name the analyzer
+    /// cannot model, so the unknown-qualifier check skips it.
     fn mark_scope_non_plain(&mut self) {
         if let Some(scope_id) = self.current_scope_id() {
             self.non_plain_scopes.insert(scope_id);
@@ -2044,11 +2100,13 @@ impl Analyzer {
     /// Two-part qualifiers that name neither a table nor an alias visible in
     /// the reference scope.
     ///
-    /// A qualifier resolves against the tables and aliases of its own scope and
-    /// of every enclosing scope, so a correlated subquery can still refer to an
-    /// outer alias. Scopes holding a relation the analyzer does not model (CTE
-    /// references, derived tables, table functions) are skipped: those aliases
-    /// are invisible here, so an unresolved qualifier would be a guess.
+    /// A qualifier resolves against the relations of its own scope and of every
+    /// enclosing scope, so a correlated subquery can still refer to an outer
+    /// alias. Relations cover physical tables, CTE names and their aliases,
+    /// derived-table aliases and the alias of a parenthesized join. Scopes
+    /// holding a relation the analyzer cannot even name (table functions,
+    /// `UNNEST`, `PIVOT`, ...) are skipped: an unresolved qualifier would be a
+    /// guess there.
     fn unknown_qualifiers(&self) -> Vec<SqlUnknownQualifier> {
         let mut scope_parents: HashMap<usize, Option<usize>> = HashMap::new();
         for scope in &self.scopes {
@@ -2061,6 +2119,9 @@ impl Analyzer {
             if let Some(alias) = &table.alias {
                 names.insert(alias.to_ascii_lowercase());
             }
+        }
+        for (scope_id, name) in &self.relation_names {
+            names_by_scope.entry(*scope_id).or_default().insert(name.clone());
         }
 
         let mut unknown = Vec::new();
@@ -2168,6 +2229,30 @@ fn table_reference_from_name(
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
     name.0.iter().rev().find_map(ObjectNamePart::as_ident)
+}
+
+fn is_mysql_timestamp_function(name: &ObjectName) -> bool {
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    part.as_ident().is_some_and(|ident| {
+        ident.quote_style.is_none()
+            && (ident.value.eq_ignore_ascii_case("TIMESTAMPADD") || ident.value.eq_ignore_ascii_case("TIMESTAMPDIFF"))
+    })
+}
+
+fn is_mysql_timestamp_unit(arg: &FunctionArg) -> bool {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) = arg else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+
+    // MySQL treats the first argument as a unit keyword, including ODBC SQL_TSI_ aliases.
+    let unit = ident.value.to_ascii_uppercase();
+    let unit = unit.strip_prefix("SQL_TSI_").unwrap_or(&unit);
+    matches!(unit, "MICROSECOND" | "SECOND" | "MINUTE" | "HOUR" | "DAY" | "WEEK" | "MONTH" | "QUARTER" | "YEAR")
 }
 
 fn sqlserver_datepart_function_name(name: &ObjectName) -> Option<&str> {
@@ -2558,11 +2643,68 @@ mod unknown_qualifier_tests {
     }
 
     #[test]
-    fn skips_scopes_with_derived_tables_or_cte_references() {
-        // The alias of a derived table is not visible to the check.
+    fn accepts_derived_table_and_cte_aliases() {
+        // The alias of a derived table is a relation name of the scope.
         assert!(qualifiers("SELECT x.id FROM (SELECT id FROM t) x", Some("mysql")).is_empty());
-        // The same holds for a CTE and for the alias of its reference.
+        // The same holds for a CTE: both the CTE name and the alias of its
+        // reference resolve.
+        assert!(qualifiers("WITH demo AS (SELECT id FROM t) SELECT demo.id FROM demo", Some("mysql")).is_empty());
         assert!(qualifiers("WITH c AS (SELECT id FROM t) SELECT ro.id FROM c ro", Some("mysql")).is_empty());
+        assert!(qualifiers("WITH demo AS (SELECT id, v FROM t) SELECT d.id FROM demo d", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_cte_or_derived_alias() {
+        assert_eq!(
+            qualifiers("WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+        assert_eq!(qualifiers("SELECT zz.id FROM (SELECT id FROM t) AS x", Some("mysql")), vec!["zz".to_string()]);
+    }
+
+    #[test]
+    fn reports_a_qualifier_inside_a_cte_body() {
+        // The body is its own scope, so an alias that no relation declares
+        // there is reported even though it sits inside a WITH clause.
+        assert_eq!(
+            qualifiers("WITH c AS (SELECT zz.y FROM t) SELECT c.id FROM c", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_parenthesized_join_alias() {
+        // The alias of the parenthesized join and the aliases inside it all
+        // resolve; anything else in that scope is an error. Keeping the inner
+        // aliases resolvable next to the join alias is the same conservative
+        // choice the physical-table path makes (`FROM t x` accepts both `t` and
+        // `x`), so a dialect that hides them once the join is aliased is
+        // under-reported rather than mis-reported.
+        let legit = "SELECT ab.id, a.id, b.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab";
+        assert!(qualifiers(legit, Some("postgres")).is_empty());
+        assert_eq!(
+            qualifiers("SELECT zz.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab", Some("postgres")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn does_not_resolve_a_derived_table_source_in_the_outer_scope() {
+        // `t` belongs to the derived table's own scope, so the outer query
+        // cannot qualify a column with it.
+        assert_eq!(qualifiers("SELECT t.id FROM (SELECT * FROM t) x", Some("mysql")), vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn skips_scopes_with_relations_it_cannot_name() {
+        // Table-valued functions, UNNEST and PIVOT expose names the analyzer
+        // does not model, so the scope stays unexplained instead of guessed.
+        assert!(qualifiers("SELECT zz.id FROM generate_series(1, 10) g", Some("postgres")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM UNNEST([1, 2]) AS numbers", Some("duckdb")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM t PIVOT(sum(v) FOR k IN ('a')) p", Some("duckdb")).is_empty());
+        // MSSQL's `FROM t (NOLOCK)` parses as a table with arguments, so it
+        // shares the table-function branch.
+        assert!(qualifiers("SELECT zz.id FROM t (NOLOCK)", Some("sqlserver")).is_empty());
     }
 
     #[test]
@@ -2603,5 +2745,56 @@ mod unknown_qualifier_tests {
         for dialect in ["mysql", "postgres", "sqlite", "sqlserver", "clickhouse", "duckdb", "spark"] {
             assert_eq!(qualifiers("SELECT b.id FROM t a", Some(dialect)), vec!["b".to_string()], "{dialect}");
         }
+    }
+}
+
+#[cfg(test)]
+mod postgres_parser_gap_tests {
+    use super::*;
+
+    /// #14829: `DROP INDEX CONCURRENTLY [IF EXISTS] name` is valid PostgreSQL (and
+    /// Kingbase) that sqlparser 0.62 cannot parse — the generic `parse_drop` consumes
+    /// `CONCURRENTLY` as the index name and the trailing `IF EXISTS ...` becomes a
+    /// second statement whose parse fails at `IF`. The gap has to route the statement
+    /// to an empty analysis instead of a bogus syntax error.
+    #[test]
+    fn drop_index_concurrently_is_documented_as_a_postgres_parser_gap() {
+        let sql = "DROP INDEX CONCURRENTLY IF EXISTS yxy_bchd_db.idx_x;";
+        assert!(
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).is_err(),
+            "sqlparser 0.62 must still fail to parse it, otherwise the gap hides a real fix upstream"
+        );
+        assert!(starts_with_postgres_parser_gap_sql(sql), "the gap must cover the statement");
+
+        let analysis = analyze_sql_references(sql, Some("postgres"))
+            .expect("the gap must return an empty analysis instead of a parse error");
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn drop_index_without_concurrently_still_parses_and_analyzes() {
+        // `DROP INDEX [IF EXISTS] name` is fully supported by sqlparser: no gap, and
+        // the statement analyzes without a bogus parse error. DROP statements carry no
+        // FROM clause, so the reference analysis is legitimately empty — the property
+        // under test is "no parse error", not the reference set.
+        let sql = "DROP INDEX IF EXISTS yxy_bchd_db.idx_x;";
+        assert!(!starts_with_postgres_parser_gap_sql(sql), "no gap for statements sqlparser already parses");
+
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("plain DROP INDEX should analyze");
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn drop_index_gap_does_not_over_match() {
+        // The gap is word-boundary anchored: only statements that actually spell
+        // `DROP INDEX CONCURRENTLY` skip the analyzer. A plain `DROP INDEX` with an
+        // index literally named "concurrently" parses into the same shape — that is
+        // sqlparser's own reading, not the gap's business.
+        assert!(starts_with_postgres_parser_gap_sql("drop index concurrently if exists t.idx"));
+        assert!(!starts_with_postgres_parser_gap_sql("drop index if exists concurrently_idx"));
+        assert!(!starts_with_postgres_parser_gap_sql("DROP INDEX CONCURRENTLYXY"));
+        assert!(!starts_with_postgres_parser_gap_sql("select 1"));
     }
 }

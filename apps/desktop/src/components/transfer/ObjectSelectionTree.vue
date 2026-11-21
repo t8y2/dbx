@@ -42,6 +42,10 @@ const emit = defineEmits<{
   "update:search": [value: string];
 }>();
 
+defineSlots<{
+  "item-actions"?(props: { kind: TransferObjectKind; item: string; selected: boolean; disabled: boolean }): unknown;
+}>();
+
 // Local search state: the input edits this ref directly and changes are
 // forwarded up via update:search (v-model:search on the parent).
 const localSearch = ref(props.search ?? "");
@@ -395,18 +399,24 @@ function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" 
 
         <template v-if="expanded.has(group.kind)">
           <div v-if="!isVirtualizedGroup(group)" class="flex flex-col gap-0.5 pl-6 pr-1 mt-1">
-            <label v-for="item in group.items" :key="item" class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
-              <input type="checkbox" class="h-3.5 w-3.5" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
-              <span class="truncate text-foreground/80">{{ item }}</span>
-            </label>
+            <div v-for="item in group.items" :key="item" class="flex min-w-0 items-center gap-2">
+              <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
+                <input type="checkbox" class="h-3.5 w-3.5 shrink-0" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
+                <span class="truncate text-foreground/80">{{ item }}</span>
+              </label>
+              <slot name="item-actions" :kind="group.kind" :item="item" :selected="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" />
+            </div>
             <div v-if="group.items.length === 0" class="px-1 py-1 text-xs text-muted-foreground">{{ t("transfer.noMatchingObjects") }}</div>
           </div>
           <div v-else class="pl-6 pr-1 mt-1" :style="{ height: `${OBJECT_LIST_HEIGHT}px` }">
             <RecycleScroller v-slot="{ item }" class="h-full" :items="group.items" :item-size="OBJECT_ITEM_HEIGHT" :buffer="OBJECT_LIST_BUFFER">
-              <label class="flex h-7 cursor-pointer items-center gap-2 rounded px-1.5 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
-                <input type="checkbox" class="h-3.5 w-3.5" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
-                <span class="truncate text-foreground/80">{{ item }}</span>
-              </label>
+              <div class="flex h-7 min-w-0 items-center gap-2">
+                <label class="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded px-1.5 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
+                  <input type="checkbox" class="h-3.5 w-3.5 shrink-0" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
+                  <span class="truncate text-foreground/80">{{ item }}</span>
+                </label>
+                <slot name="item-actions" :kind="group.kind" :item="item" :selected="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" />
+              </div>
             </RecycleScroller>
           </div>
         </template>

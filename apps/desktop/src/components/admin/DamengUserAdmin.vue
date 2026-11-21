@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
+import { generateDatabaseUserPassword } from "@/lib/security/databaseUserPassword";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
@@ -678,11 +679,14 @@ onMounted(() => {
             </Select>
             <span class="text-[10px] text-muted-foreground">{{ t("damengUserAdmin.userTypeHint") }}</span>
           </label>
-          <label class="grid gap-1">
-            <span>{{ t("damengUserAdmin.password") }}</span>
-            <PasswordInput v-model="createPassword" class="h-8 text-xs" />
+          <div class="grid gap-1">
+            <label for="new-dameng-user-password">{{ t("damengUserAdmin.password") }}</label>
+            <div class="flex flex-wrap items-center gap-2">
+              <PasswordInput id="new-dameng-user-password" v-model="createPassword" autocomplete="new-password" class="h-8 min-w-32 flex-1 text-xs" />
+              <Button type="button" variant="outline" size="sm" class="h-8 text-xs" @click="createPassword = generateDatabaseUserPassword()">{{ t("userAdmin.generatePassword") }}</Button>
+            </div>
             <span :class="createPassword.length > 0 && createPassword.length < 9 ? 'text-[10px] text-amber-600 dark:text-amber-400' : 'text-[10px] text-muted-foreground'">{{ t("damengUserAdmin.passwordPolicyHint") }}</span>
-          </label>
+          </div>
           <label class="grid gap-1">
             <span>{{ t("damengUserAdmin.tablespace") }}</span>
             <Select v-if="tablespaces.length > 0" v-model="createTablespace">

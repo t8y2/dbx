@@ -16,6 +16,7 @@ pub struct GenerateSchemaSyncSqlRequest {
     pub database_type: dbx_core::models::connection::DatabaseType,
     pub target_schema: Option<String>,
     pub cascade_delete: Option<bool>,
+    pub compare_charset: Option<bool>,
     pub source_dialect: Option<String>,
     pub field_mappings: Option<Vec<dbx_core::schema_diff::FieldMapping>>,
     pub enable_rollback: Option<bool>,
@@ -51,7 +52,7 @@ pub async fn generate_schema_sync_plan(
     } else {
         None
     };
-    Ok(Json(dbx_core::schema_diff::generate_schema_sync_sql_plan_with_oracle_ddl(
+    Ok(Json(dbx_core::schema_diff::generate_schema_sync_sql_plan_with_charset(
         &req.diffs,
         req.function_diffs.as_deref().unwrap_or_default(),
         req.sequence_diffs.as_deref().unwrap_or_default(),
@@ -65,6 +66,7 @@ pub async fn generate_schema_sync_plan(
         req.enable_rollback.unwrap_or(false),
         req.ignore_foreign_key_checks.unwrap_or(false),
         oracle_ddl.as_ref(),
+        req.compare_charset.unwrap_or(true),
     )))
 }
 
@@ -75,18 +77,25 @@ pub async fn prepare_schema_diff(
 }
 
 pub async fn generate_schema_sync_sql(Json(req): Json<GenerateSchemaSyncSqlRequest>) -> Json<String> {
-    Json(dbx_core::schema_diff::generate_schema_sync_sql(
-        &req.diffs,
-        req.function_diffs.as_deref().unwrap_or_default(),
-        req.sequence_diffs.as_deref().unwrap_or_default(),
-        req.rule_diffs.as_deref().unwrap_or_default(),
-        req.owner_diffs.as_deref().unwrap_or_default(),
-        req.database_type,
-        req.target_schema.as_deref(),
-        req.cascade_delete.unwrap_or(false),
-        req.source_dialect.as_deref().and_then(dbx_core::sql_dialect::descriptor::DialectKind::from_label),
-        req.field_mappings.as_deref().unwrap_or(&[]),
-    ))
+    Json(
+        dbx_core::schema_diff::generate_schema_sync_sql_plan_with_charset(
+            &req.diffs,
+            req.function_diffs.as_deref().unwrap_or_default(),
+            req.sequence_diffs.as_deref().unwrap_or_default(),
+            req.rule_diffs.as_deref().unwrap_or_default(),
+            req.owner_diffs.as_deref().unwrap_or_default(),
+            req.database_type,
+            req.target_schema.as_deref(),
+            req.cascade_delete.unwrap_or(false),
+            req.source_dialect.as_deref().and_then(dbx_core::sql_dialect::descriptor::DialectKind::from_label),
+            req.field_mappings.as_deref().unwrap_or(&[]),
+            false,
+            false,
+            None,
+            req.compare_charset.unwrap_or(true),
+        )
+        .sync_sql,
+    )
 }
 
 #[cfg(test)]
@@ -125,6 +134,28 @@ mod tests {
         assert_eq!(plan.sync_sql, expected.sync_sql);
         assert_eq!(plan.forward_completeness, dbx_core::schema_diff::RollbackCompleteness::Complete);
         assert!(plan.generation_issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mysql_charset_policy_reaches_both_sql_generation_routes() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path()).await;
+        for enabled in [None, Some(false), Some(true)] {
+            let mut value = json!({
+                "diffs": [{"type":"added", "objectType":"table", "name":"users",
+                    "ddl":"CREATE TABLE users (name varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"}],
+                "databaseType":"mysql", "sourceDialect":"mysql"
+            });
+            if let Some(enabled) = enabled {
+                value["compareCharset"] = json!(enabled);
+            }
+            let request = serde_json::from_value(value.clone()).unwrap();
+            let Json(plan) = generate_schema_sync_plan(State(state.clone()), Json(request)).await.unwrap();
+            let Json(sql) = generate_schema_sync_sql(Json(serde_json::from_value(value).unwrap())).await;
+            assert_eq!(plan.sync_sql, sql);
+            assert_eq!(sql.contains("CHARACTER SET"), enabled.unwrap_or(true), "{sql}");
+            assert_eq!(sql.contains("COLLATE"), enabled.unwrap_or(true), "{sql}");
+        }
     }
 
     #[tokio::test]

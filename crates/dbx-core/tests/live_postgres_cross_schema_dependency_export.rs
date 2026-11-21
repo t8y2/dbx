@@ -222,6 +222,9 @@ impl LiveCase {
             snapshot_session_id: None,
             batch_size: 1,
             split_max_mb: None,
+            row_limit_per_table: None,
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
         }
     }
 

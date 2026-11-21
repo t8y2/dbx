@@ -474,54 +474,114 @@ async fn local_backend_uses_the_installed_duckdb_sidecar() {
 #[tokio::test]
 async fn legacy_read_only_config_applies_before_settings_are_opened() {
     const CHILD_ENV: &str = "DBX_MCP_LEGACY_READ_ONLY_TEST_CHILD";
-    if std::env::var_os(CHILD_ENV).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().expect("locate test executable"))
-            .args(["--exact", "legacy_read_only_config_applies_before_settings_are_opened", "--nocapture"])
-            .env(CHILD_ENV, "1")
-            .env("DBX_MCP_ALLOW_WRITES", "0")
-            .status()
-            .expect("run legacy read-only test in an isolated process");
-        assert!(status.success(), "isolated legacy read-only test failed");
+    let Ok(case) = std::env::var(CHILD_ENV) else {
+        for (case, allow_writes) in [
+            ("launch-unconfigured", Some("0")),
+            ("launch-configured", Some("0")),
+            ("launch-false", Some("false")),
+            ("launch-invalid", Some("unexpected")),
+            ("policy-unset", None),
+            ("policy-enabled", Some("1")),
+            ("writable", None),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().expect("locate test executable"));
+            command
+                .args(["--exact", "legacy_read_only_config_applies_before_settings_are_opened", "--nocapture"])
+                .env(CHILD_ENV, case)
+                .env_remove("DBX_MCP_ALLOW_WRITES");
+            if let Some(value) = allow_writes {
+                command.env("DBX_MCP_ALLOW_WRITES", value);
+            }
+            let status = command.status().expect("run legacy read-only test in an isolated process");
+            assert!(status.success(), "isolated legacy read-only test failed: {case}");
+        }
         return;
-    }
+    };
 
     let directory = tempdir().expect("temporary data directory");
     let db_path = directory.path().join("dbx.db");
-    let storage = Storage::open(&db_path).await.expect("open storage");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open isolated storage");
     assert!(!storage.load_mcp_global_policy().await.expect("load MCP policy").configured);
+    let launch_read_only = case.starts_with("launch-");
+    let policy_read_only = case.starts_with("policy-");
+    if case != "launch-unconfigured" {
+        storage
+            .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
+                read_only: policy_read_only,
+                ..Default::default()
+            })
+            .await
+            .expect("save MCP policy");
+    }
+    tokio::fs::write(directory.path().join("legacy.sqlite"), b"").await.expect("create SQLite file");
     let connection: ConnectionConfig = serde_json::from_value(json!({
         "id": "legacy-read-only",
         "name": "legacy-read-only",
         "db_type": "sqlite",
-        "host": "",
+        "host": directory.path().join("legacy.sqlite").to_string_lossy(),
         "port": 0,
         "username": "",
         "password": "",
-        "database": directory.path().join("legacy.sqlite").to_string_lossy(),
+        "database": "main",
         "ssl": false
     }))
     .expect("minimal connection config");
-    storage.save_connections(&[connection]).await.expect("save connection");
+    storage.save_connections(std::slice::from_ref(&connection)).await.expect("save connection");
     let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
-    let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    let database = connection.database.as_deref().expect("SQLite database path");
+    backend
+        .execute_query(&connection, database, "CREATE TABLE items (name TEXT)", None, None)
+        .await
+        .expect("create test table");
+    let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize client");
-    let arguments = json!({
-        "connection_id": "legacy-read-only",
-        "sql": "INSERT INTO items (name) VALUES ('blocked')",
-    })
-    .as_object()
-    .cloned()
-    .unwrap_or_else(Map::<String, Value>::new);
+    for tool in ["dbx_execute_query", "dbx_execute_batch"] {
+        let arguments = json!({
+            "connection_id": "legacy-read-only",
+            "sql": "INSERT INTO items (name) VALUES ('blocked')",
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_else(Map::<String, Value>::new);
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new(tool).with_arguments(arguments))
+            .await
+            .expect("execute write query");
+        let text = &result.content[0].as_text().expect("text result").text;
+        if launch_read_only || policy_read_only {
+            assert_eq!(result.is_error, Some(true));
+            assert!(text.contains("MCP_READ_ONLY"), "unexpected MCP response: {text}");
+            if launch_read_only {
+                assert!(text.contains("DBX_MCP_ALLOW_WRITES"), "missing launch restriction: {text}");
+                assert!(text.contains("launch configuration"), "missing remediation: {text}");
+            } else {
+                assert!(text.contains("database"), "missing policy context: {text}");
+                assert!(!text.contains("DBX_MCP_ALLOW_WRITES"), "incorrect launch restriction: {text}");
+            }
+            assert!(!text.contains("INSERT INTO"), "error must not expose SQL: {text}");
+        } else {
+            assert_ne!(result.is_error, Some(true), "writable policy must still allow inserts: {text}");
+        }
+    }
+    let arguments = json!({ "connection_id": "legacy-read-only", "sql": "SELECT COUNT(*) FROM items" })
+        .as_object()
+        .cloned()
+        .expect("query arguments");
     let result = client
         .peer()
         .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments))
         .await
-        .expect("execute query");
-    let text = result.content[0].as_text().expect("text result");
-    assert_eq!(result.is_error, Some(true));
-    assert!(text.text.contains("MCP_READ_ONLY"), "unexpected MCP response: {}", text.text);
+        .expect("execute read query");
+    assert_ne!(result.is_error, Some(true), "read-only must allow SELECT: {result:?}");
+    let rows = backend
+        .execute_query(&connection, database, "SELECT COUNT(*) FROM items", None, None)
+        .await
+        .expect("check persisted rows");
+    let expected_rows = if launch_read_only || policy_read_only { 0 } else { 2 };
+    assert_eq!(rows.rows[0][0], json!(expected_rows));
     client.cancel().await.expect("close client");
     server_task.abort();
 }

@@ -119,6 +119,7 @@ import * as api from "@/lib/backend/api";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
+import { applyInlineCellEditorPaste, inlineCellEditorPasteNeedsExpandedEditor } from "@/lib/dataGrid/dataGridCellEditorPaste";
 import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
@@ -13514,7 +13515,47 @@ function onCellEditTextareaInput(event: Event) {
 
 function onCellEditTextareaPaste(event: ClipboardEvent) {
   const input = event.currentTarget as HTMLInputElement | HTMLTextAreaElement | null;
-  if (input instanceof HTMLTextAreaElement) scheduleCellEditTextareaResize(input);
+  if (input instanceof HTMLTextAreaElement) {
+    scheduleCellEditTextareaResize(input);
+    return;
+  }
+  redirectInlineCellEditorPasteToExpandedEditor(input, event);
+}
+
+// A single-line <input> cannot hold line breaks: the browser flattens every
+// "\n"/"\r" into a space on a native paste, so multi-line clipboard text
+// silently loses its line breaks in the inline cell editor (#15307). Hand that
+// paste to the expanded <textarea> editor of the same cell, which preserves
+// the line breaks. Numeric and decimal columns keep the native paste because
+// their single-value input mode never carries line breaks.
+function redirectInlineCellEditorPasteToExpandedEditor(input: HTMLInputElement | null, event: ClipboardEvent) {
+  const cell = editingCell.value;
+  if (!input || !cell) return;
+  const text = event.clipboardData?.getData("text/plain") ?? "";
+  if (!inlineCellEditorPasteNeedsExpandedEditor(text)) return;
+  if (cellEditInputModeForColumn(cell.col) !== undefined) return;
+  const applied = applyInlineCellEditorPaste(input.value, input.selectionStart, input.selectionEnd, text);
+  event.preventDefault();
+  expandedCellEditor.value = { rowId: cell.rowId, col: cell.col };
+  editValue.value = applied.value;
+  nextTick(() => {
+    const stillEditing = editingCell.value?.rowId === cell.rowId && editingCell.value?.col === cell.col;
+    const textarea = stillEditing ? gridRef.value?.querySelector<HTMLTextAreaElement>(".cell-edit-input--expanded") : undefined;
+    if (!textarea) {
+      // The element swap can race the browser's focus bookkeeping (e.g. a blur
+      // commit fired while the focused <input> was replaced by the textarea),
+      // which would close the editor right after the paste. Reopen the same
+      // cell in the expanded editor with the applied paste so the multiline
+      // value stays visible and editable (#15307).
+      void startCellEdit(cell.rowId, cell.col, true, applied.value);
+      return;
+    }
+    textarea.focus();
+    textarea.setSelectionRange(applied.caret, applied.caret);
+    resetCellEditTextareaScrollOnResize = false;
+    scheduleCellEditTextareaResize(textarea);
+    observeCellEditResizeBounds();
+  });
 }
 
 function resizeCellEditTextareaElement(textarea: HTMLTextAreaElement | null) {

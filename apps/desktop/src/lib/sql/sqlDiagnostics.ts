@@ -163,11 +163,32 @@ function oracleMissingObjectRange(sql: string, offset: number): SqlErrorRange | 
   return { from: tokens[first].span.start, to: tokens[last].span.end };
 }
 
+function mysqlSyntaxErrorExcerptRange(sql: string, message: string, location: SqlErrorLocation): SqlErrorRange | null {
+  // MySQL 1064 gives a line number and an excerpt starting at the offending token.
+  const match = /\b(?:ERROR\s+1064|ER_PARSE_ERROR)\b[\s\S]*?\bnear\s+'([\s\S]*?)'\s+at\s+line\s+(\d+)\b/i.exec(message);
+  const excerpt = match?.[1];
+  if (!excerpt || toZeroBased(match?.[2]) !== location.line) return null;
+  const lineStart = lineColumnToOffset(sql, { line: location.line, column: 0 });
+  if (lineStart == null) return null;
+  const lineEnd = sql.indexOf("\n", lineStart);
+  const limit = lineEnd < 0 ? sql.length : lineEnd;
+  const from = sql.indexOf(excerpt, lineStart);
+  if (from < 0 || from >= limit) return null;
+  const duplicate = sql.indexOf(excerpt, from + 1);
+  if (duplicate >= 0 && duplicate < limit) return null;
+  const token = tokenizeSqlSemantic(excerpt, "mysql")[0];
+  return token ? { from: from + token.span.start, to: from + token.span.end } : null;
+}
+
 export function sqlErrorDecorationRange(sql: string, message: string, databaseType?: DatabaseType): SqlErrorRange | null {
   const position = sqlErrorMessagePosition(message);
   if (!position) return null;
 
   if (position.kind === "location") {
+    if (databaseType === "mysql" && position.location.column === 0) {
+      const excerpt = mysqlSyntaxErrorExcerptRange(sql, message, position.location);
+      if (excerpt) return excerpt;
+    }
     const offset = lineColumnToOffset(sql, position.location);
     if (offset == null || offset >= sql.length) return null;
     return { from: offset, to: offset + 1 };

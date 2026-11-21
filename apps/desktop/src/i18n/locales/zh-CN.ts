@@ -4021,6 +4021,7 @@ export default withEnglishFallback({
     useFuzzyColumnSearch: "使用模糊列搜索",
     noColumnsFound: "未找到列",
     queryError: "查询出错",
+    queryCanceled: "查询已取消",
     saveErrorTitle: "数据修改保存失败",
     saveCompleted: "更改已保存，结果已刷新。",
     dataUnavailable: "表数据需要重新加载。",

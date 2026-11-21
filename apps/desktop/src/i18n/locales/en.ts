@@ -4092,6 +4092,7 @@ export default {
     useFuzzyColumnSearch: "Use fuzzy column search",
     noColumnsFound: "No columns found",
     queryError: "Query Error",
+    queryCanceled: "Query canceled",
     saveErrorTitle: "Failed to Save Changes",
     saveCompleted: "Changes saved; the result was refreshed.",
     dataUnavailable: "Table data needs to be reloaded.",

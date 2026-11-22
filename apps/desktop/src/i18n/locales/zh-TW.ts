@@ -3741,6 +3741,7 @@ export default withEnglishFallback({
     foreignKeyPreviewLoading: "正在載入參照列…",
     foreignKeyPreviewEmpty: "「{table}」中沒有與該值相符的資料列。",
     foreignKeyPreviewFailed: "無法載入參照列：{message}",
+    pasteRowsTruncated: "已貼上 {applied} 列，另有 {dropped} 列未貼上：目前結果不支援新增列，或可新增的列數不足。",
   },
   exportProgress: {
     recoveryTitle: "刪除尚未確認結束的匯出？",

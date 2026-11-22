@@ -3897,6 +3897,7 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "No hay filas en «{table}» que coincidan con este valor.",
     foreignKeyPreviewFailed: "No se pudieron cargar las filas de referencia: {message}",
     sortOptions: "Opciones de ordenación",
+    pasteRowsTruncated: "Se pegaron {applied} filas y {dropped} filas no se pegaron: el resultado actual no admite agregar filas o no hay suficientes filas disponibles para agregar.",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

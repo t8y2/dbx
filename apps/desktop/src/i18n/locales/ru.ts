@@ -3844,6 +3844,7 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "В таблице «{table}» нет строк, соответствующих этому значению.",
     foreignKeyPreviewFailed: "Не удалось загрузить ссылающиеся строки: {message}",
     sortOptions: "Параметры сортировки",
+    pasteRowsTruncated: "Вставлено строк: {applied}, не вставлено строк: {dropped}: текущий результат не поддерживает добавление строк или доступно недостаточно строк для добавления.",
   },
   exportProgress: {
     recoveryTitle: "Удалить экспорт, завершение которого не подтверждено?",

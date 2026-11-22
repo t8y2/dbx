@@ -3759,6 +3759,7 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "Nessuna riga in «{table}» corrisponde a questo valore.",
     foreignKeyPreviewFailed: "Impossibile caricare le righe di riferimento: {message}",
     sortOptions: "Opzioni di ordinamento",
+    pasteRowsTruncated: "Sono state incollate {applied} righe, mentre {dropped} righe non sono state incollate: il risultato corrente non supporta l'aggiunta di righe oppure il numero di righe aggiungibili non è sufficiente.",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

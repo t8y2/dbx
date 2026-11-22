@@ -659,6 +659,20 @@ fn is_valid_agent_jar(path: &Path) -> bool {
     crate::agent_manager::is_valid_agent_jar_file(path)
 }
 
+/// True when the driver is installed but the jar it would launch cannot start:
+/// the file is gone, or it survived with a readable manifest that names a main
+/// class the archive no longer contains (#15318).
+///
+/// Native-binary and custom-launch drivers never use `agent.jar`, so for them a
+/// missing jar is not a defect.
+fn agent_driver_jar_is_unusable(am: &AgentManager, db_type: &str) -> bool {
+    if am.driver_native_installed(db_type) || am.driver_launch_config_path(db_type).exists() {
+        return false;
+    }
+    let jar_path = am.driver_jar_path(db_type);
+    !jar_path.is_file() || !is_valid_agent_jar(&jar_path)
+}
+
 pub async fn fetch_registry() -> Result<AgentRegistry, String> {
     fetch_registry_from(DownloadSource::Official).await
 }
@@ -872,7 +886,8 @@ pub fn batch_driver_cancellation_key(operation_id: &str, db_type: &str) -> Strin
 
 /// Ensure an already-selected fallback Agent can be launched, installing only
 /// missing or invalid runtime artifacts. A usable installed driver is never
-/// upgraded implicitly.
+/// upgraded implicitly; an installed driver whose jar cannot start is
+/// reinstalled once, because it would otherwise stay broken forever (#15318).
 pub async fn ensure_agent_driver_ready(am: &AgentManager, db_type: &str) -> Result<(), String> {
     ensure_agent_driver_ready_from(am, db_type, DownloadSource::Official).await
 }
@@ -897,6 +912,22 @@ async fn ensure_agent_driver_ready_from(
 
     let registry = fetch_registry_from(source).await?;
     let progress = |_| {};
+    // An installed driver whose jar is unusable never becomes ready on its own:
+    // the branches below only install what is missing, so the broken jar stays
+    // put and every connect keeps failing with "driver jar is invalid or
+    // corrupt" until the user reinstalls the driver by hand (#15318). Repair it
+    // the same way the Driver Manager would, then report what is still wrong.
+    if am.is_driver_installed(db_type) && agent_driver_jar_is_unusable(am, db_type) {
+        log::warn!("[agent] {db_type} driver jar is unusable; reinstalling the driver");
+        return match install_agent_driver_from_registry(am, &registry, source, db_type, &progress, None, None, &[])
+            .await
+        {
+            Ok(()) => agent_driver_runtime_readiness(am, db_type),
+            Err(repair_error) => Err(format!(
+                "{db_type} driver jar is unusable and could not be reinstalled automatically: {repair_error}"
+            )),
+        };
+    }
     if !am.is_driver_installed(db_type) {
         install_agent_driver_from_registry(am, &registry, source, db_type, &progress, None, None, &[]).await?;
     } else if am.driver_requires_java_runtime(db_type) {
@@ -4802,6 +4833,23 @@ mod agent_registry_install_tests {
         bytes.into_inner()
     }
 
+    /// A jar that still carries a readable manifest but lost the class it names —
+    /// the shape #15318 reported: `java -jar` then fails with "Could not find or
+    /// load main class" while the file itself looks intact.
+    fn agent_jar_without_its_main_class() -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        {
+            use std::io::Write;
+            let mut archive = zip::ZipWriter::new(&mut bytes);
+            archive.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(b"Manifest-Version: 1.0\nMain-Class: com.dbx.Agent\n").unwrap();
+            archive.start_file("com/dbx/Other.class", zip::write::SimpleFileOptions::default()).unwrap();
+            archive.write_all(b"class-bytes").unwrap();
+            archive.finish().unwrap();
+        }
+        bytes.into_inner()
+    }
+
     fn sha256_bytes(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
     }
@@ -5193,6 +5241,45 @@ mod agent_registry_install_tests {
         assert!(manager.is_jre_installed(DEFAULT_JRE_KEY));
         assert_eq!(std::fs::read(&driver_path).unwrap(), old_driver_bytes);
         assert_eq!(manager.load_state().installed_drivers["mongodb"].version, "1.0.0");
+    }
+
+    /// An installed driver whose jar cannot start used to stay broken forever:
+    /// `ensure_agent_driver_ready_from` only refreshed the JRE for an installed
+    /// driver, so every connect failed with "driver jar is invalid or corrupt"
+    /// until the user reinstalled it from the Driver Manager by hand (#15318).
+    #[tokio::test]
+    async fn ensure_agent_runtime_reinstalls_an_installed_driver_whose_jar_is_broken() {
+        let _test_guard = ENSURE_AGENT_TEST_LOCK.lock().await;
+        let manager = test_manager("ensure-broken-installed-driver");
+        let driver_path = manager.driver_jar_path("mongodb");
+        std::fs::create_dir_all(driver_path.parent().unwrap()).unwrap();
+        std::fs::write(&driver_path, agent_jar_without_its_main_class()).unwrap();
+        record_driver(&manager, "mongodb");
+        assert!(!manager.is_driver_jar_valid("mongodb"), "the fixture must not be a launchable jar");
+
+        let driver_version = "0.1.47";
+        let driver_url = "https://example.com/dbx-agent-mongodb.jar";
+        let driver_bytes = test_agent_jar();
+        let jre_version = "21.0.12";
+        let jre_url = "https://example.com/dbx-jre.tar.gz";
+        let jre_archive = build_jre_archive(&manager, DEFAULT_JRE_KEY);
+        let registry = mongodb_registry_with_jre(
+            driver_version,
+            driver_url,
+            driver_bytes.len() as u64,
+            jre_version,
+            jre_url,
+            jre_archive.len() as u64,
+        );
+        write_cached_driver_download(&manager, "mongodb", driver_version, driver_url, &driver_path, &driver_bytes);
+        write_cached_jre_download(&manager, DEFAULT_JRE_KEY, jre_version, jre_url, None, None, &jre_archive);
+        cache_test_registry(registry).await;
+
+        ensure_agent_driver_ready_from(&manager, "mongodb", DownloadSource::Cnb).await.unwrap();
+
+        assert!(manager.is_driver_jar_valid("mongodb"), "the broken jar must be replaced");
+        assert_eq!(std::fs::read(&driver_path).unwrap(), driver_bytes);
+        assert_eq!(manager.load_state().installed_drivers["mongodb"].version, driver_version);
     }
 
     #[tokio::test]

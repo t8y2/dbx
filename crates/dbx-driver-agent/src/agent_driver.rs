@@ -1313,7 +1313,12 @@ fn java_compatible_path(path: &Path) -> PathBuf {
     } else {
         return path.to_path_buf();
     };
-    if plain.len() > MAX_PLAIN_PATH_LEN {
+    // A non-verbatim path can normalize trailing dots and spaces to a
+    // different directory. Preserve the original spelling in that case.
+    let has_ambiguous_component = plain
+        .split(|unit| *unit == u16::from(b'\\'))
+        .any(|component| matches!(component.last(), Some(0x0020 | 0x002e)));
+    if plain.len() > MAX_PLAIN_PATH_LEN || has_ambiguous_component {
         return path.to_path_buf();
     }
     PathBuf::from(OsString::from_wide(&plain))
@@ -1344,10 +1349,11 @@ impl AgentLaunchSpec {
         jar_path: impl AsRef<Path>,
         extra_java_args: &[String],
     ) -> Self {
-        let jar_path = java_compatible_path(jar_path.as_ref());
+        let jar_path = jar_path.as_ref();
+        let launch_jar_path = java_compatible_path(jar_path);
         Self {
             program: java_path.into(),
-            args: agent_java_args_with_extra_args(&jar_path.to_string_lossy(), extra_java_args),
+            args: agent_java_args_with_extra_args(&launch_jar_path.to_string_lossy(), extra_java_args),
             working_dir: jar_path.parent().map(Path::to_path_buf),
             env: Vec::new(),
         }
@@ -4458,6 +4464,8 @@ mod pl_debug_runtime_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::java_compatible_path;
     use super::{
         agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
         agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
@@ -4465,11 +4473,11 @@ mod tests {
         agent_proxy_env_vars, agent_schema_params, agent_schema_table_params, agent_supports_capability,
         agent_transaction_params, append_legacy_error_context, decode_agent_response, format_agent_process_error,
         format_agent_startup_error, is_agent_rpc_response_error, is_retryable_agent_startup_error,
-        is_unsupported_handshake_error, java_compatible_path, legacy_agent_call_error, mongo_collection_params,
-        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_json_response,
-        read_agent_line, read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties,
-        AgentCallError, AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage,
-        AgentHandshake, AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
+        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
+        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
+        AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
+        AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
         AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
         MongoAgentMethod, StderrTail, AGENT_JAVA_TOO_OLD_MESSAGE, AGENT_PROTOCOL_VERSION,
         AGENT_STDOUT_NOISE_SAMPLE_CHARS, MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
@@ -4477,6 +4485,7 @@ mod tests {
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
     use std::io::Write;
+    #[cfg(target_os = "windows")]
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
@@ -5133,7 +5142,7 @@ for line in sys.stdin:
         let jar = spec.args.iter().position(|arg| arg == "-jar").expect("agent jar marker should be present");
 
         assert_eq!(spec.args[jar + 1], r"D:\DBX\data\agents\drivers\iris\agent.jar");
-        assert_eq!(spec.working_dir.as_deref(), Some(Path::new(r"D:\DBX\data\agents\drivers\iris")));
+        assert_eq!(spec.working_dir.as_deref(), Some(Path::new(r"\\?\D:\DBX\data\agents\drivers\iris")));
     }
 
     #[cfg(target_os = "windows")]
@@ -5150,6 +5159,9 @@ for line in sys.stdin:
             "a volume path has no plain spelling"
         );
         assert_eq!(java_compatible_path(Path::new(r"D:\DBX\agent.jar")), PathBuf::from(r"D:\DBX\agent.jar"));
+        for ambiguous in [r"\\?\D:\DBX.\agent.jar", r"\\?\D:\DBX \agent.jar"] {
+            assert_eq!(java_compatible_path(Path::new(ambiguous)), PathBuf::from(ambiguous));
+        }
         let long = format!(r"\\?\D:\{}\agent.jar", "a".repeat(280));
         assert_eq!(java_compatible_path(Path::new(&long)), PathBuf::from(&long), "a long path keeps its prefix");
     }

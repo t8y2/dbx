@@ -12576,6 +12576,7 @@ export default withEnglishFallback({
     configuration: "ブローカー設定",
     noConfigurations: "一致する設定項目がありません",
     configurationUnsupported: "この Kafka ブローカーは設定の取得に対応していません。",
+    configurationDriverUnsupported: "インストール済みの Kafka ドライバーはブローカー設定の取得に対応していません。ドライバーマネージャーで更新を確認し、再接続してください。",
     configName: "名前",
     configValue: "値",
     configSource: "ソース",

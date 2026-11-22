@@ -13591,6 +13591,7 @@ export default withEnglishFallback({
     configuration: "Broker 配置",
     noConfigurations: "没有匹配的配置项",
     configurationUnsupported: "此 Kafka Broker 不支持查询配置。",
+    configurationDriverUnsupported: "当前 Kafka 驱动不支持查询 Broker 配置。请在驱动管理中检查更新，然后重新连接。",
     configName: "名称",
     configValue: "值",
     configSource: "来源",

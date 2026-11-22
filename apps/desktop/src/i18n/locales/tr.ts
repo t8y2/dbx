@@ -10633,6 +10633,7 @@ export default withEnglishFallback({
     configuration: "Broker yapılandırması",
     noConfigurations: "Eşleşen yapılandırma kaydı yok",
     configurationUnsupported: "Bu Kafka aracısı yapılandırma sorgulamayı desteklemiyor.",
+    configurationDriverUnsupported: "Kurulu Kafka sürücüsü aracı yapılandırmasını sorgulamayı desteklemiyor. Sürücü yöneticisinde güncelleme olup olmadığını kontrol edip yeniden bağlanın.",
     configName: "Ad",
     configValue: "Değer",
     configSource: "Kaynak",

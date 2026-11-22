@@ -13042,6 +13042,7 @@ export default withEnglishFallback({
     configuration: "Configuración del broker",
     noConfigurations: "No hay entradas de configuración coincidentes",
     configurationUnsupported: "Este broker de Kafka no permite consultar la configuración.",
+    configurationDriverUnsupported: "El controlador de Kafka instalado no permite consultar la configuración del broker. Busca una actualización en el administrador de controladores y vuelve a conectarte.",
     configName: "Nombre",
     configValue: "Valor",
     configSource: "Origen",

@@ -13777,6 +13777,7 @@ export default withEnglishFallback({
     configuration: "Конфигурация брокера",
     noConfigurations: "Нет подходящих параметров",
     configurationUnsupported: "Этот брокер Kafka не поддерживает просмотр конфигурации.",
+    configurationDriverUnsupported: "Установленный драйвер Kafka не поддерживает просмотр конфигурации брокера. Проверьте обновления в менеджере драйверов и подключитесь заново.",
     configName: "Имя",
     configValue: "Значение",
     configSource: "Источник",

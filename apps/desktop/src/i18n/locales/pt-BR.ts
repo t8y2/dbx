@@ -12546,6 +12546,7 @@ export default withEnglishFallback({
     configuration: "Configuração do broker",
     noConfigurations: "Nenhuma configuração correspondente",
     configurationUnsupported: "Este broker Kafka não oferece suporte à consulta de configurações.",
+    configurationDriverUnsupported: "O driver Kafka instalado não permite consultar a configuração do broker. Verifique se há atualizações no gerenciador de drivers e reconecte-se.",
     configName: "Nome",
     configValue: "Valor",
     configSource: "Origem",

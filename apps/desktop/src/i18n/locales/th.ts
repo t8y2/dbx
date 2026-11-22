@@ -14139,6 +14139,7 @@ export default withEnglishFallback({
     configuration: "การกำหนดค่าโบรกเกอร์",
     noConfigurations: "ไม่พบรายการกำหนดค่าที่ตรงกัน",
     configurationUnsupported: "โบรกเกอร์ Kafka นี้ไม่รองรับการเรียกดูการกำหนดค่า",
+    configurationDriverUnsupported: "ไดรเวอร์ Kafka ที่ติดตั้งไม่รองรับการดูการตั้งค่าของโบรกเกอร์ ให้ตรวจสอบการอัปเดตในตัวจัดการไดรเวอร์ แล้วเชื่อมต่อใหม่",
     configName: "ชื่อ",
     configValue: "ค่า",
     configSource: "ที่มา",

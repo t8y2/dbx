@@ -10727,6 +10727,7 @@ export default withEnglishFallback({
     configuration: "Broker konfiqurasiyası",
     noConfigurations: "Uyğun konfiqurasiya qeydi yoxdur",
     configurationUnsupported: "Bu Kafka brokeri konfiqurasiyaya baxmağı dəstəkləmir.",
+    configurationDriverUnsupported: "Quraşdırılmış Kafka drayveri broker konfiqurasiyasına baxmağı dəstəkləmir. Drayver menecerində yeniləməni yoxlayın, sonra yenidən qoşulun.",
     configName: "Ad",
     configValue: "Dəyər",
     configSource: "Mənbə",

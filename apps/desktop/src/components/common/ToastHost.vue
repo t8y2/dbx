@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { X } from "@lucide/vue";
+import { Loader2, X } from "@lucide/vue";
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
@@ -12,7 +12,8 @@ const newestFirst = computed(() => [...persistentMessages.value].reverse());
 <template>
   <div class="pointer-events-none fixed bottom-6 inset-x-0 z-99999 mx-auto flex w-[90vw] max-w-3xl flex-col items-center gap-2">
     <div v-if="persistentMessages.length" class="pointer-events-auto flex max-h-[50vh] w-full flex-col gap-2 overflow-y-auto">
-      <div v-for="entry in newestFirst" :key="entry.id" role="alert" class="flex w-full shrink-0 items-start gap-3 rounded-lg bg-foreground px-4 py-2 text-sm text-background-solid shadow-lg">
+      <div v-for="entry in newestFirst" :key="entry.id" :role="entry.loading ? 'status' : 'alert'" class="flex w-full shrink-0 items-start gap-3 rounded-lg bg-foreground px-4 py-2 text-sm text-background-solid shadow-lg">
+        <Loader2 v-if="entry.loading" class="mt-0.5 h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
         <div class="min-w-0 flex-1">
           <div class="max-h-[30vh] overflow-y-auto select-text whitespace-pre-wrap break-words">{{ entry.message }}</div>
           <button v-if="entry.action" type="button" class="mt-2 rounded border border-background/40 bg-background/10 px-2 py-0.5 text-xs font-medium hover:bg-background/20" @click="entry.action.onClick()">

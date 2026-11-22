@@ -59,6 +59,7 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
   const workspace = ref<{ toggleResultsPane: () => boolean } | null>(null);
   const saveTab = vi.fn();
   const saveAll = vi.fn();
+  const cancelClose = vi.fn();
   const active = computed(() => settings.settingsPageActive || pages.driverActive);
   const portal = createGroupTabBarPortal(active);
   const actions = {
@@ -92,10 +93,10 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
   document.body.appendChild(host);
   const root = defineComponent({
     components: { AppTabBar, SqlEditorWorkspace, TooltipProvider },
-    setup: () => ({ store, settings, pages, active, navigation, workspace, saveTab, saveAll }),
+    setup: () => ({ store, settings, pages, active, navigation, workspace, saveTab, saveAll, cancelClose }),
     template: `
       <TooltipProvider>
-        <AppTabBar :settings-page-open="pages.settingsOpen" :settings-page-active="settings.settingsPageActive" :driver-store-open="pages.driverOpen" :driver-store-active="pages.driverActive" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed" @save-tab="saveTab" @save-all-tab-close="saveAll">
+        <AppTabBar :settings-page-open="pages.settingsOpen" :settings-page-active="settings.settingsPageActive" :driver-store-open="pages.driverOpen" :driver-store-active="pages.driverActive" :tab-bar-width="navigation.width" :tab-bar-collapsed="navigation.collapsed" @save-tab="saveTab" @save-all-tab-close="saveAll" @cancel-tab-close="cancelClose">
           <div v-show="settings.settingsPageActive" data-test="settings-page"><input v-model="pages.draft" data-test="settings-input" /></div>
           <div v-show="pages.driverActive" data-test="driver-page">Drivers</div>
         </AppTabBar>
@@ -119,7 +120,7 @@ function mountNavigation(placement: "top" | "bottom" | "left" | "right", empty =
     host.remove();
     window.removeEventListener("dbx:activate-query-surface", onQuerySurface);
   });
-  return { host, store, settings, pages, portal, actions, warnings, navigation, workspace, saveTab, saveAll };
+  return { host, store, settings, pages, portal, actions, warnings, navigation, workspace, saveTab, saveAll, cancelClose };
 }
 
 function element(host: HTMLElement, selector: string): HTMLElement {
@@ -152,7 +153,7 @@ describe("AppTabBar group navigation portal", () => {
   }
 
   it("keeps the current SQL save action in a mixed TYPE recovery batch", async () => {
-    const { store, sql, recovery, saveTab, saveAll } = mixedClose();
+    const { store, sql, recovery, saveTab, saveAll, cancelClose } = mixedClose();
     await settle();
     expect(store.pendingCloseTabId).toBe(sql.id);
     expect(closeButton("editor.discardChanges")).toBeDefined();
@@ -164,12 +165,13 @@ describe("AppTabBar group navigation portal", () => {
     await settle();
     expect(saveTab).toHaveBeenCalledExactlyOnceWith(sql.id);
     expect(saveAll).not.toHaveBeenCalled();
+    expect(cancelClose).not.toHaveBeenCalled();
     expect(store.tabs.find((tab) => tab.id === recovery.id)?.typeManagementDraft).toEqual({ state: "stopped" });
     expect(sql.sql).toBe("SELECT 1");
   });
 
   it.each([false, true])("scopes discard controls to the pending tab (TYPE first: %s)", async (recoveryFirst) => {
-    const { store, sql, recovery } = mixedClose(recoveryFirst);
+    const { store, sql, recovery, cancelClose } = mixedClose(recoveryFirst);
     await settle();
     expect(store.pendingCloseTabId).toBe(recoveryFirst ? recovery.id : sql.id);
     expect(closeButton(recoveryFirst ? "objects.typeManagementDiscardClose" : "editor.discardChanges")).toBeDefined();
@@ -182,6 +184,7 @@ describe("AppTabBar group navigation portal", () => {
     expect(store.tabs.map((tab) => tab.id)).toEqual([recoveryFirst ? sql.id : recovery.id]);
     if (recoveryFirst) expect(store.tabs[0]?.sql).toBe("SELECT 1");
     else expect(store.tabs[0]?.typeManagementDraft).toEqual({ state: "stopped" });
+    expect(cancelClose).not.toHaveBeenCalled();
   });
 
   it("cancels a mixed close without discarding SQL or the TYPE recovery draft", async () => {
@@ -206,6 +209,25 @@ describe("AppTabBar group navigation portal", () => {
     expect(closeButton("editor.saveAllChanges")).toBeDefined();
     closeButton("editor.saveAllChanges")!.click();
     expect(saveAll).toHaveBeenCalledOnce();
+  });
+
+  it.each(["dismiss", "escape", "cancel"])("cancels the app close request when the unsaved changes dialog closes via %s", async (method) => {
+    const { store, settings, cancelClose } = mountNavigation("top");
+    settings.editorSettings.confirmUnsavedSqlClose = true;
+    settings.editorSettings.appCloseUnsavedTabsMode = "prompt";
+    store.tabs[0]!.originalSql = "SELECT 0";
+    expect(store.requestAppCloseConfirmation()).toBe(true);
+    await settle();
+    const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
+    expect(dialog).not.toBeNull();
+    if (method === "escape") dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    else if (method === "dismiss") dialog.querySelector<HTMLButtonElement>("[data-slot='dialog-close']")!.click();
+    else closeButton("common.cancel")!.click();
+    await settle();
+    expect(store.showCloseConfirm).toBe(false);
+    expect(store.isConfirmingAppClose).toBe(false);
+    expect(cancelClose).toHaveBeenCalledOnce();
+    expect(store.tabs[0]!.sql).toBe("SELECT 1");
   });
 
   it.each(["top", "bottom", "left", "right"] as const)("moves the same %s bar between query, settings and driver surfaces", async (placement) => {

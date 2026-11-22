@@ -370,6 +370,7 @@ pub async fn list_objects(
     execution_id: Option<String>,
     identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     exact_identity: Option<bool>,
+    lightweight: Option<bool>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let app = Arc::clone(state.inner());
     let operation_app = Arc::clone(&app);
@@ -421,7 +422,7 @@ pub async fn list_objects(
                 })
                 .collect());
         }
-        dbx_core::schema::list_objects_core_with_options(
+        dbx_core::schema::list_objects_core_with_loading_options(
             &operation_app,
             &connection_id,
             &database,
@@ -432,6 +433,7 @@ pub async fn list_objects(
             object_types.as_deref(),
             table_name_filter.as_ref(),
             &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+            lightweight,
         )
         .await
     })

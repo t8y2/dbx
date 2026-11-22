@@ -54,6 +54,17 @@ describe("shortcutRegistry editor actions", () => {
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
+  it("registers convert-selection-to-delimited as an editor shortcut", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "convertSelectionToDelimited")).toMatchObject({
+      id: "convertSelectionToDelimited",
+      labelKey: "settings.shortcutConvertSelectionToDelimited",
+      scope: "editor",
+      defaultShortcut: "Mod+Alt+,",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.convertSelectionToDelimited).toBe("Mod+Alt+,");
+    expect(shortcutToCodeMirrorKey("Mod+Alt+,")).toBe("Mod-Alt-,");
+  });
+
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
       ["goToFirstPage", "settings.shortcutGoToFirstPage"],

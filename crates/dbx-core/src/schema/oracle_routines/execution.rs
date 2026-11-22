@@ -98,6 +98,7 @@ async fn prepare_package_definition(
             schema: Some(input.identity.owner.clone()),
             name: input.identity.name.clone(),
             source: input.sql.clone(),
+            identifier_quote: None,
         },
         require_absent.then_some(false),
     )?;
@@ -181,6 +182,7 @@ fn prepare_bound_definition_with_pins(
             schema: Some(input.identity.owner.clone()),
             name: input.identity.name.clone(),
             source: input.sql.clone(),
+            identifier_quote: None,
         },
         require_absent.then_some(false),
     )?;

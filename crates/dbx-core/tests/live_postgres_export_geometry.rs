@@ -122,6 +122,7 @@ async fn round_trip(snapshot: bool, dialect: SqlInsertDialect, extension_schema:
                 database: source.clone(),
                 schema: "public".into(),
                 file_path: path.display().to_string(),
+                selected_objects: None,
                 selected_tables: vec![
                     "lines".into(),
                     "mixed".into(),
@@ -146,6 +147,9 @@ async fn round_trip(snapshot: bool, dialect: SqlInsertDialect, extension_schema:
                 snapshot_session_id: session.as_ref().map(|s| s.session_id.clone()),
                 batch_size: 2,
                 split_max_mb: None,
+                row_limit_per_table: None,
+                row_limit_sort_column: None,
+                row_limit_sort_descending: false,
             },
             |_| {},
         ),

@@ -73,7 +73,7 @@ afterEach(() => {
   const tracker = useExportTracker();
   for (const task of tracker.tasks.value) tracker.removeTask(task.exportId);
 });
-async function mountDialog(allDatabases = false) {
+async function mountDialog(allDatabases = false, prefill: Record<string, unknown> = {}) {
   const host = document.createElement("div");
   document.body.append(host);
   const open = ref(true);
@@ -86,16 +86,16 @@ async function mountDialog(allDatabases = false) {
         },
         prefillConnectionId: connection.id,
         ...(allDatabases ? { prefillAllDatabases: true } : { prefillDatabase: "app", prefillSchema: "app", prefillTable: "orders" }),
+        ...prefill,
       }),
   });
   mounted.push({ app, host });
   app.mount(host);
   const key = allDatabases ? "databaseExport.exportAllDatabases" : "databaseExport.export";
-  const button = await vi.waitFor(() => {
+  await vi.waitFor(() => {
     const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === key);
     expect(button).toBeDefined();
     expect(button!.disabled).toBe(false);
-    return button!;
   });
   return {
     host,
@@ -105,7 +105,11 @@ async function mountDialog(allDatabases = false) {
       radio.checked = true;
       radio.dispatchEvent(new Event("change", { bubbles: true }));
       await nextTick();
-      button.click();
+      // Re-query the button on every start: reopening the dialog re-renders the
+      // options view, so the button element captured at mount is stale.
+      const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === key);
+      expect(button).toBeDefined();
+      button!.click();
       await vi.waitFor(() => expect(useExportTracker().tasks.value.some((task) => task.kind === "database-export")).toBe(true));
     },
   };
@@ -175,6 +179,108 @@ it("keeps a single database lease through native completion and snapshot rollbac
   await vi.waitFor(() => expect(next).toHaveBeenCalledOnce());
   expect(tracker.tasks.value[0]!.status).toBe("Done");
   expect(operations[0]!.request).toMatchObject({ database: "app", selectedTables: ["orders"], snapshotSessionId: "snapshot-app", filePath: "C:/exports/original.sql" });
+});
+it("omits rowLimitPerTable when the limit is off and captures the cap at submit time (#14750)", async () => {
+  const dialog = await mountDialog();
+  // Limit off by default: the request carries no row cap at all.
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  expect(operations[0]!.request.rowLimitPerTable).toBeUndefined();
+  terminal(0);
+  await vi.waitFor(() => expect(useExportTracker().tasks.value[0]!.status).toBe("Done"));
+
+  // Reopen the dialog for a second run with the cap enabled.
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  await vi.waitFor(() => {
+    expect(Array.from(dialog.host.querySelectorAll<HTMLButtonElement>("button")).some((button) => button.textContent?.includes("databaseExport.limitRowsPerTable"))).toBe(true);
+  });
+  const toggle = Array.from(dialog.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("databaseExport.limitRowsPerTable"))!;
+  toggle.click();
+  await nextTick();
+  const input = await vi.waitFor(() => {
+    const input = dialog.host.querySelector<HTMLInputElement>('input[aria-label="databaseExport.rowsPerTableLimit"]');
+    expect(input).toBeDefined();
+    return input!;
+  });
+  input.value = "123";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await nextTick();
+
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(2));
+  expect(operations[1]!.request.rowLimitPerTable).toBe(123);
+
+  // The request snapshot was taken at submit time: editing the input afterwards
+  // cannot rewrite what the running export already captured.
+  input.value = "999";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await nextTick();
+  expect(operations[1]!.request.rowLimitPerTable).toBe(123);
+  terminal(1);
+});
+it("carries the row-limit sort column and direction only when the limit is on (review on #14799)", async () => {
+  const dialog = await mountDialog();
+  // Limit off: no sort column may leak into the request either.
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  expect(operations[0]!.request.rowLimitSortColumn).toBeUndefined();
+  expect(operations[0]!.request.rowLimitSortDescending).toBeUndefined();
+  terminal(0);
+  await vi.waitFor(() => expect(useExportTracker().tasks.value[0]!.status).toBe("Done"));
+
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  await vi.waitFor(() => {
+    expect(Array.from(dialog.host.querySelectorAll<HTMLButtonElement>("button")).some((button) => button.textContent?.includes("databaseExport.limitRowsPerTable"))).toBe(true);
+  });
+  const toggle = Array.from(dialog.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("databaseExport.limitRowsPerTable"))!;
+  toggle.click();
+  await nextTick();
+  const capInput = await vi.waitFor(() => {
+    const input = dialog.host.querySelector<HTMLInputElement>('input[aria-label="databaseExport.rowsPerTableLimit"]');
+    expect(input).toBeDefined();
+    return input!;
+  });
+  capInput.value = "10";
+  capInput.dispatchEvent(new Event("input", { bubbles: true }));
+  const sortInput = await vi.waitFor(() => {
+    const input = dialog.host.querySelector<HTMLInputElement>('input[aria-label="databaseExport.rowLimitSortColumn"]');
+    expect(input).toBeDefined();
+    return input!;
+  });
+  sortInput.value = "created_at";
+  sortInput.dispatchEvent(new Event("input", { bubbles: true }));
+  // Default direction is "earliest first": ASC without touching a radio.
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(2));
+  expect(operations[1]!.request.rowLimitPerTable).toBe(10);
+  expect(operations[1]!.request.rowLimitSortColumn).toBe("created_at");
+  expect(operations[1]!.request.rowLimitSortDescending).toBe(false);
+  // Complete run 2 so the tracker lease frees up for the third run below.
+  terminal(1);
+  await vi.waitFor(() => expect(useExportTracker().tasks.value[1]!.status).toBe("Done"));
+
+  // Flip to "latest first" for a third run: DESC reaches the request untouched.
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  // Reopen reloads table metadata; the export button stays disabled until it settles.
+  await vi.waitFor(() => {
+    const exportButton = [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "databaseExport.export")!;
+    expect(exportButton.disabled).toBe(false);
+  });
+  const radios = dialog.host.querySelectorAll<HTMLInputElement>('input[name="row-limit-sort-direction"]');
+  expect(radios).toHaveLength(2);
+  radios[1]!.click();
+  await nextTick();
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(3));
+  expect(operations[2]!.request.rowLimitSortColumn).toBe("created_at");
+  expect(operations[2]!.request.rowLimitSortDescending).toBe(true);
+  terminal(2);
 });
 it("holds the whole multi-database operation across child completion and each rollback", async () => {
   const tracker = useExportTracker();
@@ -252,4 +358,43 @@ it.each([false, true])("recovers the UI lease without rolling back a still-runni
   } finally {
     vi.useRealTimers();
   }
+});
+it("sends an object browser selection as typed objects instead of table names (#13940)", async () => {
+  const objects = [
+    { objectType: "TABLE", name: "orders" },
+    { objectType: "FUNCTION", name: "orders", signature: "integer" },
+  ];
+  const dialog = await mountDialog(false, { prefillObjects: objects });
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+
+  expect(operations[0]!.request).toMatchObject({ selectedObjects: objects, selectedTables: undefined, includeObjects: true });
+  terminal(0);
+});
+it("disables export once an object browser selection is cleared instead of exporting the whole schema (#13940)", async () => {
+  const dialog = await mountDialog(false, { prefillObjects: [{ objectType: "TABLE", name: "orders" }] });
+  const option = (key: string) => [...dialog.host.querySelectorAll<HTMLElement>("div")].find((element) => element.textContent?.trim() === key)!;
+  const button = (key: string) => [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.trim() === key)!;
+  // Objects only: an empty table list used to pass validation and reach the backend as "whole schema".
+  option("databaseExport.includeStructure").click();
+  option("databaseExport.includeData").click();
+  await nextTick();
+  expect(button("databaseExport.export").disabled).toBe(false);
+
+  button("databaseExport.clearTables").click();
+  await nextTick();
+
+  expect(button("databaseExport.export").disabled).toBe(true);
+});
+it("disables export of picked routines once objects are no longer included (#13940)", async () => {
+  const dialog = await mountDialog(false, { prefillObjects: [{ objectType: "PROCEDURE", name: "PRC_CLEAR_ORDERS" }] });
+  const option = (key: string) => [...dialog.host.querySelectorAll<HTMLElement>("div")].find((element) => element.textContent?.trim() === key)!;
+  const button = (key: string) => [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.trim() === key)!;
+  expect(button("databaseExport.export").disabled).toBe(false);
+
+  // The procedure is the whole selection, so without objects the export would be empty.
+  option("databaseExport.includeObjects").click();
+  await nextTick();
+
+  expect(button("databaseExport.export").disabled).toBe(true);
 });

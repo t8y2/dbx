@@ -68,4 +68,33 @@ describe("batch result INSERT requests", () => {
 
     expect(batchResultInsertRequest(result, joinedMetadata, "mysql", "`", options)).toBeUndefined();
   });
+
+  it("forwards spatial columns and values with hidden column projection", () => {
+    const result: QueryResult = {
+      columns: ["row_id", "id", "geo"],
+      rows: [["key1", 1, "POINT (30 10)"]],
+      hidden_column_indexes: [0],
+      spatial_columns: [{ column_index: 2, srid: 3857 }],
+      spatial_values: [[null, null, 3857]],
+      sourceStatement: "SELECT * FROM places",
+    };
+    const placeMeta: QueryMetadataPatch = {
+      tableMeta: {
+        tableName: "places",
+        primaryKeys: ["id"],
+        columns: [
+          { name: "row_id", data_type: "varchar", is_nullable: false },
+          { name: "id", data_type: "int", is_nullable: false },
+          { name: "geo", data_type: "geometry", is_nullable: true },
+        ],
+      },
+    };
+
+    const request = batchResultInsertRequest(result, placeMeta, "sqlserver", "[", options);
+
+    expect(request?.columns.map((c) => c.displayName)).toEqual(["id", "geo"]);
+    expect(request?.rows).toEqual([[1, "POINT (30 10)"]]);
+    expect(request?.spatialColumns).toEqual([{ column_index: 1, srid: 3857 }]);
+    expect(request?.spatialValues).toEqual([[null, 3857]]);
+  });
 });

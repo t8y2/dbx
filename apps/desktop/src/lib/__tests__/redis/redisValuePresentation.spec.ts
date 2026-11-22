@@ -290,6 +290,30 @@ describe("redisValuePresentation", () => {
     expect(autoRedisValueFormat(formatRedisMemberDetail("plain-text", { allowJsonText: true }), null)).toBe("utf8");
   });
 
+  // Issue #14384: Fastjson WriteClassName output (`1L`, `Set[...]`) is not JSON.
+  it.each([
+    ["a string", '[{"@type":"SysDictData","dictCode":1L,"roles":Set["admin"]}]'],
+    ["a blob", { raw_base64: Buffer.from('[{"@type":"SysDictData","dictCode":1L,"roles":Set["admin"]}]').toString("base64"), encoding: "utf8" }],
+  ])("indents JSON-shaped text strict JSON rejects from %s, read-only", (_, value) => {
+    const detail = formatRedisMemberDetail(value, { allowJsonText: true });
+
+    expect(detail.json).toBeUndefined();
+    expect(detail.looseJsonText).toBe(["[", "  {", '    "@type": "SysDictData",', '    "dictCode": 1L,', '    "roles": Set[', '      "admin"', "    ]", "  }", "]"].join("\n"));
+    expect(detail.rawText).toBe('[{"@type":"SysDictData","dictCode":1L,"roles":Set["admin"]}]');
+    expect(autoRedisValueFormat(detail, null)).toBe("json");
+    // YAML/XML and editing need a parsed value, which loose text does not have.
+    expect(canRenderRedisValueFormat(detail, "json")).toBe(false);
+  });
+
+  it.each([
+    ["strict JSON", '{"role":"reader"}', { allowJsonText: true }],
+    ["plain text in braces", "{name} joined", { allowJsonText: true }],
+    ["an unbalanced value", '[{"dictCode":1L}', { allowJsonText: true }],
+    ["a list row preview", '[{"dictCode":1L}]', {}],
+  ])("does not mark %s as loose JSON", (_, value, options) => {
+    expect(formatRedisMemberDetail(value, options).looseJsonText).toBeUndefined();
+  });
+
   it("lets a pinned format preference win over JSON detection", () => {
     const detail = formatRedisMemberDetail('{"role":"reader"}', { allowJsonText: true });
     expect(autoRedisValueFormat(detail, "utf8")).toBe("utf8");

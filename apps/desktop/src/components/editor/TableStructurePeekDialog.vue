@@ -5,10 +5,10 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatMetadataColumnTypeLabel } from "@/lib/dataGrid/dataGridColumnType";
-import { STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, centeredStructurePeekRect, clampStructurePeekRect, defaultStructurePeekSize, resizeStructurePeekRect, type StructurePeekResizeEdge } from "@/lib/editor/structurePeekPanel";
+import { STRUCTURE_PEEK_MAX_Z_INDEX, STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, centeredStructurePeekRect, clampStructurePeekRect, defaultStructurePeekSize, resizeStructurePeekRect, type StructurePeekResizeEdge } from "@/lib/editor/structurePeekPanel";
 import { shouldPreserveEditorFocusOnPeekPointerDown } from "@/lib/editor/focusedQueryEditorView";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
+import { filterObjectBrowserTableColumns, sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
 import type { ColumnInfo } from "@/types/database";
 
 export type TableStructurePeekInsertKind = "identifier" | "raw";
@@ -24,6 +24,12 @@ const props = defineProps<{
   zIndex?: number;
   /** 0-based index among open panels; used only for initial cascade placement. */
   cascadeIndex?: number;
+  /**
+   * Whether cells can be inserted into a query editor. Callers without an editor
+   * cursor (for example the sidebar) turn this off so no insertion affordance is
+   * advertised.
+   */
+  insertEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -59,13 +65,30 @@ const title = computed(() => {
 
 const filteredColumns = computed(() => filterObjectBrowserTableColumns(props.columns, searchQuery.value));
 
+const columnSort = ref<ObjectBrowserTableColumnSort | null>(null);
+
+const sortedColumns = computed(() => sortObjectBrowserTableColumns(filteredColumns.value, columnSort.value));
+
+function toggleColumnSort(key: ObjectBrowserTableColumnSortKey) {
+  columnSort.value = columnSort.value?.key === key ? (columnSort.value.direction === "asc" ? { key, direction: "desc" } : null) : { key, direction: "asc" };
+}
+
+function columnSortDirection(key: ObjectBrowserTableColumnSortKey): ObjectBrowserTableColumnSort["direction"] | undefined {
+  return columnSort.value?.key === key ? columnSort.value.direction : undefined;
+}
+
+function columnSortIndicator(key: ObjectBrowserTableColumnSortKey): string {
+  const direction = columnSortDirection(key);
+  return direction === "asc" ? "▲" : direction === "desc" ? "▼" : "↕";
+}
+
 const panelStyle = computed(() => {
   const style: Record<string, string> = {
     left: `${panelLeft.value}px`,
     top: `${panelTop.value}px`,
     width: `${panelWidth.value}px`,
     height: `${panelHeight.value}px`,
-    zIndex: String(props.zIndex ?? 50),
+    zIndex: String(props.zIndex ?? STRUCTURE_PEEK_MAX_Z_INDEX),
   };
   if (interacting.value) style.transition = "none";
   return style;
@@ -116,7 +139,18 @@ function insertValue(value: string | null | undefined, kind: TableStructurePeekI
   emit("insertValue", trimmed, kind);
 }
 
+const insertEnabled = computed(() => props.insertEnabled !== false);
+
+function insertableColumn(value: string | null | undefined): boolean {
+  return insertEnabled.value && insertableValue(value) !== null;
+}
+
+function insertTitle(value: string | null | undefined): string | undefined {
+  return insertableColumn(value) ? t("editor.structurePeek.doubleClickInsert") : undefined;
+}
+
 function onCellDblClick(value: string | null | undefined, kind: TableStructurePeekInsertKind) {
+  if (!insertEnabled.value) return;
   insertValue(value, kind);
 }
 
@@ -246,9 +280,10 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => props.tableName,
+  () => [props.tableName, props.schema] as const,
   () => {
     searchQuery.value = "";
+    columnSort.value = null;
   },
 );
 </script>
@@ -278,7 +313,7 @@ watch(
         </button>
         <div class="min-w-0 flex-1 select-none">
           <div class="truncate text-sm font-medium">{{ t("editor.structurePeek.title", { name: title }) }}</div>
-          <div class="truncate text-xs text-muted-foreground">{{ t("editor.structurePeek.hint") }}</div>
+          <div v-if="insertEnabled" class="truncate text-xs text-muted-foreground">{{ t("editor.structurePeek.hint") }}</div>
         </div>
         <Button type="button" variant="ghost" size="sm" data-no-drag class="h-7 w-7 shrink-0 p-0" :title="t('common.close')" :aria-label="t('common.close')" @pointerdown.stop @click="closePanel">
           <X class="h-4 w-4" />
@@ -301,37 +336,48 @@ watch(
           <thead class="sticky top-0 z-10 bg-muted text-muted-foreground">
             <tr class="border-b">
               <th class="w-8 px-3 py-2 text-left font-medium text-nowrap">#</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("grid.columnName") }}</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("grid.columnType") }}</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("grid.tableInfoNullable") }}</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("structureEditor.defaultValue") }}</th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('name') === 'asc' ? 'ascending' : columnSortDirection('name') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('name')">
+                  {{ t("grid.columnName") }} <span class="text-[10px]">{{ columnSortIndicator("name") }}</span>
+                </button>
+              </th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('dataType') === 'asc' ? 'ascending' : columnSortDirection('dataType') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('dataType')">
+                  {{ t("grid.columnType") }} <span class="text-[10px]">{{ columnSortIndicator("dataType") }}</span>
+                </button>
+              </th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('nullable') === 'asc' ? 'ascending' : columnSortDirection('nullable') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('nullable')">
+                  {{ t("grid.tableInfoNullable") }} <span class="text-[10px]">{{ columnSortIndicator("nullable") }}</span>
+                </button>
+              </th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('defaultValue') === 'asc' ? 'ascending' : columnSortDirection('defaultValue') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('defaultValue')">
+                  {{ t("structureEditor.defaultValue") }} <span class="text-[10px]">{{ columnSortIndicator("defaultValue") }}</span>
+                </button>
+              </th>
               <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("structureEditor.comment") }}</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(column, index) in filteredColumns" :key="column.name" class="border-b hover:bg-muted/40">
+            <tr v-for="(column, index) in sortedColumns" :key="column.name" class="border-b hover:bg-muted/40">
               <td class="w-8 px-3 py-2 text-muted-foreground">{{ index + 1 }}</td>
-              <td class="cursor-pointer px-3 py-2 font-medium" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(column.name, 'identifier')">
+              <td class="px-3 py-2 font-medium" :class="{ 'cursor-pointer': insertableColumn(column.name) }" :title="insertTitle(column.name)" @dblclick.stop="onCellDblClick(column.name, 'identifier')">
                 <span class="inline-flex items-center gap-1.5">
                   <KeyRound v-if="column.is_primary_key" class="h-3 w-3 text-amber-500" />
                   {{ column.name }}
                 </span>
               </td>
-              <td class="cursor-pointer px-3 py-2 font-mono text-[11px] text-muted-foreground" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(formatColumnType(column), 'raw')">
+              <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground" :class="{ 'cursor-pointer': insertableColumn(formatColumnType(column)) }" :title="insertTitle(formatColumnType(column))" @dblclick.stop="onCellDblClick(formatColumnType(column), 'raw')">
                 {{ formatColumnType(column) }}
               </td>
-              <td class="cursor-pointer px-3 py-2" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(column.is_nullable ? 'YES' : 'NO', 'raw')">
+              <td class="px-3 py-2" :class="{ 'cursor-pointer': insertEnabled }" :title="insertEnabled ? t('editor.structurePeek.doubleClickInsert') : undefined" @dblclick.stop="onCellDblClick(column.is_nullable ? 'YES' : 'NO', 'raw')">
                 {{ column.is_nullable ? "YES" : "NO" }}
               </td>
-              <td
-                class="max-w-48 px-3 py-2 font-mono text-[11px]"
-                :class="insertableValue(column.column_default) ? 'cursor-pointer' : 'text-muted-foreground/70'"
-                :title="insertableValue(column.column_default) ? t('editor.structurePeek.doubleClickInsert') : undefined"
-                @dblclick.stop="onCellDblClick(column.column_default, 'raw')"
-              >
+              <td class="max-w-48 px-3 py-2 font-mono text-[11px]" :class="insertableColumn(column.column_default) ? 'cursor-pointer' : 'text-muted-foreground/70'" :title="insertTitle(column.column_default)" @dblclick.stop="onCellDblClick(column.column_default, 'raw')">
                 <span class="block truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
               </td>
-              <td class="max-w-56 px-3 py-2 text-muted-foreground" :class="{ 'cursor-pointer': !!insertableValue(column.comment) }" :title="insertableValue(column.comment) ? t('editor.structurePeek.doubleClickInsert') : undefined" @dblclick.stop="onCellDblClick(column.comment, 'raw')">
+              <td class="max-w-56 px-3 py-2 text-muted-foreground" :class="{ 'cursor-pointer': insertableColumn(column.comment) }" :title="insertTitle(column.comment)" @dblclick.stop="onCellDblClick(column.comment, 'raw')">
                 <span class="block truncate">{{ column.comment || "—" }}</span>
               </td>
             </tr>

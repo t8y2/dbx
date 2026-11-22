@@ -15,6 +15,27 @@ export interface SqlTextRange {
   sql: string;
 }
 
+export interface MysqlDelimiterCommand {
+  from: number;
+  to: number;
+  delimiter: string;
+}
+
+export function mysqlDelimiterAt(commands: readonly MysqlDelimiterCommand[] | undefined, position: number): string {
+  if (commands) {
+    for (let index = commands.length - 1; index >= 0; index -= 1) {
+      const command = commands[index];
+      if (command.to <= position) return command.delimiter;
+    }
+  }
+  return ";";
+}
+
+export function mysqlDelimiterPrefixAt(commands: readonly MysqlDelimiterCommand[] | undefined, position: number): string {
+  const delimiter = mysqlDelimiterAt(commands, position);
+  return delimiter === ";" ? "" : `DELIMITER ${delimiter}\n`;
+}
+
 const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
 
 function isHttpJsonRestDatabaseType(databaseType?: DatabaseType): boolean {
@@ -408,7 +429,7 @@ function isAsciiAlphanumeric(ch: string): boolean {
  * only the statement text (the trailing semicolon and inter-statement
  * whitespace are excluded so editor highlights stay tight).
  */
-export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions, mysqlDelimiterCommands?: MysqlDelimiterCommand[]): RawStatement[] {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (isHttpJsonRestDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
@@ -431,6 +452,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let postgresDollarQuotedRoutine = false;
+  let sqlServerModuleBatch = false;
   let oraclePlSqlStatementEnd: number | null | undefined;
   let i = 0;
 
@@ -471,6 +493,12 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       // exact /*proxy*/ directive also keeps its historical multiline support.
       const directiveStart = pendingMysqlDirectiveStart !== -1 && (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || pos < pendingMysqlDirectiveLineEnd) ? pendingMysqlDirectiveStart : -1;
       statementStart = directiveStart !== -1 ? directiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
+      sqlServerModuleBatch = databaseType === "sqlserver" && startsWithSqlServerModuleDdl(sql, pos, parameterOptions);
+      if (sqlServerModuleBatch) {
+        // SQL Server stores the module's leading comments in its definition.
+        statementStart = statementHitStart;
+        while (isWhitespace(sql[statementStart])) statementStart += 1;
+      }
       pendingHintStart = -1;
       pendingMysqlDirectiveStart = -1;
       pendingMysqlDirectiveLineEnd = -1;
@@ -485,6 +513,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       pendingMysqlDirectiveStart = -1;
       pendingMysqlDirectiveLineEnd = -1;
       postgresDollarQuotedRoutine = false;
+      sqlServerModuleBatch = false;
       oraclePlSqlStatementEnd = undefined;
       return;
     }
@@ -498,6 +527,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     pendingMysqlDirectiveStart = -1;
     pendingMysqlDirectiveLineEnd = -1;
     postgresDollarQuotedRoutine = false;
+    sqlServerModuleBatch = false;
     oraclePlSqlStatementEnd = undefined;
     mysqlRoutineScan = null;
   };
@@ -589,6 +619,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const delimiter = parseDelimiterCommand(sql.slice(i, lineEnd));
       if (delimiter !== null) {
         flush();
+        mysqlDelimiterCommands?.push({ from: i, to: lineEnd, delimiter });
         customDelimiter = delimiter === ";" ? null : delimiter;
         i = nextLineStart(sql, lineEnd);
         statementHitStart = i;
@@ -622,7 +653,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if (ch === "/" && next === "*") {
       const hintMarker = sql[i + 2];
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
-      const close = sql.indexOf("*/", i + 2);
+      const close = findSqlBlockCommentEnd(sql, i, databaseType);
       if (statementStart === -1) {
         if (databaseType === "mysql") {
           if (pendingMysqlDirectiveStart === -1 || i > pendingMysqlDirectiveLineEnd) {
@@ -694,6 +725,11 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         continue;
       }
     } else if (ch === ";" && !isXmlEntityReferenceSemicolon(sql, i)) {
+      if (sqlServerModuleBatch) {
+        markContent(i);
+        i += 1;
+        continue;
+      }
       const routineTokensBeforeSemicolon = isMysqlRoutineBlockDatabase(databaseType) && statementStart !== -1 ? mysqlRoutineTokensUpTo(i) : null;
       const isMysqlRoutineBlock = routineTokensBeforeSemicolon !== null && isMysqlRoutineDdlStartFromWords(mysqlRoutineDdlStartWords(routineTokensBeforeSemicolon)) && mysqlRoutineTokensContainBegin(routineTokensBeforeSemicolon);
       if (isMysqlRoutineBlock) {
@@ -857,6 +893,7 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   if (isFirebirdRoutineBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
+  if (databaseType === "sqlserver" && startsWithSqlServerModuleDdl(sql, statement.from, parameterOptions)) return [statement];
   // SQL Server control-flow batches use line-oriented BEGIN/EXEC tokens inside one IF/ELSE statement.
   if (isSqlServerControlFlowBatch(sql, statement, databaseType, parameterOptions)) return [statement];
 
@@ -1054,6 +1091,18 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
   }
 
   return { openBlocks, closedAt, wordAfterClose, sawBlockBegin, hasControlFlowElse };
+}
+
+function startsWithSqlServerModuleDdl(sql: string, from: number, parameterOptions?: SqlParameterOptions): boolean {
+  const operation = nextSqlWordToken(sql, from, "sqlserver", parameterOptions);
+  if (operation?.word !== "CREATE" && operation?.word !== "ALTER") return false;
+  let kind = nextSqlWordToken(sql, operation.end, "sqlserver", parameterOptions);
+  if (operation.word === "CREATE" && kind?.word === "OR") {
+    const alter = nextSqlWordToken(sql, kind.end, "sqlserver", parameterOptions);
+    if (alter?.word !== "ALTER") return false;
+    kind = nextSqlWordToken(sql, alter.end, "sqlserver", parameterOptions);
+  }
+  return kind != null && ["PROC", "PROCEDURE", "FUNCTION", "TRIGGER", "VIEW"].includes(kind.word);
 }
 
 /**
@@ -1643,7 +1692,7 @@ function nextSqlWordToken(sql: string, pos: number, databaseType?: DatabaseType,
       continue;
     }
     if (sql[i] === "/" && sql[i + 1] === "*") {
-      const commentEnd = sql.indexOf("*/", i + 2);
+      const commentEnd = findSqlBlockCommentEnd(sql, i, databaseType);
       if (commentEnd < 0) return null;
       i = commentEnd + 2;
       continue;
@@ -1867,6 +1916,22 @@ export function startsHashLineComment(sql: string, pos: number, databaseType?: D
 
 function startsBlockComment(sql: string, pos: number): boolean {
   return sql[pos] === "/" && sql[pos + 1] === "*";
+}
+
+export function findSqlBlockCommentEnd(sql: string, from: number, databaseType?: DatabaseType): number {
+  if (databaseType !== "sqlserver") return sql.indexOf("*/", from + 2);
+  let depth = 1;
+  for (let index = from + 2; index < sql.length - 1; index += 1) {
+    if (sql[index] === "/" && sql[index + 1] === "*") {
+      depth += 1;
+      index += 1;
+    } else if (sql[index] === "*" && sql[index + 1] === "/") {
+      depth -= 1;
+      if (depth === 0) return index;
+      index += 1;
+    }
+  }
+  return -1;
 }
 
 function trimRangeEnd(sql: string, from: number, to: number): number {
@@ -2970,11 +3035,11 @@ function normalizeSql(sql: string): string {
  * cursor statement and the full document are effectively the same SQL — in
  * that case only a single candidate is returned to avoid duplicates.
  */
-export function executableStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange[] {
+export function executableStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions, mysqlDelimiterCommands?: MysqlDelimiterCommand[]): SqlTextRange[] {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (databaseType === "redis") return redisExecutableCommandRanges(sql);
   if (databaseType === "mongodb") return splitMongoCommandRanges(sql).map(({ from, to, text }) => ({ from, to, sql: text }));
-  return splitSqlStatementRanges(sql, databaseType, parameterOptions).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions).map((range) => rangeFor(range, sql)));
+  return splitSqlStatementRanges(sql, databaseType, parameterOptions, mysqlDelimiterCommands).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions).map((range) => rangeFor(range, sql)));
 }
 
 export function currentExecutableStatementRange(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {

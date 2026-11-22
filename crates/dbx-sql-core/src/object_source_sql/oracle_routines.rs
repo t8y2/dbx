@@ -162,6 +162,7 @@ pub fn comparable_oracle_routine_definition(mut input: OracleRoutineDefinitionIn
         schema: Some(schema),
         name,
         source,
+        identifier_quote: None,
     })
 }
 
@@ -357,6 +358,7 @@ BEGIN RETURN q'[Source.Owner.Mixed.Func  text]'; END;
                     schema: Some("Target.Owner".into()),
                     name: "Mixed.Func".into(),
                     source: source.into(),
+                    identifier_quote: None,
                 },
                 replace,
             )
@@ -408,6 +410,7 @@ BEGIN RETURN q'[Source.Owner.Mixed.Func  text]'; END;
                     schema: Some("Target.Owner".into()),
                     name: "Mixed.Func".into(),
                     source: source.into(),
+                    identifier_quote: None,
                 },
                 Some(false),
             )

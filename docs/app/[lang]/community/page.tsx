@@ -8,7 +8,7 @@ const channels = [
   {
     id: "qq",
     color: "#EB1923",
-    href: "https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322",
+    href: "https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=244975070",
     icon: <img src="/icons/community/qq.png" alt="QQ" width={24} height={24} />,
   },
   {
@@ -69,7 +69,7 @@ const i18n = {
     title: "Community",
     desc: "Join the DBX community — ask questions, share feedback, and connect with other users.",
     discord: { name: "Discord", desc: "Real-time chat, Q&A, and feature discussions." },
-    qq: { name: "QQ Group", desc: "Group number: 1087880322" },
+    qq: { name: "QQ Group", desc: "Group number: 244975070" },
     wechat: { name: "WeChat Group", desc: "Join via Tencent Docs invite link." },
     feishu: { name: "Feishu Group", desc: "Join via invite link." },
     github: { name: "GitHub Discussions", desc: "Bug reports, feature requests, and long-form discussions." },
@@ -78,7 +78,7 @@ const i18n = {
     title: "交流群",
     desc: "加入 DBX 社区 — 提问、反馈、与其他用户交流。",
     discord: { name: "Discord", desc: "实时聊天、问答和功能讨论。" },
-    qq: { name: "QQ 群", desc: "群号：1087880322" },
+    qq: { name: "QQ 群", desc: "群号：244975070" },
     wechat: { name: "微信群", desc: "通过腾讯文档链接加入。" },
     feishu: { name: "飞书群", desc: "点击邀请链接加入。" },
     github: { name: "GitHub Discussions", desc: "Bug 反馈、功能建议和深度讨论。" },

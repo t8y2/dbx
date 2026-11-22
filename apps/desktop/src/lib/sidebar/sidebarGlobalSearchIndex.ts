@@ -41,7 +41,8 @@ export async function collectSidebarGlobalSearchIndexes(
   const visit = async (node: TreeNode, ancestors: TreeNode[]): Promise<void> => {
     if (shouldCancel() || isSidebarSearchPrunedDatabaseNode(node, databaseScope)) return;
     if (node.connectionId && node.connectionId !== connectionId) return;
-    const path = [...ancestors, node];
+    // Virtual folders are presentation only; saved index paths must survive regrouping.
+    const path = node.type === "table-vgroup" ? ancestors : [...ancestors, node];
     try {
       if (loader.isIndexParent(node)) {
         const cachedScope = scopedCache.find((scope) => nodeMatchesRegexScopeIdentity(node, scope.parentNodeId, scope));
@@ -62,7 +63,7 @@ export async function collectSidebarGlobalSearchIndexes(
       }
       const children = node.type === "connection" || containerTypes.has(node.type) ? await loader.discover(node) : (node.children ?? []);
       for (const child of children) {
-        if (child.type === "connection-group" || child.type === "connection" || containerTypes.has(child.type) || linkedContainerTypes.has(child.type) || sidebarIndexedObjectGroupTypes.has(child.type)) await visit(child, path);
+        if (child.type === "connection-group" || child.type === "connection" || (child.type === "table-vgroup" && child.vgroupKind === "databases") || containerTypes.has(child.type) || linkedContainerTypes.has(child.type) || sidebarIndexedObjectGroupTypes.has(child.type)) await visit(child, path);
       }
     } catch (error) {
       if (!shouldCancel()) loader.onError(node, error);

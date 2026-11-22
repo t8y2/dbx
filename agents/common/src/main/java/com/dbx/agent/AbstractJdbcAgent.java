@@ -766,7 +766,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
                     value = rs.getString(index);
                     break;
             }
-            return rs.wasNull() ? null : value;
+            return rs.wasNull() ? null : JdbcExecutor.normalizeNonFiniteValue(value);
         });
     }
 

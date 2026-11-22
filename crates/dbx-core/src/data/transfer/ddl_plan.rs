@@ -47,6 +47,18 @@ pub(super) async fn prepare_table_ddl(
         .map_err(|error| format!("Cannot read complete MySQL DDL for '{table}': {error}"))?;
         return mysql_xugu::prepare(&ddl, columns, &request.target_schema, target_table);
     }
+    if oracle_xugu::is_pair(source_db_type, target_db_type) {
+        let ddl = oracle_xugu::source_ddl(state, request, source_pool_key, table).await?;
+        return oracle_xugu::prepare(
+            &ddl,
+            columns,
+            &request.source_schema,
+            table,
+            &request.target_schema,
+            target_table,
+            table_comment,
+        );
+    }
     let source_columns = if request.has_package_selection() {
         Some(serde_json::to_value(columns).map_err(|error| error.to_string())?)
     } else {
@@ -265,13 +277,14 @@ pub(super) async fn prepare_table_ddl(
             )
         }
     } else {
-        generate_create_table_ddl_with_column_quoting(
+        generate_create_table_ddl_with_source_profile(
             columns,
             target_table,
             &request.source_schema,
             &request.target_schema,
             target_db_type,
             source_db_type,
+            source_driver_profile.as_deref(),
             table_comment,
             request.target_catalog.as_deref(),
             request.quote_target_column_names,

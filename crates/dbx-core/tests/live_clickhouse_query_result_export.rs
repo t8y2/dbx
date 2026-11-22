@@ -103,6 +103,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         execution_id: Some(format!("live-clickhouse-query-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
+        csv_without_bom: false,
         null_literal: String::new(),
         export_table_name: None,
         export_schema: None,

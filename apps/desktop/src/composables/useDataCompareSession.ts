@@ -3,7 +3,7 @@ import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { openDataCompareSession } from "@/composables/useDialogSources";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase, normalizeKeyColumns, type DataCompareFromTablesPreparation, type DataCompareResult, type DataCompareSyncPlan, type DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
+import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase, normalizeKeyColumns, resolveEffectiveIgnoredColumns, type DataCompareFromTablesPreparation, type DataCompareResult, type DataCompareSyncPlan, type DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
 import { createDataCompareSelection, selectedCompareRows, type DataCompareSelection } from "@/lib/dataGrid/dataCompareSelection";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 
@@ -34,6 +34,8 @@ export interface DataCompareTableResult {
   added: number;
   removed: number;
   modified: number;
+  /** Rows differing only in ignored columns; identical for diff and sync purposes. */
+  ignoredOnlyCount: number;
   sourceRowCount: number;
   targetRowCount: number;
   sourceTruncated: boolean;
@@ -74,6 +76,13 @@ export interface DataCompareSessionConfig {
    * again — it must not silently fall back to the primary key.
    */
   keyColumnsByTable: Record<string, string[]>;
+  /**
+   * Columns ignored in every table of this compare (value differences tolerated,
+   * still read). Absent/empty means nothing is ignored.
+   */
+  globalIgnoredColumns?: string[];
+  /** Additional ignored columns per source table, merged with the global list. */
+  ignoredColumnsByTable?: Record<string, string[]>;
   label: string;
 }
 
@@ -129,7 +138,24 @@ function cloneConfig(config: DataCompareSessionConfig): DataCompareSessionConfig
     targetSchemas: [...config.targetSchemas],
     targetTables: [...config.targetTables],
     keyColumnsByTable: normalizeKeyColumnOverrides(config.keyColumnsByTable),
+    globalIgnoredColumns: config.globalIgnoredColumns ? normalizeKeyColumns(config.globalIgnoredColumns) : [],
+    ignoredColumnsByTable: normalizeIgnoredColumnOverrides(config.ignoredColumnsByTable),
   };
+}
+
+/**
+ * Normalizes a per-table ignored-column map so a cloned session never shares
+ * arrays with the caller. Same shape as the match-column overrides; an absent
+ * entry and an empty array both mean "nothing extra ignored for this table".
+ */
+export function normalizeIgnoredColumnOverrides(overrides: Record<string, string[] | undefined> | null | undefined): Record<string, string[]> {
+  const normalized: Record<string, string[]> = {};
+  for (const [table, columns] of Object.entries(overrides ?? {})) {
+    if (!table) continue;
+    const normalizedColumns = normalizeKeyColumns(columns ?? []);
+    if (normalizedColumns.length > 0) normalized[table] = normalizedColumns;
+  }
+  return normalized;
 }
 
 /**
@@ -249,6 +275,7 @@ function buildTableResult(task: DataCompareTableTask, preparation: DataCompareFr
     added,
     removed,
     modified,
+    ignoredOnlyCount: preparation.result.ignoredOnlyCount ?? 0,
     sourceRowCount: preparation.sourceRowCount,
     targetRowCount: preparation.targetRowCount,
     sourceTruncated: preparation.sourceTruncated,
@@ -274,6 +301,7 @@ function buildMissingTargetResult(task: DataCompareTableTask, preparation: DataC
     added: preparation.result.added.length,
     removed: 0,
     modified: 0,
+    ignoredOnlyCount: 0,
     sourceRowCount: preparation.sourceRowCount,
     targetRowCount: 0,
     sourceTruncated: preparation.sourceTruncated,
@@ -299,6 +327,7 @@ function buildErrorResult(task: DataCompareTableTask, keyColumns: string[], data
     added: 0,
     removed: 0,
     modified: 0,
+    ignoredOnlyCount: 0,
     sourceRowCount: 0,
     targetRowCount: 0,
     sourceTruncated: false,
@@ -372,6 +401,14 @@ async function runDataCompareSession(session: DataCompareSession, tasks: DataCom
             targetTable: task.targetTable,
             columns,
             keyColumns: canonicalKeyColumns,
+            // Ignored columns stay in `columns` (still read, kept by sync INSERTs);
+            // the backend only drops them from the modified detection.
+            ignoredColumns: resolveEffectiveIgnoredColumns({
+              globalIgnoredColumns: input.globalIgnoredColumns ?? [],
+              tableIgnoredColumns: input.ignoredColumnsByTable?.[task.sourceTable],
+              columns,
+              keyColumns: canonicalKeyColumns,
+            }),
             sourceColumns: matched.sourceColumns,
           });
           keyColumns = canonicalKeyColumns;

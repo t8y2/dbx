@@ -1215,9 +1215,10 @@ const ORACLE_PROOF_SAFE_FUNCTIONS: &[&str] = &[
 ];
 
 /// Prove that a single SQL statement is, by DBX's strict heuristic, an
-/// ordinary read. MySQL, the PostgreSQL family (PostgreSQL, GaussDB, openGauss)
-/// and Oracle/OceanBase-Oracle take part in this proof; every other database
-/// type is Unproven so its manual-transaction toolbar keeps the legacy behavior.
+/// ordinary read. MySQL, the PostgreSQL family (PostgreSQL, GaussDB, openGauss,
+/// Kingbase) and Oracle/OceanBase-Oracle take part in this proof; every other
+/// database type is Unproven so its manual-transaction toolbar keeps the legacy
+/// behavior.
 ///
 /// Oracle used to keep a purely lexical classifier in `query_execution_sql`
 /// that rejected *any* `(` after comment/literal stripping, which is why
@@ -1228,7 +1229,7 @@ const ORACLE_PROOF_SAFE_FUNCTIONS: &[&str] = &[
 pub fn prove_read_only_for_database(sql: &str, database_type: DatabaseType) -> ReadProof {
     match database_type {
         DatabaseType::Mysql => prove_read_only_statement(sql, "mysql", MYSQL_PROOF_SAFE_FUNCTIONS),
-        DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
+        DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Kingbase => {
             prove_read_only_statement(sql, "postgres", POSTGRES_PROOF_SAFE_FUNCTIONS)
         }
         DatabaseType::Oracle | DatabaseType::OceanbaseOracle => prove_oracle_read_only_statement(sql),
@@ -1605,6 +1606,21 @@ mod tests {
             ReadProof::Unproven
         );
         assert_eq!(prove_read_only_for_database("SELECT nextval('seq')", DatabaseType::Gaussdb), ReadProof::Unproven);
+    }
+
+    #[test]
+    fn proof_maps_kingbase_to_postgres_proof() {
+        // KingbaseES is a PostgreSQL-family engine: it shares the PG proof so
+        // its sticky manual-transaction toolbar behaves like PostgreSQL.
+        for sql in ["SELECT 1", "SELECT * FROM users", "EXPLAIN SELECT * FROM t"] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Kingbase),
+                ReadProof::ProvenReadOnly,
+                "expected proven for Kingbase: {sql}"
+            );
+        }
+        assert_eq!(prove_read_only_for_database("UPDATE users SET x = 1", DatabaseType::Kingbase), ReadProof::Unproven);
+        assert_eq!(prove_read_only_for_database("SELECT nextval('seq')", DatabaseType::Kingbase), ReadProof::Unproven);
     }
 
     #[test]

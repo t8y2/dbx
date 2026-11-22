@@ -80,6 +80,8 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
         include_computed_columns: false,
         include_database_name: true,
         insert_mode: DataGridCopyInsertMode::Merged,
+        spatial_columns: None,
+        spatial_values: None,
     })
     .expect("copy insert");
     assert!(copy_insert.contains("\"id\", \"title\", \"body\""));

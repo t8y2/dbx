@@ -20,6 +20,44 @@ test("parses dbx connection deep link query fields", () => {
   });
 });
 
+test("parses a one-time DB2 connection with explicit JDBC properties", () => {
+  const params = new URLSearchParams({
+    type: "db2",
+    name: "DB2 proxy test",
+    host: "127.0.0.1",
+    port: "5525",
+    user: "selector+&/",
+    password: "secret+&?#%中文",
+    database: "SAMPLE",
+    ssl: "false",
+    url_params: "securityMechanism=3;sslConnection=false;",
+    one_time: "true",
+  });
+
+  assert.deepEqual(parseConnectionDeepLink(`dbx://connection/new?${params}`), {
+    name: "DB2 proxy test",
+    dbType: "db2",
+    driverProfile: "db2",
+    driverLabel: "IBM DB2",
+    host: "127.0.0.1",
+    port: 5525,
+    username: "selector+&/",
+    password: "secret+&?#%中文",
+    database: "SAMPLE",
+    ssl: false,
+    urlParams: "securityMechanism=3;sslConnection=false;",
+    oneTime: true,
+  });
+});
+
+test("uses the DB2 default port when a deep link omits it", () => {
+  const draft = parseConnectionDeepLink("dbx://connection/new?type=DB2&host=db.internal&database=SAMPLE");
+
+  assert.equal(draft?.dbType, "db2");
+  assert.equal(draft?.driverProfile, "db2");
+  assert.equal(draft?.port, 50000);
+});
+
 test("parses encoded database URL with password", () => {
   const draft = parseConnectionDeepLink("dbx://connection/new?url=postgres%3A%2F%2Fapp%3Asecret%40db.internal%3A5432%2Forders%3Fsslmode%3Drequire");
 

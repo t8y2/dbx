@@ -223,6 +223,40 @@ describe("connectionStore completion assistant", () => {
     expect(tables).toEqual([{ name: "users", schema: "public", type: "table", detail: "→ Application users" }]);
   });
 
+  it("preserves materialized view candidates from the remote completion catalog", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "daily_orders_mv", kind: "materialized_view", schema: "public" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await expect(store.listCompletionTables("pg-1", "app", "daily_orders_mv", 20, "public")).resolves.toEqual([{ name: "daily_orders_mv", schema: "public", type: "materialized_view" }]);
+  });
+
+  it("does not connect when metadata search explicitly disallows connection activation", async () => {
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ connectDb, completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+
+    await expect(store.listCompletionTables("pg-1", "app", "users", 20, undefined, true, undefined, undefined, { activateConnection: false, allowConnection: false })).resolves.toEqual([]);
+    expect(connectDb).not.toHaveBeenCalled();
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+  });
+
   it("falls back to the server COMMAND catalog when COMMAND DOCS is unsupported", async () => {
     const redisExecuteCommand = vi
       .fn()
@@ -792,6 +826,31 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
     expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
+  });
+
+  // #14075: a busy metadata pool made completion give up on the first failure,
+  // so one large-schema load left the editor without columns.
+  it("retries a busy metadata pool instead of returning no columns", async () => {
+    const getColumns = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("DBX metadata pool is busy; please retry"))
+      .mockResolvedValueOnce([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+
+    const columns = await store.listCompletionColumns("oracle-1", "ORCL", "ORDERS", undefined, { clientSessionId: "tab-a", version: 0 });
+
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS" })]);
   });
 
   it("passes OceanBase synonym lookup context separately and isolates selected schemas", async () => {
@@ -2250,5 +2309,35 @@ describe("connectionStore completion assistant", () => {
     // Match by comment pinyin initials
     const matchedByPinyin = store.lookupLocalCompletionTables("pg-1", "app", "ddb", 20, "public");
     expect(matchedByPinyin.map((t) => t.name)).toEqual(["t_order"]);
+  });
+
+  it("loads an Oracle simple-tree table for locate regardless of schema identifier case (#15212)", async () => {
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listTables: vi.fn().mockResolvedValue([{ name: "EMP", table_type: "TABLE", comment: null }]),
+      listTablesByPage: vi.fn(),
+    }));
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    settings.editorSettings.sidebarObjectDisplay = "simple";
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oracleConnection()];
+    store.connectedIds.add("oracle-1");
+    store.treeNodes = [
+      {
+        id: "oracle-1",
+        label: "Oracle",
+        type: "connection",
+        connectionId: "oracle-1",
+        children: [{ id: "oracle-1:HR:HR", label: "HR", type: "schema", connectionId: "oracle-1", database: "HR", schema: "HR", children: [] }],
+      },
+    ];
+
+    const loaded = await store.loadTableForLocate({ connectionId: "oracle-1", database: "hr", schema: "hr", tableName: "EMP" });
+    expect(loaded).toBe(true);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((child) => child.label)).toContain("EMP");
   });
 });

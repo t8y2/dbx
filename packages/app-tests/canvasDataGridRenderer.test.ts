@@ -6,10 +6,7 @@ import { DATA_GRID_DARK_STRIPED_ROW_BG, DATA_GRID_LIGHT_STRIPED_ROW_BG, resolveD
 function rgbChannels(color: string): number[] {
   const match = color.match(/rgba?\(([^)]+)\)/);
   assert.ok(match, `not an rgb colour: ${color}`);
-  return match[1]!
-    .split(",")
-    .slice(0, 3)
-    .map((part) => Number.parseFloat(part.trim()));
+  return match[1]!.split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
 }
 
 /** 最大单通道差值：用于证明「一眼可辨」，而不是仅仅不相等。 */
@@ -59,25 +56,11 @@ test("canvas text layout reserves hover actions only for right-aligned cells", (
 });
 
 test("canvas row fill keeps frozen and scrolling regions on the same selection surface", () => {
-  const theme = { cellActive: "active-blue", rowSelected: "row-selected-blue" };
+  const theme = { cellActive: "active-blue", cellSelected: "selected-blue" };
 
   assert.equal(resolveCanvasDataGridRowFill(theme, "base", { isActive: true, isDeleted: false, isSelected: false }), "active-blue");
-  assert.equal(resolveCanvasDataGridRowFill(theme, "base", { isActive: true, isDeleted: false, isSelected: true }), "row-selected-blue");
+  assert.equal(resolveCanvasDataGridRowFill(theme, "base", { isActive: true, isDeleted: false, isSelected: true }), "selected-blue");
   assert.equal(resolveCanvasDataGridRowFill(theme, "deleted", { isActive: true, isDeleted: true, isSelected: false }), "deleted");
-});
-
-test("paint theme exposes a dedicated deep row-selected token apart from the pale selection overlay", () => {
-  const getVar = () => "";
-
-  const light = resolveDataGridPaintTheme({ getVar, isDark: false });
-  const dark = resolveDataGridPaintTheme({ getVar, isDark: true });
-
-  assert.equal(light.rowSelected, "rgb(96, 165, 250)");
-  assert.equal(light.rowSelectedDirty, "rgb(199, 185, 120)");
-  assert.equal(light.rowNumberSelected, "rgb(96, 165, 250)");
-  assert.equal(dark.rowSelected, "rgb(30, 74, 128)");
-  assert.equal(dark.rowSelectedDirty, "rgb(100, 94, 52)");
-  assert.equal(dark.rowNumberSelected, "rgb(30, 74, 128)");
 });
 
 test("data grid paint themes use the increased striped row contrast", () => {
@@ -102,7 +85,7 @@ test("pending new rows are visually distinct from striped rows and the base surf
 });
 
 test("pending new rows keep their own colour when they hold the active cursor", () => {
-  const theme = { background: "bg-base", rowMuted: "row-muted", rowNew: "row-new", rowDeleted: "row-deleted", cellActive: "active-blue", cellSelected: "selected-blue", rowSelected: "selected-blue" };
+  const theme = { background: "bg-base", rowMuted: "row-muted", rowNew: "row-new", rowDeleted: "row-deleted", cellActive: "active-blue", cellSelected: "selected-blue" };
   const newRow = { displayIndex: 0, isDeleted: false, isNew: true, isDraft: false };
   const baseRow = { displayIndex: 0, isDeleted: false, isNew: false, isDraft: false };
 

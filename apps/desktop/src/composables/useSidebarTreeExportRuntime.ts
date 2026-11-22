@@ -67,6 +67,7 @@ interface SidebarTableExportTarget {
   identifierQuote?: string;
   batchSize: number;
   rowLimit: number | null;
+  csvWithoutBom: boolean;
   csvQuoteMode: CsvQuoteMode;
   /** 导出 CSV 时 NULL 的字面量；空串表示关闭（旧行为）。 */
   nullLiteral: string;
@@ -529,6 +530,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       identifierQuote: connectionStore.connectionIdentifierQuote(connectionId),
       batchSize: editorSettings.exportBatchSize,
       rowLimit: editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null,
+      csvWithoutBom: editorSettings.csvWithoutBom,
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       primaryKeyMode: editorSettings.dataGridExtractorOptions.sql.primaryKeyMode,
@@ -580,7 +582,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         if (operation) currentTask.canCancel = false;
         operation?.setActive(currentTask, undefined);
         if (format === "csv") {
-          await read(() => api.exportQueryResultCsv(outputPath, result.columns, result.rows, target.csvQuoteMode, target.nullLiteral));
+          await read(() => api.exportQueryResultCsv(outputPath, result.columns, result.rows, target.csvQuoteMode, target.nullLiteral, target.csvWithoutBom));
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -622,6 +624,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
               omitDatabaseQualifier: target.omitDatabaseQualifier,
             }
           : {}),
+        csvWithoutBom: target.csvWithoutBom,
         csvQuoteMode: target.csvQuoteMode,
         nullLiteral: target.nullLiteral,
         columns: queryColumns,

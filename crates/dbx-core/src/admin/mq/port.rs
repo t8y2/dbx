@@ -235,6 +235,10 @@ pub trait MessageQueueAdmin: Send + Sync {
         Err("Cluster info is not supported by this MQ system".to_string())
     }
 
+    async fn get_broker_config(&self, _broker_id: i32) -> Result<serde_json::Value, String> {
+        Err("Broker configuration is not supported by this MQ system".to_string())
+    }
+
     /// Escape hatch: proxy an arbitrary admin REST call. Covers any endpoint the
     /// typed methods do not.
     async fn raw_request(&self, req: MqRawRequest) -> Result<MqRawResponse, String>;

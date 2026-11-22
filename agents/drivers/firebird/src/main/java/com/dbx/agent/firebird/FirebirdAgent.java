@@ -1,6 +1,9 @@
 package com.dbx.agent.firebird;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.CompletionAssistantCandidate;
+import com.dbx.agent.CompletionAssistantRequest;
+import com.dbx.agent.CompletionAssistantResponse;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
@@ -21,6 +24,8 @@ import java.util.Iterator;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
+import org.firebirdsql.jdbc.FBDriver;
 
 public final class FirebirdAgent extends ConfiguredJdbcAgent {
     private static final String COMMON_OBJECTS_SQL = """
@@ -105,6 +110,24 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = super.buildConnectionProperties(params);
+        String url = super.buildJdbcUrl(params);
+        Charset charset = LegacyTextDecoder.charsetFromUrl(url);
+        if (charset == null) {
+            return properties;
+        }
+        return unchecked(() -> {
+            properties.putAll(FBDriver.normalizeProperties(
+                LegacyTextDecoder.jdbcUrlWithoutDataCharset(url),
+                properties
+            ));
+            LegacyTextDecoder.configureWrites(properties, charset);
+            return properties;
+        });
+    }
+
+    @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         super.afterConnect(params, connection);
         dataCharset = LegacyTextDecoder.charsetFromUrl(super.buildJdbcUrl(params));
@@ -123,6 +146,31 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
 
     private String decodeLegacyText(String value) {
         return LegacyTextDecoder.decode(value, dataCharset);
+    }
+
+    @Override
+    public CompletionAssistantResponse completionAssistantSearch(CompletionAssistantRequest request) {
+        CompletionAssistantResponse response = super.completionAssistantSearch(request);
+        if (dataCharset == null) {
+            return response;
+        }
+
+        // JDBC completion reads REMARKS directly, bypassing getColumns and listTables.
+        List<CompletionAssistantCandidate> candidates = response.getCandidates().stream()
+            .map(candidate -> new CompletionAssistantCandidate(
+                candidate.getName(),
+                candidate.getKind(),
+                candidate.getDatabase(),
+                candidate.getSchema(),
+                candidate.getParent_schema(),
+                candidate.getParent_name(),
+                decodeLegacyText(candidate.getComment()),
+                candidate.getData_type(),
+                candidate.getSignature(),
+                candidate.getRoutine_id()
+            ))
+            .toList();
+        return new CompletionAssistantResponse(candidates, response.getIncomplete(), response.getFallback_used());
     }
 
     @Override
@@ -244,6 +292,11 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
 
     public FirebirdAgent() {
         super(FIREBIRD_PROFILE);
+    }
+
+    @Override
+    protected boolean defaultBeforeNotNullInTableDdl() {
+        return true;
     }
 
     @Override

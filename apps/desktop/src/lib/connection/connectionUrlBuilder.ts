@@ -4,6 +4,7 @@ import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
 import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { isSecretConnectionProperty, normalizeJdbcProperties, quoteJdbcProperty } from "@/lib/connection/jdbcProperties";
 import { redactConnectionStringSecrets } from "@/lib/connection/connectionStringRedaction";
+import { externalBasePath } from "@/lib/connection/connectionUrl";
 
 /**
  * Builds copy-ready connection strings (standard URL / JDBC URL / libpq DSN /
@@ -74,6 +75,7 @@ const STANDARD_URL_SCHEMES: Partial<Record<DatabaseType, string>> = {
   iris: "iris",
   trino: "trino",
   databend: "databend",
+  tdengine: "taosws",
 };
 
 /** Schemes that are plain HTTP(S) endpoints. */
@@ -162,6 +164,18 @@ function effectiveDatabase(config: ConnectionUrlCopyConfig, options?: Connection
 
 function effectiveUsername(config: ConnectionUrlCopyConfig): string {
   return config.username?.trim() ?? "";
+}
+
+/**
+ * InfluxDB passes databases and buckets as query parameters, so its URL path
+ * is free for the reverse-proxy sub path the deployment is served under.
+ * Returns `null` for every other database type.
+ */
+function influxBasePath(config: ConnectionUrlCopyConfig): string | null {
+  if (config.db_type !== "influxdb" && config.db_type !== "influxdb3") return null;
+  // Same lookup as the driver and the connection form, so the copied URL
+  // never advertises a prefix that the driver would not request.
+  return externalBasePath(config.external_config);
 }
 
 function queryHasParam(params: string, keys: string[]): boolean {
@@ -255,6 +269,8 @@ function standardUrlScheme(config: ConnectionUrlCopyConfig): string | null {
       return profile === GAUSSDB_M_JDBC_DRIVER_PROFILE ? "jdbc:gaussdb" : "postgresql";
     case "iris":
       return profile === "cache" ? "cache" : "iris";
+    case "tdengine":
+      return config.ssl ? "taoswss" : "taosws";
     default: {
       if (HTTP_URL_DB_TYPES.has(config.db_type)) return config.db_type === "dynamodb" ? "https" : config.ssl ? "https" : "http";
       return STANDARD_URL_SCHEMES[config.db_type] ?? null;
@@ -276,6 +292,8 @@ function standardUrlQuery(config: ConnectionUrlCopyConfig, scheme: string): stri
       extras.push("secure=1");
     } else if (scheme === "cassandra" && !queryHasParam(raw, ["ssl"])) {
       extras.push("ssl=true");
+    } else if (scheme === "taoswss" && !queryHasParam(raw, ["ssl", "usessl"])) {
+      extras.push("useSSL=true");
     }
   }
   return joinNonEmpty("&", [raw, ...extras]);
@@ -297,7 +315,8 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
   const userInfo = usesApiKey ? "" : buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
-  const path = database ? `/${encodeURIComponent(database)}` : "";
+  const influxPath = influxBasePath(config);
+  const path = influxPath !== null ? influxPath : database ? `/${encodeURIComponent(database)}` : "";
   const query = standardUrlQuery(config, scheme);
   return `${scheme}://${userInfo}${hostPart}${portPart}${path}${query ? `?${query}` : ""}`;
 }
@@ -467,6 +486,8 @@ function jdbcQuery(config: ConnectionUrlCopyConfig, prefix: string, withCredenti
       parts.push("sslMode=REQUIRED");
     } else if (prefix === "jdbc:clickhouse" && !queryHasParam(raw, ["ssl", "sslmode", "secure"])) {
       parts.push("ssl=true");
+    } else if ((prefix === "jdbc:TAOS-WS" || prefix === "jdbc:TAOS-RS") && !queryHasParam(raw, ["ssl", "usessl"])) {
+      parts.push("useSSL=true");
     }
   }
   return joinNonEmpty("&", parts);

@@ -1,15 +1,19 @@
 import { ref, watch } from "vue";
-import type { SqlFilePreview } from "@/lib/backend/api";
+import type { DatabaseExportSelectedObject, SqlFilePreview } from "@/lib/backend/api";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
 import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
+import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 
 const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
+const transferReexecuteTask = ref<ExportTask | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
@@ -43,9 +47,10 @@ const showConfigConnectionSelectDialog = ref(false);
 const configConnectionSelectMode = ref<"export" | "import">("export");
 const configConnectionSelectList = ref<ConnectionConfig[]>([]);
 const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
+const configConnectionSelectSortMode = ref<ConnectionListSortMode>("manual");
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
-const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis">("dbx");
+const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis">("dbx");
 const applyingImportSelection = ref(false);
 
 const transferPrefillConnectionId = ref("");
@@ -110,6 +115,7 @@ const databaseExportPrefillDatabase = ref("");
 const databaseExportPrefillSchema = ref("");
 const databaseExportPrefillTable = ref("");
 const databaseExportPrefillTables = ref<string[]>([]);
+const databaseExportPrefillObjects = ref<DatabaseExportSelectedObject[]>([]);
 const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
@@ -137,6 +143,16 @@ export function openDataCompareSession(sessionId: string): void {
 
 export function openDataTransferTask(taskId: string): void {
   transferTaskId.value = taskId;
+  transferReexecuteTask.value = null;
+  showTransferDialog.value = true;
+}
+
+export function reexecuteDataTransferTask(taskOrId: ExportTask | string): void {
+  const tracker = useExportTracker();
+  const task = typeof taskOrId === "string" ? tracker.tasks.value.find((t) => t.exportId === taskOrId) : taskOrId;
+  if (!task || !task.dataTransferRequest) return;
+  transferTaskId.value = null;
+  transferReexecuteTask.value = task;
   showTransferDialog.value = true;
 }
 
@@ -152,6 +168,7 @@ export function openDataGenerateSession(sessionId: string, target: { connectionI
 export function useDialogSources() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
   const { toast } = useToast();
 
   // Watchers for store source triggers (register only once)
@@ -180,6 +197,7 @@ export function useDialogSources() {
     watch(showTransferDialog, (open) => {
       if (!open) {
         transferTaskId.value = null;
+        transferReexecuteTask.value = null;
         clearTransferPrefill();
       }
     });
@@ -404,6 +422,7 @@ export function useDialogSources() {
           databaseExportPrefillSchema.value = v.schema ?? "";
           databaseExportPrefillTable.value = v.tableName ?? "";
           databaseExportPrefillTables.value = v.tableNames ?? [];
+          databaseExportPrefillObjects.value = v.objects ?? [];
           databaseExportAllDatabases.value = v.allDatabases ?? false;
           showDatabaseExportDialog.value = true;
           connectionStore.databaseExportSource = null;
@@ -418,6 +437,7 @@ export function useDialogSources() {
     pendingImportSource.value = "dbx";
     configConnectionSelectList.value = [];
     configConnectionSelectLayout.value = null;
+    configConnectionSelectSortMode.value = "manual";
     configPassphraseError.value = "";
   }
 
@@ -425,25 +445,28 @@ export function useDialogSources() {
     pendingExportConnectionIds.value = [];
     configConnectionSelectList.value = [];
     configConnectionSelectLayout.value = null;
+    configConnectionSelectSortMode.value = "manual";
     configPassphraseError.value = "";
   }
 
-  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null) {
+  function openConnectionSelect(mode: "export" | "import", connections: ConnectionConfig[], layout?: SidebarLayout | null, sortMode: ConnectionListSortMode = "manual") {
     configConnectionSelectMode.value = mode;
     configConnectionSelectList.value = connections;
     configConnectionSelectLayout.value = layout ?? null;
+    configConnectionSelectSortMode.value = sortMode;
     showConfigConnectionSelectDialog.value = true;
   }
 
-  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis", count: number, keychainFilled = 0) {
+  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis", count: number, keychainFilled = 0) {
     if (count <= 0) return t("configExport.importNone");
     if (source === "navicat") return t("configExport.importNavicatSuccess", { count });
     if (source === "dbeaver") return t("configExport.importDbeaverSuccess", { count });
     if (source === "datagrip") return t("configExport.importDatagripSuccess", { count, filled: keychainFilled });
+    if (source === "sqlark") return t("configExport.importSqlarkSuccess", { count, passwords: connectionStore.lastSqlarkImportStats?.passwords ?? 0 });
     return t("configExport.importSuccess", { count });
   }
 
-  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis", count: number, layout?: SidebarLayout) {
+  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis", count: number, layout?: SidebarLayout) {
     let keychainFilled = 0;
     if (source === "datagrip" && count > 0) {
       keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
@@ -451,6 +474,10 @@ export function useDialogSources() {
     toast(importSuccessMessage(source, count, keychainFilled), source === "dbx" ? 2000 : 4000);
     if (source === "datagrip" && (connectionStore.lastDataGripFallbackUsernamesCount ?? 0) > 0) {
       toast(t("configExport.importDatagripUsernamesFallbackWarning"), 5000);
+    }
+    const sqlarkSkipped = source === "sqlark" ? (connectionStore.lastSqlarkImportStats?.skipped ?? 0) : 0;
+    if (sqlarkSkipped > 0) {
+      toast(t("configExport.importSqlarkSkipped", { count: sqlarkSkipped }), 5000);
     }
     if (hasSidebarLayoutEntries(layout)) {
       pendingImportLayout.value = layout;
@@ -462,7 +489,7 @@ export function useDialogSources() {
   // Config export/import helpers
   function onExportClick() {
     clearPendingExportState();
-    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout);
+    openConnectionSelect("export", connectionStore.connections, connectionStore.sidebarLayout, settingsStore.editorSettings.sidebarConnectionSortMode);
   }
 
   function onExportConnectionsSelected(connectionIds: string[]) {
@@ -527,7 +554,7 @@ export function useDialogSources() {
     if (!open) showConfigPassphraseDialog.value = true;
   }
 
-  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis" = "dbx") {
+  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis" = "dbx") {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
@@ -609,6 +636,7 @@ export function useDialogSources() {
   return {
     showTransferDialog,
     transferTaskId,
+    transferReexecuteTask,
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
@@ -643,6 +671,7 @@ export function useDialogSources() {
     configConnectionSelectMode,
     configConnectionSelectList,
     configConnectionSelectLayout,
+    configConnectionSelectSortMode,
     transferPrefillConnectionId,
     transferPrefillDatabase,
     transferPrefillCatalog,
@@ -705,6 +734,7 @@ export function useDialogSources() {
     databaseExportPrefillSchema,
     databaseExportPrefillTable,
     databaseExportPrefillTables,
+    databaseExportPrefillObjects,
     databaseExportAllDatabases,
     onExportClick,
     onExportConfirm,

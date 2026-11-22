@@ -14,11 +14,16 @@ const mocks = vi.hoisted(() => ({
   rollbackManualTransaction: vi.fn(),
   cancelSqlFileExecution: vi.fn(),
   ensureConnected: vi.fn(),
+  ensureVisibleDatabase: vi.fn(),
+  loadDatabases: vi.fn(),
+  buildCreateDatabaseSql: vi.fn(),
+  executeQuery: vi.fn(),
   executeSqlFiles: vi.fn(),
   fetchSqlFileTargetOptions: vi.fn(),
   highlight: vi.fn(),
   highlighterState: undefined as undefined | { ready: boolean; appearance: string },
   listenSqlFileProgress: vi.fn(),
+  listSchemas: vi.fn(),
   openFileDialog: vi.fn(),
   previewSqlFile: vi.fn(),
   refreshSqlFilePreview: vi.fn(),
@@ -82,6 +87,8 @@ vi.mock("@/composables/useDatabaseOptions", () => ({
 }));
 vi.mock("@/lib/connection/connectionLevelDatabaseBootstrap", () => ({ requiresSqlFileTargetDatabaseSelection: () => false, supportsConnectionLevelDatabaseBootstrap: (connection: any) => connection?.db_type === "mysql" }));
 vi.mock("@/lib/database/productionSafety", () => ({ productionContextForDatabase: () => ({ active: false, databases: [] }) }));
+vi.mock("@/lib/database/createDatabaseSql", () => ({ buildCreateDatabaseSql: mocks.buildCreateDatabaseSql }));
+vi.mock("@/lib/database/productionExecutionGuard", () => ({ executeWithProductionSqlGuard: (options: { execute: () => Promise<unknown> }) => options.execute() }));
 vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({ requestConfirmation: mocks.requestConfirmation }),
 }));
@@ -94,6 +101,9 @@ vi.mock("@/stores/connectionStore", () => ({
       return mocks.treeNodes;
     },
     ensureConnected: mocks.ensureConnected,
+    ensureVisibleDatabase: mocks.ensureVisibleDatabase,
+    loadDatabases: mocks.loadDatabases,
+    connectionIdentifierQuote: () => undefined,
     getConfig: mocks.getConfig,
     refreshDatabaseTreeNode: mocks.refreshDatabaseTreeNode,
     refreshObjectListTreeNode: mocks.refreshObjectListTreeNode,
@@ -106,12 +116,14 @@ vi.mock("@/lib/backend/api", () => ({
   commitManualTransaction: mocks.commitManualTransaction,
   rollbackManualTransaction: mocks.rollbackManualTransaction,
   cancelSqlFileExecution: mocks.cancelSqlFileExecution,
+  executeQuery: mocks.executeQuery,
   executeSqlFiles: mocks.executeSqlFiles,
   listenSqlFileProgress: mocks.listenSqlFileProgress,
   previewSqlFile: mocks.previewSqlFile,
   refreshSqlFilePreview: mocks.refreshSqlFilePreview,
   releaseSqlFilePreview: mocks.releaseSqlFilePreview,
   inspectSqlFileTables: mocks.inspectSqlFileTables,
+  listSchemas: mocks.listSchemas,
 }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
@@ -282,12 +294,17 @@ beforeEach(() => {
   mocks.commitManualTransaction.mockReset().mockResolvedValue(undefined);
   mocks.rollbackManualTransaction.mockReset().mockResolvedValue(undefined);
   mocks.ensureConnected.mockResolvedValue(undefined);
+  mocks.ensureVisibleDatabase.mockReset().mockResolvedValue(undefined);
+  mocks.loadDatabases.mockReset().mockResolvedValue(undefined);
+  mocks.buildCreateDatabaseSql.mockReset().mockImplementation(async (options: { name: string }) => `CREATE DATABASE ${options.name}`);
+  mocks.executeQuery.mockReset().mockResolvedValue({ columns: [], rows: [], affected_rows: 1 });
   mocks.inspectSqlFileTables.mockResolvedValue([
     { database: "app", name: "users" },
     { database: "app", name: "orders" },
     { database: "archive", name: "users" },
   ]);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
+  mocks.listSchemas.mockReset().mockResolvedValue([]);
   mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
   mocks.treeNodes = reactive<TreeNode[]>([]);
   mocks.editorSettings = reactive({ sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" });
@@ -1229,7 +1246,8 @@ describe("SqlFileExecutionDialog target preservation (#4844)", () => {
 });
 
 describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
-  it("toasts success and closes dialog upon successful completion", async () => {
+  // The close-on-success default keeps the dialog open so results stay visible (#14078).
+  it("toasts success and keeps the dialog open upon successful completion by default", async () => {
     const onOpenChange = vi.fn();
     await mountReadyDialog(onOpenChange);
 
@@ -1240,7 +1258,7 @@ describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
     findButton("sqlFile.execute").click();
 
     await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
-    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("toasts warning and keeps dialog open when execution has statement failures", async () => {
@@ -1257,8 +1275,9 @@ describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
-  it("toasts success and closes dialog upon manual transaction commit", async () => {
+  it("toasts success and closes dialog upon manual transaction commit when closeOnSuccess is on", async () => {
     const onOpenChange = vi.fn();
+    localStorage.setItem("dbx-sql-file-close-on-success", "true");
     await mountReadyDialog(onOpenChange);
     const label = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
     label!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
@@ -1287,12 +1306,27 @@ describe("SqlFileExecutionDialog closeOnSuccess option (#12891)", () => {
     toggleButton.click();
     await nextTick();
 
-    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("false");
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("true");
 
     toggleButton.click();
     await nextTick();
 
-    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("true");
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("false");
+  });
+
+  it("closes dialog upon successful completion when closeOnSuccess is on", async () => {
+    const onOpenChange = vi.fn();
+    localStorage.setItem("dbx-sql-file-close-on-success", "true");
+    await mountReadyDialog(onOpenChange);
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, successCount: 1, failureCount: 0 }));
+    });
+
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("keeps dialog open after successful execution when closeOnSuccess is false", async () => {
@@ -1404,5 +1438,150 @@ describe("SqlFileExecutionDialog progress visibility", () => {
 
     expect(scrollTopValues.length).toBe(afterUserScroll);
     gate.resolve();
+  });
+});
+
+describe("SqlFileExecutionDialog schema target", () => {
+  function schemaSection() {
+    return root!.querySelector("[data-sql-file-schema]");
+  }
+
+  function selectSchemaOption(schema: string) {
+    const item = Array.from(root!.querySelectorAll<HTMLElement>("[data-select-item]")).find((element) => element.dataset.selectItem === schema);
+    expect(item, `schema option ${schema}`).toBeDefined();
+    item!.click();
+  }
+
+  beforeEach(() => {
+    mocks.connections = [{ id: "pg-1", name: "Postgres", db_type: "postgres", driver_profile: "postgres", database: "app" }];
+    mocks.queryStore.tabs = [{ id: "pg-tab", connectionId: "pg-1", database: "app" }];
+    mocks.queryStore.activeTabId = "pg-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["app", "archive"]);
+    mocks.listSchemas.mockResolvedValue(["audit", "public"]);
+  });
+
+  it("lists the database's schemas and executes in the picked one (#14584)", async () => {
+    await mountReadyDialog();
+
+    expect(mocks.listSchemas).toHaveBeenCalledWith("pg-1", "app", true);
+    expect(schemaSection()).not.toBeNull();
+
+    selectSchemaOption("public");
+    await nextTick();
+
+    mocks.executeSqlFiles.mockImplementationOnce(() => new Promise(() => {}));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+
+    const request = mocks.executeSqlFiles.mock.calls[0]![0] as { database: string; schema?: string };
+    expect(request.database).toBe("app");
+    expect(request.schema).toBe("public");
+  });
+
+  it("preselects the schema the caller came from", async () => {
+    mocks.queryStore.tabs = [{ id: "pg-tab", connectionId: "pg-1", database: "app", schema: "audit" }];
+    await mountReadyDialog();
+
+    await vi.waitFor(() => expect(mocks.listSchemas).toHaveBeenCalled());
+    await vi.waitFor(() => expect(schemaSection()!.textContent).toContain("audit"));
+
+    mocks.executeSqlFiles.mockImplementationOnce(() => new Promise(() => {}));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+    expect((mocks.executeSqlFiles.mock.calls[0]![0] as { schema?: string }).schema).toBe("audit");
+  });
+
+  it("falls back to the connection default when the schema list is unavailable", async () => {
+    mocks.listSchemas.mockRejectedValue(new Error("not supported"));
+    await mountReadyDialog();
+
+    mocks.executeSqlFiles.mockImplementationOnce(() => new Promise(() => {}));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("schema");
+  });
+
+  it("keeps a single namespace level for engines where schema is the database", async () => {
+    mocks.connections = [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }];
+    mocks.queryStore.tabs = [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }];
+    mocks.queryStore.activeTabId = "mysql-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["app"]);
+
+    await mountReadyDialog();
+
+    expect(schemaSection()).toBeNull();
+  });
+
+  it("calls the single picker a schema picker for connection-root schema engines (#14584)", async () => {
+    mocks.connections = [{ id: "ora-1", name: "Oracle", db_type: "oracle", driver_profile: "oracle", database: "ORCL" }];
+    mocks.queryStore.tabs = [{ id: "ora-tab", connectionId: "ora-1", database: "ORCL" }];
+    mocks.queryStore.activeTabId = "ora-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["HR", "SCOTT"]);
+
+    await mountReadyDialog();
+
+    const labels = [...root!.querySelectorAll("label")].map((element) => element.textContent?.trim());
+    expect(labels).toContain("sqlFile.schema");
+    expect(labels).not.toContain("sqlFile.database");
+    // The picker already lists schemas, so no second one is added.
+    expect(schemaSection()).toBeNull();
+  });
+});
+
+describe("SqlFileExecutionDialog new target database (#11322)", () => {
+  async function mountDialog() {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, "onUpdate:open": vi.fn() });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    await nextTick();
+  }
+
+  it("creates the database on the target connection and selects it", async () => {
+    mocks.fetchSqlFileTargetOptions.mockResolvedValueOnce(["sales"]).mockResolvedValue(["restored", "sales"]);
+    await mountDialog();
+
+    root!.querySelector<HTMLButtonElement>("[data-sql-file-new-database]")!.click();
+    await nextTick();
+    const input = root!.querySelector<HTMLInputElement>("[data-sql-file-new-database-form] input")!;
+    input.value = "restored";
+    input.dispatchEvent(new Event("input"));
+    await nextTick();
+    findButton("sqlFile.newDatabaseCreate").click();
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledWith("mysql-1", "", "CREATE DATABASE restored"));
+    expect(mocks.buildCreateDatabaseSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "mysql", target: "database", name: "restored" }));
+    expect(mocks.loadDatabases).toHaveBeenCalledWith("mysql-1", { force: true });
+    await vi.waitFor(() => expect(root!.querySelector("[data-select-value='restored']")).not.toBeNull());
+    expect(root!.querySelector("[data-sql-file-new-database-form]")).toBeNull();
+  });
+
+  it("keeps the form open and reports the error when the server refuses", async () => {
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["sales"]);
+    mocks.executeQuery.mockRejectedValue(new Error("access denied"));
+    await mountDialog();
+
+    root!.querySelector<HTMLButtonElement>("[data-sql-file-new-database]")!.click();
+    await nextTick();
+    const input = root!.querySelector<HTMLInputElement>("[data-sql-file-new-database-form] input")!;
+    input.value = "restored";
+    input.dispatchEvent(new Event("input"));
+    await nextTick();
+    findButton("sqlFile.newDatabaseCreate").click();
+
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.newDatabaseFailed", { persistent: true }));
+    expect(mocks.loadDatabases).not.toHaveBeenCalled();
+    expect(root!.querySelector("[data-sql-file-new-database-form]")).not.toBeNull();
+  });
+
+  it("is not offered when the picker lists schemas", async () => {
+    mocks.connections = [{ id: "oracle-1", name: "Oracle", db_type: "oracle", driver_profile: "oracle", database: "" }];
+    mocks.queryStore.tabs = [{ id: "oracle-tab", connectionId: "oracle-1", database: "" }];
+    mocks.queryStore.activeTabId = "oracle-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["APP"]);
+    await mountDialog();
+
+    expect(root!.querySelector("[data-sql-file-new-database]")).toBeNull();
   });
 });

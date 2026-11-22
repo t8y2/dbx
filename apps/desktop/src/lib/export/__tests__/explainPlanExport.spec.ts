@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.desktop }));
 vi.mock("../exportPath", () => ({ promptExportSavePath: mocks.save }));
 vi.mock("@/lib/backend/api", () => ({ exportQueryResultCsv: mocks.csv, exportQueryResultXlsx: mocks.xlsx, exportQueryResultHtml: mocks.html }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { csvQuoteMode: "all", csvNullMode: "marker" } }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { csvQuoteMode: "all", csvNullMode: "marker", csvWithoutBom: false } }) }));
 vi.mock("../diagramFormats", () => ({ svgToPngBlob: mocks.raster }));
 vi.mock("../saveDiagramExport", () => ({ saveDiagramTextExport: mocks.saveText, saveDiagramBinaryExport: mocks.saveBinary }));
 
@@ -85,7 +85,7 @@ describe("Explain Plan Summary export", () => {
     expect(await saveExplainPlanExport(plan, format, columns, "Estimated time", "Explain Plan")).toBe(true);
     expect(mocks.save).not.toHaveBeenCalled();
     if (format === "html") expect(mocks.html).toHaveBeenCalledWith("explain-plan-oracle.html", "Explain Plan", columns, rows);
-    if (format === "csv") expect(mocks.csv).toHaveBeenCalledWith("explain-plan-oracle.csv", columns, rows, "all", "\\N");
+    if (format === "csv") expect(mocks.csv).toHaveBeenCalledWith("explain-plan-oracle.csv", columns, rows, "all", "\\N", false);
     if (format === "xlsx") expect(mocks.xlsx).toHaveBeenCalledWith("explain-plan-oracle.xlsx", "Explain Plan", columns, Array(6).fill("TEXT"), undefined, rows);
   });
 

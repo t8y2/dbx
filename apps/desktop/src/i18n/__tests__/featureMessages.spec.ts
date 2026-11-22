@@ -105,6 +105,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
   { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst", "sortByInstalls", "installCount"]), locales: EXCEPT_AZ_TR, translated: true },
   { feature: "shared refresh action (#8768)", keys: ["common.refresh"] },
+  { feature: "shared column label", keys: ["common.column"], translated: true },
   {
     feature: "Xugu field lineage scope and coverage",
     keys: under("lineage", ["xuguScopeNotice", "xuguPartialCoverage"]),
@@ -114,6 +115,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "transfer bulk select", keys: under("transfer", ["bulkSelectObjects", "bulkSelectTitle", "bulkSelectHint", "bulkSelectPlaceholder", "bulkSelectConfirm", "bulkSelectMatched", "bulkSelectUnmatched", "noMatchingObjects"]), translated: true },
   { feature: "transfer background acknowledgement (#8649)", keys: ["transfer.backgroundStarted"], translated: true },
   { feature: "table info pin", keys: ["grid.pinTableInfo", "grid.unpinTableInfo"], translated: true },
+  { feature: "data grid row JSON preview", keys: ["grid.rowJsonPreview"], translated: true },
   {
     feature: "data grid structured sorting",
     keys: under("grid", [
@@ -149,6 +151,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "sidebar search match mode (#13505)", keys: under("sidebar", ["listOptions", "searchMatchMode", "searchMatchModeFuzzy", "searchMatchModeContains", "searchMatchModeTooltip"]), translated: true },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
+  { feature: "sidebar connection endpoints (#14188)", keys: under("settings", ["sidebarShowConnectionEndpoints", "sidebarShowConnectionEndpointsDescription"]), translated: true },
   { feature: "local backup selection", keys: ["settings.localBackupSecretsPassphraseRequiredHint", "settings.localBackupPathLabel", "settings.localBackupPathUnset", "settings.localBackupChoosePath", "settings.localBackupPathRequired"], translated: true },
   { feature: "SQL table completion schema qualification (#9219)", keys: ["settings.tableCompletionSchemaQualification*"], translated: true },
   { feature: "Redis batch expiration", keys: under("redis", ["batchExpiry", "batchExpiryTitle", "batchExpirySelected", "batchExpiryApply", "batchExpirySuccess", "batchExpiryPartial"]) },
@@ -170,6 +173,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
     keys: under("settings", ["shortcutToggleBookmark", "shortcutNextBookmark", "shortcutPreviousBookmark"]),
     translated: true,
   },
+  { feature: "workspace bookmark list", keys: ["editor.bookmarks.*"], locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "th", "zh-CN", "zh-TW"], translated: true },
   { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
   { feature: "editor selection to AI (#10058)", keys: under("ai", ["selectionChipLabel", "selectionChipDetail", "externalTargetUnavailable"]) },
   { feature: "SQL formatter layout style", keys: under("settings", ["sqlFormatterLayoutStyle", "sqlFormatterLayoutStyleDbx", "sqlFormatterLayoutStyleClassic"]) },
@@ -247,6 +251,12 @@ describe("feature message content rules", () => {
   it.each(ALL_LOCALES)("%s renders include syntax literally instead of resolving an i18n link", (locale) => {
     const i18n = createI18n({ legacy: false, locale, messages: { [locale]: declared[locale] } });
     expect(i18n.global.t("sqlFile.resolveIncludesHint")).toContain("-- @include");
+    i18n.dispose();
+  });
+  it.each(ALL_LOCALES)("%s renders the sidebar connection endpoints suffix @ literally instead of resolving an i18n link", (locale) => {
+    const i18n = createI18n({ legacy: false, locale, messages: { [locale]: declared[locale] } });
+    expect(i18n.global.t("settings.sidebarShowConnectionEndpointsDescription")).toContain("@");
+    expect(i18n.global.t("settings.sidebarShowConnectionEndpointsDescription")).not.toContain("{");
     i18n.dispose();
   });
   it.each(EXCEPT_AZ_TR)("%s keeps the Dameng validity labels as the database literals", (locale) => {

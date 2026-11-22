@@ -7,7 +7,7 @@ use crate::models::connection::DatabaseType;
 use crate::sql::{find_statement_at_cursor, find_statement_at_cursor_for_database};
 use crate::sql_dialect::{
     firebird_rows_clause, pagination_strategy, quote_gaussdb_jdbc_identifier, quote_iris_identifier,
-    quote_table_identifier, PaginationContext, TablePaginationStrategy,
+    quote_table_data_identifier, quote_table_identifier, PaginationContext, TablePaginationStrategy,
 };
 use sqlparser::ast::{
     visit_expressions, BinaryOperator, Expr, ForClause, GroupByExpr, LimitClause, ObjectNamePart, OrderByKind, Select,
@@ -72,6 +72,9 @@ pub struct QueryPaginationExecutionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count_sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Exact upper bound from a literal LIMIT/TOP, not an exact result count.
+    /// The actual result may contain fewer rows; consumers must observe
+    /// exhaustion, reach this bound, or execute COUNT to know the total.
     pub exact_query_row_bound: Option<usize>,
     pub use_agent_result_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +135,12 @@ pub struct SortedQuerySqlOptions {
     pub column_index: usize,
     pub column: String,
     pub direction: QuerySortDirection,
+    /// Quote character reported by the connected server, so sorting on a
+    /// GaussDB/OpenGauss/PostgreSQL connection that quotes identifiers with
+    /// backticks (GaussDB MySQL-compatible mode) does not emit a double-quoted
+    /// identifier that the server would treat as a string literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
     /// Result-column positions appended after the sort column, typically the
     /// primary key. The sort column alone is not unique, and tied rows come
     /// back in a different order for each `LIMIT`/`OFFSET` page than for the
@@ -400,7 +409,14 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
             }
             ok(add_rownum_limit(&statement, safe_limit, safe_offset))
         }
-        TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => ok(format!("{statement};")),
+        TablePaginationStrategy::AgentMaxRows
+        | TablePaginationStrategy::TeradataTop
+        | TablePaginationStrategy::Unbounded => {
+            // TeradataTop cannot appear for user queries (`pagination_strategy` routes
+            // Teradata user queries to AgentMaxRows, #14604), so the statement reaches
+            // the server exactly as written here too.
+            ok(format!("{statement};"))
+        }
         TablePaginationStrategy::IrisTop => ok(add_iris_top_limit(&statement, safe_limit)),
         TablePaginationStrategy::LimitOffset => {
             // Kingbase SQL Server compatibility mode and Xugu accept TOP as a real clause.
@@ -455,6 +471,15 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
             .unwrap_or_else(|| err("unsupported"));
     }
     if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
+        // The count query runs on a separate pooled session, so a statement that
+        // references session variables (`@a`, `@@version`) counts with a variable
+        // state the user never set there — `WHERE x.id = @a` silently counts 0
+        // instead of the rows the user sees (#13998). Decline the count rather
+        // than reporting a wrong total; strings, comments and quoted identifiers
+        // never hold a variable reference and are skipped.
+        if mysql_statement_references_session_variable(&statement) {
+            return err("session-variable");
+        }
         return mysql_count_sql(&statement)
             .map(|sql| ok(format!("{execution_hint}{sql}")))
             .unwrap_or_else(|| err("unsupported"));
@@ -508,6 +533,142 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
         "{execution_hint}{}",
         derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};"))
     ))
+}
+
+/// Whether a **session-dependent** `@` reference appears in `sql` (#13998):
+///
+/// - a user variable (`@a`) resolves per session, so a COUNT executed on a
+///   different pooled session cannot reproduce the caller's rows;
+/// - a system variable with session scope (`@@session.sql_mode`, or the bare
+///   `@@name` form, which defaults to SESSION) is equally session-dependent
+///   unless the user happened to configure it identically — refuse those too;
+/// - truly global, read-only system variables (`@@global.read_only`,
+///   `@@version`, `@@server_id`, …) are reproducible across sessions and keep
+///   counting, which the existing pagination contracts count over.
+///
+/// Quoted strings, comments and quoted identifiers never
+/// hold a live reference — with two MySQL-specific exceptions handled here:
+/// `/*! ... */` is an **executable** comment whose body the server evaluates,
+/// and `--` only starts a comment when followed by whitespace/control chars
+/// (`--@a` is a double negation, not a comment).
+fn mysql_statement_references_session_variable(sql: &str) -> bool {
+    const GLOBAL_ONLY_SYSTEM_VARIABLES: [&str; 10] = [
+        "version",
+        "version_comment",
+        "server_id",
+        "hostname",
+        "port",
+        "socket",
+        "license",
+        "basedir",
+        "datadir",
+        "lower_case_table_names",
+    ];
+    let mut i = 0usize;
+    while i < sql.len() {
+        let ch = next_char(sql, i);
+        let next = next_char_at(sql, i + ch.len_utf8());
+
+        // `-` starts a MySQL comment only when followed by whitespace or the
+        // end of input; `--@a` is a double negation that still executes @a.
+        if ch == '-' && next == Some('-') {
+            let after = next_char_at(sql, i + 2);
+            if after.is_none_or(|c| c.is_ascii_whitespace()) {
+                i += 2;
+                while i < sql.len() && next_char(sql, i) != '\n' {
+                    i += next_char(sql, i).len_utf8();
+                }
+                continue;
+            }
+        }
+
+        if ch == '#' {
+            i += 1;
+            while i < sql.len() && next_char(sql, i) != '\n' {
+                i += next_char(sql, i).len_utf8();
+            }
+            continue;
+        }
+
+        if ch == '/' && next == Some('*') {
+            // `/*! ... */` (optionally version-gated, e.g. /*!50700) is an
+            // executable comment: its body runs on the server, so scan it.
+            if next_char_at(sql, i + 2) == Some('!') {
+                i += 3;
+                continue;
+            }
+            i += 2;
+            while i < sql.len() {
+                let current = next_char(sql, i);
+                let following = next_char_at(sql, i + current.len_utf8());
+                if current == '*' && following == Some('/') {
+                    i += 2;
+                    break;
+                }
+                i += current.len_utf8();
+            }
+            continue;
+        }
+
+        if matches!(ch, '\'' | '"' | '`') {
+            i = skip_sql_quoted(sql, i, ch);
+            continue;
+        }
+
+        if ch == '[' {
+            i = skip_sql_bracket_identifier(sql, i);
+            continue;
+        }
+
+        if ch == '@' {
+            if next == Some('@') {
+                // System variable: parse `@@[scope.]name`. The scope defaults
+                // to SESSION when omitted, so only an explicit `@@global.`
+                // prefix is reproducible across the count's separate session;
+                // global-only variables in the allow list below are equally
+                // reproducible and keep their existing contracts.
+                i += 2;
+                let name_start = i;
+                while i < sql.len() {
+                    let c = next_char(sql, i);
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                        i += c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let first = sql[name_start..i].to_ascii_lowercase();
+                if next_char(sql, i) == '.' {
+                    // `@@<scope>.<name>`: only @@global.* is reproducible.
+                    i += 1;
+                    while i < sql.len() {
+                        let c = next_char(sql, i);
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                            i += c.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+                    if first != "global" {
+                        return true;
+                    }
+                    continue;
+                }
+                // Bare `@@name` without scope: reproducible only for the
+                // known global-only variables (existing pagination
+                // contracts count over @@server_id).
+                if !GLOBAL_ONLY_SYSTEM_VARIABLES.contains(&first.as_str()) {
+                    return true;
+                }
+                continue;
+            }
+            // A user variable (`@a`) carries session state.
+            return true;
+        }
+
+        i += ch.len_utf8();
+    }
+    false
 }
 
 pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildResult {
@@ -697,7 +858,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
             // constant. Ordinary names must be sent unquoted.
             quote_iris_identifier(alias, None)
         } else {
-            quote_table_identifier(options.database_type, alias)
+            quote_table_data_identifier(options.database_type, alias, options.identifier_quote.as_deref())
         }
     };
     let sort_reference = column_reference(options.column_index, &sort_alias);
@@ -734,7 +895,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     if use_derived_column_aliases {
         let alias_list = aliases
             .iter()
-            .map(|alias| quote_table_identifier(options.database_type, alias))
+            .map(|alias| quote_table_data_identifier(options.database_type, alias, options.identifier_quote.as_deref()))
             .collect::<Vec<_>>()
             .join(", ");
         ok(format!(
@@ -1788,14 +1949,27 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
     }
     let dialect = MsSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, statement).ok()?;
-    let (derived_table_projection_safe, ast_has_order_by) = {
+    let (derived_table_projection_safe, explicit_projection_width, ast_has_order_by, ast_has_offset_or_fetch) = {
         let [Statement::Query(query)] = statements.as_slice() else {
             return None;
         };
         let SetExpr::Select(select) = query.body.as_ref() else {
             return None;
         };
-        (sql_server_derived_table_select_projection_safe(select), query.order_by.is_some())
+        let explicit_projection_width = (select.into.is_none()
+            && query.for_clause.is_none()
+            && select
+                .projection
+                .iter()
+                .all(|item| matches!(item, SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. })))
+        .then_some(select.projection.len());
+        (
+            sql_server_derived_table_select_projection_safe(select),
+            explicit_projection_width,
+            query.order_by.is_some(),
+            matches!(&query.limit_clause, Some(LimitClause::LimitOffset { offset: Some(_), .. }))
+                || query.fetch.is_some(),
+        )
     };
     // 词法扫描在 `#` 临时表、反斜杠字符串后会漏掉结尾 ORDER BY（见
     // sql_server_ast_has_order_by）。定位不到就不能原样塞进派生表：SQL Server
@@ -1806,10 +1980,29 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
     let hidden_order_by = ast_has_order_by
         && find_top_level_trailing_order_by(statement).is_none()
         && !has_top_level_select_top(statement)
-        && !sql_server_ast_has_offset_or_fetch(statement);
-    if derived_table_projection_safe && !hidden_order_by {
+        && !ast_has_offset_or_fetch;
+    if (derived_table_projection_safe || explicit_projection_width.is_some()) && !hidden_order_by {
         let alias = quote_table_identifier(Some(DatabaseType::SqlServer), "dbx_count");
-        let wrapped_sql = sql_server_statement_for_derived_table(statement);
+        // SQL Server requires every derived-table output to have a unique name.
+        // An explicit column alias list lets COUNT wrap unnamed subqueries or
+        // duplicate labels without changing the projection's row cardinality.
+        // Wildcards have unknown width and retain the guarded rewrite below.
+        let alias = if derived_table_projection_safe {
+            alias
+        } else {
+            let columns = (0..explicit_projection_width?)
+                .map(|index| quote_table_identifier(Some(DatabaseType::SqlServer), &fallback_alias(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{alias}({columns})")
+        };
+        let wrapped_sql = if ast_has_offset_or_fetch {
+            // OFFSET/FETCH changes which rows are counted, so its ORDER BY
+            // must stay inside the derived table even without a TOP clause.
+            statement.to_string()
+        } else {
+            sql_server_statement_for_derived_table(statement)
+        };
         return Some(derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};")));
     }
 
@@ -3251,6 +3444,23 @@ mod tests {
         }
     }
 
+    /// #14604: Teradata has no `LIMIT` clause, so a rewritten page is a syntax
+    /// error ("expected something between ... and the 'LIMIT' keyword"). The
+    /// statement has to reach the server exactly as the user wrote it.
+    #[test]
+    fn teradata_user_queries_reach_the_server_without_a_limit_clause() {
+        let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM employee".into(),
+            database_type: Some(DatabaseType::Teradata),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(paginated.ok, "Teradata user queries must not need a rewrite");
+        let sql = paginated.sql.expect("the untouched statement is returned");
+        assert!(!sql.to_uppercase().contains("LIMIT"), "{sql}");
+        assert_eq!(sql.trim_end_matches(';'), "SELECT id, name FROM employee");
+    }
+
     #[test]
     fn oceanbase_columns_named_like_pseudocolumns_keep_bounded_sql() {
         for sql in ["SELECT t.\"nextval\" AS v FROM t", "SELECT nextval AS v FROM t"] {
@@ -3357,6 +3567,7 @@ mod tests {
                 column: "NAME".into(),
                 direction: QuerySortDirection::Desc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
             assert!(sorted.ok, "{sql}");
             let sorted = sorted.sql.unwrap();
@@ -3384,6 +3595,7 @@ mod tests {
                 column: "NAME".into(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
             assert!(!sorted.ok);
         }
@@ -3402,6 +3614,7 @@ mod tests {
                 column: "id".into(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert!(!sorted.ok, "must not append a second ORDER BY: {sql}");
@@ -3418,6 +3631,7 @@ mod tests {
             column: "id".into(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
         assert!(sorted.ok);
         assert_eq!(sorted.sql.unwrap(), "SELECT * FROM t ORDER BY 1 ASC;");
@@ -4171,15 +4385,15 @@ mod tests {
     #[test]
     fn sqlserver_unsafe_top_projections_use_rowcount_for_later_pages() {
         let queries = [
-            "SELECT TOP 100 AAA, * FROM BBB",
-            "SELECT TOP 100 AAA, bbb AS aaa FROM BBB",
-            "SELECT TOP 100 a.id, b.id FROM AAA a JOIN BBB b ON a.id = b.id",
-            "SELECT TOP 100 a.*, b.* FROM AAA a JOIN BBB b ON a.id = b.id",
-            "SELECT TOP 100 a.*, * FROM AAA a",
-            "SELECT TOP 100 AAA + 1 FROM BBB",
+            ("SELECT TOP 100 AAA, * FROM BBB", false),
+            ("SELECT TOP 100 AAA, bbb AS aaa FROM BBB", true),
+            ("SELECT TOP 100 a.id, b.id FROM AAA a JOIN BBB b ON a.id = b.id", true),
+            ("SELECT TOP 100 a.*, b.* FROM AAA a JOIN BBB b ON a.id = b.id", false),
+            ("SELECT TOP 100 a.*, * FROM AAA a", false),
+            ("SELECT TOP 100 AAA + 1 FROM BBB", true),
         ];
 
-        for sql in queries {
+        for (sql, countable) in queries {
             let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                 sql: sql.to_string(),
                 query_base_sql: sql.to_string(),
@@ -4191,7 +4405,7 @@ mod tests {
             });
             assert_eq!(first_page.sql_to_execute, sql);
             assert!(first_page.page_sql.is_none());
-            assert!(first_page.count_sql.is_none());
+            assert_eq!(first_page.count_sql.is_some(), countable);
 
             let later_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                 sql: sql.to_string(),
@@ -4205,9 +4419,103 @@ mod tests {
             assert!(later_page.sql_to_execute.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; "));
             assert_eq!(sqlserver_result_offset(&later_page.sql_to_execute), 100);
             assert_eq!(later_page.page_sql, Some(later_page.sql_to_execute.clone()));
-            assert!(later_page.count_sql.is_none());
+            assert_eq!(later_page.count_sql.is_some(), countable);
             assert_eq!(later_page.page_limit, Some(100));
             assert_eq!(later_page.page_offset, Some(100));
+        }
+    }
+
+    #[test]
+    fn sqlserver_unnamed_scalar_subquery_keeps_count_and_later_pages() {
+        let sql = "SELECT a.town, a.[postal code], a.province, a.port, \
+            (SELECT TOP 1 b.id FROM regions b WHERE b.port_name = a.port AND b.name_en = a.province) \
+            FROM (SELECT DISTINCT town, [postal code], province, port FROM region_data \
+            WHERE port IN ('BARCELONA', 'VALENCIA')) a WHERE a.port IN ('BARCELONA', 'VALENCIA')";
+
+        for offset in [0, 200, 7000] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 200, offset, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+                execution_hint: None,
+            });
+
+            let count = plan.count_sql.expect("an unnamed scalar subquery must remain countable");
+            assert!(count.contains(sql), "the scalar subquery and filters must be preserved: {count}");
+            assert!(count.ends_with("[dbx_count]([column_1], [column_2], [column_3], [column_4], [column_5]);"));
+            assert!(Parser::parse_sql(&MsSqlDialect {}, &count).is_ok());
+            assert_eq!(plan.exact_query_row_bound, None, "the inner TOP 1 must not bound the outer result");
+            assert_eq!(plan.page_limit, Some(200));
+            assert_eq!(plan.page_offset, Some(offset));
+            assert!(!plan.sql_to_execute.contains("[column_"), "internal count aliases must not rename result columns");
+            if offset == 0 {
+                assert!(plan.sql_to_execute.starts_with("SELECT TOP (200) a.town"));
+            } else {
+                assert_eq!(sqlserver_result_offset(&plan.sql_to_execute), offset);
+                assert!(plan
+                    .sql_to_execute
+                    .starts_with(&format!("EXEC sys.sp_executesql N'SET ROWCOUNT {};", offset + 200)));
+            }
+        }
+    }
+
+    #[test]
+    fn sqlserver_count_supplies_names_for_explicit_unnamed_or_duplicate_columns() {
+        for (sql, aliases) in [
+            ("SELECT id + 1 FROM towns", "[column_1]"),
+            ("SELECT (SELECT TOP 1 id FROM regions) FROM towns", "[column_1]"),
+            ("SELECT t.id, t.id FROM towns t", "[column_1], [column_2]"),
+            ("SELECT id AS column_2, id + 1 FROM towns", "[column_1], [column_2]"),
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+            });
+            assert_eq!(
+                result.sql.as_deref(),
+                Some(format!("SELECT COUNT(*) AS dbx_total_rows FROM ({sql}) [dbx_count]({aliases});").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn sqlserver_count_keeps_unnamed_projection_cardinality_modifiers() {
+        for sql in [
+            "SELECT DISTINCT id + 1 FROM towns",
+            "SELECT TOP (7000) id + 1 FROM towns ORDER BY id",
+            "SELECT TOP (10) WITH TIES id + 1 FROM towns ORDER BY id",
+            "SELECT province, COUNT(*) FROM towns GROUP BY province HAVING COUNT(*) > 1",
+            "SELECT MAX(id) FROM towns WHERE 1 = 0",
+            "SELECT id + 1 FROM towns ORDER BY id OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY",
+            "SELECT 1",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+            });
+            let count = result.sql.expect("explicit unnamed projections must remain countable");
+            assert!(count.contains(sql), "must count the original result, including its row-count modifiers: {count}");
+            assert!(Parser::parse_sql(&MsSqlDialect {}, &count).is_ok(), "invalid SQL Server count: {count}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_unnamed_count_does_not_guess_wildcard_width_or_wrap_output_clauses() {
+        for sql in [
+            "SELECT t.*, (SELECT TOP 1 id FROM regions) FROM towns t",
+            "SELECT id + 1, * FROM towns",
+            "SELECT id + 1 INTO new_towns FROM towns",
+            "SELECT id + 1 FROM #towns FOR JSON PATH",
+            "SELECT id + 1 FROM #towns FOR XML PATH",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+            });
+            assert!(!result.ok, "must not generate an unsafe count for {sql}");
         }
     }
 
@@ -5645,6 +5953,7 @@ WHERE u.id = picked.id;
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert_eq!(page.sql.unwrap(), "SELECT id FROM users LIMIT 50;");
@@ -6287,6 +6596,139 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM TATFY WHERE UpdateDate = '2026-07-30' AND UpdateTime > '08:00:00';"
+        );
+    }
+
+    #[test]
+    fn mysql_count_query_declines_variables_between_mysql_dollar_identifiers() {
+        let sql = "SELECT * FROM (SELECT 1 AS `a$a$`) t WHERE a$a$ + @x + a$a$ = 4";
+        assert!(mysql_statement_references_session_variable(sql));
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+        assert!(!result.ok, "MySQL identifier dollars are not dollar-quoted strings");
+    }
+
+    #[test]
+    fn mysql_count_query_declines_session_variables() {
+        for sql in [
+            "SELECT x.id FROM table_x x WHERE x.id=@a",
+            // A multi-statement script never counted (single-statement guard);
+            // pinned here so the variable guard cannot loosen it either.
+            "SET @a=1; SELECT x.id FROM table_x x WHERE x.id=@a",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "expected a declined count for {sql}");
+            assert_eq!(result.sql, None, "declined count for {sql} must not carry SQL");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_allows_system_variables_and_at_signs_outside_variables() {
+        for sql in [
+            // System variables are server-scoped and reproducible on the count
+            // session; counting over them is an existing contract.
+            "SELECT @@version",
+            "SELECT 'a@b.com' AS email FROM table_x",
+            "SELECT `col@name` FROM table_x",
+            "SELECT /* @a */ id FROM table_x WHERE id = 1",
+            "SELECT id FROM table_x WHERE email = 'x@y' AND id = 1",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "an @ outside a user variable must still count: {sql}");
+            assert!(result.sql.unwrap_or_default().contains("COUNT(*)"), "{sql}");
+        }
+    }
+
+    // Review round for #14005: the scanner must speak MySQL's comment dialect —
+    // `/*! ... */` is executable, `--` needs a trailing space, and `@@scope.`
+    // decides reproducibility — verified against a live MySQL 8 server.
+    #[test]
+    fn mysql_count_query_declines_executable_comment_bodies() {
+        for sql in ["SELECT id FROM t WHERE id = /*! @a */", "SELECT id FROM t WHERE id = /*!50700 @a */"] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "executable comment bodies still execute @a: {sql}");
+            assert_eq!(result.sql, None, "declined count for {sql} must not carry SQL");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_declines_double_dash_without_trailing_space() {
+        // MySQL: `--@a` without whitespace is a double negation, not a comment,
+        // so @a still participates and the count would be wrong.
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT id FROM t WHERE id = 1--@a".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+        assert!(!result.ok);
+        assert_eq!(result.sql, None);
+    }
+
+    #[test]
+    fn mysql_count_query_skips_real_comments_with_trailing_space() {
+        for sql in ["SELECT id FROM t WHERE id = 1 -- @a", "SELECT id FROM t WHERE name = 'x@y' -- note"] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "a real comment must not trip the variable guard: {sql}");
+            assert!(result.sql.unwrap().contains("COUNT(*)"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_declines_session_scoped_system_variables() {
+        for sql in [
+            "SELECT id FROM t WHERE @@session.sql_mode IS NOT NULL",
+            "SELECT id FROM t WHERE @@session.time_zone = '+08:00'",
+            "SELECT id FROM t WHERE id = @@local.max_allowed_packet",
+            // Bare `@@name` defaults to SESSION scope.
+            "SELECT id FROM t WHERE id = @@some_session_var",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "session-scoped system variables must decline the count: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_allows_global_scoped_and_known_global_variables() {
+        for sql in [
+            "SELECT id FROM t WHERE @@global.read_only = 0",
+            "SELECT @@server_id",
+            "SELECT @@version",
+            "SELECT @@global.version_comment",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "global/known-global variables keep counting: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_still_wraps_plain_selects() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT x.id FROM table_x x WHERE x.id = 1".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT x.id FROM table_x x WHERE x.id = 1) `dbx_count`;"
         );
     }
 
@@ -7143,6 +7585,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7161,11 +7604,51 @@ WHERE u.id = picked.id;
             column: "iso3".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT iso3, year, gdp_pc FROM country_gdp) t(\"iso3\", \"year\", \"gdp_pc\") ORDER BY \"iso3\" ASC;"
+        );
+    }
+
+    #[test]
+    fn gaussdb_mysql_mode_sorted_query_uses_connection_backtick_quotes() {
+        // GaussDB in M/B/MYSQL compatibility mode reports a backtick identifier
+        // quote through the connection; the derived-table column aliases and the
+        // ORDER BY reference must use it instead of double quotes.
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT c.id, m.id, `order` FROM sales".to_string(),
+            database_type: Some(DatabaseType::Gaussdb),
+            result_columns: vec!["id".to_string(), "id".to_string(), "order".to_string()],
+            column_index: 2,
+            column: "order".to_string(),
+            direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: Some("`".to_string()),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT c.id, m.id, `order` FROM sales) t(id, id_2, `order`) ORDER BY `order` ASC;"
+        );
+
+        // Without a connection quote GaussDB keeps the double-quoted identifiers.
+        let plain = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT c.id, m.id, `order` FROM sales".to_string(),
+            database_type: Some(DatabaseType::Gaussdb),
+            result_columns: vec!["id".to_string(), "id".to_string(), "order".to_string()],
+            column_index: 2,
+            column: "order".to_string(),
+            direction: QuerySortDirection::Asc,
+            tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(
+            plain.sql.unwrap(),
+            "SELECT * FROM (SELECT c.id, m.id, `order` FROM sales) t(\"id\", \"id_2\", \"order\") ORDER BY \"order\" ASC;"
         );
     }
 
@@ -7185,6 +7668,7 @@ WHERE u.id = picked.id;
             column: "login_name".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM admin LIMIT 100) t ORDER BY `login_name` ASC;");
@@ -7200,6 +7684,7 @@ WHERE u.id = picked.id;
             column: "kdrq".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: vec![0],
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7218,6 +7703,7 @@ WHERE u.id = picked.id;
             column: "kdrq".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: vec![2],
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7236,6 +7722,7 @@ WHERE u.id = picked.id;
             column: "C2".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: vec![1],
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "select c1, t.* from dbx_eval_t t ORDER BY 3 DESC, 2 ASC;");
@@ -7251,6 +7738,7 @@ WHERE u.id = picked.id;
             column: "b".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: vec![5, 1, 0, 0],
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7271,6 +7759,7 @@ WHERE u.id = picked.id;
                     column: "name".to_string(),
                     direction,
                     tie_breaker_column_indexes: Vec::new(),
+                    identifier_quote: None,
                 });
 
                 assert_eq!(
@@ -7293,6 +7782,7 @@ WHERE u.id = picked.id;
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert_eq!(
@@ -7324,6 +7814,7 @@ WHERE u.id = picked.id;
                     column: "name".to_string(),
                     direction: QuerySortDirection::Desc,
                     tie_breaker_column_indexes: Vec::new(),
+                    identifier_quote: None,
                 });
 
                 assert_eq!(
@@ -7347,6 +7838,7 @@ WHERE u.id = picked.id;
                     column: "display name".to_string(),
                     direction: QuerySortDirection::Asc,
                     tie_breaker_column_indexes: Vec::new(),
+                    identifier_quote: None,
                 });
 
                 assert_eq!(
@@ -7372,6 +7864,7 @@ WHERE u.id = picked.id;
                         column: "name".to_string(),
                         direction: QuerySortDirection::Desc,
                         tie_breaker_column_indexes: Vec::new(),
+                        identifier_quote: None,
                     });
 
                     assert_eq!(result, err("unsupported"), "{database_type:?} {result_columns:?} {column_index}");
@@ -7400,6 +7893,7 @@ WHERE u.id = picked.id;
                     column: "id".to_string(),
                     direction: QuerySortDirection::Asc,
                     tie_breaker_column_indexes: Vec::new(),
+                    identifier_quote: None,
                 });
 
                 assert_eq!(result, err(reason), "{database_type:?} {original_sql:?}");
@@ -7425,6 +7919,7 @@ WHERE u.id = picked.id;
                 column: "id".to_string(),
                 direction: QuerySortDirection::Desc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert_eq!(
@@ -7445,6 +7940,7 @@ WHERE u.id = picked.id;
             column: "NAME".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7467,6 +7963,7 @@ WHERE u.id = picked.id;
             column: "Name".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
         let sql = result.sql.unwrap();
         assert!(!sql.contains(") t("), "derived column alias list must not be emitted: {sql}");
@@ -7483,6 +7980,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7511,6 +8009,7 @@ WHERE u.id = picked.id;
                 column: "@@server_id".to_string(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert!(result.ok, "{prefix}: {result:?}");
@@ -7531,6 +8030,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7549,6 +8049,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users LIMIT 100) t ORDER BY `id` DESC;");
@@ -7564,6 +8065,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7582,6 +8084,7 @@ WHERE u.id = picked.id;
             column: "name".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7602,6 +8105,7 @@ WHERE u.id = picked.id;
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert!(!result.ok, "must refuse the unsafe wrap: {original}");
@@ -7625,6 +8129,7 @@ WHERE u.id = picked.id;
                 column: "id".to_string(),
                 direction: QuerySortDirection::Asc,
                 tie_breaker_column_indexes: Vec::new(),
+                identifier_quote: None,
             });
 
             assert!(result.ok, "must keep the wrap legal: {original}");
@@ -7643,6 +8148,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY \"id\" ASC;");
@@ -7658,6 +8164,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7676,6 +8183,7 @@ WHERE u.id = picked.id;
             column: "ID".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 1 ASC;");
@@ -7691,6 +8199,7 @@ WHERE u.id = picked.id;
             column: "C2".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "select c1, t.* from dbx_eval_t t ORDER BY 3 DESC;");
@@ -7706,6 +8215,7 @@ WHERE u.id = picked.id;
             column: "C1".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert!(!result.ok);
@@ -7722,6 +8232,7 @@ WHERE u.id = picked.id;
             column: "X".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7740,6 +8251,7 @@ WHERE u.id = picked.id;
             column: "C2".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT * FROM dbx_eval_t) t ORDER BY \"C2\" ASC;");
@@ -7756,6 +8268,7 @@ WHERE u.id = picked.id;
             column: "name".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7774,6 +8287,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 2 ASC;");
@@ -7789,6 +8303,7 @@ WHERE u.id = picked.id;
             column: "name".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert!(!result.ok);
@@ -7806,6 +8321,7 @@ WHERE u.id = picked.id;
             column: "name".to_string(),
             direction: QuerySortDirection::Desc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7824,6 +8340,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT a.ID, b.id FROM a JOIN b ON b.a_id = a.id ORDER BY 2 ASC;");
@@ -7839,6 +8356,7 @@ WHERE u.id = picked.id;
             column: "name".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t ORDER BY `name` ASC;");
@@ -7854,6 +8372,7 @@ WHERE u.id = picked.id;
             column: "ID".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7872,6 +8391,7 @@ WHERE u.id = picked.id;
             column: "score".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(
@@ -7898,6 +8418,7 @@ WHERE u.id = picked.id;
             column: "id".to_string(),
             direction: QuerySortDirection::Asc,
             tie_breaker_column_indexes: Vec::new(),
+            identifier_quote: None,
         });
 
         assert_eq!(result.sql.unwrap(), "SELECT * FROM (SELECT id, name FROM users) t(id, name) ORDER BY id ASC;");
@@ -7919,6 +8440,7 @@ WHERE u.id = picked.id;
             column: result_columns.get(column_index).map(|column| column.to_string()).unwrap_or_default(),
             direction,
             tie_breaker_column_indexes,
+            identifier_quote: None,
         })
     }
 

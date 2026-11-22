@@ -1,6 +1,7 @@
 import type { BackendError } from "@/lib/backend/errorUtils";
 import type { TransferColumnNameCase, TransferContent, TransferMode, TransferObjectKind, TransferTableNameCase } from "@/lib/backend/tauri";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import type { MysqlDelimiterCommand } from "@/lib/sql/sqlStatementRanges";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/sqlExecution";
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
@@ -97,7 +98,7 @@ export interface SqlShortcutAction {
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
 
-export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "sequence" | "object";
+export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "column" | "sequence" | "object";
 
 export type CompletionAssistantMatchMode = "prefix" | "contains";
 
@@ -1112,6 +1113,11 @@ export interface TableInfo {
   /** Optional validity populated by status-aware object loaders. */
   valid?: boolean | null;
   comment?: string | null;
+  /**
+   * Schema that owns this object. The backend list does not return it (it is the
+   * schema that was queried), so the sidebar table index fills it in.
+   */
+  schema?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
 }
@@ -1614,6 +1620,7 @@ export interface TriggerInfo {
 
 /** Missing metadata means a provider has not established exact identity. */
 export interface MetadataReadOptions {
+  lightweight?: boolean;
   identityMode?: "exact";
   catalog?: string;
 }
@@ -1957,6 +1964,7 @@ export interface BatchStatementExecutionItem {
 export interface BatchSqlExecution {
   executionId: string;
   submittedSql: string;
+  mysqlDelimiterCommands?: readonly MysqlDelimiterCommand[];
   editorFingerprint: string;
   sourceOffset: number;
   completed: number;
@@ -2014,6 +2022,8 @@ export interface QueryResultRun {
    * disk eviction/restore. See `dataGridViewStateCache.ts`.
    */
   resultViewGeneration?: string;
+  /** Identifies the latest successful refresh for automatic column sizing. */
+  resultColumnWidthRevision?: string;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
@@ -2114,6 +2124,16 @@ export interface SqlGroupByViolation {
   qualifier?: string | null;
 }
 
+/**
+ * A two-part column qualifier that names neither a table nor an alias visible
+ * in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+ * The span covers the qualifier itself.
+ */
+export interface SqlUnknownQualifier {
+  qualifier: string;
+  span: SqlTextSpan;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -2124,6 +2144,7 @@ export interface SqlReferenceAnalysis {
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
   group_by_violations?: SqlGroupByViolation[];
+  unknown_qualifiers?: SqlUnknownQualifier[];
 }
 
 export type TreeNodeType =
@@ -2167,6 +2188,7 @@ export type TreeNodeType =
   | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
+  | "postgres-aggregate-functions"
   | "group-internal-functions"
   | "group-udf-functions"
   | "group-types"
@@ -2278,7 +2300,10 @@ export interface TreeNode {
   nacosNamespaceName?: string;
   schema?: string;
   tableName?: string;
+  columnIndexKind?: "primary" | "unique" | "index";
   objectName?: string;
+  /** Native PostgreSQL sequence identifiers were read without display normalization. Absent on legacy cached nodes. */
+  postgresSequenceExactIdentity?: true;
   /** Distinguishes schema indexes from the existing table-child index actions. */
   objectScope?: "schema";
   signature?: string;
@@ -2308,6 +2333,7 @@ export interface TreeNode {
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
   tableSearchParentId?: string;
+  indexSearchOnly?: boolean;
   savedSqlId?: string;
   savedSqlFolderId?: string;
   /** Set on synthetic table virtual-group container nodes. */
@@ -2459,6 +2485,8 @@ export interface TableStructureEditorDraft {
   createPartitioningColumns?: string[];
   createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
+  /** A failed index read must keep restored index edits blocked until an explicit reload succeeds. */
+  indexMetadataReadError?: string;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
   appliedInitialTabRequestId?: number;
@@ -2517,6 +2545,7 @@ export interface TabUiState {
   activeOutputView?: TabOutputView;
   /** Redis query results default to grid; a per-tab override selects command-line output. */
   redisResultViewMode?: RedisResultViewMode;
+  resultTransposeEnabled?: boolean;
   resultPaneOpen?: boolean;
   /** Tracks whether the active output view was auto-switched to "messages" by live server output during execution. */
   autoSwitchedToMessagesDuringExecution?: boolean;
@@ -2555,6 +2584,7 @@ export interface DatabaseSearchTableTask {
 export interface DatabaseSearchTabState {
   keyword: string;
   searchScope?: DatabaseSearchScope;
+  selectedObjects?: string[];
   perTableLimit: number;
   progressDone: number;
   progressTotal: number;
@@ -2675,6 +2705,7 @@ export interface QueryTab {
   resultGridRevision?: string;
   /** Logical-result identity for the tab-switch view snapshot cache; see QueryResultRun. */
   resultViewGeneration?: string;
+  resultColumnWidthRevision?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
   /** Undefined inherits the default on open; false preserves an explicit per-tab opt-out. */
@@ -2698,6 +2729,10 @@ export interface QueryTab {
     scrollTop: number;
     scrollLeft: number;
   };
+  /** One-based bookmarked lines, saved with the open SQL tab. */
+  editorBookmarks?: number[];
+  /** Runtime-only document associated with mapped bookmark lines; not session data. */
+  editorBookmarksDocument?: string;
   editorSelection?: {
     anchor: number;
     head: number;
@@ -2797,7 +2832,7 @@ export interface QueryTab {
   structureTableName?: string;
   structureExactIdentity?: boolean;
   /** Navigation type of the opened structure object; views matter for "view data" routing. */
-  structureTableType?: "table" | "view";
+  structureTableType?: "table" | "view" | "materialized_view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;
@@ -3020,6 +3055,12 @@ export interface QueryTab {
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;
+  /** Session restore truncated this tab's SQL because it exceeded the persistence cap. */
+  sqlTruncated?: boolean;
+  /** Original SQL length before truncation. */
+  sqlTruncatedChars?: number;
+  /** Path of the recovery file that holds the full SQL, when it was spilled. */
+  sqlRecoveryPath?: string;
   /** Whether to use auto-commit mode (default true). When false, multiple statements are
    *  wrapped in a single transaction. */
   autoCommit?: boolean;

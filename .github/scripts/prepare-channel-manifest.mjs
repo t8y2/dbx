@@ -26,9 +26,30 @@ if (!manifest || typeof manifest !== "object" || !manifest.version || !manifest.
 
 const baseVersion = tagMatch[1];
 const tagVersion = tag.slice(1);
-if (manifest.version !== baseVersion && manifest.version !== tagVersion) {
-  throw new Error(`Manifest version ${manifest.version} does not match tag version ${tagVersion} or base version ${baseVersion}.`);
+// A promoted beta is published under its stable tag, but the Release it was
+// built from still carries the beta build version, so a stable promotion
+// accepts either version of the same release line.
+const promotedBetaVersion = new RegExp(`^${baseVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-beta\\.\\d{8}\\.\\d+$`);
+const promotesBetaBuild = channel === "stable" && promoted === "true" && promotedBetaVersion.test(manifest.version);
+if (manifest.version !== baseVersion && manifest.version !== tagVersion && !promotesBetaBuild) {
+  throw new Error(
+    `Manifest version ${manifest.version} does not match tag version ${tagVersion}, base version ${baseVersion}, or the promoted beta build of ${baseVersion}.`,
+  );
 }
+// The promoted binary keeps its beta build version, which the stable manifest
+// no longer exposes. Record it so an installed beta build can recognise that
+// it is the build that was promoted.
+// Rerunning a promotion feeds the already-promoted manifest back in, and it
+// must stay byte-identical: dropping promoted_from would lose the build
+// provenance the installed beta uses to recognise itself.
+const alreadyPromoted =
+  channel === "stable" &&
+  promoted === "true" &&
+  manifest.is_promoted === true &&
+  typeof manifest.promoted_from === "string" &&
+  manifest.promoted_from.length > 0;
+if (promotesBetaBuild) manifest.promoted_from = manifest.version;
+else if (!alreadyPromoted) delete manifest.promoted_from;
 manifest.version = channel === "beta" ? tagVersion : baseVersion;
 manifest.channel = channel;
 manifest.release_tag = tag;

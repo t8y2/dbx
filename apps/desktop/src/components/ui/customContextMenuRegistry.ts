@@ -34,8 +34,8 @@ export function isContextMenuInternalScroll(event: Event): boolean {
 }
 
 export interface ContextMenuRegistration {
-  activate(): void;
-  setOpen(open: boolean): void;
+  activate(triggerTarget?: Node | null): void;
+  setOpen(open: boolean, triggerTarget?: Node | null): void;
   dispose(): void;
 }
 
@@ -44,20 +44,37 @@ export interface ContextMenuRegistry {
 }
 
 export function createContextMenuRegistry(documentTarget: EventTarget, windowTarget: EventTarget): ContextMenuRegistry {
-  const openMenus = new Set<ContextMenuClose>();
+  const openMenus = new Map<ContextMenuClose, Node | null>();
   let hostCount = 0;
   let listenersAttached = false;
 
   function closeAll() {
-    const closers = [...openMenus];
+    const closers = [...openMenus.keys()];
     openMenus.clear();
     for (const close of closers) close();
   }
 
+  function shouldCloseOnScroll(event: Event, triggerTarget: Node | null): boolean {
+    if (isContextMenuInternalScroll(event)) return false;
+    if (!triggerTarget || !triggerTarget.isConnected) return true;
+    const target = event.target;
+    if (!(target instanceof Node)) return true;
+    if (target === documentTarget || target === windowTarget) return true;
+    if (typeof document !== "undefined" && (target === document || target === document.documentElement || target === document.body)) {
+      return true;
+    }
+    return target.contains(triggerTarget);
+  }
+
   function closeAllOnScroll(event: Event) {
-    // Ignore scroll that originates from within an open menu/submenu.
     if (isContextMenuInternalScroll(event)) return;
-    closeAll();
+    const entries = [...openMenus.entries()];
+    for (const [close, triggerTarget] of entries) {
+      if (shouldCloseOnScroll(event, triggerTarget)) {
+        openMenus.delete(close);
+        close();
+      }
+    }
   }
 
   function attachListeners() {
@@ -84,19 +101,22 @@ export function createContextMenuRegistry(documentTarget: EventTarget, windowTar
       let disposed = false;
 
       return {
-        activate() {
+        activate(triggerTarget) {
           if (disposed) return;
-          const closers = [...openMenus];
+          const closers = [...openMenus.keys()];
           openMenus.clear();
           for (const activeClose of closers) {
             if (activeClose !== close) activeClose();
           }
-          openMenus.add(close);
+          openMenus.set(close, triggerTarget ?? null);
         },
-        setOpen(open) {
+        setOpen(open, triggerTarget) {
           if (disposed) return;
-          if (open) openMenus.add(close);
-          else openMenus.delete(close);
+          if (open) {
+            openMenus.set(close, triggerTarget ?? openMenus.get(close) ?? null);
+          } else {
+            openMenus.delete(close);
+          }
         },
         dispose() {
           if (disposed) return;

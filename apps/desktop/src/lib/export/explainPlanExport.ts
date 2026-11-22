@@ -44,7 +44,7 @@ export async function saveExplainPlanExport(plan: ParsedExplainPlan, format: Exp
     return saveDiagramBinaryExport(defaultPath, png, "png");
   }
 
-  const { csvQuoteMode, csvNullMode } = useSettingsStore().editorSettings;
+  const { csvQuoteMode, csvNullMode, csvWithoutBom } = useSettingsStore().editorSettings;
   let path = defaultPath;
   if (isTauriRuntime()) {
     const selectedPath = await promptExportSavePath({
@@ -56,7 +56,7 @@ export async function saveExplainPlanExport(plan: ParsedExplainPlan, format: Exp
   }
 
   if (format === "csv") {
-    await api.exportQueryResultCsv(path, columns, rows, csvQuoteMode, csvNullLiteralForMode(csvNullMode));
+    await api.exportQueryResultCsv(path, columns, rows, csvQuoteMode, csvNullLiteralForMode(csvNullMode), csvWithoutBom);
   } else if (format === "xlsx") {
     // Keep engine-native costs/rows (e.g. "148 (0)" and "0.29..1830.12") as text.
     await api.exportQueryResultXlsx(

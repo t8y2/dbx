@@ -25,6 +25,8 @@ mod agent_pg_sequences;
 #[cfg(all(test, unix))]
 mod external_table_filter_tests;
 mod kingbase;
+mod postgres_view_comments;
+pub(crate) use postgres_view_comments::enrich_postgres_view_ddl_with_comments;
 mod mongodb_columns;
 mod oracle_ddl_indexes;
 pub mod oracle_routines;
@@ -225,6 +227,21 @@ async fn list_database_storage_once(
         return Ok(Vec::new());
     }
     let config = connection_config(state, connection_id).await;
+    if config.as_ref().is_some_and(is_native_mysql_browser_config) {
+        let mut seen = std::collections::HashSet::new();
+        let requested = database_names
+            .iter()
+            .filter(|name| !name.is_empty() && seen.insert((*name).clone()))
+            .take(MAX_DATABASE_STORAGE_NAMES)
+            .cloned()
+            .collect::<Vec<_>>();
+        let pool = state.pool_handle(connection_id).await;
+        if let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) = pool {
+            let budget = mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"));
+            return db::mysql::list_database_storage_with_budget(&pool, &requested, budget).await;
+        }
+        return Ok(Vec::new());
+    }
     if !config.as_ref().is_some_and(|config| {
         config.db_type == DatabaseType::Postgres && config.driver_profile.as_deref() != Some("cockroachdb")
     }) {
@@ -789,6 +806,8 @@ async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> R
         let mode = *mode;
         return if mode == MysqlMode::OceanBaseOracle {
             db::ob_oracle::list_databases(&pool).await
+        } else if config.as_ref().is_some_and(is_native_mysql_browser_config) {
+            db::mysql::list_database_attributes(&pool).await
         } else {
             db::mysql::list_database_metadata(&pool).await
         };
@@ -843,6 +862,27 @@ async fn list_schema_infos_once(
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
+/// Renders one `list_data_types` row for the structure editor's dropdown:
+/// search_path-visible simple lowercase names stay bare so they remain
+/// interchangeable with the static list; everything else — off-search_path
+/// schemas, mixed case, lowercase reserved words like a type literally named
+/// `order` — comes back schema-qualified with the quoting the identifier
+/// requires, so generated `CREATE TABLE` / `ALTER TABLE ... TYPE` resolves
+/// (#14525 review follow-up).
+fn render_postgres_type_name(schema: &str, name: &str, visible: bool) -> String {
+    if visible
+        && crate::sql_dialect::is_simple_lower_identifier(name)
+        && !crate::sql_dialect::is_postgres_reserved_identifier(name)
+    {
+        return name.to_string();
+    }
+    format!(
+        "{}.{}",
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(schema, "\""),
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(name, "\"")
+    )
+}
+
 pub async fn list_data_types_core(
     state: &AppState,
     connection_id: &str,
@@ -870,6 +910,16 @@ pub async fn list_data_types_core(
                 .list_data_types::<Vec<String>>(database, agent_metadata_timeout(db_config.as_ref()))
                 .await
                 .map(deduplicate_data_type_names);
+        }
+        if let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() {
+            let entries = db::postgres::list_data_types(pool).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|entry| render_postgres_type_name(&entry.schema, &entry.name, entry.visible))
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect());
         }
         Ok(Vec::new())
     })
@@ -1317,6 +1367,11 @@ fn mysql_auto_increment_from_query_result(result: db::QueryResult) -> Result<Opt
     Ok(Some(text))
 }
 
+// Must not contain "connection": `is_connection_error` matches that substring, and the
+// metadata retry would then rebuild and drop the shared pool under concurrent requests
+// (t8y2/dbx#14067).
+const TABLE_COMMENT_UNSUPPORTED_ERROR: &str = "Table comment lookup is not supported for this database type";
+
 async fn get_table_comment_core_with_pool_key(
     state: &AppState,
     connection_id: &str,
@@ -1415,7 +1470,7 @@ async fn get_table_comment_core_with_pool_key(
         PoolKind::Postgres(p) if !db_config.as_ref().is_some_and(is_questdb_config) => {
             db::postgres::get_table_comment(p, schema, table).await
         }
-        _ => Err("Table comment lookup is not supported for this connection".to_string()),
+        _ => Err(TABLE_COMMENT_UNSUPPORTED_ERROR.to_string()),
     }
 }
 
@@ -1601,6 +1656,13 @@ impl OracleSynonymResolver {
         true
     }
 
+    /// The local object reached through at least one synonym. A PUBLIC synonym does not resolve
+    /// once it is qualified with the requested schema, so writes must address this object.
+    /// Remote targets keep the synonym name, which already carries the database link.
+    fn followed_local_target(&self) -> Option<&OracleObjectRef> {
+        (self.depth > 0 && self.current.db_link.is_none()).then_some(&self.current)
+    }
+
     fn retry_next_candidate(&mut self) -> bool {
         while let Some(target) = self.retries.pop() {
             if self.visited.insert(target.clone()) {
@@ -1754,6 +1816,26 @@ fn oracle_synonym_target_sql(
          ORDER BY CASE WHEN s.OWNER = {owner} THEN 0 ELSE 1 END",
         sql_string(table),
     ))
+}
+
+fn oracle_object_type_sql(owner: &str, name: &str) -> String {
+    format!(
+        "SELECT OBJECT_TYPE FROM ALL_OBJECTS \
+         WHERE OWNER = {} AND OBJECT_NAME = {} \
+           AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')",
+        sql_string(owner),
+        sql_string(name),
+    )
+}
+
+/// A materialized view is listed as both a TABLE and a MATERIALIZED VIEW object, and editing
+/// must treat it as the latter.
+fn oracle_object_type_from_query_result(result: db::QueryResult) -> Option<String> {
+    let types: Vec<String> = result.rows.iter().filter_map(|row| query_result_cell_string(row, 0)).collect();
+    ["MATERIALIZED VIEW", "VIEW", "TABLE"]
+        .into_iter()
+        .find(|candidate| types.iter().any(|object_type| object_type.eq_ignore_ascii_case(candidate)))
+        .map(str::to_string)
 }
 
 fn oracle_synonym_target_from_query_result(
@@ -1911,7 +1993,30 @@ async fn external_driver_oracle_columns_via_sql(
     oracle_columns_via_metadata_query(&mut query, schema, table).await
 }
 
+fn oracle_column_lookup_table_candidates(table: &str) -> Vec<String> {
+    let exact = table.to_string();
+    let uppercase = table.trim().to_uppercase();
+    if uppercase.is_empty() || uppercase == exact {
+        return vec![exact];
+    }
+    vec![exact, uppercase]
+}
+
 async fn oracle_columns_via_metadata_query(
+    query: &mut OracleMetadataQuery<'_>,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<db::ColumnInfo>, String> {
+    for candidate in oracle_column_lookup_table_candidates(table) {
+        let columns = oracle_columns_via_metadata_query_exact(query, schema, &candidate).await?;
+        if !columns.is_empty() {
+            return Ok(columns);
+        }
+    }
+    Ok(Vec::new())
+}
+
+async fn oracle_columns_via_metadata_query_exact(
     query: &mut OracleMetadataQuery<'_>,
     schema: &str,
     table: &str,
@@ -1957,7 +2062,17 @@ async fn oracle_columns_via_metadata_query(
             .map(oracle_columns_from_query_result)
             .unwrap_or_default();
         if !columns.is_empty() {
-            return Ok(deduplicate_column_infos(columns));
+            let mut columns = deduplicate_column_infos(columns);
+            if let Some(target) = resolver.followed_local_target().cloned() {
+                let sql = oracle_object_type_sql(&target.owner, &target.name);
+                let object_type = oracle_object_type_from_query_result(query.run(&sql, session_schema, 10).await?);
+                for column in &mut columns {
+                    column.resolved_schema = Some(target.owner.clone());
+                    column.resolved_table = Some(target.name.clone());
+                    column.resolved_object_type = object_type.clone();
+                }
+            }
+            return Ok(columns);
         }
 
         let target = if resolver.can_follow() {
@@ -2355,7 +2470,7 @@ async fn load_tdengine_table_comments_for_filter(
     Ok(())
 }
 
-async fn load_oracle_table_comments_for_objects(
+pub(super) async fn load_oracle_table_comments_for_objects(
     client: &mut db::agent_driver::AgentDriverClient,
     database: &str,
     schema: &str,
@@ -3499,6 +3614,25 @@ pub(in crate::schema) fn is_mycat_config(config: &ConnectionConfig) -> bool {
         || config.database_info.as_ref().and_then(|info| info.server_comment.as_deref()).is_some_and(is_mycat_version)
 }
 
+/// MySQL 8+ resolves `TABLE_COMMENT` from the data dictionary, so the browser's
+/// lightweight table list can select it without the per-table open that 5.x-era
+/// servers pay for `.frm` metadata (the #14139 budget). MariaDB and proxy forks
+/// keep that cost, and unknown versions fail closed to the lazy comment.
+pub(in crate::schema) fn mysql_lightweight_comment_supported(version: Option<&str>) -> bool {
+    let Some(version) = version else { return false };
+    let lowered = version.to_ascii_lowercase();
+    if lowered.contains("mariadb") || is_mycat_version(version) || is_shardingsphere_proxy_version(version) {
+        return false;
+    }
+    version.split('.').next().and_then(|major| major.trim().parse::<u64>().ok()).is_some_and(|major| major >= 8)
+}
+
+fn mysql_lightweight_comment_for_config(config: Option<&ConnectionConfig>) -> bool {
+    mysql_lightweight_comment_supported(
+        config.and_then(|config| config.database_info.as_ref()).and_then(|info| info.product_version.as_deref()),
+    )
+}
+
 fn mysql_table_list_source_for_config(config: Option<&ConnectionConfig>) -> MysqlTableListSource {
     if config.is_some_and(db::tdsql_mysql::is_config)
         || config.is_some_and(is_mycat_config)
@@ -3538,26 +3672,26 @@ mod tests {
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
         is_sqlserver_external_driver_config, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_browser_interactive_budget,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
         oracle_current_schema_from_query_result, oracle_database_link_name, oracle_database_link_user_sql,
         oracle_identifier_from_query_result, oracle_object_statistics_dba_segments_sql,
         oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql, oracle_object_type_from_query_result,
+        oracle_object_type_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         single_table_comment_from_query_result, split_oracle_database_link, table_comments_from_query_result,
         table_name_filter_matches, tdengine_table_comment_like_pattern, tdengine_table_comment_sql,
         tdengine_table_comments_sql, uses_mongodb_agent_collection_listing, visible_schema_filter,
         ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource, OracleObjectRef,
         OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH,
-        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        TABLE_COMMENT_UNSUPPORTED_ERROR, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -4609,6 +4743,16 @@ done
     }
 
     #[test]
+    fn only_a_missing_object_ddl_error_triggers_the_oracle_synonym_lookup() {
+        assert!(crate::schema::oracle_ddl_error_is_missing_object("object not found: HR.ORDERS_SYN"));
+        assert!(crate::schema::oracle_ddl_error_is_missing_object(
+            "ORA-31603: object \"ORDERS_SYN\" of type TABLE not found"
+        ));
+        assert!(!crate::schema::oracle_ddl_error_is_missing_object("source denied"));
+        assert!(!crate::schema::oracle_ddl_error_is_missing_object("ORA-01031: insufficient privileges"));
+    }
+
+    #[test]
     fn should_append_oracle_style_comment_ddl_for_oracle_family() {
         assert!(should_append_oracle_style_comment_ddl(Some(&test_connection_config(DatabaseType::Oracle))));
         assert!(should_append_oracle_style_comment_ddl(Some(&test_connection_config(DatabaseType::OceanbaseOracle))));
@@ -5079,6 +5223,37 @@ done
     }
 
     #[test]
+    fn mysql_browser_interactive_budget_follows_session_query_timeout() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+
+        // Configured query timeout: enumeration follows it (plus the protocol margin)
+        // instead of the driver's historical 5s constant.
+        config.query_timeout_secs = 120;
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(125));
+
+        // A short query timeout cannot shrink enumeration below the browsing floor:
+        // `mysql_browser_explicit_budget` clamps to 15s and the interactive floor keeps
+        // at least the historical 5s, so a small setting never strangles browsing.
+        for short in [1, 5, 9] {
+            config.query_timeout_secs = short;
+            let budget = mysql_browser_interactive_budget(Some(&config));
+            assert_eq!(budget, Duration::from_secs(15), "query_timeout_secs={short} must not shrink to the raw value");
+            assert!(budget >= Duration::from_secs(5), "query_timeout_secs={short} must keep the browsing floor");
+        }
+
+        // UI "no limit" (0) stays bounded instead of reverting to the 5s constant.
+        config.query_timeout_secs = 0;
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(60));
+
+        // Default 60s session timeout: a comfortable browse budget, still bounded.
+        config.query_timeout_secs = crate::models::connection::default_query_timeout_secs();
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(65));
+
+        // Unknown config (pool only) keeps the historical driver default.
+        assert_eq!(mysql_browser_interactive_budget(None), Duration::from_secs(5));
+    }
+
+    #[test]
     fn metadata_retry_excludes_pool_saturation_from_reconnects() {
         assert!(!is_retryable_metadata_error("Pool not found"));
         assert!(!is_retryable_metadata_error(crate::query::METADATA_POOL_BUSY_ERROR));
@@ -5098,6 +5273,63 @@ done
         ));
         assert!(!is_retryable_metadata_error("Unknown column 'email' in 'field list'"));
         assert!(!is_retryable_metadata_error("Access denied for user"));
+    }
+
+    #[tokio::test]
+    async fn mysql_browser_metadata_timeout_returns_once_without_reconnecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        // An in-memory pool makes an accidental reconnect observable without a live server.
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = "conn".to_string();
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        config.database = None;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        pool.with_connection(|conn| {
+            conn.execute_batch("CREATE TEMP TABLE metadata_timeout_marker (id INTEGER)").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("conn".to_string(), super::PoolKind::Sqlite(pool.clone()));
+            })
+            .await;
+
+        for error in [
+            "MySQL browser metadata timed out after 5s; query cancelled",
+            "MySQL browser metadata timed out after 5s; cancellation failed: connection reset by peer",
+        ] {
+            assert!(!is_retryable_metadata_error(error));
+            assert_eq!(
+                metadata_error_action(Some(DatabaseType::Mysql), error, false),
+                super::MetadataErrorAction::Return
+            );
+            let mut attempts = 0;
+            let result = super::retry_metadata_connection_for_session(&state, "conn", None, None, || {
+                attempts += 1;
+                async { Err::<(), _>(error.to_string()) }
+            })
+            .await;
+
+            assert_eq!(result.unwrap_err(), error);
+            assert_eq!(attempts, 1);
+            let Some(super::PoolKind::Sqlite(retained)) = state.pool_handle("conn").await else {
+                panic!("metadata timeout must retain the pool");
+            };
+            retained
+                .with_connection(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM metadata_timeout_marker", [], |row| row.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            metadata_error_action(Some(DatabaseType::Mysql), "connection reset by peer", false),
+            super::MetadataErrorAction::Retry
+        );
     }
 
     #[tokio::test]
@@ -5691,6 +5923,43 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn render_postgres_type_name_keeps_reserved_words_quoted() {
+        // #14536 review follow-up: a type literally named `order` must not be
+        // emitted bare even though it is a simple lowercase identifier.
+        assert_eq!(super::render_postgres_type_name("public", "hstore", true), "hstore");
+        assert_eq!(super::render_postgres_type_name("public", "mood", true), "mood");
+        // %I/quote semantics: simple lowercase names stay unquoted — schema
+        // qualification alone already bypasses the search path.
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "mood", false), "dbx_custom.mood");
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "Mood", false), "dbx_custom.\"Mood\"");
+        assert_eq!(super::render_postgres_type_name("public", "order", true), "public.\"order\"");
+        assert!(!crate::sql_dialect::is_simple_lower_identifier("with space"));
+    }
+
+    #[test]
+    fn mysql_lightweight_comment_support_follows_the_data_dictionary() {
+        // MySQL 8+ resolves TABLE_COMMENT in the data dictionary: cheap in the light list.
+        for version in ["8.0.43", "8.0.36-MySQL Community Server", " 8.0.40", "8.0.11-TiDB-v7.5.1"] {
+            assert!(super::mysql_lightweight_comment_supported(Some(version)), "{version} must keep comments");
+        }
+        // 5.x-era servers open every table for the comment, and MariaDB/proxy forks
+        // inherit that cost: comments stay lazy there.
+        for version in [
+            "5.5.40-36.1-log",
+            "5.7.42",
+            "10.11.6-MariaDB",
+            "5.6.29-mycat-1.6",
+            "8.0.36-MySQL Community Server - ShardingSphere-Proxy 5.5.2",
+        ] {
+            assert!(!super::mysql_lightweight_comment_supported(Some(version)), "{version} must stay lazy");
+        }
+        // Unknown or malformed versions fail closed to the lazy comment.
+        for version in [None, Some(""), Some("garbage"), Some(".5")] {
+            assert!(!super::mysql_lightweight_comment_supported(version), "{version:?} must stay lazy");
+        }
+    }
+
+    #[test]
     fn tdsql_profile_uses_logical_show_full_tables_source() {
         let mut config = test_connection_config(DatabaseType::Mysql);
         config.driver_profile = Some("TDSQL".to_string());
@@ -5891,6 +6160,30 @@ for line in sys.stdin:
         let filtered = filter_table_infos(tables, Some("orders"), Some(1), Some(1), Some(&object_types), None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["monthly_orders_mv"]);
+    }
+
+    #[test]
+    fn mysql_browser_loading_policy_excludes_other_dialects_and_proxies() {
+        assert!(super::is_native_mysql_browser_config(&test_connection_config(DatabaseType::Mysql)));
+        for profile in ["", " ", "mysql", " MYSQL "] {
+            let mut config = test_connection_config(DatabaseType::Mysql);
+            config.driver_profile = Some(profile.to_string());
+            assert!(super::is_native_mysql_browser_config(&config));
+        }
+        for dialect in [DatabaseType::Postgres, DatabaseType::OceanbaseOracle, DatabaseType::Jdbc] {
+            assert!(!super::is_native_mysql_browser_config(&test_connection_config(dialect)));
+        }
+        for profile in ["tidb", "dolt", "oceanbase-mysql", "starrocks", "doris"] {
+            let mut config = test_connection_config(DatabaseType::Mysql);
+            config.driver_profile = Some(profile.to_string());
+            assert!(!super::is_native_mysql_browser_config(&config));
+        }
+        let mut proxy = test_connection_config(DatabaseType::Mysql);
+        proxy.database_info = Some(DatabaseConnectionInfo {
+            product_version: Some("5.6.29-mycat-1.6".to_string()),
+            ..Default::default()
+        });
+        assert!(!super::is_native_mysql_browser_config(&proxy));
     }
 
     #[test]
@@ -6711,8 +7004,48 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn oracle_synonym_resolver_reports_only_followed_local_targets() {
+        let mut resolver = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(resolver.followed_local_target().is_none(), "a directly readable object needs no write identity");
+
+        let base = OracleObjectRef { owner: "OWNER".to_string(), name: "ORDERS_BASE".to_string(), db_link: None };
+        assert!(resolver.follow(base.clone()));
+        assert_eq!(resolver.followed_local_target(), Some(&base));
+
+        let mut remote = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(remote.follow(OracleObjectRef {
+            owner: "REMOTE_APP".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: Some("SALES".to_string()),
+        }));
+        assert!(remote.followed_local_target().is_none(), "a remote target is only addressable through the synonym");
+    }
+
+    #[test]
+    fn oracle_object_type_prefers_materialized_view_and_view_over_table() {
+        let types = |rows: &[&str]| {
+            oracle_object_type_from_query_result(oracle_current_schema_result(
+                &["OBJECT_TYPE"],
+                rows.iter().map(|value| vec![serde_json::json!(value)]).collect(),
+            ))
+        };
+        assert_eq!(types(&["TABLE"]).as_deref(), Some("TABLE"));
+        assert_eq!(types(&["VIEW"]).as_deref(), Some("VIEW"));
+        assert_eq!(types(&["TABLE", "MATERIALIZED VIEW"]).as_deref(), Some("MATERIALIZED VIEW"));
+        assert_eq!(types(&[]), None);
+        assert!(oracle_object_type_sql("OWNER", "O'NAME").contains("OBJECT_NAME = 'O''NAME'"));
+    }
+
+    #[test]
     fn oracle_columns_sql_first_handles_current_schema_editor_sessions() {
         assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("tab-1")));
+    }
+
+    #[test]
+    fn oracle_column_lookup_table_candidates_try_exact_then_uppercase_fallback() {
+        assert_eq!(super::oracle_column_lookup_table_candidates("EMP"), vec!["EMP"]);
+        assert_eq!(super::oracle_column_lookup_table_candidates("emp"), vec!["emp", "EMP"]);
+        assert_eq!(super::oracle_column_lookup_table_candidates("MixedCase"), vec!["MixedCase", "MIXEDCASE"]);
     }
 
     #[test]
@@ -7124,6 +7457,134 @@ done
         // One probe for the alias, one for the resolved target: the plain table must not
         // reach the Oracle metadata SQL at all.
         assert_eq!(calls.matches("ALL_TAB_COLUMNS").count(), 2, "{calls}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `DBMS_METADATA` has no table DDL for a synonym, so the table DDL of a synonym comes
+    /// from the object the column reader resolved it to (t8y2/dbx#14733). A synonym whose
+    /// target cannot be resolved keeps the driver error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_oracle_table_ddl_of_a_synonym_renders_the_resolved_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-oracle-synonym-ddl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"getObjectSource"'*)
+      case "$line" in
+        *'"name":"ORDERS"'*'"schema":"SYSTEM"'*|*'"schema":"SYSTEM"'*'"name":"ORDERS"'*)
+          printf '{{"id":%s,"result":{{"schema":"SYSTEM","source":"CREATE TABLE \\"SYSTEM\\".\\"ORDERS\\" (\\"ID\\" NUMBER(10,0))"}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"error":{{"message":"object not found"}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *'"method":"getColumns"'*)
+      printf '{{"id":%s,"result":[]}}\n' "$id"
+      ;;
+    *'"method":"executeQuery"'*)
+      case "$line" in
+        *'FROM ALL_SYNONYMS s'*'ORDERS_ALIAS'*)
+          printf '{{"id":%s,"result":{{"columns":["TABLE_OWNER","TABLE_NAME"],"rows":[["SYSTEM","ORDERS"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *"c.OWNER = 'SYSTEM' AND c.TABLE_NAME = 'ORDERS'"*)
+          printf '{{"id":%s,"result":{{"columns":["COLUMN_NAME","DATA_TYPE","NULLABLE","DATA_DEFAULT","DATA_LENGTH","DATA_PRECISION","DATA_SCALE","COLUMN_ID","IS_PK","COMMENTS"],"rows":[["ID","NUMBER","N",null,"22","10","0","1","1",null]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *'FROM ALL_OBJECTS'*)
+          printf '{{"id":%s,"result":{{"columns":["OBJECT_TYPE"],"rows":[["TABLE"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":{{"columns":[],"rows":[],"affected_rows":0,"execution_time_ms":0}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *)
+      printf '{{"id":%s,"result":{{}}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-oracle-synonym-ddl".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@127.0.0.1:1521/demo".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    config.id.clone(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let ddl =
+            super::get_table_ddl_core(&state, "jdbc-oracle-synonym-ddl", "demo", "DBX_TEST", "ORDERS_ALIAS", None)
+                .await
+                .unwrap();
+        assert!(ddl.contains(r#"CREATE TABLE "SYSTEM"."ORDERS""#), "{ddl}");
+
+        let missing =
+            super::get_table_ddl_core(&state, "jdbc-oracle-synonym-ddl", "demo", "DBX_TEST", "MISSING_ALIAS", None)
+                .await
+                .unwrap_err();
+        assert!(missing.contains("object not found"), "{missing}");
+
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        assert!(calls.contains(r#""name":"ORDERS_ALIAS""#), "{calls}");
+        assert!(calls.contains("FROM ALL_SYNONYMS s"), "{calls}");
 
         state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);
@@ -7641,6 +8102,20 @@ done
     }
 
     #[test]
+    fn unsupported_table_comment_is_not_treated_as_a_connection_error() {
+        // StarRocks/Doris editors fetch the table comment alongside indexes; a
+        // misclassified error rebuilt the shared metadata pool and emptied the
+        // concurrent index lookup (t8y2/dbx#14067).
+        assert!(!crate::query::is_connection_error(TABLE_COMMENT_UNSUPPORTED_ERROR));
+        for retried in [false, true] {
+            assert_eq!(
+                metadata_error_action(Some(DatabaseType::StarRocks), TABLE_COMMENT_UNSUPPORTED_ERROR, retried),
+                MetadataErrorAction::Return
+            );
+        }
+    }
+
+    #[test]
     fn doris_family_catalog_capable_matches_doris_and_starrocks_only() {
         // Doris and StarRocks expose multi-catalog federation.
         assert!(db::mysql_compatible::supports_external_catalogs(&test_connection_config(DatabaseType::Doris)));
@@ -7696,6 +8171,119 @@ pub async fn list_objects_core(
         object_types,
         table_name_filter,
         &Default::default(),
+    )
+    .await
+}
+
+/// Mirrors the frontend `metadataLoadBudgetMs`: explicit user-initiated metadata reads
+/// (details / storage) follow the session query timeout instead of the snappy 5s
+/// browsing budget, and stay bounded even when server timeouts are disabled (0).
+fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
+    let timeout_secs = config.effective_query_timeout_secs();
+    if timeout_secs == 0 {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs((timeout_secs + 5).max(15))
+    }
+}
+
+/// Budget for interactive MySQL browser enumeration (`lightweight` listing and the
+/// object list it feeds).
+///
+/// The driver's historical `BROWSER_METADATA_TIMEOUT` (5s) is a floor, not a ceiling:
+/// enumeration follows the session query timeout, the only timeout users can already
+/// tune for metadata-heavy catalogs, and stays bounded when the server timeout is
+/// disabled (0) instead of falling back to the hard-coded 5s. With default/unset
+/// settings this resolves to the historical 5s, so fast links keep the snappy
+/// behavior and #14139's budget contract is unchanged.
+fn mysql_browser_interactive_budget(config: Option<&ConnectionConfig>) -> Duration {
+    let Some(config) = config else {
+        return Duration::from_secs(5);
+    };
+    mysql_browser_explicit_budget(config).max(Duration::from_secs(5))
+}
+
+fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Mysql
+        && config
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"))
+        && !db::mysql_compatible::uses_show_metadata(config)
+        && !is_mycat_config(config)
+        && mysql_table_list_source_for_config(Some(config)) != MysqlTableListSource::ShowFullTables
+}
+
+/// Optional browser loading policy; omission retains the existing metadata contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn list_objects_core_with_loading_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    options: &MetadataReadOptions,
+    lightweight: Option<bool>,
+) -> Result<Vec<db::ObjectInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if let Some(lightweight) = lightweight.filter(|_| config.as_ref().is_some_and(is_native_mysql_browser_config)) {
+        let lightweight_comment = mysql_lightweight_comment_for_config(config.as_ref());
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        if matches!(
+            clone_metadata_pool(state, &pool_key).await,
+            Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
+        ) {
+            // `lightweight` selects the cheaper query shape, not a separate wall clock:
+            // both paths follow the session query timeout.
+            let budget = mysql_browser_interactive_budget(config.as_ref());
+            return retry_metadata_connection(state, connection_id, Some(database), || async {
+                let pool_key =
+                    state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+                let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) =
+                    clone_metadata_pool(state, &pool_key).await
+                else {
+                    return Err("MySQL metadata pool unavailable".to_string());
+                };
+                let can_page = filter.is_none_or(|value| value.trim().is_empty())
+                    && table_name_filter.is_none_or(|filter| filter.is_empty());
+                let result = db::mysql::list_objects_for_browser(
+                    &pool,
+                    database,
+                    object_types,
+                    if can_page { limit } else { None },
+                    if can_page { offset } else { None },
+                    lightweight,
+                    lightweight_comment,
+                    budget,
+                )
+                .await?;
+                Ok(filter_object_infos(
+                    result.objects,
+                    filter,
+                    limit,
+                    if result.paging_applied { Some(0) } else { offset },
+                    object_types,
+                    table_name_filter,
+                ))
+            })
+            .await;
+        }
+    }
+    list_objects_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        options,
     )
     .await
 }
@@ -8030,7 +8618,10 @@ async fn completion_assistant_fallback_core(
         )
         .await?;
         for table in tables {
-            let kind = if table.table_type.to_uppercase().contains("VIEW") {
+            let normalized_table_type = table.table_type.to_ascii_uppercase().replace(' ', "_");
+            let kind = if normalized_table_type == "MATERIALIZED_VIEW" {
+                db::CompletionAssistantCandidateKind::MaterializedView
+            } else if normalized_table_type.contains("VIEW") {
                 db::CompletionAssistantCandidateKind::View
             } else {
                 db::CompletionAssistantCandidateKind::Table
@@ -8332,7 +8923,13 @@ async fn list_object_statistics_once(
                 let include_mysql_details = db_config.as_ref().is_some_and(|config| {
                     config.db_type == DatabaseType::Mysql && !db::mysql_compatible::uses_show_metadata(config)
                 });
-                db::mysql::list_object_statistics(p, database, include_mysql_details).await
+                db::mysql::list_object_statistics_with_budget(
+                    p,
+                    database,
+                    include_mysql_details,
+                    db_config.as_ref().is_some_and(is_native_mysql_browser_config),
+                )
+                .await
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => Ok(vec![]),
@@ -10916,6 +11513,18 @@ async fn get_table_ddl_core_with_options(
                 .await,
             ));
         }
+        if database_type == Some(DatabaseType::Postgres) {
+            return enrich_postgres_view_ddl_with_comments(
+                state,
+                connection_id,
+                database,
+                schema,
+                table,
+                &sanitize_ddl_string(ddl),
+                client_session_id,
+            )
+            .await;
+        }
         return Ok(sanitize_ddl_string(ddl));
     }
     if matches!(object_type, Some(db::ObjectSourceKind::MaterializedView)) {
@@ -10930,7 +11539,21 @@ async fn get_table_ddl_core_with_options(
             None,
         )
         .await?;
-        return Ok(sanitize_ddl_string(source.source));
+        let ddl = sanitize_ddl_string(source.source);
+        if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::Postgres)
+        {
+            return enrich_postgres_view_ddl_with_comments(
+                state,
+                connection_id,
+                database,
+                schema,
+                table,
+                &ddl,
+                client_session_id,
+            )
+            .await;
+        }
+        return Ok(ddl);
     }
     if let Some(kind) = object_type.clone().filter(ddl_kind_uses_object_source) {
         // Routines, packages, triggers, types and the other schema objects have no
@@ -10949,10 +11572,56 @@ async fn get_table_ddl_core_with_options(
         }
     }
 
-    let ddl = retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
-        get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
-    })
-    .await?;
+    // A synonym has no table DDL of its own, so a table request that names one renders the
+    // table or view behind it. The resolved target is never a synonym, so the call below
+    // recurses at most once.
+    if object_type.is_none() {
+        if let Some(target) =
+            sqlserver_table_ddl_synonym_target(state, connection_id, database, schema, table, client_session_id).await
+        {
+            return Box::pin(get_table_ddl_core_with_options(
+                state,
+                connection_id,
+                database,
+                &target.schema,
+                &target.name,
+                target.object_type,
+                options,
+                client_session_id,
+            ))
+            .await;
+        }
+    }
+
+    let ddl =
+        match retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
+            get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
+        })
+        .await
+        {
+            Ok(ddl) => ddl,
+            Err(error) if object_type.is_none() && oracle_ddl_error_is_missing_object(&error) => {
+                match oracle_table_ddl_synonym_target(state, connection_id, database, schema, table, client_session_id)
+                    .await
+                {
+                    Some(target) => {
+                        return Box::pin(get_table_ddl_core_with_options(
+                            state,
+                            connection_id,
+                            database,
+                            &target.schema,
+                            &target.name,
+                            target.object_type,
+                            options,
+                            client_session_id,
+                        ))
+                        .await;
+                    }
+                    None => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
 
     let db_config = connection_config(state, connection_id).await;
     if should_append_oracle_style_comment_ddl(db_config.as_ref()) {
@@ -10974,6 +11643,94 @@ async fn get_table_ddl_core_with_options(
     } else {
         Ok(sanitize_ddl_string(ddl))
     }
+}
+
+/// Whether a table DDL failure says the name matched no table, view or materialized view, the
+/// only failure a synonym can explain. Denied access, a missing source and every other error
+/// are returned without further metadata calls. The Oracle agent reports a dictionary miss as
+/// `object not found`, and `DBMS_METADATA` reports one as `ORA-31603`.
+fn oracle_ddl_error_is_missing_object(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("object not found") || error.contains("ora-31603")
+}
+
+/// The object whose DDL stands in for a synonym's.
+#[derive(Debug, Clone)]
+struct SynonymDdlTarget {
+    schema: String,
+    name: String,
+    object_type: Option<db::ObjectSourceKind>,
+}
+
+/// SQL Server keeps synonyms in the same namespace as tables and views, so a synonym never
+/// hides a table of the same name and the lookup can run before the table DDL. A failed
+/// lookup keeps the previous behaviour.
+async fn sqlserver_table_ddl_synonym_target(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Option<SynonymDdlTarget> {
+    if connection_config(state, connection_id).await?.db_type != DatabaseType::SqlServer {
+        return None;
+    }
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await.ok()?;
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let client = extract_pool!(pool_handle.as_ref(), SqlServer)?;
+    let mut client = lock_sqlserver_metadata_client(&client).await.ok()?;
+    match db::sqlserver::resolve_synonym_target(&mut client, schema, table).await {
+        Ok(target) => target.map(|target| SynonymDdlTarget {
+            schema: target.schema,
+            name: target.name,
+            object_type: target.is_view.then_some(db::ObjectSourceKind::View),
+        }),
+        Err(error) => {
+            log::debug!(
+                "[schema][sqlserver:get_table_ddl:synonym-lookup-failed] connection_id={connection_id} database={database} schema={schema} table={table} error={error}"
+            );
+            None
+        }
+    }
+}
+
+/// Oracle resolves a name to the requested schema's own object before any private or PUBLIC
+/// synonym, so the synonym is only looked up once the table DDL fails. The column reader
+/// already follows synonym chains and reports the local object it reached; a database link
+/// target, a missing target, or an object that is not a table, view or materialized view
+/// resolves to nothing and the original error stands.
+async fn oracle_table_ddl_synonym_target(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Option<SynonymDdlTarget> {
+    let config = connection_config(state, connection_id).await?;
+    if config.db_type != DatabaseType::Oracle && !is_oracle_external_driver_config(&config) {
+        return None;
+    }
+    let columns =
+        get_columns_core_for_session(state, connection_id, database, schema, table, client_session_id).await.ok()?;
+    let column = columns.first()?;
+    let (Some(target_schema), Some(target_name)) =
+        (column.resolved_schema.as_deref(), column.resolved_table.as_deref())
+    else {
+        return None;
+    };
+    if target_schema.eq_ignore_ascii_case(schema) && target_name == table {
+        return None;
+    }
+    let object_type = match column.resolved_object_type.as_deref() {
+        Some("TABLE") => None,
+        Some("VIEW") => Some(db::ObjectSourceKind::View),
+        Some("MATERIALIZED VIEW") => Some(db::ObjectSourceKind::MaterializedView),
+        _ => return None,
+    };
+    Some(SynonymDdlTarget { schema: target_schema.to_string(), name: target_name.to_string(), object_type })
 }
 
 pub(crate) fn sanitize_ddl_string(mut ddl: String) -> String {
@@ -11306,7 +12063,7 @@ fn object_types_include_packages(object_types: Option<&[String]>) -> (bool, bool
 /// Used to keep agent errors visible: the native PostgreSQL fallback never
 /// lists custom types, so running it for a dedicated type request would mask a
 /// real catalog failure as an empty type group.
-fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
+pub(super) fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
     object_types.is_some_and(|types| {
         !types.is_empty() && types.iter().all(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY"))
     })
@@ -11888,6 +12645,18 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
 /// procedures either, so this matches plain functions only).
 const POSTGRES_LEGACY_ROUTINE_FILTER: &str = " AND NOT p.proisagg AND NOT p.proiswindow";
 
+fn postgres_routine_signature_filter(signature: Option<&str>, formatter: &str) -> String {
+    match signature {
+        // GaussDB's A compatibility mode treats the SQL literal '' as NULL,
+        // but the catalog formatter returns a non-NULL, zero-length string
+        // for a routine without arguments. Keep that identity distinct from
+        // an unspecified signature and from routines with only OUT arguments.
+        Some("") => format!(" AND length({formatter}(p.oid)) = 0"),
+        Some(value) => format!(" AND {formatter}(p.oid) = {}", sql_string(value)),
+        None => String::new(),
+    }
+}
+
 fn postgres_function_object_source_sql_with_legacy_signature(
     schema: &str,
     name: &str,
@@ -11901,9 +12670,7 @@ fn postgres_function_object_source_sql_with_legacy_signature(
     } else {
         POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
     };
-    let signature_filter = signature
-        .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
-        .unwrap_or_default();
+    let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_arguments");
     format!(
         "SELECT pg_get_functiondef(p.oid) \
          FROM pg_proc p \
@@ -11920,15 +12687,17 @@ fn postgres_function_object_source_sql_with_legacy_signature(
 fn postgres_function_object_source_sql_without_prokind(
     schema: &str,
     name: &str,
+    signature: Option<&str>,
     unwrap_opengauss_record: bool,
 ) -> String {
     let source_expression =
         if unwrap_opengauss_record { "(pg_get_functiondef(p.oid)).definition" } else { "pg_get_functiondef(p.oid)" };
+    let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_identity_arguments");
     format!(
         "SELECT {source_expression} \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER} \
+         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER}{signature_filter} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name)
@@ -11954,11 +12723,11 @@ fn opengauss_routine_source_fallback_sqls(
     // Keep both no-prokind expressions so a server with both compatibility differences still succeeds.
     fallbacks.push((
         "record-return without prokind",
-        postgres_function_object_source_sql_without_prokind(schema, name, true),
+        postgres_function_object_source_sql_without_prokind(schema, name, signature, true),
     ));
     fallbacks.push((
         "text-return without prokind",
-        postgres_function_object_source_sql_without_prokind(schema, name, false),
+        postgres_function_object_source_sql_without_prokind(schema, name, signature, false),
     ));
     fallbacks
 }
@@ -12022,9 +12791,7 @@ fn postgres_object_source_sql_inner(
             } else {
                 "pg_get_functiondef(p.oid)"
             };
-            let signature_filter = signature
-                .map(|value| format!(" AND pg_get_function_identity_arguments(p.oid) = {}", sql_string(value)))
-                .unwrap_or_default();
+            let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_identity_arguments");
             // PostgreSQL 11 renamed the routine-kind columns to prokind; older
             // servers (and some Gauss-family kernels) only have proisagg and
             // proiswindow, so a hardcoded prokind reference fails before the
@@ -12081,7 +12848,13 @@ fn postgres_object_source_sql_inner(
                 "SELECT concat_ws(E'\\n\\n', \
                    '-- auto-generated definition' || E'\\n' || \
                    'create sequence ' || quote_ident(c.relname) || E'\\n' || \
-                   '    as ' || pg_catalog.format_type(s.seqtypid, NULL) || ';', \
+                   '    as ' || pg_catalog.format_type(s.seqtypid, NULL) || E'\\n' || \
+                   '    increment by ' || s.seqincrement || E'\\n' || \
+                   '    minvalue ' || s.seqmin || E'\\n' || \
+                   '    maxvalue ' || s.seqmax || E'\\n' || \
+                   '    start with ' || s.seqstart || E'\\n' || \
+                   '    cache ' || s.seqcache || E'\\n' || \
+                   CASE WHEN s.seqcycle THEN '    cycle;' ELSE '    no cycle;' END, \
                    'alter sequence ' || quote_ident(c.relname) || ' owner to ' || quote_ident(pg_get_userbyid(c.relowner)) || ';', \
                    CASE WHEN owned.relname IS NOT NULL AND a.attname IS NOT NULL \
                      THEN 'alter sequence ' || quote_ident(c.relname) || ' owned by ' || quote_ident(owned.relname) || '.' || quote_ident(a.attname) || ';' \
@@ -12525,6 +13298,7 @@ pub async fn get_oracle_type_management_snapshot_with_objects_core(
                         schema: Some(object_owner.clone()),
                         name: object_name.clone(),
                         source: source.clone(),
+                        identifier_quote: None,
                     },
                 )
                 .ok()
@@ -12721,6 +13495,7 @@ pub fn build_oracle_type_management_sql(
             schema: Some(owner.clone()),
             name: name.clone(),
             source,
+            identifier_quote: None,
         };
         let (sql, fingerprint) = if object_type == db::ObjectSourceKind::Trigger {
             dbx_sql::object_source_sql::build_oracle_type_management_trigger_source(
@@ -12762,6 +13537,7 @@ pub fn build_oracle_type_management_sql(
                 schema: Some(input.owner.clone()),
                 name: input.name.clone(),
                 source,
+                identifier_quote: None,
             })?;
             let quoted = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
             return Ok(db::OracleTypeManagementSqlResult {
@@ -14031,7 +14807,7 @@ async fn postgres_object_source(
             if postgres_missing_prokind_error(&primary_err)
                 && matches!(object_type, db::ObjectSourceKind::Function | db::ObjectSourceKind::Procedure) =>
         {
-            let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, false);
+            let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, signature, false);
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -14425,7 +15201,7 @@ mod object_source_tests {
 
     #[test]
     fn builds_postgres_function_source_sql_without_prokind_for_legacy_catalogs() {
-        let sql = postgres_function_object_source_sql_without_prokind("public", "recalc_score", false);
+        let sql = postgres_function_object_source_sql_without_prokind("public", "recalc_score", None, false);
 
         assert_eq!(
             sql,
@@ -14451,7 +15227,7 @@ mod object_source_tests {
         );
 
         assert_eq!(
-            postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
+            postgres_function_object_source_sql_without_prokind("public", "recalc_score", None, true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
     }
@@ -14551,6 +15327,86 @@ mod object_source_tests {
         assert_eq!(missing_prokind.len(), 2);
         assert_eq!(missing_prokind[0].0, "record-return without prokind");
         assert_eq!(missing_prokind[1].0, "text-return without prokind");
+    }
+
+    #[test]
+    fn routine_source_filters_preserve_empty_and_nonempty_signatures() {
+        use rusqlite::OptionalExtension;
+
+        // Check identity selection independently of the server return format.
+        // Live GaussDB tests additionally cover A-mode's empty-literal behavior.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pg_namespace (oid INTEGER, nspname TEXT);
+             INSERT INTO pg_namespace VALUES (1, 'public');
+             CREATE TABLE pg_proc (oid INTEGER, pronamespace INTEGER, proname TEXT,
+                 prokind TEXT, proisagg BOOLEAN, proiswindow BOOLEAN);
+             INSERT INTO pg_proc VALUES
+                 (1, 1, 'probe', 'f', false, false),
+                 (2, 1, 'probe', 'f', false, false),
+                 (3, 1, 'probe', 'f', false, false),
+                 (4, 1, 'probe', 'f', false, false),
+                 (5, 1, 'probe', 'f', false, false);",
+        )
+        .unwrap();
+        let flags = rusqlite::functions::FunctionFlags::SQLITE_UTF8;
+        conn.create_scalar_function("pg_get_functiondef", 1, flags, |ctx| ctx.get::<i64>(0)).unwrap();
+        for formatter in ["pg_get_function_identity_arguments", "pg_get_function_arguments"] {
+            conn.create_scalar_function(formatter, 1, flags, |ctx| {
+                Ok(match ctx.get::<i64>(0)? {
+                    1 => Some("value integer"),
+                    2 => Some(""),
+                    3 => Some("OUT result text"),
+                    4 => None,
+                    _ => Some("\"it's quoted\" text"),
+                })
+            })
+            .unwrap();
+        }
+        for (signature, expected) in [
+            (None, Some(1)),
+            (Some(""), Some(2)),
+            (Some("value integer"), Some(1)),
+            (Some("OUT result text"), Some(3)),
+            (Some("\"it's quoted\" text"), Some(5)),
+            (Some(" "), None),
+            (Some("value boolean"), None),
+        ] {
+            let mut queries = vec![
+                postgres_object_source_sql("public", "probe", &ObjectSourceKind::Function, signature),
+                postgres_function_object_source_sql_with_legacy_signature(
+                    "public",
+                    "probe",
+                    &ObjectSourceKind::Function,
+                    signature,
+                    true,
+                ),
+            ];
+            for (_, sql) in opengauss_routine_source_fallback_sqls(
+                "public",
+                "probe",
+                &ObjectSourceKind::Function,
+                signature,
+                "Object source not found",
+            ) {
+                // SQLite cannot parse the record-return expression. The
+                // fallback's identity predicate must still be present there.
+                if signature == Some("") {
+                    assert!(sql.contains("length(pg_get_function_identity_arguments(p.oid)) = 0"));
+                }
+                if !sql.contains(".definition") {
+                    queries.push(sql);
+                }
+            }
+            for sql in queries {
+                assert!(!sql.contains("= ''"), "must not compare against an empty SQL literal: {sql}");
+                let actual = conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).optional().unwrap();
+                assert_eq!(actual, expected, "{sql}");
+            }
+        }
+        conn.execute("DELETE FROM pg_proc WHERE oid = 2", []).unwrap();
+        let sql = postgres_function_object_source_sql_without_prokind("public", "probe", Some(""), false);
+        assert_eq!(conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).optional().unwrap(), None);
     }
 
     #[test]
@@ -17030,6 +17886,21 @@ fn postgres_pool_serves_one_request_at_a_time(pool: &deadpool_postgres::Pool) ->
 /// 与并发执行的端到端耗时相同（一条连接本来也只能串行处理），但不会产生排队
 /// 导致的 checkout 超时。
 macro_rules! postgres_metadata_batch {
+    // Labeled form first: `("columns", future)` is also a valid tuple expression,
+    // so the unlabeled arm below would otherwise swallow it. A vendor kernel can
+    // reject one facet with an opaque message (`db error`), and an unlabeled batch
+    // gives the user nothing to act on.
+    ($pool:expr, $(($facet:literal, $call:expr)),+ $(,)?) => {{
+        if postgres_pool_serves_one_request_at_a_time($pool) {
+            Ok(($(
+                $call.await.map_err(|error| format!("{}: {error}", $facet))?,
+            )+))
+        } else {
+            tokio::try_join!($(
+                async { $call.await.map_err(|error| format!("{}: {error}", $facet)) }
+            ),+)
+        }
+    }};
     ($pool:expr, $($call:expr),+ $(,)?) => {{
         if postgres_pool_serves_one_request_at_a_time($pool) {
             Ok(($($call.await?,)+))
@@ -17048,14 +17919,14 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
     let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
         postgres_metadata_batch!(
             pool,
-            db::postgres::get_columns(pool, schema, table),
-            db::postgres::list_indexes(pool, schema, table),
-            db::postgres::list_foreign_keys(pool, schema, table),
-            db::postgres::list_constraints(pool, schema, table),
-            db::postgres::get_table_comment(pool, schema, table),
-            db::postgres::get_table_partition_info(pool, schema, table),
-            db::postgres::list_trigger_definitions(pool, schema, table),
-            db::postgres::list_check_constraints(pool, schema, table),
+            ("columns", db::postgres::get_columns(pool, schema, table)),
+            ("indexes", db::postgres::list_indexes(pool, schema, table)),
+            ("foreign keys", db::postgres::list_foreign_keys(pool, schema, table)),
+            ("constraints", db::postgres::list_constraints(pool, schema, table)),
+            ("table comment", db::postgres::get_table_comment(pool, schema, table)),
+            ("partition info", db::postgres::get_table_partition_info(pool, schema, table)),
+            ("triggers", db::postgres::list_trigger_definitions(pool, schema, table)),
+            ("check constraints", db::postgres::list_check_constraints(pool, schema, table)),
         )?;
     let partition_local_objects = if partition_info.is_partition {
         db::postgres::get_table_partition_local_objects(pool, schema, table).await?
@@ -17131,13 +18002,13 @@ pub async fn pg_ddl_with_partitions(
         local_objects_by_oid,
     ) = postgres_metadata_batch!(
         pool,
-        db::postgres::get_columns_for_relations(pool, &relations),
-        db::postgres::list_indexes_for_relations(pool, &relations),
-        db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs),
-        db::postgres::get_table_comments_for_relations(pool, &oids),
-        db::postgres::list_trigger_definitions_for_relations(pool, &oids),
-        db::postgres::list_check_constraints_for_relations(pool, &oids),
-        db::postgres::get_table_partition_local_objects_for_relations(pool, &oids),
+        ("columns", db::postgres::get_columns_for_relations(pool, &relations)),
+        ("indexes", db::postgres::list_indexes_for_relations(pool, &relations)),
+        ("foreign keys", db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs)),
+        ("table comment", db::postgres::get_table_comments_for_relations(pool, &oids)),
+        ("triggers", db::postgres::list_trigger_definitions_for_relations(pool, &oids)),
+        ("check constraints", db::postgres::list_check_constraints_for_relations(pool, &oids)),
+        ("partition info", db::postgres::get_table_partition_local_objects_for_relations(pool, &oids)),
     )?;
 
     // `list_foreign_keys_for_relations` is keyed by (schema, table) since its

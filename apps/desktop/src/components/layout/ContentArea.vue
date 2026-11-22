@@ -216,7 +216,7 @@ import type { ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
-import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDeleteId, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
@@ -1127,11 +1127,12 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
     }
     if (!changes.columns.includes(target.idColumn)) throw new Error("No _id column");
     for (const operation of buildMongoQueryResultOperations(changes, editTarget)) {
-      const id = serializeMongoDocumentId(operation.id);
       if (operation.kind === "delete") {
+        const canonicalDocument = tab.result?.mongo_copy_documents?.[operation.rowIndex] as Record<string, unknown> | undefined;
+        const id = serializeMongoDeleteId(operation.id, canonicalDocument?._id);
         await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id);
       } else {
-        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id, JSON.stringify(operation.update));
+        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(operation.id), JSON.stringify(operation.update));
       }
     }
   };

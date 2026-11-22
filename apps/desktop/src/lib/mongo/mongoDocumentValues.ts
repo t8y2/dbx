@@ -734,6 +734,20 @@ export function serializeMongoDocumentId(value: unknown): string {
   return String(value);
 }
 
+function hasReorderedMongoIdKeys(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasReorderedMongoIdKeys);
+  if (!value || typeof value !== "object") return false;
+  // JavaScript enumerates array-index keys in numeric order, which can change BSON equality.
+  return Object.entries(value).some(([key, nested]) => (String(Number(key) >>> 0) === key && key !== "4294967295") || hasReorderedMongoIdKeys(nested));
+}
+
+export function serializeMongoDeleteId(value: unknown, canonicalId: unknown): string {
+  if (canonicalId && typeof canonicalId === "object" && !Array.isArray(canonicalId) && !Object.keys(canonicalId).some((key) => key.startsWith("$")) && !hasReorderedMongoIdKeys(canonicalId)) {
+    return `__dbx_mongo_embedded_id__${JSON.stringify(canonicalId)}`;
+  }
+  return serializeMongoDocumentId(value);
+}
+
 export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
   if (isMongoExtendedJsonId(value)) return String(value.$numberLong ?? value.$oid);
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;

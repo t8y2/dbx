@@ -155,7 +155,7 @@ import { createQueryEditorSelectionCaseShortcutBindings } from "@/lib/editor/que
 import { createQueryEditorExecutionShortcutBindings, createQueryEditorExecutionShortcutHandler, createQueryEditorPostCompositionKeyGuard } from "@/lib/editor/queryEditorExecutionShortcut";
 import { supportsPlDebugRoutine, supportsQueryEditorBlockComments, supportsSqlInListPaste } from "@/lib/database/databaseFeatureSupport";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { launchPlDebugAnonymous } from "@/components/debug/plDebugLaunch";
+import { launchPlDebug, launchPlDebugAnonymous } from "@/components/debug/plDebugLaunch";
 import { queryContextObjectRoute, queryTableCandidateAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -1384,14 +1384,19 @@ const contextMenuActions: QueryEditorContextMenuActions = {
     const currentView = view.value;
     if (!currentView || !props.connectionId || !props.database) return;
     const selection = currentView.state.selection.main;
-    void launchPlDebugAnonymous({
+    const selectedText = currentView.state.doc.sliceString(selection.from, selection.to);
+    const connectionTarget = {
       connectionId: props.connectionId,
       database: props.database,
       databaseType: effectiveDatabaseTypeForConnection(connectionStore.getConfig(props.connectionId)) ?? props.databaseType,
       schema: props.schema,
-      selectedText: currentView.state.doc.sliceString(selection.from, selection.to),
-      documentText: currentView.state.doc.toString(),
-    });
+    };
+    if (!selectedText.trim() && props.debugRoutine) {
+      const { schema, name, objectType } = props.debugRoutine;
+      void launchPlDebug({ ...connectionTarget, schema: schema ?? props.schema, objectName: name, objectType });
+      return;
+    }
+    void launchPlDebugAnonymous({ ...connectionTarget, selectedText, documentText: currentView.state.doc.toString() });
   },
   executeFromContextMenu,
   executeAllFromContextMenu,

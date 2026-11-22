@@ -1891,13 +1891,20 @@ defineExpose({
             </div>
 
             <div v-for="row in displayRows" :key="row.type === 'connection' ? row.key : row.type + '-' + (row.type === 'folder' ? row.folder.id : row.file.id)">
-              <div v-if="row.type === 'connection'" class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group hover:bg-accent/40" :data-sql-library-connection="row.connectionId || 'unassociated'" @click="toggleConnection(row.connectionId)">
+              <button
+                v-if="row.type === 'connection'"
+                type="button"
+                class="relative flex w-full items-center gap-1 py-1.5 pr-2 text-left text-[13px] group hover:bg-accent/40 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                :data-sql-library-connection="row.connectionId || 'unassociated'"
+                :aria-expanded="isConnectionExpanded(row.connectionId)"
+                @click="toggleConnection(row.connectionId)"
+              >
                 <ChevronRight v-if="!isConnectionExpanded(row.connectionId)" class="h-4 w-4 shrink-0 text-muted-foreground" />
                 <ChevronDown v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
                 <Database class="h-4 w-4 shrink-0" :style="{ color: connectionColor(row.connectionId) }" />
                 <span class="min-w-0 flex-1 truncate font-medium">{{ row.label }}</span>
                 <span class="shrink-0 text-muted-foreground">({{ row.fileCount }})</span>
-              </div>
+              </button>
               <div
                 v-else-if="row.type === 'folder'"
                 class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"

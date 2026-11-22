@@ -3,6 +3,7 @@ import { createApp, nextTick, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import { saveSavedSqlDisplayMode } from "@/lib/savedSql/savedSqlUiState";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 import SqlLibraryPanel from "../SqlLibraryPanel.vue";
@@ -123,4 +124,15 @@ describe("SqlLibraryPanel expanded state persistence (issue #13593)", () => {
     const second = await mountLibrary(folders, files);
     expect(visibleFileIds(second.host)).toEqual([]);
   });
+});
+
+it("exposes a native disclosure button for a connection group", async () => {
+  saveSavedSqlDisplayMode("connection");
+  const { host } = await mountLibrary([], [makeFile("query", "Query")]);
+  const button = host.querySelector<HTMLButtonElement>('button[data-sql-library-connection="c1"]')!;
+  expect(button.getAttribute("aria-expanded")).toBe("false");
+  button.click();
+  await nextTick();
+  expect(button.getAttribute("aria-expanded")).toBe("true");
+  expect(visibleFileIds(host)).toEqual(["query"]);
 });

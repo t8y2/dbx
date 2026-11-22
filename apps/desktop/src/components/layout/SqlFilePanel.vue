@@ -1634,10 +1634,12 @@ function clearContextTarget() {
               {{ searchQuery ? t("grid.noSearchResults") : t("sqlFileTree.noSqlFiles") }}
             </div>
             <div v-else v-for="group in connectionFileGroups" :key="group.key" class="border-b last:border-b-0">
-              <div
+              <button
+                type="button"
                 data-sql-file-row="true"
-                class="flex cursor-default items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] select-none"
+                class="flex w-full items-center gap-1 px-2 py-1.5 text-left text-[11px] font-medium text-muted-foreground bg-[color-mix(in_oklab,var(--muted)_10%,var(--background))] select-none focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-ring"
                 :data-sql-file-connection="group.connectionId || 'unassociated'"
+                :aria-expanded="isConnectionExpanded(group.connectionId)"
                 @click.stop="toggleConnection(group.connectionId)"
               >
                 <ChevronRight v-if="!isConnectionExpanded(group.connectionId)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1645,7 +1647,7 @@ function clearContextTarget() {
                 <FolderOpen class="h-3.5 w-3.5 shrink-0 text-amber-500" :style="{ color: connectionStore.getConfig(group.connectionId)?.color }" />
                 <span class="truncate flex-1">{{ group.label }}</span>
                 <span class="shrink-0 text-muted-foreground">({{ group.rows.length }})</span>
-              </div>
+              </button>
               <div v-if="isConnectionExpanded(group.connectionId)">
                 <template v-for="row in group.rows" :key="row.id">
                   <div

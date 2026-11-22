@@ -116,6 +116,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   dataGridFreezeFirstColumn: "data",
   dataGridBooleanDisplayMode: "data",
   numericColumnRightAlign: "data",
+  globalNumberGrouping: "data",
   structureEditorDensity: "data",
   tableInfoActiveTab: "data",
   tableInfoDrawerPinned: "data",

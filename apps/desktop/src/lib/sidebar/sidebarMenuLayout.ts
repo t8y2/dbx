@@ -129,6 +129,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.damengJobAdmin",
     "contextMenu.vacuumTable",
     "contextMenu.mysqlAutoIncrement",
+    "contextMenu.mysqlTableMaintenance",
   ],
 };
 

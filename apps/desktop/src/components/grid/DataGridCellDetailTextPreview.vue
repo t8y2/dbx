@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { buildSafeHtmlPreview } from "@/lib/common/safeHtmlPreview";
+import { buildStaticHtmlPreview } from "@/lib/common/safeHtmlPreview";
 import { useToast } from "@/composables/useToast";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -29,7 +29,7 @@ const htmlPreview = ref(false);
 // 只读 presentation：结果不回写 detail.value / rawValue，不进入编辑与提交路径。
 const preview = computed(() => binaryCellTextPreview(props.value, encoding.value, props.columnType, props.databaseType, props.incomplete));
 const decodedText = computed(() => (preview.value.ok ? preview.value.text : ""));
-const htmlDocument = computed(() => (htmlPreview.value && preview.value.ok ? buildSafeHtmlPreview(decodedText.value) : ""));
+const htmlDocument = computed(() => (htmlPreview.value && preview.value.ok ? buildStaticHtmlPreview(decodedText.value) : ""));
 const byteLength = computed(() => (preview.value.ok ? preview.value.byteLength : 0));
 const errorKey = computed(() => (preview.value.ok ? "" : `grid.binaryTextPreviewErrors.${preview.value.error}`));
 

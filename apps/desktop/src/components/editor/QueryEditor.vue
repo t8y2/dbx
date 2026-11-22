@@ -36,6 +36,7 @@ import { useI18n } from "vue-i18n";
 
 import { EditorState as CodeMirrorEditorState, Transaction } from "@codemirror/state";
 import type { Text } from "@codemirror/state";
+import { sameStatementExecutionMarkers, type StatementExecutionMarker } from "@/lib/tabs/tabPresentation";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import { useQueryEditorBatchSelection } from "./useQueryEditorBatchSelection";
@@ -118,6 +119,7 @@ import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
+import { highlightActiveCursorLineGutter } from "@/lib/editor/codemirrorActiveLineGutter";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { applyVimConfig, isVimMappingCommand, loadVimConfig } from "@/lib/editor/vimConfig";
 import { createVimImeGuard } from "@/lib/editor/vimImeGuard";
@@ -2228,7 +2230,6 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
       rectangularSelection,
       hoverTooltip,
       tooltips,
-      highlightActiveLineGutter,
       highlightSpecialChars,
       drawSelection,
       dropCursor,
@@ -2336,7 +2337,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
         createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
         currentStatementFrameExtension,
-        highlightActiveLineGutter(),
+        highlightActiveCursorLineGutter(),
         keepGuttersAttachedDuringSync(ViewPlugin),
         highlightSpecialChars(),
         initializedRuntime.historyResetComp.of(history()),
@@ -2557,7 +2558,8 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
           blur(_event, currentView) {
             imeCompositionActive = false;
             imeCompositionRecovered = false;
-            documentState.recordSelection(currentView);
+            // Focus moving to the sidebar or toolbar is when the tab's selection is read (locate at cursor).
+            documentState.commitSelection(currentView);
             return false;
           },
           compositionstart() {
@@ -2806,13 +2808,24 @@ watch([() => props.executionError, () => props.executionErrorSql, () => props.ex
   reconfigureDiagnostics();
 });
 
+// The parent recomputes the markers from the tab SQL, so every keystroke hands
+// down a fresh (almost always empty) array. Dispatching it anyway cost a whole
+// extra editor update per keystroke; the gutter field already clears itself on
+// every edit, so only a set that differs from what the field holds is sent.
+let dispatchedStatementExecutionMarkers: { doc: Text; markers: StatementExecutionMarker[] } | null = null;
 watch(
   () => props.statementExecutionMarkers ?? [],
   (markers) => {
-    if (!view.value || !codeMirrorRuntime.setStatementExecutionMarkersEffect) return;
-    view.value.dispatch({
+    const currentView = view.value;
+    if (!currentView || !codeMirrorRuntime.setStatementExecutionMarkersEffect) return;
+    const dispatched = dispatchedStatementExecutionMarkers;
+    // After an edit the field is empty again, whatever was dispatched before it.
+    const held = dispatched && dispatched.doc === currentView.state.doc ? dispatched.markers : [];
+    if (sameStatementExecutionMarkers(held, markers)) return;
+    currentView.dispatch({
       effects: codeMirrorRuntime.setStatementExecutionMarkersEffect.of(markers),
     });
+    dispatchedStatementExecutionMarkers = { doc: currentView.state.doc, markers: markers.map((marker) => ({ ...marker })) };
   },
   { deep: true },
 );

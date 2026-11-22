@@ -1158,7 +1158,8 @@ const executableSql = computed(() => {
 
 // Descendants only need to know whether there is anything to run. Handing them the SQL text itself
 // would re-render the whole editor shell on every keystroke.
-const hasExecutableSql = computed(() => executableSql.value.trim().length > 0);
+// `/\S/` stops at the first character that is not whitespace; `trim()` copied the whole script per keystroke.
+const hasExecutableSql = computed(() => /\S/.test(executableSql.value));
 
 async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, executionTab?: QueryTab) {
   const tab = executionTab ?? activeTab.value;

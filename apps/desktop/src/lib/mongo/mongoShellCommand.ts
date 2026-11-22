@@ -1,5 +1,5 @@
 import type { QueryResult } from "@/types/database";
-import { isMongoExtendedJsonId, mongoDocumentGridValue, mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
+import { isMongoExtendedJsonId, mongoDocumentGridColumnTypes, mongoDocumentGridValue, mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
   chainedMethodCallPattern,
   describeMongoCommandParseFailure as describeMongoCommandParseFailureBasic,
@@ -1246,11 +1246,17 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
     return columns.map((column) => (column === "value" ? toCellValue(doc, documentGridValues) : null));
   });
 
+  const canonicalDocuments = copyDocuments?.length === documents.length ? copyDocuments : undefined;
+  // Query cells keep their existing text for editing and export. Only canonical
+  // BSON dates provide evidence that the column should use date display settings.
+  const dateColumnTypes = documentGridValues && canonicalDocuments ? mongoDocumentGridColumnTypes(canonicalDocuments.filter(isRecord), columns).map((type) => (type === "datetime" ? type : "")) : [];
+
   return {
     columns,
     rows,
+    ...(dateColumnTypes.includes("datetime") ? { column_types: dateColumnTypes } : {}),
     mongo_documents: documents,
-    ...(copyDocuments?.length === documents.length ? { mongo_copy_documents: copyDocuments } : {}),
+    ...(canonicalDocuments ? { mongo_copy_documents: canonicalDocuments } : {}),
     ...(totalIsExact ? {} : { total_is_exact: false }),
     affected_rows: total,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),

@@ -7311,12 +7311,13 @@ const aiTestErrorCategoryKeys: Record<string, string> = {
   network: "ai.testErrorNetwork",
   unknown: "ai.testErrorUnknown",
 };
-const aiTestErrorPresentation = computed(() => {
-  const match = aiTestError.value.match(/^\[([^\]]+)]\s*(.*)$/s);
-  if (!match) return { summary: "", detail: aiTestError.value };
+function aiTestErrorPresentationOf(error: string) {
+  const match = error.match(/^\[([^\]]+)]\s*(.*)$/s);
+  if (!match) return { summary: "", detail: error };
   const key = aiTestErrorCategoryKeys[match[1]];
-  return key ? { summary: t(key), detail: match[2] } : { summary: "", detail: aiTestError.value };
-});
+  return key ? { summary: t(key), detail: match[2] } : { summary: "", detail: error };
+}
+const aiTestErrorPresentation = computed(() => aiTestErrorPresentationOf(aiTestError.value));
 const aiTestErrorDisplay = computed(() => [aiTestErrorPresentation.value.summary, aiTestErrorPresentation.value.detail].filter(Boolean).join(" "));
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
 const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
@@ -7794,6 +7795,7 @@ function aiDeleteConfig(id: string) {
 
 async function aiConfirmDeleteConfig() {
   if (aiDeleteConfigId.value) {
+    aiClearListTestState(aiDeleteConfigId.value);
     try {
       await settingsStore.deleteAiConfig(aiDeleteConfigId.value);
     } catch (e: any) {
@@ -8026,6 +8028,37 @@ async function copyAiTestError() {
   window.setTimeout(() => {
     aiTestErrorCopied.value = false;
   }, 1500);
+}
+
+// #15393: per-config test from the AI config list. Reuses the same backend
+// probe as the edit-mode footer button, keyed by config id so each row keeps
+// its own status while a test is in flight.
+interface AiListTestState {
+  status: "testing" | "success" | "error";
+  latencyMs: number | null;
+  error: string;
+}
+const aiListTestStates = ref<Record<string, AiListTestState>>({});
+
+function aiListTestErrorTitle(configId: string): string {
+  const error = aiListTestStates.value[configId]?.error ?? "";
+  const presentation = aiTestErrorPresentationOf(error);
+  return [presentation.summary, presentation.detail].filter(Boolean).join(" ");
+}
+
+async function aiTestConfigFromList(config: AiConfigItem) {
+  if (aiListTestStates.value[config.id]?.status === "testing") return;
+  aiListTestStates.value[config.id] = { status: "testing", latencyMs: null, error: "" };
+  try {
+    const result = await aiTestConnection(config);
+    aiListTestStates.value[config.id] = { status: "success", latencyMs: result.latencyMs ?? null, error: "" };
+  } catch (e) {
+    aiListTestStates.value[config.id] = { status: "error", latencyMs: null, error: translateBackendError(t, e) };
+  }
+}
+
+function aiClearListTestState(configId: string) {
+  delete aiListTestStates.value[configId];
 }
 
 async function ensureCliMcpStatus() {
@@ -12630,6 +12663,17 @@ LIMIT 100;</pre>
                       </div>
                     </div>
                     <div class="flex items-center gap-1">
+                      <Button type="button" size="sm" variant="ghost" :disabled="aiListTestStates[config.id]?.status === 'testing'" @click="aiTestConfigFromList(config)">
+                        <Loader2 v-if="aiListTestStates[config.id]?.status === 'testing'" class="mr-1 h-3 w-3 animate-spin" />
+                        {{ t("connection.test") }}
+                      </Button>
+                      <span v-if="aiListTestStates[config.id]?.status === 'success'" class="shrink-0 text-xs text-green-500">
+                        {{ t("connection.testSuccess") }}
+                        <span v-if="aiListTestStates[config.id]?.latencyMs != null" class="text-green-500/70">{{ aiListTestStates[config.id]?.latencyMs }}ms</span>
+                      </span>
+                      <span v-else-if="aiListTestStates[config.id]?.status === 'error'" class="max-w-[16rem] truncate text-xs text-destructive" :title="aiListTestErrorTitle(config.id)">
+                        {{ aiListTestStates[config.id]?.error }}
+                      </span>
                       <Button v-if="!config.isDefault" type="button" size="sm" variant="ghost" @click="aiSetDefaultConfig(config.id)">
                         {{ t("ai.setDefault") }}
                       </Button>

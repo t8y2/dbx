@@ -773,6 +773,7 @@ mod tests {
             schema: Some("APP".into()),
             name: "T".into(),
             source: "BEGIN NULL; END;".into(),
+            identifier_quote: None,
         })
         .unwrap();
         assert_eq!(legacy, ["BEGIN NULL; END;"]);

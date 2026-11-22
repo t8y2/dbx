@@ -1,6 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildSidebarDdlTemplateSql, formatSidebarDdlTemplateForDisplay, sidebarDdlTargetsForExecutionContext } from "@/lib/sidebar/sidebarDdlTemplate";
 
+const KEEP_DDL_TEXT = { includeDdlStorage: true, compactDdlSql: false };
+
+// Oracle display DDL as returned for a commented table (statements are separated by blank lines).
+const ORACLE_COMMENTED_TABLE_DDL = [
+  'CREATE TABLE "APP"."ORDERS" ("ID" NUMBER(10, 0), "NOTE" VARCHAR2(100)) SEGMENT CREATION DEFERRED TABLESPACE "USERS";',
+  "",
+  'COMMENT ON TABLE "APP"."ORDERS" IS \'Orders\';',
+  "",
+  'COMMENT ON COLUMN "APP"."ORDERS"."ID" IS \'Id\';',
+  "",
+  'COMMENT ON COLUMN "APP"."ORDERS"."NOTE" IS \'Note\';',
+].join("\n");
+
 describe("sidebar DDL template", () => {
   it("preserves the single-target SQL", async () => {
     const sql = await buildSidebarDdlTemplateSql(
@@ -30,7 +43,7 @@ describe("sidebar DDL template", () => {
     const sql = await buildSidebarDdlTemplateSql(
       [{ databaseType: "oracle" as const, catalog: undefined }],
       async () => 'CREATE TABLE "SYSTEM"."TEST" ("ID" NUMBER)',
-      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "oracle", target.databaseType, false, undefined, true, target.catalog),
+      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "oracle", target.databaseType, false, undefined, true, KEEP_DDL_TEXT, target.catalog),
     );
 
     expect(sql).toBe('CREATE TABLE "TEST" ("ID" NUMBER)');
@@ -44,10 +57,20 @@ describe("sidebar DDL template", () => {
     const sql = await buildSidebarDdlTemplateSql(
       targets,
       async (target) => `CREATE TABLE \`iceberg\`.\`analytics\`.\`${target.name}\` (\`id\` bigint)`,
-      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "mysql", "starrocks", false, undefined, false, target.catalog),
+      async (ddl, target) => formatSidebarDdlTemplateForDisplay(ddl, "mysql", "starrocks", false, undefined, false, KEEP_DDL_TEXT, target.catalog),
     );
 
     expect(sql).toBe("CREATE TABLE iceberg.analytics.events (id bigint);\n\nCREATE TABLE iceberg.analytics.sessions (id bigint);\n");
+  });
+
+  it("applies the DDL viewer text preferences to Oracle DDL", () => {
+    const sql = formatSidebarDdlTemplateForDisplay(ORACLE_COMMENTED_TABLE_DDL, "oracle", "oracle", true, undefined, true, { includeDdlStorage: false, compactDdlSql: true });
+
+    expect(sql).toBe(['CREATE TABLE "APP"."ORDERS" ("ID" NUMBER(10, 0), "NOTE" VARCHAR2(100));', 'COMMENT ON TABLE "APP"."ORDERS" IS \'Orders\';', 'COMMENT ON COLUMN "APP"."ORDERS"."ID" IS \'Id\';', 'COMMENT ON COLUMN "APP"."ORDERS"."NOTE" IS \'Note\';'].join("\n"));
+  });
+
+  it("keeps Oracle blank lines and storage clauses when the preferences are off", () => {
+    expect(formatSidebarDdlTemplateForDisplay(ORACLE_COMMENTED_TABLE_DDL, "oracle", "oracle", true, undefined, true, KEEP_DDL_TEXT)).toBe(ORACLE_COMMENTED_TABLE_DDL);
   });
 
   it("keeps DDL targets in the active SQL execution context", () => {

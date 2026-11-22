@@ -424,6 +424,7 @@ pub fn build_table_data_select_sql_with_database(
             &options.columns,
             tdengine_should_include_tbname(database_type, options.table_type.as_deref()),
             options.identifier_quote.as_deref(),
+            options.project_columns,
         )
     };
     let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
@@ -514,6 +515,14 @@ pub fn build_table_data_select_sql_with_database(
         TablePaginationStrategy::Unbounded => {
             format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order}")
         }
+        TablePaginationStrategy::TeradataTop => build_teradata_table_select_sql(
+            &table_alias,
+            &where_clause,
+            order_by,
+            &options.columns,
+            limit,
+            options.offset.unwrap_or(0),
+        ),
         TablePaginationStrategy::SqlServerTop => build_sqlserver_table_select_sql(
             &table_alias,
             &where_clause,
@@ -780,6 +789,11 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
         TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
             format!("SELECT {select_columns} FROM {table}{order_by} FETCH FIRST {limit} ROWS ONLY")
         }
+        // #14604: this summary pagination path has no offset (first page only);
+        // pages past the first go through the row-number template above.
+        TablePaginationStrategy::TeradataTop => {
+            format!("SELECT TOP {limit} {select_columns} FROM {table}{order_by}")
+        }
         TablePaginationStrategy::SqlServerTop => {
             format!("SELECT TOP ({limit}) {select_columns} FROM {table}{order_by}")
         }
@@ -789,6 +803,39 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
             format!("SELECT {select_columns} FROM {table}{order_by} LIMIT {limit};")
         }
     }
+}
+
+/// #14604: Teradata has no ANSI `LIMIT` (error 3706). The first page takes
+/// `SELECT TOP n`; pages past the first wrap the ordered source in a
+/// `ROW_NUMBER()` derived table. Identifiers keep the ANSI double-quote form.
+pub(super) fn build_teradata_table_select_sql(
+    table: &str,
+    where_clause: &str,
+    order_by: Option<&str>,
+    columns: &[String],
+    limit: usize,
+    offset: usize,
+) -> String {
+    let columns_sql = if columns.is_empty() {
+        "*".to_string()
+    } else {
+        columns
+            .iter()
+            .map(|column| quote_table_identifier(Some(DatabaseType::Teradata), column))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if offset == 0 {
+        let order = order_by.map(|order| format!(" ORDER BY {order}")).unwrap_or_default();
+        return format!("SELECT TOP {limit} {columns_sql} FROM {table}{where_clause}{order}");
+    }
+    // The window needs an ORDER BY; position 1 keeps the SQL valid when the caller
+    // has no preferred order.
+    let window = order_by.map(|order| format!("ORDER BY {order}")).unwrap_or_else(|| "ORDER BY 1".to_string());
+    let end = offset + limit;
+    format!(
+        "SELECT {columns_sql} FROM (SELECT {columns_sql}, ROW_NUMBER() OVER ({window}) AS \"__dbx_row_num\" FROM {table}{where_clause}) \"dbx_page\" WHERE \"__dbx_row_num\" > {offset} AND \"__dbx_row_num\" <= {end} ORDER BY \"__dbx_row_num\""
+    )
 }
 
 fn victoriametrics_metric_selector(metric_name: &str) -> String {
@@ -888,6 +935,7 @@ pub(super) fn build_select_columns(
     columns: &[String],
     include_tdengine_tbname: bool,
     identifier_quote: Option<&str>,
+    project_columns: bool,
 ) -> String {
     if columns.is_empty() {
         if database_type == Some(DatabaseType::Tdengine) && include_tdengine_tbname {
@@ -932,23 +980,26 @@ pub(super) fn build_select_columns(
     // OSCAR table previews keep their explicit projection: switching the
     // pagination form from ROWNUM to LIMIT/OFFSET must not also widen a
     // generated page to every column (#13515).
-    if !matches!(
-        database_type,
-        Some(
-            DatabaseType::Hive
-                | DatabaseType::Kyuubi
-                | DatabaseType::Impala
-                | DatabaseType::Argo
-                | DatabaseType::Transwarp
-                | DatabaseType::Oscar
+    // `project_columns` is the explicit opt-in for SQL the user reads or copies.
+    if !project_columns
+        && !matches!(
+            database_type,
+            Some(
+                DatabaseType::Hive
+                    | DatabaseType::Kyuubi
+                    | DatabaseType::Impala
+                    | DatabaseType::Argo
+                    | DatabaseType::Transwarp
+                    | DatabaseType::Oscar
+            )
         )
-    ) {
+    {
         return "*".to_string();
     }
     columns
         .iter()
         .map(|column| {
-            let ident = if database_type == Some(DatabaseType::Kyuubi) {
+            let ident = if database_type == Some(DatabaseType::Kyuubi) || project_columns {
                 quote_table_data_identifier(database_type, column, identifier_quote)
             } else {
                 quote_table_identifier(database_type, column)
@@ -1241,7 +1292,80 @@ mod tests {
             where_input: None,
             inject_default_time_series_where: false,
             include_row_id: false,
+            project_columns: false,
         }
+    }
+
+    #[test]
+    fn table_select_ignores_columns_unless_projection_is_requested() {
+        // Table loading keeps `SELECT *` for most engines even when the caller
+        // lists columns; only an explicit `project_columns` narrows the list.
+        let columns = vec!["id".to_string(), "item".to_string()];
+        for (database_type, schema, expected_star, expected_projection) in [
+            (
+                DatabaseType::Mysql,
+                "app",
+                "SELECT * FROM `app`.`orders` LIMIT 100;",
+                "SELECT `id`, `item` FROM `app`.`orders` LIMIT 100;",
+            ),
+            (
+                DatabaseType::Postgres,
+                "app",
+                "SELECT * FROM \"app\".\"orders\" LIMIT 100;",
+                "SELECT \"id\", \"item\" FROM \"app\".\"orders\" LIMIT 100;",
+            ),
+            (
+                DatabaseType::Sqlite,
+                "main",
+                "SELECT * FROM \"main\".\"orders\" LIMIT 100;",
+                "SELECT \"id\", \"item\" FROM \"main\".\"orders\" LIMIT 100;",
+            ),
+        ] {
+            let build = |project_columns| {
+                build_table_data_select_sql(TableDataSelectSqlOptions {
+                    database_type: Some(database_type),
+                    schema: Some(schema.to_string()),
+                    table_name: "orders".to_string(),
+                    columns: columns.clone(),
+                    project_columns,
+                    ..Default::default()
+                })
+            };
+            assert_eq!(build(false), expected_star, "{database_type:?}");
+            assert_eq!(build(true), expected_projection, "{database_type:?}");
+        }
+    }
+
+    #[test]
+    fn table_select_projection_keeps_where_order_and_pagination() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: Some("app".to_string()),
+            table_name: "orders".to_string(),
+            columns: vec!["id".to_string(), "status".to_string()],
+            project_columns: true,
+            where_input: Some("status = 4".to_string()),
+            order_by: Some("id DESC".to_string()),
+            limit: Some(100),
+            offset: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(
+            sql,
+            "SELECT `id`, `status` FROM `app`.`orders` WHERE (status = 4) ORDER BY id DESC LIMIT 100 OFFSET 100;"
+        );
+    }
+
+    #[test]
+    fn table_select_projection_without_columns_stays_star() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: Some("app".to_string()),
+            table_name: "orders".to_string(),
+            project_columns: true,
+            ..Default::default()
+        });
+        assert_eq!(sql, "SELECT * FROM `app`.`orders` LIMIT 100;");
     }
 
     #[test]
@@ -1395,6 +1519,32 @@ mod tests {
         let options = opts(DatabaseType::Mysql, None, Some("aaa"), "apis");
         assert_eq!(build_table_data_select_sql(options.clone()), "SELECT * FROM `apis` LIMIT 10;");
         assert_eq!(build_table_data_select_sql_with_database(options, true), "SELECT * FROM `aaa`.`apis` LIMIT 10;");
+    }
+
+    #[test]
+    fn teradata_table_data_pages_with_top_then_row_number() {
+        // #14604: Teradata rejects `LIMIT`; the preview takes `TOP n` on the first
+        // page and a `ROW_NUMBER()` derived table afterwards.
+        let mut first = opts(DatabaseType::Teradata, None, None, "employee");
+        first.order_by = Some("id".to_string());
+        assert_eq!(build_table_data_select_sql(first), "SELECT TOP 10 * FROM \"employee\" ORDER BY id");
+
+        let mut page = opts(DatabaseType::Teradata, None, None, "employee");
+        page.order_by = Some("id".to_string());
+        page.offset = Some(200);
+        assert_eq!(
+            build_table_data_select_sql(page),
+            "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS \"__dbx_row_num\" FROM \"employee\") \"dbx_page\" WHERE \"__dbx_row_num\" > 200 AND \"__dbx_row_num\" <= 210 ORDER BY \"__dbx_row_num\""
+        );
+
+        // Without a preferred order the window falls back to position 1, and the
+        // first page stays a bare TOP just like the other TOP dialects.
+        let unordered_first = opts(DatabaseType::Teradata, None, None, "employee");
+        assert_eq!(build_table_data_select_sql(unordered_first), "SELECT TOP 10 * FROM \"employee\"");
+        let mut unordered_page = opts(DatabaseType::Teradata, None, None, "employee");
+        unordered_page.offset = Some(200);
+        let unordered = build_table_data_select_sql(unordered_page);
+        assert!(unordered.contains("ROW_NUMBER() OVER (ORDER BY 1)"), "sql was: {unordered}");
     }
 
     /// issue #9262: SQL Server addresses tables as `database.schema.table`, and

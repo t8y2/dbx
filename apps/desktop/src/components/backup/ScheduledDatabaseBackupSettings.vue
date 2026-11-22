@@ -1097,7 +1097,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
                 <div class="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar" :aria-label="t('databaseBackup.progress')" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="run.progressPercent ?? 0">
                   <div class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${run.progressPercent ?? 0}%` }" />
                 </div>
-                <span class="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ run.progressPercent ?? 0 }}%</span>
+                <span class="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ Math.round(run.progressPercent ?? 0) }}%</span>
               </div>
             </div>
             <div class="flex items-center justify-end gap-1">

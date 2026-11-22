@@ -8,12 +8,13 @@ import type { QueryResult } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { buildMongoUpdateDocument } from "@/lib/mongo/mongoDocumentValues";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { readTextFromClipboard } from "@/lib/common/clipboard";
+import { canReadClipboardText, readTextFromClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
 
 vi.mock("@/lib/common/clipboard", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/common/clipboard")>()),
   readTextFromClipboard: vi.fn(),
+  canReadClipboardText: vi.fn(() => true),
 }));
 
 // DataGrid.vue imports RecycleScroller directly (no global registration),
@@ -231,6 +232,7 @@ afterEach(() => {
     host.remove();
   }
   vi.mocked(readTextFromClipboard).mockReset();
+  vi.mocked(canReadClipboardText).mockReturnValue(true);
 });
 
 async function pasteAsNewRows(host: HTMLElement) {
@@ -306,6 +308,40 @@ describe("DataGrid paste as new rows", () => {
       ["2", "Ada", "Lovelace"],
       ["3", "Grace", "Hopper"],
     ]);
+  });
+
+  it("asks for a native paste when the runtime cannot read the clipboard", async () => {
+    const { host } = mountGrid({ hideNullColumns: true });
+    await settle();
+    vi.mocked(canReadClipboardText).mockReturnValue(false);
+
+    await pasteAsNewRows(host);
+
+    expect(readTextFromClipboard).not.toHaveBeenCalled();
+    expect(useToast().message.value).toBe(i18n.global.t("grid.pasteAsNewRowsAwaitingPaste"));
+
+    // The armed grid must not swallow Ctrl+V, otherwise the browser never emits
+    // the paste event this wait depends on.
+    const chord = new KeyboardEvent("keydown", { key: "v", ctrlKey: true, bubbles: true, cancelable: true });
+    gridRoot(host).dispatchEvent(chord);
+    expect(chord.defaultPrevented).toBe(false);
+
+    await paste(host, "2\tAda\tLovelace");
+
+    expect(pendingRows(host).map(visibleCellTexts)).toEqual([["2", "Ada", "Lovelace"]]);
+  });
+
+  it("cancels the waiting paste on Escape and appends nothing", async () => {
+    const { host } = mountGrid({ hideNullColumns: true });
+    await settle();
+    vi.mocked(canReadClipboardText).mockReturnValue(false);
+
+    await pasteAsNewRows(host);
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await settle();
+    await paste(host, "2\tAda\tLovelace");
+
+    expect(pendingRows(host)).toHaveLength(0);
   });
 
   it("drops a delayed clipboard read when the result is replaced", async () => {

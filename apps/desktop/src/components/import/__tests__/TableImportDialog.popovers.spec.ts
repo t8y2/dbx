@@ -307,6 +307,96 @@ describe("TableImportDialog popovers lifecycle and positioning", () => {
 
       expect(document.getElementById("table-import-generator-options")).toBeTruthy();
     });
+
+    it("选择 Fixed Value 后 popover 保持打开，输入常量后按钮显示该值 (issue #14503)", async () => {
+      await mountDialogAndGoToStep2();
+
+      const genButtons = [...document.body.querySelectorAll<HTMLElement>("button[data-generator-picker]")];
+      genButtons[0]!.click();
+      await flushAsyncUpdates();
+
+      const menu = document.getElementById("table-import-generator-options")!;
+      const fixedOption = [...menu.querySelectorAll<HTMLButtonElement>('button[role="option"]')].find((b) => b.textContent?.trim() === "Fixed Value");
+      expect(fixedOption).toBeTruthy();
+      fixedOption!.click();
+      await flushAsyncUpdates();
+
+      // 选中固定值不关 popover，出现常量输入框
+      expect(document.getElementById("table-import-generator-options")).toBeTruthy();
+      const input = document.querySelector<HTMLInputElement>("input[data-fixed-value-input]");
+      expect(input).toBeTruthy();
+
+      input!.value = "batch-2026";
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushAsyncUpdates();
+
+      expect(genButtons[0]!.textContent).toContain("Fixed Value: batch-2026");
+
+      // 预览列头标记只显示国际化名称，不带用户常量（常量在下方单元格逐行展示）
+      const header = [...document.body.querySelectorAll("th")].find((th) => th.textContent?.includes("[Fixed Value]"));
+      expect(header).toBeTruthy();
+      expect(header!.textContent).not.toContain("batch-2026");
+      expect(header!.textContent).not.toContain("fixed:");
+      const previewCells = [...document.body.querySelectorAll("td")].filter((td) => td.textContent?.trim() === "batch-2026");
+      expect(previewCells.length).toBeGreaterThan(0);
+
+      // 关闭后重新打开，常量仍在输入框中
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await flushAsyncUpdates();
+      expect(document.getElementById("table-import-generator-options")).toBeNull();
+
+      genButtons[0]!.click();
+      await flushAsyncUpdates();
+      const reopened = document.querySelector<HTMLInputElement>("input[data-fixed-value-input]");
+      expect(reopened?.value).toBe("batch-2026");
+    });
+
+    it("固定值输入框在 modal Dialog 下能真正获得焦点（焦点不被抢回对话框）", async () => {
+      await mountDialogAndGoToStep2();
+
+      const genButtons = [...document.body.querySelectorAll<HTMLElement>("button[data-generator-picker]")];
+      genButtons[0]!.click();
+      await flushAsyncUpdates();
+      const menu = document.getElementById("table-import-generator-options")!;
+      [...menu.querySelectorAll<HTMLButtonElement>('button[role="option"]')].find((b) => b.textContent?.trim() === "Fixed Value")!.click();
+      await flushAsyncUpdates();
+
+      const input = document.querySelector<HTMLInputElement>("input[data-fixed-value-input]")!;
+      // 模拟用户点击：先让焦点离开，再聚焦输入框；没有 FocusScope 时 modal Dialog 的焦点陷阱会抢回去
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      input.focus();
+      await flushAsyncUpdates();
+      expect(document.activeElement).toBe(input);
+    });
+
+    it("底部空间不足时 generatorPicker 向上弹出", async () => {
+      await mountDialogAndGoToStep2();
+
+      const genButtons = [...document.body.querySelectorAll<HTMLElement>("button[data-generator-picker]")];
+      const trigger = genButtons[0]!;
+      // 先正常打开（不做 rect mock，否则 scrollParent 可见性检查会误判关闭）
+      trigger.click();
+      await flushAsyncUpdates();
+      const opened = document.getElementById("table-import-generator-options")!;
+      expect(opened).toBeTruthy();
+      // 再把触发按钮移到视口底部 + 只 mock 菜单元素的高度（全局 mock 会破坏 happy-dom 布局），触发重定位。
+      // scrollParent 检查要求触发按钮仍在滚动容器内：容器 rect 一并 mock 到视口底部
+      const scrollParent = trigger.closest(".overflow-auto")!;
+      vi.spyOn(scrollParent, "getBoundingClientRect").mockReturnValue({ top: window.innerHeight - 100, bottom: window.innerHeight, left: 0, right: 500, width: 500, height: 100, x: 0, y: window.innerHeight - 100, toJSON: () => ({}) });
+      vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({ top: window.innerHeight - 50, bottom: window.innerHeight - 22, left: 100, right: 300, width: 200, height: 28, x: 100, y: window.innerHeight - 50, toJSON: () => ({}) });
+      const offsetHeight = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        return this.id === "table-import-generator-options" ? 200 : 0;
+      });
+      try {
+        window.dispatchEvent(new Event("resize"));
+        await flushAsyncUpdates();
+        const top = Number.parseFloat(opened.style.top);
+        // 向上翻转：菜单底边贴在触发按钮顶边上方，而不是越过视口底部
+        expect(top).toBe(window.innerHeight - 50 - 2 - 200);
+      } finally {
+        offsetHeight.mockRestore();
+      }
+    });
   });
 
   describe("dataTypePicker lifecycle & interaction", () => {

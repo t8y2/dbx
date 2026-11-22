@@ -1,14 +1,31 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::redis_driver::{
     self, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisConnection, RedisDatabaseInfo, RedisKeyMetadata,
-    RedisKeysExpiry, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
-    RedisStreamPendingPage, RedisValue,
+    RedisKeysExpiry, RedisKeysExpiryResult, RedisScanCountLimit, RedisScanResult, RedisStreamConsumer,
+    RedisStreamGroup, RedisStreamPage, RedisStreamPendingPage, RedisValue,
 };
 
 pub use redis_driver::ListPushSide;
 
 async fn ensure_redis_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
+}
+
+/// The `SCAN COUNT` this connection's server accepted before, if any.
+///
+/// Redis caps nothing, but a server with a hard per-command return limit
+/// rejects a `COUNT` above it (TongRDS: `Server.Common.MaxItemsReturned`, 10000
+/// by default), so the driver learns the limit from that rejection. Keeping it
+/// per connection means only the first page of a connection pays for it.
+async fn redis_scan_count_limit(state: &AppState, connection_id: &str) -> RedisScanCountLimit {
+    RedisScanCountLimit::with_max_count(state.redis_scan_count_limit(connection_id).await)
+}
+
+/// Stores a limit the driver just learned, so later pages start at it.
+async fn remember_redis_scan_count_limit(state: &AppState, connection_id: &str, limit: RedisScanCountLimit) {
+    if let Some(max_count) = limit.max_count() {
+        state.set_redis_scan_count_limit(connection_id, max_count).await;
+    }
 }
 
 pub async fn redis_list_databases_core(
@@ -63,16 +80,26 @@ pub async fn redis_scan_keys_batch_core(
 ) -> Result<RedisScanResult, String> {
     ensure_redis_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Connection not found")?;
-    match &pool {
+    let mut limit = redis_scan_count_limit(state, connection_id).await;
+    let result = match &pool {
         PoolKind::Redis(redis) => match redis.as_ref() {
             RedisConnection::Direct(con) => {
                 let mut con = con.lock().await;
                 redis_driver::select_db(&mut *con, db).await?;
-                redis_driver::scan_keys_batch(&mut *con, cursor, pattern, count, max_iterations, include_types).await
+                redis_driver::scan_keys_batch_with_limit(
+                    &mut *con,
+                    cursor,
+                    pattern,
+                    count,
+                    max_iterations,
+                    include_types,
+                    &mut limit,
+                )
+                .await
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_database(cluster, db).await?;
-                redis_driver::scan_cluster_keys_batch_in_db(
+                redis_driver::scan_cluster_keys_batch_in_db_with_limit(
                     cluster,
                     db,
                     cursor,
@@ -80,12 +107,17 @@ pub async fn redis_scan_keys_batch_core(
                     count,
                     max_iterations,
                     include_types,
+                    &mut limit,
                 )
                 .await
             }
         },
-        _ => Err("Not a Redis connection".to_string()),
-    }
+        _ => return Err("Not a Redis connection".to_string()),
+    };
+    // Learned before the request finished, so it is kept even when the request
+    // itself failed: the next page should not pay for the rejection again.
+    remember_redis_scan_count_limit(state, connection_id, limit).await;
+    result
 }
 
 /// Reads TYPE and TTL for an explicit list of keys.
@@ -142,16 +174,26 @@ pub async fn redis_scan_values_core(
 ) -> Result<RedisScanResult, String> {
     ensure_redis_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Connection not found")?;
-    match &pool {
+    let mut limit = redis_scan_count_limit(state, connection_id).await;
+    let result = match &pool {
         PoolKind::Redis(redis) => match redis.as_ref() {
             RedisConnection::Direct(con) => {
                 let mut con = con.lock().await;
                 redis_driver::select_db(&mut *con, db).await?;
-                redis_driver::scan_values_page(&mut *con, cursor, pattern, query, include_key_matches, count).await
+                redis_driver::scan_values_page_with_limit(
+                    &mut *con,
+                    cursor,
+                    pattern,
+                    query,
+                    include_key_matches,
+                    count,
+                    &mut limit,
+                )
+                .await
             }
             RedisConnection::Cluster(cluster) => {
                 redis_driver::ensure_cluster_database(cluster, db).await?;
-                redis_driver::scan_cluster_values_page_in_db(
+                redis_driver::scan_cluster_values_page_in_db_with_limit(
                     cluster,
                     db,
                     cursor,
@@ -159,12 +201,15 @@ pub async fn redis_scan_values_core(
                     query,
                     include_key_matches,
                     count,
+                    &mut limit,
                 )
                 .await
             }
         },
-        _ => Err("Not a Redis connection".to_string()),
-    }
+        _ => return Err("Not a Redis connection".to_string()),
+    };
+    remember_redis_scan_count_limit(state, connection_id, limit).await;
+    result
 }
 
 pub async fn redis_get_value_core(state: &AppState, connection_id: &str, key: &str) -> Result<RedisValue, String> {
@@ -1198,7 +1243,8 @@ pub async fn redis_delete_keys_by_pattern_in_db_core(
 ) -> Result<u64, String> {
     ensure_redis_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    let mut limit = redis_scan_count_limit(state, connection_id).await;
+    let result = match &pool {
         PoolKind::Redis(redis) => match redis.as_ref() {
             RedisConnection::Direct(con) => {
                 let mut con = con.lock().await;
@@ -1207,6 +1253,7 @@ pub async fn redis_delete_keys_by_pattern_in_db_core(
                     &mut *con,
                     pattern,
                     redis_driver::DELETE_KEYS_BY_PATTERN_SCAN_COUNT,
+                    &mut limit,
                 )
                 .await
             }
@@ -1218,8 +1265,8 @@ pub async fn redis_delete_keys_by_pattern_in_db_core(
                 // `redis_delete_keys_in_db_core`.
                 let mut cursor = 0u64;
                 let mut deleted = 0u64;
-                loop {
-                    let page = redis_driver::scan_cluster_keys_batch_in_db(
+                let total = loop {
+                    let page = redis_driver::scan_cluster_keys_batch_in_db_with_limit(
                         cluster,
                         db,
                         cursor,
@@ -1227,6 +1274,7 @@ pub async fn redis_delete_keys_by_pattern_in_db_core(
                         redis_driver::DELETE_KEYS_BY_PATTERN_SCAN_COUNT,
                         1,
                         false,
+                        &mut limit,
                     )
                     .await?;
                     for key in &page.keys {
@@ -1236,13 +1284,16 @@ pub async fn redis_delete_keys_by_pattern_in_db_core(
                     }
                     cursor = page.cursor;
                     if cursor == 0 {
-                        return Ok(deleted);
+                        break deleted;
                     }
-                }
+                };
+                Ok(total)
             }
         },
-        _ => Err("Not a Redis connection".to_string()),
-    }
+        _ => return Err("Not a Redis connection".to_string()),
+    };
+    remember_redis_scan_count_limit(state, connection_id, limit).await;
+    result
 }
 
 pub async fn redis_flush_db_core(state: &AppState, connection_id: &str, db: u32) -> Result<(), String> {
@@ -1489,5 +1540,34 @@ mod cluster_database_tests {
         }
         assert_eq!(super::cluster_console_argv("GET key").unwrap(), [b"GET".to_vec(), b"key".to_vec()]);
         assert!(super::cluster_console_argv("\"").is_err());
+    }
+}
+
+#[cfg(test)]
+mod scan_count_limit_tests {
+    use super::*;
+
+    async fn test_state(dir: &std::path::Path) -> AppState {
+        AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn scan_count_limit_is_remembered_per_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+
+        assert_eq!(state.redis_scan_count_limit("conn-a").await, None);
+
+        // A limit the driver learned is kept, so the next page of the same
+        // connection starts at it instead of paying for the rejection again.
+        remember_redis_scan_count_limit(&state, "conn-a", RedisScanCountLimit::with_max_count(Some(10_000))).await;
+        assert_eq!(state.redis_scan_count_limit("conn-a").await, Some(10_000));
+        assert_eq!(redis_scan_count_limit(&state, "conn-a").await.max_count(), Some(10_000));
+
+        // Nothing is stored for a server that accepted the request, and one
+        // connection never speaks for another.
+        remember_redis_scan_count_limit(&state, "conn-b", RedisScanCountLimit::new()).await;
+        assert_eq!(state.redis_scan_count_limit("conn-b").await, None);
+        assert_eq!(state.redis_scan_count_limit_count().await, 1);
     }
 }

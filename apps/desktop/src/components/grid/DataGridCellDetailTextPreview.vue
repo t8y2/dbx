@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { buildStaticHtmlPreview } from "@/lib/common/safeHtmlPreview";
 import { useToast } from "@/composables/useToast";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -23,10 +24,12 @@ const { t } = useI18n();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 const encoding = ref<BinaryCellTextEncoding>("utf8");
+const htmlPreview = ref(false);
 
 // 只读 presentation：结果不回写 detail.value / rawValue，不进入编辑与提交路径。
 const preview = computed(() => binaryCellTextPreview(props.value, encoding.value, props.columnType, props.databaseType, props.incomplete));
 const decodedText = computed(() => (preview.value.ok ? preview.value.text : ""));
+const htmlDocument = computed(() => (htmlPreview.value && preview.value.ok ? buildStaticHtmlPreview(decodedText.value) : ""));
 const byteLength = computed(() => (preview.value.ok ? preview.value.byteLength : 0));
 const errorKey = computed(() => (preview.value.ok ? "" : `grid.binaryTextPreviewErrors.${preview.value.error}`));
 
@@ -35,6 +38,7 @@ watch(
   () => {
     open.value = false;
     encoding.value = "utf8";
+    htmlPreview.value = false;
   },
   { flush: "sync" },
 );
@@ -73,10 +77,14 @@ async function copyResult() {
       <p v-if="errorKey" role="alert" class="text-xs text-destructive">{{ t(errorKey) }}</p>
       <template v-else>
         <div class="flex items-center justify-between gap-2 text-xs">
-          <span>{{ t("grid.binaryTextPreviewResult") }}</span>
-          <Button variant="outline" size="sm" class="h-6 text-xs" @click="copyResult">{{ t("grid.binaryTextPreviewCopy") }}</Button>
+          <span>{{ t(htmlPreview ? "cellTransform.htmlPreview" : "grid.binaryTextPreviewResult") }}</span>
+          <div class="flex flex-wrap items-center justify-end gap-1">
+            <Button variant="outline" size="sm" class="h-6 text-xs" @click="htmlPreview = !htmlPreview">{{ t(htmlPreview ? "cellTransform.exitPreview" : "cellTransform.htmlPreview") }}</Button>
+            <Button variant="outline" size="sm" class="h-6 text-xs" @click="copyResult">{{ t("grid.binaryTextPreviewCopy") }}</Button>
+          </div>
         </div>
-        <textarea :value="decodedText" :aria-label="t('grid.binaryTextPreviewResult')" readonly class="dbx-data-grid-value-font h-64 min-h-24 w-full resize-y rounded border bg-muted/20 p-3 text-xs" spellcheck="false" />
+        <iframe v-if="htmlPreview" :srcdoc="htmlDocument" sandbox="" referrerpolicy="no-referrer" :title="t('cellTransform.htmlPreview')" class="h-64 min-h-24 w-full rounded border bg-white" />
+        <textarea v-else :value="decodedText" :aria-label="t('grid.binaryTextPreviewResult')" readonly class="dbx-data-grid-value-font h-64 min-h-24 w-full resize-y rounded border bg-muted/20 p-3 text-xs" spellcheck="false" />
       </template>
       <p class="text-xs text-muted-foreground">{{ t("grid.binaryTextPreviewOriginalHint") }}</p>
     </DialogContent>

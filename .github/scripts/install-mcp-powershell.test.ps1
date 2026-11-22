@@ -39,7 +39,14 @@ function New-Fixture([string]$Platform, [string]$Mode) {
     $packageBin = Join-Path $script:fixture 'source/package/bin'
     [IO.Directory]::CreateDirectory($packageBin) | Out-Null
     [IO.File]::WriteAllText((Join-Path $packageBin 'dbx-mcp.exe'), 'fixture binary')
-    & $realTar -czf (Join-Path $script:fixture 'npm.tgz') -C (Join-Path $script:fixture 'source') 'package/bin/dbx-mcp.exe'
+    # GNU tar rejects absolute archive paths on Windows ("Cannot connect to C: resolve
+    # failed"), so create the fixture through a relative name from inside the directory.
+    Push-Location $script:fixture
+    try {
+        & $realTar -czf 'npm.tgz' -C 'source' 'package/bin/dbx-mcp.exe'
+    } finally {
+        Pop-Location
+    }
     if ($LASTEXITCODE) { throw 'Fixture tar failed' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($packageBin, (Join-Path $script:fixture 'github.zip'))

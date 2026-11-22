@@ -463,7 +463,7 @@ export interface ReorderEntriesOptions {
   preserveSameGroupOrder?: boolean;
 }
 
-function findEntryParentGroupId(entries: SidebarOrderEntry[], entryId: string, parentGroupId: string | null = null): string | null | undefined {
+export function findEntryParentGroupId(entries: SidebarOrderEntry[], entryId: string, parentGroupId: string | null = null): string | null | undefined {
   for (const entry of entries) {
     if (entry.id === entryId) return parentGroupId;
     if (entry.type !== "group") continue;

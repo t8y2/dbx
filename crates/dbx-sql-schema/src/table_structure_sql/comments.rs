@@ -33,6 +33,17 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
             // FOREIGN form instead.
             vec![format!("COMMENT ON FOREIGN TABLE {table} IS {quoted};")]
         }
+        // PostgreSQL also rejects `COMMENT ON TABLE` for views (relkind = 'v')
+        // and materialized views (relkind = 'm') with the same error.
+        StructureDialect::Postgres if options.table_type.as_deref() == Some("view") => {
+            vec![format!("COMMENT ON VIEW {table} IS {quoted};")]
+        }
+        StructureDialect::Postgres if options.table_type.as_deref() == Some("materialized_view") => {
+            vec![format!("COMMENT ON MATERIALIZED VIEW {table} IS {quoted};")]
+        }
+        StructureDialect::SapHana if options.table_type.as_deref() == Some("view") => {
+            vec![format!("COMMENT ON VIEW {table} IS {quoted};")]
+        }
         StructureDialect::Postgres
         | StructureDialect::Oracle
         | StructureDialect::Dameng
@@ -255,6 +266,7 @@ mod tests {
             mysql_auto_increment_value: None,
             transwarp_create: None,
             partitioned: false,
+            table_type: None,
             is_gaussdb_m_mode: false,
             table_collation: None,
             primary_key_name: None,
@@ -283,6 +295,52 @@ mod tests {
     }
 
     #[test]
+    fn postgres_view_comment_uses_the_relation_kind_form() {
+        for (table_type, keyword) in [("view", "VIEW"), ("materialized_view", "MATERIALIZED VIEW")] {
+            for (comment, literal) in [("港口资料", "'港口资料'"), ("owner's note", "'owner''s note'"), ("", "''")]
+            {
+                let mut options = pg_comment_options(false);
+                options.table_type = Some(table_type.to_string());
+                options.table_comment = Some(comment.to_string());
+                options.original_table_comment = Some("old".to_string());
+                let mut warnings = Vec::new();
+                let statements = build_table_comment_sql(&options, &mut warnings);
+
+                assert_eq!(
+                    statements,
+                    vec![format!("COMMENT ON {keyword} \"de_sk\".\"vmes_base_destination\" IS {literal};")]
+                );
+                assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_table_kind_and_legacy_requests_keep_table_form() {
+        for table_type in [None, Some("table")] {
+            let mut options = pg_comment_options(false);
+            options.table_type = table_type.map(str::to_string);
+            let mut warnings = Vec::new();
+            let statements = build_table_comment_sql(&options, &mut warnings);
+
+            assert_eq!(statements, vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+        }
+    }
+
+    #[test]
+    fn view_kind_is_ignored_by_dialects_that_comment_views_as_tables() {
+        // Oracle documents `COMMENT ON TABLE` for views, so the kind must not
+        // change its statement.
+        let mut options = pg_comment_options(false);
+        options.database_type = Some(DatabaseType::Oracle);
+        options.table_type = Some("view".to_string());
+        let mut warnings = Vec::new();
+        let statements = build_table_comment_sql(&options, &mut warnings);
+
+        assert_eq!(statements, vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+    }
+
+    #[test]
     fn foreign_table_flag_is_ignored_by_non_postgres_dialects() {
         let mut options = pg_comment_options(true);
         options.database_type = Some(DatabaseType::Oracle);
@@ -290,6 +348,70 @@ mod tests {
         let statements = build_table_comment_sql(&options, &mut warnings);
 
         assert_eq!(statements, vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+    }
+
+    #[test]
+    fn saphana_view_comment_request_uses_view_form() {
+        for (schema, reference) in [(None, "\"V_6200_YGMBBK\""), (Some("S\"chema"), "\"S\"\"chema\".\"V_6200_YGMBBK\"")]
+        {
+            for comment in ["员工目标", "owner's description", ""] {
+                let options: TableStructureSqlOptions = serde_json::from_value(serde_json::json!({
+                    "databaseType": "saphana",
+                    "schema": schema,
+                    "tableName": "V_6200_YGMBBK",
+                    "tableType": "view",
+                    "tableComment": comment,
+                    "originalTableComment": "old description"
+                }))
+                .unwrap();
+                let result = crate::table_structure_sql::build_table_structure_change_sql(options);
+
+                assert_eq!(
+                    result.statements,
+                    vec![format!("COMMENT ON VIEW {reference} IS '{}';", comment.replace('\'', "''"))]
+                );
+                assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            }
+        }
+    }
+
+    #[test]
+    fn saphana_table_comment_requests_keep_table_form() {
+        for table_type in [None, Some("table")] {
+            let mut options = pg_comment_options(false);
+            options.database_type = Some(DatabaseType::SapHana);
+            options.table_type = table_type.map(str::to_string);
+            let result = crate::table_structure_sql::build_table_structure_change_sql(options);
+
+            assert_eq!(result.statements, vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]);
+            assert!(result.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn saphana_unchanged_view_comment_does_not_generate_sql() {
+        let mut options = pg_comment_options(false);
+        options.database_type = Some(DatabaseType::SapHana);
+        options.table_type = Some("view".into());
+        options.original_table_comment = options.table_comment.clone();
+
+        let result = crate::table_structure_sql::build_table_structure_change_sql(options);
+        assert!(result.statements.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn oracle_view_comment_keeps_table_form() {
+        let mut options = pg_comment_options(false);
+        options.database_type = Some(DatabaseType::Oracle);
+        options.table_type = Some("view".into());
+        let mut warnings = Vec::new();
+
+        assert_eq!(
+            build_table_comment_sql(&options, &mut warnings),
+            vec!["COMMENT ON TABLE \"de_sk\".\"vmes_base_destination\" IS '港口资料';"]
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]

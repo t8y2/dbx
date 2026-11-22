@@ -42,7 +42,7 @@ const emit = defineEmits<{
   "open-settings": [];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 
@@ -51,6 +51,7 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "sqlark", label: t("sidebar.importSqlark"), tooltip: "SQLark" },
   { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
   { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);

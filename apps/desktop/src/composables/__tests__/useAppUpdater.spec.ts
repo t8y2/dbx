@@ -3,6 +3,7 @@ import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, resolveUpdateReleaseUrl, useAppUpdater } from "@/composables/useAppUpdater";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
   downloadUpdate: vi.fn(),
@@ -139,7 +140,13 @@ describe("silent update lifecycle", () => {
     await updater.initialize();
     await flush();
 
-    expect(mocks.checkForUpdates).toHaveBeenCalledExactlyOnceWith("en", "official", "beta");
+    // The beta-channel check runs first; because the running build is a
+    // prerelease with no recorded promotion, the stable manifest is also
+    // consulted for the promotion (#14739). The beta manifest answers both
+    // here, so nothing is recorded.
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(mocks.checkForUpdates).toHaveBeenNthCalledWith(1, "en", "official", "beta");
+    expect(mocks.checkForUpdates).toHaveBeenNthCalledWith(2, "en", "official", "stable");
     expect(updater.updateInfo.value?.update_available).toBe(false);
     expect(updater.showUpdateDialog.value).toBe(false);
 
@@ -771,5 +778,119 @@ describe("ignoring a version (#13626)", () => {
     await flush();
 
     expect(updater.ignoredReleaseVersion.value).toBe("");
+  });
+});
+
+describe("promoted build recognition on the beta channel (#14739)", () => {
+  // A beta build promoted to stable is not rebuilt: the binary keeps its beta
+  // version, and only the stable manifest names the promotion. A user on the
+  // beta channel who installs the stable build by hand would otherwise keep
+  // seeing the beta version forever, because their checks only ever read the
+  // beta manifest, which carries no promoted_from.
+  function channelManifests(build: string, stableVersion: string) {
+    const beta = { ...info, current_version: build, latest_version: build, channel: "beta" as const, update_available: false, promoted_from: undefined };
+    const stable = { ...info, current_version: build, latest_version: stableVersion, channel: "stable" as const, update_available: false, promoted_from: build };
+    return { beta, stable };
+  }
+
+  it("consults the stable manifest when a beta-channel check runs a prerelease build", async () => {
+    const build = "0.6.69-beta.20261110.1";
+    const { beta, stable } = channelManifests(build, "0.6.69");
+    settings.updateChannel = "beta";
+    mocks.checkForUpdates.mockImplementation(async (_locale: string, _source: string, channel: string) => (channel === "stable" ? stable : beta));
+    const updater = mount();
+    await updater.checkUpdates();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(mocks.checkForUpdates).toHaveBeenNthCalledWith(1, "en", "official", "beta");
+    expect(mocks.checkForUpdates).toHaveBeenNthCalledWith(2, "en", "official", "stable");
+    expect(updater.updateInfo.value?.channel).toBe("beta");
+    expect(displayAppVersion(build)).toBe("0.6.69");
+  });
+
+  it("does not consult the stable manifest twice on the stable channel", async () => {
+    const build = "0.6.69-beta.20261110.2";
+    const { stable } = channelManifests(build, "0.6.69");
+    settings.updateChannel = "stable";
+    mocks.checkForUpdates.mockResolvedValue(stable);
+    const updater = mount();
+    await updater.checkUpdates();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "stable");
+    expect(displayAppVersion(build)).toBe("0.6.69");
+  });
+
+  it("does not consult the stable manifest when the running build is not a prerelease", async () => {
+    const build = "0.6.69";
+    const beta = { ...info, current_version: build, latest_version: build, channel: "beta" as const, update_available: false };
+    settings.updateChannel = "beta";
+    mocks.checkForUpdates.mockResolvedValue(beta);
+    const updater = mount();
+    await updater.checkUpdates();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(displayAppVersion(build)).toBe("0.6.69");
+  });
+
+  it("does not consult the stable manifest again once the promotion is recorded", async () => {
+    const build = "0.6.69-beta.20261110.3";
+    const { beta, stable } = channelManifests(build, "0.6.69");
+    settings.updateChannel = "beta";
+    mocks.checkForUpdates.mockImplementation(async (_locale: string, _source: string, channel: string) => (channel === "stable" ? stable : beta));
+    const updater = mount();
+    await updater.checkUpdates();
+    await flush();
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(displayAppVersion(build)).toBe("0.6.69");
+
+    mocks.checkForUpdates.mockClear();
+    await updater.checkUpdates();
+    await flush();
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "beta");
+  });
+
+  it("keeps the channel check result when the stable lookup fails", async () => {
+    const build = "0.6.69-beta.20261110.4";
+    const { beta } = channelManifests(build, "0.6.69");
+    settings.updateChannel = "beta";
+    mocks.checkForUpdates.mockImplementation(async (_locale: string, _source: string, channel: string) => {
+      if (channel === "stable") throw new Error("offline");
+      return beta;
+    });
+    const updater = mount();
+    await updater.checkUpdates();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(updater.updateInfo.value?.current_version).toBe(build);
+    expect(updater.updateCheckFailed.value).toBe(false);
+    expect(displayAppVersion(build)).toBe(build);
+  });
+
+  it("ignores a check disposed while its stable promotion lookup is pending", async () => {
+    const build = "0.6.69-beta.20261110.9";
+    const { beta, stable } = channelManifests(build, "0.6.69");
+    const pendingStable = deferred<typeof stable>();
+    settings.updateChannel = "beta";
+    mocks.checkForUpdates.mockImplementation(async (_locale: string, _source: string, channel: string) => (channel === "stable" ? pendingStable.promise : beta));
+    const updater = mount();
+    const check = updater.checkUpdates();
+    await flush();
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    updater.dispose();
+    await flush();
+    const message = updater.updateCheckMessage.value;
+
+    pendingStable.resolve(stable);
+    await check;
+
+    expect(updater.updateCheckMessage.value).toBe(message);
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
   });
 });

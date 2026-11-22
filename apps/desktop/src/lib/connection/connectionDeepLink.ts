@@ -15,6 +15,31 @@ export type ConnectionDeepLinkServiceConfig =
       rnacosHistoryEnabled?: false;
     };
 
+/**
+ * 运行时安装的连接提供者（插件贡献）在深链里的可寻址描述。
+ *
+ * 解析本身保持纯函数：插件表由调用方（App）注入，没装插件时行为与旧版本完全一致。
+ */
+export interface ConnectionDeepLinkPluginProvider {
+  pluginId: string;
+  providerId: string;
+  label: string;
+  /** 提供者声明的 `database_type`，即宿主与插件约定的连接类型名（例如 `ssh`）。 */
+  databaseType?: string;
+  /** 提供者声明的默认端口；缺省时交给插件表单自己的默认值。 */
+  defaultPort?: number;
+}
+
+export interface ConnectionDeepLinkPluginTarget {
+  pluginId: string;
+  providerId: string;
+  label: string;
+}
+
+export interface ConnectionDeepLinkOptions {
+  pluginProviders?: readonly ConnectionDeepLinkPluginProvider[];
+}
+
 export interface ConnectionDeepLinkDraft {
   name?: string;
   dbType: DatabaseType;
@@ -35,6 +60,8 @@ export interface ConnectionDeepLinkDraft {
   oneTime?: boolean;
   serviceConfig?: ConnectionDeepLinkServiceConfig;
   mqConfig?: MqAdminConfig;
+  /** 命中的插件连接提供者；`dbType === "plugin"` 时由弹窗据此选中插件表单。 */
+  pluginProvider?: ConnectionDeepLinkPluginTarget;
 }
 
 export interface ConnectionDeepLinkUpdatePatch {
@@ -320,7 +347,32 @@ function kafkaConnectionDraft(params: URLSearchParams): ConnectionDeepLinkDraft 
   };
 }
 
-export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft | null {
+function normalizePluginToken(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+/**
+ * 把深链里的 `type` 解析成已安装的插件连接提供者。
+ *
+ * 匹配顺序：`<插件 id>/<提供者 id>` 显式限定 → 提供者 id → 插件 id → `database_type`。
+ * `database_type` 排在最后，是因为一个插件可能注册多个提供者，而类型名（如 `ssh`）
+ * 只保证插件与宿主之间唯一。
+ */
+export function connectionDeepLinkPluginProviderForType(type: string, providers: readonly ConnectionDeepLinkPluginProvider[] | undefined): ConnectionDeepLinkPluginProvider | undefined {
+  if (!providers?.length) return undefined;
+  const key = normalizePluginToken(type);
+  if (!key) return undefined;
+
+  const separator = key.indexOf("/");
+  if (separator > 0 && separator < key.length - 1) {
+    const pluginId = key.slice(0, separator);
+    const providerId = key.slice(separator + 1);
+    return providers.find((entry) => normalizePluginToken(entry.pluginId) === pluginId && normalizePluginToken(entry.providerId) === providerId);
+  }
+  return providers.find((entry) => normalizePluginToken(entry.providerId) === key) ?? providers.find((entry) => normalizePluginToken(entry.pluginId) === key) ?? providers.find((entry) => entry.databaseType !== undefined && normalizePluginToken(entry.databaseType) === key);
+}
+
+export function parseConnectionDeepLink(value: string, options: ConnectionDeepLinkOptions = {}): ConnectionDeepLinkDraft | null {
   let url: URL;
   try {
     url = new URL(value);
@@ -337,6 +389,11 @@ export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft 
   const preferredProfile = optionalParam(params, "type")?.toLowerCase();
   if (preferredProfile === "kafka") return kafkaConnectionDraft(params);
   const rawConnectionUrl = optionalParam(params, "url");
+  const requestedPluginProvider = connectionDeepLinkPluginProviderForType(preferredProfile ?? "", options.pluginProviders);
+  if (requestedPluginProvider && rawConnectionUrl) {
+    // 插件连接的字段由插件自己声明，通用 DSN 无法映射到它们；给出可诊断的错误而不是静默丢弃。
+    throw new Error(`Connection type ${preferredProfile} is provided by a plugin and does not accept a database URL`);
+  }
   let serviceType = normalizeServiceType(preferredProfile);
   if (!serviceType && rawConnectionUrl) {
     try {
@@ -349,13 +406,27 @@ export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft 
     ? draftFromConnectionUrl(rawConnectionUrl, preferredProfile)
     : (() => {
         const profile = connectionProfileForScheme(preferredProfile || "mysql");
-        if (!profile) throw new Error(`Unsupported connection type: ${preferredProfile}`);
+        if (profile) {
+          return {
+            dbType: profile.type,
+            driverProfile: profile.profile,
+            driverLabel: profile.label,
+            port: profile.defaultPort,
+            ssl: false,
+          };
+        }
+        if (!requestedPluginProvider) throw new Error(`Unsupported connection type: ${preferredProfile}`);
         return {
-          dbType: profile.type,
-          driverProfile: profile.profile,
-          driverLabel: profile.label,
-          port: profile.defaultPort,
+          dbType: "plugin" as DatabaseType,
+          driverProfile: "plugin",
+          driverLabel: requestedPluginProvider.label,
+          port: requestedPluginProvider.defaultPort,
           ssl: false,
+          pluginProvider: {
+            pluginId: requestedPluginProvider.pluginId,
+            providerId: requestedPluginProvider.providerId,
+            label: requestedPluginProvider.label,
+          },
         };
       })();
 

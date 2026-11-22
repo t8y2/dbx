@@ -586,10 +586,32 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
 }
 
 fn is_network_path(path: &str) -> bool {
-    path.starts_with("\\\\") || path.starts_with("//") || path.contains("wsl.localhost") || path.contains("wsl$")
+    let normalized = path.replace('/', "\\");
+    let is_verbatim_unc = normalized.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\\\?\\UNC\\"));
+    is_verbatim_unc
+        || (normalized.starts_with("\\\\") && !normalized.starts_with("\\\\?\\"))
+        || normalized.contains("wsl.localhost")
+        || normalized.contains("wsl$")
+}
+
+/// `\\?\UNC\server\share` (or the `/`-separated spelling, as produced by
+/// Windows `canonicalize()`) cannot be embedded in a `file:` URI as-is: the
+/// verbatim `?` would be parsed as the query separator and shred the share
+/// name. Restore the plain `\\server\share` form first; any other path is
+/// returned unchanged.
+fn restore_plain_unc_path(path: &str) -> String {
+    let is_verbatim_unc =
+        path.get(..8).is_some_and(|prefix| prefix.replace('/', "\\").eq_ignore_ascii_case("\\\\?\\UNC\\"));
+    if !is_verbatim_unc {
+        return path.to_string();
+    }
+    let share = path[8..].replace('/', "\\");
+    format!("\\\\{share}")
 }
 
 fn sqlite_network_path_uri(path: &str) -> String {
+    let restored = restore_plain_unc_path(path);
+    let path = restored.as_str();
     let (path_and_query, fragment) =
         path.split_once('#').map_or((path, None), |(prefix, suffix)| (prefix, Some(suffix)));
     let (file_path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
@@ -981,6 +1003,42 @@ mod tests {
             sqlite_network_path_uri(path),
             r"file:\\wsl.localhost\Ubuntu\home\app\data.db?nolock=1&cache=shared"
         );
+    }
+
+    #[test]
+    fn windows_verbatim_paths_are_only_network_when_they_are_unc() {
+        assert!(!is_network_path(r"\\?\C:\Users\app\AppData\Roaming\com.dbx.app\dbx.db"));
+        assert!(!is_network_path(r"//?/C:/Users/app/AppData/Roaming/com.dbx.app/dbx.db"));
+        assert!(is_network_path(r"\\?\UNC\server\share\dbx.db"));
+        assert!(is_network_path(r"//?/UNC/server/share/dbx.db"));
+    }
+
+    #[test]
+    fn sqlite_network_path_uri_restores_verbatim_unc_prefixes() {
+        assert_eq!(sqlite_network_path_uri(r"\\?\UNC\server\share\dbx.db"), r"file:\\server\share\dbx.db?nolock=1");
+        assert_eq!(sqlite_network_path_uri("//?/UNC/server/share/dbx.db"), r"file:\\server\share\dbx.db?nolock=1");
+        assert_eq!(sqlite_network_path_uri(r"\\?\unc\Server\Share\dbx.db"), r"file:\\Server\Share\dbx.db?nolock=1");
+    }
+
+    #[test]
+    fn sqlite_network_path_uri_keeps_query_after_verbatim_unc_restore() {
+        assert_eq!(
+            sqlite_network_path_uri(r"\\?\UNC\server\share\dbx.db?mode=ro"),
+            r"file:\\server\share\dbx.db?mode=ro&nolock=1"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn verbatim_windows_paths_open_as_local_sqlite_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = std::fs::canonicalize(directory.path()).unwrap().join("dbx.db");
+        let database_path = database_path.to_string_lossy();
+
+        assert!(database_path.starts_with(r"\\?\"));
+        let database = connect_path_create_if_missing(&database_path).await.unwrap();
+        drop(database);
+        assert!(directory.path().join("dbx.db").is_file());
     }
 
     #[test]

@@ -451,25 +451,42 @@ pub(super) async fn runtime_identity_in_session(
         (None, saved) => saved,
     };
     let engine = resolve_engine(config, info.as_ref())?;
-    let sql = match engine {
-        NativeJobEngine::Dameng => "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL",
-        _ => "SELECT USER AS DBX_SESSION_USER FROM DUAL",
+    // Dameng reserves CURRENT_USER: many instances reject `SELECT CURRENT_USER`
+    // with a syntax error while plain USER works everywhere, so try the
+    // current-user spelling first and fall back to USER once on failure
+    // (#14859).
+    let sql_candidates: &[&str] = match engine {
+        NativeJobEngine::Dameng => {
+            &["SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL", "SELECT USER AS DBX_SESSION_USER FROM DUAL"]
+        }
+        _ => &["SELECT USER AS DBX_SESSION_USER FROM DUAL"],
     };
-    let query = NativeJobCatalogQuery {
-        source: "session-user",
-        coverage: NativeJobCatalogCoverage::CurrentUser,
-        sql: sql.into(),
-        limit: 1,
-    };
-    let raw = execute_catalog_query_in_session(engine, pool, database, query, timeout, physical)
-        .await
-        .map_err(|_| "native_job_runtime_identity_failed")?;
-    let rows = rows_from_result(
-        decode_query_result(engine, raw).map_err(|_| "native_job_runtime_identity_failed")?,
-        2,
-        |_| Ok(()),
-    )
-    .map_err(|_| "native_job_runtime_identity_failed")?;
+    let mut rows = None;
+    for sql in sql_candidates {
+        let query = NativeJobCatalogQuery {
+            source: "session-user",
+            coverage: NativeJobCatalogCoverage::CurrentUser,
+            sql: (*sql).into(),
+            limit: 1,
+        };
+        let raw = match execute_catalog_query_in_session(engine, pool, database, query, timeout, physical).await {
+            Ok(raw) => raw,
+            Err(_) if sql_candidates.len() > 1 => continue,
+            Err(_) => return Err("native_job_runtime_identity_failed"),
+        };
+        let decoded = match decode_query_result(engine, raw) {
+            Ok(decoded) => match rows_from_result(decoded, 2, |_| Ok(())) {
+                Ok(decoded) => decoded,
+                Err(_) if sql_candidates.len() > 1 => continue,
+                Err(_) => return Err("native_job_runtime_identity_failed"),
+            },
+            Err(_) if sql_candidates.len() > 1 => continue,
+            Err(_) => return Err("native_job_runtime_identity_failed"),
+        };
+        rows = Some(decoded);
+        break;
+    }
+    let rows = rows.ok_or("native_job_runtime_identity_failed")?;
     let NativeJobMetadata::Available { value } = rows else {
         return Err("native_job_runtime_identity_invalid");
     };

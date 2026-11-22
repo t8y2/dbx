@@ -73,6 +73,12 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function appendUnrelated(state: any) {
+  await state.openPicker();
+  state.picked = [JSON.stringify(["public", "unrelated"])];
+  await state.appendSelectedTables();
+}
+
 async function mountDialog(focused = true, overrides: { focusTableNames?: string[]; prefillSchema?: string } = {}) {
   const props = reactive({ open: true, prefillConnectionId: "c", prefillDatabase: "db", prefillSchema: "public", prefillCatalog: "catalog", focusTableName: focused ? "A" : "", ...overrides });
   // Exercise the actual SFC setup, watchers, loaders and layout/persistence with the canvas renderer omitted.
@@ -95,6 +101,147 @@ afterEach(() => {
 });
 
 describe("diagram loading integration", () => {
+  it("adds only checked tables without changing existing positions and toggles display without changing metadata", async () => {
+    const { state } = await mountDialog();
+    const previous = structuredClone(JSON.parse(JSON.stringify(state.positions)));
+    vi.clearAllMocks();
+    await state.openPicker();
+    expect(state.candidates.map((table: DiagramTable) => table.name)).toEqual(["unrelated"]);
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+    state.picked = [JSON.stringify(["public", "unrelated"])];
+    const column = { name: "field", data_type: "int", is_nullable: false, is_primary_key: false, column_default: null, extra: null };
+    mocks.getColumns.mockResolvedValueOnce(Array.from({ length: 15 }, (_, i) => ({ ...column, name: `field_${i}` })));
+    await state.appendSelectedTables();
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C", "unrelated"]);
+    expect(mocks.getColumns).toHaveBeenCalledExactlyOnceWith("c", "db", "public", "unrelated", "catalog");
+    for (const [key, position] of Object.entries(previous)) expect(state.positions[key]).toEqual(position);
+    const appended = state.nodes.find((node: { id: string }) => node.id === "unrelated");
+    expect(appended.data.fieldsExpanded).toBe(false);
+    expect(appended.data.table.columns).toHaveLength(15);
+    appended.data.toggleFields();
+    expect(state.nodes.find((node: { id: string }) => node.id === "unrelated").data.fieldsExpanded).toBe(true);
+    expect(state.tables.at(-1).columns).toHaveLength(15);
+  });
+
+  it.each(["listForeignKeys", "listIndexes"] as const)("appends columns when %s fails", async (method) => {
+    const { state } = await mountDialog();
+    await state.openPicker();
+    state.picked = [JSON.stringify(["public", "unrelated"])];
+    mocks[method].mockRejectedValueOnce(new Error("optional metadata unavailable"));
+
+    await state.appendSelectedTables();
+
+    expect(state.tables.at(-1)).toMatchObject({ name: "unrelated", columns: [expect.objectContaining({ name: "id" })], foreignKeys: [], indexes: [] });
+    expect(state.picker).toBe(false);
+  });
+
+  it.each([false, true])("persists appended tables and positions across a cold reopen (dragged: %s)", async (dragged) => {
+    const { state } = await mountDialog();
+    await appendUnrelated(state);
+    if (dragged) await state.handleNodeDragStop({ node: { id: "unrelated", type: "table", position: { x: 900, y: 310 } } });
+    const saved = { ...state.positions.unrelated };
+    if (dragged) expect(saved).toEqual({ x: 900, y: 310 });
+    state.open = false;
+    await settle();
+    clearFocusedDiagramCacheForTests();
+
+    const reopened = await mountDialog();
+
+    expect(reopened.state.nodes.find((node: { id: string }) => node.id === "unrelated")?.position).toEqual(saved);
+    expect(loadDraftTables("c", "db", "public")).toEqual([]);
+    const otherFocus = await mountDialog(true, { focusTableNames: ["B"] });
+    expect(otherFocus.state.nodes.some((node: { id: string }) => node.id === "unrelated")).toBe(false);
+  });
+
+  it("restores the manual selection when switching back from the full schema or refreshing", async () => {
+    const { state } = await mountDialog();
+    await appendUnrelated(state);
+    await state.handleToggleShowAllTables();
+    await state.handleToggleShowAllTables();
+    await state.loadDiagram({ force: true });
+    expect(state.showAllTables).toBe(false);
+    expect(state.tables.filter((table: DiagramTable) => table.name === "unrelated")).toHaveLength(1);
+  });
+
+  it.each(["ctrlKey", "metaKey"] as const)("undoes and redoes appended membership with %s and preserves shared live patches", async (modifier) => {
+    saveLiveTablePatches([{ name: "unrelated", schema: "public", origin: "live", columns: [], foreignKeys: [], pendingDrop: true }], "c", "db", "public");
+    const { state } = await mountDialog();
+    await appendUnrelated(state);
+    expect(state.tables.at(-1)).toMatchObject({ name: "unrelated", pendingDrop: true });
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", [modifier]: true }));
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C"]);
+    expect(loadLiveTablePatches("c", "db", "public")).toEqual([expect.objectContaining({ tableName: "unrelated", pendingDrop: true })]);
+    const undone = await mountDialog();
+    expect(undone.state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C"]);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", [modifier]: true, shiftKey: true }));
+    expect(state.tables.at(-1)).toMatchObject({ name: "unrelated", pendingDrop: true });
+    expect((await mountDialog()).state.tables.at(-1)).toMatchObject({ name: "unrelated", pendingDrop: true });
+  });
+
+  it("immediately adds inferred relationships to the canvas and match results", async () => {
+    const { state } = await mountDialog();
+    mocks.getColumns.mockResolvedValueOnce([{ name: "a_id", data_type: "int", is_nullable: false, is_primary_key: false, column_default: null, extra: null }]);
+    await appendUnrelated(state);
+
+    expect(state.matchResult.pending).toContainEqual(expect.objectContaining({ sourceTable: "unrelated", targetTable: "A", sourceColumn: "a_id" }));
+    expect(state.visibleRelationships).toContainEqual(expect.objectContaining({ sourceTable: "unrelated", targetTable: "A", sourceColumn: "a_id" }));
+  });
+
+  it.each(["auto", "free"] as const)("resizes a %s layer when its long table is expanded or collapsed", async (layoutMode) => {
+    savePersistedLayers([{ id: "layer", name: "saved", color: "red", visible: true, collapsed: false, tableNames: ["A"], layoutMode }], "c", "db", "public");
+    savePersistedPositions({ A: { x: 90, y: 100 } }, "c", "db", "public");
+    const column = { name: "field", data_type: "int", is_nullable: false, is_primary_key: false, column_default: null, extra: null };
+    mocks.getColumns.mockResolvedValueOnce(Array.from({ length: 24 }, (_, i) => ({ ...column, name: `field_${i}` })));
+    const { state } = await mountDialog();
+    const layerHeight = () => parseFloat(state.nodes.find((node: { id: string }) => node.id === "layer").style.height);
+    const toggle = () => state.nodes.find((node: { id: string }) => node.id === "A").data.toggleFields();
+    const collapsed = layerHeight();
+    expect(collapsed).toBeGreaterThan(0);
+
+    toggle();
+    expect(layerHeight()).toBeGreaterThan(collapsed);
+    expect(state.positions.A).toEqual({ x: 90, y: 100 });
+    toggle();
+    expect(layerHeight()).toBe(collapsed);
+  });
+
+  it("appends successful tables and keeps only failed selections for retry", async () => {
+    const { state } = await mountDialog();
+    mocks.listTables.mockResolvedValueOnce(["unrelated", "restricted"].map((name) => ({ name, table_type: "TABLE" })));
+    await state.openPicker();
+    const restricted = JSON.stringify(["public", "restricted"]);
+    state.picked = [restricted, JSON.stringify(["public", "unrelated"])];
+    mocks.getColumns.mockRejectedValueOnce(new Error("columns unavailable"));
+
+    await state.appendSelectedTables();
+
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C", "unrelated"]);
+    expect(state.candidates.map((table: DiagramTable) => table.name)).toEqual(["restricted"]);
+    expect(state.picked).toEqual([restricted]);
+    expect(state.picker).toBe(true);
+    expect(state.pickerBusy).toBe(false);
+    expect(state.pickerError).toBe("diagram.partialError");
+
+    await state.appendSelectedTables();
+
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C", "unrelated", "restricted"]);
+    expect(state.picker).toBe(false);
+  });
+
+  it("discards table metadata resolved after the picker closes", async () => {
+    const { state } = await mountDialog();
+    await state.openPicker();
+    state.picked = [JSON.stringify(["public", "unrelated"])];
+    const pending = deferred<never[]>();
+    mocks.getColumns.mockImplementationOnce(() => pending.promise);
+    const append = state.appendSelectedTables();
+    state.closePicker();
+    pending.resolve([]);
+    await append;
+    expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C"]);
+  });
   it("loads the recursive closure without listing tables and passes catalog", async () => {
     const { state } = await mountDialog();
     expect(state.tables.map((table: DiagramTable) => table.name)).toEqual(["A", "B", "C"]);

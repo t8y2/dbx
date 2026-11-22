@@ -136,6 +136,9 @@ async fn live_postgres_export_restores_tables_that_depend_on_functions() {
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            row_limit_per_table: None,
+            row_limit_sort_column: None,
+            row_limit_sort_descending: false,
         },
         |_| {},
     )

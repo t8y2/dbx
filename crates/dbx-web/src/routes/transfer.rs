@@ -431,6 +431,7 @@ mod tests {
             create_table: false,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            target_table_names: Default::default(),
             oracle_packages: None,
             content: TransferContent::DataOnly,
             objects: Some(Vec::new()),

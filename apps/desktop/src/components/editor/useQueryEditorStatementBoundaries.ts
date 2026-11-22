@@ -1,5 +1,6 @@
 import type { ShallowRef } from "vue";
 import { EditorState, RangeSet, RangeValue } from "@codemirror/state";
+import { syntaxTree } from "@codemirror/language";
 import type { EditorView as EditorViewType, ViewPlugin as ViewPluginType } from "@codemirror/view";
 import { queryEditorStatementDatabaseType } from "@/lib/mongo/mongoSql";
 import { executableStatementRangeCacheForDoc, statementGutterStartIndexForCache, mapStatementGutterStartIndex, type ExecutableStatementRangeCache, type StatementGutterStartIndex } from "@/lib/sql/executableStatementRangeCache";
@@ -10,6 +11,8 @@ import { createSqlStatementAnalysisWorker } from "@/lib/sql/sqlStatementAnalysis
 import { shouldParseQueryEditorSyntax, shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
 import { computeBlockFoldRanges, type FoldRange } from "@/lib/editor/codemirrorSqlBlockFolding";
 import type { SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+
+type SyntaxTree = ReturnType<typeof syntaxTree>;
 
 /** Statements (sorted, non-overlapping) that intersect [from, to]. */
 export function statementsOverlapping(ranges: readonly SqlTextRange[], from: number, to: number): SqlTextRange[] {
@@ -66,6 +69,8 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     generation: number;
     /** Statement starts whose fold ranges were already computed on demand (documents past the grammar budget). */
     windowFolded: Set<number>;
+    /** Syntax tree the folds of a full-feature document were computed from; see `ensureSyntaxFolds`. */
+    foldsTree: SyntaxTree | null;
   } | null = null;
 
   let statementBoundariesGeneration = 0;
@@ -101,6 +106,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
       fresh: true,
       generation: statementBoundariesGeneration,
       windowFolded: new Set(),
+      foldsTree: null,
     };
   }
 
@@ -146,6 +152,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     fresh: boolean;
     generation: number;
     windowFolded: Set<number>;
+    foldsTree: SyntaxTree | null;
   }
 
   // Returns the view matching `state`, rebuilding it synchronously when the
@@ -154,7 +161,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
   // reference current through ChangeSet mapping, so this stays cheap.
   function statementBoundariesForState(state: import("@codemirror/state").EditorState): StatementBoundariesView {
     if (statementBoundariesView && statementBoundariesView.doc === state.doc && statementBoundariesView.generation === statementBoundariesGeneration) return statementBoundariesView;
-    statementBoundariesView = { doc: state.doc, startsIndex: { starts: RangeSet.empty, executableLineStarts: RangeSet.empty }, folds: RangeSet.empty, frameRange: null, fresh: false, generation: statementBoundariesGeneration, windowFolded: new Set() };
+    statementBoundariesView = { doc: state.doc, startsIndex: { starts: RangeSet.empty, executableLineStarts: RangeSet.empty }, folds: RangeSet.empty, frameRange: null, fresh: false, generation: statementBoundariesGeneration, windowFolded: new Set(), foldsTree: null };
     refreshStatementBoundaries(state);
     return statementBoundariesView!;
   }
@@ -177,6 +184,24 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
       for (const range of folds.values()) additions.push(foldRangeMarker.range(statement.from + range.from, statement.from + range.to));
     }
     if (additions.length > 0) boundaries.folds = boundaries.folds.update({ add: additions, sort: true });
+  }
+
+  // Below the large-document threshold the main thread already holds a full syntax tree, so folds are
+  // computed from it here. Every keystroke produces a new tree, and walking all of it per keystroke was
+  // the dominant typing cost on scripts of a few hundred lines; so, as for large documents, the folds are
+  // only recomputed once the boundaries are fresh again (after the typing pause) and otherwise mapped
+  // through the edits by the tracking plugin. A tree that changes without an edit (the parser covering
+  // more of the document in the background, a dialect swap) is picked up on the next fold query.
+  function ensureSyntaxFolds(state: EditorState, boundaries: StatementBoundariesView) {
+    if (!boundaries.fresh) return;
+    const tree = syntaxTree(state);
+    if (boundaries.foldsTree === tree) return;
+    boundaries.foldsTree = tree;
+    const folds = computeBlockFoldRanges(state, props.databaseType, tree);
+    boundaries.folds = RangeSet.of(
+      [...folds.values()].map((range) => foldRangeMarker.range(range.from, range.to)),
+      true,
+    );
   }
 
   function scheduleStatementBoundariesRefresh(currentView: EditorViewType) {
@@ -223,6 +248,7 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
               fresh: false,
               generation: boundaries.generation,
               windowFolded: new Set(),
+              foldsTree: null,
             };
           }
           scheduleStatementBoundariesRefresh(update.view);
@@ -237,11 +263,11 @@ export function useQueryEditorStatementBoundaries(options: QueryEditorStatementB
     return statementBoundariesTrackingPlugin;
   }
   return {
-    foldRangeForState(state: EditorState, lineStart: number): FoldRange | null | undefined {
-      if (!shouldUseQueryEditorLargeDocumentModeForSize(state.doc.length, state.doc.lines)) return undefined;
+    foldRangeForState(state: EditorState, lineStart: number): FoldRange | null {
       const lineEnd = state.doc.lineAt(lineStart).to;
       const boundaries = statementBoundariesForState(state);
-      if (!shouldParseQueryEditorSyntax(state.doc.length)) ensureWindowFolds(state, boundaries, lineStart, lineEnd);
+      if (!shouldUseQueryEditorLargeDocumentModeForSize(state.doc.length, state.doc.lines)) ensureSyntaxFolds(state, boundaries);
+      else if (!shouldParseQueryEditorSyntax(state.doc.length)) ensureWindowFolds(state, boundaries, lineStart, lineEnd);
       let range: FoldRange | null = null;
       boundaries.folds.between(lineEnd, lineEnd, (from, to) => {
         if (from !== lineEnd) return;

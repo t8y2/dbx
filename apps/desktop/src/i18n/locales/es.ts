@@ -1368,6 +1368,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "Resultados incompletos: no se pudo cargar el contenido de {count} archivos.",
     matchPreviewLimit: "Las vistas previas se limitan a las primeras {limit} de {total} líneas coincidentes.",
     sortByDateCreated: "Ordenar por fecha de creación",
+    displayMode: "Modo de visualización",
+    displayModeFolder: "Por estructura de carpetas",
+    displayModeConnection: "Agrupar por conexión",
   },
 
   connection: {
@@ -12324,6 +12327,11 @@ export default withEnglishFallback({
     fileFilterHint: "Use un comodín como *.sql o *.sh, o una expresión regular como {regex}.",
     openWithDefaultApp: "Abrir con la aplicación predeterminada del sistema",
     openWithDefaultAppFailed: "Error al abrir con la aplicación predeterminada del sistema: {message}",
+    displayMode: "Modo de visualización",
+    displayModeFolder: "Por estructura de carpetas",
+    displayModeConnection: "Agrupar por conexión",
+    unassociated: "Sin asociar",
+    deletedConnection: "Conexión eliminada",
   },
   impact: {
     title: "Informe de impacto",

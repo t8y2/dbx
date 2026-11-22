@@ -1442,6 +1442,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "ผลการค้นหาไม่ครบถ้วน: ไม่สามารถโหลดเนื้อหาของไฟล์ {count} ไฟล์ได้",
     matchPreviewLimit: "แสดงตัวอย่างได้เฉพาะ {limit} บรรทัดแรกจากทั้งหมด {total} บรรทัดที่ตรงกัน",
     sortByDateCreated: "เรียงตามวันที่สร้าง",
+    displayMode: "รูปแบบการแสดงผล",
+    displayModeFolder: "ตามโครงสร้างโฟลเดอร์",
+    displayModeConnection: "จัดกลุ่มตามการเชื่อมต่อ",
   },
   connection: {
     groupPath: "เส้นทางกลุ่ม",
@@ -10339,6 +10342,11 @@ export default withEnglishFallback({
     fileFilterHint: "ใช้ glob เช่น *.sql หรือ *.sh หรือ regular expression เช่น {regex}",
     openWithDefaultApp: "เปิดด้วยแอปเริ่มต้นของระบบ",
     openWithDefaultAppFailed: "เปิดด้วยแอปเริ่มต้นของระบบไม่สำเร็จ: {message}",
+    displayMode: "รูปแบบการแสดงผล",
+    displayModeFolder: "ตามโครงสร้างโฟลเดอร์",
+    displayModeConnection: "จัดกลุ่มตามการเชื่อมต่อ",
+    unassociated: "ไม่ได้เชื่อมโยง",
+    deletedConnection: "การเชื่อมต่อถูกลบแล้ว",
   },
   marketplace: {
     viewGrid: "ดูเป็นกริด",

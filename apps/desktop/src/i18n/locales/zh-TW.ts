@@ -1345,6 +1345,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "搜尋結果不完整：{count} 個檔案的內容無法載入。",
     matchPreviewLimit: "共 {total} 行相符，僅提供前 {limit} 行的預覽。",
     sortByDateCreated: "按建立日期排序",
+    displayMode: "顯示方式",
+    displayModeFolder: "按資料夾結構",
+    displayModeConnection: "按連線分組",
   },
 
   connection: {
@@ -11842,6 +11845,11 @@ export default withEnglishFallback({
     fileFilterPlaceholder: "檔案名稱篩選規則",
     filterInvalid: "檔案篩選規則無效，已保留原規則：{message}",
     fileFilterHint: "支援萬用字元（如 *.sql、*.sh）或正則表示式（如 {regex}）。",
+    displayMode: "顯示方式",
+    displayModeFolder: "按資料夾結構",
+    displayModeConnection: "按連線分組",
+    unassociated: "未關聯",
+    deletedConnection: "連線已刪除",
   },
   mqTopics: {
     title: "主題管理",

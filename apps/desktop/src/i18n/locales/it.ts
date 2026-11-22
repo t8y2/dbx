@@ -1357,6 +1357,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "Risultati incompleti: impossibile caricare il contenuto di {count} file.",
     matchPreviewLimit: "Le anteprime sono limitate alle prime {limit} righe su {total} righe corrispondenti.",
     sortByDateCreated: "Ordina per data di creazione",
+    displayMode: "Modalità di visualizzazione",
+    displayModeFolder: "Per struttura delle cartelle",
+    displayModeConnection: "Per connessione",
   },
 
   connection: {
@@ -11868,6 +11871,11 @@ export default withEnglishFallback({
     fileFilterHint: "Usa un carattere jolly come *.sql o *.sh oppure un'espressione regolare come {regex}.",
     openWithDefaultApp: "Apri con l'app predefinita del sistema",
     openWithDefaultAppFailed: "Impossibile aprire con l'app predefinita del sistema: {message}",
+    displayMode: "Modalità di visualizzazione",
+    displayModeFolder: "Per struttura delle cartelle",
+    displayModeConnection: "Per connessione",
+    unassociated: "Non associato",
+    deletedConnection: "Connessione eliminata",
   },
   mqTopics: {
     title: "Gestione topic",

@@ -1366,6 +1366,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "검색 결과가 완전하지 않습니다. 파일 {count}개의 내용을 불러오지 못했습니다.",
     matchPreviewLimit: "일치하는 총 {total}개 줄 중 처음 {limit}개 줄만 미리 볼 수 있습니다.",
     sortByDateCreated: "생성 날짜순으로 정렬",
+    displayMode: "표시 방식",
+    displayModeFolder: "폴더 구조별",
+    displayModeConnection: "연결별 그룹화",
   },
   connection: {
     groupPath: "그룹 경로",
@@ -8546,6 +8549,11 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql 또는 *.sh 같은 와일드카드나 {regex} 같은 정규식을 사용할 수 있습니다.",
     openWithDefaultApp: "시스템 기본 앱으로 열기",
     openWithDefaultAppFailed: "시스템 기본 앱으로 열기 실패: {message}",
+    displayMode: "표시 방식",
+    displayModeFolder: "폴더 구조별",
+    displayModeConnection: "연결별 그룹화",
+    unassociated: "연결되지 않음",
+    deletedConnection: "연결이 삭제됨",
   },
   diff: {
     additionalSchemas: "다음 스키마도 비교",

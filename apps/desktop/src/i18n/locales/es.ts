@@ -8149,6 +8149,13 @@ export default withEnglishFallback({
       saveFailed: "Error al guardar: {message}",
       deleteFailed: "Error al eliminar: {message}",
     },
+    tableRenameSet: "Renombrar",
+    tableRenameEdit: "Nombre de tabla de destino",
+    tableRenameClear: "Restaurar nombre original",
+    tableRenameTitle: "Establecer el nombre de tabla de destino de «{table}»",
+    tableRenameHint: "La tabla se creará y se escribirá con este nombre en el destino. Si introduces el nombre de la tabla de origen, se mantendrá sin cambios.",
+    tableRenameCollision: "Otra tabla ya seleccionada usa este nombre: «{table}».",
+    tableRenameSave: "Guardar",
   },
   tableImport: {
     title: "Importar datos a tabla",

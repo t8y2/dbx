@@ -348,6 +348,12 @@ pub struct TransferRequest {
     pub mode: TransferMode,
     #[serde(default)]
     pub target_table_name_case: TransferTableNameCase,
+    /// Explicit target table name per source table (key = source table name).
+    ///
+    /// Takes precedence over `target_table_name_case`; tables without an entry keep the
+    /// name the case option produces.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub target_table_names: HashMap<String, String>,
     #[serde(default)]
     pub target_column_name_case: TransferColumnNameCase,
     #[serde(default = "default_quote_target_column_names")]
@@ -563,6 +569,11 @@ impl TransferRequest {
     }
 
     pub fn target_table_name(&self, source_table: &str) -> String {
+        if let Some(name) =
+            self.target_table_names.get(source_table).map(|name| name.trim()).filter(|name| !name.is_empty())
+        {
+            return name.to_string();
+        }
         match self.target_table_name_case {
             TransferTableNameCase::Preserve => source_table.to_string(),
             TransferTableNameCase::Lower => source_table.to_lowercase(),
@@ -1175,6 +1186,11 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
             return Err("Table filter contains an empty table name".to_string());
         }
         parse_transfer_table_filter(raw)?;
+    }
+    for (table, name) in &request.target_table_names {
+        if table.trim().is_empty() || name.trim().is_empty() || name.contains('\0') {
+            return Err(format!("Invalid target table name for {table:?}: {name:?}"));
+        }
     }
     Ok(())
 }
@@ -16412,6 +16428,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             batch_size: 1000,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            target_table_names: Default::default(),
             oracle_packages: None,
         };
         let json = serde_json::to_value(&request).unwrap();
@@ -16529,6 +16546,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 table_filters: std::collections::HashMap::new(),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
+                target_table_names: Default::default(),
                 oracle_packages: None,
             }
         }
@@ -16710,6 +16728,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 objects: Some(Vec::new()),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
+                target_table_names: Default::default(),
                 oracle_packages: None,
             };
             assert!(validate_transfer_request(&base).is_ok());
@@ -16753,6 +16772,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
                 objects: Some(Vec::new()),
                 drop_target_before_create: false,
                 drop_target_confirmed: false,
+                target_table_names: Default::default(),
                 oracle_packages: None,
             };
 
@@ -18101,6 +18121,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             batch_size: 1000,
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            target_table_names: Default::default(),
             oracle_packages: None,
         }
     }
@@ -18197,6 +18218,31 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
 
         request.target_table_name_case = TransferTableNameCase::Upper;
         assert_eq!(request.target_table_name("orders"), "ORDERS");
+    }
+
+    #[test]
+    fn transfer_explicit_target_table_name_overrides_the_case_option() {
+        let mut request = test_transfer_request(vec!["address", "ORDERS"]);
+        request.target_table_name_case = TransferTableNameCase::Lower;
+        request.target_table_names.insert("address".to_string(), "  base_address_service_address ".to_string());
+        request.target_table_names.insert("blank".to_string(), "   ".to_string());
+
+        assert_eq!(request.target_table_name("address"), "base_address_service_address");
+        assert_eq!(request.target_table_name("ORDERS"), "orders");
+        assert_eq!(request.target_table_name("blank"), "blank");
+    }
+
+    #[test]
+    fn transfer_request_rejects_invalid_or_colliding_explicit_target_table_names() {
+        let mut request = test_transfer_request(vec!["a", "b"]);
+        request.target_table_names.insert("a".to_string(), "renamed".to_string());
+        assert!(validate_transfer_request(&request).is_ok());
+
+        request.target_table_names.insert("b".to_string(), "renamed".to_string());
+        assert!(validate_transfer_request(&request).unwrap_err().contains("Target table name collision"));
+
+        request.target_table_names.insert("b".to_string(), "   ".to_string());
+        assert!(validate_transfer_request(&request).unwrap_err().contains("Invalid target table name"));
     }
 
     #[test]

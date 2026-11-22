@@ -3159,6 +3159,8 @@ export interface TransferTaskConfig {
   operationTimeoutSecs?: number;
   /** Optional per-source-table transfer filter (bare WHERE or a full SELECT). */
   tableFilters?: Record<string, string>;
+  /** Optional explicit target table name per source table. */
+  targetTableNames?: Record<string, string>;
   /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
   dropTargetBeforeCreate?: boolean;
   /** Legacy field only. Saved confirmation is always ignored and reset to false. */

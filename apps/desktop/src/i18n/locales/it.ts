@@ -7935,6 +7935,13 @@ export default withEnglishFallback({
       saveFailed: "Salvataggio fallito: {message}",
       deleteFailed: "Eliminazione fallita: {message}",
     },
+    tableRenameSet: "Rinomina",
+    tableRenameEdit: "Nome tabella di destinazione",
+    tableRenameClear: "Ripristina nome originale",
+    tableRenameTitle: "Imposta il nome della tabella di destinazione per «{table}»",
+    tableRenameHint: "La tabella verrà creata e scritta sulla destinazione con questo nome. Se inserisci il nome della tabella di origine, rimane invariato.",
+    tableRenameCollision: "Un'altra tabella già selezionata utilizza questo nome: «{table}».",
+    tableRenameSave: "Salva",
   },
   tableImport: {
     title: "Importa Dati Tabella",

@@ -7040,6 +7040,13 @@ export default withEnglishFallback({
       saveFailed: "儲存失敗：{message}",
       deleteFailed: "刪除失敗：{message}",
     },
+    tableRenameSet: "改名",
+    tableRenameEdit: "目標表名",
+    tableRenameClear: "恢復原名",
+    tableRenameTitle: "設定「{table}」的目標表名",
+    tableRenameHint: "目標端將以此名稱建立並寫入該表。填寫來源表名則保持不變。",
+    tableRenameCollision: "已選取的另一張表已使用此名稱：「{table}」。",
+    tableRenameSave: "儲存",
   },
   tableImport: {
     title: "匯入資料表資料",

@@ -7944,6 +7944,13 @@ export default withEnglishFallback({
       saveFailed: "保存に失敗しました：{message}",
       deleteFailed: "削除に失敗しました：{message}",
     },
+    tableRenameSet: "名前を変更",
+    tableRenameEdit: "ターゲットテーブル名",
+    tableRenameClear: "元の名前に戻す",
+    tableRenameTitle: "「{table}」のターゲットテーブル名を設定",
+    tableRenameHint: "ターゲット側ではこの名前でテーブルが作成され、書き込みが行われます。ソーステーブル名を入力した場合はそのまま維持されます。",
+    tableRenameCollision: "選択済みの別のテーブルがこの名前を使用しています：「{table}」。",
+    tableRenameSave: "保存",
   },
   tableImport: {
     title: "テーブルデータをインポート",

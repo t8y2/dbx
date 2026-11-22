@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { cn } from "@/lib/common/utils";
-import { floatingArrowOffset, floatingViewportShift, visibleTriggerRect } from "@/lib/common/floatingViewportPosition";
+import { flipFloatingSide, floatingArrowOffset, floatingSurfaceOverlapsTrigger, floatingViewportShift, visibleTriggerRect, type FloatingSide } from "@/lib/common/floatingViewportPosition";
 
 const props = withDefaults(
   defineProps<{
     text: string;
     disabled?: boolean | (() => boolean);
-    side?: "top" | "right" | "bottom" | "left";
+    side?: FloatingSide;
     sideOffset?: number;
     delay?: number;
     closeDelay?: number;
@@ -34,6 +34,10 @@ const show = ref(false);
 const x = ref(0);
 const y = ref(0);
 const arrowOffset = ref<number>();
+// The rendered edge. `props.side` is only a preference: when clamping would put
+// the tooltip on top of its own trigger, the surface flips once (#15331).
+const resolvedSide = ref<FloatingSide>(props.side);
+let flippedToOppositeSide = false;
 // `nowrap` keeps short hints on one line. Anything wider than the surface cap
 // (max-w-xs) cannot stay on one line without spilling past the bubble, so the
 // content switches to wrapping once the single-line layout overflows (#10451).
@@ -56,7 +60,7 @@ function triggerElement(): HTMLElement | undefined {
 }
 
 const tooltipTransformClass = computed(() => {
-  switch (props.side) {
+  switch (resolvedSide.value) {
     case "right":
       return "-translate-y-1/2";
     case "left":
@@ -70,7 +74,7 @@ const tooltipTransformClass = computed(() => {
 });
 
 const arrowClass = computed(() => {
-  switch (props.side) {
+  switch (resolvedSide.value) {
     case "right":
       return "absolute -left-1.25 top-1/2 -translate-y-1/2 border-b border-l";
     case "left":
@@ -89,7 +93,7 @@ const arrowSurfaceClass = computed(() => (props.surface === "popover" ? "bg-popo
 
 const arrowStyle = computed(() => {
   if (arrowOffset.value === undefined) return undefined;
-  return props.side === "left" || props.side === "right" ? { top: `${arrowOffset.value}px` } : { left: `${arrowOffset.value}px` };
+  return resolvedSide.value === "left" || resolvedSide.value === "right" ? { top: `${arrowOffset.value}px` } : { left: `${arrowOffset.value}px` };
 });
 
 function clearTimer() {
@@ -135,7 +139,7 @@ function updatePosition() {
   arrowOffset.value = undefined;
   const rect = visibleTriggerRect(el);
   const offset = props.sideOffset;
-  switch (props.side) {
+  switch (resolvedSide.value) {
     case "right":
       x.value = Math.min(window.innerWidth - 8, rect.right + offset);
       y.value = Math.min(Math.max(8, rect.top + rect.height / 2), window.innerHeight - 8);
@@ -161,9 +165,21 @@ function fitPositionToViewport() {
   if (!tooltip) return;
   const rect = tooltip.getBoundingClientRect();
   const shift = floatingViewportShift(rect, { width: window.innerWidth, height: window.innerHeight });
+  // A tooltip that overflows the top edge is clamped back down; at the very top
+  // of a fullscreen result pane that lands it on top of its own trigger, where
+  // the click aimed at the trigger hits the tooltip instead (#15331). Prefer the
+  // opposite edge over covering the trigger.
+  const el = shift.x || shift.y ? triggerElement() : null;
+  if (el && !flippedToOppositeSide && floatingSurfaceOverlapsTrigger({ left: rect.left + shift.x, right: rect.right + shift.x, top: rect.top + shift.y, bottom: rect.bottom + shift.y }, visibleTriggerRect(el))) {
+    flippedToOppositeSide = true;
+    resolvedSide.value = flipFloatingSide(resolvedSide.value);
+    updatePosition();
+    void nextTick(fitPositionToViewport);
+    return;
+  }
   x.value += shift.x;
   y.value += shift.y;
-  arrowOffset.value = props.side === "left" || props.side === "right" ? floatingArrowOffset(rect.height, shift.y) : floatingArrowOffset(rect.width, shift.x);
+  arrowOffset.value = resolvedSide.value === "left" || resolvedSide.value === "right" ? floatingArrowOffset(rect.height, shift.y) : floatingArrowOffset(rect.width, shift.x);
 }
 
 /**
@@ -185,6 +201,8 @@ function close() {
   clearCloseTimer();
   show.value = false;
   wrapNowrapContent.value = false;
+  resolvedSide.value = props.side;
+  flippedToOppositeSide = false;
   openSource = null;
   removeGlobalListeners();
 }
@@ -255,6 +273,8 @@ function open(source: "hover" | "focus") {
   if (Date.now() < suppressOpenUntil) return;
   if (isDisabled() || !hasContent.value) return;
   if (source === "focus" ? !hasFocusVisible() : !isPointerActive()) return;
+  resolvedSide.value = props.side;
+  flippedToOppositeSide = false;
   updatePosition();
   openSource = source;
   wrapNowrapContent.value = false;
@@ -291,9 +311,21 @@ watch(
   () => {
     if (isDisabled() || !props.text) close();
     else if (show.value) {
+      flippedToOppositeSide = false;
       updatePosition();
       void nextTick(fitPositionToViewport);
     }
+  },
+);
+
+watch(
+  () => props.side,
+  () => {
+    resolvedSide.value = props.side;
+    flippedToOppositeSide = false;
+    if (!show.value) return;
+    updatePosition();
+    void nextTick(fitPositionToViewport);
   },
 );
 </script>

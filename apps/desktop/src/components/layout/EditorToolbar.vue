@@ -1038,9 +1038,7 @@ defineExpose({
               <span class="inline-flex items-center gap-px leading-none" aria-hidden="true">
                 <span class="text-[11px] font-bold">Tx:</span>
                 <span class="inline-flex h-3 min-w-3 items-center justify-center rounded-[3px] border border-current px-px text-[8px] font-extrabold leading-none">{{ transactionModeBadge }}</span>
-                <!-- Auto-commit tab with an uncommitted explicit transaction:
-                     the commit/rollback actions next to the badge act on it. -->
-                <span v-if="hasOpenAutoCommitTransaction" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
+                <span v-if="showTxnActions" data-toolbar-open-transaction-dot class="ml-px h-1.5 w-1.5 rounded-full bg-current" />
               </span>
             </Button>
           </TooltipTrigger>
@@ -1235,6 +1233,7 @@ defineExpose({
           :empty-text="t('grid.noSearchResults')"
           :loading-text="t('common.loading')"
           :loading="!!activeConnection && isLoadingSchemas(activeConnection.id, schemaDatabaseKey)"
+          :clearable="activeConnection?.db_type === 'postgres' && activeTab.mode === 'query'"
           :clear-selected-option="supportsClearableQuerySchema(activeConnection?.db_type)"
           trigger-variant="ghost"
           trigger-class="gap-1.5"

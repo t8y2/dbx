@@ -11594,12 +11594,15 @@ mod tests {
                 generator: None,
             },
         ];
-        let target_types = vec![("id".to_string(), "int".to_string()), ("workday".to_string(), "bit(1)".to_string())];
+        let target_types = vec![("id".to_string(), "int".to_string()), ("workday".to_string(), "bit(8)".to_string())];
         let batches =
             build_import_insert_batches(&parsed, &mappings, &target_types, "t_calendar", "", &DatabaseType::Mysql, 500)
                 .unwrap();
         assert_eq!(batches.len(), 1);
-        assert!(batches[0].sql.contains("(1, b'1'), (2, b'0'), (3, b'1'), (4, b'101')"));
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO `t_calendar` (`id`, `workday`) VALUES\n(1, b'1'),\n(2, b'0'),\n(3, b'1'),\n(4, b'101')"
+        );
     }
 
     #[test]

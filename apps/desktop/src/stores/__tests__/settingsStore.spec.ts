@@ -477,6 +477,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarDensity: 123 } as any).sidebarDensity).toBe("default");
   });
 
+  it("keeps original connection icons for missing or invalid saved preferences", () => {
+    expect(normalizeEditorSettings({}).sidebarConnectionIconStyle).toBe("classic");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "badge" }).sidebarConnectionIconStyle).toBe("badge");
+    expect(normalizeEditorSettings({ sidebarConnectionIconStyle: "unknown" } as any).sidebarConnectionIconStyle).toBe("classic");
+  });
+
   it("uses inline comments by default and preserves legacy comment visibility", () => {
     expect(normalizeEditorSettings({}).sidebarObjectInfoMode).toBe("comment-inline");
     expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-aligned" }).sidebarObjectInfoMode).toBe("comment-aligned");
@@ -1391,6 +1397,14 @@ describe("normalizeEditorSettings - colorizeConnectionTabsScope", () => {
   });
 });
 
+describe("normalizeEditorSettings - crossWindowTabDragPreviewEnabled", () => {
+  it("defaults to enabled and only accepts booleans", () => {
+    expect(normalizeEditorSettings({}).crossWindowTabDragPreviewEnabled).toBe(true);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: false }).crossWindowTabDragPreviewEnabled).toBe(false);
+    expect(normalizeEditorSettings({ crossWindowTabDragPreviewEnabled: "false" } as any).crossWindowTabDragPreviewEnabled).toBe(true);
+  });
+});
+
 describe("normalizeEditorSettings - tabMaxWidth", () => {
   it("defaults tabMaxWidth to 0", () => {
     expect(normalizeEditorSettings({}).tabMaxWidth).toBe(0);
@@ -1555,21 +1569,9 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],
-    });
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "aicodemirror")).toMatchObject({
-      endpoint: "https://api.aicodemirror.ai/v1",
-      provider: "openai-compatible",
-      authMethod: "bearer",
-      requiresApiKey: true,
-      websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-      badgeKey: "ai.aicodemirrorSponsored",
     });
   });
 

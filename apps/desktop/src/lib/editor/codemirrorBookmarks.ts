@@ -1,5 +1,5 @@
 import type { Extension } from "@codemirror/state";
-import type { EditorView as EditorViewType } from "@codemirror/view";
+import type { EditorView as EditorViewType, ViewUpdate } from "@codemirror/view";
 import { nextBookmarkLine, normalizeBookmarkLines, type BookmarkNavigationDirection } from "./bookmarkNavigation";
 
 export interface QueryEditorBookmarkModules {
@@ -10,12 +10,21 @@ export interface QueryEditorBookmarkModules {
   gutter: typeof import("@codemirror/view").gutter;
 }
 
+export interface QueryEditorBookmark {
+  from: number;
+  line: number;
+  text: string;
+}
+
 export interface QueryEditorBookmarks {
   extension: Extension;
+  list(view: EditorViewType): QueryEditorBookmark[];
+  changed(update: ViewUpdate): boolean;
   toggle(view: EditorViewType): boolean;
   next(view: EditorViewType): boolean;
   previous(view: EditorViewType): boolean;
   reset(view: EditorViewType): void;
+  restore(view: EditorViewType, lines: readonly number[]): void;
 }
 
 export interface QueryEditorBookmarkOptions {
@@ -58,6 +67,7 @@ export function createQueryEditorBookmarks(options: QueryEditorBookmarkOptions):
   const bookmarkMarker = new BookmarkMarker();
   const toggleBookmarkEffect = StateEffect.define<number>();
   const resetBookmarksEffect = StateEffect.define<null>();
+  const restoreBookmarksEffect = StateEffect.define<readonly number[]>();
 
   const bookmarkField = StateField.define<ReadonlySet<number>>({
     create: () => new Set<number>(),
@@ -75,6 +85,9 @@ export function createQueryEditorBookmarks(options: QueryEditorBookmarkOptions):
 
       for (const effect of transaction.effects) {
         if (effect.is(resetBookmarksEffect)) next = new Set<number>();
+        if (effect.is(restoreBookmarksEffect)) {
+          next = new Set(effect.value.filter((line) => Number.isSafeInteger(line) && line >= 1 && line <= transaction.newDoc.lines).map((line) => transaction.newDoc.line(line).from));
+        }
       }
 
       for (const effect of transaction.effects) {
@@ -150,11 +163,24 @@ export function createQueryEditorBookmarks(options: QueryEditorBookmarkOptions):
 
   sharedBookmarks = {
     extension: [bookmarkField, bookmarkGutter, theme],
+    list(view) {
+      return normalizeBookmarkLines(view.state.field(bookmarkField)).map((from) => {
+        const line = view.state.doc.lineAt(from);
+        return { from, line: line.number, text: line.text };
+      });
+    },
+    changed: (update) => update.startState.field(bookmarkField) !== update.state.field(bookmarkField),
     toggle,
     next: (view) => navigate(view, "next"),
     previous: (view) => navigate(view, "previous"),
     reset(view) {
       view.dispatch({ effects: resetBookmarksEffect.of(null) });
+    },
+    restore(view, lines) {
+      const validLines = [...new Set(lines.filter((line) => Number.isSafeInteger(line) && line >= 1 && line <= view.state.doc.lines))].sort((a, b) => a - b);
+      const current = sharedBookmarks!.list(view).map((bookmark) => bookmark.line);
+      if (current.length === validLines.length && current.every((line, index) => line === validLines[index])) return;
+      view.dispatch({ effects: restoreBookmarksEffect.of(validLines) });
     },
   };
   return sharedBookmarks;
@@ -163,4 +189,12 @@ export function createQueryEditorBookmarks(options: QueryEditorBookmarkOptions):
 /** Clear every bookmark in this editor, e.g. after swapping in another tab's document. */
 export function resetQueryEditorBookmarks(view: EditorViewType): void {
   sharedBookmarks?.reset(view);
+}
+
+export function restoreQueryEditorBookmarks(view: EditorViewType, lines: readonly number[]): void {
+  sharedBookmarks?.restore(view, lines);
+}
+
+export function queryEditorBookmarkLines(view: EditorViewType): number[] {
+  return sharedBookmarks?.list(view).map((bookmark) => bookmark.line) ?? [];
 }

@@ -4048,6 +4048,13 @@ fn agent_java_args_with_extra_opts(
         args.push("--add-opens=java.base/java.net=ALL-UNNAMED".to_string());
     }
 
+    // Snowflake's driver reads results through its bundled Arrow, whose MemoryUtil
+    // reflects into java.nio.Buffer.address; without this open every query fails with
+    // "Could not initialize class ...arrow.memory.RootAllocator" on the managed JRE 21.
+    if agent_jar_path_matches_key(jar_path, "snowflake") {
+        args.push("--add-opens=java.base/java.nio=ALL-UNNAMED".to_string());
+    }
+
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
     if let Some(extra) = extra_opts {
@@ -5032,6 +5039,13 @@ for line in sys.stdin:
         assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
         assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.util=ALL-UNNAMED"));
         assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.lang=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_open_java_nio_for_snowflake_arrow() {
+        let args = agent_java_args("/tmp/dbx/drivers/snowflake/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
     }
 
     #[test]

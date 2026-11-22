@@ -586,7 +586,17 @@ impl PluginDriverSession {
     }
 
     pub fn is_available(&self) -> bool {
-        self.logical.as_ref().is_none_or(|logical| logical.is_available())
+        match &self.logical {
+            Some(logical) => logical.is_available(),
+            None => self.sidecar.status().state == PluginSessionState::Running,
+        }
+    }
+
+    pub fn has_in_flight_request(&self) -> bool {
+        match &self.logical {
+            Some(logical) => logical.has_in_flight_request(),
+            None => self.sidecar.has_pending_requests(),
+        }
     }
 
     pub async fn pid(&self) -> Option<u32> {
@@ -605,7 +615,7 @@ impl PluginDriverSession {
         self.sidecar.send_binary(channel, data).await
     }
 
-    #[cfg(all(any(test, feature = "test-support"), unix))]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn start_for_test(
         plugin: InstalledPlugin,
         driver_id: String,

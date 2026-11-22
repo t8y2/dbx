@@ -65,8 +65,24 @@ mod tests {
         let wm_class = template.lines().find_map(|line| line.strip_prefix("StartupWMClass="));
         assert_eq!(
             wm_class,
-            Some("{{exec}}"),
-            "StartupWMClass must stay the bare executable so window grouping keeps working"
+            Some("{{name}}"),
+            "StartupWMClass must follow the product name, which is what GTK reports as WM_CLASS"
+        );
+    }
+
+    /// On Wayland the compositor finds the window's icon by matching its app_id against
+    /// the desktop entry file name, case-sensitively. The bundler names that file after
+    /// `productName`, so the GTK program name set in `main.rs` must be exactly the same.
+    #[test]
+    fn linux_app_id_matches_the_desktop_entry_file_name() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).expect("tauri.conf.json must be valid JSON");
+        let product_name = config["productName"].as_str().expect("tauri.conf.json must declare productName");
+
+        let main_rs = include_str!("../main.rs");
+        assert!(
+            main_rs.contains(&format!("set_prgname(Some(\"{product_name}\"))")),
+            "main.rs must set the GTK program name to {product_name:?} so the Wayland app_id matches {product_name}.desktop"
         );
     }
 

@@ -69,6 +69,25 @@ describe("connectionStore Kingbase mode lifecycle", () => {
     expect(store.getConfig(config.id)?.database_info?.compatibilityMode).toBeUndefined();
   });
 
+  it("caches quotes for the database requested, including concurrent lookups", async () => {
+    const config = kingbaseConnection();
+    api.connectionDatabaseInfo.mockResolvedValue({ productName: "KingbaseES", compatibilityMode: "oracle" });
+    api.connectionIdentifierQuote.mockImplementation(async (_id, database) => (database === "mysql_app" ? "`" : '"'));
+    const store = useConnectionStore();
+    await store.addConnection(config);
+    await store.connect(config);
+
+    expect(store.connectionIdentifierQuote(config.id)).toBe('"');
+    expect(store.connectionIdentifierQuote(config.id, "mysql_app")).toBeUndefined();
+    const quotes = await Promise.all([store.ensureConnectionIdentifierQuote(config.id, "oracle_app"), store.ensureConnectionIdentifierQuote(config.id, "mysql_app"), store.ensureConnectionIdentifierQuote(config.id, "mysql_app")]);
+
+    expect(quotes).toEqual(['"', "`", "`"]);
+    expect(store.connectionIdentifierQuote(config.id, "oracle_app")).toBe('"');
+    expect(store.connectionIdentifierQuote(config.id, "mysql_app")).toBe("`");
+    await expect(store.ensureConnectionIdentifierQuote(config.id, "oracle_app")).resolves.toBe('"');
+    expect(api.connectionIdentifierQuote.mock.calls).toEqual([[config.id], [config.id, "oracle_app"], [config.id, "mysql_app"]]);
+  });
+
   it("refreshes and persists the reported mode", async () => {
     const mode = "oracle";
     const config = kingbaseConnection();

@@ -203,6 +203,12 @@ struct PoolPublicationSnapshot {
     publication: PoolPublication,
 }
 
+struct MysqlClientSession {
+    publication: PoolPublication,
+    physical_connection_id: u32,
+    database: String,
+}
+
 pub struct ConnectionPoolReceipt {
     pool_key: String,
     publication: PoolPublication,
@@ -297,6 +303,7 @@ enum ConnectionDatabaseInfoSource {
     },
     NativeMysql(db::mysql::MySqlPool),
     NativeGaussdbDws(deadpool_postgres::Pool),
+    NativePostgres(deadpool_postgres::Pool),
     NativeHBase(db::hbase_driver::HBaseClient),
     NativeMongo(mongodb::Client, Option<String>),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
@@ -312,6 +319,23 @@ async fn gaussdb_dws_product_version_from_pool(pool: &deadpool_postgres::Pool) -
     let result = db::postgres::execute_query_with_max_rows(pool, "SELECT version()", Some(1)).await.ok()?;
     let server_version = result.rows.first()?.first()?.as_str()?;
     crate::query::plugin_plan::gaussdb_product_version_from_server_version(server_version)
+}
+
+/// Product display name for a PostgreSQL-family `SELECT version()` string.
+/// Greenplum and Cloudberry both report as `PostgreSQL x.y (...)` with the
+/// real product inside the parentheses, so surface that name when present.
+fn postgres_family_product_name(server_version: &str) -> Option<&str> {
+    let lower = server_version.to_ascii_lowercase();
+    if lower.contains("cloudberry") {
+        return Some("Apache Cloudberry");
+    }
+    if lower.contains("greenplum") {
+        return Some("Greenplum");
+    }
+    if lower.contains("gaussdb") || lower.contains("hologres") {
+        return Some("GaussDB");
+    }
+    lower.contains("postgresql").then_some("PostgreSQL")
 }
 
 /// Held connection for a manual transaction session
@@ -501,6 +525,10 @@ pub struct AppState {
     /// pool, or a closed tab can never inherit a transaction that no longer
     /// exists.
     mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
+    /// Physical identity and last requested database of a logical MySQL tab.
+    /// Survives automatic pool eviction so a replacement cannot silently run
+    /// COMMIT or other SQL on behalf of a session whose state was lost.
+    mysql_client_sessions: RwLock<HashMap<String, MysqlClientSession>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
     pub sqlserver_transaction_ends: Arc<std::sync::Mutex<crate::query::sqlserver_manual_transaction::EndedSessions>>,
     /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
@@ -512,6 +540,18 @@ pub struct AppState {
     pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     pub native_jobs: crate::schema::native_jobs::NativeJobRegistry,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    /// The `SCAN COUNT` each Redis server answered at, keyed by connection id.
+    ///
+    /// Redis treats `COUNT` as a hint and caps nothing, but servers that
+    /// implement the protocol with a hard per-command return limit do (TongRDS:
+    /// `Server.Common.MaxItemsReturned`, 10000 by default) and reject the whole
+    /// request when the count exceeds it. Only that refusal names the
+    /// configured limit, so the driver negotiates it; what is kept here is the
+    /// `COUNT` the server finally answered at. Every later page starts there
+    /// instead of paying for the refusal again, and a server that answers the
+    /// caller's own `COUNT` stores nothing. Dropped together with the
+    /// connection's pools, so a reconnect re-discovers the server it reached.
+    redis_scan_count_limits: Arc<RwLock<HashMap<String, usize>>>,
     /// Backend-confirmed liveness losses plus resync requests (#4339). The keepalive task
     /// publishes here once a connection has no pools left; each shell relays it to its own
     /// frontend, so DBX core never needs a UI handle of its own.
@@ -560,6 +600,13 @@ fn last_ssh_layer_local_port(transport_layers: &[TransportLayerConfig]) -> Optio
     transport_layers.last().and_then(ssh_layer_local_port)
 }
 
+fn mongo_uses_srv(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::MongoDb
+        && config.connection_string.as_deref().is_some_and(|uri| {
+            uri.trim().get(.."mongodb+srv://".len()).is_some_and(|scheme| scheme.eq_ignore_ascii_case("mongodb+srv://"))
+        })
+}
+
 /// Connection kinds whose primary path never listens on the static SSH tunnel,
 /// as `(kind, route)` for the error message. `plugin_proxy_route` carries the
 /// provider label of a plugin that declared `proxy_route`.
@@ -569,6 +616,7 @@ fn static_tunnel_bypass(config: &ConnectionConfig, plugin_proxy_route: Option<&s
         DatabaseType::ClickHouse => ("ClickHouse", "a SOCKS5 route"),
         DatabaseType::Consul => ("Consul", "a SOCKS5 route"),
         DatabaseType::Turso => ("Turso", "a SOCKS5 route"),
+        DatabaseType::MongoDb if mongo_uses_srv(config) => ("MongoDB SRV", "a SOCKS5 route"),
         DatabaseType::Redis if config.uses_redis_cluster() => ("Redis Cluster", "per-node tunnels"),
         DatabaseType::Redis if config.uses_redis_sentinel() => ("Redis Sentinel", "per-node tunnels"),
         DatabaseType::MessageQueue if connection_secrets::is_rocketmq_connection(config) => {
@@ -2142,12 +2190,14 @@ impl AppState {
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
+            mysql_client_sessions: RwLock::new(HashMap::new()),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
             session_credentials: SessionCredentialStore::new(),
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             native_jobs: crate::schema::native_jobs::NativeJobRegistry::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
+            redis_scan_count_limits: Arc::new(RwLock::new(HashMap::new())),
             // Bounded so a shell that stops draining cannot grow memory without bound. A
             // lagged receiver re-syncs from the read-only status check on its next use, so
             // dropping events here is safe.
@@ -2168,6 +2218,33 @@ impl AppState {
 
     pub fn mongo_oidc_browser_opener(&self) -> Option<MongoOidcBrowserOpener> {
         self.mongo_oidc_browser_opener.read().expect("MongoDB OIDC browser opener lock poisoned").clone()
+    }
+
+    pub async fn connect_native_mongodb(
+        &self,
+        url: &str,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+        proxy: Option<&PluginRuntimeProxy>,
+    ) -> Result<mongodb::Client, String> {
+        let proxy = proxy.map(|proxy| {
+            mongodb::options::Socks5Proxy::builder()
+                .host(proxy.host.clone())
+                .port(proxy.port)
+                .authentication(
+                    (!proxy.username.is_empty() || !proxy.password.is_empty())
+                        .then(|| (proxy.username.clone(), proxy.password.clone())),
+                )
+                .build()
+        });
+        db::mongo_driver::connect_with_oidc_and_proxy(
+            url,
+            connect_timeout,
+            idle_timeout,
+            self.mongo_oidc_browser_opener(),
+            proxy,
+        )
+        .await
     }
 
     pub fn set_salesforce_browser_opener(&self, opener: SfBrowserOpener) {
@@ -2319,7 +2396,7 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<ConnectionTestResult, String> {
         let params = serde_json::json!({ "connection": config });
-        if driver_id == "jdbc" && is_embedded_h2_jdbc(config) {
+        if driver_id == "jdbc" && uses_shared_embedded_jdbc_runtime(config) {
             let PoolKind::ExternalDriver { session, .. } = self.external_driver_pool(driver_id, config).await? else {
                 unreachable!();
             };
@@ -2355,7 +2432,7 @@ impl AppState {
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
         let env = self.external_driver_runtime_env(driver_id)?;
-        let session = if driver_id == "jdbc" && is_embedded_h2_jdbc(config) {
+        let session = if driver_id == "jdbc" && uses_shared_embedded_jdbc_runtime(config) {
             let runtime_key = serde_json::to_string(&(
                 &config.jdbc_driver_class,
                 &config.jdbc_driver_paths,
@@ -3555,7 +3632,7 @@ impl AppState {
         let pool_result = async {
         let pool = match db_config.db_type {
             DatabaseType::Mysql => {
-                let (pool, mode) = connect_mysql_metadata_pool(
+                let (mut pool, mode) = connect_mysql_metadata_pool(
                     &config,
                     &db_config,
                     &host,
@@ -3564,6 +3641,9 @@ impl AppState {
                     mysql_pool_max_connections,
                 )
                 .await?;
+                if matches!(&transport_stamp.plan.route, ConnectionTransportRoute::Navicat { .. }) {
+                    pool.set_stateless_http_tunnel();
+                }
                 PoolKind::Mysql(pool, mode)
             }
             DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
@@ -3719,12 +3799,7 @@ impl AppState {
                     client.connect(connect_params).await.map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                     PoolKind::agent(client)
                 } else {
-                    let native_err = match db::mongo_driver::connect_with_oidc(
-                        &url,
-                        connect_timeout,
-                        idle_timeout,
-                        self.mongo_oidc_browser_opener(),
-                    )
+                    let native_err = match self.connect_native_mongodb(&url, connect_timeout, idle_timeout, runtime_proxy.as_ref())
                     .await
                     {
                         Ok(client) => match db::mongo_driver::test_connection_for_url(
@@ -3758,7 +3833,7 @@ impl AppState {
                         },
                         Err(e) => e,
                     };
-                    if !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
+                    if runtime_proxy.is_none() && !uses_oidc && should_retry_mongo_with_legacy_driver(&native_err) {
                         log::info!("Native MongoDB driver failed ({native_err}), falling back to agent driver");
                         let connect_params = serde_json::json!({ "connection": agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""))? });
                         let legacy_agent_key =
@@ -4634,6 +4709,24 @@ impl AppState {
             }
         }
         let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
+        if mongo_uses_srv(config) {
+            if mongo_uses_legacy_driver(config) && !db::mongo_driver::mongo_uri_uses_oidc(&config.connection_url()) {
+                return Err("MongoDB SRV with transport layers requires the native MongoDB driver. Select MongoDB instead of MongoDB (Legacy).".to_string());
+            }
+            if !matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_)))
+                && !matches!(transport_layers.last(), Some(TransportLayerConfig::Proxy(proxy)) if proxy.proxy_type == crate::models::connection::ProxyType::Socks5)
+            {
+                return Err("MongoDB SRV requires SSH or SOCKS5 as its final transport layer.".to_string());
+            }
+            // Keep the SRV hostname and options. The driver discovers the seed
+            // list and sends every server connection through the SOCKS5 route.
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::SocksProxy { host: config.host.clone(), port: config.port },
+            });
+        }
         if matches!(
             config.db_type,
             DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso | DatabaseType::Consul
@@ -6272,6 +6365,7 @@ impl AppState {
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
+        self.mysql_client_sessions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
         Ok(removed.map(|pool| (pool_key, pool)))
     }
@@ -6282,12 +6376,141 @@ impl AppState {
         self.mysql_preserved_transactions.read().await.contains(pool_key)
     }
 
+    pub(crate) async fn mysql_client_session_physical_id(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        database: &str,
+    ) -> Option<u32> {
+        let snapshot = self.pool_publication_snapshot(pool_key).await?;
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return None;
+        }
+        let sessions = self.mysql_client_sessions.read().await;
+        let session = sessions.get(pool_key)?;
+        (session.publication.is_same_pool(&snapshot.publication) && session.database == database)
+            .then_some(session.physical_connection_id)
+    }
+
+    pub(crate) async fn mysql_client_session_database_change(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        physical_connection_id: u32,
+        database: &str,
+    ) -> Result<bool, String> {
+        let snapshot = self.pool_publication_snapshot(pool_key).await.ok_or("MYSQL_CLIENT_SESSION_LOST: The original MySQL session pool is no longer available. Session state and the transaction outcome cannot be assumed to have survived.")?;
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return Err("MYSQL_CLIENT_SESSION_LOST: The MySQL session pool was replaced. Session variables, temporary tables and the original transaction are no longer available on this connection.".to_string());
+        }
+        let mut sessions = self.mysql_client_sessions.write().await;
+        if let Some(previous) = sessions.get(pool_key) {
+            if !previous.publication.is_same_pool(&snapshot.publication) {
+                if self.mysql_preserved_transactions.read().await.contains(pool_key) {
+                    sessions.remove(pool_key);
+                    drop(sessions);
+                    self.clear_preserved_explicit_transaction(pool_key).await;
+                    return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. User variables and temporary tables are no longer available, and the previous transaction outcome may be unknown. This statement was not executed.".to_string());
+                }
+                // The pool was replaced or re-published (network switch,
+                // reconnect after dropped connections). Same reasoning as the
+                // recycled-connection adopt below: without a preserved
+                // explicit transaction nothing unrecoverable is lost — the
+                // caller re-issues USE to restore the database context, and
+                // untracked user variables or temporary tables surface as
+                // their own clear MySQL errors if referenced. Erroring here
+                // made the first query after a network switch fail, with the
+                // second refresh succeeding only because the failed gate had
+                // already dropped the tracking entry (#15169/#15191).
+                sessions.insert(
+                    pool_key.to_string(),
+                    MysqlClientSession {
+                        publication: snapshot.publication,
+                        physical_connection_id,
+                        database: String::new(),
+                    },
+                );
+                return Ok(!database.is_empty());
+            }
+            if previous.physical_connection_id != physical_connection_id {
+                let has_transaction = self.mysql_preserved_transactions.read().await.contains(pool_key);
+                if !has_transaction {
+                    // The pool recycled the idle connection. Without an open
+                    // transaction there is nothing that cannot be recovered:
+                    // the caller re-issues USE to restore the database
+                    // context, and user variables or temporary tables that
+                    // were never tracked surface as their own clear errors
+                    // if referenced. Erroring here made every idle tab fail
+                    // its first query after the pool's idle timeout (#v0.6.71).
+                    sessions.insert(
+                        pool_key.to_string(),
+                        MysqlClientSession {
+                            publication: snapshot.publication,
+                            physical_connection_id,
+                            database: String::new(),
+                        },
+                    );
+                    return Ok(!database.is_empty());
+                }
+                sessions.remove(pool_key);
+                drop(sessions);
+                self.clear_preserved_explicit_transaction(pool_key).await;
+                return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. The previous transaction outcome is unknown. This statement was not executed.".to_string());
+            }
+            return Ok(previous.database != database && !database.is_empty());
+        }
+        sessions.insert(
+            pool_key.to_string(),
+            MysqlClientSession {
+                publication: snapshot.publication,
+                physical_connection_id,
+                // A recycled physical connection starts with the pool's
+                // original database, which may predate the tab's latest USE.
+                // Record the requested database only after USE succeeds.
+                database: String::new(),
+            },
+        );
+        Ok(!database.is_empty())
+    }
+
+    pub(crate) async fn record_mysql_client_session_database(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        database: &str,
+    ) {
+        let Some(snapshot) = self.pool_publication_snapshot(pool_key).await else { return };
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return;
+        }
+        if let Some(session) = self.mysql_client_sessions.write().await.get_mut(pool_key) {
+            if session.publication.is_same_pool(&snapshot.publication) {
+                session.database = database.to_string();
+            }
+        }
+    }
+
     pub(crate) async fn mark_preserved_explicit_transaction(&self, pool_key: &str) {
         self.mysql_preserved_transactions.write().await.insert(pool_key.to_string());
     }
 
     pub(crate) async fn clear_preserved_explicit_transaction(&self, pool_key: &str) {
         self.mysql_preserved_transactions.write().await.remove(pool_key);
+    }
+
+    /// The `SCAN COUNT` this connection's server has answered at, once known.
+    pub(crate) async fn redis_scan_count_limit(&self, connection_id: &str) -> Option<usize> {
+        self.redis_scan_count_limits.read().await.get(connection_id).copied()
+    }
+
+    /// Remembers a `COUNT` the connection's server actually answered.
+    pub(crate) async fn set_redis_scan_count_limit(&self, connection_id: &str, max_count: usize) {
+        self.redis_scan_count_limits.write().await.insert(connection_id.to_string(), max_count);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn redis_scan_count_limit_count(&self) -> usize {
+        self.redis_scan_count_limits.read().await.len()
     }
 
     pub async fn remove_pool_by_key(&self, pool_key: &str) -> bool {
@@ -6696,6 +6919,7 @@ impl AppState {
                 {
                     Some(ConnectionDatabaseInfoSource::NativeGaussdbDws(pool.clone()))
                 }
+                Some(PoolKind::Postgres(pool)) => Some(ConnectionDatabaseInfoSource::NativePostgres(pool.clone())),
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
                 Some(PoolKind::MongoDb(client)) => {
@@ -6755,6 +6979,38 @@ impl AppState {
                         .map(str::to_string)
                         .or_else(|| config.effective_database().map(str::to_string)),
                     driver_name: Some("DBX PostgreSQL-compatible driver".to_string()),
+                    ..Default::default()
+                }))
+            }
+            Some(ConnectionDatabaseInfoSource::NativePostgres(pool)) => {
+                // Version discovery is optional metadata; on failure return
+                // versionless info so the frontend still sees a PostgreSQL
+                // connection. The full `SELECT version()` string is kept as
+                // `product_version` because engine sniffing (Greenplum /
+                // Cloudberry, whose AO tables reject system-column locators)
+                // depends on the product keywords it carries (#14745).
+                let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    });
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: product_version
+                        .as_deref()
+                        .and_then(postgres_family_product_name)
+                        .map(str::to_string)
+                        .or_else(|| Some("PostgreSQL".to_string())),
+                    product_version,
+                    current_database: database
+                        .map(str::to_string)
+                        .or_else(|| config.effective_database().map(str::to_string)),
+                    driver_name: Some("DBX PostgreSQL driver".to_string()),
                     ..Default::default()
                 }))
             }
@@ -7297,9 +7553,17 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::ExternalDriver { driver_id, config, session } => {
+                    match validate_external_driver_connection(driver_id, config, session, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("External driver connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
-                | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => true,
@@ -7636,6 +7900,7 @@ impl AppState {
             }
         }
         self.session_credentials.remove_pool_owners(&keys_to_remove);
+        self.redis_scan_count_limits.write().await.remove(connection_id);
         let mut conns = self.connections.write().await;
         let mut removed = Vec::with_capacity(keys_to_remove.len());
         for key in keys_to_remove {
@@ -7781,6 +8046,11 @@ enum KeepaliveTarget {
     InfluxDb3(db::influxdb3_driver::Influxdb3Client),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
+    ExternalDriver {
+        driver_id: String,
+        config: Arc<ConnectionConfig>,
+        session: Arc<crate::plugins::PluginDriverSession>,
+    },
     #[cfg(feature = "mq-admin")]
     MessageQueue(Arc<dyn crate::mq::port::MessageQueueAdmin>),
 }
@@ -7876,13 +8146,19 @@ impl KeepaliveTarget {
         match (self, pool) {
             (Self::Agent(expected), PoolKind::Agent(current)) => Arc::ptr_eq(expected, current),
             (Self::SqlServer(expected), PoolKind::SqlServer(current)) => Arc::ptr_eq(expected, current),
+            (Self::ExternalDriver { session: expected, .. }, PoolKind::ExternalDriver { session: current, .. }) => {
+                Arc::ptr_eq(expected, current)
+            }
             #[cfg(feature = "mq-admin")]
             (Self::MessageQueue(_), PoolKind::MessageQueue) => true,
             #[cfg(feature = "mq-admin")]
             (Self::MessageQueue(_), _) | (_, PoolKind::MessageQueue) => false,
-            (Self::Agent(_), _) | (_, PoolKind::Agent(_)) | (Self::SqlServer(_), _) | (_, PoolKind::SqlServer(_)) => {
-                false
-            }
+            (Self::Agent(_), _)
+            | (_, PoolKind::Agent(_))
+            | (Self::SqlServer(_), _)
+            | (_, PoolKind::SqlServer(_))
+            | (Self::ExternalDriver { .. }, _)
+            | (_, PoolKind::ExternalDriver { .. }) => false,
             _ => true,
         }
     }
@@ -7941,6 +8217,11 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::InfluxDb3(client) => Some(KeepaliveTarget::InfluxDb3(client.clone())),
         PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
+        PoolKind::ExternalDriver { driver_id, config, session } => Some(KeepaliveTarget::ExternalDriver {
+            driver_id: driver_id.clone(),
+            config: config.clone(),
+            session: session.clone(),
+        }),
         _ => None,
     }
 }
@@ -8015,6 +8296,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
                 Err(error) => Err(KeepaliveError::Agent(error)),
             }
         }
+        KeepaliveTarget::ExternalDriver { driver_id, config, session } => {
+            validate_external_driver_connection(driver_id, config, session, timeout).await.map_err(Into::into)
+        }
         #[cfg(feature = "mq-admin")]
         KeepaliveTarget::MessageQueue(adapter) => {
             adapter.test_connection().await.map(|_| ()).map_err(KeepaliveError::from)
@@ -8025,6 +8309,40 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
 fn is_agent_validate_connection_unsupported(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("validate_connection") && (lower.contains("unknown method") || lower.contains("method not found"))
+}
+
+async fn validate_external_driver_connection(
+    driver_id: &str,
+    config: &ConnectionConfig,
+    session: &crate::plugins::PluginDriverSession,
+    timeout: Duration,
+) -> Result<(), String> {
+    if !session.is_available() {
+        return Err("External driver session is unavailable".to_string());
+    }
+    if driver_id != "jdbc" || session.has_in_flight_request() {
+        return Ok(());
+    }
+    let params = serde_json::json!({
+        "connection": config,
+        "timeoutSecs": timeout.as_secs().saturating_sub(1).max(1),
+    });
+    let probe = session.invoke_with_timeout::<serde_json::Value>("validateConnection", params, None);
+    match tokio::time::timeout(timeout, probe).await {
+        Ok(Ok(verdict)) if verdict["valid"] == false => {
+            Err(verdict["reason"].as_str().unwrap_or("External driver connection is not valid").to_string())
+        }
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) if !session.is_available() => Err(error),
+        Ok(Err(error)) => {
+            log::debug!(
+                "External driver connection '{}' did not answer its health probe conclusively; keeping pool: {error}",
+                config.id
+            );
+            Ok(())
+        }
+        Err(_) => Err(format!("External driver health probe timed out after {} seconds", timeout.as_secs())),
+    }
 }
 
 /// Runtime dial endpoint handed to a plugin lifecycle call: the logical
@@ -8242,6 +8560,27 @@ fn is_embedded_h2_jdbc(config: &ConnectionConfig) -> bool {
         && !location.starts_with("ssl:")
         && !location.starts_with("mem:")
         && !location.is_empty()
+}
+
+/// Derby boots an embedded file database at most once per JVM, so the metadata
+/// and query sessions must live in one shared runtime just like embedded H2
+/// (#14912). Network (`jdbc:derby://`) and in-memory URLs have no file lock and
+/// keep their dedicated processes.
+fn is_embedded_derby_jdbc(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Jdbc {
+        return false;
+    }
+    let Some(url) = config.connection_string.as_deref() else { return false };
+    let normalized = url.trim().to_ascii_lowercase();
+    let Some(location) = normalized.strip_prefix("jdbc:derby:") else { return false };
+    !location.starts_with("//") && !location.starts_with("memory:") && !location.is_empty()
+}
+
+/// Embedded file engines whose boot lock forces every logical session into one
+/// JVM; the runtime key still scopes by driver class, jar paths and Java
+/// options, so unrelated drivers and options never share a process.
+fn uses_shared_embedded_jdbc_runtime(config: &ConnectionConfig) -> bool {
+    is_embedded_h2_jdbc(config) || is_embedded_derby_jdbc(config)
 }
 
 fn is_postgres_jdbc(config: &ConnectionConfig) -> bool {
@@ -8468,12 +8807,25 @@ fn pool_key_for_session_role(
     client_session_id: Option<&str>,
     session_role: AgentSessionRole,
 ) -> String {
+    if let Some(config) = config.filter(|config| {
+        session_role == AgentSessionRole::Workload
+            && config.db_type == DatabaseType::Mysql
+            && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+            && normalize_client_session_id(client_session_id).is_some()
+    }) {
+        // USE changes the current database, not the logical session.
+        // Keep variables, temp tables and transactions on the same pool.
+        return session_scoped_pool_key(config.id.clone(), client_session_id);
+    }
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
     if session_role == AgentSessionRole::Metadata
         && config.is_some_and(|config| {
             database_capabilities::is_agent_type(&config.db_type)
                 || sqlserver_uses_legacy_driver(config)
                 || is_postgres_jdbc(config)
+                || (config.db_type == DatabaseType::Mysql
+                    && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+                    && normalize_client_session_id(client_session_id).is_some())
         })
     {
         // The legacy SQL Server Agent borrows one connection-level pool for metadata across
@@ -9032,13 +9384,13 @@ mod tests {
         gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
         kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
         metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port, redact_transport_url,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        report_connection_liveness_lost, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
-        sqlserver_uses_legacy_driver, ssh_local_port_config_error, task_client_session_id,
-        transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
+        postgres_family_product_name, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
+        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
         PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -11187,6 +11539,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mongodb_srv_transport_preserves_seed_and_uses_dynamic_ssh_route() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = config_of_type(DatabaseType::MongoDb);
+        let uri = "mongodb+srv://cluster.example.test/app?replicaSet=rs0";
+        config.connection_string = Some(uri.into());
+
+        let direct = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(direct.route, super::ConnectionTransportRoute::Direct { .. }));
+
+        let mut ssh = ssh_layer("ssh-1", "");
+        ssh.host = "bastion.example.test".into();
+        ssh.user = "tester".into();
+        let mut proxy = proxy_layer("proxy-1", "");
+        proxy.host = "proxy.example.test".into();
+        config.transport_layers = vec![TransportLayerConfig::Proxy(proxy), TransportLayerConfig::Ssh(ssh)];
+        let tunneled = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        let super::ConnectionTransportRoute::SocksProxy { host, port } = tunneled.route else {
+            panic!("expected dynamic SOCKS5 route for SRV");
+        };
+        assert_eq!(connection_url_for_endpoint(&config, &host, port), uri);
+
+        config.driver_profile = Some("mongodb-legacy".into());
+        assert!(state
+            .prepare_connection_transport(&config.id, &config)
+            .await
+            .err()
+            .unwrap()
+            .contains("native MongoDB driver"));
+
+        config.driver_profile = None;
+        config.connection_string = Some("mongodb://mongo.example.test:27017/app".into());
+        let ordinary = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(ordinary.route, super::ConnectionTransportRoute::Static { .. }));
+    }
+
+    #[tokio::test]
     async fn zookeeper_transport_plan_tracks_every_endpoint_and_order() {
         let (state, _dir) = test_app_state().await;
         let mut config = config_of_type(DatabaseType::ZooKeeper);
@@ -12543,7 +12931,7 @@ sleep 30
     }
 
     #[test]
-    fn non_agent_metadata_role_preserves_existing_pool_keys() {
+    fn mysql_client_session_metadata_role_is_isolated_from_workload() {
         let config = mysql_config(Some("analytics"));
 
         let workload = super::pool_key_for_session_role(
@@ -12559,8 +12947,40 @@ sleep 30
             crate::agent_connection::AgentSessionRole::Metadata,
         );
 
-        assert_eq!(metadata, workload);
-        assert_eq!(metadata, "conn:analytics:session:task_1");
+        assert_eq!(workload, "conn:session:task_1");
+        assert_eq!(metadata, "conn:analytics:session:task_1:role:metadata");
+        assert_ne!(metadata, workload);
+
+        let base_metadata = super::pool_key_for_session_role(
+            Some(&config),
+            "conn:analytics".to_string(),
+            None,
+            crate::agent_connection::AgentSessionRole::Metadata,
+        );
+        assert_eq!(base_metadata, "conn:analytics");
+    }
+
+    #[test]
+    fn non_mysql_non_agent_metadata_role_preserves_existing_pool_keys() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::SqlServer] {
+            let mut config = mysql_config(Some("analytics"));
+            config.db_type = db_type;
+            let workload = super::pool_key_for_session_role(
+                Some(&config),
+                "conn:analytics".to_string(),
+                Some("task:1"),
+                crate::agent_connection::AgentSessionRole::Workload,
+            );
+            let metadata = super::pool_key_for_session_role(
+                Some(&config),
+                "conn:analytics".to_string(),
+                Some("task:1"),
+                crate::agent_connection::AgentSessionRole::Metadata,
+            );
+
+            assert_eq!(metadata, workload);
+            assert_eq!(metadata, "conn:analytics:session:task_1");
+        }
     }
 
     #[test]
@@ -12622,6 +13042,105 @@ sleep 30
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn mysql_workload_session_key_survives_database_changes_but_keeps_tabs_isolated() {
+        let config = mysql_config(Some("first"));
+        let key = |database: &str, session: &str, role| {
+            super::pool_key_for_session_role(Some(&config), format!("conn:{database}"), Some(session), role)
+        };
+        let workload = crate::agent_connection::AgentSessionRole::Workload;
+        let metadata = crate::agent_connection::AgentSessionRole::Metadata;
+        assert_eq!(key("first", "tab-1", workload), key("second", "tab-1", workload));
+        assert_ne!(key("first", "tab-1", workload), key("first", "tab-2", workload));
+        assert_ne!(key("first", "tab-1", metadata), key("second", "tab-1", metadata));
+        assert_ne!(key("first", "tab-1", workload), key("first", "tab-1", metadata));
+        let metadata_without_database =
+            super::pool_key_for_session_role(Some(&config), "conn".into(), Some("tab-1"), metadata);
+        assert_ne!(key("first", "tab-1", workload), metadata_without_database);
+    }
+
+    #[tokio::test]
+    async fn mysql_client_session_detects_replaced_connections_and_pool_generations() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-1";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/first", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "first").await;
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        // Adopting an existing pool changes its publication receipt, but keeps
+        // the same physical session and must not lose its database context.
+        state.connections.write().await.publications.get_mut(key).unwrap().identity = std::sync::Arc::new(());
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "second").await;
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        // Without a preserved transaction, a recycled connection is adopted
+        // silently: the caller re-issues USE and the query succeeds.
+        assert!(state.mysql_client_session_database_change(key, &pool, 11, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "second").await;
+        state.mark_preserved_explicit_transaction(key).await;
+        assert!(state
+            .mysql_client_session_database_change(key, &pool, 12, "second")
+            .await
+            .unwrap_err()
+            .contains("MYSQL_CLIENT_SESSION_LOST"));
+        assert!(state.mysql_client_session_database_change(key, &pool, 12, "second").await.unwrap());
+        // A replaced pool (network switch, reconnect) is adopted without a
+        // preserved transaction: the caller re-issues USE and the query
+        // succeeds instead of failing its first refresh (#15169/#15191).
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/second", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &replacement, 11, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &replacement, "second").await;
+        // With a preserved explicit transaction the outcome is genuinely
+        // unrecoverable, so the replacement still fails closed.
+        state.mark_preserved_explicit_transaction(key).await;
+        let replacement_two = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/second", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement_two.clone(), MysqlMode::Normal));
+        assert!(state
+            .mysql_client_session_database_change(key, &replacement_two, 12, "second")
+            .await
+            .unwrap_err()
+            .contains("MYSQL_CLIENT_SESSION_LOST"));
+        // The failed gate cleared the preserved transaction; the next query re-records.
+        assert!(state.mysql_client_session_database_change(key, &replacement_two, 12, "second").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mysql_replaced_pool_adopts_without_transaction_and_reissues_use() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-switch";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        // First query: creates the tracking entry and USEs the database.
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "app").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "app").await;
+        // The network drops and the pool is replaced on the next use (new
+        // publication, new physical connection). No transaction was open, so
+        // the first query must adopt the replacement instead of erroring.
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &replacement, 11, "app").await.unwrap());
+        state.record_mysql_client_session_database(key, &replacement, "app").await;
+        // Steady state afterwards.
+        assert!(!state.mysql_client_session_database_change(key, &replacement, 11, "app").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mysql_idle_tab_recycle_does_not_error_without_transaction() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-idle";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        // First query: creates the tracking entry and USEs the database.
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "app").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "app").await;
+        // Tab goes idle, pool recycles the connection (physical id 10 → 11).
+        // No transaction was open, so the next query must succeed silently.
+        assert!(state.mysql_client_session_database_change(key, &pool, 11, "app").await.unwrap());
     }
 
     #[test]
@@ -13275,6 +13794,409 @@ for line in sys.stdin:
         let outcome = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await;
         assert!(outcome.is_err(), "a stopped keepalive must not report a liveness loss: {outcome:?}");
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn spawn_keepalive_external_driver(
+        dir: &std::path::Path,
+        name: &str,
+        script_body: &str,
+    ) -> std::sync::Arc<crate::plugins::PluginDriverSession> {
+        let plugin_dir = dir.join(name);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let py_path = plugin_dir.join("driver.py");
+        std::fs::write(&py_path, script_body).unwrap();
+        #[cfg(windows)]
+        let executable = {
+            let cmd_path = plugin_dir.join("driver.cmd");
+            std::fs::write(&cmd_path, "@echo off\r\npython -u \"%~dp0driver.py\"\r\n").unwrap();
+            cmd_path
+        };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            let sh_path = plugin_dir.join("driver.sh");
+            std::fs::write(&sh_path, "#!/bin/sh\nexec python3 -u \"$(dirname \"$0\")/driver.py\"\n").unwrap();
+            std::fs::set_permissions(&sh_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            sh_path
+        };
+        let plugin = crate::plugins::InstalledPlugin {
+            manifest: crate::plugins::PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "0.1.53".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some(executable.file_name().unwrap().to_string_lossy().into_owned()),
+                drivers: vec![crate::plugins::PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..crate::plugins::PluginManifest::default()
+            },
+            path: plugin_dir,
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(executable),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            crate::plugins::PluginDriverSession::start_for_test(
+                plugin,
+                "jdbc".to_string(),
+                crate::plugins::PluginRuntimeEnv::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        session.invoke::<serde_json::Value>("ready", serde_json::json!({})).await.expect("fake plugin must start");
+        session
+    }
+
+    fn keepalive_external_driver_script(calls: &std::path::Path, handler: &str) -> String {
+        format!(
+            r#"import json, sys, time
+def reply(req, **body):
+    print(json.dumps({{'id': req['id'], **body}}), flush=True)
+validations = 0
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'ready':
+        reply(req, result={{}})
+        continue
+    with open({calls}, 'a', encoding='utf-8') as log:
+        log.write(method + '\n')
+    if method == 'validateConnection':
+        validations += 1
+{handler}
+"#,
+            calls = serde_json::to_string(&calls.to_string_lossy()).unwrap(),
+        )
+    }
+
+    const EXTERNAL_DRIVER_REPORTS_INVALID: &str =
+        "    reply(req, result={'valid': False, 'reason': 'JDBC connection is not valid'})";
+
+    const EXTERNAL_DRIVER_SLOW_LIST_TABLES: &str = r#"    if method == 'listTables':
+        time.sleep(3)
+        reply(req, result=[])
+    else:
+        reply(req, result={'valid': False, 'reason': 'JDBC connection is not valid'})"#;
+
+    fn keepalive_jdbc_config(interval_secs: u64) -> ConnectionConfig {
+        let mut config = keepalive_test_config("conn", interval_secs);
+        config.db_type = DatabaseType::Jdbc;
+        config.connection_string = Some("jdbc:sqlserver://127.0.0.1:1433;databaseName=master".to_string());
+        config
+    }
+
+    fn jdbc_keepalive_pool(
+        config: &ConnectionConfig,
+        session: &std::sync::Arc<crate::plugins::PluginDriverSession>,
+    ) -> PoolKind {
+        PoolKind::ExternalDriver {
+            driver_id: "jdbc".to_string(),
+            config: std::sync::Arc::new(config.clone()),
+            session: std::sync::Arc::clone(session),
+        }
+    }
+
+    fn external_driver_calls(calls: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(calls).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    async fn start_in_flight_list_tables(
+        session: &std::sync::Arc<crate::plugins::PluginDriverSession>,
+    ) -> tokio::task::JoinHandle<Result<serde_json::Value, String>> {
+        let request = {
+            let session = std::sync::Arc::clone(session);
+            tokio::spawn(async move {
+                session
+                    .invoke_with_timeout::<serde_json::Value>(
+                        "listTables",
+                        serde_json::json!({}),
+                        Some(Duration::from_secs(20)),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !session.has_in_flight_request() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the request must be registered as in flight");
+        request
+    }
+
+    #[tokio::test]
+    async fn external_driver_keepalive_probes_validate_connection_and_reports_lost() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let calls = dir.join("validate-calls.log");
+        let script = keepalive_external_driver_script(
+            &calls,
+            "    reply(req, result={'valid': validations == 1, 'reason': 'JDBC connection is not valid'})",
+        );
+        let session = spawn_keepalive_external_driver(&dir, "validate-jdbc", &script).await;
+        let pool = jdbc_keepalive_pool(&config, &session);
+        state.connections.write().await.insert("conn".to_string(), pool.clone());
+        let mut events = state.subscribe_connection_liveness();
+
+        state.start_keepalive_task(
+            "conn",
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        let message = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("a connection reported invalid must report liveness loss")
+            .expect("liveness channel must remain open");
+        assert_eq!(
+            message,
+            ConnectionLivenessMessage::Lost {
+                connection_id: "conn".to_string(),
+                failure_kind: ConnectionLivenessFailureKind::ProbeFailed,
+            }
+        );
+        assert!(state.connections.read().await.get("conn").is_none());
+        assert_eq!(external_driver_calls(&calls), ["validateConnection", "validateConnection"]);
+
+        state.stop_keepalive_task("conn").await;
+        let _ = session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_keepalive_keeps_pool_when_plugin_cannot_answer_the_probe() {
+        let (_state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(1);
+        let calls = dir.join("unanswerable-calls.log");
+        let script = keepalive_external_driver_script(
+            &calls,
+            r#"    if validations == 1:
+        reply(req, error={'message': 'Unsupported JDBC plugin method: validateConnection'})
+    else:
+        reply(req, error={'message': 'native_job_session_reserved'})"#,
+        );
+        let session = spawn_keepalive_external_driver(&dir, "unanswerable-jdbc", &script).await;
+        let pool = jdbc_keepalive_pool(&config, &session);
+        let mut target = super::keepalive_target_from_pool(&pool, &config)
+            .expect("ExternalDriver pool must yield a keepalive target");
+
+        for _ in 0..2 {
+            super::ping_keepalive_target(&mut target, Duration::from_secs(5))
+                .await
+                .expect("a probe the plugin cannot answer is not proof of a dead connection");
+        }
+
+        assert_eq!(external_driver_calls(&calls), ["validateConnection", "validateConnection"]);
+        assert!(session.is_available());
+
+        let _ = session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_keepalive_waits_for_an_in_flight_request_before_probing() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let script =
+            keepalive_external_driver_script(&dir.join("busy-keepalive-calls.log"), EXTERNAL_DRIVER_SLOW_LIST_TABLES);
+        let session = spawn_keepalive_external_driver(&dir, "busy-keepalive-jdbc", &script).await;
+        let pool = jdbc_keepalive_pool(&config, &session);
+        state.connections.write().await.insert("conn".to_string(), pool.clone());
+        let mut events = state.subscribe_connection_liveness();
+        let in_flight = start_in_flight_list_tables(&session).await;
+
+        state.start_keepalive_task(
+            "conn",
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        let early = tokio::time::timeout(Duration::from_millis(2500), events.recv()).await;
+        assert!(early.is_err(), "a pool that is serving a request must not be probed: {early:?}");
+        in_flight.await.unwrap().expect("the in-flight request must survive the keepalive ticks");
+
+        let message = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("keepalive must resume probing once the request finished")
+            .expect("liveness channel must remain open");
+        assert_eq!(
+            message,
+            ConnectionLivenessMessage::Lost {
+                connection_id: "conn".to_string(),
+                failure_kind: ConnectionLivenessFailureKind::ProbeFailed,
+            }
+        );
+
+        state.stop_keepalive_task("conn").await;
+        let _ = session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_keepalive_reports_lost_when_an_idle_plugin_never_answers_the_probe() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let script = keepalive_external_driver_script(
+            &dir.join("hung-calls.log"),
+            r#"    if method != 'validateConnection':
+        reply(req, result={'ok': True})"#,
+        );
+        let session = spawn_keepalive_external_driver(&dir, "hung-jdbc", &script).await;
+        let pool = jdbc_keepalive_pool(&config, &session);
+        state.connections.write().await.insert("conn".to_string(), pool.clone());
+        let mut events = state.subscribe_connection_liveness();
+
+        state.start_keepalive_task(
+            "conn",
+            &pool,
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        let message = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("a probe that hangs on an idle plugin must report liveness loss")
+            .expect("liveness channel must remain open");
+        assert!(
+            matches!(&message, ConnectionLivenessMessage::Lost { connection_id, .. } if connection_id == "conn"),
+            "{message:?}"
+        );
+        assert!(state.connections.read().await.get("conn").is_none());
+
+        state.stop_keepalive_task("conn").await;
+        let _ = session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_keepalive_stale_target_does_not_detach_replacement() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(1);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let stale_calls = dir.join("stale-calls.log");
+        let current_script =
+            keepalive_external_driver_script(&dir.join("current-calls.log"), EXTERNAL_DRIVER_REPORTS_INVALID);
+        let stale_script = keepalive_external_driver_script(&stale_calls, EXTERNAL_DRIVER_REPORTS_INVALID);
+        let current = spawn_keepalive_external_driver(&dir, "current-jdbc", &current_script).await;
+        let stale = spawn_keepalive_external_driver(&dir, "stale-jdbc", &stale_script).await;
+        state.connections.write().await.insert("conn".to_string(), jdbc_keepalive_pool(&config, &current));
+        let mut events = state.subscribe_connection_liveness();
+
+        state.start_keepalive_task(
+            "conn",
+            &jdbc_keepalive_pool(&config, &stale),
+            &config,
+            #[cfg(feature = "mq-admin")]
+            None,
+        );
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while external_driver_calls(&stale_calls).is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the stale target must still be probed");
+        let outcome = tokio::time::timeout(Duration::from_millis(1500), events.recv()).await;
+        assert!(outcome.is_err(), "stale ExternalDriver probe must not report liveness loss: {outcome:?}");
+        assert!(state.connections.read().await.get("conn").is_some(), "replacement pool must remain registered");
+        assert_eq!(external_driver_calls(&stale_calls), ["validateConnection"]);
+
+        state.stop_keepalive_task("conn").await;
+        let _ = current.shutdown().await;
+        let _ = stale.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_reuse_check_skips_the_probe_and_removes_only_an_exited_plugin() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(0);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let calls = dir.join("reuse-calls.log");
+        let script = keepalive_external_driver_script(
+            &calls,
+            r#"    if method == 'crash':
+        sys.exit(0)
+    reply(req, result={'valid': False, 'reason': 'JDBC connection is not valid'})"#,
+        );
+        let session = spawn_keepalive_external_driver(&dir, "reuse-jdbc", &script).await;
+        state.connections.write().await.insert("conn".to_string(), jdbc_keepalive_pool(&config, &session));
+
+        assert!(!state.remove_stale_connection_pool("conn").await);
+        assert!(state.connections.read().await.get("conn").is_some());
+        assert!(external_driver_calls(&calls).is_empty());
+
+        let _ = session.invoke::<serde_json::Value>("crash", serde_json::json!({})).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while session.is_available() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("an exited plugin process must stop being available");
+
+        assert!(state.remove_stale_connection_pool("conn").await);
+        assert!(state.connections.read().await.get("conn").is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_refresh_connections_removes_pool_reported_invalid() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(0);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let calls = dir.join("refresh-calls.log");
+        let script = keepalive_external_driver_script(&calls, EXTERNAL_DRIVER_REPORTS_INVALID);
+        let session = spawn_keepalive_external_driver(&dir, "refresh-jdbc", &script).await;
+        state.connections.write().await.insert("conn".to_string(), jdbc_keepalive_pool(&config, &session));
+
+        state.refresh_connections().await;
+
+        assert!(state.connections.read().await.get("conn").is_none());
+        assert_eq!(external_driver_calls(&calls), ["validateConnection"]);
+
+        let _ = session.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn external_driver_refresh_connections_keeps_pool_serving_a_request() {
+        let (state, dir) = test_app_state().await;
+        let config = keepalive_jdbc_config(0);
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        let script =
+            keepalive_external_driver_script(&dir.join("busy-refresh-calls.log"), EXTERNAL_DRIVER_SLOW_LIST_TABLES);
+        let session = spawn_keepalive_external_driver(&dir, "busy-refresh-jdbc", &script).await;
+        state.connections.write().await.insert("conn".to_string(), jdbc_keepalive_pool(&config, &session));
+        let in_flight = start_in_flight_list_tables(&session).await;
+
+        state.refresh_connections().await;
+
+        assert!(state.connections.read().await.get("conn").is_some());
+
+        in_flight.abort();
+        let _ = session.shutdown().await;
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -16499,5 +17421,23 @@ for line in sys.stdin:
             .unwrap_or_else(|err| panic!("failed to drop KWDB test schema: {err}"));
         pool.close();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn postgres_family_product_name_detects_greenplum_cloudberry() {
+        assert_eq!(
+            postgres_family_product_name("PostgreSQL 14.4 (Apache Cloudberry 1.2.0 build 8f2a) on x86_64"),
+            Some("Apache Cloudberry")
+        );
+        assert_eq!(
+            postgres_family_product_name(
+                "PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit: 062eba04) on x86_64"
+            ),
+            Some("Greenplum")
+        );
+        assert_eq!(postgres_family_product_name("PostgreSQL 16.2 on aarch64"), Some("PostgreSQL"));
+        // Unrelated engines report their own strings; without a PostgreSQL
+        // marker there is no product name to claim.
+        assert_eq!(postgres_family_product_name("MySQL 8.0.33"), None);
     }
 }

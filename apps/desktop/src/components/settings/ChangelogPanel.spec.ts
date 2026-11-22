@@ -120,6 +120,24 @@ describe("ChangelogPanel lazy release bodies", () => {
     expect(container.textContent).toContain("v0.6.8 fix note");
   });
 
+  it("shows the stable version for a promoted beta tag but still fetches its body by the raw tag", async () => {
+    // The 0.6.63 release was promoted from its beta build without being
+    // renamed, so the index still carries the beta tag for the stable release.
+    changelogMocks.fetchChangelogIndex.mockResolvedValue({
+      updatedAt: "2026-11-01",
+      releases: [entry("v0.6.64"), entry("v0.6.63-beta.20261101.3"), entry("v0.6.62")],
+    });
+    const container = await mountPanel();
+
+    expect(container.textContent).not.toContain("0.6.63-beta");
+    expect(container.textContent).toContain("0.6.63");
+
+    // The per-release file is still named by the raw tag.
+    releaseRows(container)[1].click();
+    await flushPanel();
+    expect(changelogMocks.fetchChangelogRelease).toHaveBeenCalledWith(expect.any(String), "v0.6.63-beta.20261101.3");
+  });
+
   it("surfaces a body load failure with a retry that renders the notes", async () => {
     changelogMocks.fetchChangelogRelease.mockRejectedValueOnce(new Error("offline"));
     const container = await mountPanel();

@@ -2661,6 +2661,38 @@ func TestTableCommentCachesMissingCatalogOIDCapability(t *testing.T) {
 	}
 }
 
+func TestGetColumnsMarksMissingCatalogOID(t *testing.T) {
+	tests := []struct {
+		name        string
+		mysqlCompat bool
+		failure     error
+		wantMarker  bool
+	}{
+		{name: "catalog", failure: &gokb.Error{Code: "42703", Message: "column c.oid does not exist"}, wantMarker: true},
+		{name: "mysql catalog join", mysqlCompat: true, failure: &gokb.Error{Code: "42703", Message: "column rel.oid does not exist"}, wantMarker: true},
+		{name: "unrelated column", failure: &gokb.Error{Code: "42703", Message: "column a.attnum does not exist"}},
+		{name: "permission denied", failure: &gokb.Error{Code: "42501", Message: "permission denied for relation sys_class"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(_ string) (driver.Rows, error) {
+				return nil, test.failure
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+			server.mode.mysqlCompat = test.mysqlCompat
+			_, _, err := server.dispatch("get_columns", map[string]json.RawMessage{"schema": json.RawMessage("\"public\""), "table": json.RawMessage("\"orders\"")})
+			if !errors.Is(err, test.failure) {
+				t.Fatalf("expected the original metadata error, got %v", err)
+			}
+			rpcError := errorResponse(nil, err).Error
+			if strings.HasPrefix(rpcError.Message, "KINGBASE_CATALOG_OID_UNAVAILABLE:") != test.wantMarker {
+				t.Fatalf("unexpected RPC error: %s", rpcError.Message)
+			}
+		})
+	}
+}
+
 func TestTableOIDFallbackRejectsUnrelatedErrors(t *testing.T) {
 	tests := []struct {
 		name string

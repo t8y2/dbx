@@ -8,10 +8,10 @@ interface FileRow {
 }
 
 interface DropTarget extends FileRow {
-  position: "before" | "after";
+  position: "before" | "after" | "inside";
 }
 
-export function useSqlFileReorder(options: { tree: Ref<HTMLElement | null>; enabled: () => boolean; files: () => FileRow[]; drop: (source: FileRow, target: DropTarget) => void }) {
+export function useSqlFileReorder(options: { tree: Ref<HTMLElement | null>; enabled: () => boolean; files: () => FileRow[]; directories?: () => FileRow[]; drop: (source: FileRow, target: DropTarget) => void }) {
   const source = ref<FileRow | null>(null);
   const target = ref<DropTarget | null>(null);
   let pending: (FileRow & { x: number; y: number }) | null = null;
@@ -70,6 +70,8 @@ export function useSqlFileReorder(options: { tree: Ref<HTMLElement | null>; enab
   function resolveTarget(x: number, y: number): DropTarget | null {
     const row = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-sql-file-row]");
     if (!row || !options.tree.value?.contains(row) || !source.value) return null;
+    const directory = options.directories?.().find((item) => item.root === (row.dataset.sqlFileRoot ?? row.dataset.sqlFileDropRoot) && item.path === (row.dataset.sqlFilePath ?? row.dataset.sqlFileDropPath));
+    if (directory) return sqlFileParentPath(source.value.path) === sqlFileParentPath(`${directory.path}/_`) ? null : { ...directory, position: "inside" };
     const file = options.files().find((item) => item.root === row.dataset.sqlFileRoot && item.path === row.dataset.sqlFilePath);
     if (!file || file.root !== source.value.root || file.path === source.value.path || sqlFileParentPath(file.path) !== sqlFileParentPath(source.value.path)) return null;
     const rect = row.getBoundingClientRect();

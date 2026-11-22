@@ -15,6 +15,27 @@ export interface SqlTextRange {
   sql: string;
 }
 
+export interface MysqlDelimiterCommand {
+  from: number;
+  to: number;
+  delimiter: string;
+}
+
+export function mysqlDelimiterAt(commands: readonly MysqlDelimiterCommand[] | undefined, position: number): string {
+  if (commands) {
+    for (let index = commands.length - 1; index >= 0; index -= 1) {
+      const command = commands[index];
+      if (command.to <= position) return command.delimiter;
+    }
+  }
+  return ";";
+}
+
+export function mysqlDelimiterPrefixAt(commands: readonly MysqlDelimiterCommand[] | undefined, position: number): string {
+  const delimiter = mysqlDelimiterAt(commands, position);
+  return delimiter === ";" ? "" : `DELIMITER ${delimiter}\n`;
+}
+
 const ELASTICSEARCH_REST_REQUEST = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD)\s+\S+/i;
 
 function isHttpJsonRestDatabaseType(databaseType?: DatabaseType): boolean {
@@ -408,7 +429,7 @@ function isAsciiAlphanumeric(ch: string): boolean {
  * only the statement text (the trailing semicolon and inter-statement
  * whitespace are excluded so editor highlights stay tight).
  */
-export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions, mysqlDelimiterCommands?: MysqlDelimiterCommand[]): RawStatement[] {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (isHttpJsonRestDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
@@ -598,6 +619,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const delimiter = parseDelimiterCommand(sql.slice(i, lineEnd));
       if (delimiter !== null) {
         flush();
+        mysqlDelimiterCommands?.push({ from: i, to: lineEnd, delimiter });
         customDelimiter = delimiter === ";" ? null : delimiter;
         i = nextLineStart(sql, lineEnd);
         statementHitStart = i;
@@ -3013,11 +3035,11 @@ function normalizeSql(sql: string): string {
  * cursor statement and the full document are effectively the same SQL — in
  * that case only a single candidate is returned to avoid duplicates.
  */
-export function executableStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange[] {
+export function executableStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions, mysqlDelimiterCommands?: MysqlDelimiterCommand[]): SqlTextRange[] {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (databaseType === "redis") return redisExecutableCommandRanges(sql);
   if (databaseType === "mongodb") return splitMongoCommandRanges(sql).map(({ from, to, text }) => ({ from, to, sql: text }));
-  return splitSqlStatementRanges(sql, databaseType, parameterOptions).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions).map((range) => rangeFor(range, sql)));
+  return splitSqlStatementRanges(sql, databaseType, parameterOptions, mysqlDelimiterCommands).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType, parameterOptions).map((range) => rangeFor(range, sql)));
 }
 
 export function currentExecutableStatementRange(sql: string, cursorPos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlTextRange | null {

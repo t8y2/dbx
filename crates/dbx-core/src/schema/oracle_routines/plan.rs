@@ -127,6 +127,7 @@ fn ddl_input(endpoint: &RoutineEndpoint, identity: &RoutineIdentity, sql: String
         schema: Some(identity.owner.clone()),
         name: identity.name.clone(),
         source: sql,
+        identifier_quote: None,
     }
 }
 fn drop_sql(identity: &RoutineIdentity) -> String {

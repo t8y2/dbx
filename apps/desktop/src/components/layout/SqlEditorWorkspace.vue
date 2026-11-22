@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, useAttrs, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { FocusScope } from "reka-ui";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import "./sqlEditorWorkspace.css";
@@ -165,6 +166,42 @@ const showResultPane = computed({
   },
 });
 const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value && !isObjectDependencySection(activeQueryTab.value!));
+const resultFullscreen = ref(false);
+let resultFullscreenButton: HTMLElement | undefined;
+
+function closeResultFullscreen(restoreFocus = false) {
+  resultFullscreen.value = false;
+  const button = resultFullscreenButton;
+  resultFullscreenButton = undefined;
+  if (restoreFocus) void nextTick(() => button?.focus({ preventScroll: true }));
+}
+
+function toggleResultFullscreen(button: HTMLElement) {
+  if (resultFullscreen.value) {
+    closeResultFullscreen(true);
+  } else if (isResultPaneVisible.value) {
+    resultFullscreenButton = button;
+    resultFullscreen.value = true;
+    void nextTick(() => button.focus({ preventScroll: true }));
+  }
+}
+
+function onResultEscape(event: KeyboardEvent) {
+  if (!resultFullscreen.value || event.defaultPrevented) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeResultFullscreen(true);
+}
+
+function withResultFullscreenClosed(action: () => boolean): boolean {
+  if (!resultFullscreen.value) return action();
+  closeResultFullscreen();
+  void nextTick(action);
+  return true;
+}
+
+watch([() => activeQueryTab.value?.id, isResultPaneVisible, () => props.contentSuppressed], () => closeResultFullscreen());
+
 // Keep the pane mounted, but apply its target size immediately so available
 // results never wait for an expansion animation before becoming visible.
 const resultPaneTargetSize = computed(() => (isResultPaneVisible.value ? resultPaneSize.value : 0));
@@ -224,7 +261,7 @@ function focusSqlEditor(): boolean {
   if (props.contentSuppressed) return false;
   ++focusRequest;
   resultSurfaceRef.value?.cancelResultGridFocus();
-  return activeEditorGroup()?.focusSqlEditor() ?? false;
+  return withResultFullscreenClosed(() => activeEditorGroup()?.focusSqlEditor() ?? false);
 }
 
 // Restores the pre-split "running a query re-expands the results pane"
@@ -253,10 +290,21 @@ function paneEnterClass(groupId: string): string | undefined {
   return queryStore.orientation === "horizontal" ? "workspace-pane-enter workspace-pane-enter--from-top" : "workspace-pane-enter workspace-pane-enter--from-left";
 }
 let splitterDragging = false;
+let editorFocusedBeforeResize: HTMLElement | null = null;
 const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "pointercancel"] as const;
 function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
   const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
   if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  if (event.type === "mousedown") {
+    event.preventDefault();
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.matches(".cm-content") && splitter.closest(".sql-editor-workspace-split")?.contains(focused)) {
+      // Splitpanes clears the native selection during a drag. If CodeMirror
+      // still has focus, it can read that change back into its editor state.
+      editorFocusedBeforeResize = focused;
+      focused.blur();
+    }
+  }
   splitterDragging = true;
   beginPanelResize();
   for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);
@@ -269,6 +317,15 @@ function onWorkspaceSplitterEnd() {
   for (const eventName of splitterEndEvents) document.removeEventListener(eventName, onWorkspaceSplitterEnd, true);
   window.removeEventListener("blur", onWorkspaceSplitterEnd);
   endPanelResize();
+  const editor = editorFocusedBeforeResize;
+  editorFocusedBeforeResize = null;
+  if (editor) {
+    // Splitpanes clears the native selection again on mouseup. Restore
+    // focus only after that handler and only if focus has stayed on the body.
+    queueMicrotask(() => {
+      if (editor.isConnected && document.hasFocus() && document.activeElement === document.body) editor.focus({ preventScroll: true });
+    });
+  }
 }
 
 onBeforeUnmount(onWorkspaceSplitterEnd);
@@ -414,29 +471,31 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           </Splitpanes>
         </Pane>
         <Pane class="min-h-0" :size="resultPaneTargetSize" :min-size="resultPaneTargetSize > 0 ? SHARED_RESULT_PANE_MIN_SIZE : 0" :max-size="SHARED_RESULT_PANE_MAX_SIZE">
-          <div v-if="isResultPaneVisible" data-shared-result-surface class="h-full min-h-0 overflow-hidden">
-            <QueryResultSurface
-              ref="resultSurfaceRef"
-              v-bind="resultSurfaceBindings"
-              class="h-full"
-              @toggle-results-pane="toggleSharedResultsPane"
-              @preview-statement="
-                (tabId: string, range: { from: number; to: number } | null) => {
-                  handlePreviewStatement(tabId, range);
-                }
-              "
-              @focus-statement="
-                (tabId: string, range: { from: number; to: number } | null) => {
-                  handleFocusStatement(tabId, range);
-                }
-              "
-              @focus-error-offset="
-                (tabId: string, offset: number) => {
-                  handleFocusErrorOffset(tabId, offset);
-                }
-              "
-            />
-          </div>
+          <Teleport v-if="isResultPaneVisible" to="body" :disabled="!resultFullscreen">
+            <FocusScope as-child :present="resultFullscreen" :trapped="resultFullscreen" :loop="resultFullscreen" @mount-auto-focus.prevent @unmount-auto-focus.prevent>
+              <div
+                data-shared-result-surface
+                class="h-full min-h-0 overflow-hidden"
+                :class="resultFullscreen ? 'fixed inset-0 z-40 bg-background' : undefined"
+                :role="resultFullscreen ? 'dialog' : undefined"
+                :aria-modal="resultFullscreen || undefined"
+                :aria-label="resultFullscreen ? t('editor.fullscreenResultsPane') : undefined"
+                @keydown.esc="onResultEscape"
+              >
+                <QueryResultSurface
+                  ref="resultSurfaceRef"
+                  v-bind="resultSurfaceBindings"
+                  :fullscreen="resultFullscreen"
+                  class="h-full"
+                  @toggle-results-pane="toggleSharedResultsPane"
+                  @toggle-result-fullscreen="toggleResultFullscreen"
+                  @preview-statement="(tabId, range) => handlePreviewStatement(tabId, range)"
+                  @focus-statement="(tabId, range) => withResultFullscreenClosed(() => handleFocusStatement(tabId, range))"
+                  @focus-error-offset="(tabId, offset) => withResultFullscreenClosed(() => handleFocusErrorOffset(tabId, offset))"
+                />
+              </div>
+            </FocusScope>
+          </Teleport>
         </Pane>
       </Splitpanes>
       <!-- The shared surface unmounts when collapsed, so the mouse re-show

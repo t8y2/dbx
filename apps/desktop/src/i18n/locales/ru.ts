@@ -1340,6 +1340,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "Результаты поиска неполные: не удалось загрузить содержимое {count} файлов.",
     matchPreviewLimit: "Предпросмотр ограничен первыми {limit} из {total} совпадающих строк.",
     sortByDateCreated: "Сортировать по дате создания",
+    displayMode: "Режим отображения",
+    displayModeFolder: "По структуре папок",
+    displayModeConnection: "По подключениям",
   },
   connection: {
     groupPath: "Путь группы",
@@ -10009,6 +10012,11 @@ export default withEnglishFallback({
     fileFilterHint: "Используйте шаблон, например *.sql или *.sh, либо регулярное выражение, например {regex}.",
     openWithDefaultApp: "Открыть с помощью системного приложения по умолчанию",
     openWithDefaultAppFailed: "Не удалось открыть с помощью системного приложения по умолчанию: {message}",
+    displayMode: "Режим отображения",
+    displayModeFolder: "По структуре папок",
+    displayModeConnection: "По подключениям",
+    unassociated: "Не связано",
+    deletedConnection: "Подключение удалено",
   },
   diff: {
     additionalSchemas: "Также сравнить эти схемы",

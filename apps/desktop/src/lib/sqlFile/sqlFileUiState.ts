@@ -1,6 +1,33 @@
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 export const SQL_FILE_FOLDERS_UI_STATE_STORAGE_KEY = "dbx-sql-file-folders-ui-state";
+export const SQL_FILE_DISPLAY_MODE_STORAGE_KEY = "dbx-sql-file-display-mode";
+export const SQL_FILE_EXPANDED_CONNECTIONS_STORAGE_KEY = "dbx-sql-file-expanded-connections";
+
+export type SqlFileDisplayMode = "folder" | "connection";
+
+export function getSqlFileDisplayMode(): SqlFileDisplayMode {
+  return safeLocalStorageGet(SQL_FILE_DISPLAY_MODE_STORAGE_KEY) === "connection" ? "connection" : "folder";
+}
+
+export function saveSqlFileDisplayMode(mode: SqlFileDisplayMode): void {
+  safeLocalStorageSet(SQL_FILE_DISPLAY_MODE_STORAGE_KEY, mode === "connection" ? "connection" : "folder");
+}
+
+export function getSqlFileExpandedConnectionIds(): Set<string> {
+  try {
+    const raw = safeLocalStorageGet(SQL_FILE_EXPANDED_CONNECTIONS_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.filter((id): id is string => typeof id === "string")) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveSqlFileExpandedConnectionIds(expandedIds: ReadonlySet<string>): void {
+  safeLocalStorageSet(SQL_FILE_EXPANDED_CONNECTIONS_STORAGE_KEY, JSON.stringify([...expandedIds]));
+}
 
 export interface SqlFileFolderUiState {
   collapsed?: boolean;

@@ -1513,6 +1513,9 @@ export default {
   },
   sqlLibrary: {
     title: "SQL Library",
+    displayMode: "Display mode",
+    displayModeFolder: "Folder structure",
+    displayModeConnection: "Group by connection",
     storageHelp: "SQL Library content is stored in DBX app data, not as standalone .sql files on disk.\nTo use files in the file system, export the SQL Library.",
     unassociated: "Unassociated",
     deletedConnection: "Connection deleted",
@@ -9721,6 +9724,11 @@ export default {
     completedWithErrors: "Execution completed: {succeeded} succeeded, {failed} failed",
   },
   sqlFileTree: {
+    displayMode: "Display mode",
+    displayModeFolder: "Folder structure",
+    displayModeConnection: "Group by connection",
+    unassociated: "Unassociated",
+    deletedConnection: "Connection deleted",
     searchIncompleteHelp: "Why this search is incomplete:",
     searchSkippedTooLarge: "Larger than 32 MiB: {count} file(s) skipped.",
     searchSkippedUnreadable: "Could not read (possibly removed or access denied): {count} file(s) or folder(s).",

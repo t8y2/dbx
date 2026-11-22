@@ -1358,6 +1358,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "Resultados incompletos: não foi possível carregar o conteúdo de {count} arquivos.",
     matchPreviewLimit: "As prévias são limitadas às primeiras {limit} de {total} linhas correspondentes.",
     sortByDateCreated: "Ordenar por data de criação",
+    displayMode: "Modo de exibição",
+    displayModeFolder: "Por estrutura de pastas",
+    displayModeConnection: "Agrupar por conexão",
   },
 
   connection: {
@@ -11873,6 +11876,11 @@ export default withEnglishFallback({
     fileFilterHint: "Use um curinga como *.sql ou *.sh, ou uma expressão regular como {regex}.",
     openWithDefaultApp: "Abrir com o aplicativo padrão do sistema",
     openWithDefaultAppFailed: "Falha ao abrir com o aplicativo padrão do sistema: {message}",
+    displayMode: "Modo de exibição",
+    displayModeFolder: "Por estrutura de pastas",
+    displayModeConnection: "Agrupar por conexão",
+    unassociated: "Não associado",
+    deletedConnection: "Conexão excluída",
   },
   mqTopics: {
     title: "Gerenciamento de tópicos",

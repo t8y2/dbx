@@ -1358,6 +1358,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "検索結果は不完全です：{count} 件のファイルの内容を読み込めませんでした。",
     matchPreviewLimit: "一致する全 {total} 行のうち、先頭 {limit} 行のみプレビューできます。",
     sortByDateCreated: "作成日で並べ替え",
+    displayMode: "表示モード",
+    displayModeFolder: "フォルダー構造別",
+    displayModeConnection: "接続別にグループ化",
   },
   connection: {
     groupPath: "グループパス",
@@ -11903,6 +11906,11 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql や *.sh のようなワイルドカード、または {regex} のような正規表現を使用できます。",
     openWithDefaultApp: "システムの既定のアプリで開く",
     openWithDefaultAppFailed: "システムの既定のアプリで開けませんでした: {message}",
+    displayMode: "表示モード",
+    displayModeFolder: "フォルダー構造別",
+    displayModeConnection: "接続別にグループ化",
+    unassociated: "未関連付け",
+    deletedConnection: "接続が削除されました",
   },
   mqTopics: {
     title: "トピック管理",

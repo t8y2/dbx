@@ -63,7 +63,7 @@ import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCoun
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
 import { savedSqlBatchErrorMessage, savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDatabaseScopeKey } from "@/lib/savedSql/savedSqlDatabaseTree";
-import { getSavedSqlExpandedFolderIds, saveSavedSqlExpandedFolderIds } from "@/lib/savedSql/savedSqlUiState";
+import { getSavedSqlDisplayMode, getSavedSqlExpandedConnectionIds, getSavedSqlExpandedFolderIds, saveSavedSqlDisplayMode, saveSavedSqlExpandedConnectionIds, saveSavedSqlExpandedFolderIds, type SavedSqlDisplayMode } from "@/lib/savedSql/savedSqlUiState";
 import { ensureSqlExtension, extractCandidateDatabaseFromName, nextAvailableSqlName } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlImportTarget } from "@/lib/savedSql/savedSqlImportTarget";
 import { buildSavedSqlTreeRows, savedSqlFolderBranchMatches, type SavedSqlTreeRow, type SavedSqlTreeSortMode } from "@/lib/savedSql/savedSqlTreeRows";
@@ -132,6 +132,8 @@ watch(
 
 const sortMode = ref<SavedSqlTreeSortMode>("folder");
 const sortMenuOpen = ref(false);
+const displayMode = ref<SavedSqlDisplayMode>(getSavedSqlDisplayMode());
+const displayModeDraft = ref<SavedSqlDisplayMode>(displayMode.value);
 const sortOptions = computed(
   () =>
     [
@@ -149,12 +151,15 @@ const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
 
 function openInteractionSettings() {
   openModeDraft.value = openMode.value;
+  displayModeDraft.value = displayMode.value;
   interactionSettingsOpen.value = true;
 }
 
 function saveInteractionSettings() {
   openMode.value = openModeDraft.value;
   saveSqlFileOpenMode(openMode.value);
+  displayMode.value = displayModeDraft.value;
+  saveSavedSqlDisplayMode(displayMode.value);
   interactionSettingsOpen.value = false;
 }
 
@@ -465,7 +470,79 @@ const treeRows = computed<SavedSqlTreeRow[]>(() =>
   }),
 );
 
-const hasAnyVisibleItem = computed(() => treeRows.value.length > 0);
+type SavedSqlDisplayRow = { type: "connection"; key: string; connectionId: string; label: string; fileCount: number } | SavedSqlTreeRow;
+
+const expandedConnections = ref<Set<string>>(getSavedSqlExpandedConnectionIds());
+
+function saveExpandedConnectionsState() {
+  saveSavedSqlExpandedConnectionIds(expandedConnections.value);
+}
+
+function connectionGroupLabel(connectionId: string) {
+  return getConnectionLabel(connectionId);
+}
+
+const connectionGroups = computed(() => {
+  const connectionIds = new Set<string>([...savedSqlStore.allFolders.map((folder) => folder.connectionId), ...savedSqlStore.allFiles.map((file) => file.connectionId)]);
+  const knownIds = new Set(connectionStore.connections.map((connection) => connection.id));
+  const orderedIds = [
+    ...connectionStore.connections.map((connection) => connection.id).filter((id) => connectionIds.has(id)),
+    ...[...connectionIds].filter((id) => !knownIds.has(id)).sort((left, right) => connectionGroupLabel(left).localeCompare(connectionGroupLabel(right), undefined, { numeric: true, sensitivity: "base" })),
+  ];
+
+  return orderedIds
+    .map((connectionId) => {
+      const folders = savedSqlStore.allFolders.filter((folder) => folder.connectionId === connectionId);
+      const files = savedSqlStore.allFiles.filter((file) => file.connectionId === connectionId);
+      const rows = buildSavedSqlTreeRows(folders, files, {
+        mode: sortMode.value,
+        isFolderExpanded,
+        folderMatches: searchQuery.value ? folderMatchesQuery : undefined,
+        fileMatches: searchQuery.value ? fileMatchesQuery : undefined,
+      });
+      return {
+        key: `connection:${connectionId || "unassociated"}`,
+        connectionId,
+        label: connectionGroupLabel(connectionId),
+        fileCount: files.length,
+        rows,
+      };
+    })
+    .filter((group) => group.rows.length > 0);
+});
+
+function isConnectionExpanded(connectionId: string) {
+  return expandedConnections.value.has(connectionId);
+}
+
+function toggleConnection(connectionId: string) {
+  const next = new Set(expandedConnections.value);
+  if (next.has(connectionId)) next.delete(connectionId);
+  else next.add(connectionId);
+  expandedConnections.value = next;
+  saveExpandedConnectionsState();
+}
+
+const displayRows = computed<SavedSqlDisplayRow[]>(() => {
+  if (displayMode.value === "folder") return treeRows.value;
+  const rows: SavedSqlDisplayRow[] = [];
+  for (const group of connectionGroups.value) {
+    rows.push({ type: "connection", key: group.key, connectionId: group.connectionId, label: group.label, fileCount: group.fileCount });
+    if (isConnectionExpanded(group.connectionId)) {
+      rows.push(
+        ...group.rows.map((row) => ({
+          ...row,
+          depth: row.depth + 1,
+        })),
+      );
+    }
+  }
+  return rows;
+});
+
+const selectableTreeRows = computed<SavedSqlTreeRow[]>(() => displayRows.value.filter((row): row is SavedSqlTreeRow => row.type === "folder" || row.type === "file"));
+
+const hasAnyVisibleItem = computed(() => displayRows.value.length > 0);
 
 const expandedFolders = ref<Set<string>>(getSavedSqlExpandedFolderIds());
 
@@ -488,13 +565,15 @@ watch(
 );
 
 function collapseAllFolders() {
-  if (expandedFolders.value.size === 0) return;
+  if (expandedFolders.value.size === 0 && expandedConnections.value.size === 0) return;
   expandedFolders.value = new Set();
+  expandedConnections.value = new Set();
   saveExpandedFoldersState();
+  saveExpandedConnectionsState();
 }
 
 function hasAnyFolder(): boolean {
-  return savedSqlStore.allFolders.length > 0;
+  return savedSqlStore.allFolders.length > 0 || connectionGroups.value.length > 0;
 }
 
 function toggleFolder(folderId: string) {
@@ -591,7 +670,7 @@ async function locateFile(fileId: string) {
   lastClickedKey = null;
   const file = savedSqlStore.getFile(fileId);
   if (!file) return;
-  if (searchInputPending.value || !treeRows.value.some((row) => row.type === "file" && row.file.id === file.id)) {
+  if (searchInputPending.value || !selectableTreeRows.value.some((row) => row.type === "file" && row.file.id === file.id)) {
     searchInput.value?.clear();
   }
   const expanded = new Set(expandedFolders.value);
@@ -604,10 +683,14 @@ async function locateFile(fileId: string) {
   }
   expandedFolders.value = expanded;
   saveExpandedFoldersState();
+  if (displayMode.value === "connection") {
+    expandedConnections.value = new Set([...expandedConnections.value, file.connectionId]);
+    saveExpandedConnectionsState();
+  }
   clearSelection();
   activeItemId.value = file.id;
   activeItemType.value = "file";
-  lastClickedItemIndex.value = treeRows.value.findIndex((row) => row.type === "file" && row.file.id === file.id);
+  lastClickedItemIndex.value = selectableTreeRows.value.findIndex((row) => row.type === "file" && row.file.id === file.id);
   await nextTick();
   const row = Array.from(libraryTree.value?.querySelectorAll<HTMLElement>("[data-sql-library-file]") ?? []).find((element) => element.dataset.sqlLibraryFile === file.id);
   row?.scrollIntoView({ block: "center", inline: "nearest" });
@@ -653,7 +736,7 @@ watch(
 
 // Unified item list for selection, matching the currently rendered order.
 const allSelectableItems = computed(() => {
-  return treeRows.value.map((row) => ({
+  return selectableTreeRows.value.map((row) => ({
     type: row.type,
     id: row.type === "folder" ? row.folder.id : row.file.id,
   }));
@@ -1807,9 +1890,23 @@ defineExpose({
               {{ t("sqlLibrary.unfiled") }}
             </div>
 
-            <div v-for="row in treeRows" :key="row.type + '-' + (row.type === 'folder' ? row.folder.id : row.file.id)">
+            <div v-for="row in displayRows" :key="row.type === 'connection' ? row.key : row.type + '-' + (row.type === 'folder' ? row.folder.id : row.file.id)">
+              <button
+                v-if="row.type === 'connection'"
+                type="button"
+                class="relative flex w-full items-center gap-1 py-1.5 pr-2 text-left text-[13px] group hover:bg-accent/40 focus-visible:outline focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                :data-sql-library-connection="row.connectionId || 'unassociated'"
+                :aria-expanded="isConnectionExpanded(row.connectionId)"
+                @click="toggleConnection(row.connectionId)"
+              >
+                <ChevronRight v-if="!isConnectionExpanded(row.connectionId)" class="h-4 w-4 shrink-0 text-muted-foreground" />
+                <ChevronDown v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
+                <Database class="h-4 w-4 shrink-0" :style="{ color: connectionColor(row.connectionId) }" />
+                <span class="min-w-0 flex-1 truncate font-medium">{{ row.label }}</span>
+                <span class="shrink-0 text-muted-foreground">({{ row.fileCount }})</span>
+              </button>
               <div
-                v-if="row.type === 'folder'"
+                v-else-if="row.type === 'folder'"
                 class="relative flex cursor-default items-center gap-1 py-1.5 pr-2 text-[13px] group"
                 :data-sql-library-folder="row.folder.id"
                 :style="{ paddingLeft: `${8 + row.depth * 16}px` }"
@@ -1920,7 +2017,17 @@ defineExpose({
       </CustomContextMenu>
     </div>
 
-    <SqlFileInteractionSettingsDialog v-model:open="interactionSettingsOpen" v-model:open-mode="openModeDraft" open-mode-id="sql-library-open-mode" @save="saveInteractionSettings" />
+    <SqlFileInteractionSettingsDialog
+      v-model:open="interactionSettingsOpen"
+      v-model:open-mode="openModeDraft"
+      v-model:display-mode="displayModeDraft"
+      open-mode-id="sql-library-open-mode"
+      display-mode-id="sql-library-display-mode"
+      :display-mode-label="t('sqlLibrary.displayMode')"
+      :display-mode-folder-label="t('sqlLibrary.displayModeFolder')"
+      :display-mode-connection-label="t('sqlLibrary.displayModeConnection')"
+      @save="saveInteractionSettings"
+    />
 
     <Dialog v-model:open="showDeleteConfirm">
       <DialogContent class="sm:max-w-[380px]">

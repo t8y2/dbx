@@ -227,6 +227,7 @@ const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacemen
 // Meaningless without grouping, so it silently falls back to the single row.
 const isTwoRowLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabGroupRows === "two-row" && settingsStore.editorSettings.tabGroupMode !== "none");
 const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
+const hasWrapRowLimit = computed(() => isWrapLayout.value && settingsStore.editorSettings.tabWrapMaxRows > 0);
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
@@ -243,6 +244,7 @@ const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value && settingsStore.editorSettings.tabMaxWidth > 0) {
     styles["--tab-max-width"] = `${settingsStore.editorSettings.tabMaxWidth}px`;
   }
+  if (hasWrapRowLimit.value) styles["--tab-wrap-max-rows"] = settingsStore.editorSettings.tabWrapMaxRows;
   return Object.keys(styles).length > 0 ? styles : undefined;
 });
 const tabBarCollapseIcon = computed(() => {
@@ -2062,7 +2064,7 @@ watch(
       }
     }
     nextTick(() => {
-      if (!isWrapLayout.value) {
+      if (!isWrapLayout.value || hasWrapRowLimit.value) {
         const container = tabsContainerRef.value;
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
@@ -2104,6 +2106,7 @@ watch(
     props.specialPageTabs?.settingsOpen,
     props.specialPageTabs?.driverStoreOpen,
     settingsStore.editorSettings.tabLayout,
+    settingsStore.editorSettings.tabWrapMaxRows,
     settingsStore.editorSettings.tabGroupMode,
     settingsStore.editorSettings.tabMaxWidth,
     compactTabTitle.value,
@@ -2322,11 +2325,12 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
             isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-0 overflow-x-auto py-1.5',
             isWrapLayout ? 'wrap-mode' : '',
             isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+            hasWrapRowLimit ? 'wrap-mode--limited' : '',
             hasHorizontalFixedRows ? 'horizontal-fixed-tabs-scroll' : '',
           ]"
-          :style="tabsContainerStyle"
+          :style="hasWrapRowLimit ? undefined : tabsContainerStyle"
           @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
-          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && onTabsWheel($event)"
+          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && !hasWrapRowLimit && onTabsWheel($event)"
         >
           <template v-for="section in stripSections" :key="section.key">
             <div

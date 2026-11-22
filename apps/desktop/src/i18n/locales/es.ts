@@ -11186,6 +11186,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",
     completionAutoActivationDelayDescription:
       "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",
+    tabWrapMaxRows: "Número máximo de filas de mosaico de pestañas",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

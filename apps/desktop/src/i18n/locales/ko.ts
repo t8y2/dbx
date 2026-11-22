@@ -10998,6 +10998,7 @@ export default withEnglishFallback({
     toolbarPinItem: "툴바에 {item} 고정",
     completionAutoActivationDelay: "자동 완성 자동 활성화 지연(밀리초)",
     completionAutoActivationDelayDescription: "입력 후 자동 완성 후보가 표시되기까지의 지연 시간입니다. 기본값은 500밀리초이며, 값을 높이면 연속 입력 시 자동 완성 후보가 자주 표시되어 편집을 방해하는 것을 방지할 수 있습니다. 0은 즉시 표시를 의미합니다.",
+    tabWrapMaxRows: "탭 최대 타일 행 수",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

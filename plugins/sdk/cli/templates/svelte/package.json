@@ -7,7 +7,7 @@
     "build:watch": "vite build --watch"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "svelte": "^5.38.7",
     "vite": "^7.1.5"
   }

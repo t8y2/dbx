@@ -242,6 +242,9 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
             EstimatedPlanStrategy { sql_generation: SqliteQueryPlan, acquisition: GeneratedSql, format: Json }
         }
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
+        DatabaseType::DuckDb => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
@@ -2185,6 +2188,7 @@ mod tests {
             (DatabaseType::MongoDb, "EXPLAIN (FORMAT JSON) SELECT 1"),
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1"),
             (DatabaseType::Doris, "EXPLAIN SELECT 1"),
+            (DatabaseType::DuckDb, "EXPLAIN SELECT 1"),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1"),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1"),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1"),
@@ -2416,6 +2420,7 @@ mod tests {
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
             (DatabaseType::Sqlite, "EXPLAIN QUERY PLAN SELECT 1", Json, GeneratedSql),
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
+            (DatabaseType::DuckDb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
             (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
@@ -2456,7 +2461,6 @@ mod tests {
             Some(DatabaseType::MongoDb),
             Some(DatabaseType::Gaussdb),
             Some(DatabaseType::StarRocks),
-            Some(DatabaseType::DuckDb),
             Some(DatabaseType::CloudflareD1),
         ] {
             assert!(estimated_plan_strategy(database_type).is_none(), "{database_type:?}");

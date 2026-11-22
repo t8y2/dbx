@@ -47,6 +47,7 @@ import {
   analyzeEditableQueryEditability,
   analyzeSelectStructureForDisplay,
   foldUnquotedPostgresMetadataIdentifier,
+  flattenSimpleDerivedTablesForDisplay,
   hasTopLevelKeyword,
   hasUnparsedQuerySource,
   resolveMetadataColumnName,
@@ -8053,7 +8054,8 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode !== "query" || !tab.connectionId || !tab.result || !tab.result.columns.length) return undefined;
     const conn = connection ?? useConnectionStore().getConfig(tab.connectionId);
     const dbType = conn?.db_type || "";
-    const analysis = analyzeSelectStructureForDisplay(sql);
+    const flattenedSql = flattenSimpleDerivedTablesForDisplay(sql);
+    const analysis = analyzeSelectStructureForDisplay(flattenedSql);
     if (!analysis) return undefined;
     const sources = editableQuerySources(analysis);
     if (!sources.length) return undefined;
@@ -8087,7 +8089,9 @@ export const useQueryStore = defineStore("query", () => {
         resultColumnTypeLabels: displayInfo.typeLabels,
         queryDisplaySourceColumns: displayInfo.mapping,
       };
-      if (!allowMysqlEditing || dbType !== "mysql" || (conn?.driver_profile || conn?.db_type) !== "mysql") return readOnlyPatch;
+      // Flattened derived-table queries are display-only: comments resolve
+      // through the base tables, but the editing surface must stay unchanged.
+      if (!allowMysqlEditing || flattenedSql !== sql || dbType !== "mysql" || (conn?.driver_profile || conn?.db_type) !== "mysql") return readOnlyPatch;
       // Mutation safety boundary: the FROM root must remain on the preserved
       // side of the join tree, and GROUP BY must resolve to exactly that table's
       // declared primary key. This makes every editable result row identify one
@@ -8166,7 +8170,7 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     queryExecutionLog("info", "metadata:editability:start", { traceId, elapsed: elapsed?.() });
-    if (hasUnparsedQuerySource(sql)) {
+    if (hasUnparsedQuerySource(flattenSimpleDerivedTablesForDisplay(sql))) {
       return {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
@@ -12030,7 +12034,8 @@ export const useQueryStore = defineStore("query", () => {
     const sourceStatement = sourceResult.sourceStatement;
     const truncated = sourceResult.truncated;
     const sourceTotalRows = tab.resultTotalRowCount;
-    const sourceClientSessionId = tabClientSessionId(tab, "export");
+    const exportClientSessionPrefix = tabClientSessionId(tab, "export");
+    const sourceClientSessionId = tab.resultClientSessionId ?? tabClientSessionId(tab);
     const txnSessionId = exportTxnSessionId(tab);
     const transactionEpoch = manualTransactionTargetEpoch(tab);
     const hasUniqueInsertTarget = tab.tableMeta !== undefined && tab.queryAnalysis?.multiSource !== true && (tab.queryAnalysis?.sources?.length ?? 1) === 1 && (tab.queryWriteTargets?.length ?? 1) <= 1;
@@ -12070,7 +12075,7 @@ export const useQueryStore = defineStore("query", () => {
       const setupSql = batchStatements[resultStatementIndex!]?.sql === sourceStatement ? batchStatements.slice(0, resultStatementIndex).map((statement) => statement.sql) : undefined;
       const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
       const totalRows = typeof sourceTotalRows === "number" ? (rowLimit === null ? sourceTotalRows : Math.min(sourceTotalRows, rowLimit)) : null;
-      const clientSessionId = `${sourceClientSessionId}:${options.exportId}`;
+      const clientSessionId = `${exportClientSessionPrefix}:${options.exportId}`;
 
       return {
         exportId: options.exportId,
@@ -12095,6 +12100,7 @@ export const useQueryStore = defineStore("query", () => {
         csvWithoutBom: settings.csvWithoutBom,
         csvQuoteMode: settings.csvQuoteMode,
         clientSessionId,
+        ...(conn?.db_type === "mysql" && effectiveDbType === "mysql" && !useAgentCursor && !txnSessionId ? { sourceClientSessionId } : {}),
         txnSessionId,
         nullLiteral: csvNullLiteralForMode(settings.csvNullMode),
         executionId: uuid(),

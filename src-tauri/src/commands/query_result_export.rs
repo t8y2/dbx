@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::commands::connection::AppState;
 
 use dbx_core::query_cancel::RunningTaskMetadata;
-pub use dbx_core::query_result_export::QueryResultExportRequest;
+use dbx_core::query_result_export::QueryResultExportInvocation;
 use dbx_core::query_result_export::StagedExportTarget;
 use dbx_core::table_export::ExportStatus;
 pub use dbx_core::table_export::TableExportProgress;
@@ -321,8 +321,9 @@ mod tests {
 pub async fn start_query_result_export(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
-    mut request: QueryResultExportRequest,
+    request: QueryResultExportInvocation,
 ) -> Result<(), String> {
+    let QueryResultExportInvocation { mut request, source_client_session_id } = request;
     dbx_core::query::mysql_data_charset_policy::check_export(&state, &request.connection_id, &request.format).await?;
     let state = state.inner().clone();
     let export_id = request.export_id.clone();
@@ -346,7 +347,7 @@ pub async fn start_query_result_export(
         let cancel_token = registered_query.as_ref().map(|query| query.token());
         let routed_progress = Arc::new(RoutedExportProgress::default());
         let routed_progress_handler = routed_progress.clone();
-        let completion = dbx_core::query_result_export::export_query_result_core_with_completion(
+        let completion = dbx_core::query_result_export::export_query_result_with_cleanup(
             &state,
             &request,
             cancel_token.clone(),
@@ -355,6 +356,8 @@ pub async fn start_query_result_export(
                     emit_progress(&app, progress);
                 });
             },
+            true,
+            source_client_session_id.as_deref(),
         )
         .await;
         drop(registered_query);

@@ -769,6 +769,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "standart olaraq deaktivdir; aktiv etmək üçün müntəzəm ifadə daxil edin",
     elasticsearchIndexGroupingPatternHint: "Standart olaraq deaktivdir (adlandırma sxemləri fərqlənir). Aktiv etmək üçün müntəzəm ifadə daxil edin: uyğun gələn dövri və ya zaman sırası indeksləri gündəlik təfərrüatları gizlətməklə sorğulana bilən bir ümumiləşdirici şablonda birləşdirilir.",
     version: "Versiya",
+    influxdbApiPath: "API yolu",
+    influxdbApiPathHint: "Nginx kimi tərs proksi InfluxDB-ni alt yolda (məsələn /influxdb) təqdim edirsə, doldurun. Serverə kökdən daxil olmaq üçün boş buraxın. Sondakı kəsilmə nəzərə alınmır.",
     victoriametricsApiPath: "API yolu",
     victoriametricsApiPathHint: "Tək qovşaqlı quraşdırmalar üçün /prometheus, klasterlər üçün isə /select/tenantID/prometheus yolundan istifadə edin.",
     victoriametricsLookback: "Metaverilənlər üçün geriyə baxış müddəti",
@@ -2448,6 +2450,7 @@ export default withEnglishFallback({
     dismiss: "Bağla",
     addRow: "Sətir əlavə et",
     insertMultipleRows: "Bir neçə sətir əlavə et…",
+    pasteAsNewRowsAwaitingPaste: "Bu brauzer buferi birbaşa oxumağa icazə vermir. Yeni sətir kimi yapışdırmaq üçün cədvəldə Ctrl+V (macOS-də ⌘V) basın.",
     insertRowsTitle: "Bir neçə sətir əlavə et",
     insertRowsDescription: "Bu sayda yadda saxlanmamış qaralama sətir yaradın. Yadda saxlayarkən boş sətirlər nəzərə alınmır; yadda saxlandıqdan sonra göstərilmə sırası cari sorğuya uyğun olur.",
     insertRowCountLabel: "Sətir sayı",
@@ -7215,6 +7218,9 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql və ya *.sh kimi fayl şablonundan, yaxud {regex} kimi müntəzəm ifadədən istifadə edin.",
   },
   diff: {
+    additionalSchemas: "Bu sxemləri də müqayisə et",
+    additionalSchemasHint: "Hər biri hədəfdəki eyni adlı sxemlə müqayisə olunur, sonra ayrıca yoxlanılır və tətbiq edilir.",
+    schemaResults: "Sxem nəticələri",
     progress: {
       loadingObjects: "Mənbə və hədəf verilənlər bazası obyektləri oxunur...",
       loadingSourceDetails: "Mənbə verilənlər bazasının cədvəl strukturları oxunur",

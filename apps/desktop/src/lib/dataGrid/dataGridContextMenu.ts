@@ -269,6 +269,7 @@ export function createDataGridCellContextMenuItems(options: {
   downloadItem?: DataGridContextMenuItem | null;
   foreignKeyItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
+  pasteCellItem?: DataGridContextMenuItem | null;
   clearSelectionItem?: DataGridContextMenuItem;
   generateSubmenu?: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
@@ -285,6 +286,7 @@ export function createDataGridCellContextMenuItems(options: {
     items.push({ label: options.labels.rowDetails, action: options.actions.rowDetails, icon: options.icons.rowDetails }, { label: "", separator: true });
   }
   if (!options.headerColumn) items.push(options.copySubmenu);
+  if (options.pasteCellItem) items.push(options.pasteCellItem);
   if (options.editable && options.hasCellSelection) {
     if (!options.headerColumn) items.push({ label: options.labels.setNull, action: options.actions.setNull, disabled: !options.hasEditableSelection, icon: options.icons.setNull });
     items.push({ label: options.labels.bulkEdit, action: options.actions.bulkEdit, disabled: !options.hasEditableSelection, icon: options.icons.bulkEdit });

@@ -3713,6 +3713,8 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "{table}에 이 값과 일치하는 행이 없습니다.",
     foreignKeyPreviewFailed: "참조 행을 불러올 수 없습니다: {message}",
     sortOptions: "정렬 옵션",
+    pasteCellText: "이 셀에 텍스트 붙여넣기",
+    pasteCellTextFailed: "셀에 텍스트를 붙여넣을 수 없습니다: {message}",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

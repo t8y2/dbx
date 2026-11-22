@@ -3759,6 +3759,8 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "Nessuna riga in «{table}» corrisponde a questo valore.",
     foreignKeyPreviewFailed: "Impossibile caricare le righe di riferimento: {message}",
     sortOptions: "Opzioni di ordinamento",
+    pasteCellText: "Incolla il testo in questa cella",
+    pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

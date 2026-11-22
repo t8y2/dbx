@@ -3767,6 +3767,8 @@ export default {
     insertMultipleRows: "Insert Multiple Rows…",
     pasteAsNewRows: "Paste as new rows",
     pasteAsNewRowsAwaitingPaste: "Clipboard access is unavailable in this browser. Press Ctrl+V (⌘V on macOS) to paste as new rows.",
+    pasteCellText: "Paste text into this cell",
+    pasteCellTextFailed: "Could not paste text into the cell: {message}",
     insertRowsTitle: "Insert Multiple Rows",
     insertRowsDescription: "Create this many unsaved draft rows. Empty rows are ignored when saving; after saving, the display order follows the current query.",
     insertRowCountLabel: "Row count",

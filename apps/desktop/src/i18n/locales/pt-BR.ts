@@ -3757,6 +3757,8 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "Não há linhas em “{table}” que correspondam a este valor.",
     foreignKeyPreviewFailed: "Não foi possível carregar as linhas de referência: {message}",
     sortOptions: "Opções de classificação",
+    pasteCellText: "Colar texto nesta célula",
+    pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

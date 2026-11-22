@@ -3781,6 +3781,8 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "「{table}」にこの値と一致する行はありません。",
     foreignKeyPreviewFailed: "参照行を読み込めませんでした：{message}",
     sortOptions: "並べ替えオプション",
+    pasteCellText: "このセルにテキストを貼り付け",
+    pasteCellTextFailed: "セルにテキストを貼り付けできません：{message}",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",

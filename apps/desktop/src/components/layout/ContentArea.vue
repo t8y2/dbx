@@ -1127,6 +1127,10 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const editTarget = { idColumn: target.idColumn, documentAt: (rowIdx: number) => tab.result?.mongo_documents?.[rowIdx] };
+  function deleteIdForRow(id: unknown, rowIndex: number) {
+    const canonicalDocument = tab.result?.mongo_copy_documents?.[rowIndex] as Record<string, unknown> | undefined;
+    return serializeMongoDeleteId(id, canonicalDocument?._id);
+  }
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
     if (changes.newRows.length > 0) {
@@ -1135,16 +1139,15 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
     if (!changes.columns.includes(target.idColumn)) throw new Error("No _id column");
     for (const operation of buildMongoQueryResultOperations(changes, editTarget)) {
       if (operation.kind === "delete") {
-        const canonicalDocument = tab.result?.mongo_copy_documents?.[operation.rowIndex] as Record<string, unknown> | undefined;
-        const id = serializeMongoDeleteId(operation.id, canonicalDocument?._id);
-        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id);
+        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, deleteIdForRow(operation.id, operation.rowIndex));
       } else {
         await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(operation.id), JSON.stringify(operation.update));
       }
     }
   };
 
-  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation));
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) =>
+    buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation, operation.kind === "delete" ? deleteIdForRow(operation.id, operation.rowIndex) : undefined));
 
   const applySavedChanges: NonNullable<CustomSaveHandler["applySavedChanges"]> = ({ dirtyRows, columns }) => {
     const documents = tab.result?.mongo_documents;

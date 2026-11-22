@@ -89,6 +89,7 @@ import {
   mongoDocumentDisplayValue,
   mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
+  formatMongoDeleteIdCondition,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
   serializeMongoDeleteId,
@@ -1841,7 +1842,10 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`DELETE /${coll}/_doc/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}`);
     } else {
-      stmts.push(`db.${coll}.deleteOne({_id: ${formatMongoShellLiteral(documents.value[rowIdx]?._id ?? id)}})`);
+      const documentId = documents.value[rowIdx]?._id ?? id;
+      const deleteId = serializeMongoDeleteId(documentId, mongoCopyDocumentsAvailable.value ? copyDocuments.value[rowIdx]?._id : undefined);
+      const condition = formatMongoDeleteIdCondition(documentId, deleteId);
+      stmts.push(`db.${coll}.deleteOne({_id: ${condition}})`);
     }
   }
 

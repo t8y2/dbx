@@ -2903,19 +2903,20 @@ pub async fn find_one_and_delete(
     Ok(single_document_result(result))
 }
 
+pub async fn delete_document_by_bson_id(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    id: &serde_json::Value,
+) -> Result<u64, String> {
+    let id = json_object_to_document_extended_json(id).map_err(|e| format!("Invalid BSON document ID: {e}"))?;
+    let col = client.database(database).collection::<Document>(collection);
+    let result = col.delete_one(doc! { "_id": { "$eq": id } }).await.map_err(|e| e.to_string())?;
+    Ok(result.deleted_count)
+}
+
 pub async fn delete_document(client: &Client, database: &str, collection: &str, id: &str) -> Result<u64, String> {
     let col = client.database(database).collection::<Document>(collection);
-    if let Some(payload) = id.strip_prefix("__dbx_mongo_embedded_id__") {
-        let value: serde_json::Value =
-            serde_json::from_str(payload).map_err(|e| format!("Invalid document ID: {e}"))?;
-        // Decode canonical Extended JSON without the shell's shorthand or ObjectId coercions.
-        let id = Bson::try_from(value).map_err(|e| format!("Invalid document ID: {e}"))?;
-        let Bson::Document(id) = id else {
-            return Err("Expected an embedded document ID".to_string());
-        };
-        let result = col.delete_one(doc! { "_id": { "$eq": id } }).await.map_err(|e| e.to_string())?;
-        return Ok(result.deleted_count);
-    }
     for filter in document_id_filters(id) {
         let result = col.delete_one(filter).await.map_err(|e| e.to_string())?;
         if result.deleted_count > 0 {

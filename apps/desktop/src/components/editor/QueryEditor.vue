@@ -3410,17 +3410,10 @@ defineExpose({
   contain: size layout style;
 }
 
-/* Matches the geometry of the custom-drawn data grid scrollbars (DataGrid.vue):
-   a fixed 10px track with a 4px visual thumb widening on hover/drag, transparent
-   track, capsule thumb, colors from the same --foreground color-mix. The thin
-   idle look comes from a transparent border (background-clip: padding-box);
-   hover drops the border to fill the full track. Partial border widths are not
-   honored on scrollbar part state changes, so the hover endpoint is the full
-   10px track rather than the grid's 6px. Changing the track width on hover
-   would squeeze the content and cause a reflow flicker, so it stays constant. */
+/* Widen the thumb within a fixed track so hovering cannot reflow the editor. */
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar) {
-  width: 10px;
-  height: 10px;
+  width: var(--dbx-workspace-scrollbar-size);
+  height: var(--dbx-workspace-scrollbar-size);
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-track),
@@ -3429,15 +3422,15 @@ defineExpose({
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb) {
-  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  background: var(--dbx-workspace-scrollbar-thumb);
   background-clip: padding-box;
-  border: 3px solid transparent;
+  border: var(--dbx-workspace-scrollbar-inset) solid transparent;
   border-radius: 999px;
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb:hover),
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb:active) {
-  background: color-mix(in oklch, var(--foreground) 48%, transparent);
+  background: var(--dbx-workspace-scrollbar-thumb-active);
   border: 0 solid transparent;
 }
 

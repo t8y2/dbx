@@ -18562,10 +18562,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-row-number-deleted-bg: rgb(255, 244, 244);
   --data-grid-row-number-active-bg: rgb(219, 234, 254);
   --data-grid-row-number-selected-bg: rgb(191, 219, 254);
-  --data-grid-scrollbar-thumb: color-mix(in oklch, var(--foreground) 30%, transparent);
-  --data-grid-scrollbar-thumb-hover: color-mix(in oklch, var(--foreground) 48%, transparent);
-  --data-grid-scrollbar-track: transparent;
-  --data-grid-vertical-scrollbar-width: 10px;
+  --data-grid-vertical-scrollbar-width: var(--dbx-workspace-scrollbar-size);
   background-color: var(--data-grid-background);
 }
 
@@ -18597,9 +18594,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-row-number-deleted-bg: rgb(55, 31, 32);
   --data-grid-row-number-active-bg: rgb(27, 46, 70);
   --data-grid-row-number-selected-bg: rgb(30, 64, 96);
-  --data-grid-scrollbar-thumb: rgb(82, 82, 91);
-  --data-grid-scrollbar-thumb-hover: rgb(113, 113, 122);
-  --data-grid-scrollbar-track: rgb(24, 24, 27);
   background-color: var(--data-grid-background);
 }
 
@@ -18915,7 +18909,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   inset-inline: calc(var(--row-num-w) + 8px) 4px;
   bottom: 0;
   z-index: 30;
-  height: 10px;
+  height: var(--dbx-workspace-scrollbar-size);
   cursor: pointer;
   touch-action: none;
   background-color: var(--data-grid-background);
@@ -18926,34 +18920,29 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   background-color: var(--data-grid-background) !important;
 }
 
-.data-grid-horizontal-scrollbar::before {
-  content: "";
-  position: absolute;
-  inset-inline: 0;
-  top: 4px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--data-grid-scrollbar-track);
-}
-
 .data-grid-horizontal-scrollbar__thumb {
   position: absolute;
-  top: 3px;
-  height: 4px;
+  inset-block: 0;
   min-width: 24px;
+  border-block: var(--dbx-workspace-scrollbar-inset) solid transparent;
+}
+
+.data-grid-horizontal-scrollbar__thumb,
+.data-grid-vertical-scrollbar__thumb {
   border-radius: 999px;
-  background: var(--data-grid-scrollbar-thumb);
+  background: var(--dbx-workspace-scrollbar-thumb);
+  background-clip: padding-box;
   transition:
-    height 120ms ease,
-    background-color 120ms ease,
-    top 120ms ease;
+    border-width 120ms ease,
+    background-color 120ms ease;
 }
 
 .data-grid-horizontal-scrollbar:hover .data-grid-horizontal-scrollbar__thumb,
-.data-grid-horizontal-scrollbar--dragging .data-grid-horizontal-scrollbar__thumb {
-  top: 2px;
-  height: 6px;
-  background: var(--data-grid-scrollbar-thumb-hover);
+.data-grid-horizontal-scrollbar--dragging .data-grid-horizontal-scrollbar__thumb,
+.data-grid-vertical-scrollbar:hover .data-grid-vertical-scrollbar__thumb,
+.data-grid-vertical-scrollbar--dragging .data-grid-vertical-scrollbar__thumb {
+  border-width: 0;
+  background-color: var(--dbx-workspace-scrollbar-thumb-active);
 }
 
 .data-grid-detail-resize-handle--bottom {
@@ -18968,7 +18957,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   width: 42px;
   height: 2px;
   border-radius: 999px;
-  background: var(--data-grid-scrollbar-thumb-hover);
+  background: var(--dbx-workspace-scrollbar-thumb-active);
   opacity: 0;
   pointer-events: none;
   transform: translate(-50%, -50%);
@@ -19006,22 +18995,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 
 .data-grid-vertical-scrollbar__thumb {
   position: absolute;
-  inset-inline-start: 3px;
-  width: 4px;
+  inset-inline: 0;
   min-height: 24px;
-  border-radius: 999px;
-  background: var(--data-grid-scrollbar-thumb);
-  transition:
-    background-color 120ms ease,
-    inset-inline-start 120ms ease,
-    width 120ms ease;
-}
-
-.data-grid-vertical-scrollbar:hover .data-grid-vertical-scrollbar__thumb,
-.data-grid-vertical-scrollbar.data-grid-vertical-scrollbar--dragging .data-grid-vertical-scrollbar__thumb {
-  inset-inline-start: 1px;
-  width: 8px;
-  background: var(--data-grid-scrollbar-thumb-hover);
+  border-inline: var(--dbx-workspace-scrollbar-inset) solid transparent;
 }
 
 .canvas-grid-surface {

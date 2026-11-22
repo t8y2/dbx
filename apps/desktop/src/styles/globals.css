@@ -79,6 +79,10 @@
 :root {
   --dbx-dialog-top-z-index: 50;
   --dbx-floating-layer-z-index: 51;
+  --dbx-workspace-scrollbar-size: 10px;
+  --dbx-workspace-scrollbar-inset: 3px;
+  --dbx-workspace-scrollbar-thumb: rgba(24, 24, 27, 0.3);
+  --dbx-workspace-scrollbar-thumb-active: rgba(24, 24, 27, 0.48);
   --data-grid-type-integer-fg: #1d4ed8;
   --data-grid-type-numeric-fg: #0e7490;
   --data-grid-type-string-fg: #166534;
@@ -100,6 +104,19 @@
   --data-grid-type-identifier-fg: #fcd34d;
   --data-grid-type-binary-fg: #fca5a5;
   --data-grid-type-spatial-fg: #6ee7b7;
+}
+
+.dark {
+  --dbx-workspace-scrollbar-thumb: rgba(250, 250, 250, 0.3);
+  --dbx-workspace-scrollbar-thumb-active: rgba(250, 250, 250, 0.48);
+}
+
+@supports (color: color-mix(in oklch, black, transparent)) {
+  :root,
+  .dark {
+    --dbx-workspace-scrollbar-thumb: color-mix(in oklch, var(--foreground) 30%, transparent);
+    --dbx-workspace-scrollbar-thumb-active: color-mix(in oklch, var(--foreground) 48%, transparent);
+  }
 }
 
 /* Reka caches the content's computed z-index on its positioning wrapper.

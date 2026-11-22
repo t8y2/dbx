@@ -2506,6 +2506,41 @@ fn builds_deletes_inserts_merged_mode() {
 }
 
 #[test]
+fn builds_deletes_only() {
+    let mut request = request(DataGridExtractorId::SqlDeletes);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: None,
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "varchar".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+    let result = extract_data_grid_selection(request).expect("SQL DELETE extraction");
+    assert_eq!(
+        result.text,
+        "DELETE FROM \"public\".\"users\" WHERE \"id\" = 1;\nDELETE FROM \"public\".\"users\" WHERE \"id\" = 2;"
+    );
+}
+
+#[test]
 fn builds_deletes_inserts_row_by_row_mode() {
     let mut request = request(DataGridExtractorId::SqlDeletesInserts);
     request.options.sql.insert_mode = crate::data_grid_sql::DataGridCopyInsertMode::RowByRow;

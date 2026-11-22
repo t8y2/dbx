@@ -16,6 +16,8 @@ export type ShortcutActionId =
   | "saveSql"
   | "acceptCompletion"
   | "triggerCompletion"
+  | "previousCompletion"
+  | "nextCompletion"
   | "indentMore"
   | "indentLess"
   | "insertLineBelow"
@@ -46,6 +48,7 @@ export type ShortcutActionId =
   | "lowercaseSelection"
   | "toggleCaseSelection"
   | "convertNamingStyle"
+  | "convertSelectionToDelimited"
   | "exPasteSqlInCondition"
   | "toggleFold"
   | "foldAll"
@@ -56,6 +59,8 @@ export type ShortcutActionId =
   | "deleteCurrentRow"
   | "focusWhere"
   | "goToColumn"
+  | "selectNextGridColumn"
+  | "selectPreviousGridColumn"
   | "goToFirstPage"
   | "goToPreviousPage"
   | "goToNextPage"
@@ -99,6 +104,7 @@ export type ShortcutActionId =
   | "toggleResultsPane"
   | "focusResultGrid"
   | "focusSqlEditor"
+  | "copyActiveResult"
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
@@ -111,9 +117,16 @@ export type ShortcutActionId =
   | "openDataInNewTab"
   | "viewTableDdl"
   | "editSidebarTableStructure"
+  | "createSidebarTable"
+  | "createSidebarDatabase"
   | "sendSelectionToAi"
   | "sqlIntentionActions"
-  | "commitTransaction";
+  | "commitTransaction"
+  | "copyResultColumn1"
+  | "copyResultColumn2"
+  | "copyResultColumn3"
+  | "copyResultColumn4"
+  | "copyResultColumn5";
 
 export type ShortcutScope = "global" | "debug" | "editor" | "grid" | "search" | "sidebar";
 
@@ -279,6 +292,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutTriggerCompletion",
     scope: "editor",
     defaultShortcut: "Alt+/",
+  },
+  {
+    id: "previousCompletion",
+    labelKey: "settings.shortcutPreviousCompletion",
+    scope: "editor",
+    defaultShortcut: "Ctrl+P",
+  },
+  {
+    id: "nextCompletion",
+    labelKey: "settings.shortcutNextCompletion",
+    scope: "editor",
+    defaultShortcut: "Ctrl+N",
   },
   {
     id: "indentMore",
@@ -449,6 +474,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Shift+Alt+C",
   },
   {
+    id: "convertSelectionToDelimited",
+    labelKey: "settings.shortcutConvertSelectionToDelimited",
+    scope: "editor",
+    defaultShortcut: "Mod+Alt+,",
+  },
+  {
     id: "exPasteSqlInCondition",
     labelKey: "settings.shortcutExPasteSqlInCondition",
     scope: "editor",
@@ -505,6 +536,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: "goToColumn",
     labelKey: "settings.shortcutGoToColumn",
+    scope: "grid",
+    defaultShortcut: "",
+  },
+  {
+    id: "selectNextGridColumn",
+    labelKey: "settings.shortcutSelectNextGridColumn",
+    scope: "grid",
+    defaultShortcut: "",
+  },
+  {
+    id: "selectPreviousGridColumn",
+    labelKey: "settings.shortcutSelectPreviousGridColumn",
     scope: "grid",
     defaultShortcut: "",
   },
@@ -756,11 +799,37 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "commitTransaction",
     labelKey: "settings.shortcutCommitTransaction",
     scope: "global",
-    // Mirrors the toolbar's commit button. The shortcut is only consumed when
-    // the active tab actually holds an open transaction (App.vue keydown), so
-    // the key stays free for in-context bindings (e.g. a user SQL shortcut
-    // action) whenever no transaction exists.
-    defaultShortcut: "Shift+Mod+C",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn1",
+    labelKey: "settings.shortcutCopyResultColumn1",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn2",
+    labelKey: "settings.shortcutCopyResultColumn2",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn3",
+    labelKey: "settings.shortcutCopyResultColumn3",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn4",
+    labelKey: "settings.shortcutCopyResultColumn4",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyResultColumn5",
+    labelKey: "settings.shortcutCopyResultColumn5",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "toggleResultsPane",
@@ -777,6 +846,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: "focusSqlEditor",
     labelKey: "settings.shortcutFocusSqlEditor",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyActiveResult",
+    labelKey: "settings.shortcutCopyActiveResult",
     scope: "global",
     defaultShortcut: "",
   },
@@ -852,6 +927,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutEditSidebarTableStructure",
     scope: "sidebar",
     defaultShortcut: "F4",
+  },
+  {
+    id: "createSidebarTable",
+    labelKey: "contextMenu.createTable",
+    scope: "sidebar",
+    defaultShortcut: "Mod+Alt+N",
+  },
+  {
+    id: "createSidebarDatabase",
+    labelKey: "contextMenu.createDatabase",
+    scope: "sidebar",
+    defaultShortcut: "Shift+F4",
   },
   {
     id: "sendSelectionToAi",
@@ -1020,10 +1107,8 @@ function computeNormalizedShortcutSettings(settings: Partial<ShortcutSettings> |
     normalized.copyCurrentRow = LEGACY_COPY_CURRENT_ROW_DEFAULT;
   }
 
-  // gotoLine 的平台默认键（Win/Linux 为 Ctrl+G）在该动作引入前是其他动作可合法
-  // 显式绑定的自由键位；无显式配置的默认值与同作用域显式绑定同键时同样让位，
-  // 否则运行时 keymap 先注册的 gotoLine 会遮蔽用户的显式配置。
-  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine"] as ShortcutActionId[]) {
+  // 新增动作的默认键可能已经被用户绑定到同作用域的其他动作。保留用户的绑定。
+  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine", "createSidebarTable", "createSidebarDatabase"] as ShortcutActionId[]) {
     if (hasExplicitShortcut(settings, actionId)) continue;
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
     if (!definition) continue;

@@ -17,8 +17,8 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
  * `drawSelection` keeps the native one transparent), it copies from its own
  * state, and it ignores a selection parked outside its content element. So the
  * browser selection is parked on the editor chrome while an overlay menu covers
- * the editor, for as long as a pointer gesture is dragging a long selection
- * out, and restored as soon as the menu closes or the pointer is released. On
+ * the editor, for as long as a pointer gesture is dragging a selection out, and
+ * restored as soon as the menu closes or the pointer is released. On
  * macOS desktop a view plugin also holds any long selection for as long as it
  * exists, focused or not: a parked selection that survives focus loss cannot be
  * published again by a focus repair or by CodeMirror's next write, which is what
@@ -46,9 +46,8 @@ import { appendDebugLog } from "@/lib/backend/debugLog";
 
 /**
  * Selections shorter than this are serialized cheaply enough that parking them
- * would only trade a measurable cost for an invisible one. Dragging a selection
- * out keeps the browser selection live until it crosses this length, so a drag
- * over a few lines behaves exactly as it did before.
+ * outside a gesture would only trade a measurable cost for an invisible one.
+ * A pointer drag is the exception — see `keepNativeSelectionParkedDuringDrag`.
  */
 export const NATIVE_SELECTION_PARK_MIN_CHARS = 1000;
 
@@ -515,16 +514,20 @@ export function keepNativeSelectionParkedWhileScrolling(currentView: EditorView,
  * Parks the browser selection for the length of a pointer gesture.
  *
  * Call this on pointer down and `release()` on pointer up: the browser
- * selection stays parked only while the editor's own selection is long enough
- * to be worth it (`isLargeEditorSelection`), so a gesture that never grows past
- * a few lines — or one that starts by shrinking a selection back down — keeps
- * behaving exactly as it did before. The editor keeps its own selection while
- * this runs, so the highlight, the selection that survives the release and the
- * text on the clipboard are unchanged.
+ * selection stays parked for as long as the gesture has selected anything. The
+ * length threshold the other windows use does not apply here: a drag pays the
+ * serialization once per pointer move rather than once, so even the few dozen
+ * highlighted lines of a typical drag (well under
+ * {@link NATIVE_SELECTION_PARK_MIN_CHARS}) were enough to stall it on macOS
+ * 26/27, and nothing about a drag needs the browser selection — the editor
+ * draws it, copies it from its own state, and gets it back on release. A click
+ * that never selects anything is left alone. The editor keeps its own selection
+ * while this runs, so the highlight, the selection that survives the release
+ * and the text on the clipboard are unchanged.
  */
 export function keepNativeSelectionParkedDuringDrag(currentView: EditorView, options: EditorNativeSelectionDragParkOptions = {}): EditorNativeSelectionPark {
   return createNativeSelectionPark(currentView, {
-    shouldKeepParked: () => isLargeEditorSelection(currentView) && (options.shouldKeepParked?.() ?? true),
+    shouldKeepParked: () => !currentView.state.selection.main.empty && (options.shouldKeepParked?.() ?? true),
     finalizeClipboardText: options.finalizeClipboardText ?? ((text: string) => text),
     suppressWrites: options.suppressEditorSelectionWrites ?? true,
     // A gesture ends by dispatching a selection change, and that write is both

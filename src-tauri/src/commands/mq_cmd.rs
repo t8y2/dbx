@@ -774,6 +774,15 @@ pub async fn mq_get_cluster_info(
 }
 
 #[tauri::command]
+pub async fn mq_get_broker_config(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    broker_id: i32,
+) -> Result<serde_json::Value, String> {
+    dbx_core::mq::service::mq_get_broker_config_core(&state, &connection_id, broker_id).await
+}
+
+#[tauri::command]
 pub async fn mq_get_topic_route(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -872,4 +881,40 @@ pub async fn mq_send_message(
 ) -> Result<dbx_core::mq::SendMessageResponse, String> {
     ensure_connection_writable(&state, &connection_id, "Send message").await?;
     dbx_core::mq::service::mq_send_message_core(&state, &connection_id, req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets};
+
+    #[test]
+    fn broker_config_invoke_resolves_managed_app_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = tauri::async_runtime::block_on(dbx_core::persistence::test_storage::open(
+            &directory.path().join("storage.db"),
+        ))
+        .unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
+        let app = mock_builder()
+            .manage(state)
+            .invoke_handler(tauri::generate_handler![mq_get_broker_config])
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let request = tauri::webview::InvokeRequest {
+            cmd: "mq_get_broker_config".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"connectionId": "kafka", "brokerId": -1})),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        };
+
+        assert_eq!(
+            get_ipc_response(&webview, request).unwrap_err(),
+            serde_json::json!("Broker ID must be non-negative")
+        );
+    }
 }

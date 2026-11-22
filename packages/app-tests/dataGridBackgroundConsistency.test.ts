@@ -7,7 +7,7 @@ function escapeColor(color: string): string {
   return color.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-test("DataGrid DOM surfaces use one opaque theme background", () => {
+test("DataGrid data surfaces stay opaque while the vertical overlay stays transparent", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
 
   assert.match(source, /\[data-grid-root\]\s*\{[^}]*--data-grid-background:\s*var\(--background-solid,\s*var\(--background\)\);[^}]*background-color:\s*var\(--data-grid-background\);/s);
@@ -19,7 +19,8 @@ test("DataGrid DOM surfaces use one opaque theme background", () => {
 
   assert.match(source, /\.data-grid-cell--frozen\s*\{[^}]*background-color:\s*var\(--data-grid-cell-bg,\s*var\(--data-grid-background\)\)\s*!important;/s);
   assert.match(source, /\.data-grid-horizontal-scrollbar\s*\{[^}]*background-color:\s*var\(--data-grid-background\);/s);
-  assert.match(source, /:global\(\.dark\)\s*\[data-grid-root\]\s+\.data-grid-vertical-scrollbar\s*\{[^}]*background-color:\s*var\(--data-grid-background\);/s);
+  assert.match(source, /\.data-grid-vertical-scrollbar\s*\{[^}]*background:\s*transparent;/s);
+  assert.doesNotMatch(source, /:global\(\.dark\)\s*\[data-grid-root\]\s+\.data-grid-vertical-scrollbar\s*\{[^}]*background-color:\s*var\(--data-grid-background\);/s);
 
   assert.match(source, /item\.displayIndex % 2 === 1[\s\S]*?:\s*"var\(--data-grid-background\)";/);
 

@@ -811,6 +811,7 @@ app_memory_usage 1
             display_server_addr: server_addr.to_string(),
             namespace: String::new(),
             context_path: context_path.to_string(),
+            context_path_implied: false,
             managed_namespaces: Vec::new(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: None,

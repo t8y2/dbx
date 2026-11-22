@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, defineComponent, h, markRaw, nextTick, ref, type PropType } from "vue";
+import { createApp, defineComponent, h, markRaw, nextTick, ref, shallowRef, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -42,24 +42,27 @@ async function settle() {
   await Promise.resolve();
   await nextTick();
 }
-async function mountGrid(databaseType: DatabaseType = "mysql", options: { rows?: unknown[][]; hidden?: number[] } = {}) {
+async function mountGrid(databaseType: DatabaseType = "mysql", options: { rows?: unknown[][]; hidden?: number[]; pageLimit?: number } = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   useSettingsStore().updateEditorSettings({ dataGridRenderMode: "canvas" });
-  const result = markRaw<QueryResult>({
-    columns: ["id", "name"],
-    rows: options.rows ?? [
-      [1, "Alice"],
-      [2, "Bob"],
-    ],
-    affected_rows: 0,
-    execution_time_ms: 1,
-    hidden_column_indexes: options.hidden,
-  });
-  const grid = ref<{ focusGrid(): boolean; selectSingleCell(row: number, column: number): void; selectRow(row: number): void; setDefaultCopyPreference(value: string): void }>();
+  const result = shallowRef(
+    markRaw<QueryResult>({
+      columns: ["id", "name"],
+      rows: options.rows ?? [
+        [1, "Alice"],
+        [2, "Bob"],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      hidden_column_indexes: options.hidden,
+    }),
+  );
+  const loading = ref(false);
+  const grid = ref<{ focusGrid(): boolean; copyActiveResult(isSessionValid?: () => boolean): Promise<boolean>; selectSingleCell(row: number, column: number): void; selectRow(row: number): void; setDefaultCopyPreference(value: string): void }>();
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ render: () => h(TooltipProvider, {}, { default: () => h(DataGrid, { ref: grid, result, databaseType, context: "results" }) }) });
+  const app = createApp({ render: () => h(TooltipProvider, {}, { default: () => h(DataGrid, { ref: grid, result: result.value, loading: loading.value, pageLimit: options.pageLimit, databaseType, context: "results" }) }) });
   app.use(pinia);
   app.use(i18n);
   app.component(
@@ -97,7 +100,7 @@ async function mountGrid(databaseType: DatabaseType = "mysql", options: { rows?:
     const request = calls[calls.length - 1]![0];
     return request.rows.map((row) => request.selectedColumnIndexes.map((index) => row[index]));
   };
-  return { grid, root, key, copy };
+  return { grid, root, key, copy, result, loading };
 }
 
 describe("DataGrid keyboard focus", () => {
@@ -151,5 +154,64 @@ describe("DataGrid keyboard focus", () => {
       [2, "Bob"],
     ]);
     expect(vi.mocked(extractDataGridSelection).mock.calls[0]![0].extractor).toBe("csv-with-headers");
+  });
+
+  it.each(["csv-with-headers", "json"])("copies all loaded rows as %s while keeping editor focus, selection and the grid selection", async (preference) => {
+    const { grid, copy } = await mountGrid("postgres", { pageLimit: 1 });
+    grid.value!.selectSingleCell(1, 1);
+    grid.value!.setDefaultCopyPreference(preference);
+    const editor = document.createElement("textarea");
+    editor.value = "SELECT id, name FROM users";
+    document.body.append(editor);
+    cleanups.push(() => editor.remove());
+    editor.focus();
+    editor.setSelectionRange(7, 15);
+
+    await expect(grid.value!.copyActiveResult()).resolves.toBe(true);
+
+    expect(document.activeElement).toBe(editor);
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([7, 15]);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: preference,
+        rows: [
+          [1, "Alice"],
+          [2, "Bob"],
+        ],
+      }),
+    );
+    grid.value!.focusGrid();
+    expect(await copy()).toEqual([["Bob"]]);
+  });
+
+  it.each(["result", "layout"])("cancels a pending whole-result copy when its %s changes", async (change) => {
+    const { grid, result } = await mountGrid("postgres");
+    let finish!: (value: Awaited<ReturnType<typeof extractDataGridSelection>>) => void;
+    vi.mocked(extractDataGridSelection).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    let valid = true;
+    const copying = grid.value!.copyActiveResult(() => valid);
+    await vi.waitFor(() => expect(extractDataGridSelection).toHaveBeenCalled());
+    if (change === "result") result.value = { ...result.value, rows: [[3, "different result"]] };
+    else valid = false;
+    await settle();
+    finish({ text: "old result", mimeType: "text/plain", fileExtension: "txt", rowCount: 2, columnCount: 2 });
+    await expect(copying).resolves.toBe(false);
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("does not copy an empty result or a grid that is loading", async () => {
+    const empty = await mountGrid("postgres", { rows: [] });
+    await expect(empty.grid.value!.copyActiveResult()).resolves.toBe(false);
+    const busy = await mountGrid("postgres");
+    busy.loading.value = true;
+    await settle();
+    await expect(busy.grid.value!.copyActiveResult()).resolves.toBe(false);
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
   });
 });

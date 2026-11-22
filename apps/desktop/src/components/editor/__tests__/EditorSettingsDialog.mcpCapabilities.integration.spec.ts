@@ -1,5 +1,5 @@
 import ts from "typescript";
-import { computed, ref, shallowRef, type Ref } from "vue";
+import { computed, nextTick, ref, shallowRef, watch, type Ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import dialogSource from "../EditorSettingsDialog.vue?raw";
 import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_SIDEBAR_TABLE_PAGE_SIZE, normalizeMcpGlobalPolicy, type McpGlobalPolicy } from "@/stores/settingsStore";
@@ -1175,5 +1175,73 @@ describe("MCP policy corruption recovery", () => {
     await h.recoverMcpAccessPolicy();
     expect(h.mcpAccessPolicyError.value).toBe("backup failed");
     expect(h.mcpPolicyRecovering.value).toBe(false);
+  });
+});
+
+describe("MCP capability tab plugin list on web", () => {
+  // The capabilities-tab watcher is a top-level statement in the dialog, so
+  // pull it out of the real source and run it against mocked loaders. Web
+  // (#15021) must load the plugin views exactly like desktop: the HTTP
+  // backend serves GET /api/app-settings/plugin-mcp, and the permissions tab
+  // already discovers plugins on web.
+  function managementTabWatcher(): string {
+    for (const statement of source.statements) {
+      if (!ts.isExpressionStatement(statement)) continue;
+      const expr = statement.expression;
+      if (!ts.isCallExpression(expr)) continue;
+      if (expr.expression.getText(source) !== "watch") continue;
+      if (expr.arguments[0]?.getText(source) !== "mcpManagementTab") continue;
+      return statement.getText(source);
+    }
+    throw new Error("Missing MCP management tab watcher");
+  }
+
+  function runWatcher(context: { isWeb: boolean; plugins: PluginMcpView[] | null }) {
+    const mcpManagementTab = ref("access");
+    const mcpPluginViews = ref<PluginMcpView[] | null>(context.plugins);
+    const loadMcpPluginScopeContext = vi.fn(async () => {});
+    const ensureMcpToolCatalog = vi.fn(async () => {});
+    const loadMcpPluginViews = vi.fn(async () => {});
+    const run = new Function("watch", "mcpManagementTab", "isWeb", "loadMcpPluginScopeContext", "ensureMcpToolCatalog", "loadMcpPluginViews", "mcpPluginViews", managementTabWatcher());
+    run(watch, mcpManagementTab, context.isWeb, loadMcpPluginScopeContext, ensureMcpToolCatalog, loadMcpPluginViews, mcpPluginViews);
+    return { mcpManagementTab, mcpPluginViews, loadMcpPluginScopeContext, ensureMcpToolCatalog, loadMcpPluginViews };
+  }
+
+  it("loads plugin views when the capabilities tab opens on web", async () => {
+    const w = runWatcher({ isWeb: true, plugins: null });
+    w.mcpManagementTab.value = "capabilities";
+    await nextTick();
+    expect(w.ensureMcpToolCatalog).toHaveBeenCalledTimes(1);
+    expect(w.loadMcpPluginViews).toHaveBeenCalledTimes(1);
+    expect(w.loadMcpPluginScopeContext).not.toHaveBeenCalled();
+  });
+
+  it("loads plugin views when the capabilities tab opens on desktop", async () => {
+    const w = runWatcher({ isWeb: false, plugins: null });
+    w.mcpManagementTab.value = "capabilities";
+    await nextTick();
+    expect(w.loadMcpPluginViews).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload plugin views that are already loaded", async () => {
+    const w = runWatcher({ isWeb: true, plugins: [structuredClone(plugin)] });
+    w.mcpManagementTab.value = "capabilities";
+    await nextTick();
+    expect(w.ensureMcpToolCatalog).toHaveBeenCalledTimes(1);
+    expect(w.loadMcpPluginViews).not.toHaveBeenCalled();
+  });
+
+  it("loads only the scope context on the permissions tab", async () => {
+    const w = runWatcher({ isWeb: true, plugins: null });
+    w.mcpManagementTab.value = "permissions";
+    await nextTick();
+    expect(w.loadMcpPluginScopeContext).toHaveBeenCalledTimes(1);
+    expect(w.loadMcpPluginViews).not.toHaveBeenCalled();
+  });
+
+  it("renders the plugin section and its allowlist warning on web", () => {
+    expect(dialogSource).not.toContain(':show-plugins="!isWeb"');
+    expect(dialogSource).not.toContain('v-if="!isWeb && mcpPluginToolsBlockedByAllowlist"');
+    expect(dialogSource).toContain(':plugins="mcpPluginViews"');
   });
 });

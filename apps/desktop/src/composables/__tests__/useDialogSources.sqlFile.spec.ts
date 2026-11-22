@@ -15,6 +15,7 @@ vi.mock("@/stores/connectionStore", async () => {
   mocks.store = reactive(mocks.store);
   return { useConnectionStore: () => mocks.store };
 });
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sidebarConnectionSortMode: "manual" } }) }));
 vi.mock("vue-i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("vue-i18n")>()),
   useI18n: () => ({ t: (key: string) => key }),

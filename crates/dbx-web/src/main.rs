@@ -1,4 +1,5 @@
 mod auth;
+mod captcha;
 mod credentials;
 mod demo;
 mod error;
@@ -256,6 +257,35 @@ async fn directory_static_cache_policy(request: Request<axum::body::Body>, next:
     response
 }
 
+/// Response headers a security scanner expects on the browser build (#15439).
+///
+/// The bundle is served over whatever TLS the operator terminates in front of
+/// it, so the headers are unconditional: `Strict-Transport-Security` is ignored
+/// by browsers on plain HTTP and takes effect as soon as the client sees HTTPS.
+/// `X-XSS-Protection: 0` is the current recommendation (the legacy auditor is
+/// itself an XSS vector) while still answering scanners that only look for the
+/// header's presence.
+const SECURITY_RESPONSE_HEADERS: [(&str, &str); 7] = [
+    ("x-content-type-options", "nosniff"),
+    ("x-frame-options", "SAMEORIGIN"),
+    ("referrer-policy", "strict-origin-when-cross-origin"),
+    ("x-xss-protection", "0"),
+    ("x-download-options", "noopen"),
+    ("x-permitted-cross-domain-policies", "none"),
+    ("strict-transport-security", "max-age=31536000"),
+];
+
+/// Applies [`SECURITY_RESPONSE_HEADERS`] to every response, API and assets alike.
+async fn security_headers(request: Request<axum::body::Body>, next: middleware::Next) -> Response {
+    use axum::http::header::{HeaderName, HeaderValue};
+
+    let mut response = next.run(request).await;
+    for (name, value) in SECURITY_RESPONSE_HEADERS {
+        response.headers_mut().insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+    }
+    response
+}
+
 fn add_public_base_path_redirect<S>(app: Router<S>, public_base_path: &str) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -484,6 +514,7 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
         .route("/mq/tokens/list", post(routes::mq::list_token_records))
         .route("/mq/monitoring/backlog", post(routes::mq::get_backlog))
         .route("/mq/monitoring/cluster-info", post(routes::mq::get_cluster_info))
+        .route("/mq/monitoring/broker-config", post(routes::mq::get_broker_config))
         .route("/mq/overview", post(routes::mq::get_overview))
         .route("/mq/nodes", post(routes::mq::list_nodes))
         .route("/mq/raw", post(routes::mq::raw_request))
@@ -589,6 +620,18 @@ async fn serve() -> Result<(), String> {
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
+    // `DBX_WEB_CAPTCHA` pins the policy for managed deployments; otherwise the
+    // value saved from `设置 → 安全` wins, and `auto` is the default.
+    let captcha_env_raw = std::env::var("DBX_WEB_CAPTCHA").ok();
+    let captcha_env_locked = captcha_env_raw.as_deref().is_some_and(|raw| !raw.trim().is_empty());
+    let captcha_mode = match captcha_env_raw.as_deref().filter(|raw| !raw.trim().is_empty()) {
+        Some(raw) => captcha::CaptchaMode::parse(raw),
+        None => match app_state.storage.load_web_login_captcha_mode().await.unwrap_or(None).as_deref() {
+            Some(stored) => captcha::CaptchaMode::parse(stored),
+            None => captcha::CaptchaMode::Auto,
+        },
+    };
+
     let demo_mode = demo::demo_mode_from_env();
 
     let migration_ready = storage_migration_ready(&app_state).await;
@@ -617,6 +660,9 @@ async fn serve() -> Result<(), String> {
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        captchas: captcha::CaptchaStore::new(),
+        captcha_mode: tokio::sync::RwLock::new(captcha_mode),
+        captcha_env_locked,
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
@@ -649,6 +695,7 @@ async fn serve() -> Result<(), String> {
         // global limit so the extractor cannot buffer an unauthenticated DoS
         // body before any rate limiting runs.
         .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/captcha", get(auth::captcha))
         .route("/auth/check", get(auth::check))
         .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
@@ -933,6 +980,7 @@ async fn serve() -> Result<(), String> {
         )
         .route("/query/build-executable-object-source-sql", post(routes::query::build_executable_object_source_sql))
         .route("/query/build-editable-object-source", post(routes::query::build_editable_object_source))
+        .route("/query/build-oracle-object-export-sql", post(routes::query::build_oracle_object_export_sql))
         .route(
             "/query/build-routine-rename-object-source-statements",
             post(routes::query::build_routine_rename_object_source_statements),
@@ -1500,6 +1548,10 @@ async fn serve() -> Result<(), String> {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route(
+            "/app-settings/web-login-captcha",
+            get(routes::app_settings::load_web_login_captcha).put(routes::app_settings::save_web_login_captcha),
+        )
         .route("/app-settings/mcp-tool-catalog", get(routes::app_settings::load_mcp_tool_catalog))
         .route("/app-settings/mcp-access-policy", get(routes::app_settings::load_mcp_access_policy))
         .route("/app-settings/mcp-access-policy/recover", post(routes::app_settings::reset_invalid_mcp_access_policy))
@@ -1613,6 +1665,11 @@ async fn serve() -> Result<(), String> {
         }
     };
     app = mount_static_assets(app, &public_base_path, static_source);
+    // Outermost layer so the scanner-visible headers land on API responses,
+    // static assets and error pages alike (#15439). Keep every route, nested
+    // router and fallback mounted above this line: anything added below would
+    // silently escape the headers.
+    app = app.layer(middleware::from_fn(security_headers));
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
@@ -1636,8 +1693,11 @@ async fn serve() -> Result<(), String> {
     }
     if password_disabled {
         tracing::info!("Password protection is disabled");
-    } else if std::env::var("DBX_PASSWORD").is_ok() {
-        tracing::info!("Password protection is enabled");
+    } else {
+        if std::env::var("DBX_PASSWORD").is_ok() {
+            tracing::info!("Password protection is enabled");
+        }
+        tracing::info!("Login captcha mode: {}", captcha_mode.as_str());
     }
     if !password_viewer_enabled {
         tracing::info!("Saved connection password viewing is disabled");
@@ -1727,8 +1787,9 @@ async fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, web_agent_dir_from_env,
-        web_body_limit_bytes_from_value, web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
+        mount_static_assets, normalize_public_base_path, password_viewer_enabled_from_env, security_headers,
+        web_agent_dir_from_env, web_body_limit_bytes_from_value, web_compression_predicate, StaticSource,
+        SECURITY_RESPONSE_HEADERS, XLSX_CONTENT_TYPE,
     };
     use crate::routes::table_import;
     use axum::body::Body;
@@ -1781,6 +1842,54 @@ mod tests {
 
     fn compression_response(content_type: &str) -> Response<Body> {
         Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    /// The header set the browser hardening scan looks for (#15439), kept
+    /// literal so renaming or dropping one fails here instead of only in the
+    /// scanner.
+    const EXPECTED_SECURITY_RESPONSE_HEADERS: [(&str, &str); 7] = [
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "SAMEORIGIN"),
+        ("referrer-policy", "strict-origin-when-cross-origin"),
+        ("x-xss-protection", "0"),
+        ("x-download-options", "noopen"),
+        ("x-permitted-cross-domain-policies", "none"),
+        ("strict-transport-security", "max-age=31536000"),
+    ];
+
+    #[test]
+    fn security_response_headers_cover_the_reported_set() {
+        use axum::http::header::{HeaderName, HeaderValue};
+
+        assert_eq!(SECURITY_RESPONSE_HEADERS, EXPECTED_SECURITY_RESPONSE_HEADERS);
+        for (name, value) in EXPECTED_SECURITY_RESPONSE_HEADERS {
+            HeaderName::from_static(name);
+            HeaderValue::from_static(value);
+        }
+    }
+
+    #[tokio::test]
+    async fn security_headers_land_on_every_response() {
+        let router =
+            Router::new().route("/api/ok", get(|| async { "ok" })).layer(axum::middleware::from_fn(security_headers));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        for (path, status) in [("/api/ok", StatusCode::OK), ("/missing", StatusCode::NOT_FOUND)] {
+            let response = client.get(format!("http://{address}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), status, "{path}");
+            for (name, expected) in EXPECTED_SECURITY_RESPONSE_HEADERS {
+                assert_eq!(
+                    response.headers().get(name).and_then(|value| value.to_str().ok()),
+                    Some(expected),
+                    "{path} is missing {name}"
+                );
+            }
+        }
+
+        server.abort();
     }
 
     #[test]

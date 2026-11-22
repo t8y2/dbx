@@ -451,7 +451,10 @@ mod tests {
     #[test]
     fn accepts_same_base_beta_from_stable_portable_build() {
         assert!(validate_requested_portable_version("0.5.64-beta.20261029.1", "0.5.64").is_ok());
-        assert!(validate_requested_portable_version("0.5.64", "0.5.64-beta.20261029.1").is_err());
+        // #15341: the stable artifact is a different build from this beta, so the
+        // download must go through; only the promoted build itself is suppressed,
+        // and that happens in `build_update_info`, which has the manifest.
+        assert!(validate_requested_portable_version("0.5.64", "0.5.64-beta.20261029.1").is_ok());
         assert!(validate_requested_portable_version("0.5.65", "0.5.64-beta.20261029.1").is_ok());
         assert!(validate_requested_portable_version("0.5.63", "0.5.64-beta.20261029.1").is_err());
         assert!(validate_requested_portable_version("0.5.64-beta.20261029.2", "0.5.64-beta.20261029.1").is_ok());

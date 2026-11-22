@@ -142,7 +142,7 @@ pub struct DocumentDeleteRequest {
     pub connection_id: String,
     pub database: String,
     pub collection: String,
-    pub id: String,
+    pub id: dbx_core::document_ops::DocumentDeleteId,
     pub routing: Option<String>,
     pub document_type: Option<String>,
 }
@@ -495,7 +495,7 @@ pub async fn delete_document(
         &req.connection_id,
         &req.database,
         &req.collection,
-        &req.id,
+        req.id,
         req.routing.as_deref(),
         req.document_type.as_deref(),
     )

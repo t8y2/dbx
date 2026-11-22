@@ -68,6 +68,7 @@ export async function analyzeSqlDiagnosticReferences(sql: string, dialect: strin
             tables: analysis.tables.map((table) => ({ ...table, span: remap(table.span) })),
             columns: analysis.columns.map((column) => ({ ...column, span: remap(column.span) })),
             ...(analysis.group_by_violations && { group_by_violations: analysis.group_by_violations.map((violation) => ({ ...violation, span: remap(violation.span) })) }),
+            ...(analysis.unknown_qualifiers && { unknown_qualifiers: analysis.unknown_qualifiers.map((unknown) => ({ ...unknown, span: remap(unknown.span) })) }),
           },
           keywordDiagnostic: {
             message: `${token.text} → ${keyword}\n${diagnostic.message}`,

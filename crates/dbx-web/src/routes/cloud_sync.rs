@@ -136,6 +136,8 @@ pub struct SnippetUploadRequest {
     #[serde(default)]
     pub selection: Option<SyncSelection>,
     pub expected_remote_content_hash: Option<String>,
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -446,11 +448,12 @@ pub async fn snippet_sync_upload(
     .map_err(AppError::from)?;
     let client = SnippetSyncClient::new(req.config).map_err(AppError::from)?;
     let mut summary = client
-        .put_snapshot_with_expected_remote_hash(
+        .put_snapshot_guarded(
             &snapshot,
             snippet_passphrase.as_deref(),
             secrets_passphrase,
             req.expected_remote_content_hash.as_deref(),
+            req.automatic,
         )
         .await
         .map_err(AppError::from)?;

@@ -267,12 +267,13 @@ fn ensure_path_within_base(am: &AgentManager, path: &Path) -> Result<(), String>
 fn inspect_agent_jar_manifest(path: &Path) -> Result<bool, String> {
     let file = File::open(path).map_err(|error| format!("Failed to read Agent JAR: {error}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("Invalid Agent JAR: {error}"))?;
-    let manifest = archive.by_name("META-INF/MANIFEST.MF").map_err(|_| "Agent JAR manifest is missing".to_string())?;
+    let mut manifest =
+        archive.by_name("META-INF/MANIFEST.MF").map_err(|_| "Agent JAR manifest is missing".to_string())?;
     if manifest.size() > MAX_AGENT_MANIFEST_BYTES {
         return Err(format!("Agent JAR manifest exceeds the {MAX_AGENT_MANIFEST_BYTES}-byte safety limit"));
     }
     let mut text = String::new();
-    manifest
+    (&mut manifest)
         .take(MAX_AGENT_MANIFEST_BYTES + 1)
         .read_to_string(&mut text)
         .map_err(|error| format!("Failed to read Agent JAR manifest: {error}"))?;
@@ -286,6 +287,12 @@ fn inspect_agent_jar_manifest(path: &Path) -> Result<bool, String> {
     });
     if !has_main_class {
         return Err("Agent JAR manifest does not declare Main-Class".to_string());
+    }
+    // An export is only useful if the receiving DBX can install it, so refuse
+    // the same jars the install boundary rejects (#15330).
+    drop(manifest);
+    if !crate::agent_manager::archive_declares_main_class(&mut archive, &text) {
+        return Err("Agent JAR does not contain the class its manifest declares as Main-Class".to_string());
     }
     Ok(logical_lines.iter().any(|line| {
         line.split_once(':').is_some_and(|(name, value)| {
@@ -1143,6 +1150,8 @@ mod tests {
             let mut archive = zip::ZipWriter::new(&mut bytes);
             archive.start_file("META-INF/MANIFEST.MF", SimpleFileOptions::default()).unwrap();
             archive.write_all(manifest.as_bytes()).unwrap();
+            archive.start_file("com/example/Agent.class", SimpleFileOptions::default()).unwrap();
+            archive.write_all(b"class-bytes").unwrap();
             archive.finish().unwrap();
         }
         let bytes = bytes.into_inner();

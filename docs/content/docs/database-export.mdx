@@ -78,6 +78,10 @@ MySQL exports can add `CREATE DATABASE IF NOT EXISTS` and `USE` at the beginning
 
 By default, table-level `AUTO_INCREMENT=N` is preserved. Omit Auto Increment removes only that table option; it does not remove the column's `AUTO_INCREMENT` attribute. This is useful when a fresh environment should choose its own starting sequence value.
 
+### MySQL Table Name Prefix
+
+MySQL-family data inserts qualify every table with its source database (`db.table`). **Omit database prefix in table names** drops that qualifier from the generated `INSERT` statements. Without a `USE` preamble the rows go to whatever database the replay session selects; when the export also writes a `USE` statement, that line still switches the context back to the source database, so targeting a different database requires editing or removing it. The switch applies to MySQL-family data inserts only (MySQL, GoldenDB, Doris, StarRocks), shows when data export is enabled, and is off by default.
+
 ## Data Writing and Consistency
 
 DBX uses paged or streaming reads and writes rows incrementally. Interactive exports currently use a batch size of 1000 rows. Generated inserts may be multi-row or single-row depending on database capabilities.

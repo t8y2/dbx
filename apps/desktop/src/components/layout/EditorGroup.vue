@@ -17,6 +17,8 @@ import { mayContainDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
 import { usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { firstResultCellValue } from "@/lib/query/queryResultFirstValue";
 import * as api from "@/lib/backend/api";
 import { externalSqlEditorMaxBytes, externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
@@ -83,13 +85,13 @@ defineExpose({
   focusWhere: () => activeSurfaceRef.value?.focusWhere() ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeSurfaceRef.value?.openTableStructureEditor?.(initialTab) ?? false,
-  // Same action as the toolbar's commit button (Shift+Mod+C default). Only
-  // reports handled when the active tab holds a committable transaction, so
-  // the shortcut stays unconsumed for everything else.
-  commitTransaction: () => {
-    const tab = activeTab.value;
-    if (!tab || !(tab.txnSessionId || tab.autoCommitOpenTransaction)) return false;
-    void queryStore.commitTransaction(tab.id);
+  commitTransaction: () => toolbarRef.value?.commitFromToolbar() ?? false,
+  copyResultColumn: (column: number) => {
+    const cell = firstResultCellValue(activeTab.value?.result, column);
+    if (!cell) return false;
+    void copyToClipboard(cell.value)
+      .then(() => toast(t("grid.resultColumnCopied", { column: cell.column })))
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : String(error), 5000));
     return true;
   },
   refreshData: () => activeSurfaceRef.value?.refreshData() ?? false,
@@ -268,9 +270,11 @@ const groupExecutableSqlMayContainDml = computed(() => mayContainDmlStatement(gr
         @format-sql="activeTab && toolbar.formatSql(activeTab.id)"
         @compress-sql="activeTab && toolbar.compressSql(activeTab.id)"
         @fold-all="activeSurfaceRef?.foldAll?.()"
+        @toggle-line-comment="activeSurfaceRef?.toggleLineComment?.()"
         @unfold-all="activeSurfaceRef?.unfoldAll?.()"
         @toggle-sql-keyword-case="activeTab && toolbar.toggleSqlKeywordCase(activeTab.id)"
         @save-sql="(tabId: string) => toolbar.saveSql(tabId)"
+        @save-routine-to-database="(tabId: string) => toolbar.saveRoutineToDatabase(tabId)"
         @change-encoding="changeExternalSqlEncoding"
         @open-sql="toolbar.openSqlFile()"
         @import-result-archive="toolbar.importResultArchive()"

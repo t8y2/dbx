@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::connection::{AppState, PoolKind};
 use crate::path_utils::expand_tilde;
+use crate::plugins::PluginRuntimeProxy;
 
 use super::config::ConsulScope;
 use super::config::{ConsulConfig, ConsulConsistency};
@@ -18,7 +19,14 @@ pub struct ConsulClient {
 }
 
 impl ConsulClient {
-    pub async fn new(mut config: ConsulConfig) -> Result<Self, String> {
+    pub async fn new(config: ConsulConfig) -> Result<Self, String> {
+        Self::new_with_proxy(config, None).await
+    }
+
+    pub async fn new_with_proxy(
+        mut config: ConsulConfig,
+        runtime_proxy: Option<PluginRuntimeProxy>,
+    ) -> Result<Self, String> {
         // The desktop build unifies reqwest with both `default-tls` and `rustls-tls`,
         // and `TlsBackend` defaults to native-tls there, which rejects the PEM identity
         // below with `incompatible TLS identity type`. Pin rustls like the etcd metrics
@@ -63,7 +71,24 @@ impl ConsulClient {
                 .map_err(|error| format!("Failed to parse Consul client identity: {error}"))?;
             builder = builder.identity(identity);
         }
-        if let Some((override_host, override_port)) = config.connect_override.clone() {
+        if let Some(proxy) = runtime_proxy {
+            let scheme = match proxy.proxy_type.as_str() {
+                "socks5" => "socks5h",
+                "http" => "http",
+                other => return Err(format!("Unsupported Consul transport proxy type: {other}")),
+            };
+            let host = if proxy.host.contains(':') && !proxy.host.starts_with('[') {
+                format!("[{}]", proxy.host)
+            } else {
+                proxy.host
+            };
+            let mut http_proxy = reqwest::Proxy::all(format!("{scheme}://{host}:{}", proxy.port))
+                .map_err(|error| format!("Invalid Consul transport proxy address: {error}"))?;
+            if !proxy.username.is_empty() || !proxy.password.is_empty() {
+                http_proxy = http_proxy.basic_auth(&proxy.username, &proxy.password);
+            }
+            builder = builder.proxy(http_proxy);
+        } else if let Some((override_host, override_port)) = config.connect_override.clone() {
             let original_host = config.base_url.host_str().ok_or("Consul server address has no host")?.to_string();
             let ip = override_host
                 .parse::<IpAddr>()
@@ -250,6 +275,89 @@ pub(crate) async fn ensure_writable_core(state: &AppState, connection_id: &str, 
 mod tests {
     use super::*;
     use crate::consul::test_support::serve_once;
+    use crate::plugins::PluginRuntimeProxy;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    async fn serve_socks5_once(
+        response: String,
+        expected_host: &str,
+        expected_port: u16,
+        credentials: Option<(&str, &str)>,
+    ) -> (u16, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_tx, request_rx) = oneshot::channel();
+        let expected_host = expected_host.to_string();
+        let expected_user = credentials.map(|(user, _)| user.to_string());
+        let expected_password = credentials.map(|(_, password)| password.to_string());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 2];
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting[0], 5);
+            let mut methods = vec![0_u8; greeting[1] as usize];
+            socket.read_exact(&mut methods).await.unwrap();
+            let method = if expected_user.is_some() { 2 } else { 0 };
+            assert!(methods.contains(&method));
+            socket.write_all(&[5, method]).await.unwrap();
+
+            if let (Some(expected_user), Some(expected_password)) = (expected_user, expected_password) {
+                let mut auth_header = [0_u8; 2];
+                socket.read_exact(&mut auth_header).await.unwrap();
+                assert_eq!(auth_header, [1, expected_user.len() as u8]);
+                let mut user = vec![0_u8; auth_header[1] as usize];
+                socket.read_exact(&mut user).await.unwrap();
+                assert_eq!(user, expected_user.as_bytes());
+                let mut password_len = [0_u8; 1];
+                socket.read_exact(&mut password_len).await.unwrap();
+                let mut password = vec![0_u8; password_len[0] as usize];
+                socket.read_exact(&mut password).await.unwrap();
+                assert_eq!(password, expected_password.as_bytes());
+                socket.write_all(&[1, 0]).await.unwrap();
+            }
+
+            let mut connect_header = [0_u8; 4];
+            socket.read_exact(&mut connect_header).await.unwrap();
+            assert_eq!(connect_header[..3], [5, 1, 0]);
+            match connect_header[3] {
+                1 => {
+                    let mut host = [0_u8; 4];
+                    socket.read_exact(&mut host).await.unwrap();
+                    assert_eq!(host, [192, 0, 2, 51]);
+                }
+                3 => {
+                    let mut host_len = [0_u8; 1];
+                    socket.read_exact(&mut host_len).await.unwrap();
+                    let mut host = vec![0_u8; host_len[0] as usize];
+                    socket.read_exact(&mut host).await.unwrap();
+                    assert_eq!(host, expected_host.as_bytes());
+                }
+                atyp => panic!("unexpected SOCKS5 address type {atyp}"),
+            }
+            let mut port_bytes = [0_u8; 2];
+            socket.read_exact(&mut port_bytes).await.unwrap();
+            assert_eq!(u16::from_be_bytes(port_bytes), expected_port);
+            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await.unwrap();
+
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = request_tx.send(String::from_utf8(request).unwrap());
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (port, request_rx)
+    }
 
     #[tokio::test]
     async fn connect_override_replaces_explicit_base_url_port() {
@@ -273,6 +381,57 @@ mod tests {
 
         let request = request_rx.await.unwrap();
         assert!(request.starts_with("GET /proxy/v1/kv/?"));
+    }
+
+    #[tokio::test]
+    async fn proxy_route_handles_ip_literal_without_dns_override() {
+        let body = "[]";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (proxy_url, request_rx) = serve_once(response).await;
+        let mut config = test_config("");
+        config.base_url = Url::parse("http://192.0.2.51:8500").unwrap();
+
+        let proxy = PluginRuntimeProxy {
+            proxy_type: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: proxy_url.port().unwrap(),
+            username: String::new(),
+            password: String::new(),
+        };
+        let client = ConsulClient::new_with_proxy(config, Some(proxy)).await.unwrap();
+        client.probe().await.unwrap();
+
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with("GET http://192.0.2.51:8500/v1/kv/?"));
+    }
+
+    #[tokio::test]
+    async fn socks5h_proxy_route_preserves_ip_literal_and_proxy_credentials() {
+        let body = "[]";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (proxy_port, request_rx) = serve_socks5_once(response, "192.0.2.51", 8500, Some(("user", "pass"))).await;
+        let mut config = test_config("");
+        config.base_url = Url::parse("http://192.0.2.51:8500").unwrap();
+        config.connect_override = Some(("127.0.0.1".to_string(), 1));
+
+        let proxy = PluginRuntimeProxy {
+            proxy_type: "socks5".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: proxy_port,
+            username: "user".to_string(),
+            password: "pass".to_string(),
+        };
+        let client = ConsulClient::new_with_proxy(config, Some(proxy)).await.unwrap();
+        client.probe().await.unwrap();
+
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with("GET /v1/kv/?"));
     }
 
     #[tokio::test]

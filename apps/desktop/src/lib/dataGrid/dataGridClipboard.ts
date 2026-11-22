@@ -135,6 +135,10 @@ function* prepareDataGridClipboard(text: string, limits: DataGridClipboardLimits
   return rows;
 }
 
+// Maps the in-bounds portion of a clipboard matrix onto overwrite cells.
+// Callers are responsible for splitting out any rows beyond `maxRows` and
+// appending those as new rows themselves, so clipboard data is never silently
+// dropped (issue #15263).
 export function planDataGridPaste(rows: readonly (readonly (string | null)[])[], maxRows: number, maxColumns: number): DataGridPasteCell[] {
   if (maxRows <= 0 || maxColumns <= 0) return [];
   const cells: DataGridPasteCell[] = [];

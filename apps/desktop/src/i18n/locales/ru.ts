@@ -3848,6 +3848,7 @@ export default withEnglishFallback({
     foreignKeyPreviewFailed: "Не удалось загрузить ссылающиеся строки: {message}",
     sortOptions: "Параметры сортировки",
     queryCanceled: "Запрос отменён",
+    pasteRowsTruncated: "Вставлено строк: {applied}, не вставлено строк: {dropped}: текущий результат не поддерживает добавление строк или доступно недостаточно строк для добавления.",
     pasteCellText: "Вставить текст в эту ячейку",
     pasteCellTextFailed: "Не удалось вставить текст в ячейку: {message}",
   },

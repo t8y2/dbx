@@ -3761,6 +3761,7 @@ export default withEnglishFallback({
     foreignKeyPreviewFailed: "Não foi possível carregar as linhas de referência: {message}",
     sortOptions: "Opções de classificação",
     queryCanceled: "Consulta cancelada",
+    pasteRowsTruncated: "Foram coladas {applied} linhas; {dropped} linhas não foram coladas: o resultado atual não permite adicionar linhas, ou a quantidade de linhas que podem ser adicionadas é insuficiente.",
     pasteCellText: "Colar texto nesta célula",
     pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
   },

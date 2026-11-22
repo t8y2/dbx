@@ -3901,6 +3901,7 @@ export default withEnglishFallback({
     foreignKeyPreviewFailed: "No se pudieron cargar las filas de referencia: {message}",
     sortOptions: "Opciones de ordenación",
     queryCanceled: "Consulta cancelada",
+    pasteRowsTruncated: "Se pegaron {applied} filas y {dropped} filas no se pegaron: el resultado actual no admite agregar filas o no hay suficientes filas disponibles para agregar.",
     pasteCellText: "Pegar texto en esta celda",
     pasteCellTextFailed: "No se puede pegar texto en la celda: {message}",
   },

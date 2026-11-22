@@ -3733,6 +3733,7 @@ export default {
     hideIdenticalColumnsCount: "Hide Columns with Identical Values ({count})",
     showAllColumnsMenu: "Show All Columns",
     pasted: "Pasted!",
+    pasteRowsTruncated: "Pasted {applied} row(s); {dropped} row(s) were not pasted because new rows cannot be inserted here or the pending-row limit was reached.",
     batchAppendPasteNotEditable: "This result cannot be edited.",
     batchAppendPasteInvalidTarget: "Select the row number of an empty new row before pasting.",
     batchAppendPasteTargetNotEmpty: "The selected new row already contains data.",

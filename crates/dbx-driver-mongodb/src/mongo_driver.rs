@@ -2903,6 +2903,18 @@ pub async fn find_one_and_delete(
     Ok(single_document_result(result))
 }
 
+pub async fn delete_document_by_bson_id(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    id: &serde_json::Value,
+) -> Result<u64, String> {
+    let id = json_object_to_document_extended_json(id).map_err(|e| format!("Invalid BSON document ID: {e}"))?;
+    let col = client.database(database).collection::<Document>(collection);
+    let result = col.delete_one(doc! { "_id": { "$eq": id } }).await.map_err(|e| e.to_string())?;
+    Ok(result.deleted_count)
+}
+
 pub async fn delete_document(client: &Client, database: &str, collection: &str, id: &str) -> Result<u64, String> {
     let col = client.database(database).collection::<Document>(collection);
     for filter in document_id_filters(id) {

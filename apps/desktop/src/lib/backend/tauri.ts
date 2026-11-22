@@ -1,4 +1,5 @@
 import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
+import type { MongoDeleteId } from "@/lib/mongo/mongoDocumentValues";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { AppThemeMode } from "@/lib/app/appTheme";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
@@ -5640,11 +5641,11 @@ export async function mongoUpdateDocuments(connectionId: string, database: strin
   return { affected_rows: affectedRows };
 }
 
-export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function mongoDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string): Promise<number> {
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: MongoDeleteId, routing?: string, documentType?: string): Promise<number> {
   return invoke("document_delete_document", {
     connectionId,
     database,

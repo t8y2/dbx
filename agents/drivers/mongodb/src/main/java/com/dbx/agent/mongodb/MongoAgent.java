@@ -1070,17 +1070,14 @@ public final class MongoAgent {
         List<JsonObject> extendedDocuments = new ArrayList<>();
         if (document != null) {
             documents.add(bsonToJson(document));
-            extendedDocuments.add(bsonToExtendedJson(document));
+            extendedDocuments.add(bsonToCanonicalExtendedJson(document));
         }
         Map<String, Object> result = documentQueryResult(documents, new CollectionTotal(documents.size(), true));
         result.put("extended_documents", extendedDocuments);
         return result;
     }
 
-    /**
-     * MongoDB Extended JSON read path for transfer; output follows the driver's
-     * relaxed Extended JSON representation rather than the UI display format.
-     */
+    /** The read path keeps relaxed documents for transfer and canonical BSON values for editing. */
     private static Object findDocumentsExtendedJson(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -1110,10 +1107,14 @@ public final class MongoAgent {
         }
 
         List<JsonObject> documents = new ArrayList<>();
+        List<JsonObject> canonicalDocuments = new ArrayList<>();
         for (Document document : iterable) {
             documents.add(bsonToExtendedJson(document));
+            canonicalDocuments.add(bsonToCanonicalExtendedJson(document));
         }
-        return documentQueryResult(documents, total);
+        Map<String, Object> result = documentQueryResult(documents, total);
+        result.put("extended_documents", canonicalDocuments);
+        return result;
     }
 
     static Collation collationOrNull(Document document) {
@@ -2411,10 +2412,22 @@ public final class MongoAgent {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
         String collection = params.get("collection").getAsString();
-        String id = params.get("id").getAsString();
+        JsonElement id = params.get("id");
+        Document filter;
+        if (id instanceof JsonObject typedId) {
+            if (typedId.size() != 1 || !(typedId.get("bsonDocument") instanceof JsonObject bsonDocument)
+                || bsonDocument.keySet().stream().anyMatch(key -> key.startsWith("$"))) {
+                throw new IllegalArgumentException("Expected a BSON document ID");
+            }
+            // Parse canonical Extended JSON without interpreting shell-like string values.
+            Object value = Document.parse("{\"value\":" + bsonDocument + "}").get("value");
+            filter = new Document("_id", new Document("$eq", value));
+        } else {
+            filter = new Document("_id", parseId(id.getAsString()));
+        }
 
         var col = c.getDatabase(database).getCollection(collection);
-        var result = col.deleteOne(new Document("_id", parseId(id)));
+        var result = col.deleteOne(filter);
         return Collections.singletonMap("deleted_count", result.getDeletedCount());
     }
 

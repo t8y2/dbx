@@ -216,7 +216,7 @@ import type { ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
-import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, serializeMongoDeleteId, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { buildMongoQueryResultOperations, formatMongoQueryResultOperationPreview } from "@/lib/mongo/mongoQueryResultEditing";
 import { buildInfluxDbV1DeleteStatements, canDeleteInfluxDbV1Row, resolveInfluxDbV1DeleteTarget } from "@/lib/influxdb/influxDbV1Delete";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
@@ -1127,6 +1127,10 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
   if (!tab.result.columns.includes(target.idColumn)) return undefined;
 
   const editTarget = { idColumn: target.idColumn, documentAt: (rowIdx: number) => tab.result?.mongo_documents?.[rowIdx] };
+  function deleteIdForRow(id: unknown, rowIndex: number) {
+    const canonicalDocument = tab.result?.mongo_copy_documents?.[rowIndex] as Record<string, unknown> | undefined;
+    return serializeMongoDeleteId(id, canonicalDocument?._id);
+  }
 
   const save: CustomSaveHandler["save"] = async (changes: MongoQueryGridChanges) => {
     if (changes.newRows.length > 0) {
@@ -1134,16 +1138,16 @@ const mongoQueryResultSaveHandler = computed<CustomSaveHandler | undefined>(() =
     }
     if (!changes.columns.includes(target.idColumn)) throw new Error("No _id column");
     for (const operation of buildMongoQueryResultOperations(changes, editTarget)) {
-      const id = serializeMongoDocumentId(operation.id);
       if (operation.kind === "delete") {
-        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id);
+        await api.mongoDeleteDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, deleteIdForRow(operation.id, operation.rowIndex));
       } else {
-        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, id, JSON.stringify(operation.update));
+        await api.mongoUpdateDocument(activeResultConnectionId.value, activeResultDatabase.value, target.collection, serializeMongoDocumentId(operation.id), JSON.stringify(operation.update));
       }
     }
   };
 
-  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) => buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation));
+  const preview: CustomSaveHandler["preview"] = async (changes: MongoQueryGridChanges) =>
+    buildMongoQueryResultOperations(changes, editTarget).map((operation) => formatMongoQueryResultOperationPreview(target.collection, operation, operation.kind === "delete" ? deleteIdForRow(operation.id, operation.rowIndex) : undefined));
 
   const applySavedChanges: NonNullable<CustomSaveHandler["applySavedChanges"]> = ({ dirtyRows, columns }) => {
     const documents = tab.result?.mongo_documents;

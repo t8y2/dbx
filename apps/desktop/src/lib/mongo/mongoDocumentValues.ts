@@ -734,6 +734,32 @@ export function serializeMongoDocumentId(value: unknown): string {
   return String(value);
 }
 
+function hasReorderedMongoIdKeys(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasReorderedMongoIdKeys);
+  if (!value || typeof value !== "object") return false;
+  // JavaScript enumerates array-index keys in numeric order, which can change BSON equality.
+  return Object.entries(value).some(([key, nested]) => (String(Number(key) >>> 0) === key && key !== "4294967295") || hasReorderedMongoIdKeys(nested));
+}
+
+export type MongoDeleteId = string | { bsonDocument: Record<string, unknown> };
+
+function isEmbeddedMongoId(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value) && !Object.keys(value).some((key) => key.startsWith("$"));
+}
+
+export function serializeMongoDeleteId(value: unknown, canonicalId: unknown): MongoDeleteId {
+  if (isEmbeddedMongoId(canonicalId)) {
+    if (hasReorderedMongoIdKeys(canonicalId)) throw new Error("Cannot preserve the MongoDB document ID's field order.");
+    return { bsonDocument: canonicalId };
+  }
+  if (isEmbeddedMongoId(value)) throw new Error("Cannot delete a MongoDB document without its canonical BSON ID.");
+  return serializeMongoDocumentId(value);
+}
+
+export function formatMongoDeleteIdCondition(value: unknown, deleteId?: MongoDeleteId): string {
+  return deleteId && typeof deleteId !== "string" ? `{$eq: ${formatMongoShellLiteral(deleteId.bsonDocument)}}` : formatMongoShellLiteral(value);
+}
+
 export function mongoDocumentIdForGrid(value: unknown): MongoInputValue {
   if (isMongoExtendedJsonId(value)) return String(value.$numberLong ?? value.$oid);
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;

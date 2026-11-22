@@ -90,6 +90,14 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   const viewportEmitTask = createDeferredEditorTask(() => {
     if (latestViewport) emitEditorViewport(latestViewport);
   }, 150);
+  // The tab keeps the selection for restoring it and for persistence, and the
+  // tab content area reads it back, so reporting every selection change re-rendered
+  // the whole content area on each pointer move of a drag. Like the viewport it is
+  // reported once the selection settles, and flushed before anything reads it as
+  // the editor's final state (blur, tab switch, deactivation).
+  const selectionEmitTask = createDeferredEditorTask(() => {
+    if (latestSelection) emitEditorSelection(latestSelection);
+  }, 150);
   let viewportRestoreFrame: number | null = null;
   let viewportRestoreGeneration = 0;
   let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
@@ -307,6 +315,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
   }
 
   function flushEditorSelection() {
+    selectionEmitTask.cancel();
     if (view.value) latestSelection = readEditorSelection(view.value);
     if (latestSelection) emitEditorSelection(latestSelection);
   }
@@ -413,6 +422,13 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
 
   function recordSelection(currentView: EditorViewType) {
     latestSelection = readEditorSelection(currentView);
+    if (runtime.editorIsActive) selectionEmitTask.schedule();
+  }
+
+  /** Reports the selection right away, for a moment when something else is about to read it. */
+  function commitSelection(currentView: EditorViewType) {
+    selectionEmitTask.cancel();
+    latestSelection = readEditorSelection(currentView);
     if (runtime.editorIsActive) emitEditorSelection(latestSelection);
   }
 
@@ -435,10 +451,11 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
 
   function dispose() {
     viewportEmitTask.cancel();
+    selectionEmitTask.cancel();
     cancelEditorViewportRestore();
     view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
     window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
   }
 
-  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, cancelEditorViewportRestore, recordSelection, recordBookmarks, restoreBookmarks, flushBeforeDeactivation, attach, dispose };
+  return { normalizedEditorSelection, restoreEditorSelection, performEditorReveal, restoreEditorFocus, scheduleEditorViewportEmit, restoreEditorViewport, cancelEditorViewportRestore, recordSelection, commitSelection, recordBookmarks, restoreBookmarks, flushBeforeDeactivation, attach, dispose };
 }

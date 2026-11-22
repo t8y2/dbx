@@ -181,6 +181,26 @@ describe("QueryEditor document and viewport ownership", () => {
     expect(emit).toHaveBeenCalledWith("viewportChange", { scrollTop: 100, scrollLeft: 0 }, "tab-b");
   });
 
+  it("reports a settled selection once and commits it immediately when asked", async () => {
+    const { state, currentView, emit } = createHarness();
+    const selectionEmits = () => emit.mock.calls.filter(([event]) => event === "selectionStateChange");
+    for (const head of [2, 4, 6]) {
+      currentView.dispatch({ selection: { anchor: 0, head } });
+      state.recordSelection(currentView);
+    }
+    expect(selectionEmits()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(selectionEmits()).toEqual([["selectionStateChange", { anchor: 0, head: 6 }]]);
+
+    currentView.dispatch({ selection: { anchor: 3 } });
+    state.recordSelection(currentView);
+    state.commitSelection(currentView);
+    expect(selectionEmits()).toHaveLength(2);
+    expect(selectionEmits()[1]).toEqual(["selectionStateChange", { anchor: 3, head: 3 }]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(selectionEmits()).toHaveLength(2);
+  });
+
   it("captures state before tab deactivation and never flushes a reset inactive viewport", () => {
     const { state, currentView, runtime, emit } = createHarness();
     currentView.scrollDOM.scrollTop = 220;

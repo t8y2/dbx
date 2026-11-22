@@ -18,6 +18,7 @@ export interface QueryEditorProps {
   /** Warm table metadata for the active database; only query tabs enable this. */
   prefetchCompletion?: boolean;
   schema?: string;
+  debugRoutine?: { schema?: string; name: string; objectType: "PROCEDURE" | "FUNCTION" };
   clientSessionId?: string;
   completionContextVersion?: number;
   databaseType?: DatabaseType;

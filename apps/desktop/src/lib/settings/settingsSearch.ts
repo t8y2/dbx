@@ -343,7 +343,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.welcomePageIntro", "settings.welcomePageIntroDescription", "settings.welcomePageWorkspace", "settings.welcomePageWorkspaceDescription"],
   },
   { id: "appearance-layout", category: "appearance", titleKey: "settings.appLayout", targetId: "appearance", keywordKeys: ["settings.appLayoutSeparated", "settings.appLayoutClassic", "settings.appLayoutSeparatedDescription", "settings.appLayoutClassicDescription"] },
-  { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance", keywordKeys: ["settings.tabLayoutScroll", "settings.tabLayoutWrap", "settings.tabLayoutScrollDescription", "settings.tabLayoutWrapDescription"] },
+  { id: "appearance-tab-layout", category: "appearance", titleKey: "settings.tabLayout", targetId: "appearance", keywordKeys: ["settings.tabLayoutScroll", "settings.tabLayoutWrap", "settings.tabLayoutScrollDescription", "settings.tabLayoutWrapDescription", "settings.tabWrapMaxRows"] },
   { id: "appearance-cross-window-tabs", category: "appearance", titleKey: "settings.crossWindowTabDragPreview", descriptionKey: "settings.crossWindowTabDragPreviewDescription", targetId: "appearance" },
   {
     id: "appearance-tab-double-click-action",

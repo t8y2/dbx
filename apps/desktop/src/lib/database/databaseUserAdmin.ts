@@ -11,6 +11,9 @@ export interface DatabaseUserIdentity {
   user: string;
   host: string;
   plugin?: string;
+  accountLocked?: boolean;
+  passwordExpired?: boolean;
+  passwordLastChanged?: string;
 }
 
 export interface CreatePrincipalInput extends DatabaseUserIdentity {
@@ -144,6 +147,18 @@ export function postgresRoleLabel(user: DatabaseUserIdentity): string {
 
 export function mysqlListUsersSql(): string {
   return "SELECT User AS user, Host AS host, plugin AS plugin FROM mysql.user ORDER BY User, Host;";
+}
+
+export function mysqlListUsersWithStatusSql(connection: ConnectionConfig): string | undefined {
+  if (effectiveDatabaseTypeForConnection(connection) !== "mysql") return undefined;
+  const profile = connection.driver_profile?.trim().toLowerCase() || "mysql";
+  if (profile === "oceanbase") {
+    // OceanBase's password_expired field is not used, and password_last_changed is absent.
+    return "SELECT User AS user, Host AS host, plugin, account_locked FROM mysql.user ORDER BY User, Host;";
+  }
+  if (profile === "mysql") {
+    return "SELECT User AS user, Host AS host, plugin, account_locked, password_expired, password_last_changed FROM mysql.user ORDER BY User, Host;";
+  }
 }
 
 export function mysqlListUsersFallbackSql(): string {
@@ -330,13 +345,39 @@ export function usersFromMySqlUserResult(result: QueryResult): DatabaseUserIdent
   const userIndex = columnIndex(result, "user", "User");
   const hostIndex = columnIndex(result, "host", "Host");
   const pluginIndex = columnIndex(result, "plugin", "Plugin");
+  const lockedIndex = columnIndex(result, "account_locked");
+  const expiredIndex = columnIndex(result, "password_expired");
+  const changedIndex = columnIndex(result, "password_last_changed");
+  const flag = (value: unknown): boolean | undefined => {
+    switch (
+      String(value ?? "")
+        .trim()
+        .toUpperCase()
+    ) {
+      case "Y":
+      case "YES":
+        return true;
+      case "N":
+      case "NO":
+        return false;
+    }
+  };
   if (userIndex < 0 || hostIndex < 0) return [];
   return result.rows
-    .map((row) => ({
-      user: String(row[userIndex] ?? ""),
-      host: String(row[hostIndex] ?? ""),
-      plugin: pluginIndex >= 0 && row[pluginIndex] != null ? String(row[pluginIndex]) : undefined,
-    }))
+    .map((row) => {
+      const user: DatabaseUserIdentity = {
+        user: String(row[userIndex] ?? ""),
+        host: String(row[hostIndex] ?? ""),
+        plugin: pluginIndex >= 0 && row[pluginIndex] != null ? String(row[pluginIndex]) : undefined,
+      };
+      const locked = flag(row[lockedIndex]);
+      const expired = flag(row[expiredIndex]);
+      const changed = row[changedIndex];
+      if (locked !== undefined) user.accountLocked = locked;
+      if (expired !== undefined) user.passwordExpired = expired;
+      if (typeof changed === "string" && changed.trim()) user.passwordLastChanged = changed;
+      return user;
+    })
     .filter((user) => user.user || user.host);
 }
 

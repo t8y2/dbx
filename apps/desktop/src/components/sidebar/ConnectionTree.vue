@@ -32,6 +32,7 @@ import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 import { filterConnectionIndexes, hideSimpleSidebarIndexes, insertConnectionIndexSearchControls } from "@/lib/sidebar/sidebarIndexSearch";
 import { firstSidebarSearchMatchDataNode, hasActiveSidebarSearch } from "@/lib/sidebar/sidebarSearchEnter";
 import { collectSidebarRegexIndexScopes } from "@/lib/sidebar/sidebarRegexSearchIndex";
+import { createSidebarTableCommentUpdates, patchSidebarTableComments } from "@/lib/sidebar/sidebarTableCommentUpdates";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { runSidebarSearchTasks } from "./sidebarSearchTaskRunner";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
@@ -585,6 +586,8 @@ function restoreTableSearchInput(focusRestore: TableSearchFocusRestore) {
 const userAdminVisibility = computed(() => sidebarUserAdminVisibility(store.treeNodes, store.getConfig, store.connections));
 const displayedTreeNodes = computed(() => sortConnectionListForDisplay(orderSidebarConnectionUtilitiesForDisplay(userAdminVisibility.value.nodes), settingsStore.editorSettings.sidebarConnectionSortMode));
 const localTableSearchResults = ref<Record<string, TableInfo[] | null>>({});
+const localTableSearchScopes = new Map<string, SidebarRegexScopeIdentity>();
+const localTableCommentUpdates = createSidebarTableCommentUpdates();
 const localTableSearchRequestRevisions = new Map<string, number>();
 type InvalidatedTableSearchScope = SidebarRegexScopeIdentity & { parentNodeId: string };
 const pendingInvalidatedTableSearchScopes = new Map<string, InvalidatedTableSearchScope>();
@@ -631,6 +634,7 @@ const globalIndexSearchQuery = computed(() => qualifiedGlobalSearch.value?.name 
 const { scopes: globalTableSearchScopes, isLoading: isGlobalIndexLoading } = useSidebarSearchIndexes({
   query: globalIndexSearchQuery,
   context: globalSearchContext,
+  commentUpdate: () => store.sidebarTableCommentUpdate,
   load: loadGlobalTableSearchIndexes,
   onError: (error) => toast(error instanceof Error ? error.message : String(error), 5000),
 });
@@ -764,6 +768,21 @@ function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
 
 watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
 
+watch(
+  () => store.sidebarTableCommentUpdate,
+  (update) => {
+    if (!update) return;
+    localTableCommentUpdates.record(update);
+    const results = { ...localTableSearchResults.value };
+    for (const [parentNodeId, scope] of localTableSearchScopes) {
+      const entries = results[parentNodeId];
+      if (entries) results[parentNodeId] = patchSidebarTableComments(scope, entries, [update]);
+    }
+    localTableSearchResults.value = results;
+  },
+  { flush: "sync" },
+);
+
 function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusRestore?: TableSearchFocusRestore) {
   scheduleExclusiveSidebarTableSearchDebounce(parentNodeId, localTableSearchDebouncer, remoteTableSearchDebouncer, () => {
     void loadLocalTableSearchResults(parentNodeId, false, focusRestore);
@@ -774,15 +793,34 @@ function invalidatedTableSearchScopeKey(scope: InvalidatedTableSearchScope): str
   return [scope.connectionId, scope.catalog ?? "", scope.database, scope.schema ?? "", scope.nodeType, scope.parentNodeId].join("\0");
 }
 
+function localTableSearchScope(parentNodeId: string): SidebarRegexScopeIdentity | undefined {
+  const find = (nodes: readonly TreeNode[]): TreeNode | undefined => {
+    for (const node of nodes) {
+      if (node.id === parentNodeId) return node;
+      const child = find(node.children ?? []);
+      if (child) return child;
+    }
+    return undefined;
+  };
+  const parent = find(store.treeNodes);
+  return parent?.connectionId && parent.database !== undefined ? { connectionId: parent.connectionId, database: parent.database, schema: parent.schema, catalog: parent.catalog, nodeType: parent.type } : undefined;
+}
+
 async function loadLocalTableSearchResults(parentNodeId: string, refresh = false, focusRestore?: TableSearchFocusRestore, identity?: SidebarRegexScopeIdentity) {
   const requestRevision = (localTableSearchRequestRevisions.get(parentNodeId) ?? 0) + 1;
   localTableSearchRequestRevisions.set(parentNodeId, requestRevision);
+  const scope = identity ?? localTableSearchScope(parentNodeId);
+  const updates = localTableCommentUpdates.begin();
   try {
     const query = store.sidebarTableSearchQueries[parentNodeId]?.trim() ?? "";
     const entries = await store.ensureSidebarTableSearchIndex(parentNodeId, query, identity, { refresh });
     if (localTableSearchRequestRevisions.get(parentNodeId) !== requestRevision) return;
-    if (query || refresh) localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: entries };
+    if (query || refresh) {
+      if (scope) localTableSearchScopes.set(parentNodeId, scope);
+      localTableSearchResults.value = { ...localTableSearchResults.value, [parentNodeId]: scope && entries ? updates.patchEntries(scope, entries) : entries };
+    }
   } finally {
+    updates.finish();
     if (focusRestore) restoreTableSearchInput(focusRestore);
   }
 }
@@ -810,6 +848,7 @@ watch(
     const nextResults = { ...localTableSearchResults.value };
     for (const scope of invalidation.scopes) {
       delete nextResults[scope.parentNodeId];
+      localTableSearchScopes.delete(scope.parentNodeId);
       localTableSearchDebouncer.cancel(scope.parentNodeId);
       pendingInvalidatedTableSearchScopes.set(invalidatedTableSearchScopeKey(scope), scope);
     }

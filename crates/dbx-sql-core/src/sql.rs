@@ -3471,6 +3471,16 @@ pub fn starts_with_executable_sql_keyword(sql: &str, keywords: &[&str]) -> bool 
     starts_with_executable_sql_keyword_with_options(sql, keywords, SqlParsingOptions::default())
 }
 
+/// Whether `sql` contains `word` in any ASCII letter case, wherever it occurs.
+///
+/// sqlparser matches keywords by their ASCII spelling, so a statement without
+/// this text cannot contain the keyword. Statement checks use it to skip a
+/// full parse (costly for multi-megabyte INSERTs) when the keyword they look
+/// for is absent.
+pub fn contains_ascii_case_insensitive(sql: &str, word: &str) -> bool {
+    word.is_empty() || sql.as_bytes().windows(word.len()).any(|window| window.eq_ignore_ascii_case(word.as_bytes()))
+}
+
 /// Like [`starts_with_executable_sql_keyword`], but requires the leading
 /// executable words to match a whole sequence. Needed for statements such as
 /// GaussDB's `EXECUTE DIRECT`, where the first word alone does not decide

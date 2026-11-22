@@ -78,6 +78,7 @@ import {
   connectionGroupDestinationRows,
   connectionGroupIdForSelection,
   connectionSidebarSearchAliases,
+  findEntryParentGroupId,
   type DropPosition,
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
@@ -234,6 +235,7 @@ import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
 import { clearMetadataRuntimeCacheForConnection, clearMetadataRuntimeCacheForDatabase } from "@/lib/metadata/metadataRuntimeCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
+import { retryCompletionMetadata } from "@/lib/metadata/completionMetadataRetry";
 import { buildCustomTypeTreeChildren } from "@/lib/sidebar/customTypeTree";
 import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/treeNodeLoadHandle";
 import { buildXuguTablespaceChildren } from "@/lib/sidebar/xuguTablespaces";
@@ -373,7 +375,7 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
 }
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis";
 
 interface LocateTableTarget {
   catalog?: string;
@@ -751,6 +753,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
   const lastDataGripFallbackUsernamesCount = ref(0);
+  /** Recovered SQLark passwords / skipped connection count from the last SQLark import. */
+  const lastSqlarkImportStats = ref({ passwords: 0, skipped: 0 });
   const dirtyTableVGroupScopeKeys = new Set<string>();
   let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
@@ -9616,7 +9620,18 @@ export const useConnectionStore = defineStore("connection", () => {
   function withCompletionInFlight<T>(key: string, load: () => Promise<T>, limit?: { scope: string; kind: string }): Promise<T> {
     const existing = completionInFlight.get(key) as Promise<T> | undefined;
     if (existing) return existing;
-    const promise = (limit ? completionMetadataLimiter.run(limit.scope, limit.kind, load) : load()).finally(() => {
+    const run = () => (limit ? completionMetadataLimiter.run(limit.scope, limit.kind, load) : load());
+    // A busy metadata pool is transient: retry the read instead of returning an
+    // empty candidate list, which would leave completion dead until the next
+    // keystroke (#14075). Non-busy failures still surface on the first attempt.
+    const promise = (
+      limit
+        ? retryCompletionMetadata(run, {
+            kind: limit.kind,
+            onRetry: (event) => console.debug("[DBX][completion-metadata:retry]", { ...event, scope: limit.scope }),
+          })
+        : run()
+    ).finally(() => {
       if (completionInFlight.get(key) === promise) completionInFlight.delete(key);
     });
     completionInFlight.set(key, promise);
@@ -11950,7 +11965,45 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  async function readSqlarkImportFile(): Promise<{ content: string; encrypted: boolean } | null> {
+    let zipBase64: string;
+
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const path = await open({
+        filters: [{ name: "SQLark 配置备份", extensions: ["zip"] }],
+        multiple: false,
+      });
+      if (!path) return null;
+      // The backup is a ZIP, so it must be read as bytes: the parser needs the
+      // raw member bytes, not a decoded text form.
+      zipBase64 = bytesToBase64(await readFile(path as string));
+    } else {
+      zipBase64 = await new Promise<string>((resolve, reject) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".zip";
+        input.onchange = () => {
+          const file = input.files?.[0];
+          if (!file) {
+            reject(new Error("No file selected"));
+            return;
+          }
+          file
+            .arrayBuffer()
+            .then((buffer) => resolve(bytesToBase64(new Uint8Array(buffer))))
+            .catch(reject);
+        };
+        input.click();
+      });
+    }
+
+    return { content: JSON.stringify({ format: "sqlark-import", zipBase64 }), encrypted: false };
+  }
+
   async function readImportFile(source: ImportSource = "dbx"): Promise<{ content: string; encrypted: boolean } | null> {
+    if (source === "sqlark") return readSqlarkImportFile();
     if (source === "dbeaver") return readDbeaverImportFile();
     if (source === "datagrip") return readDataGripImportFile();
 
@@ -12017,6 +12070,12 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!("content" in payload) || typeof payload.content !== "string") throw new Error("RedisDesktopManager: invalid import payload.");
         const { parseRedisDesktopManagerImport } = await import("@/lib/imports/redisDesktopManagerImport");
         return parseRedisDesktopManagerImport(payload.content);
+      }
+      const { isSqlarkImportPayload, parseSqlarkImport } = await import("@/lib/imports/sqlarkImport");
+      if (isSqlarkImportPayload(payload)) {
+        const result = await parseSqlarkImport(payload);
+        lastSqlarkImportStats.value = { passwords: result.passwordCount, skipped: result.skippedCount };
+        return { connections: result.connections, layout: result.layout };
       }
       const { isDbeaverImportPayload, parseDbeaverImport } = await import("@/lib/imports/dbeaverImport");
       const { isDataGripImportPayload, parseDataGripImport } = await import("@/lib/imports/datagripImport");
@@ -12452,6 +12511,7 @@ export const useConnectionStore = defineStore("connection", () => {
     importConnectionsFromFile,
     applyDataGripKeychainPasswords,
     lastDataGripFallbackUsernamesCount,
+    lastSqlarkImportStats,
     applySidebarLayout,
     transferSource,
     schemaDiffSource,
@@ -12522,6 +12582,9 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     groupIdForConnection(connectionId: string): string | null {
       return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;
+    },
+    parentGroupIdForSidebarEntry(entryId: string): string | null {
+      return findEntryParentGroupId(sidebarLayout.value.order, entryId) ?? null;
     },
     reorderSidebarEntry(draggedId: string, targetId: string, position: DropPosition) {
       markSidebarLayoutPlacementsEdited([draggedId]);

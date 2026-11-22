@@ -45,6 +45,7 @@ import {
   Hash,
   KeyRound,
   Link2,
+  LockOpen,
   ListTree,
   Maximize2,
   RefreshCw,
@@ -103,6 +104,7 @@ import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.v
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
+import DataGridCellDetailForeignKey, { type ForeignKeyRowPreviewState } from "@/components/grid/DataGridCellDetailForeignKey.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
@@ -255,6 +257,7 @@ import {
   isToggleTransposeShortcut,
   matchesShortcut,
 } from "@/lib/editor/keyboardShortcuts";
+import { handleTextInputCaseShortcut } from "@/lib/editor/textInputCaseShortcut";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import {
   canFetchNextDataGridSegment,
@@ -377,7 +380,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { useDataGridExport, type DataGridExportSheet, type MongoCopyUpdateTarget, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
-import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
+import { canReadClipboardText, eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy, parseDataGridClipboard, parseDataGridClipboardInBatches, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
@@ -406,11 +409,14 @@ import { findDataGridReplacementMatches, prepareDataGridCellReplacements, type D
 import { useDataGridResultLifecycle } from "@/composables/useDataGridResultLifecycle";
 import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
+import { useSqlPluginCodecs } from "@/composables/useSqlPluginCodecs";
+import type { PluginDecodeRequest } from "@/lib/dataGrid/sqlPluginCodec";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useDataGridCellDetailEdit } from "@/composables/useDataGridCellDetailEdit";
@@ -1260,6 +1266,12 @@ const bulkEditDialogMounted = useDataGridAsyncSurface(bulkEditDialogOpen);
 const copyColumnNamesDialogMounted = useDataGridAsyncSurface(copyColumnNamesDialogOpen);
 const insertRowsDialogMounted = useDataGridAsyncSurface(insertRowsDialogOpen);
 const cellDetailDialogMounted = useDataGridAsyncSurface(cellDetailDialogOpen);
+const { codecs: sqlPluginCodecs } = useSqlPluginCodecs();
+const cellDetailPluginDecodeRequest = ref<PluginDecodeRequest | null>(null);
+let cellDetailPluginDecodeRequestId = 0;
+watch(cellDetailDialogOpen, (isOpen) => {
+  if (!isOpen) cellDetailPluginDecodeRequest.value = null;
+});
 const detailDialogsMounted = useDataGridAsyncSurface(computed(() => rowDetailDialogOpen.value || columnDetailDialogOpen.value));
 const imagePreviewMounted = useDataGridAsyncSurface(imagePreviewOpen);
 const previewDialogOpen = ref(false);
@@ -3006,6 +3018,13 @@ function measureColumnHeaderText(text: string): number | undefined {
 }
 
 let columnFormatterForWidth: ((columnIndex: number) => ColumnFormatterConfig | undefined) | undefined;
+const groupedNumberDisplay: ColumnFormatterConfig = { kind: "number", useGrouping: true };
+
+function displayColumnFormatter(columnIndex: number, configured: ColumnFormatterConfig | undefined): ColumnFormatterConfig | undefined {
+  if (configured || !settingsStore.editorSettings.globalNumberGrouping) return configured;
+  const kind = allColumnTypeVisualKinds.value[columnIndex];
+  return kind === "integer" || kind === "numeric" ? groupedNumberDisplay : undefined;
+}
 const gridViewportWidth = ref(0);
 
 function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellValue {
@@ -6358,7 +6377,7 @@ const {
   formatForeignKeyCellDisplay,
   toast,
 });
-columnFormatterForWidth = columnFormatter;
+columnFormatterForWidth = (columnIndex) => displayColumnFormatter(columnIndex, columnFormatter(columnIndex));
 
 initColumnWidths();
 watch([visibleColumnIndexes, () => renderedColumnWidths.value.length], () => scheduleColumnLayoutRefresh());
@@ -6721,6 +6740,7 @@ const {
   selectionAnchor,
   selectedCells,
   selectedCellKeys,
+  firstSelectedCellPosition,
   selectedCellMatrix,
   selectedCellCount,
   hasCellSelection,
@@ -8007,11 +8027,18 @@ watch(columnDetailDialogOpen, (open) => {
   }
 });
 
+// The "referenced row" tab is offered for foreign-key cells; defined before the tab list because a watcher reads that list during setup.
+const foreignKeyRowPreviewAvailable = computed(() => {
+  const cell = detailCell.value;
+  return !!cell && canvasCellForeignKey(cell.rowIndex, cell.col) !== null;
+});
+
 const activeCellDetailTabs = computed(() => {
   const detail = activeCellDetail.value;
   return visibleCellDetailTabs({
     isEditable: !!detail?.isEditable,
     hasBinaryHexViewer: isBinaryCellColumnType(detail?.type),
+    hasForeignKeyPreview: foreignKeyRowPreviewAvailable.value,
   });
 });
 
@@ -8221,7 +8248,11 @@ const detailEdit = useDataGridCellDetailEdit({
   nullValue: () => (props.mongoCollectionGrid ? MONGO_DOCUMENT_GRID_NULL : null),
   getRowItem,
   hydrateLargeValueCell,
-  applyCellValue,
+  applyCellValue: (rowId, columnIndex, value) => {
+    // An untouched detail draft can pass the Mongo grid's stored value back unchanged.
+    if (usesMongoDocumentGridValues.value && getRowItem(rowId)?.data[columnIndex] === value) return;
+    applyCellValue(rowId, columnIndex, value);
+  },
   restoreCellValue,
   syncEditor: (value, columnType) => {
     const editor = getDetailEditor();
@@ -8604,7 +8635,8 @@ const CELL_FORMAT_CACHE_PRUNE_COUNT = 5_000;
 const CELL_FORMAT_CACHE_STRING_KEY_MAX_LENGTH = 512;
 
 const resolvedColumnFormatters = computed(() => props.result.columns.map((_, columnIndex) => columnFormatter(columnIndex)));
-const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
+const displayColumnFormatters = computed(() => resolvedColumnFormatters.value.map((formatter, index) => displayColumnFormatter(index, formatter)));
+const columnFormatterSignatures = computed(() => displayColumnFormatters.value.map(formatterSignature));
 // BSON dates carry their type with each value. Mixed columns and subdocuments
 // may contain dates even when the column itself has no temporal type.
 const mongoDateDisplayFormatter = computed(() => {
@@ -8646,7 +8678,7 @@ function primitiveCellFormatKey(value: CellValue, columnIndex?: number): string 
 }
 
 function formatCell(value: CellValue, columnIndex?: number, originalBytes?: number, limitDisplay = true): string {
-  const formatter = columnIndex === undefined ? undefined : resolvedColumnFormatters.value[columnIndex];
+  const formatter = columnIndex === undefined ? undefined : displayColumnFormatters.value[columnIndex];
   if (usesMongoDocumentGridValues.value) {
     const documentGridText = mongoDocumentGridDisplayText(value, formatter ?? mongoDateDisplayFormatter.value);
     if (documentGridText !== undefined) return documentGridText;
@@ -9825,6 +9857,13 @@ function onGridFocusIn(event: FocusEvent) {
   if (event.target instanceof HTMLElement) lastFocusedWithinGrid = event.target;
 }
 
+function onGridFocusOut(event: FocusEvent) {
+  if (!pendingPasteAsNewRows.value) return;
+  const next = event.relatedTarget as Node | null;
+  if (next && gridRef.value?.contains(next)) return;
+  pendingPasteAsNewRows.value = null;
+}
+
 function restoreGridFocusAfterActivation() {
   if (!lastFocusedWithinGrid) return;
   const activationToken = ++gridFocusActivationToken;
@@ -10856,14 +10895,58 @@ async function pasteClipboardIntoSelection() {
   await pasteTextIntoGrid(text);
 }
 
+interface PasteAsNewRowsContext {
+  operation: ReturnType<typeof dataGridResultLifecycle.beginOperation>;
+  lifecycle: number;
+  columnIndexes: number[];
+}
+
+function beginPasteAsNewRowsContext(): PasteAsNewRowsContext {
+  return {
+    operation: dataGridResultLifecycle.beginOperation(),
+    lifecycle: gridClipboardLifecycle,
+    // Capture the column mapping with the result, before the asynchronous read.
+    columnIndexes: [...visibleColumnIndexes.value],
+  };
+}
+
+// Set while the grid waits for a real paste event because the runtime cannot
+// read the clipboard on demand (plain-HTTP web builds have no
+// `navigator.clipboard`, issue #15158).
+const pendingPasteAsNewRows = ref<PasteAsNewRowsContext | null>(null);
+
+// A new result invalidates the captured generation anyway, but clear the armed
+// state so the next paste is not hijacked after the user switches data.
+watch(
+  () => props.result,
+  () => {
+    pendingPasteAsNewRows.value = null;
+  },
+);
+
 async function pasteClipboardAsNewRows() {
   if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
-  const operation = dataGridResultLifecycle.beginOperation();
-  const lifecycle = gridClipboardLifecycle;
-  // Capture the column mapping with the result, before the asynchronous read.
-  const columnIndexes = [...visibleColumnIndexes.value];
+  const context = beginPasteAsNewRowsContext();
+  if (!canReadClipboardText()) {
+    pendingPasteAsNewRows.value = context;
+    toast(t("grid.pasteAsNewRowsAwaitingPaste"), 8000);
+    gridRef.value?.focus();
+    return;
+  }
+  let text: string;
   try {
-    const text = await readTextFromClipboard();
+    text = await readTextFromClipboard();
+  } catch (error) {
+    if (gridClipboardActive && context.lifecycle === gridClipboardLifecycle && dataGridResultLifecycle.isCurrent(context.operation)) reportGridPasteError(error);
+    return;
+  }
+  await pasteTextAsNewRows(text, context);
+}
+
+async function pasteTextAsNewRows(text: string, context: PasteAsNewRowsContext) {
+  if (!canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
+  const { operation, lifecycle, columnIndexes } = context;
+  try {
     if (!gridClipboardActive || lifecycle !== gridClipboardLifecycle || !dataGridResultLifecycle.isCurrent(operation) || !canInsertRows.value || isSaving.value || isConditionalUpdateActive.value) return;
     if (!clipboardWithinGridCapacity(text)) return;
     const firstNewRowId = -(newRows.value.length + 1);
@@ -11039,6 +11122,16 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
 }
 
 function onGridPaste(event: ClipboardEvent) {
+  if (pendingPasteAsNewRows.value) {
+    const pendingContext = pendingPasteAsNewRows.value;
+    const pendingText = event.clipboardData?.getData("text/plain");
+    // No payload yet: keep waiting instead of silently dropping the armed paste.
+    if (pendingText === undefined) return;
+    pendingPasteAsNewRows.value = null;
+    event.preventDefault();
+    void pasteTextAsNewRows(pendingText, pendingContext);
+    return;
+  }
   const intent = claimDataGridPaste(event, effectiveEditable.value, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
   if (intent === "native") return;
   if (intent === "block") return;
@@ -11168,7 +11261,7 @@ async function replaceGridMatches(currentOnly = false) {
   }
 }
 
-function fillSelectionWithValue(value: string | null, options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean } = {}): boolean {
+function fillSelectionWithValue(value: string | null, options: { preserveEmptyString?: boolean; emptyStringAsNull?: boolean; skipCell?: CellPosition } = {}): boolean {
   const range = selectedRange.value;
   let applied = false;
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
@@ -11180,6 +11273,7 @@ function fillSelectionWithValue(value: string | null, options: { preserveEmptySt
         const rowIndex = Number(rStr);
         const visibleCol = Number(cStr);
         if (Number.isNaN(rowIndex) || Number.isNaN(visibleCol)) continue;
+        if (options.skipCell?.rowIndex === rowIndex && options.skipCell.colIndex === visibleCol) continue;
         const item = displayItemAt(rowIndex);
         if (!item) continue;
         if (cellIsSelected(rowIndex, visibleCol)) applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue, options) || applied;
@@ -11192,6 +11286,7 @@ function fillSelectionWithValue(value: string | null, options: { preserveEmptySt
         const item = displayItemAt(rowIndex);
         if (!item) continue;
         for (let visibleCol = range.startCol; visibleCol <= range.endCol; visibleCol++) {
+          if (options.skipCell?.rowIndex === rowIndex && options.skipCell.colIndex === visibleCol) continue;
           if (cellIsSelected(rowIndex, visibleCol)) applied = applyVisibleSelectedCellValue(item, visibleCol, value, allowDraftSelectionValue, options) || applied;
         }
       }
@@ -11938,6 +12033,25 @@ function selectedOrCurrentRowIds(): number[] {
   return item ? [item.id] : [];
 }
 
+function fillFromFirstSelectedCell(): boolean {
+  if (hasRowSelection.value || hasColumnSelection.value || selectedCellCount.value < 2 || !effectiveEditable.value) return false;
+  // A cell selection must never fall through to cloning its rows.
+  if (isSelectingAll.value || isSaving.value || isTransposeMode.value) return true;
+
+  const source = firstSelectedCellPosition();
+  if (!source) return true;
+  const item = displayItemAt(source.rowIndex);
+  const columnIndex = actualColumnIndex(source.colIndex);
+  if (!item || item.isDraft || item.isDeleted || isLargeValuePreview(item, columnIndex) || isPendingDecode(item, columnIndex)) return true;
+
+  const value = item.data[columnIndex];
+  if (value === undefined) return true;
+  const isNull = gridDetailIsNullValue(value);
+  if (!isNull && isBinaryCellColumnType(allColumnTypes.value[columnIndex])) return true;
+  fillSelectionWithValue(isNull ? null : gridDetailRawValue(value), { preserveEmptyString: true, skipCell: source });
+  return true;
+}
+
 function copyCurrentRow(): boolean {
   if (!canInsertRows.value) return false;
   const rowIds = selectedOrCurrentRowIds().filter((rowId) => !getRowItem(rowId)?.isDraft);
@@ -12100,6 +12214,7 @@ async function onCellEditKeydown(event: KeyboardEvent) {
     }
     return;
   }
+  if (handleTextInputCaseShortcut(event, settingsStore.editorSettings.shortcuts)) return;
   onEditKeydown(event, cellEditCompositionActive.value);
 }
 
@@ -12159,6 +12274,12 @@ function cancelPendingRowOrRestoreCell(): boolean {
 
 async function onGridKeydown(event: KeyboardEvent) {
   if (event.defaultPrevented) return;
+
+  if (pendingPasteAsNewRows.value) {
+    if (event.key === "Escape" || (!event.ctrlKey && !event.metaKey && !["Shift", "Alt"].includes(event.key))) {
+      pendingPasteAsNewRows.value = null;
+    }
+  }
 
   const target = event.target;
   if (event.key === "Escape" && !event.isComposing && showCellDetail.value && target instanceof Element && (target === gridRef.value || target.closest("[data-cell-detail-panel]"))) {
@@ -12241,7 +12362,7 @@ async function onGridKeydown(event: KeyboardEvent) {
     }
     return;
   }
-  if (isCopyCurrentRowShortcut(event, settingsStore.editorSettings.shortcuts) && copyCurrentRow()) {
+  if (isCopyCurrentRowShortcut(event, settingsStore.editorSettings.shortcuts) && (fillFromFirstSelectedCell() || copyCurrentRow())) {
     event.preventDefault();
     return;
   }
@@ -12365,6 +12486,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (clipboardShortcut(event, "v")) {
+    // While the grid waits for a real paste (runtimes without the Web Clipboard
+    // API, issue #15158), leave the shortcut alone so the browser performs the
+    // default paste and the `paste` event reaches onGridPaste.
+    if (pendingPasteAsNewRows.value) return;
     const intent = claimDataGridPaste(event, effectiveEditable.value, !!selectedRange.value || hasColumnSelection.value || canAppendPastedRows());
     if (intent === "native") return;
     // A focused grid owns the shortcut even when read-only; otherwise the webview may paste into the previously focused SQL editor.
@@ -12559,6 +12684,23 @@ function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuIt
         return downloadDetailBinaryValue(detail, mode, snapshotTarget);
       },
     })),
+  };
+}
+
+// Shown only while a SQL value codec plugin is installed; nothing reaches a plugin until the user decodes in the dialog.
+function pluginDecodeItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  const cell = contextCell.value;
+  if (!detail || !cell || cell.col < 0 || sqlPluginCodecs.value.length === 0) return null;
+  const isNull = detail.isNull ?? detail.value === null;
+  return {
+    label: t("grid.pluginDecode"),
+    icon: LockOpen,
+    // Numeric columns cannot hold a ciphertext; drivers may deliver them as strings, so check the column type too.
+    disabled: isNull || typeof detail.value === "number" || typeof detail.value === "boolean" || isNumericColumnType(detail.type),
+    action: () => {
+      openCellDetailDialog(cell.rowIndex, cell.col);
+      cellDetailPluginDecodeRequest.value = { id: ++cellDetailPluginDecodeRequestId, identity: `${detail.rowId}:${detail.colIndex}` };
+    },
   };
 }
 
@@ -13729,12 +13871,15 @@ function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.
   const max = layout === "bottom" ? CELL_DETAIL_PANEL_MAX_HEIGHT : DRAWER_MAX_WIDTH;
   return Math.min(Math.max(value, min), max);
 }
-// Table info drawers are tied to a single grid instance. Keeping this state
-// module-global leaks the drawer into other kept-alive tabs.
-const showTableInfo = ref(false);
+const tableInfoState = useTabUiState<{ open?: boolean; tab?: TableInfoTab }>({}, "tableInfoDrawer");
+const restoreTableInfo = props.context === "table-data" && tableInfoState.initialState.open === true;
+const showTableInfo = ref(restoreTableInfo);
 const { tableInfoHeaderRef, tableInfoActionLabelsCompact, observeTableInfoHeader, disconnectTableInfoHeader } = useTableInfoHeaderLayout();
 void tableInfoHeaderRef;
-const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableInfoActiveTab);
+const activeTableInfoTab = ref<TableInfoTab>((restoreTableInfo ? tableInfoState.initialState.tab : undefined) ?? settingsStore.editorSettings.tableInfoActiveTab);
+if (props.context === "table-data") {
+  tableInfoState.track(() => ({ open: showTableInfo.value, tab: showTableInfo.value ? activeTableInfoTab.value : undefined }));
+}
 const canPinTableInfo = computed(() => props.context === "table-data");
 const tableInfoDrawerPinned = computed(() => settingsStore.editorSettings.tableInfoDrawerPinned);
 const rawDdlContent = ref("");
@@ -14197,7 +14342,7 @@ function toggleTableInfoDrawerPinned() {
   settingsStore.updateEditorSettings({ tableInfoDrawerPinned: !tableInfoDrawerPinned.value });
 }
 
-async function selectTableInfoTab(tab: TableInfoTab) {
+async function selectTableInfoTab(tab: TableInfoTab, options: { restore?: boolean } = {}) {
   // The drawer is often opened after the table was already selected, so the
   // partition status may never have been probed; do it here (once) before the
   // tab list is consulted, or the Partitions tab would be missing entirely.
@@ -14206,9 +14351,9 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   const nextTab = tabSupported ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   activeTableInfoTab.value = nextTab;
-  if (tabSupported) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
+  if (tabSupported && !options.restore) settingsStore.updateEditorSettings({ tableInfoActiveTab: tab });
   if (nextTab === "info") await fetchTableOverview();
-  else if (nextTab === "ddl") await fetchDdl();
+  else if (nextTab === "ddl") await fetchDdl(!options.restore);
   else if (nextTab === "indexes") await fetchIndexes();
   else if (nextTab === "foreignKeys") await fetchForeignKeys();
   else if (nextTab === "constraints") await fetchConstraints();
@@ -14231,7 +14376,7 @@ watch(
     showTableInfo.value = true;
     void selectTableInfoTab(activeTableInfoTab.value);
   },
-  { immediate: true },
+  { immediate: !restoreTableInfo },
 );
 
 async function refreshActiveTableInfo() {
@@ -14520,10 +14665,11 @@ watch(
   { immediate: true },
 );
 
-async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
+/** Referenced table and the WHERE condition that selects the row a foreign-key cell points to. */
+async function foreignKeyReferenceTarget(rowIndex: number, actualColIdx: number) {
   const association = cellForeignKeyAssociation(actualColIdx);
   const item = displayItems.value[rowIndex];
-  if (!association || !item || !props.connectionId) return;
+  if (!association || !item || !props.connectionId) return null;
   let cells = foreignKeyAssociationCells({
     association,
     context: props.context,
@@ -14531,45 +14677,104 @@ async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) 
     sourceColumns: props.sourceColumns,
     row: item.data,
   });
-  if (!cells) return;
-  try {
-    const resolved = await resolveLargeValueCells(
-      [item.id],
-      cells.map((cell) => cell.columnIndex),
-    );
-    const resolvedRow = resolved.get(item.id);
-    if (resolvedRow) {
-      cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
-      if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
-    }
-    const conditions = await Promise.all(
-      cells.map(({ foreignKey, value }) =>
-        buildColumnValueFilterCondition({
-          databaseType: resolvedDatabaseType.value,
-          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-          columnName: foreignKey.ref_column,
-          columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
-          rawValue: String(value),
-        }),
-      ),
-    );
-    const condition = combineForeignKeyConditions(conditions);
-    if (!condition) return;
-    await openTableTarget(
-      foreignKeyNavigationTarget({
-        connectionId: props.connectionId,
-        database: props.database || props.tableMeta?.database || "",
-        currentSchema: props.tableMeta?.schema || props.schema,
-        fk: association.foreignKey,
-        whereInput: condition,
-        connection: connectionStore.getConfig(props.connectionId),
+  if (!cells) return null;
+  const resolved = await resolveLargeValueCells(
+    [item.id],
+    cells.map((cell) => cell.columnIndex),
+  );
+  const resolvedRow = resolved.get(item.id);
+  if (resolvedRow) {
+    cells = cells.map((cell) => (resolvedRow.has(cell.columnIndex) ? { ...cell, value: resolvedRow.get(cell.columnIndex) ?? null } : cell));
+    if (cells.some((cell) => cell.value === null)) throw new Error(t("grid.largeValueRowUnavailable"));
+  }
+  const conditions = await Promise.all(
+    cells.map(({ foreignKey, value }) =>
+      buildColumnValueFilterCondition({
         databaseType: resolvedDatabaseType.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
+        columnName: foreignKey.ref_column,
+        columnInfo: props.tableMeta?.columns.find((column) => column.name.toLowerCase() === foreignKey.column.toLowerCase()),
+        rawValue: String(value),
       }),
-    );
+    ),
+  );
+  const condition = combineForeignKeyConditions(conditions);
+  if (!condition) return null;
+  return foreignKeyNavigationTarget({
+    connectionId: props.connectionId,
+    database: props.database || props.tableMeta?.database || "",
+    currentSchema: props.tableMeta?.schema || props.schema,
+    fk: association.foreignKey,
+    whereInput: condition,
+    connection: connectionStore.getConfig(props.connectionId),
+    databaseType: resolvedDatabaseType.value,
+  });
+}
+
+async function navigateToForeignKeyCell(rowIndex: number, actualColIdx: number) {
+  try {
+    const target = await foreignKeyReferenceTarget(rowIndex, actualColIdx);
+    if (target) await openTableTarget(target);
   } catch (e: any) {
     toast(String(e?.message || e), 5000);
   }
 }
+
+// ---- 单元格详情面板的“引用行”标签：就地预览外键指向的那一行 ----
+const idleForeignKeyRowPreview = (): ForeignKeyRowPreviewState => ({ status: "idle", table: "", columns: [], row: [], message: "" });
+const foreignKeyRowPreview = ref<ForeignKeyRowPreviewState>(idleForeignKeyRowPreview());
+let foreignKeyRowPreviewGeneration = 0;
+
+async function loadForeignKeyRowPreview() {
+  const generation = ++foreignKeyRowPreviewGeneration;
+  const cell = detailCell.value;
+  const connectionId = props.connectionId;
+  const isCurrent = () => generation === foreignKeyRowPreviewGeneration && props.connectionId === connectionId;
+  if (!cell || !connectionId) {
+    foreignKeyRowPreview.value = idleForeignKeyRowPreview();
+    return;
+  }
+  foreignKeyRowPreview.value = { ...idleForeignKeyRowPreview(), status: "loading" };
+  let table = "";
+  try {
+    const target = await foreignKeyReferenceTarget(cell.rowIndex, cell.col);
+    if (!isCurrent()) return;
+    if (!target) {
+      foreignKeyRowPreview.value = idleForeignKeyRowPreview();
+      return;
+    }
+    table = [target.schema, target.tableName].filter(Boolean).join(".");
+    const connection = connectionStore.getConfig(connectionId);
+    const sql = await buildTableSelectSql({
+      databaseType: resolvedDatabaseType.value,
+      driverProfile: connection?.driver_profile,
+      serverVersion: connection?.database_info?.productVersion,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
+      catalog: props.tableMeta?.catalog,
+      database: target.database,
+      schema: target.schema,
+      tableName: target.tableName,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      whereInput: target.whereInput,
+      limit: 1,
+    });
+    if (!isCurrent()) return;
+    const result = await api.executeQuery(connectionId, target.database ?? props.executionDatabase ?? props.database ?? "", sql, target.schema, undefined, { maxRows: 1, fetchSize: 1, pageSize: 1 });
+    if (!isCurrent()) return;
+    foreignKeyRowPreview.value = result.rows.length > 0 ? { status: "ready", table, columns: result.columns, row: result.rows[0], message: "" } : { ...idleForeignKeyRowPreview(), status: "empty", table };
+  } catch (error: any) {
+    if (!isCurrent()) return;
+    foreignKeyRowPreview.value = { ...idleForeignKeyRowPreview(), status: "error", table, message: String(error?.message || error) };
+  }
+}
+
+watch(
+  () => [activeCellDetailTab.value, detailCell.value?.rowIndex, detailCell.value?.col, props.result, props.connectionId] as const,
+  ([tab]) => {
+    if (tab === "foreignKey") void loadForeignKeyRowPreview();
+    else foreignKeyRowPreviewGeneration += 1;
+  },
+);
 
 function contextForeignKeyMenuItem(): ContextMenuItem | null {
   const cell = contextCell.value;
@@ -14599,7 +14804,7 @@ function contextForeignKeyMenuItem(): ContextMenuItem | null {
 }
 
 if (showTableInfo.value && props.tableMeta && props.connectionId) {
-  selectTableInfoTab(activeTableInfoTab.value);
+  void selectTableInfoTab(activeTableInfoTab.value, { restore: restoreTableInfo });
 }
 
 function copyDdl() {
@@ -14779,6 +14984,7 @@ onActivated(() => {
 onDeactivated(() => {
   gridClipboardActive = false;
   pendingColumnOrder.value = null;
+  pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
   rowPreparationController?.abort();
   autoRefresh.stop();
@@ -14786,6 +14992,7 @@ onDeactivated(() => {
 
 onUnmounted(() => {
   gridClipboardActive = false;
+  pendingPasteAsNewRows.value = null;
   gridClipboardLifecycle++;
   rowPreparationController?.abort();
   syncPendingDataEditorDraft(false);
@@ -15229,7 +15436,9 @@ function buildExtractorContextItems(destination: "copy" | "export" = "copy"): Co
         action: () => {
           // One-off use of the chosen format; do NOT persist it as the default —
           // the saved default stays controlled by the toolbar/settings dialog.
-          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor));
+          const wholeQueryResult = extractor === "sql-updates" && isResultsContext.value && props.databaseType === "mysql" && props.fullExportResult && !hasCompleteLocalResult.value && isSelectingAll.value && selectedCellCount.value === visibleDisplayItems.value.length * visibleColumns.value.length;
+          const scope = wholeQueryResult ? "result" : "selection";
+          void (destination === "copy" ? copyWithExtractor(extractor) : exportWithExtractor(extractor, undefined, scope));
         },
         disabled: !canCopyWithExtractor(extractor),
       });
@@ -15610,6 +15819,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         bulkEdit: openBulkEditDialog,
         transpose: openContextTranspose,
       },
+      pluginDecodeItem: pluginDecodeItem(contextCellDetail.value),
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
       foreignKeyItem: contextForeignKeyMenuItem(),
@@ -15779,6 +15989,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     @keydown="onGridKeydown"
     @paste="onGridPaste"
     @focusin="onGridFocusIn"
+    @focusout="onGridFocusOut"
   >
     <p v-if="compatibilityReadOnly" class="shrink-0 border-b px-3 py-1 text-xs text-muted-foreground" :title="t('connection.mysqlDataCharsetReadOnly')">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
     <CustomContextMenu :items="currentGridContextMenuItems" @open="onGridContextMenuOpen" @close="onGridContextMenuClose" v-slot="{ onContextMenu }">
@@ -16606,11 +16817,12 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               type="button"
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded"
                               :class="columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
-                              :title="t('grid.quickSortHint')"
-                              :aria-label="t('grid.sort')"
+                              :title="t('grid.sortOptions')"
+                              :aria-label="t('grid.sortOptions')"
+                              aria-haspopup="menu"
                               :aria-expanded="open"
                               @mousedown.stop
-                              @click.stop="toggleHeaderSort(col.name, col.actualColIdx)"
+                              @click.stop="$event.shiftKey ? toggleHeaderSort(col.name, col.actualColIdx) : toggle()"
                               @contextmenu.prevent.stop="toggle"
                               @keydown.shift.f10.prevent.stop="toggle"
                             >
@@ -17788,6 +18000,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                 @copy-sql-condition="copyDetailSqlCondition"
               />
               <DataGridCellDetailHexViewer v-if="activeCellDetailTabs.includes('hexViewer')" :rows="activeBinaryHexRows" :byte-count="activeBinaryHexByteCount" />
+              <DataGridCellDetailForeignKey v-if="activeCellDetailTabs.includes('foreignKey') && detailCell" :preview="foreignKeyRowPreview" @open="navigateToForeignKeyCell(detailCell.rowIndex, detailCell.col)" />
 
               <TabsContent v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col p-3 text-xs">
                 <div :style="detailTransformOpen ? { display: 'none' } : null" class="min-w-0 flex min-h-0 flex-1 flex-col">
@@ -18003,6 +18216,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :can-import-binary-value="canImportDetailBinaryValue"
       :import-binary-value="importDetailBinaryValue"
       :database-type="resolvedDatabaseType"
+      :plugin-decode-request="cellDetailPluginDecodeRequest"
       @edit="openDialogCellInSidePanel"
     />
 

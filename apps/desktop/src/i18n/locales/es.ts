@@ -3875,7 +3875,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL de la página actual",
     copyActualExecutionSql: "Copiar SQL realmente ejecutado",
     pageProbeDescription: "Esta página muestra como máximo {count} filas; se lee como máximo 1 fila adicional para determinar si hay una página siguiente.",
-    resultColumnCopied: "Se copió {column}: {value}",
+    resultColumnCopied: "Se copió {column}",
     queryPendingChangesTitle: "El conjunto de resultados tiene cambios sin confirmar",
     queryPendingChangesMessage: "Ejecutar la consulta descartará los cambios sin confirmar del conjunto de resultados actual. Puede cancelar y confirmar los cambios primero, o descartar los cambios y ejecutar la consulta.",
     queryDiscardAndExecute: "Descartar cambios y ejecutar",

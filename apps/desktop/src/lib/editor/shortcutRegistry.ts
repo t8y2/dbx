@@ -794,39 +794,35 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     scope: "global",
     defaultShortcut: "F5",
   },
-  // Alt+N copies the first row's value from column N of the active tab's
-  // current result. App.vue only consumes the key when that result actually
-  // has a first row with the column, so Alt+N stays free when there is
-  // nothing to copy. Tab switching owns Mod+N.
   {
     id: "copyResultColumn1",
     labelKey: "settings.shortcutCopyResultColumn1",
     scope: "global",
-    defaultShortcut: "Alt+1",
+    defaultShortcut: "",
   },
   {
     id: "copyResultColumn2",
     labelKey: "settings.shortcutCopyResultColumn2",
     scope: "global",
-    defaultShortcut: "Alt+2",
+    defaultShortcut: "",
   },
   {
     id: "copyResultColumn3",
     labelKey: "settings.shortcutCopyResultColumn3",
     scope: "global",
-    defaultShortcut: "Alt+3",
+    defaultShortcut: "",
   },
   {
     id: "copyResultColumn4",
     labelKey: "settings.shortcutCopyResultColumn4",
     scope: "global",
-    defaultShortcut: "Alt+4",
+    defaultShortcut: "",
   },
   {
     id: "copyResultColumn5",
     labelKey: "settings.shortcutCopyResultColumn5",
     scope: "global",
-    defaultShortcut: "Alt+5",
+    defaultShortcut: "",
   },
   {
     id: "toggleResultsPane",

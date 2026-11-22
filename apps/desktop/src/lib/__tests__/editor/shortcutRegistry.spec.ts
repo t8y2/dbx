@@ -65,21 +65,18 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcutToCodeMirrorKey("Mod+Alt+,")).toBe("Mod-Alt-,");
   });
 
-  it("registers copy-result-column shortcuts as global actions defaulting to Alt+1..5", () => {
+  it("registers copy-result-column shortcuts as unassigned global actions", () => {
     for (const column of [1, 2, 3, 4, 5]) {
       const id = `copyResultColumn${column}` as const;
       expect(SHORTCUT_DEFINITIONS.find((item) => item.id === id)).toMatchObject({
         id,
         labelKey: `settings.shortcutCopyResultColumn${column}`,
         scope: "global",
-        defaultShortcut: `Alt+${column}`,
+        defaultShortcut: "",
       });
-      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(`Alt+${column}`);
-      // Alt+N is unclaimed by every other action in any scope, and settings
-      // saved before the action existed pick up the default (tab switching
-      // owns Mod+N, not Alt+N).
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe("");
       expect(findShortcutConflict(id, `Alt+${column}`, normalizeShortcutSettings())).toBeNull();
-      expect(normalizeShortcutSettings()[id]).toBe(`Alt+${column}`);
+      expect(normalizeShortcutSettings()[id]).toBe("");
     }
   });
 

@@ -3822,7 +3822,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Копировать SQL текущей страницы",
     copyActualExecutionSql: "Копировать фактически выполненный SQL",
     pageProbeDescription: "На этой странице отображается не более {count} строк; дополнительно считывается не более 1 строки, чтобы определить, есть ли следующая страница.",
-    resultColumnCopied: "Скопировано {column}: {value}",
+    resultColumnCopied: "Скопировано {column}",
     queryPendingChangesTitle: "В наборе результатов есть незафиксированные изменения",
     queryPendingChangesMessage: "Выполнение запроса приведёт к потере незафиксированных изменений в текущем наборе результатов. Можно отменить выполнение и сначала зафиксировать изменения либо отбросить изменения и выполнить запрос.",
     queryDiscardAndExecute: "Отбросить изменения и выполнить",

@@ -3408,7 +3408,7 @@ export default withEnglishFallback({
     filterSqlPreviewReady: "条件已就绪，应用后刷新结果",
     copyFilterSql: "复制 SQL 条件",
     filterSqlCopied: "SQL 条件已复制",
-    resultColumnCopied: "已复制 {column}：{value}",
+    resultColumnCopied: "已复制 {column}",
     filterBuilderSummary: "{count} 条规则",
     filterBuilderAddRule: "新增条件",
     filterBuilderApplyOnly: "仅筛选此项",

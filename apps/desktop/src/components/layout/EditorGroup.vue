@@ -85,15 +85,11 @@ defineExpose({
   focusWhere: () => activeSurfaceRef.value?.focusWhere() ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeSurfaceRef.value?.openTableStructureEditor?.(initialTab) ?? false,
-  // Alt+N (default) copies the first row's value from column N of the active
-  // tab's current result. Only reports handled when that result has a first
-  // row with the column, so the keys stay unconsumed for everything else.
   copyResultColumn: (column: number) => {
     const cell = firstResultCellValue(activeTab.value?.result, column);
     if (!cell) return false;
-    const preview = cell.value.length > 60 ? `${cell.value.slice(0, 60)}…` : cell.value;
     void copyToClipboard(cell.value)
-      .then(() => toast(t("grid.resultColumnCopied", { column: cell.column, value: preview === "" ? "—" : preview })))
+      .then(() => toast(t("grid.resultColumnCopied", { column: cell.column })))
       .catch((error: unknown) => toast(error instanceof Error ? error.message : String(error), 5000));
     return true;
   },

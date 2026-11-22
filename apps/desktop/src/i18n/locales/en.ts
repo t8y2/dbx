@@ -3481,7 +3481,7 @@ export default {
     filterSqlPreviewReady: "Condition ready; apply to refresh results",
     copyFilterSql: "Copy SQL condition",
     filterSqlCopied: "SQL condition copied",
-    resultColumnCopied: "Copied {column}: {value}",
+    resultColumnCopied: "Copied {column}",
     filterBuilderSummary: "{count} rules",
     filterBuilderAddRule: "Add rule",
     filterBuilderApplyOnly: "Filter only this rule",

@@ -3999,7 +3999,7 @@ export default withEnglishFallback({
     copyActualExecutionSql: "คัดลอก SQL ที่ดำเนินการจริง",
     pageProbeDescription: "หน้านี้แสดงได้สูงสุด {count} แถว และอ่านเพิ่มได้สูงสุด 1 แถวเพื่อตรวจสอบว่ามีหน้าถัดไปหรือไม่",
     copyExtractorHeaderTwoRows: "ชื่อและคำอธิบาย (แบ่งเป็นสองบรรทัด)",
-    resultColumnCopied: "คัดลอก {column} แล้ว: {value}",
+    resultColumnCopied: "คัดลอก {column} แล้ว",
     queryPendingChangesTitle: "ชุดผลลัพธ์มีการแก้ไขที่ยังไม่ได้คอมมิต",
     queryPendingChangesMessage: "การเรียกใช้คิวรีจะละทิ้งการแก้ไขที่ยังไม่ได้คอมมิตในชุดผลลัพธ์ปัจจุบัน คุณสามารถยกเลิกแล้วคอมมิตการแก้ไขก่อน หรือละทิ้งการแก้ไขและเรียกใช้คิวรี",
     queryDiscardAndExecute: "ละทิ้งการแก้ไขและเรียกใช้คิวรี",

@@ -348,9 +348,9 @@ describe("keyboard shortcut matching", () => {
 });
 
 describe("copyResultColumnIndexFromShortcut", () => {
-  it("maps Alt+1..Alt+5 to result columns 1..5", () => {
+  it("leaves every result-column action unassigned until configured", () => {
     for (const digit of [1, 2, 3, 4, 5]) {
-      expect(copyResultColumnIndexFromShortcut({ key: String(digit), altKey: true })).toBe(digit);
+      expect(copyResultColumnIndexFromShortcut({ key: String(digit), altKey: true })).toBeNull();
     }
   });
 

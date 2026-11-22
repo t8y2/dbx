@@ -3759,7 +3759,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "現在のページの SQL をコピー",
     copyActualExecutionSql: "実際に実行された SQL をコピー",
     pageProbeDescription: "このページには最大 {count} 行を表示し、次のページがあるかどうかを判断するために最大 1 行を追加で読み取ります。",
-    resultColumnCopied: "{column} をコピーしました：{value}",
+    resultColumnCopied: "{column} をコピーしました",
     queryPendingChangesTitle: "結果セットに未コミットの変更があります",
     queryPendingChangesMessage: "クエリを実行すると、現在の結果セットにある未コミットの変更が破棄されます。キャンセルして先に変更をコミットするか、変更を破棄してクエリを実行してください。",
     queryDiscardAndExecute: "変更を破棄して実行",

@@ -9611,10 +9611,7 @@ mod tests {
 
         let tables = table_infos_from_show_rows(&rows);
 
-        assert_eq!(
-            tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
-            vec![" orders ", "orders"]
-        );
+        assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), vec![" orders ", "orders"]);
     }
 
     #[test]

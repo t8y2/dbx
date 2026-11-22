@@ -150,7 +150,7 @@ describe("schema index browsing and draft navigation", () => {
       });
       action.click();
       await vi.waitFor(() => expect(mocks.getTableDdl).toHaveBeenCalledOnce());
-      expect(mocks.getTableDdl.mock.calls[0]).toEqual([connection.id, "service", "Mixed", "EXPORT_TARGET", objectType === "VIEW" ? "VIEW" : undefined, undefined, true, ...(objectType === "TABLE" ? [undefined, true, "Mixed"] : [])]);
+      expect(mocks.getTableDdl.mock.calls[0]).toEqual([connection.id, "service", " Mixed ", "EXPORT_TARGET", objectType === "VIEW" ? "VIEW" : undefined, undefined, true, ...(objectType === "TABLE" ? [undefined, true, " Mixed "] : [])]);
     } finally {
       createUrl.mockRestore();
       revokeUrl.mockRestore();

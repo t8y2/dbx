@@ -12527,6 +12527,7 @@ export default withEnglishFallback({
     configuration: "Broker 設定",
     noConfigurations: "沒有符合的設定項目",
     configurationUnsupported: "此 Kafka Broker 不支援查詢設定。",
+    configurationDriverUnsupported: "目前的 Kafka 驅動程式不支援查詢 Broker 設定。請在驅動程式管理員中檢查更新，然後重新連線。",
     configName: "名稱",
     configValue: "值",
     configSource: "來源",

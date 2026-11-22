@@ -11569,6 +11569,7 @@ export default withEnglishFallback({
     configuration: "Konfigurasi broker",
     noConfigurations: "Tidak ada entri konfigurasi yang cocok",
     configurationUnsupported: "Broker Kafka ini tidak mendukung penayangan konfigurasi.",
+    configurationDriverUnsupported: "Driver Kafka yang terpasang tidak mendukung pembacaan konfigurasi broker. Periksa pembaruan di pengelola driver, lalu sambungkan kembali.",
     configName: "Nama",
     configValue: "Nilai",
     configSource: "Sumber",

@@ -12267,6 +12267,7 @@ export default withEnglishFallback({
     configuration: "브로커 구성",
     noConfigurations: "일치하는 구성 항목이 없습니다",
     configurationUnsupported: "이 Kafka 브로커는 구성 조회를 지원하지 않습니다.",
+    configurationDriverUnsupported: "설치된 Kafka 드라이버는 브로커 구성 조회를 지원하지 않습니다. 드라이버 관리자에서 업데이트를 확인한 후 다시 연결하세요.",
     configName: "이름",
     configValue: "값",
     configSource: "출처",

@@ -11622,6 +11622,7 @@ export default withEnglishFallback({
     configuration: "Konfiguracja brokera",
     noConfigurations: "Brak pasujących ustawień",
     configurationUnsupported: "Ten broker Kafka nie obsługuje odczytu konfiguracji.",
+    configurationDriverUnsupported: "Zainstalowany sterownik Kafka nie obsługuje odczytu konfiguracji brokera. Sprawdź aktualizacje w menedżerze sterowników i połącz się ponownie.",
     configName: "Nazwa",
     configValue: "Wartość",
     configSource: "Źródło",

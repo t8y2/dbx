@@ -13633,6 +13633,7 @@ export default {
     configuration: "Broker configuration",
     noConfigurations: "No matching configuration entries",
     configurationUnsupported: "This Kafka broker does not support configuration lookup.",
+    configurationDriverUnsupported: "The installed Kafka driver does not support broker configuration lookup. Check for a driver update in Driver Manager, then reconnect.",
     configName: "Name",
     configValue: "Value",
     configSource: "Source",

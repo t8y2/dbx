@@ -9253,7 +9253,9 @@ mod tests {
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![json!(r#"{"a":"x\\y"}"#)], vec![json!(r"C:\new\it's")], vec![json!("中文\\日文")]],
-            batch_size: Some(10),
+            // batch_size 是「每条 INSERT 最多行数」而不是语句条数；置 1 让每行
+            // 独立成句，便于逐字面量断言（多行合并由既有批量路径覆盖）。
+            batch_size: Some(1),
             preserve_original_language: false,
         })
         .unwrap();

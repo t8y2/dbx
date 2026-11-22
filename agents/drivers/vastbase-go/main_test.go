@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +72,7 @@ func TestVastbaseBuildDSNUsesNativeDefaultsForJDBCURL(t *testing.T) {
 		"password='secret'",
 		"dbname='postgres'",
 		"sslmode=prefer",
+		"client_encoding=UTF8",
 		"application_name='dbx'",
 	} {
 		if !strings.Contains(dsn, expected) {
@@ -110,6 +115,286 @@ func TestVastbaseBuildDSNTranslatesJDBCParameters(t *testing.T) {
 	for _, rejected := range []string{"targetServerType", "currentSchema", "applicationName", "autosave", "enable_ce", "db_compatibility"} {
 		if strings.Contains(dsn, rejected) {
 			t.Fatalf("JDBC-only parameter leaked into DSN: %s", dsn)
+		}
+	}
+}
+
+func TestVastbaseBuildDSNEnforcesUTF8ClientEncoding(t *testing.T) {
+	cases := []struct {
+		name string
+		cp   connectParams
+	}{
+		{
+			name: "structured defaults",
+			cp: connectParams{
+				Host:     "vastbase.example.com",
+				Database: "gb_db",
+				Username: "vbadmin",
+				Password: "secret",
+			},
+		},
+		{
+			name: "structured with gb18030 and jdbc encoding params",
+			cp: connectParams{
+				Host:             "vastbase.example.com",
+				Database:         "gb_db",
+				Username:         "vbadmin",
+				Password:         "secret",
+				ConnectionString: "jdbc:vastbase://vastbase.example.com:5432/gb_db",
+				URLParams:        "client_encoding=GB18030&clientEncoding=GB18030&characterEncoding=GB18030&useUnicode=true&application_name=dbx",
+			},
+		},
+		{
+			name: "postgresql native url",
+			cp: connectParams{
+				ConnectionString: "postgresql://vbadmin:secret@vastbase.example.com:5432/gb_db?client_encoding=GB18030&characterEncoding=GB18030&application_name=dbx",
+			},
+		},
+		{
+			name: "opengauss native url",
+			cp: connectParams{
+				ConnectionString: "opengauss://vbadmin:secret@vastbase.example.com:5432/gb_db?clientEncoding=GB18030",
+			},
+		},
+		{
+			name: "mogdb native url",
+			cp: connectParams{
+				ConnectionString: "mogdb://vbadmin:secret@vastbase.example.com:5432/gb_db",
+			},
+		},
+		{
+			name: "keyword value native dsn",
+			cp: connectParams{
+				ConnectionString: "host=vastbase.example.com port=5432 user=vbadmin dbname=gb_db client_encoding=GB18030 characterEncoding=GB18030",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := buildDSN(tc.cp)
+			if !strings.Contains(dsn, "client_encoding=UTF8") {
+				t.Fatalf("DSN missing client_encoding=UTF8: %s", dsn)
+			}
+			lower := strings.ToLower(dsn)
+			for _, forbidden := range []string{"gb18030", "clientencoding", "characterencoding", "useunicode"} {
+				if strings.Contains(lower, forbidden) {
+					t.Fatalf("DSN must not forward %q: %s", forbidden, dsn)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenGaussDriverSendsUTF8ClientEncodingInStartupPacket(t *testing.T) {
+	type capturedStartup struct {
+		params map[string]string
+		err    error
+	}
+
+	cases := []struct {
+		name string
+		cp   connectParams
+	}{
+		{
+			name: "structured",
+			cp: connectParams{
+				Host:      "127.0.0.1",
+				Port:      5432,
+				Database:  "gb_db",
+				Username:  "vbadmin",
+				Password:  "secret",
+				URLParams: "sslmode=disable&client_encoding=GB18030&characterEncoding=GB18030",
+			},
+		},
+		{
+			name: "native_url",
+			cp: connectParams{
+				ConnectionString: "postgresql://vbadmin:secret@127.0.0.1:5432/gb_db?sslmode=disable&client_encoding=GB18030",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := make(chan capturedStartup, 2)
+			dsn := buildDSNWithSSLMode(tc.cp, "disable")
+			cfg, err := pq.ParseConfig(dsn)
+			if err != nil {
+				t.Fatalf("pq.ParseConfig(%q): %v", dsn, err)
+			}
+			cfg.DialFunc = func(context.Context, string, string) (net.Conn, error) {
+				clientConn, serverConn := net.Pipe()
+				go func(c net.Conn) {
+					defer c.Close()
+					_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+					params, readErr := readMockOpenGaussStartup(c)
+					if readErr != nil {
+						captured <- capturedStartup{err: readErr}
+						return
+					}
+					captured <- capturedStartup{params: params}
+					if writeErr := writeMockOpenGaussStartupOK(c); writeErr != nil {
+						return
+					}
+					serveMockOpenGaussSimpleQueries(c, "中文备注GB18030测试")
+				}(serverConn)
+				return clientConn, nil
+			}
+			connector, err := pq.NewConnectorConfig(cfg)
+			if err != nil {
+				t.Fatalf("pq.NewConnectorConfig: %v", err)
+			}
+			db := sql.OpenDB(connector)
+			defer db.Close()
+
+			srv := newServer()
+			srv.db = db
+			result, queryErr := srv.executeQuery(queryOptions{SQL: "SELECT memo FROM t", MaxRows: 10})
+			if queryErr != nil {
+				t.Fatalf("executeQuery: %v", queryErr)
+			}
+
+			select {
+			case got := <-captured:
+				if got.err != nil {
+					t.Fatalf("read startup packet: %v", got.err)
+				}
+				if got.params["client_encoding"] != "UTF8" {
+					t.Fatalf("startup client_encoding = %q, want UTF8 (all params: %v)", got.params["client_encoding"], got.params)
+				}
+				if _, leaked := got.params["characterEncoding"]; leaked {
+					t.Fatalf("startup packet leaked characterEncoding: %v", got.params)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for startup packet")
+			}
+
+			if len(result.Rows) != 1 || len(result.Rows[0]) != 1 || result.Rows[0][0] != "中文备注GB18030测试" {
+				t.Fatalf("unexpected decoded row: %#v", result.Rows)
+			}
+		})
+	}
+}
+
+func readMockOpenGaussStartup(conn net.Conn) (map[string]string, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	msgLen := int(binary.BigEndian.Uint32(lenBuf[:]))
+	if msgLen < 8 {
+		return nil, fmt.Errorf("startup message too short: %d", msgLen)
+	}
+	payload := make([]byte, msgLen-4)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return nil, err
+	}
+	params := map[string]string{}
+	rest := payload[4:] // skip protocol version
+	for len(rest) > 0 && rest[0] != 0 {
+		kEnd := bytes.IndexByte(rest, 0)
+		if kEnd < 0 {
+			break
+		}
+		key := string(rest[:kEnd])
+		rest = rest[kEnd+1:]
+		vEnd := bytes.IndexByte(rest, 0)
+		if vEnd < 0 {
+			break
+		}
+		val := string(rest[:vEnd])
+		rest = rest[vEnd+1:]
+		params[key] = val
+	}
+	return params, nil
+}
+
+func writePGMessage(w io.Writer, msgType byte, body []byte) error {
+	header := []byte{msgType, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(header[1:], uint32(len(body)+4))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	if len(body) > 0 {
+		_, err := w.Write(body)
+		return err
+	}
+	return nil
+}
+
+func writeMockOpenGaussStartupOK(w io.Writer) error {
+	// AuthenticationOk
+	if err := writePGMessage(w, 'R', []byte{0, 0, 0, 0}); err != nil {
+		return err
+	}
+	// ParameterStatus: server_encoding=GB18030, client_encoding=UTF8
+	for _, kv := range [][2]string{
+		{"server_encoding", "GB18030"},
+		{"client_encoding", "UTF8"},
+	} {
+		var body bytes.Buffer
+		body.WriteString(kv[0])
+		body.WriteByte(0)
+		body.WriteString(kv[1])
+		body.WriteByte(0)
+		if err := writePGMessage(w, 'S', body.Bytes()); err != nil {
+			return err
+		}
+	}
+	// ReadyForQuery ('I')
+	return writePGMessage(w, 'Z', []byte{'I'})
+}
+
+func serveMockOpenGaussSimpleQueries(conn net.Conn, cellValue string) {
+	for {
+		var header [5]byte
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
+			return
+		}
+		msgType := header[0]
+		bodyLen := int(binary.BigEndian.Uint32(header[1:])) - 4
+		body := make([]byte, bodyLen)
+		if bodyLen > 0 {
+			if _, err := io.ReadFull(conn, body); err != nil {
+				return
+			}
+		}
+		if msgType == 'X' {
+			return
+		}
+		if msgType != 'Q' {
+			continue
+		}
+		// RowDescription: 1 column "memo" of type varchar (OID 1043)
+		var rowDesc bytes.Buffer
+		_ = binary.Write(&rowDesc, binary.BigEndian, int16(1))
+		rowDesc.WriteString("memo")
+		rowDesc.WriteByte(0)
+		_ = binary.Write(&rowDesc, binary.BigEndian, int32(0))    // table OID
+		_ = binary.Write(&rowDesc, binary.BigEndian, int16(0))    // attr num
+		_ = binary.Write(&rowDesc, binary.BigEndian, int32(1043)) // varchar OID
+		_ = binary.Write(&rowDesc, binary.BigEndian, int16(-1))   // type size
+		_ = binary.Write(&rowDesc, binary.BigEndian, int32(-1))   // type mod
+		_ = binary.Write(&rowDesc, binary.BigEndian, int16(0))    // text format
+		if err := writePGMessage(conn, 'T', rowDesc.Bytes()); err != nil {
+			return
+		}
+		// DataRow
+		var dataRow bytes.Buffer
+		_ = binary.Write(&dataRow, binary.BigEndian, int16(1))
+		_ = binary.Write(&dataRow, binary.BigEndian, int32(len(cellValue)))
+		dataRow.WriteString(cellValue)
+		if err := writePGMessage(conn, 'D', dataRow.Bytes()); err != nil {
+			return
+		}
+		// CommandComplete
+		if err := writePGMessage(conn, 'C', append([]byte("SELECT 1"), 0)); err != nil {
+			return
+		}
+		// ReadyForQuery
+		if err := writePGMessage(conn, 'Z', []byte{'I'}); err != nil {
+			return
 		}
 	}
 }

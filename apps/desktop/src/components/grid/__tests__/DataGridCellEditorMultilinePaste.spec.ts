@@ -80,12 +80,14 @@ function multilineResult(): QueryResult {
   };
 }
 
-function mountGrid(renderMode: "canvas" | "dom" = "dom") {
+function mountGrid(renderMode: "canvas" | "dom" = "dom", resultOnlyType?: string) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
   settingsStore.updateEditorSettings({ dataGridRenderMode: "canvas", dataGridMultiRowTranspose: false, dataGridHideNullColumns: false, dataGridQuickEntry: false });
-  const resultRef = shallowRef(markRaw(multilineResult()));
+  const result = multilineResult();
+  if (resultOnlyType) result.column_types = [resultOnlyType, "varchar", "varchar"];
+  const resultRef = shallowRef(markRaw(result));
   const visibleRef = shallowRef(true);
   const gridRef = shallowRef<InstanceType<typeof DataGrid> | null>(null);
 
@@ -106,17 +108,20 @@ function mountGrid(renderMode: "canvas" | "dom" = "dom") {
                         ref: gridRef,
                         result: resultRef.value,
                         databaseType: "dameng",
-                        context: "table-data",
+                        context: resultOnlyType ? "results" : "table-data",
                         editable: true,
-                        tableMeta: {
-                          tableName: "multiline_paste",
-                          columns: [
-                            { name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
-                            { name: "note", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
-                            { name: "tag", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
-                          ],
-                          primaryKeys: ["id"],
-                        },
+                        customSaveHandler: resultOnlyType ? { save: async () => {} } : undefined,
+                        tableMeta: resultOnlyType
+                          ? undefined
+                          : {
+                              tableName: "multiline_paste",
+                              columns: [
+                                { name: "id", data_type: "int", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+                                { name: "note", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+                                { name: "tag", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+                              ],
+                              primaryKeys: ["id"],
+                            },
                       })
                     : null,
               }),
@@ -234,6 +239,19 @@ describe("DataGrid inline cell editor multiline paste (#15307)", () => {
 
     expect(host.querySelector("textarea.cell-edit-input--expanded")).toBeNull();
     expect(host.querySelector("input.cell-edit-input")).not.toBeNull();
+  });
+
+  it.each(["integer", "decimal(8,2)"])("keeps a single-line editor for a %s result column without table metadata", async (resultType) => {
+    const { host, gridRef } = mountGrid("dom", resultType);
+    await openCellEditor(host, gridRef, 0, 0);
+
+    const input = host.querySelector<HTMLInputElement>("input.cell-edit-input")!;
+    expect(input?.inputMode).toBe(resultType === "integer" ? "numeric" : "decimal");
+    dispatchPasteOn(input, "1\n2");
+    await settle();
+
+    expect(host.querySelector("textarea.cell-edit-input--expanded")).toBeNull();
+    expect(host.querySelector("input.cell-edit-input")).toBe(input);
   });
 
   it("switches to the expanded editor in canvas render mode too", async () => {

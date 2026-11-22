@@ -4024,6 +4024,7 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "ไม่มีแถวใน «{table}» ที่ตรงกับค่านี้",
     foreignKeyPreviewFailed: "ไม่สามารถโหลดแถวที่อ้างอิง: {message}",
     sortOptions: "ตัวเลือกการเรียงลำดับ",
+    pasteRowsTruncated: "วางแล้ว {applied} แถว และอีก {dropped} แถวไม่ได้วาง: ผลลัพธ์ปัจจุบันไม่รองรับการเพิ่มแถว หรือจำนวนแถวที่เพิ่มได้ไม่เพียงพอ",
     pasteCellText: "วางข้อความลงในเซลล์นี้",
     pasteCellTextFailed: "ไม่สามารถวางข้อความลงในเซลล์: {message}",
   },

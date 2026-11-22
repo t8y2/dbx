@@ -5015,6 +5015,7 @@ const {
   availableInsertRows,
   appendPastedRowsToNewRow,
   appendPastedRowsToNewRowInBatches,
+  appendPastedRowsAsNewRows,
   appendPastedRowsAsNewRowsInBatches,
   cloneRow: cloneEditorRow,
   showDeleteRowConfirm,
@@ -11103,10 +11104,10 @@ function applyParsedGridPaste(rows: readonly (readonly (string | null)[])[], col
   }
   const cellTarget = blankSelectionBatchAppendPasteTarget(rows.length);
   if (cellTarget) return appendParsedRowsToBlankTarget(cellTarget.rowId, rows, cellTarget.columnIndexes, columnNames, preparation);
-  return pasteRowsIntoSelection(rows);
+  return pasteRowsIntoSelection(rows, preparation);
 }
 
-function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): boolean {
+function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[], preparation?: DataGridRowPreparationOptions): boolean | Promise<boolean> {
   const allowDraftSelectionValue = selectedRangeTargetsOnlyDraftRow();
 
   if (rows.length === 1 && rows[0]?.length === 1 && fillSelectionWithValue(rows[0][0], { preserveEmptyString: true })) {
@@ -11119,10 +11120,38 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
   const recordIndexes = isTransposeMode.value ? transposeScopeRecordIndexes.value : null;
   const startPosition = recordIndexes ? recordIndexes.indexOf(start.rowIndex) : start.rowIndex;
   if (startPosition < 0) return false;
+
+  // Split the clipboard into the part that overwrites existing cells and the
+  // part that overflows past the end of the result. Previously the overflow
+  // was silently dropped by planDataGridPaste (issue #15263).
+  const rowSlots = Math.max(0, (recordIndexes?.length ?? displayRowCount.value) - startPosition);
+  const overwriteRows = rows.slice(0, rowSlots);
+  const overflowRows = rows.slice(rowSlots);
+
+  // Only append overflow rows for a plain cell paste onto already-saved rows.
+  // Transpose scope, column selections, draft/new rows and read-only columns
+  // keep their established bounded-overwrite behaviour.
+  const startItem = displayItemAt(start.rowIndex);
+  const insertColumnIndexes = visibleColumnIndexes.value.slice(start.colIndex);
+  const canOverflow =
+    overflowRows.length > 0 &&
+    !recordIndexes &&
+    !hasColumnSelection.value &&
+    !!startItem &&
+    !startItem.isNew &&
+    !startItem.isDraft &&
+    !startItem.isDeleted &&
+    canInsertRows.value &&
+    overflowRows.length <= availableInsertRows.value &&
+    insertColumnIndexes.length > 0 &&
+    insertColumnIndexes.every((col) => canEditColumn(col));
+
   let applied = false;
-  beginBatch();
+  // When an append will follow, capture one undo snapshot up front so the
+  // overwrite and the appended rows undo together as a single change.
+  beginBatch({ captureUndo: canOverflow });
   try {
-    for (const cell of planDataGridPaste(rows, (recordIndexes?.length ?? displayRowCount.value) - startPosition, visibleColumns.value.length - start.colIndex)) {
+    for (const cell of planDataGridPaste(overwriteRows, rowSlots, visibleColumns.value.length - start.colIndex)) {
       const rowIndex = recordIndexes ? recordIndexes[startPosition + cell.rowOffset] : start.rowIndex + cell.rowOffset;
       const item = displayItemAt(rowIndex);
       if (!item) continue;
@@ -11134,8 +11163,36 @@ function pasteRowsIntoSelection(rows: readonly (readonly (string | null)[])[]): 
   } finally {
     commitBatch();
   }
-  if (applied) toast(t("grid.pasted"));
-  return applied;
+
+  const finish = (inserted: boolean) => {
+    if (overflowRows.length > 0 && !inserted) {
+      // Insert was not available; make the dropped rows explicit instead of
+      // silently losing them, even though the in-bounds cells were overwritten.
+      toast(t("grid.pasteRowsTruncated", { applied: overwriteRows.length, dropped: overflowRows.length }), 5000);
+    } else if (applied || inserted) {
+      toast(t("grid.pasted"));
+    }
+    return applied || inserted;
+  };
+
+  if (!canOverflow) return finish(false);
+
+  // Append the overflow as new rows, reusing the existing batch-aware
+  // preparation (capacity checks, generated-column clearing, NULL fidelity)
+  // while skipping its own undo snapshot — beginBatch already captured one.
+  if (preparation) {
+    // The overwrite segment's commitBatch() advanced pendingChangesVersion, so
+    // the caller's isCurrent() (captured before the paste) would now report
+    // stale. Rebuild a preparation that keeps cancellation/progress but relies
+    // on the composable's fresh isCurrent() for state consistency.
+    const appendPreparation: DataGridRowPreparationOptions = {
+      signal: preparation.signal,
+      onProgress: preparation.onProgress,
+      isCurrent: () => !preparation.signal?.aborted && gridClipboardActive,
+    };
+    return appendPastedRowsAsNewRowsInBatches(overflowRows, insertColumnIndexes, undefined, appendPreparation, { skipUndoSnapshot: true }).then((result) => finish(result.ok));
+  }
+  return finish(appendPastedRowsAsNewRows(overflowRows, insertColumnIndexes, undefined, { skipUndoSnapshot: true }).ok);
 }
 
 function onGridPaste(event: ClipboardEvent) {

@@ -3716,6 +3716,7 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "{table}에 이 값과 일치하는 행이 없습니다.",
     foreignKeyPreviewFailed: "참조 행을 불러올 수 없습니다: {message}",
     sortOptions: "정렬 옵션",
+    pasteRowsTruncated: "{applied}개 행을 붙여넣었고, {dropped}개 행은 붙여넣지 못했습니다: 현재 결과에서 행 추가를 지원하지 않거나 추가할 수 있는 행 수가 부족합니다.",
     pasteCellText: "이 셀에 텍스트 붙여넣기",
     pasteCellTextFailed: "셀에 텍스트를 붙여넣을 수 없습니다: {message}",
   },

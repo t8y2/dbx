@@ -3784,6 +3784,7 @@ export default withEnglishFallback({
     foreignKeyPreviewEmpty: "「{table}」にこの値と一致する行はありません。",
     foreignKeyPreviewFailed: "参照行を読み込めませんでした：{message}",
     sortOptions: "並べ替えオプション",
+    pasteRowsTruncated: "{applied} 行を貼り付けました。残りの {dropped} 行は貼り付けられませんでした：現在の結果は行の追加をサポートしていないか、追加できる行数が不足しています。",
     pasteCellText: "このセルにテキストを貼り付け",
     pasteCellTextFailed: "セルにテキストを貼り付けできません：{message}",
   },

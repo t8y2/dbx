@@ -354,8 +354,7 @@ async function runIndexBuild(connectionId: string): Promise<void> {
   if (indexBusyConnection.value) return;
   indexBusyConnection.value = connectionId;
   try {
-    await rebuildMetadataIndex(connectionId);
-    toast(t("quickOpen.indexBuildComplete"), 3000);
+    if (await rebuildMetadataIndex(connectionId)) toast(t("quickOpen.indexBuildComplete"), 3000);
   } catch {
     toast(t("quickOpen.indexBuildFailed"), 5000);
   } finally {
@@ -367,8 +366,7 @@ async function runAllIndexBuild(): Promise<void> {
   if (indexBusyConnection.value) return;
   indexBusyConnection.value = "__all__";
   try {
-    await rebuildAllMetadataIndexes();
-    toast(t("quickOpen.indexBuildComplete"), 3000);
+    if (await rebuildAllMetadataIndexes()) toast(t("quickOpen.indexBuildComplete"), 3000);
   } catch {
     toast(t("quickOpen.indexBuildFailed"), 5000);
   } finally {
@@ -440,6 +438,12 @@ function handleKeyDown(e: KeyboardEvent): void {
     if (contentMode.value) selectPrevious();
     else navigateVisible(-1);
   } else if (e.key === "Enter") {
+    if (contentMode.value && displayedSearchQuery.value !== searchQuery.value) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (!contentMode.value && displayedSearchQuery.value !== searchQuery.value) refreshDisplayedResults();
     const target = contentMode.value ? contentSelectedItem.value : selectedDisplayItem.value;
     if (target) {
       e.preventDefault();

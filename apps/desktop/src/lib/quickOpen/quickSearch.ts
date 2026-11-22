@@ -132,16 +132,16 @@ export function parseQuickSearchQuery(raw: string): QuickSearchQuery {
 }
 
 function includesValue(value: string | undefined, expected: string | undefined): boolean {
-  return !expected || (value || "").toLocaleLowerCase().includes(expected.toLocaleLowerCase());
+  return !expected || (value || "").toLowerCase().includes(expected.toLowerCase());
 }
 
 function normalizedQuickSearchFields(result: QuickSearchResult & { filePath?: string; fileName?: string }, fields = quickSearchFields(result)): QuickSearchNormalizedFields {
   return {
     name: fields.name.toLowerCase(),
-    comment: fields.comment.toLocaleLowerCase(),
-    context: fields.context.toLocaleLowerCase(),
-    path: fields.path.toLocaleLowerCase(),
-    searchText: result.searchText.toLocaleLowerCase(),
+    comment: fields.comment.toLowerCase(),
+    context: fields.context.toLowerCase(),
+    path: fields.path.toLowerCase(),
+    searchText: result.searchText.toLowerCase(),
     pinyinName: containsHan(fields.name) ? pinyinFirstLetters(fields.name) : "",
   };
 }
@@ -175,9 +175,9 @@ function matchesQuickSearchQueryFields(result: QuickSearchResult, query: QuickSe
     if (!kindMatches) return false;
   }
   if (!matchesQuickSearchContext(result, query)) return false;
-  if (filters.schema && !(result.schemaNamespace ?? result.schema ?? "").toLocaleLowerCase().includes(filters.schema.toLocaleLowerCase())) return false;
-  if (filters.comment && !fields.comment.includes(filters.comment.toLocaleLowerCase())) return false;
-  if (filters.file && !fields.path.includes(filters.file.toLocaleLowerCase())) return false;
+  if (filters.schema && !(result.schemaNamespace ?? result.schema ?? "").toLowerCase().includes(filters.schema.toLowerCase())) return false;
+  if (filters.comment && !fields.comment.includes(filters.comment.toLowerCase())) return false;
+  if (filters.file && !fields.path.includes(filters.file.toLowerCase())) return false;
   if (filters.source && inferQuickSearchSource(result) !== filters.source) return false;
   if (filters.category) {
     const category = result.type === "sql_file" || result.type === "sql_library_file" || result.type === "content_match" ? "files" : result.type === "plugin_command" || result.type === "plugin_workbench" ? "commands" : "objects";
@@ -220,7 +220,7 @@ export function updateQuickSearchIndex<T extends QuickSearchResult & { filePath?
     const fields = quickSearchFields(result);
     const source = inferQuickSearchSource(result);
     const old = previousById.get(result.id);
-    if (old && old.source === source && old.fields.name === fields.name && old.fields.comment === fields.comment && old.fields.context === fields.context && old.fields.path === fields.path && old.normalized.searchText === result.searchText.toLocaleLowerCase()) {
+    if (old && old.source === source && old.fields.name === fields.name && old.fields.comment === fields.comment && old.fields.context === fields.context && old.fields.path === fields.path && old.normalized.searchText === result.searchText.toLowerCase()) {
       old.result = result;
       return old;
     }
@@ -253,7 +253,7 @@ export function updateQuickSearchIndex<T extends QuickSearchResult & { filePath?
 
 /** Narrow the full index using characters that must occur in any literal or fuzzy match. */
 export function quickSearchCandidateEntries<T extends QuickSearchResult>(index: QuickSearchIndex<T>, query: QuickSearchQuery): QuickSearchIndexEntry<T>[] {
-  const filterText = [query.text, query.filters.comment, query.filters.file, query.filters.connection, query.filters.database, query.filters.schema].filter(Boolean).join(" ").toLocaleLowerCase();
+  const filterText = [query.text, query.filters.comment, query.filters.file, query.filters.connection, query.filters.database, query.filters.schema].filter(Boolean).join(" ").toLowerCase();
   const characters = [...new Set([...filterText].filter((character) => !/\s/u.test(character)))];
   if (characters.length === 0) return index.entries;
 
@@ -289,7 +289,7 @@ export interface QuickSearchFieldMatch {
 
 /** Literal field matching used for comments, paths and connection context. */
 export function matchQuickSearchField(query: string, value: string): QuickSearchFieldMatch | null {
-  return matchQuickSearchFieldNormalized(query.trim().toLocaleLowerCase(), value.toLocaleLowerCase());
+  return matchQuickSearchFieldNormalized(query.trim().toLowerCase(), value.toLowerCase());
 }
 
 export function matchQuickSearchFieldNormalized(normalizedQuery: string, normalizedValue: string): QuickSearchFieldMatch | null {

@@ -396,7 +396,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const persistedMetadataWriteQueues = new Map<string, Promise<void>>();
   const persistedMetadataWriteSignatures = new Map<string, { generation: number; signature: string }>();
   const metadataIndexStatuses = ref<Record<string, QuickOpenIndexStatus>>({});
-  const metadataIndexBuilds = new Map<string, Promise<void>>();
+  const metadataIndexBuilds = new Map<string, Promise<boolean>>();
   const metadataIndexBuildGenerations = new Map<string, number>();
   let metadataIndexStatusGeneration = 0;
   const metadataIndexBuildingConnections = new Set<string>();
@@ -1136,6 +1136,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   }
 
   function quickOpenItemKey(item: QuickOpenItem): string {
+    if (item.type === "plugin_command" || item.type === "plugin_workbench") return JSON.stringify(["plugin", item.id]);
     if (item.type === "sql_file" && item.filePath) return JSON.stringify(["file", item.filePath]);
     if (item.type === "column") {
       return JSON.stringify(["column", item.connectionId, item.catalog ?? "", item.database ?? "", item.schema ?? "", item.tableName ?? "", item.columnName ?? item.label]);
@@ -1165,7 +1166,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     const merged = new Map<string, QuickOpenItem>();
     for (const item of items) {
       const key = quickOpenItemKey(item);
-      if (!merged.has(key)) merged.set(key, item);
+      merged.set(key, item);
     }
     return [...merged.values()];
   }
@@ -1255,7 +1256,12 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     }
   }
 
-  async function persistLiveQuickOpenMetadata(items: readonly QuickOpenItem[], options: { replaceConnectionId?: string; throwOnError?: boolean; status?: { state?: "ready" | "partial"; error?: string } } = {}): Promise<void> {
+  function persistedItemMatchesMetadataScope(item: PersistedQuickOpenItem, scope: MetadataIndexScope): boolean {
+    if (item.database !== scope.database || (item.catalog ?? "") !== (scope.catalog ?? "")) return false;
+    return scope.schema === undefined || (item.schema ?? "") === scope.schema;
+  }
+
+  async function persistLiveQuickOpenMetadata(items: readonly QuickOpenItem[], options: { replaceConnectionId?: string; replaceScopes?: readonly MetadataIndexScope[]; throwOnError?: boolean; status?: { state?: "ready" | "partial"; error?: string } } = {}): Promise<void> {
     if (persistedMetadataDisposed) return;
     const saveSchemaCache = optionalQuickOpenCacheApiMethod("saveSchemaCache");
     if (!saveSchemaCache) return;
@@ -1281,13 +1287,15 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           const snapshot = persistedQuickOpenSnapshot(item);
           return snapshot ? [snapshot] : [];
         });
-        if (snapshots.length === 0 && options.replaceConnectionId !== connectionId) return;
+        if (snapshots.length === 0 && options.replaceConnectionId !== connectionId && !options.replaceScopes?.some((scope) => scope.database === conn.database)) return;
         const mergedByKey = new Map<string, PersistedQuickOpenItem>();
         if (options.replaceConnectionId !== connectionId) {
+          const replaceScopes = options.replaceScopes ?? [];
           for (const item of persistedMetadataItems.value) {
             if (item.connectionId !== connectionId) continue;
             const snapshot = persistedQuickOpenSnapshot(item);
-            if (snapshot) mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
+            if (!snapshot || replaceScopes.some((scope) => persistedItemMatchesMetadataScope(snapshot, scope))) continue;
+            mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
           }
         }
         for (const snapshot of snapshots) mergedByKey.set(persistedQuickOpenItemKey(snapshot), snapshot);
@@ -1357,10 +1365,19 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     }
   }
 
+  interface MetadataIndexScope {
+    database: string;
+    catalog?: string;
+    schema?: string;
+  }
+
   interface MetadataIndexBuildResult {
     items: QuickOpenItem[];
-    failedScopes: string[];
+    failedScopes: MetadataIndexScope[];
+    coveredScopes: MetadataIndexScope[];
   }
+
+  const metadataIndexScopeLabel = (scope: MetadataIndexScope): string => [scope.catalog, scope.database, scope.schema].filter(Boolean).join(" / ");
 
   async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
     const results: R[] = [];
@@ -1484,7 +1501,8 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
       };
     };
 
-    const failedScopes: string[] = [];
+    const failedScopes: MetadataIndexScope[] = [];
+    const coveredScopes: MetadataIndexScope[] = [];
     for (const { database, catalog } of scopes.values()) {
       assertCurrent();
       addItem(createDatabaseItem(database, catalog));
@@ -1494,7 +1512,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           schemas = await connectionStore.listCompletionSchemas(connection.id, database);
         }
       } catch {
-        failedScopes.push([catalog, database].filter(Boolean).join(" / "));
+        failedScopes.push({ database, catalog });
         continue;
       }
       for (const schema of schemas) addItem(createSchemaItem(database, schema, catalog));
@@ -1503,6 +1521,10 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
       await mapWithConcurrency(tableScopes, 4, async (tableScope) => {
         try {
           assertCurrent();
+          const scopeItems = new Map<string, QuickOpenItem>();
+          const addScopeItem = (item: QuickOpenItem): void => {
+            scopeItems.set(quickOpenItemKey(item), item);
+          };
           let tables: SqlCompletionTable[];
           if (catalog && typeof api.listTables === "function") {
             const rawTables = await api.listTables(connection.id, database, databaseObjectTreeQuerySchema(effectiveDatabaseTypeForConnection(connection), database, tableScope.schema), undefined, undefined, undefined, undefined, catalog);
@@ -1522,30 +1544,32 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           await mapWithConcurrency(tables, 4, async (table) => {
             assertCurrent();
             const relation = remoteTableItem({ ...table, database, catalog: table.catalog ?? catalog, schema: table.schema ?? tableScope.schema }, connection, database, catalog);
-            addItem(relation);
+            addScopeItem(relation);
             if (typeof connectionStore.listCompletionColumns !== "function") return;
             const columns = await connectionStore.listCompletionColumns(connection.id, database, table.name, table.schema ?? tableScope.schema, undefined, catalog, { activateConnection: false });
             assertCurrent();
-            for (const column of columns) addItem(createColumnItem(table, column, database, catalog));
+            for (const column of columns) addScopeItem(createColumnItem(table, column, database, catalog));
           });
 
           if (!catalog && typeof connectionStore.listCompletionObjects === "function") {
             const objects = await connectionStore.listCompletionObjects(connection.id, database, "", undefined, tableScope.schema, undefined, true, undefined);
             for (const object of objects) {
               const item = createRoutineItem(object, database, tableScope.schema ?? object.schema, catalog);
-              if (item) addItem(item);
+              if (item) addScopeItem(item);
             }
           }
+          for (const item of scopeItems.values()) addItem(item);
+          coveredScopes.push({ database, catalog, schema: tableScope.schema });
         } catch (error) {
           if (error instanceof MetadataIndexBuildCancelled) throw error;
-          failedScopes.push([catalog, database, tableScope.schema].filter(Boolean).join(" / "));
+          failedScopes.push({ database, catalog, schema: tableScope.schema });
         }
       });
     }
-    return { items: [...items.values()], failedScopes };
+    return { items: [...items.values()], failedScopes, coveredScopes };
   }
 
-  async function rebuildMetadataIndex(connectionId: string): Promise<void> {
+  async function rebuildMetadataIndex(connectionId: string): Promise<boolean> {
     const existing = metadataIndexBuilds.get(connectionId);
     if (existing) return existing;
     const buildGeneration = (metadataIndexBuildGenerations.get(connectionId) ?? 0) + 1;
@@ -1562,19 +1586,24 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         if (!connection) throw new Error(`Connection not found: ${connectionId}`);
         if (!isQuickOpenMetadataIndexSupported(connection.db_type)) throw new Error(`Metadata indexes are not supported for ${connection.db_type}`);
         metadataIndexStatuses.value = { ...metadataIndexStatuses.value, [connectionId]: { connectionId, state: "building", itemCount: previousStatus?.itemCount ?? 0, capturedAt: previousStatus?.capturedAt } };
+        if (typeof connectionStore.invalidateCompletionCache === "function") connectionStore.invalidateCompletionCache(connectionId);
         await connectionStore.ensureConnected(connectionId, { activate: false, passive: true });
         assertCurrent();
         const buildResult = await loadAllMetadataIndexObjects(connection, assertCurrent);
         assertCurrent();
-        if (buildResult.failedScopes.length > 0 && buildResult.items.length === 0) throw new Error(`Metadata index collection failed for ${buildResult.failedScopes.length} scope(s)`);
+        if (buildResult.failedScopes.length > 0 && buildResult.coveredScopes.length === 0) throw new Error(`Metadata index collection failed for ${buildResult.failedScopes.length} scope(s)`);
+        const partial = buildResult.failedScopes.length > 0;
+        const failedScopeText = buildResult.failedScopes.map(metadataIndexScopeLabel).join(", ");
         await persistLiveQuickOpenMetadata(buildResult.items, {
-          replaceConnectionId: connectionId,
+          ...(partial ? { replaceScopes: buildResult.coveredScopes } : { replaceConnectionId: connectionId }),
           throwOnError: true,
-          status: buildResult.failedScopes.length > 0 ? { state: "partial", error: `Failed scopes: ${buildResult.failedScopes.join(", ")}` } : { state: "ready" },
+          status: partial ? { state: "partial", error: `Failed scopes: ${failedScopeText}` } : { state: "ready" },
         });
+        assertCurrent();
         persistedMetadataLoadGeneration += 1;
         persistedMetadataConnectionSignature = "";
         await loadPersistedQuickOpenMetadata();
+        assertCurrent();
         const loadSchemaCache = optionalQuickOpenCacheApiMethod("loadSchemaCache");
         const payload = loadSchemaCache ? await loadSchemaCache(quickOpenMetadataCacheKey(connectionId)) : null;
         const persistedStatus = payload ? quickOpenIndexStatus(connectionId, payload) : undefined;
@@ -1582,11 +1611,20 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           ...metadataIndexStatuses.value,
           [connectionId]:
             buildResult.failedScopes.length > 0
-              ? { connectionId, state: "partial", itemCount: persistedStatus?.itemCount ?? buildResult.items.length, capturedAt: persistedStatus?.capturedAt, error: `Failed scopes: ${buildResult.failedScopes.join(", ")}` }
+              ? { connectionId, state: "partial", itemCount: persistedStatus?.itemCount ?? buildResult.items.length, capturedAt: persistedStatus?.capturedAt, error: `Failed scopes: ${buildResult.failedScopes.map(metadataIndexScopeLabel).join(", ")}` }
               : (persistedStatus ?? { connectionId, state: "ready", itemCount: buildResult.items.length }),
         };
+        return true;
       } catch (error) {
-        if (error instanceof MetadataIndexBuildCancelled) return;
+        if (error instanceof MetadataIndexBuildCancelled) {
+          if (metadataIndexStatuses.value[connectionId]?.state === "building") {
+            metadataIndexStatuses.value = {
+              ...metadataIndexStatuses.value,
+              [connectionId]: previousStatus ?? { connectionId, state: "not-built", itemCount: 0 },
+            };
+          }
+          return false;
+        }
         // A failed build did not replace the cache. Subsequent live metadata
         // loads continue refreshing the previous snapshot normally.
         metadataIndexStatuses.value = {
@@ -1600,17 +1638,18 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     })();
     metadataIndexBuilds.set(connectionId, build);
     try {
-      await build;
+      return await build;
     } finally {
       if (metadataIndexBuilds.get(connectionId) === build) metadataIndexBuilds.delete(connectionId);
     }
   }
 
-  async function rebuildAllMetadataIndexes(): Promise<void> {
+  async function rebuildAllMetadataIndexes(): Promise<boolean> {
     const indexable = connectionStore.connections.filter((connection) => isQuickOpenMetadataIndexSupported(connection.db_type));
     const results = await Promise.allSettled(indexable.map((connection) => rebuildMetadataIndex(connection.id)));
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failures.length > 0) throw new Error(`${failures.length} search index build(s) failed`);
+    return results.some((result): result is PromiseFulfilledResult<boolean> => result.status === "fulfilled" && result.value);
   }
 
   async function clearMetadataIndex(connectionId: string): Promise<void> {
@@ -2167,9 +2206,9 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
     const parsedQuery = parseQuickSearchQuery(searchQuery.value);
     const queryText = parsedQuery.text;
-    const normalizedQuery = queryText.trim().toLocaleLowerCase();
+    const normalizedQuery = queryText.trim().toLowerCase();
     const candidates = quickSearchCandidateEntries(quickSearchIndex.value, parsedQuery);
-    const buckets: [MatchedItem[], MatchedItem[], MatchedItem[]] = [[], [], []];
+    const buckets = new Map<string, MatchedItem[]>();
     const seen = new Set<string>();
     const matchMode = options.matchMode?.value ?? "enhanced";
 
@@ -2195,12 +2234,14 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         matchScore: result.score + (labelMatch ? 0 : 1000),
         matchIndices: labelMatch?.indices ?? [],
       };
-      const bucket = buckets[resultCategoryOrder(item)]!;
+      const category = quickSearchCategory(item);
+      const bucket = buckets.get(category) ?? [];
       const limit = item.source === "remote" ? REMOTE_SEARCH_MAX_RESULTS_PER_CATEGORY : QUICK_OPEN_MAX_RESULTS;
       addTopMatchedItem(bucket, matched, limit);
+      buckets.set(category, bucket);
     }
 
-    const matched = buckets.flat();
+    const matched = [...buckets.values()].flat();
     matched.sort(compareMatchedItems);
     return matched;
   });

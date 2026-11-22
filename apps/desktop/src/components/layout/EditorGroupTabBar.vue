@@ -2238,27 +2238,25 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           @wheel="onRailWheel"
         >
           <CustomContextMenu v-for="group in twoRowGroupItems" :key="group.key" :items="() => getTwoRowGroupMenuItems(group)" v-slot="{ onContextMenu }">
-            <div class="relative flex shrink-0 items-center" @contextmenu="openTabGroupContextMenu($event, onContextMenu)">
-              <button type="button" class="tab-group-header" :class="{ 'tab-group-header--active': twoRowSelectedKey === group.key }" :style="group.colorStyle" :title="group.label" :aria-pressed="twoRowSelectedKey === group.key" @click="selectTwoRowGroup(group)">
-                <span class="tab-group-header-content">
-                  <span class="tab-group-marker" aria-hidden="true" />
-                  <PlugZap v-if="isPluginTabGroup(group.tab)" class="tab-group-database-icon text-violet-600 dark:text-violet-400" aria-hidden="true" />
-                  <ConnectionIcon v-else-if="group.key && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(group.tab.connectionId)" class="tab-group-database-icon" aria-hidden="true" />
-                  <DatabaseIcon v-else :db-type="tabDatabaseIconType(group.tab)" class="tab-group-database-icon" aria-hidden="true" />
-                  <span class="tab-group-label">{{ group.label }}</span>
-                  <span class="tab-group-count">{{ group.count }}</span>
-                </span>
-              </button>
-              <button
-                type="button"
-                class="absolute end-1 flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground"
-                :aria-label="`${t('contextMenu.closeTabGroup')} · ${group.label}`"
-                :title="t('contextMenu.closeTabGroup')"
-                @click="closeTabsByIds(group.tabIds)"
-              >
-                <X class="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            </div>
+            <button
+              type="button"
+              class="tab-group-header"
+              :class="{ 'tab-group-header--active': twoRowSelectedKey === group.key }"
+              :style="group.colorStyle"
+              :title="group.label"
+              :aria-pressed="twoRowSelectedKey === group.key"
+              @click="selectTwoRowGroup(group)"
+              @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
+            >
+              <span class="tab-group-header-content">
+                <span class="tab-group-marker" aria-hidden="true" />
+                <PlugZap v-if="isPluginTabGroup(group.tab)" class="tab-group-database-icon text-violet-600 dark:text-violet-400" aria-hidden="true" />
+                <ConnectionIcon v-else-if="group.key && settingsStore.editorSettings.tabGroupMode === 'sidebar'" :connection="connectionStore.getConfig(group.tab.connectionId)" class="tab-group-database-icon" aria-hidden="true" />
+                <DatabaseIcon v-else :db-type="tabDatabaseIconType(group.tab)" class="tab-group-database-icon" aria-hidden="true" />
+                <span class="tab-group-label">{{ group.label }}</span>
+                <span class="tab-group-count">{{ group.count }}</span>
+              </span>
+            </button>
           </CustomContextMenu>
           <!-- App surfaces are rail-level contexts, not tabs of the selected group: they trail the group pills in the same scroll row. -->
           <CustomContextMenu v-for="page in railSpecialPageItems" :key="page.surface" :items="() => getSpecialPageTabMenuItems(page.surface)" v-slot="{ onContextMenu }">

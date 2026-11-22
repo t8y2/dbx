@@ -1002,9 +1002,8 @@
 
 /* Long connection names must not eat the whole rail. Respect the user's tab
  * width cap when one is configured; otherwise keep a sane 16rem default. */
-.app-tab-bar:not(.vertical-tab-layout) .tab-group-rail .tab-group-header-content {
+.tab-group-rail .tab-group-header-content {
   max-width: var(--tab-max-width, 16rem);
-  padding-inline-end: 1.75rem;
 }
 
 /* The base ::after pushes the accent 0.2rem past the pill's right edge so a

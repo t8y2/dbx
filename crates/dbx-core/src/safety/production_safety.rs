@@ -562,11 +562,9 @@ fn tokenize_scope_query(dialect: &dyn Dialect, sql: &str) -> Option<Vec<Token>> 
 /// collect the tables directly, including comma joins inside any query block.
 fn static_mysql_cte_qualifiers(sql: &str, db_type: &DatabaseType) -> Option<HashSet<String>> {
     if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris)
-        || first_keyword(sql).as_deref() != Some("with")
         || sql.contains(['\\', '"', '#', '$'])
         || sql.contains("/*")
         || sql.contains("--")
-        || crate::query_execution_sql::is_write_sql_for_database(sql, *db_type)
     {
         return None;
     }
@@ -574,14 +572,33 @@ fn static_mysql_cte_qualifiers(sql: &str, db_type: &DatabaseType) -> Option<Hash
     // Those inputs keep the existing conservative scan.
     let dialect = MySqlDialect {};
     let statements = Parser::new(&dialect).with_tokens(tokenize_scope_query(&dialect, sql)?).parse_statements().ok()?;
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return None;
-    };
+    let query = static_mysql_cte_query(statements.as_slice())?;
     query.with.as_ref()?;
     let mut scope = StaticMysqlCteScope::default();
-    match statements.visit(&mut scope) {
+    match query.visit(&mut scope) {
         ControlFlow::Continue(()) => Some(scope.qualifiers),
         ControlFlow::Break(()) => None,
+    }
+}
+
+/// Returns the query whose CTE definitions can be trusted for a static scope
+/// proof.
+///
+/// Besides a plain `WITH … SELECT`, MCP callers send `EXPLAIN WITH …` and
+/// `INSERT INTO … WITH … SELECT`. Both keep the same `Query` node, so the
+/// visitor can prove their CTE names instead of falling back to the legacy
+/// FROM scan, which crossed the CTE boundary and rejected these statements
+/// as out of scope (#15288).
+fn static_mysql_cte_query(statements: &[Statement]) -> Option<&Query> {
+    match statements {
+        [Statement::Query(query)] => Some(query),
+        [Statement::Explain { statement, .. }] => match statement.as_ref() {
+            Statement::Query(query) => Some(query),
+            Statement::Insert(insert) => insert.source.as_deref(),
+            _ => None,
+        },
+        [Statement::Insert(insert)] => insert.source.as_deref(),
+        _ => None,
     }
 }
 
@@ -1761,6 +1778,42 @@ mod tests {
                 connection_scope_rejects(sql, &db_type, "reporting", &allowed),
                 "non-PostgreSQL query changed behavior ({db_type:?}): {sql}"
             );
+        }
+    }
+
+    #[test]
+    fn mysql_cte_scope_proof_covers_explain_and_insert_forms() {
+        // Doris MCP callers send `EXPLAIN WITH …` and `INSERT INTO … WITH …`.
+        // Both wrap the same query block, so the static CTE proof must reach
+        // them instead of falling back to the legacy FROM scan (#15288).
+        let allowed = vec!["reporting".to_string()];
+        for sql in [
+            "EXPLAIN WITH a AS (SELECT 1 AS id), b AS (SELECT id FROM a), c AS (SELECT id FROM b) SELECT id FROM c LIMIT 1",
+            "EXPLAIN ANALYZE WITH a AS (SELECT 1 AS id) SELECT id FROM a",
+            "INSERT INTO logs (id) WITH a AS (SELECT 1 AS id), b AS (SELECT id FROM a) SELECT id FROM b",
+            "EXPLAIN INSERT INTO logs (id) WITH a AS (SELECT 1 AS id) SELECT id FROM a",
+        ] {
+            for db_type in [DatabaseType::Doris, DatabaseType::Mysql] {
+                assert!(
+                    !connection_scope_rejects(sql, &db_type, "reporting", &allowed),
+                    "static CTE proof missed a supported form ({db_type:?}): {sql}"
+                );
+            }
+        }
+        for sql in [
+            "EXPLAIN WITH a AS (SELECT id FROM production.users) SELECT id FROM a",
+            "INSERT INTO logs (id) WITH a AS (SELECT id FROM production.users) SELECT id FROM a",
+            "WITH a AS (SELECT id FROM production.users) SELECT id FROM a",
+            // A UNION body is not part of the static proof; the legacy scan
+            // must keep rejecting the cross-database branch.
+            "INSERT INTO logs (id) WITH a AS (SELECT 1 AS id) SELECT id FROM a UNION SELECT id FROM production.users",
+        ] {
+            for db_type in [DatabaseType::Doris, DatabaseType::Mysql] {
+                assert!(
+                    connection_scope_rejects(sql, &db_type, "reporting", &allowed),
+                    "cross-database CTE reference was accepted ({db_type:?}): {sql}"
+                );
+            }
         }
     }
 

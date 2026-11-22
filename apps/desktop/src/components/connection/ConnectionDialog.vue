@@ -81,7 +81,7 @@ import {
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isWindows } from "@/lib/backend/platform";
-import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, externalBasePath, normalizeBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
 import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
@@ -100,7 +100,8 @@ import {
   supportsIdleTimeout,
 } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
-import { applyConnectionDeepLinkUpdate, resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
+import { applyConnectionEditPrefill, resolveConnectionEditPrefill, type ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
 import {
   connectionDeepLinkServiceHydrationValue,
   parseConnectionDeepLink,
@@ -351,7 +352,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
-  updatePrefill?: ConnectionDeepLinkUpdate | null;
+  updatePrefill?: ConnectionEditPrefill | null;
   pluginProvider?: PluginCenterFocus | null;
   initialTab?: ConfigTab;
 }>();
@@ -1736,13 +1737,15 @@ const INFLUXDB_V3_DEFAULT_PORT = 8181;
 
 const influxDbVersion = ref<InfluxDbVersion>("1");
 const influxDbOrg = ref("");
+const influxDbBasePath = ref("");
 const victoriaMetricsApiPath = ref("/prometheus");
 const victoriaMetricsLookback = ref("1h");
 
 function resetInfluxDbFields(config?: Partial<InfluxDbExternalConfig>, versionHint?: InfluxDbVersion) {
   const version = versionHint ?? (config?.version === "2" ? "2" : config?.version === "3" ? "3" : "1");
   influxDbVersion.value = version;
-  influxDbOrg.value = config?.org?.trim() || "";
+  influxDbOrg.value = typeof config?.org === "string" ? config.org.trim() : "";
+  influxDbBasePath.value = externalBasePath(config);
 }
 
 function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
@@ -1750,6 +1753,11 @@ function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
     resetInfluxDbFields(undefined, versionHint);
     return;
   }
+  // The driver accepts both spellings, so the form has to read both as well:
+  // `buildInfluxDbExternalConfig` rebuilds the whole external config from the
+  // form, and a stored `base_path` would otherwise be dropped on save.
+  // `externalBasePath` resolves both keys with the same precedence as the
+  // driver, so the form cannot show a prefix the driver would ignore.
   resetInfluxDbFields(value as Partial<InfluxDbExternalConfig>, versionHint);
 }
 
@@ -1768,15 +1776,18 @@ function resetDamengJvmOptions(config?: Pick<ConnectionConfig, "agent_java_optio
 }
 
 function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
+  // Reverse proxies that serve InfluxDB under a sub path need that prefix on
+  // every request URL, so it is stored normalized next to the version.
+  const basePath = normalizeBasePath(influxDbBasePath.value);
   // InfluxDB 3 Core can run with --without-auth; the driver treats an empty
   // password as "no Authorization header", so the token stays optional here.
-  if (influxDbVersion.value === "3") return { version: "3" };
-  if (influxDbVersion.value !== "2") return { version: "1" };
+  if (influxDbVersion.value === "3") return basePath ? { version: "3", basePath } : { version: "3" };
+  if (influxDbVersion.value !== "2") return basePath ? { version: "1", basePath } : { version: "1" };
   const org = influxDbOrg.value.trim();
   if (!org) throw new Error("InfluxDB 2.x organization is required");
   if (!form.value.password.trim()) throw new Error("InfluxDB 2.x token is required");
   if (!form.value.database?.trim()) throw new Error("InfluxDB 2.x bucket is required");
-  return { version: "2", org };
+  return basePath ? { version: "2", org, basePath } : { version: "2", org };
 }
 
 function resetVictoriaMetricsFields(config?: Partial<VictoriaMetricsExternalConfig>) {
@@ -3291,7 +3302,7 @@ function switchGbaseProfile(profile: GbaseProfile) {
 }
 
 let applyingConnectionUpdate = false;
-let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
+let appliedConnectionUpdate: ConnectionEditPrefill | null = null;
 
 /**
  * 免确认保存的去重键。必须早于下面这个 `immediate` watcher 声明——更新链接的
@@ -3325,7 +3336,7 @@ watch(
     // flag the update as applied when the prefill really targeted this
     // connection, so an ID mismatch cannot freeze port-flag recomputation.
     const connectionUpdate = savedConfig && props.updatePrefill?.connectionId === savedConfig.id ? props.updatePrefill : null;
-    const config = connectionUpdate && savedConfig ? applyConnectionDeepLinkUpdate(savedConfig, connectionUpdate) : savedConfig;
+    const config = connectionUpdate && savedConfig ? applyConnectionEditPrefill(savedConfig, connectionUpdate) : savedConfig;
     resetConnectionNoteVisibilityDraft(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes);
     editGlobalConnectTimeoutSecs.value = settingsStore.editorSettings.globalConnectTimeoutSecs;
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
@@ -3494,9 +3505,9 @@ watch(
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
-      if (props.updatePrefill) {
+      if (connectionUpdate) {
         finishApplyingConnectionUpdate();
-        submitUpdateIfAutoConfirmed(props.updatePrefill);
+        if (connectionUpdate.source !== "plugin") submitUpdateIfAutoConfirmed(connectionUpdate);
       }
       // Form/profile watchers normalize derived fields in this flush. Capture
       // the saved baseline afterwards so those initial changes are not treated
@@ -4913,6 +4924,15 @@ function applyConnectionUrlToForm(input: string): boolean {
       selectedType.value = "gbase";
     } else {
       selectedType.value = parsed.driverProfile;
+    }
+    if (parsed.dbType === "influxdb" || parsed.dbType === "influxdb3") {
+      // The influxdb3 engine is presented as a version option inside the
+      // InfluxDB card; the form keeps db_type = influxdb and the save side
+      // swaps it back to influxdb3.
+      if (parsed.dbType === "influxdb3") {
+        form.value.db_type = "influxdb";
+      }
+      hydrateInfluxDbFields(form.value.external_config, parsed.dbType === "influxdb3" ? "3" : undefined);
     }
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
@@ -7120,8 +7140,8 @@ function validateConnectionUpdateTarget() {
   const update = props.updatePrefill ?? appliedConnectionUpdate;
   if (!update) return;
   const target = store.getConfig(update.connectionId);
-  resolveConnectionDeepLinkUpdate(update, target ? [target] : [], false);
-  if (editingId.value !== update.connectionId) throw new Error("The connection specified by the update link is no longer being edited.");
+  resolveConnectionEditPrefill(update, target ? [target] : [], false);
+  if (editingId.value !== update.connectionId) throw new Error("The target connection is no longer being edited.");
 }
 
 async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
@@ -9276,6 +9296,13 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                       <Input v-model="form.host" class="col-span-2" />
                       <Input v-model.number="form.port" type="number" class="col-span-1" />
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.influxdbApiPath") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <Input v-model="influxDbBasePath" placeholder="/influxdb" />
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.influxdbApiPathHint") }}</p>
+                      </div>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <span />

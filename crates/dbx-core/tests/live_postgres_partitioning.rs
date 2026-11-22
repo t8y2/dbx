@@ -318,6 +318,7 @@ async fn live_postgres_create_partitioned_table_executes() {
         transwarp_create: None,
         partitioned: false,
         foreign_table: false,
+        table_type: None,
         is_gaussdb_m_mode: false,
         table_collation: None,
         primary_key_name: None,

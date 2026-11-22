@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 import { CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider } from "@/lib/connection/connectionDeepLink";
+import type { ConnectionEditPrefill } from "@/lib/connection/connectionEditPrefill";
 
 const visibleTab = vi.hoisted(() => ({ value: "connection" }));
 
@@ -188,8 +189,9 @@ async function settle() {
   for (let i = 0; i < 8; i++) await nextTick();
 }
 
-async function mountDialog(config: ConnectionConfig, url = "", initiallyOpen = true) {
-  const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill: url ? parseConnectionDeepLinkUpdate(url) : null });
+async function mountDialog(config: ConnectionConfig, prefill: string | ConnectionEditPrefill = "", initiallyOpen = true) {
+  const updatePrefill = typeof prefill === "string" ? parseConnectionDeepLinkUpdate(prefill) : prefill;
+  const props = reactive({ open: initiallyOpen, editConfig: config, updatePrefill });
   store.getConfig.mockReturnValue(config);
   const container = document.createElement("div");
   document.body.append(container);
@@ -1062,6 +1064,49 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
 
     expect(store.updateConnection).toHaveBeenCalledTimes(1);
     expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", host: "new.example.test" }));
+  });
+
+  it.each(["dismiss", "save"])("keeps a plugin edit draft pending user action even with auto-save enabled (%s)", async (action) => {
+    settings.editorSettings.deepLinkConnectionConfirmMode = "all";
+    const saved = savedConnection();
+    const patch = { name: "Renamed connection", host: "new.example.test", port: 3310, database: "reports", note: "Managed in DBX", username: "new-user", password: "fresh-secret+&" };
+    const props = await mountDialog(saved, { source: "plugin", connectionId: saved.id, patch });
+
+    expect(props.open).toBe(true);
+    expect([...document.querySelectorAll("input")].map((input) => input.value)).toEqual(expect.arrayContaining([patch.name, patch.host, String(patch.port), patch.database, patch.username, patch.password]));
+    expect([...document.querySelectorAll("textarea")].some((input) => input.value === patch.note)).toBe(true);
+    expect(store.updateConnection).not.toHaveBeenCalled();
+    expect(backend.testConnectionWithInfo).not.toHaveBeenCalled();
+
+    const button = action === "dismiss" ? document.querySelector<HTMLButtonElement>('[data-testid="dismiss-dialog"]') : [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "Save");
+    expect(button).toBeTruthy();
+    button!.click();
+    await settle();
+
+    if (action === "save") {
+      expect(store.updateConnection).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: saved.id, read_only: saved.read_only, is_production: saved.is_production, ssl: saved.ssl, ...patch }));
+    } else {
+      expect(store.updateConnection).not.toHaveBeenCalled();
+    }
+    expect(props.open).toBe(false);
+    expect(store.addConnection).not.toHaveBeenCalled();
+    expect(store.connect).not.toHaveBeenCalled();
+    expect(saved.password).toBe("old-password");
+  });
+
+  it("saves a file connection's display fields through the native editor", async () => {
+    const saved = savedConnection({ db_type: "sqlite", driver_profile: "sqlite", driver_label: "SQLite", host: "D:/reports/archived.db", port: 0 });
+    const patch = { name: "Archived reports", note: "Quarterly snapshot", color: "#2563eb" };
+    await mountDialog(saved, { source: "plugin", connectionId: saved.id, patch });
+    expect(store.updateConnection).not.toHaveBeenCalled();
+
+    const save = [...document.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "Save");
+    expect(save).toBeTruthy();
+    save!.click();
+    await settle();
+
+    expect(store.updateConnection).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: saved.id, host: saved.host, db_type: "sqlite", ...patch }));
+    expect(store.connect).not.toHaveBeenCalled();
   });
 
   it("keeps an id update link open for confirmation in the default mode", async () => {

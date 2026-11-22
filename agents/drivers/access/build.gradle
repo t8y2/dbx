@@ -1,5 +1,5 @@
 dependencies {
-    implementation 'io.github.spannm:ucanaccess:5.2.0'
+    implementation 'io.github.spannm:ucanaccess:5.3.0'
     implementation 'io.github.spannm:jackcess-encrypt:5.2.0'
 }
 

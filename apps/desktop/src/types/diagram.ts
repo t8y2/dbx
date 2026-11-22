@@ -1,4 +1,5 @@
 import type { CustomDiagramRelationship, DiagramPosition, DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram";
+import type { DiagramTableIdentity } from "@/lib/diagram/diagramMetadataLoader";
 
 export interface InferredRelationship {
   id: string;
@@ -27,6 +28,7 @@ export interface HistorySnapshot {
   positions: Record<string, DiagramPosition>;
   layers: DiagramLayer[];
   tables: DiagramTable[];
+  focusedTableSelection?: DiagramTableIdentity[];
   customRelationships: CustomDiagramRelationship[];
   edgeWaypoints: Record<string, { x: number; y: number }[]>;
   edgeHandleHints: Record<string, { sourceHandle?: string; targetHandle?: string }>;

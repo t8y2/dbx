@@ -1193,18 +1193,29 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
   }
 
-  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+  async function readFullExtractorResult(): Promise<QueryResult> {
+    const isSourceCurrent = captureExportConfirmationSource();
+    const readResult = options.captureFullExportResult?.() ?? fullExportResult;
+    const result = await readResult?.();
+    if (!result || !isSourceCurrent() || result.truncated || result.has_more || result.columns.length !== allColumns.value.length || result.columns.some((name, index) => name !== allColumns.value[index])) {
+      throw new Error(t("grid.exportDatabaseIncomplete"));
+    }
+    return { ...result, rows: await materializeExportSnapshot(result, isSourceCurrent) };
+  }
+
+  async function exportWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, scope: "selection" | "result" = "selection"): Promise<boolean> {
     if (!allowExport(extractor === "csv-with-headers" ? "csv" : extractor)) return false;
     let exported = false;
     await runExclusiveExport(async () => {
       if (!canCopyWithExtractor(extractor, extractorOptions)) return;
       try {
-        const extraction = await extractWithExtractor(extractor, extractorOptions);
+        const result = scope === "result" ? await readFullExtractorResult() : undefined;
+        const extraction = await extractWithExtractor(extractor, extractorOptions, undefined, result);
         if (!extraction) return;
         const extension = extraction.result.fileExtension.replace(/^\.+/, "") || "txt";
-        const baseName = `${exportFileBaseName?.value || tableMeta.value?.tableName || "export"}_selected`;
-        const saved = await saveTextFile(extraction.result.text, exportFileName(baseName, extension, { preferFallback: true }), extension.toUpperCase(), extension, {
-          operation: `selection-extractor-${extractor}`,
+        const baseName = exportFileBaseName?.value || tableMeta.value?.tableName || "export";
+        const saved = await saveTextFile(extraction.result.text, exportFileName(scope === "selection" ? `${baseName}_selected` : baseName, extension, { preferFallback: true }), extension.toUpperCase(), extension, {
+          operation: `${scope}-extractor-${extractor}`,
         });
         if (!saved) return;
         notifyExportSuccess(typeof saved === "string" ? saved : undefined);

@@ -225,16 +225,14 @@ test("a host without the plan API advertises no capability and fails closed", as
 test("a plan request survives the bridge unchanged for the plugin", async () => {
   const { messages, target } = sandbox();
   const capabilities: PluginPlanCapabilities = {
-    dbType: "postgres",
-    dbVersion: "15.19",
+    dbType: "sqlite",
     supports: { estimatedPlan: true },
     limits: { maxTimeoutMs: 30_000, maxPlanBytes: MAX_PLUGIN_PLAN_BYTES },
   };
   const result = {
-    dbType: "postgres",
-    dbVersion: "15.19",
+    dbType: "sqlite",
     format: "json" as const,
-    rawPlan: [{ Plan: { "Node Type": "Seq Scan", "Relation Name": "orders" } }],
+    rawPlan: [{ id: 3, parent: 0, notused: 0, detail: "SEARCH example USING INDEX idx_example_name" }],
     truncated: false,
     warnings: [],
   };

@@ -206,6 +206,20 @@ describe("DataGrid edit-table-structure shortcut", () => {
     expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "users", "columns", undefined, "warehouse", "table");
   });
 
+  it.each([
+    ["VIEW", "view"],
+    ["MATERIALIZED_VIEW", "materialized_view"],
+    ["TABLE", "table"],
+  ] as const)("opens the structure editor for a PostgreSQL %s as kind %s", async (metaTableType, expectedKind) => {
+    const { grid, openTableStructure } = mountGrid({
+      databaseType: "postgres",
+      tableMeta: { catalog: "warehouse", schema: "public", tableName: "orders_view", tableType: metaTableType, columns: [], primaryKeys: [] },
+    });
+    await settle();
+    expect(grid.value!.openTableStructureEditor()).toBe(true);
+    expect(openTableStructure).toHaveBeenCalledExactlyOnceWith("connection-1", "app", "public", "orders_view", "columns", undefined, "warehouse", expectedKind);
+  });
+
   it("returns false from openTableStructureEditor when table structure editing is not available", async () => {
     const { grid, openTableStructure } = mountGrid({ databaseType: "redis" });
     await settle();

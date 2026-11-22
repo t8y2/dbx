@@ -45,6 +45,13 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
 const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
 const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+/// ClickHouse has no unique constraints: `system.tables.primary_key` is only the
+/// sorting key the mutation reads, and many rows can share it (a MergeTree with
+/// `ORDER BY tuple()` has none at all). A key-based predicate can therefore
+/// address a whole block of rows — the exact "delete one row, lose the filtered
+/// set" report behind #15206 — so every ClickHouse predicate is verified to
+/// match a single row before the mutation runs.
+const CLICKHOUSE_NON_UNIQUE_KEY_ERROR: &str = "Cannot safely update or delete this row: ClickHouse identifies rows by its sorting key, which is not unique, and more than one row matches the condition Dbx generated. Narrow the result set, or run your own ALTER TABLE ... DELETE/UPDATE statement, before editing.";
 const POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row because its hidden row identifier is missing or invalid. Refresh the table data before saving.";
 const POSTGRES_CTID_STALE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded. Another session may have changed or deleted it. Refresh the table data and try again.";
 /// Dameng rejects every comparison against its binary LOB types with
@@ -1878,8 +1885,12 @@ fn build_data_grid_save_statements(
     // physical row, so its guard must match exactly one row rather than "at most one".
     let postgres_ctid_locator = is_postgres_ctid_primary_keys(options.database_type, &options.table_meta.primary_keys)
         && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
-    let guards_keyless_predicates =
-        (primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type)) || postgres_ctid_locator;
+    // ClickHouse is guarded even when it reports a "primary key": that metadata
+    // is the non-unique sorting key, so a key-based predicate can still match a
+    // whole block of rows.
+    let guards_keyless_predicates = (primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type))
+        || postgres_ctid_locator
+        || options.database_type == Some(DatabaseType::ClickHouse);
     let mut guarded_predicates: Vec<GuardedPredicate> = Vec::new();
     let guard_predicate = |predicate: &str, guarded: &mut Vec<GuardedPredicate>| {
         if !guards_keyless_predicates || predicate.trim().is_empty() {
@@ -2096,7 +2107,11 @@ fn build_data_grid_save_statements(
         sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({})", predicate.sql),
         max_matched_rows: 1,
         min_matched_rows: u32::from(predicate.requires_match),
-        message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+        message: if options.database_type == Some(DatabaseType::ClickHouse) {
+            CLICKHOUSE_NON_UNIQUE_KEY_ERROR.to_string()
+        } else {
+            KEYLESS_AMBIGUOUS_ROW_ERROR.to_string()
+        },
         min_message: predicate.requires_match.then(|| POSTGRES_CTID_STALE_ROW_ERROR.to_string()),
     }));
 
@@ -5206,6 +5221,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Sundb
                 | DatabaseType::Databend
                 | DatabaseType::Hive
+                | DatabaseType::ClickHouse
                 | DatabaseType::Iris
         )
     )
@@ -12926,6 +12942,51 @@ mod tests {
             ]
         );
         assert!(result.rollback_statements.is_empty());
+        // The sorting key is not unique, so the same key predicate is verified
+        // to match a single row before the mutation runs (#15206).
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert_eq!(
+            result.keyless_guards[0].sql,
+            "SELECT COUNT(*) AS dbx_keyless_row_matches FROM `people` WHERE (`id` = 1)"
+        );
+        assert_eq!(result.keyless_guards[0].max_matched_rows, 1);
+        assert_eq!(result.keyless_guards[0].message, CLICKHOUSE_NON_UNIQUE_KEY_ERROR);
+    }
+
+    #[test]
+    fn clickhouse_keyless_delete_matches_every_column_and_is_guarded() {
+        // Regression test for https://github.com/t8y2/dbx/issues/15206: without
+        // primary-key metadata the old code produced `DELETE WHERE ;`, and with
+        // a non-unique sorting key it could delete a whole block of rows.
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "UInt64", false, None), column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["ALTER TABLE `people` DELETE WHERE `id` = 1 AND `name` = 'Ada';"]);
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert_eq!(
+            result.keyless_guards[0].sql,
+            "SELECT COUNT(*) AS dbx_keyless_row_matches FROM `people` WHERE (`id` = 1 AND `name` = 'Ada')"
+        );
+        assert_eq!(result.keyless_guards[0].message, CLICKHOUSE_NON_UNIQUE_KEY_ERROR);
     }
 
     #[test]

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="200 280 640 460">
+<!-- Monochrome sidebar adaptation of ../duckdb.svg. Original vector geometry retained; foreground extraction / transparent detail treatment only. -->
+<defs><mask id="duckdb-mono" x="0.0" y="0.0" width="1024.0" height="1024.0" maskUnits="userSpaceOnUse" mask-type="luminance">
+<path xmlns="http://www.w3.org/2000/svg" fill="white" d="M731.034 450.765H650.65v121.241h80.384c33.536 0 60.979-27.648 60.979-60.979 0-33.28-27.443-60.262-60.98-60.262m-474.061 60.979a169.984 169.984 0 0 0 169.779 169.78 169.984 169.984 0 0 0 169.78-169.78 169.984 169.984 0 0 0-169.78-169.728 169.984 169.984 0 0 0-169.78 169.78z" />
+</mask></defs><rect x="0.0" y="0.0" width="1024.0" height="1024.0" fill="white" mask="url(#duckdb-mono)"/>
+</svg>

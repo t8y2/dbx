@@ -1,4 +1,4 @@
-import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizeToolbarItemOrder, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizePinnedToolbarMenuItems, normalizeToolbarItemOrder, type ToolbarItemKey, type ToolbarMenuItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
@@ -562,22 +562,6 @@ export function aiProviderLabel(provider: AiProvider, t: (key: string) => string
 
 export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
   {
-    id: "aicodemirror",
-    label: "AICodeMirror",
-    iconPath: "/icons/ai/aicodemirror.png",
-    group: "partner",
-    provider: "openai-compatible",
-    endpoint: "https://api.aicodemirror.ai/v1",
-    model: "",
-    apiStyle: "completions",
-    authMethod: "bearer",
-    requiresApiKey: true,
-    websiteUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-    apiKeyUrl: "https://www.aicodemirror.ai/register?invitecode=DK44NH",
-    descriptionKey: "ai.aicodemirrorDescription",
-    badgeKey: "ai.aicodemirrorSponsored",
-  },
-  {
     id: "hualong-ai",
     label: "HuaLongAI",
     iconPath: "/icons/ai/hualong-ai.png",
@@ -805,6 +789,13 @@ export type SidebarDensity = (typeof SIDEBAR_DENSITIES)[number];
 export function isSidebarDensity(value: unknown): value is SidebarDensity {
   return typeof value === "string" && (SIDEBAR_DENSITIES as readonly string[]).includes(value);
 }
+export const SIDEBAR_CONNECTION_ICON_STYLES = ["classic", "badge"] as const;
+export type SidebarConnectionIconStyle = (typeof SIDEBAR_CONNECTION_ICON_STYLES)[number];
+
+export function isSidebarConnectionIconStyle(value: unknown): value is SidebarConnectionIconStyle {
+  return value === "classic" || value === "badge";
+}
+
 const DATA_GRID_COLUMN_WIDTH_MODES = ["fill", "content"] as const;
 export type DataGridColumnWidthMode = (typeof DATA_GRID_COLUMN_WIDTH_MODES)[number];
 const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
@@ -847,7 +838,8 @@ export type MultiStatementDefaultView = (typeof MULTI_STATEMENT_DEFAULT_VIEWS)[n
 export const DEFAULT_EXPLAIN_VIEWS = ["canvas", "tree", "summary", "table", "raw"] as const;
 export type DefaultExplainView = (typeof DEFAULT_EXPLAIN_VIEWS)[number];
 export const TABLE_FONT_SIZE_MIN = 8;
-export const TABLE_FONT_SIZE_MAX = 16;
+// Table font size has no product upper bound. The sentinel keeps the View Options controls unchanged.
+export const TABLE_FONT_SIZE_MAX = Number.POSITIVE_INFINITY;
 export const TABLE_FONT_SIZE_DEFAULT = 13;
 export const SIDEBAR_FONT_SIZE_MIN = 9;
 export const SIDEBAR_FONT_SIZE_MAX = 24;
@@ -1031,6 +1023,8 @@ export interface EditorSettings {
   sequenceCompletionEnabled: boolean;
   sortCompletionColumnsAlphabetically: boolean;
   selectFirstCompletionOnOpen: boolean;
+  /** Delay before the completion popup opens after typing, in milliseconds (#15340). */
+  completionAutoActivationDelayMs: number;
   wordWrap: boolean;
   showWhitespace: boolean;
   tableDdlWordWrap: boolean;
@@ -1262,8 +1256,10 @@ export interface EditorSettings {
   sidebarIndent: number;
   sidebarFontSize: number;
   sidebarDensity: SidebarDensity;
+  sidebarConnectionIconStyle: SidebarConnectionIconStyle;
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
+  globalNumberGrouping: boolean;
   globalDateTimeDisplayFormat: string;
   globalDateTimeExportFormat: string;
   globalDateTimeImportFormat: string;
@@ -1323,6 +1319,8 @@ export interface ToolbarItems {
   newConnection: boolean;
   newQuery: boolean;
   openSql: boolean;
+  recentClosedTabs: boolean;
+  pinnedMenuItems: ToolbarMenuItemKey[];
   databaseBackups: boolean;
   mcpSettings: boolean;
   exportProgress: boolean;
@@ -1354,6 +1352,8 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   newConnection: true,
   newQuery: true,
   openSql: true,
+  recentClosedTabs: true,
+  pinnedMenuItems: [],
   databaseBackups: true,
   mcpSettings: true,
   exportProgress: true,
@@ -1477,6 +1477,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   snippetTriggerKey: "tab",
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
+  completionAutoActivationDelayMs: 500,
   wordWrap: false,
   showWhitespace: false,
   tableDdlWordWrap: true,
@@ -1663,8 +1664,10 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
   sidebarDensity: "default",
+  sidebarConnectionIconStyle: "classic",
   columnFormatters: {},
   customColumnFormatters: {},
+  globalNumberGrouping: false,
   globalDateTimeDisplayFormat: "",
   globalDateTimeExportFormat: "",
   globalDateTimeImportFormat: "",
@@ -1728,6 +1731,14 @@ export function normalizeGlobalConnectTimeoutSecs(value: unknown): number {
 function normalizeUiScale(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.uiScale;
   return Math.min(MAX_UI_SCALE, Math.max(MIN_UI_SCALE, Math.round(value * 100) / 100));
+}
+
+export const MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 0;
+export const MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS = 5000;
+
+function normalizeCompletionAutoActivationDelay(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs;
+  return Math.min(MAX_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.max(MIN_COMPLETION_AUTO_ACTIVATION_DELAY_MS, Math.round(value)));
 }
 
 function normalizeFontFamily(value: unknown, fallback: string, migrateMonoPresets = false): string {
@@ -1856,7 +1867,7 @@ function normalizeDefaultExplainView(value: unknown): DefaultExplainView {
 
 function normalizeTableFontSize(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return TABLE_FONT_SIZE_DEFAULT;
-  return Math.min(TABLE_FONT_SIZE_MAX, Math.max(TABLE_FONT_SIZE_MIN, Math.round(value)));
+  return Math.max(TABLE_FONT_SIZE_MIN, Math.round(value));
 }
 
 function normalizeSidebarFontSize(value: unknown): number {
@@ -1871,6 +1882,10 @@ function normalizeSidebarIndent(value: unknown): number {
 
 function normalizeSidebarDensity(value: unknown): SidebarDensity {
   return isSidebarDensity(value) ? value : DEFAULT_EDITOR_SETTINGS.sidebarDensity;
+}
+
+function normalizeSidebarConnectionIconStyle(value: unknown): SidebarConnectionIconStyle {
+  return isSidebarConnectionIconStyle(value) ? value : DEFAULT_EDITOR_SETTINGS.sidebarConnectionIconStyle;
 }
 
 function normalizeUpdateDownloadSource(value: unknown): UpdateDownloadSource {
@@ -2078,6 +2093,8 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     newConnection: items.newConnection ?? defaults.newConnection,
     newQuery: items.newQuery ?? defaults.newQuery,
     openSql: items.openSql ?? defaults.openSql,
+    recentClosedTabs: items.recentClosedTabs ?? defaults.recentClosedTabs,
+    pinnedMenuItems: normalizePinnedToolbarMenuItems(items.pinnedMenuItems),
     databaseBackups: items.databaseBackups ?? defaults.databaseBackups,
     mcpSettings: items.mcpSettings ?? defaults.mcpSettings,
     exportProgress: items.exportProgress ?? defaults.exportProgress,
@@ -2234,6 +2251,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     snippetTriggerKey: settings.snippetTriggerKey === "space" || settings.snippetTriggerKey === "both" ? settings.snippetTriggerKey : DEFAULT_EDITOR_SETTINGS.snippetTriggerKey,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
+    completionAutoActivationDelayMs: normalizeCompletionAutoActivationDelay(settings.completionAutoActivationDelayMs),
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
     showWhitespace: typeof settings.showWhitespace === "boolean" ? settings.showWhitespace : DEFAULT_EDITOR_SETTINGS.showWhitespace,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
@@ -2472,8 +2490,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
     sidebarDensity: normalizeSidebarDensity(settings.sidebarDensity),
+    sidebarConnectionIconStyle: normalizeSidebarConnectionIconStyle(settings.sidebarConnectionIconStyle),
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
+    globalNumberGrouping: settings.globalNumberGrouping === true,
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
     globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
@@ -3253,6 +3273,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.snippetTriggerKey !== undefined) editorSettings.value.snippetTriggerKey = partial.snippetTriggerKey === "space" || partial.snippetTriggerKey === "both" ? partial.snippetTriggerKey : "tab";
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
+    if (partial.completionAutoActivationDelayMs !== undefined) editorSettings.value.completionAutoActivationDelayMs = normalizeCompletionAutoActivationDelay(partial.completionAutoActivationDelayMs);
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
     if (partial.showWhitespace !== undefined) editorSettings.value.showWhitespace = partial.showWhitespace === true;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;
@@ -3464,8 +3485,10 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
     if (partial.sidebarFontSize !== undefined) editorSettings.value.sidebarFontSize = normalizeSidebarFontSize(partial.sidebarFontSize);
     if (partial.sidebarDensity !== undefined) editorSettings.value.sidebarDensity = normalizeSidebarDensity(partial.sidebarDensity);
+    if (partial.sidebarConnectionIconStyle !== undefined) editorSettings.value.sidebarConnectionIconStyle = normalizeSidebarConnectionIconStyle(partial.sidebarConnectionIconStyle);
     if (partial.columnFormatters !== undefined) editorSettings.value.columnFormatters = partial.columnFormatters;
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
+    if (partial.globalNumberGrouping !== undefined) editorSettings.value.globalNumberGrouping = partial.globalNumberGrouping === true;
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
     if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);

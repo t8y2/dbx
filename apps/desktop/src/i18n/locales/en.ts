@@ -11549,6 +11549,7 @@ export default {
     shortcutZoomOutUi: "Zoom out UI",
     shortcutResetUiZoom: "Reset UI zoom",
     shortcutRefreshData: "Refresh data",
+    shortcutCommitTransaction: "Commit transaction",
     shortcutCopyResultColumn1: "Copy column 1 of first result row",
     shortcutCopyResultColumn2: "Copy column 2 of first result row",
     shortcutCopyResultColumn3: "Copy column 3 of first result row",

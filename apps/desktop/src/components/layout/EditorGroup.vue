@@ -85,6 +85,7 @@ defineExpose({
   focusWhere: () => activeSurfaceRef.value?.focusWhere() ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeSurfaceRef.value?.openTableStructureEditor?.(initialTab) ?? false,
+  commitTransaction: () => toolbarRef.value?.commitFromToolbar() ?? false,
   copyResultColumn: (column: number) => {
     const cell = firstResultCellValue(activeTab.value?.result, column);
     if (!cell) return false;

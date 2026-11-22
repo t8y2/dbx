@@ -11515,6 +11515,7 @@ export default withEnglishFallback({
     shortcutZoomOutUi: "缩小全局界面",
     shortcutResetUiZoom: "重置全局界面缩放",
     shortcutRefreshData: "刷新数据",
+    shortcutCommitTransaction: "提交事务",
     shortcutCopyResultColumn1: "复制第一行结果的第 1 列",
     shortcutCopyResultColumn2: "复制第一行结果的第 2 列",
     shortcutCopyResultColumn3: "复制第一行结果的第 3 列",

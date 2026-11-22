@@ -121,6 +121,7 @@ export type ShortcutActionId =
   | "createSidebarDatabase"
   | "sendSelectionToAi"
   | "sqlIntentionActions"
+  | "commitTransaction"
   | "copyResultColumn1"
   | "copyResultColumn2"
   | "copyResultColumn3"
@@ -793,6 +794,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutRefreshData",
     scope: "global",
     defaultShortcut: "F5",
+  },
+  {
+    id: "commitTransaction",
+    labelKey: "settings.shortcutCommitTransaction",
+    scope: "global",
+    defaultShortcut: "",
   },
   {
     id: "copyResultColumn1",

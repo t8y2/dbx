@@ -12496,6 +12496,7 @@ export default withEnglishFallback({
     deepLinkConnectionConfirmModeUpdateDescription: "Ссылки с id сразу обновляют сохранённое подключение; для новых подключений по-прежнему открывается диалоговое окно для подтверждения.",
     deepLinkConnectionConfirmModeAll: "Все ссылки подключения",
     deepLinkConnectionConfirmModeAllDescription: "Новые подключения и ссылки обновления с id сохраняются сразу, без подтверждения. Если предварительно заполненные параметры не проходят проверку, диалоговое окно останется открытым, и вы сможете дополнить их вручную.",
+    shortcutCommitTransaction: "Зафиксировать транзакцию",
     shortcutCopyResultColumn1: "Копировать 1-й столбец результата первой строки",
     shortcutCopyResultColumn2: "Копировать 2-й столбец результата первой строки",
     shortcutCopyResultColumn3: "Копировать 3-й столбец результата первой строки",

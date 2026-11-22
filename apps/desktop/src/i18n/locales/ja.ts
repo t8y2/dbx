@@ -10932,6 +10932,7 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "すべての SQL を実行",
     showConnectionGroupPath: "クエリ接続の完全なグループパスを表示",
     showConnectionGroupPathDescription: "有効にすると、クエリページ右上の接続セレクターで接続名の前に完全なグループパスが表示されます。無効にすると接続名のみが表示されます。",
+    shortcutCommitTransaction: "トランザクションをコミット",
     shortcutCopyResultColumn1: "結果の1行目の1列目をコピー",
     shortcutCopyResultColumn2: "結果の1行目の2列目をコピー",
     shortcutCopyResultColumn3: "結果の1行目の3列目をコピー",

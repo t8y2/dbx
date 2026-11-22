@@ -151,6 +151,7 @@ import {
   isCloseTabShortcut,
   isReopenClosedTabShortcut,
   isCloseWindowShortcut,
+  isCommitTransactionShortcut,
   isDisconnectAllActiveConnectionsShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
@@ -5077,6 +5078,12 @@ async function handleKeydown(e: KeyboardEvent) {
   }
   if (!showSettingsPage.value && !showPluginCenter.value && !showDriverStore.value) {
     const target = e.target instanceof Element ? e.target : null;
+    const canUseShortcut = !target?.closest('[role="dialog"], [role="alertdialog"], input, textarea, [contenteditable="true"]:not(.cm-content)');
+    if (!e.repeat && canUseShortcut && isCommitTransactionShortcut(e, shortcuts) && contentAreaRef.value?.commitTransaction()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const copyResultColumn = copyResultColumnIndexFromShortcut(e, shortcuts);
     if (copyResultColumn !== null && !target?.closest('[role="dialog"], [role="alertdialog"], input, textarea') && contentAreaRef.value?.copyResultColumn(copyResultColumn)) {
       e.preventDefault();

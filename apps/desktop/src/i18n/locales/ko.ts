@@ -11009,6 +11009,7 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "모든 SQL 실행",
     showConnectionGroupPath: "쿼리 연결의 전체 그룹 경로 표시",
     showConnectionGroupPathDescription: "활성화하면 쿼리 페이지 오른쪽 위의 연결 선택기에서 연결 이름 앞에 전체 그룹 경로를 표시합니다. 비활성화하면 연결 이름만 표시합니다.",
+    shortcutCommitTransaction: "트랜잭션 커밋",
     shortcutCopyResultColumn1: "첫 번째 행 결과의 1열 복사",
     shortcutCopyResultColumn2: "첫 번째 행 결과의 2열 복사",
     shortcutCopyResultColumn3: "첫 번째 행 결과의 3열 복사",

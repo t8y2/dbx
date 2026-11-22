@@ -10901,6 +10901,7 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "Executar todo o SQL",
     showConnectionGroupPath: "Mostrar caminho completo do grupo da conexão de consulta",
     showConnectionGroupPathDescription: "Quando ativado, o seletor de conexão no canto superior direito da página de consulta exibirá o caminho completo do grupo antes do nome da conexão; quando desativado, exibirá apenas o nome da conexão.",
+    shortcutCommitTransaction: "Confirmar transação",
     shortcutCopyResultColumn1: "Copiar a coluna 1 do resultado da primeira linha",
     shortcutCopyResultColumn2: "Copiar a coluna 2 do resultado da primeira linha",
     shortcutCopyResultColumn3: "Copiar a coluna 3 do resultado da primeira linha",

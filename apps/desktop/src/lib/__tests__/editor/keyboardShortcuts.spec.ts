@@ -8,6 +8,7 @@ import {
   isCaretBrowsingShortcut,
   shouldBlockCaretBrowsing,
   isConvertNamingStyleShortcut,
+  isCommitTransactionShortcut,
   copyResultColumnIndexFromShortcut,
   isEditCellShortcut,
   isEditSidebarTableStructureShortcut,
@@ -344,6 +345,17 @@ describe("keyboard shortcut matching", () => {
     expect(matcher({ key: "F8", altKey: true }, shortcuts)).toBe(false);
     expect(matcher({ key, altKey: true, isComposing: true }, shortcuts)).toBe(false);
     expect(matcher({ key, altKey: true })).toBe(false);
+  });
+
+  it("matches only the configured commit-transaction shortcut", () => {
+    const shortcuts = { commitTransaction: "Shift+Mod+C" } as const;
+
+    expect(isCommitTransactionShortcut({ key: "C", ctrlKey: true, shiftKey: true }, shortcuts)).toBe(true);
+    expect(isCommitTransactionShortcut({ key: "C", ctrlKey: true, shiftKey: true })).toBe(false);
+    expect(isCommitTransactionShortcut({ key: "C", ctrlKey: true }, shortcuts)).toBe(false);
+    expect(isCommitTransactionShortcut({ key: "C", shiftKey: true }, shortcuts)).toBe(false);
+    expect(isCommitTransactionShortcut({ key: "C", ctrlKey: true, shiftKey: true }, { commitTransaction: "" })).toBe(false);
+    expect(isCommitTransactionShortcut({ key: "C", ctrlKey: true, shiftKey: true, isComposing: true }, shortcuts)).toBe(false);
   });
 });
 

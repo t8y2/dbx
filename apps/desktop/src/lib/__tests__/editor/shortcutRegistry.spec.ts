@@ -54,6 +54,16 @@ describe("shortcutRegistry editor actions", () => {
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
+  it("registers commit transaction as an unassigned global shortcut", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "commitTransaction")).toMatchObject({
+      id: "commitTransaction",
+      labelKey: "settings.shortcutCommitTransaction",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    expect(normalizeShortcutSettings().commitTransaction).toBe("");
+  });
+
   it("registers convert-selection-to-delimited as an editor shortcut", () => {
     expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "convertSelectionToDelimited")).toMatchObject({
       id: "convertSelectionToDelimited",

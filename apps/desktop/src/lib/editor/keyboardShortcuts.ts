@@ -335,6 +335,10 @@ export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Part
   return matchesShortcut(event, actionShortcut("refreshData", shortcuts));
 }
 
+export function isCommitTransactionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("commitTransaction", shortcuts));
+}
+
 /**
  * Sidebar tree refresh predates the configurable `refreshData` binding and also
  * accepted Ctrl/Cmd+R. Keep that alias only while the user runs the default

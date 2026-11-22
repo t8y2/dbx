@@ -12858,6 +12858,7 @@ export default withEnglishFallback({
     deepLinkConnectionConfirmModeUpdateDescription: "ลิงก์ที่มี id จะอัปเดตการเชื่อมต่อที่บันทึกไว้โดยตรง ส่วนการเชื่อมต่อใหม่ยังคงเปิดป๊อปอัปเพื่อรอการยืนยัน",
     deepLinkConnectionConfirmModeAll: "ลิงก์การเชื่อมต่อทั้งหมด",
     deepLinkConnectionConfirmModeAllDescription: "การเชื่อมต่อใหม่และลิงก์อัปเดตที่มี id จะถูกบันทึกโดยตรงโดยไม่ต้องยืนยันอีก หากการตรวจสอบพารามิเตอร์ที่กรอกล่วงหน้าไม่ผ่าน ป๊อปอัปจะยังคงเปิดอยู่ และคุณสามารถกรอกข้อมูลให้ครบด้วยตนเองต่อไปได้",
+    shortcutCommitTransaction: "คอมมิตธุรกรรม",
     shortcutCopyResultColumn1: "คัดลอกคอลัมน์ที่ 1 ของผลลัพธ์แถวแรก",
     shortcutCopyResultColumn2: "คัดลอกคอลัมน์ที่ 2 ของผลลัพธ์แถวแรก",
     shortcutCopyResultColumn3: "คัดลอกคอลัมน์ที่ 3 ของผลลัพธ์แถวแรก",

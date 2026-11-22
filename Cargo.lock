@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.71"
+version = "0.6.72"
 dependencies = [
  "anyhow",
  "axum",
@@ -2189,6 +2189,7 @@ dependencies = [
  "log",
  "minisign-verify",
  "mongodb",
+ "notify",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -2782,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.71"
+version = "0.6.72"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

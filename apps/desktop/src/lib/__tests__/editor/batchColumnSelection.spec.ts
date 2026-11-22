@@ -23,6 +23,10 @@ describe("batchColumnSelectionColumnList", () => {
     expect(batchColumnSelectionColumnList(["id", "name"], "insert", "users")).toBe("id, name");
   });
 
+  it("repeats a quoted qualifier verbatim (#11330, #15190)", () => {
+    expect(batchColumnSelectionColumnList(["id", "name"], "select", '"ap"')).toBe('id, "ap".name');
+  });
+
   it("formats candidates with column comments in SELECT mode (#11354)", () => {
     const candidates = [{ apply: "order_start_time", comment: "医嘱开始时间" }, { apply: "order_end_time", comment: "医嘱结束时间" }, { apply: "patient_id" }];
     expect(batchColumnSelectionColumnList(candidates, "select", "t", "  ")).toBe("order_start_time, -- 医嘱开始时间\n  t.order_end_time, -- 医嘱结束时间\n  t.patient_id");

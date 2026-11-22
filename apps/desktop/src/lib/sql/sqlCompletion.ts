@@ -1002,6 +1002,10 @@ function isPairPrefixKeywordForFollowing(keyword: string, followingKeyword: stri
 }
 
 const MAX_TABLE_COMPLETION_ITEMS = 200;
+// Bounds the ranked column candidate pool, in parity with the table cap. Prefix
+// matching, ranking, dedupe/qualification and the per-table prefilter still run
+// first, so the cap only trims the tail of an already-ranked list (issue #15129).
+const MAX_COLUMN_COMPLETION_ITEMS = 200;
 const EXACT_LABEL_MATCH_BOOST = 10000;
 const EXACT_CUSTOM_SNIPPET_TRIGGER_BOOST = 40000;
 
@@ -1862,6 +1866,7 @@ export interface SqlCompletionContext {
   /** The table position being completed is a DML target, where a generated alias can be rejected by the server. */
   tableCompletionTargetAliasUnsafe?: boolean;
   tableAliasAfterCursor?: boolean;
+  suppressSqlServerTableAliasCompletion?: boolean;
   openingParenAfterCursor: boolean;
   followingKeyword?: string;
   contextKind: SqlCompletionContextKind;
@@ -2099,6 +2104,7 @@ class SqlCompletionProvider {
 
   build(): SqlCompletionItem[] {
     const { context } = this;
+    if (context.suppressSqlServerTableAliasCompletion) return [];
     const pendingJoinKeyword = isPendingJoinKeywordContext(context);
     const completionTables = [
       ...this.input.tables.map((table) => {
@@ -2313,6 +2319,7 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (isAfterJoinModifierContext(beforeCursor, options.databaseType)) return true;
   if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeCursor)) return true;
   const context = precomputedContext ?? getSqlCompletionContext(sql, cursor, options);
+  if (context.suppressSqlServerTableAliasCompletion) return false;
   if (previousChar === "(" && (context.insertTable || context.preferredValueKeywords?.length)) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
   if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
@@ -3348,7 +3355,17 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const enclosingCteIndex = cteDefs.findIndex((cte) => cursorInStatement > cte.bodyStart && cursorInStatement <= cte.bodyEnd);
   const enclosingCte = enclosingCteIndex >= 0 ? cteDefs[enclosingCteIndex] : undefined;
   const scopedStatement = enclosingCte ? keepOnlyCteBody(fullStatement, enclosingCte) : maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs);
-  let referencedTables = extractReferencedTables(scopedStatement, options.databaseType);
+  let aliasAtCursor = false;
+  const trackTableAlias = resolveSqlDialectId(options) === "sqlserver" && !!prefix && !qualifier;
+  let referencedTables = extractReferencedTables(
+    scopedStatement,
+    options.databaseType,
+    trackTableAlias
+      ? (alias) => {
+          aliasAtCursor ||= alias.start < cursorInStatement && cursorInStatement <= alias.end;
+        }
+      : undefined,
+  );
   const visibleCteDefs = enclosingCte ? cteDefs.slice(0, enclosingCteIndex).concat(referencedTables.some((rt) => rt.name.toLowerCase() === enclosingCte.name.toLowerCase()) ? [enclosingCte] : []) : cteDefs;
   for (const cte of visibleCteDefs) {
     const matching = referencedTables.filter((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
@@ -3383,7 +3400,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // tokenizeSqlSemantic pass, so the duplicate work is worth avoiding.
   const inTableListContext = isInTableListContext(beforeToken, options.databaseType);
   const applyTableTrigger = isApplyOperatorTrigger(lastWord, beforeToken, options.databaseType);
-  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || isAfterDropTableIfExists(beforeToken, options.databaseType) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || applyTableTrigger || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const scopedReferences = exclusiveTableSuggestions ? undefined : scopedQueryCompletionReferences(fullStatement, cursorInStatement, referencedTables, cteDefs, options);
   if (scopedReferences) referencedTables = scopedReferences;
@@ -3412,6 +3429,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
   const mysqlVariablesAllowed = (options.databaseType === "mysql" || (!options.databaseType && options.dialect === "mysql")) && !prefix.startsWith("@") && !qualifier && !dataTypeContext && !afterTableTrigger && !insertInfo && !inCallRoutineContext;
   const localVariables = prefix.startsWith("@") ? collectSqlServerLocalVariables(sql, cursor, options) : mysqlVariablesAllowed ? collectMysqlRoutineVariables(sql, cursor) : undefined;
+  // Without AS, a partial clause keyword can look like an alias until it is complete.
+  const suppressSqlServerTableAliasCompletion = aliasAtCursor && statementKind === "select" && !suggestColumns && !exclusiveTableSuggestions && (lastWord === "as" || !SQLSERVER_TABLE_REFERENCE_CONTINUATIONS.some((keyword) => keyword.toLowerCase().startsWith(prefix.toLowerCase())));
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo, options.databaseType, options.driverProfile);
   const contextKind = detectCompletionContextKind({
     qualifier,
@@ -3474,6 +3493,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     oracleTableFunctionContext,
     autoAliasTableCompletions,
     tableAliasAfterCursor,
+    ...(suppressSqlServerTableAliasCompletion ? { suppressSqlServerTableAliasCompletion } : {}),
     openingParenAfterCursor: /^\s*\(/.test(sql.slice(cursor)),
     followingKeyword: getFollowingKeywordAfterCursor(sql, cursor, statementSpan.end),
     contextKind,
@@ -4158,11 +4178,29 @@ function preferredKeywordsForCompletion(
     keywords.push("LIMIT");
   }
   if (isAfterConditionExpression(beforeToken, databaseType)) keywords.push("AND", "OR");
+  keywords.push(...dropTableIfExistsKeywords(beforeToken, databaseType));
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
   if (deleteInfo?.afterTarget) keywords.push("WHERE");
   keywords.push(...driverProfileContextKeywords(driverProfile, { beforeCursor, beforeToken, databaseType }));
   return keywords;
+}
+
+const DROP_TABLE_NAME_SLOT_PATTERN = /^\s*drop\s+(?:temporary\s+)?table\s+if\s+exists$/i;
+const DROP_TABLE_IF_SLOT_PATTERN = /^\s*drop\s+(?:temporary\s+)?table$/i;
+const DROP_TABLE_EXISTS_SLOT_PATTERN = /^\s*drop\s+(?:temporary\s+)?table\s+if$/i;
+
+/** `DROP TABLE IF EXISTS |` expects a table name, but `exists` is not a table trigger keyword (#14113). */
+function isAfterDropTableIfExists(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
+  return DROP_TABLE_NAME_SLOT_PATTERN.test(maskSqlLiteralsAndComments(beforeToken, databaseType).trim());
+}
+
+/** Offer the optional `IF EXISTS` words while a DROP TABLE statement is still waiting for them. */
+function dropTableIfExistsKeywords(beforeToken: string, databaseType: DatabaseType | undefined): string[] {
+  const cleaned = maskSqlLiteralsAndComments(beforeToken, databaseType).trim();
+  if (DROP_TABLE_IF_SLOT_PATTERN.test(cleaned)) return ["IF"];
+  if (DROP_TABLE_EXISTS_SLOT_PATTERN.test(cleaned)) return ["EXISTS"];
+  return [];
 }
 
 function hasSelectListExpression(beforeCursor: string, databaseType: DatabaseType | undefined): boolean {
@@ -4464,7 +4502,7 @@ function maskSqlLiteralsAndComments(sql: string, databaseType?: DatabaseType): s
   return out;
 }
 
-function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
+function extractReferencedTables(sql: string, databaseType?: DatabaseType, onAlias?: (span: SqlSemanticSpan) => void): SqlCompletionReferencedTable[] {
   // Keywords that should NOT be treated as table aliases
   const ALIAS_BLACKLIST = new Set([
     "where",
@@ -4603,6 +4641,10 @@ function extractReferencedTables(sql: string, databaseType?: DatabaseType): SqlC
     }
     // Filter out SQL keywords that accidentally matched as aliases
     const cleanAlias = alias && !ALIAS_BLACKLIST.has(alias.toLowerCase()) ? alias : undefined;
+    if (cleanAlias && onAlias) {
+      const end = match.index + match[0].length;
+      onAlias({ start: end - cleanAlias.length, end });
+    }
     if (isElasticsearchStyleIndexName(rawName)) {
       referenced.push({ name: unquoteIdentifier(rawName), alias: cleanAlias });
       continue;
@@ -5716,6 +5758,35 @@ function quoteCompletionApplyIdentifier(identifier: string, dialect?: SqlComplet
   return quoteSqlIdentifier(identifier, dialect);
 }
 
+// A plain identifier the user typed bare. Anything outside this shape (spaces,
+// dots, punctuation) could not have been written unquoted in valid SQL, so it
+// keeps the dialect's quoting.
+const BARE_QUALIFIER_PART = /^[\p{L}_][\p{L}\p{Nd}_$#@]*$/u;
+
+// Batch-selected columns repeat the qualifier the user already wrote in the
+// document. Re-quoting it through `quoteCompletionApplyIdentifier` changes its
+// meaning on folding dialects: `FROM orders ap` folds to AP, while `"ap"`
+// addresses a different identifier, so every column after the first came out
+// unreadable (#11330, #15190).
+function completionBatchQualifierPart(part: string, quoted: boolean | undefined, dialect?: SqlCompletionApplyDialect): string {
+  const applied = quoteCompletionApplyIdentifier(part, dialect);
+  // Unknown quoting info, an explicitly quoted part, or a value that never
+  // could have been typed bare: keep the dialect-correct quoting as before.
+  if (quoted !== false || !BARE_QUALIFIER_PART.test(part)) return applied;
+  // A bare reserved word is not valid input, so it stays quoted too.
+  if (POSTGRES_IDENTIFIER_KEYWORDS.has(part.toLowerCase())) return applied;
+  return part;
+}
+
+function completionBatchSelectionQualifier(context: SqlCompletionContext, dialect?: SqlCompletionApplyDialect): string | undefined {
+  const parts = context.qualifierParts ?? context.qualifier?.split(".").filter(Boolean);
+  if (!parts?.length) return undefined;
+  // The semantic layer may rebuild qualifierParts; only trust the quote flags
+  // when they describe the same parts, otherwise fall back to the old behavior.
+  const quoted = context.qualifierQuoted?.length === parts.length ? context.qualifierQuoted : undefined;
+  return parts.map((part, index) => completionBatchQualifierPart(part, quoted?.[index], dialect)).join(".");
+}
+
 function quoteCompletionApplyName(applyName: string, dialect?: SqlCompletionApplyDialect): string {
   if (dialect !== "mysql" && dialect !== "oracle" && dialect !== "sqlserver" && dialect !== "clickhouse") return applyName;
   const parts = splitQualifiedNameRawParts(applyName);
@@ -6350,6 +6421,27 @@ function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet, body = snippet.bod
   return body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
 }
 
+function snippetMaxTabstopNumber(body: string): number {
+  let max = 0;
+  for (const match of body.matchAll(/\$\{?(\d+)/g)) {
+    const seq = Number(match[1]);
+    if (seq > max) max = seq;
+  }
+  return max;
+}
+
+// CodeMirror's snippet engine has no VSCode-style `$0` (final cursor position):
+// a bare `$0` is inserted literally and `${0}` sorts *before* `${1}` because
+// fields are ordered by number. Renumber the final cursor to max tabstop + 1 —
+// Tab walks ${1}..${n}, then lands on it as the last field and snippet mode
+// ends, matching VSCode. Only `0` is translated: PostgreSQL bind parameters
+// start at $1, so bare `$1`/`$2` stay literal, and `\`-escaped `$0` is kept.
+function finalizeSnippetCursor(body: string): string {
+  if (!/\$0|\$\{0/.test(body)) return body;
+  const finalSeq = snippetMaxTabstopNumber(body) + 1;
+  return body.replace(/\\[\s\S]|\$(?:0(?!\d)|\{0(:[^{}]*)?\})/g, (match, placeholder: string | undefined) => (match.startsWith("\\") ? match : `\${${finalSeq}${placeholder ?? ""}}`));
+}
+
 function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordCase?: SqlKeywordCase, matchMode: SqlCompletionMatchMode = "fuzzy"): SqlCompletionItem[] {
   return keywords
     .filter((keyword) => matchesPrefix(keyword, prefix, matchMode))
@@ -6960,10 +7052,12 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       return { column, index, boost: matchScore + keyBoost + relevanceBoost };
     })
     .sort((left, right) => right.boost - left.boost || left.index - right.index)
-    .slice(0, context.insertTable || !context.prefix ? 50 : context.qualifier ? 30 : 20);
+    .slice(0, MAX_COLUMN_COMPLETION_ITEMS);
 
   const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
   const quoteBatchColumns = !!batchSelectionMode && quoteIdentifiers !== false && (databaseType === "mysql" || databaseType === "starrocks");
+  // Compute once: every candidate of the same context repeats this qualifier.
+  const batchSelectionQualifier = batchSelectionMode === "select" ? completionBatchSelectionQualifier(context, dialect) : undefined;
 
   return rankedColumns.flatMap(({ column, boost }): SqlCompletionItem[] => {
     const nameMatches = matchesIdentifierSearch(column.name, context.prefix, matchMode) || matchesIdentifierSearch(column.displayLabel, context.prefix, matchMode);
@@ -6979,9 +7073,9 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       batchSelectionMode,
       batchSelectionApply: quoteBatchColumns ? buildColumnApply(column, context, dialect, quoteTableIdentifier(databaseType, column.name)) : undefined,
       // The first selected column keeps the qualifier already present in the
-      // document. Subsequent columns must use that same user-typed qualifier,
+      // document. Subsequent columns repeat that same user-typed qualifier,
       // not a referenced-table alias which may be different from it.
-      batchSelectionQualifier: batchSelectionMode === "select" && context.qualifier ? (context.qualifierParts ?? context.qualifier.split(".").filter(Boolean)).map((part) => quoteCompletionApplyIdentifier(part, dialect)).join(".") : undefined,
+      batchSelectionQualifier,
       comment: column.comment?.trim() || undefined,
     };
     if (!context.mysqlWherePredicateStart || !/^(?:var)?char\b/i.test(column.dataType?.trim() ?? "") || !item.apply) return [item];
@@ -7055,7 +7149,10 @@ function buildColumnApply(column: SqlCompletionColumn & { displayLabel: string }
   if (context.qualifier || column.displayLabel === column.name || !column.displayLabel.includes(".")) {
     return columnName;
   }
-  const qualifier = column.sourceQualifierSql ?? quoteCompletionApplyIdentifier(column.sourceAlias ?? column.table, dialect);
+  // `sourceAlias` is the alias as written in the document, so it is reused
+  // verbatim: quoting it would change its meaning on folding dialects
+  // (Oracle `ap` -> AP). Only the metadata table name needs quoting (#11330).
+  const qualifier = column.sourceQualifierSql ?? column.sourceAlias ?? quoteCompletionApplyIdentifier(column.table, dialect);
   return `${qualifier}.${columnName}`;
 }
 
@@ -7501,6 +7598,9 @@ export function buildSnippetItemsForTest(prefix: string, snippets: SqlSnippet[],
   return buildSnippetItems(prefix, snippets, keywordCase, databaseType);
 }
 
+/** Match scores at or above this are prefix-tier or better; pinyin substring and subsequence matches stay below it (see computeMatchScore). */
+const SNIPPET_BASE_BOOST_MIN_MATCH_SCORE = 1900;
+
 function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?: SqlKeywordCase, databaseType?: DatabaseType, matchMode: SqlCompletionMatchMode = "fuzzy"): SqlCompletionItem[] {
   if (!prefix) return [];
   return snippets
@@ -7518,12 +7618,16 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       // When the user types past the snippet prefix (e.g. "sele" vs prefix "sel"),
       // they are likely typing the actual keyword — reduce the base boost so
       // the real keyword can rank higher.
-      const baseBoost = matchesByPrefix ? 4000 : 0;
+      //
+      // Only a literal, initials or pinyin-prefix match earns the base boost. A loose
+      // match (e.g. `wh` hitting the pinyin initials of `企微活码数据`) must not
+      // outrank a real keyword such as WHERE (#15292).
+      const baseBoost = matchesByPrefix && boostByPrefix >= SNIPPET_BASE_BOOST_MIN_MATCH_SCORE ? 4000 : 0;
       // Placeholder replacement runs on the original (UPPER-case) body first,
       // then keyword casing is applied to both variants uniformly.
       const resolvedBody = resolveSqlSnippetBodyForDatabase(snippet, databaseType);
       const body = applyBuiltinSnippetKeywordCase(snippet, resolvedBody, keywordCase);
-      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase);
+      const apply = finalizeSnippetCursor(applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase));
       return {
         label: snippet.label,
         filterText: snippet.prefix,
@@ -7815,7 +7919,9 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
 
 // MySQL index hints that follow a table reference (#14431, #14598).
 const MYSQL_INDEX_HINT_KEYWORDS = new Set(["FORCE INDEX", "IGNORE INDEX", "USE INDEX"]);
-const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", ...MYSQL_INDEX_HINT_KEYWORDS]);
+const SELECT_TABLE_CLAUSE_KEYWORDS = ["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT"];
+const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set([...SELECT_TABLE_CLAUSE_KEYWORDS, ...MYSQL_INDEX_HINT_KEYWORDS]);
+const SQLSERVER_TABLE_REFERENCE_CONTINUATIONS = ["AS", "JOIN", ...JOIN_MODIFIER_KEYWORD_PHRASES.filter((keyword) => keyword !== "NATURAL JOIN"), "CROSS APPLY", "OUTER APPLY", "ON", "WITH", "TABLESAMPLE", "PIVOT", "UNPIVOT", "FOR", "OPTION", ...SELECT_TABLE_CLAUSE_KEYWORDS];
 // Enough to outrank a routine's initials match plus the procedure type boost.
 const TABLE_REFERENCE_CLAUSE_KEYWORD_BOOST = 3000;
 

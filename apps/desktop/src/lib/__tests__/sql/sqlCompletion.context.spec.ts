@@ -3060,3 +3060,156 @@ describe("Spanner keyword completion (issue #13129)", () => {
     expect(items.some((item) => item.label === "CREATE CHANGE STREAM")).toBe(false);
   });
 });
+
+describe("column completion item cap (#15129)", () => {
+  // buildColumnItems() used to truncate the ranked column candidates to 20 (plain
+  // prefix) / 30 (table qualifier) / 50 (INSERT column list or empty prefix), so a
+  // field beyond the cap was unreachable. It now trims to one
+  // MAX_COLUMN_COMPLETION_ITEMS = 200 pool; these specs pin the old 20/30/50
+  // boundaries and the new 200 ceiling.
+  //
+  // Only `type === "column"` items belong to the table's own column set: keyword,
+  // wildcard, "select all" snippet and run-query items must never inflate the
+  // counts, and the implement kind "text"/"snippet" items are filtered out here.
+  const columnItems = (items: ReturnType<typeof buildSqlCompletionItems>) => items.filter((item) => item.type === "column" && !item.label.endsWith(".*"));
+
+  const prefixedNames = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `${prefix}${String(index + 1).padStart(3, "0")}`);
+
+  const singleTableMetadata = (table: string, names: string[], dataType = "text") => ({
+    databaseType: "mysql" as const,
+    tables: [{ name: table, type: "table" as const }],
+    columnsByTable: new Map([[table, names.map((name) => ({ name, table, dataType }))]]),
+  });
+
+  it("keeps every same-prefix column past the old 20-item plain-prefix cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "SELECT mb FROM wide_table";
+    const cursor = "SELECT mb".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old plain-prefix behavior stopped at 20, dropping mb021..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(20);
+    expect(new Set(labels).size).toBe(80);
+    expect(labels).toEqual(expect.arrayContaining(["mb001", "mb020", "mb021", "mb050", "mb080"]));
+  });
+
+  it("keeps table-alias qualified columns past the old 30-item cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "SELECT w.mb FROM wide_table w";
+    const cursor = "SELECT w.mb".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+    expect(context).toMatchObject({ qualifier: "w", prefix: "mb", suggestColumns: true });
+
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old qualifier behavior stopped at 30, dropping mb031..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(30);
+    expect(labels).toEqual(expect.arrayContaining(["mb030", "mb031", "mb080"]));
+  });
+
+  it("keeps empty-prefix columns past the old 50-item cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "SELECT  FROM wide_table";
+    const cursor = "SELECT ".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old empty-prefix behavior stopped at 50, dropping mb051..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(50);
+    expect(labels).toEqual(expect.arrayContaining(["mb050", "mb051", "mb080"]));
+  });
+
+  it("keeps INSERT column-list completion past the old 50-item cap", () => {
+    const names = prefixedNames("mb", 80);
+    const sql = "INSERT INTO wide_table (";
+    expect(getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" })).toMatchObject({ insertTable: "wide_table", contextKind: "column" });
+
+    const columns = columnItems(buildSqlCompletionItems(sql, sql.length, singleTableMetadata("wide_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // Old INSERT behavior stopped at 50, dropping mb051..mb080.
+    expect(columns).toHaveLength(80);
+    expect(columns.length).toBeGreaterThan(50);
+    expect(labels).toEqual(expect.arrayContaining(["mb050", "mb051", "mb080"]));
+  });
+
+  it("caps matching column items at exactly 200", () => {
+    const names = prefixedNames("mx", 250);
+    const sql = "SELECT mx FROM huge_table";
+    const cursor = "SELECT mx".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("huge_table", names)));
+    const labels = columns.map((item) => item.label);
+
+    // The ranked pool is trimmed to MAX_COLUMN_COMPLETION_ITEMS: not 201+, not 250.
+    expect(columns).toHaveLength(200);
+    expect(columns.length).toBeLessThan(250);
+    expect(new Set(labels).size).toBe(200);
+    // Every candidate matches equally well, so ranking keeps the earliest 200.
+    expect(labels).toContain("mx001");
+    expect(labels).toContain("mx200");
+    expect(labels).not.toContain("mx201");
+    expect(labels).not.toContain("mx250");
+  });
+
+  it("keeps same-name columns from joined tables qualified, deduped and applicable", () => {
+    const sql = "SELECT  FROM alpha a JOIN beta b ON a.id = b.id";
+    const cursor = "SELECT ".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [
+        { name: "alpha", type: "table" as const },
+        { name: "beta", type: "table" as const },
+      ],
+      columnsByTable: new Map([
+        [
+          "alpha",
+          [
+            { name: "id", table: "alpha", dataType: "int" },
+            { name: "alpha_name", table: "alpha", dataType: "text" },
+          ],
+        ],
+        [
+          "beta",
+          [
+            { name: "id", table: "beta", dataType: "int" },
+            { name: "beta_name", table: "beta", dataType: "text" },
+          ],
+        ],
+      ]),
+    });
+    const columns = columnItems(items);
+    const labels = columns.map((item) => item.label);
+
+    // The shared name stays qualified per table instead of collapsing into one `id`.
+    expect(columns).toHaveLength(4);
+    expect(new Set(labels).size).toBe(4);
+    expect(labels).toEqual(expect.arrayContaining(["a.id", "a.alpha_name", "b.id", "b.beta_name"]));
+    expect(labels).not.toContain("id");
+
+    const aId = columns.find((item) => item.label === "a.id");
+    const bId = columns.find((item) => item.label === "b.id");
+    expect(aId?.apply).toBe("a.id");
+    expect(bId?.apply).toBe("b.id");
+    // Accepting the suggestion at the cursor yields the qualified reference.
+    expect(`${sql.slice(0, cursor)}${aId?.apply ?? ""}`).toBe("SELECT a.id");
+    expect(`${sql.slice(0, cursor)}${bId?.apply ?? ""}`).toBe("SELECT b.id");
+  });
+
+  it("finds a column that sits late in a 300-column table when its exact prefix is typed", () => {
+    const names = Array.from({ length: 300 }, (_, index) => `col_${String(index).padStart(4, "0")}_field`);
+    // The target sits at original index 250, far behind the first 20/50 columns.
+    expect(names[250]).toBe("col_0250_field");
+    const sql = "SELECT col_0250_f FROM wide_300";
+    const cursor = "SELECT col_0250_f".length;
+    const columns = columnItems(buildSqlCompletionItems(sql, cursor, singleTableMetadata("wide_300", names)));
+
+    // The per-table candidate prefilter still reaches later columns of a wide table.
+    expect(columns.map((item) => item.label)).toEqual(["col_0250_field"]);
+    expect(columns[0]?.apply).toBe("col_0250_field");
+  });
+});

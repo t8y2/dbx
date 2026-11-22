@@ -39,6 +39,7 @@ import {
   type TableImportWizardStep,
   validateImportMappings,
 } from "@/lib/table/tableImport";
+import { applyImportMappingTemplate, readImportMappingTemplates, withImportMappingTemplate, withoutImportMappingTemplate, writeImportMappingTemplates, type ImportMappingTemplate } from "@/lib/table/importMappingTemplates";
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
@@ -1246,6 +1247,49 @@ function mapByName() {
   columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "name");
 }
 
+// Saved column mappings (existing-table mode): name the current mapping once, apply it to later files.
+const mappingTemplates = ref<ImportMappingTemplate[]>(readImportMappingTemplates());
+const savingMappingTemplate = ref(false);
+const mappingTemplateNameDraft = ref("");
+const appliedMappingTemplate = ref("");
+const hasMappedSourceColumn = computed(() => (preview.value?.columns ?? []).some((column) => (columnMapping.value[column] ?? "").trim()));
+
+function setMappingTemplates(next: ImportMappingTemplate[]) {
+  mappingTemplates.value = next;
+  writeImportMappingTemplates(next);
+}
+
+function openSaveMappingTemplate() {
+  mappingTemplateNameDraft.value = appliedMappingTemplate.value;
+  savingMappingTemplate.value = true;
+}
+
+function saveMappingTemplate() {
+  const currentPreview = preview.value;
+  const name = mappingTemplateNameDraft.value.trim();
+  if (!currentPreview || !name) return;
+  const mapping = Object.fromEntries(currentPreview.columns.map((column) => [column, columnMapping.value[column] ?? ""]));
+  setMappingTemplates(withImportMappingTemplate(mappingTemplates.value, name, mapping));
+  appliedMappingTemplate.value = name;
+  savingMappingTemplate.value = false;
+  toast(t("tableImport.templateSaved", { name }), 3000);
+}
+
+function applyMappingTemplate(name: string) {
+  const currentPreview = preview.value;
+  const template = mappingTemplates.value.find((item) => item.name === name);
+  if (!currentPreview || !template) return;
+  const { mapping, matched } = applyImportMappingTemplate(template, currentPreview.columns, targetColumnNames.value);
+  columnMapping.value = mapping;
+  appliedMappingTemplate.value = template.name;
+  toast(t("tableImport.templateApplied", { name: template.name, matched, total: currentPreview.columns.length }), 3000);
+}
+
+function deleteMappingTemplate(name: string) {
+  setMappingTemplates(withoutImportMappingTemplate(mappingTemplates.value, name));
+  if (appliedMappingTemplate.value === name) appliedMappingTemplate.value = "";
+}
+
 function skipAllColumns() {
   const currentPreview = preview.value;
   if (!currentPreview) return;
@@ -2415,8 +2459,40 @@ watch(rawProgressPercent, (percent) => {
                     <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
                       {{ t("tableImport.skipAll") }}
                     </button>
+                    <span class="text-muted-foreground/40">·</span>
+                    <button type="button" data-action="save-template" class="text-xs text-muted-foreground hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline" :disabled="!hasMappedSourceColumn" @click="openSaveMappingTemplate">
+                      {{ t("tableImport.saveTemplate") }}
+                    </button>
+                    <template v-if="mappingTemplates.length">
+                      <span class="text-muted-foreground/40">·</span>
+                      <select
+                        data-action="apply-template"
+                        class="h-6 max-w-32 rounded-md border bg-background px-1 text-xs text-muted-foreground"
+                        :value="''"
+                        :aria-label="t('tableImport.applyTemplate')"
+                        @change="
+                          (e) => {
+                            const select = e.target as HTMLSelectElement;
+                            if (select.value) applyMappingTemplate(select.value);
+                            select.value = '';
+                          }
+                        "
+                      >
+                        <option value="">{{ t("tableImport.applyTemplate") }}</option>
+                        <option v-for="template in mappingTemplates" :key="template.name" :value="template.name">{{ template.name }}</option>
+                      </select>
+                    </template>
                   </template>
                 </div>
+              </div>
+              <div v-if="targetMode === 'existing' && savingMappingTemplate" class="flex items-center gap-1.5 border-b px-3 py-1.5" data-template-save-form>
+                <Input v-model="mappingTemplateNameDraft" class="h-7 min-w-0 flex-1 text-xs" :placeholder="t('tableImport.templateNamePlaceholder')" @keydown.enter.prevent="saveMappingTemplate" />
+                <Button size="sm" class="h-7 text-xs" :disabled="!mappingTemplateNameDraft.trim()" @click="saveMappingTemplate">{{ t("tableImport.templateSave") }}</Button>
+                <Button variant="outline" size="sm" class="h-7 text-xs" @click="savingMappingTemplate = false">{{ t("common.cancel") }}</Button>
+              </div>
+              <div v-if="targetMode === 'existing' && appliedMappingTemplate && mappingTemplates.some((template) => template.name === appliedMappingTemplate)" class="flex items-center justify-between gap-2 border-b px-3 py-1 text-[11px] text-muted-foreground" data-template-applied>
+                <span class="truncate">{{ t("tableImport.templateInUse", { name: appliedMappingTemplate }) }}</span>
+                <button type="button" data-action="delete-template" class="shrink-0 hover:text-destructive hover:underline" @click="deleteMappingTemplate(appliedMappingTemplate)">{{ t("tableImport.templateDelete") }}</button>
               </div>
               <div class="max-h-[320px] overflow-auto p-2">
                 <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)_minmax(92px,120px)]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)]'">

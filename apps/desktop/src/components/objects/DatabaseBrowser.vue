@@ -138,7 +138,9 @@ function setCompactCardWidth(width: ObjectBrowserCompactWidth) {
 // controls into the overflow menu, tier 2 drops the connection chip (the tab
 // title already carries it). See useToolbarOverflow for the tier contract.
 const toolbarRef = ref<HTMLElement | null>(null);
-const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => settingsStore.editorSettings.objectBrowserViewMode]);
+// The connection chip renders `connection.name`, so a rename changes the row's
+// content extent without changing its width — track the name, not just the id.
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id, () => props.connection.name, () => settingsStore.editorSettings.objectBrowserViewMode]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
 const showConnectionChip = computed(() => toolbarTier.value < 2);
 const showInlineSortAndView = computed(() => toolbarTier.value < 1);
@@ -642,7 +644,7 @@ defineExpose({ focusSearch, refresh });
 
 <template>
   <section class="flex h-full min-h-0 min-w-0 flex-col bg-background">
-    <div ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <span v-if="showConnectionChip" class="inline-flex max-w-[14rem] min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="connection.name">
         {{ connection.name }}
       </span>

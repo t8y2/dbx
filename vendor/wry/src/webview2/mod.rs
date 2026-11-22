@@ -1308,6 +1308,17 @@ impl InnerWebView {
     dwrefdata: usize,
   ) -> LRESULT {
     match msg {
+      WM_SYSCOMMAND
+        if wparam.0 & 0xFFF0 == SC_KEYMENU as usize
+          && lparam.0 == 0
+          && GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CHILD.0 == 0
+          && GetMenu(hwnd).0.is_null() =>
+      {
+        // A frameless Tao window can still have WS_CAPTION.
+        // With no native menu, skip the system menu loop for bare Alt/F10.
+        return LRESULT(0);
+      }
+
       WM_SIZE => {
         if wparam.0 != SIZE_MINIMIZED as usize {
           let controller = dwrefdata as *mut ICoreWebView2Controller;

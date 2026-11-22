@@ -45,7 +45,7 @@ jobs:
       - run: npm ci --prefix plugins/sdk/dev-host
       - run: npm test --prefix plugins/sdk/dev-host
         timeout-minutes: 5
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
         with:
           tool: cargo-nextest@0.9.137
       - run: cargo nextest run --locked --manifest-path plugins/sdk/cli/Cargo.toml --no-fail-fast

@@ -161,6 +161,10 @@ Completion uses the active database dialect and metadata to suggest:
 - Dialect-specific functions and syntax for MySQL, PostgreSQL, SQL Server, ClickHouse, and others
 - User-defined [SQL Snippets](/en/docs/sql-snippets)
 
+For PostgreSQL, MySQL, and SQLite, completion also reads unexecuted DDL from the whole editor document. `CREATE TABLE`, simple `CREATE TABLE AS SELECT` projections, and `ALTER TABLE ADD COLUMN` can provide table and column candidates before anything is executed, including when remote metadata is empty or unavailable. The overlay is isolated per editor tab, recomputed from the current text after edits, and merged with the existing alias/JOIN completion path; it is never written to connection metadata.
+
+This local overlay is intentionally smaller than a database catalog. It supports qualified and quoted identifiers, skips table constraints, keeps the first duplicate table definition, and does not treat `DROP TABLE` as an executed catalog change. Complex CTAS expressions and other DDL forms may require refreshing real connection metadata instead.
+
 Semantic diagnostics flag selected unresolved tables, columns, aliases, and SQL structures. They help catch mistakes early but do not guarantee that vendor extensions will be accepted or rejected; the server result remains authoritative.
 
 <Callout type="info">Refresh connection metadata after creating or changing objects. DBX caches and lazy-loads table structure to reduce repeated requests in large schemas.</Callout>

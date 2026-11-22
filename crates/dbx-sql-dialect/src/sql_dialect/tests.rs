@@ -285,6 +285,17 @@ fn maps_table_pagination_strategy_by_database_type() {
         TablePaginationStrategy::Rownum
     );
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Jdbc)), TablePaginationStrategy::AgentMaxRows);
+    for trino_family in [DatabaseType::Trino, DatabaseType::PrestoSql] {
+        assert_eq!(table_pagination_strategy(Some(trino_family)), TablePaginationStrategy::FetchFirst);
+        assert_eq!(
+            pagination_strategy(Some(trino_family), PaginationContext::BoundedRead),
+            TablePaginationStrategy::FetchFirst
+        );
+        assert_eq!(
+            pagination_strategy(Some(trino_family), PaginationContext::UserQuery),
+            TablePaginationStrategy::LimitOffset
+        );
+    }
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
@@ -341,6 +352,28 @@ fn oscar_table_data_pages_use_one_limit_pagination_form_without_rownum() {
         "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100 OFFSET 100;"
     );
     assert!(!second_page.to_ascii_uppercase().contains("ROWNUM"), "{second_page}");
+}
+
+#[test]
+fn trino_table_data_pages_put_offset_before_the_row_limit() {
+    // Trino and PrestoSQL reject `LIMIT n OFFSET m` ("mismatched input
+    // 'OFFSET'"), so page 2 of the table data grid failed (#15231).
+    for database_type in [DatabaseType::Trino, DatabaseType::PrestoSql] {
+        let options = TableDataSelectSqlOptions {
+            database_type: Some(database_type),
+            schema: Some("demo".to_string()),
+            table_name: "orders".to_string(),
+            limit: Some(100),
+            offset: Some(0),
+            ..Default::default()
+        };
+
+        let first_page = build_table_data_select_sql(options.clone());
+        assert_eq!(first_page, "SELECT * FROM \"demo\".\"orders\" FETCH FIRST 100 ROWS ONLY");
+
+        let second_page = build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options });
+        assert_eq!(second_page, "SELECT * FROM \"demo\".\"orders\" OFFSET 100 ROWS FETCH FIRST 100 ROWS ONLY");
+    }
 }
 
 #[test]

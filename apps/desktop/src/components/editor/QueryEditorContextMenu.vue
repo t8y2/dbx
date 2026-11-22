@@ -34,6 +34,7 @@ import {
   Trash2,
   UnfoldVertical,
   WandSparkles,
+  ListPlus,
 } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
@@ -83,6 +84,7 @@ export interface QueryEditorContextMenuActions {
   convertSelectedSqlCase: (mode: SqlSelectionCaseMode) => void;
   convertSelectedNamingStyle: () => void;
   openDelimitedListDialog: () => void;
+  openSnippetQuickAddDialog: () => void;
   addNextSelectionOccurrenceFromContextMenu: () => void;
   selectAllSelectionOccurrencesFromContextMenu: () => void;
   openFindReplaceFromContextMenu: () => void;
@@ -180,6 +182,9 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
             icon: Play,
             shortcut: shortcuts.executeSql,
           },
+          ...(state.showExecuteScriptFromHere && actions.executeScriptFromContextPosition
+            ? [{ sidebarActionId: "editor.contextMenu.executeScriptFromHere", label: t("editor.contextMenu.executeScriptFromHere"), action: actions.executeScriptFromContextPosition, disabled: !state.canExecuteScriptFromHere, icon: FastForward }]
+            : []),
           ...(actions.executeAllFromContextMenu
             ? [
                 {
@@ -192,7 +197,6 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
                 },
               ]
             : []),
-          ...(state.showExecuteScriptFromHere && actions.executeScriptFromContextPosition ? [{ label: t("editor.contextMenu.executeScriptFromHere"), action: actions.executeScriptFromContextPosition, disabled: !state.canExecuteScriptFromHere, icon: FastForward }] : []),
           ...(state.canDebugPlSql && actions.debugPlSqlFromContextMenu ? [{ sidebarActionId: "plDebug.start.title", label: t("plDebug.start.title"), action: actions.debugPlSqlFromContextMenu, icon: Play }] : []),
           {
             sidebarActionId: "settings.shortcutExecuteSqlInNewResultTab",
@@ -393,6 +397,15 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: state.readOnly || !canCopySelectedSql,
       icon: List,
       shortcut: shortcuts.convertSelectionToDelimited,
+    },
+    {
+      sidebarActionId: "editor.contextMenu.addSnippet",
+      // Saves editor content as a snippet (settings persist immediately); the
+      // selection, if any, only prefills the body — no editor text is touched,
+      // so it stays available in read-only editors too.
+      label: t("editor.contextMenu.addSnippet"),
+      action: actions.openSnippetQuickAddDialog,
+      icon: ListPlus,
     },
     {
       sidebarActionId: "editor.contextMenu.addNextSelectionOccurrence",

@@ -4,6 +4,7 @@ import { createApp, defineComponent, h, nextTick, shallowRef } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { dispatch, findAll, findOne, hostText, mountComponent } from "./vueHostHarness";
+import type { HostNode } from "./vueHostHarness";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
 const settingsMock = vi.hoisted(() => ({ store: null as any }));
@@ -2042,6 +2043,56 @@ describe("DataGridFilterWorkbench", () => {
     expect(findAll(mounted.root, (node) => node.type === "button" && node.props.title === "grid.databaseValueFilter")).toHaveLength(1);
   });
 
+  it("shows active local column filters in the conditions workbench and forwards clears", () => {
+    const clearLocalFilter = vi.fn();
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [],
+      columns: ["department"],
+      filteredColumns: [],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      hasLocalColumnFilters: true,
+      localFilterCount: 1,
+      localFilterSummaries: [{ columnIndex: 0, columnName: "department", values: ["Engineering", "HR"], hiddenValueCount: 3 }],
+      onClearLocalFilter: clearLocalFilter,
+    });
+
+    const summary = findOne(mounted.root, (node) => node.props["data-grid-local-filter-summary"] === "");
+    expect(hostText(summary)).toContain("grid.localFiltersActive");
+    expect(hostText(summary)).toContain("department");
+    expect(hostText(summary)).toContain("Engineering");
+    expect(hostText(summary)).toContain("grid.localFilterMoreValues");
+
+    const withinSummary = (node: HostNode) => {
+      let current: HostNode | null = node;
+      while (current) {
+        if (current.props["data-grid-local-filter-summary"] === "") return true;
+        current = current.parent;
+      }
+      return false;
+    };
+    const clearColumnButton = findOne(mounted.root, (node) => node.type === "button" && node.props.title === "grid.clearFilter" && withinSummary(node));
+    dispatch(clearColumnButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith(0);
+    const clearAllButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearLocalFiltersShort");
+    dispatch(clearAllButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith();
+  });
+
+  it("hides the local filter summary when no local column filters are active", () => {
+    const mounted = mountComponent(DataGridFilterWorkbench, {
+      sqlPreview: "",
+      rules: [],
+      columns: ["department"],
+      filteredColumns: [],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+    });
+
+    expect(findAll(mounted.root, (node) => node.props["data-grid-local-filter-summary"] === "")).toHaveLength(0);
+  });
+
   it("exposes value suggestions in the reusable popover builder when provided", () => {
     const mounted = mountComponent(DataGridFilterBuilder, {
       rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "", rawEndValue: "", conjunction: "AND" }],
@@ -2199,6 +2250,42 @@ describe("DataGridFilterWorkbench", () => {
 });
 
 describe("DataGridTextFilterWorkbench", () => {
+  it("shows active local column filters in the text workbench and forwards clears", () => {
+    const clearLocalFilter = vi.fn();
+    const mounted = mountComponent(DataGridTextFilterWorkbench, {
+      height: 168,
+      sqlPreview: "",
+      rules: [],
+      columns: ["department"],
+      filteredColumns: [],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      hasLocalColumnFilters: true,
+      localFilterCount: 1,
+      localFilterSummaries: [{ columnIndex: 0, columnName: "department", values: ["Engineering"], hiddenValueCount: 0 }],
+      onClearLocalFilter: clearLocalFilter,
+    });
+
+    const summary = findOne(mounted.root, (node) => node.props["data-grid-local-filter-summary"] === "");
+    expect(hostText(summary)).toContain("grid.localFiltersActive");
+    expect(hostText(summary)).toContain("department");
+
+    const withinSummary = (node: HostNode) => {
+      let current: HostNode | null = node;
+      while (current) {
+        if (current.props["data-grid-local-filter-summary"] === "") return true;
+        current = current.parent;
+      }
+      return false;
+    };
+    const clearColumnButton = findOne(mounted.root, (node) => node.type === "button" && node.props.title === "grid.clearFilter" && withinSummary(node));
+    dispatch(clearColumnButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith(0);
+    const clearAllButton = findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearLocalFiltersShort");
+    dispatch(clearAllButton, "click");
+    expect(clearLocalFilter).toHaveBeenCalledWith();
+  });
+
   it("shows and forwards database value suggestions in the text filter panel", async () => {
     const openValueSuggestions = vi.fn();
     const closeValueSuggestions = vi.fn();
@@ -2543,10 +2630,12 @@ describe("cell detail surfaces", () => {
       // canonical 值仍是 0x 十六进制，解码文本只出现在只读预览里。
       expect(hostText(mounted.root)).toContain("0x5b5b68656164657273203d207b7d");
       expect(hostText(mounted.root)).toContain("grid.binaryTextPreview");
-      // binary 列不再渲染 timestamp/radix 这类对 hex 无意义的文本转换。
-      expect(findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(0);
+      // binary 列不再渲染 timestamp/radix 这类对 hex 无意义的文本转换；只有插件解码（收原始字节）可用。
+      const transforms = findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridValueTransform");
+      expect(transforms.every((node) => node.props["plugin-only"] !== undefined)).toBe(true);
       expect(findOne(mounted.root, (node) => node.type === "textarea").value).toBe("[[headers = {}");
     }
+    expect(findAll(dialog.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(1);
   });
 
   it("re-decodes the binary text preview with GBK only after the user picks it", async () => {

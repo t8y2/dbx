@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
+import { generateDatabaseUserPassword } from "@/lib/security/databaseUserPassword";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import AuthorizationScopeEditor from "@/components/admin/AuthorizationScopeEditor.vue";
 import OracleSecurityDetails from "@/components/admin/OracleSecurityDetails.vue";
@@ -1423,8 +1424,11 @@ onBeforeUnmount(() => {
             <input v-model="createCanLogin" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
             {{ t("userAdmin.allowLogin") }}
           </label>
-          <label class="block text-xs font-medium">{{ t("connection.password") }}</label>
-          <PasswordInput v-model="createPassword" />
+          <label for="new-database-user-password" class="block text-xs font-medium">{{ t("connection.password") }}</label>
+          <div class="flex flex-wrap items-center gap-2">
+            <PasswordInput id="new-database-user-password" v-model="createPassword" autocomplete="new-password" class="min-w-32 flex-1" />
+            <Button type="button" variant="outline" @click="createPassword = generateDatabaseUserPassword()">{{ t("userAdmin.generatePassword") }}</Button>
+          </div>
 
           <div v-if="createAccountType === 'admin'" class="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
             {{ t("userAdmin.adminUserWarning") }}

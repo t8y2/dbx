@@ -51,7 +51,7 @@
   overflow: visible !important;
 }
 
-.app-tab-bar.tab-wrap-mode > div {
+.app-tab-bar.tab-wrap-mode > div:not(.tab-group-rail) {
   height: auto !important;
   min-height: 0 !important;
   max-height: none !important;
@@ -197,7 +197,7 @@
  * alters the layout it is measured from. The overflow control stays at the far
  * right; when the new-query button is also visible, the strip reserves both
  * adjacent 28px action slots. */
-.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .app-tab-strip {
+.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):is(:not(.tab-wrap-mode), .tab-two-row-groups) .app-tab-strip {
   padding-inline-end: 2.5rem;
 }
 
@@ -205,7 +205,7 @@
   inset-inline-end: 2.5rem;
 }
 
-.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):not(.tab-wrap-mode) .has-tab-action-controls .app-tab-strip {
+.app-tab-bar:not(.horizontal-fixed-tabs):not(.vertical-tab-layout):is(:not(.tab-wrap-mode), .tab-two-row-groups) .has-tab-action-controls .app-tab-strip {
   padding-inline-end: 3.5rem;
 }
 

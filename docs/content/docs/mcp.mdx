@@ -88,6 +88,34 @@ The npm/npx channel remains supported unchanged. DBX desktop now installs the st
   </Step>
 </Steps>
 
+## Inspect a local schema and look up public engine docs
+
+### Local schema
+
+In DBX Desktop, save a SQLite connection named `Local SQLite demo` that points to a disposable database file. Open the SQL editor for that connection and create an empty example table.
+
+```sql
+CREATE TABLE notes (id INTEGER, body TEXT);
+```
+
+In **Settings → MCP → Permission management → Access control**, choose **Selected only**, select the demo connection, and set its permission to **Read only**. In **Capabilities**, disable the other categories and toolsets. In the schema toolset, open **View details**, enable `dbx_describe_table` only, and disable the other tools. Click **Apply** in Settings. These settings are shared by all DBX MCP clients.
+
+In a client profile configured with only the native DBX MCP server, call `dbx_describe_table` with these arguments.
+
+```json
+{"connection_name":"Local SQLite demo","table":"notes"}
+```
+
+Record the returned column types under **Local schema**. For this example, expect `id INTEGER` and `body TEXT`.
+
+### Public docs
+
+Use a browser or a separate search-only session to look up the public question below. If you use a search assistant, start a fresh session without DBX MCP enabled or access to the local database. Search with only the public question. Keep your schema, SQL, credentials, rows, and instance URLs in the local session.
+
+> What does JSONB store in SQLite 3.45.0? Cite the official SQLite docs.
+
+Record the answer and source URLs under **Public docs**. SQLite 3.45.0 introduced JSONB, which stores SQLite’s internal JSON parse tree as a BLOB. [SQLite 3.45.0 release notes](https://sqlite.org/releaselog/3_45_0.html) · [SQLite JSONB reference](https://sqlite.org/json1.html#jsonb)
+
 ## Supported AI Agents
 
 | Agent | Configuration |

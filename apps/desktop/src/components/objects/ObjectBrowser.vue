@@ -113,7 +113,6 @@ import type {
   TreeNode,
   TriggerInfo,
 } from "@/types/database";
-import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -158,6 +157,7 @@ import {
 import { confirmOracleTriggerPlan } from "@/lib/database/oracleTriggerActions";
 import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
 import ObjectSourceDialog from "@/components/objects/ObjectSourceDialog.vue";
+import PostgresSequenceDialog from "@/components/objects/PostgresSequenceDialog.vue";
 import { assertSourceIdentity, beginSourceSave, captureSourceIdentity, freezeSourceIdentities, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { buildRenameObjectSql, supportsObjectRename } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
@@ -221,7 +221,7 @@ import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { COLUMN_NAME_COPY_SEPARATOR_VALUES } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
-import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { orderObjectBrowserDropRows, runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
 import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -262,7 +262,7 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
-import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { metadataLoadBudgetMs, waitForMetadata } from "@/lib/metadata/metadataLoadBudget";
 import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -328,6 +328,48 @@ const refreshTooltip = computed(() => {
 const firebirdManagerOpen = ref(false);
 const schemas = ref<string[]>([]);
 const selectedSchema = ref<string | undefined>(props.schema);
+const postgresSequenceOpen = ref(false);
+type PostgresSequenceTarget = { connectionId: string; database: string; schema: string; name: string; catalog?: string; browserSchema?: string };
+const postgresSequenceTarget = shallowRef<PostgresSequenceTarget>();
+function postgresSequenceTargetForRow(row: ObjectBrowserRow): PostgresSequenceTarget | undefined {
+  const identity = row.postgresSequenceIdentity;
+  const schema = identity?.schema ?? selectedSchema.value;
+  if (props.connection.db_type !== "postgres" || row.type !== "SEQUENCE" || !identity || !schema) return;
+  return { connectionId: props.connection.id, database: props.database, schema, name: identity.name, catalog: props.catalog, browserSchema: selectedSchema.value };
+}
+function openPostgresSequence(target: PostgresSequenceTarget | undefined) {
+  if (!target || props.connection.db_type !== "postgres" || target.connectionId !== props.connection.id || target.database !== props.database || target.catalog !== props.catalog || target.browserSchema !== selectedSchema.value) return;
+  postgresSequenceTarget.value = target;
+  postgresSequenceOpen.value = true;
+}
+watch(
+  [() => props.connection.id, () => props.connection.db_type, () => props.database, () => props.catalog, selectedSchema],
+  () => {
+    postgresSequenceOpen.value = false;
+  },
+  { flush: "sync" },
+);
+watch(postgresSequenceOpen, (open) => {
+  if (!open) postgresSequenceTarget.value = undefined;
+});
+onDeactivated(() => {
+  postgresSequenceOpen.value = false;
+});
+async function refreshPostgresSequence() {
+  const target = postgresSequenceTarget.value;
+  if (!target) return;
+  const scope = { connectionId: target.connectionId, database: target.database, schema: target.schema, tableName: target.name };
+  try {
+    await Promise.all([invalidateObjectMetadataCache(scope), invalidateObjectDdlCache(scope)]);
+    invalidateObjectBrowserRowsCache({ connectionId: target.connectionId, database: target.database, schema: target.schema });
+    await connectionStore.refreshObjectListTreeNode(target.connectionId, target.database, target.schema, target.catalog);
+    if (!objectBrowserUnmounted && props.connection.id === target.connectionId && props.database === target.database && props.catalog === target.catalog && selectedSchema.value === target.browserSchema) {
+      await reload({ preserveExistingRows: true });
+    }
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
 const triggerCreateOpen = ref(false);
 const triggerCreateDialog = ref<InstanceType<typeof ObjectSourceDialog>>();
 const triggerCreateContext = ref<{ connectionId: string; database: string; catalog?: string; schema: string; databaseType: ConnectionConfig["db_type"] }>();
@@ -355,12 +397,6 @@ let invalidObjectsDialogGeneration = 0;
 let invalidObjectSourceRequestGeneration = 0;
 let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
-// MySQL browser split (#14139): names first, details automatically afterwards.
-// Phase-two (details) reads are tracked per cache write token; see
-// scheduleObjectBrowserDetails(). Declared here because loadObjects() starts the
-// passes and helpers below only read from it.
-const objectBrowserDetailsPasses = new Map<ObjectBrowserRowsCacheWriteToken, Promise<unknown>>();
-const detailsPassEnabled = computed(() => usesLightweightMysqlBrowser(props.connection));
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
 function initialObjectBrowserFilter(): ObjectFilter {
@@ -383,6 +419,9 @@ let objectPageNextAnchor: string | undefined;
 let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
+const loadingObjectDetails = ref(false);
+const objectDetailsError = ref("");
+let retryObjectDetails: (() => void) | undefined;
 const sourceLoading = ref(false);
 const sourceContent = ref("");
 const sourceError = ref("");
@@ -686,6 +725,7 @@ const batchDropExecuting = ref(false);
 const batchDropProgress = ref({ completed: 0, total: 0 });
 const batchDropPreviewSql = ref("");
 const batchDropPreviewError = ref("");
+const batchDropPreviewPending = ref(false);
 const batchTriggerDropRequested = ref(false);
 const batchTriggerDropPreview = shallowRef<BrowserTriggerDropPreview>();
 const showBatchTruncateConfirm = ref(false);
@@ -969,6 +1009,9 @@ const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [
   () => objectFilter.value,
   () => canCreateSchemaIndex.value,
   () => oracleInvalidObjectsSupported.value,
+  // The paste-table button is driven by the clipboard, which can change from
+  // another object browser's tab without resizing this row.
+  () => connectionStore.treeClipboard,
   () => settingsStore.editorSettings.objectBrowserViewMode,
 ]);
 const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
@@ -1321,7 +1364,7 @@ const hasSelectedSchemaIndexes = computed(() => selectedTableRows.value.some((ro
 const hasSelectedTablesOnly = computed(() => selectedTableRows.value.length > 0 && selectedTableRows.value.every((row) => row.type === "TABLE"));
 const batchDropConfirmTitle = computed(() => (hasSelectedTablesOnly.value ? t("objects.confirmBatchDropTitle") : t("contextMenu.confirmBatchDropTitle")));
 const batchDropConfirmMessage = computed(() => (hasSelectedTablesOnly.value ? t("objects.confirmBatchDropMessage", { count: selectedTableCount.value }) : t("contextMenu.confirmBatchDropMessage", { count: selectedTableCount.value })));
-const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
+const canBatchDropCascade = computed(() => supportsDropTableCascade(effectiveDatabaseType.value) && selectedTableRows.value.some((row) => row.type === "TABLE"));
 const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
 
 // Column resizes change the scrollable content width, so the header's clamped
@@ -3652,21 +3695,14 @@ function openBatchDatabaseExport() {
   };
 }
 
-async function fetchSortedTableRowsForDrop(): Promise<ObjectBrowserRow[]> {
-  const rows = [...selectedTableRows.value];
-  if (rows.length <= 1) return rows;
-
-  const fkResults = await Promise.all(rows.map((row) => (row.type === "TABLE" ? api.listForeignKeys(props.connection.id, props.database, row.schema || selectedSchema.value || "", row.name, props.catalog).catch(() => [] as ForeignKeyInfo[]) : Promise.resolve([] as ForeignKeyInfo[]))));
-
-  const tablesWithFk: TableWithFk[] = rows.map((row, i) => ({
-    name: row.name,
-    schema: row.schema || selectedSchema.value,
-    foreignKeys: fkResults[i] ?? [],
-  }));
-
-  const sorted = sortTablesByFkDependency(tablesWithFk);
-  const nameToRow = new Map(rows.map((r) => [r.name, r]));
-  return sorted.map((t) => nameToRow.get(t.name)!).filter(Boolean);
+async function fetchBatchDropPlan() {
+  const connectionId = props.connection.id;
+  const database = props.database;
+  const catalog = props.catalog;
+  const schema = selectedSchema.value;
+  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
+  const rows = await orderObjectBrowserDropRows([...selectedTableRows.value], schema, (row) => api.listForeignKeys(connectionId, database, row.schema || schema || "", row.name, catalog).catch(() => [] as ForeignKeyInfo[]));
+  return Promise.all(rows.map(async (target) => ({ target, sql: await buildDropSqlForRow(target, { cascade: useCascade }) })));
 }
 
 interface BrowserTriggerDropPreview {
@@ -3676,7 +3712,7 @@ interface BrowserTriggerDropPreview {
   pinnedContext: ReturnType<typeof objectBrowserPinnedTreeNodeContext>;
   isCurrent: () => boolean;
 }
-let batchTriggerDropPreviewRequestId = 0;
+let batchDropPreviewRequestId = 0;
 
 function usesExactTriggerDrop(row: ObjectBrowserRow): boolean {
   return row.type === "TRIGGER" && (!!exactOracleTriggerMetadata(row.trigger) || !!oracleTriggerObjectReadOptions(props.connection, undefined, props.catalog));
@@ -3696,14 +3732,10 @@ async function prepareBrowserTriggerDrops(selected: readonly ObjectBrowserRow[],
     browserTriggerContext() === context &&
     (batch ? showBatchDropConfirm.value && [...selectedTableIds.value].sort().join("\n") === selection && (canBatchDropCascade.value && batchDropCascade.value) === cascade : showDropConfirm.value && dropTarget.value?.id === selected[0]?.id) &&
     expected.every((item) => rows.value.some((row) => row.id === item.id && (item.objectId === undefined || exactOracleTriggerMetadata(row.trigger)?.objectId === item.objectId)));
-  // Verify triggers before dropping a selected parent. The existing FK sorter
-  // still orders tables, with exact tuple keys instead of collapsing bare names.
-  const tables = selected.filter((row) => row.type === "TABLE");
-  const key = (schema: string | undefined | null, name: string) => JSON.stringify([schema ?? fixed.executionSchema, name]);
-  const tableIds = new Map(tables.map((row) => [key(row.schema, row.name), row.id]));
-  const foreignKeys = await Promise.all(tables.map((row) => api.listForeignKeys(fixed.connectionId, fixed.database, row.schema || fixed.executionSchema, row.name, fixed.catalog).catch(() => [] as ForeignKeyInfo[])));
-  const sortedTables = sortTablesByFkDependency(tables.map((row, index) => ({ name: row.id, foreignKeys: foreignKeys[index].map((fk) => ({ ...fk, ref_table: tableIds.get(key(fk.ref_schema ?? row.schema, fk.ref_table)) ?? "" })) })));
-  const ordered = [...selected.filter((row) => usesExactTriggerDrop(row)), ...sortedTables.map((table) => tables.find((row) => row.id === table.name)!), ...selected.filter((row) => row.type !== "TABLE" && !usesExactTriggerDrop(row))];
+  // Verify triggers before dropping a selected parent.
+  const triggers = selected.filter(usesExactTriggerDrop);
+  const otherRows = [...selected.filter((row) => row.type === "TABLE"), ...selected.filter((row) => row.type !== "TABLE" && !usesExactTriggerDrop(row))];
+  const ordered = [...triggers, ...(await orderObjectBrowserDropRows(otherRows, fixed.executionSchema, (row) => api.listForeignKeys(fixed.connectionId, fixed.database, row.schema || fixed.executionSchema, row.name, fixed.catalog).catch(() => [] as ForeignKeyInfo[])))];
   const entries = [];
   let engine: OracleTriggerDropBatchPlan["engine"] | undefined;
   for (const row of ordered) {
@@ -3802,29 +3834,26 @@ async function executeBrowserTriggerDrops(preview: BrowserTriggerDropPreview, ba
 }
 
 async function refreshBatchDropPreviewSql() {
-  if (batchTriggerDropRequested.value) {
-    const requestId = ++batchTriggerDropPreviewRequestId;
-    batchTriggerDropPreview.value = undefined;
-    batchDropPreviewSql.value = "";
-    batchDropPreviewError.value = "";
-    try {
+  const requestId = ++batchDropPreviewRequestId;
+  batchTriggerDropPreview.value = undefined;
+  batchDropPreviewSql.value = "";
+  batchDropPreviewError.value = "";
+  batchDropPreviewPending.value = true;
+  try {
+    if (batchTriggerDropRequested.value) {
       const prepared = await prepareBrowserTriggerDrops([...selectedTableRows.value], true);
-      if (requestId !== batchTriggerDropPreviewRequestId || !prepared.isCurrent()) return;
+      if (requestId !== batchDropPreviewRequestId || !prepared.isCurrent()) return;
       batchTriggerDropPreview.value = prepared;
       batchDropPreviewSql.value = prepared.plan.entries.map((entry) => entry.sql).join("\n\n");
-    } catch (error) {
-      if (requestId === batchTriggerDropPreviewRequestId) batchDropPreviewError.value = error instanceof Error ? error.message : String(error);
+    } else {
+      const plan = await fetchBatchDropPlan();
+      if (requestId === batchDropPreviewRequestId) batchDropPreviewSql.value = plan.map((entry) => entry.sql).join("\n");
     }
-    return;
+  } catch (error) {
+    if (requestId === batchDropPreviewRequestId) batchDropPreviewError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (requestId === batchDropPreviewRequestId) batchDropPreviewPending.value = false;
   }
-  const statements: string[] = [];
-  const sortedRows = await fetchSortedTableRowsForDrop();
-  const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-  for (const row of sortedRows) {
-    const sql = await buildDropSqlForRow(row, { cascade: useCascade }).catch(() => "");
-    if (sql) statements.push(sql);
-  }
-  batchDropPreviewSql.value = statements.join("\n");
 }
 
 function requestBatchDropTables() {
@@ -3858,7 +3887,7 @@ function requestBatchDropTables() {
 }
 
 async function confirmBatchDropTables() {
-  if (batchDropExecuting.value) return;
+  if (batchDropExecuting.value || batchDropPreviewPending.value || batchDropPreviewError.value) return;
   if (selectedTableRows.value.some((row) => row.type === "INDEX")) return;
   if (batchTriggerDropRequested.value) {
     if (batchTriggerDropPreview.value) await executeBrowserTriggerDrops(batchTriggerDropPreview.value, true);
@@ -3870,16 +3899,10 @@ async function confirmBatchDropTables() {
   let targets: ObjectBrowserRow[] = [];
   const start = Date.now();
   try {
-    targets = await fetchSortedTableRowsForDrop();
-    if (targets.length === 0) return;
+    const plan = await fetchBatchDropPlan();
+    if (plan.length === 0) return;
+    targets = plan.map(({ target }) => target);
     batchDropProgress.value = { completed: 0, total: targets.length };
-    const useCascade = canBatchDropCascade.value && batchDropCascade.value;
-    const plan = await Promise.all(
-      targets.map(async (target) => ({
-        target,
-        sql: await buildDropSqlForRow(target, { cascade: useCascade }),
-      })),
-    );
     const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
     batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
     const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
@@ -4731,6 +4754,7 @@ async function fetchAllObjectRowsForCopy(): Promise<ObjectBrowserRow[]> {
     database: copyDatabase,
     fallbackSchema: schema,
     rowSchema,
+    databaseType: copyConnection.db_type,
   });
   return rows.filter((row) => matchesTableNameFilter(row.name, copyNameFilters[row.type]));
 }
@@ -5676,13 +5700,13 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-// MySQL is two-phase and automatic (#14139 follow-up): this pass only enumerates
-// names, and scheduleObjectBrowserDetails() upgrades the rows on screen in the
-// background. No caller has to ask for "details" any more.
 async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, { preserveExistingRows: options?.preserveExistingRows });
   error.value = "";
+  loadingObjectDetails.value = false;
+  objectDetailsError.value = "";
+  retryObjectDetails = undefined;
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
   // epoch moved on) and would otherwise leave refreshingObjects stuck spinning
@@ -5718,15 +5742,14 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
-    // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
-    // Backfill MySQL scaffolds cached before all table metadata was merged,
-    // even while fresh. Null timestamps are known to be unavailable.
+    // Refresh stale or incomplete metadata without replacing cached membership.
+    // Null timestamps are known to be unavailable and do not need backfilling.
     const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined || row.created_at === undefined || row.updated_at === undefined));
-    const statistics = cached.stale || missingMysqlTableMetadata ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
-    // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
-    if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
-      detailsPassStarter(request, cacheWriteToken, statistics)();
-    }
+    if (usesLightweightMysqlBrowser(props.connection)) {
+      if (!cached.detailsComplete || cached.stale || missingMysqlTableMetadata) {
+        void loadMysqlObjectDetails(request, cacheWriteToken, !cached.detailsComplete);
+      }
+    } else if (cached.stale || missingMysqlTableMetadata) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5747,11 +5770,15 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
-    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    // Row/size statistics come from a separate aggregate read; the MySQL split only
-    // skips them on the enumeration, not for the whole view.
-    const statistics = loadObjectStatistics(request, cacheWriteToken, cachedAt);
-    if (detailsPassEnabled.value) detailsPassStarter(request, cacheWriteToken, statistics)();
+    const progressive = usesLightweightMysqlBrowser(props.connection);
+    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows, { detailsComplete: !progressive });
+    if (progressive) {
+      // Publish names and release the blocking spinner before awaiting details.
+      loadingObjects.value = false;
+      refreshingObjects.value = false;
+      finishOnce();
+      void loadMysqlObjectDetails(request, cacheWriteToken);
+    } else void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5844,6 +5871,7 @@ async function loadObjectPage(append: boolean, options?: { preserveExistingRows?
       database: request.scope.database,
       fallbackSchema: request.scope.schema,
       rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+      databaseType: props.connection.db_type,
     });
     applyObjectBrowserRows(replaceWindow ? pageRows : [...rows.value, ...pageRows]);
     objectPageOffset = (replaceWindow ? 0 : offset) + page.length;
@@ -5868,17 +5896,66 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
   const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const objects: ObjectInfo[] = await shareObjectBrowserRead(objectBrowserReadKey(request, types, readOptions), () =>
-    readOptions
+  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () => {
+    const read = readOptions
       ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
-  );
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog);
+    // Evict a timed-out shared detail read too, so retry starts a new request.
+    // This bounds local waiting; backend statement cancellation remains separate.
+    return details ? waitForMetadata(read, metadataLoadBudgetMs(props.connection.query_timeout_secs)) : read;
+  });
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
     fallbackSchema: request.scope.schema,
     rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
+    databaseType: props.connection.db_type,
   });
+}
+
+/** One deferred enrichment pass: statistics first, then missing details. */
+async function loadMysqlObjectDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, needsDetails = true) {
+  if (!objectBrowserRowsLoadGuard.isCurrent(request) || loadingObjectDetails.value) return;
+  loadingObjectDetails.value = true;
+  objectDetailsError.value = "";
+  retryObjectDetails = () => void loadMysqlObjectDetails(request, cacheWriteToken, needsDetails);
+  const budget = metadataLoadBudgetMs(props.connection.query_timeout_secs);
+  const failures: string[] = [];
+  try {
+    // Keep the names render ahead of phase two, including a cached scaffold.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: false });
+    if (rows.value.some((row) => row.type === "TABLE")) {
+      try {
+        const statistics = shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => waitForMetadata(api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema), budget));
+        const stats = await objectBrowserRowsLoadGuard.wait(request.epoch, statistics, budget);
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, undefined, false);
+      } catch (e) {
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        failures.push(translateBackendError(t, e));
+      }
+    }
+    if (needsDetails) {
+      try {
+        const details = await objectBrowserRowsLoadGuard.wait(request.epoch, loadSqlObjectBrowserRows(request, true), budget);
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        // Only detail fields are merged; preserve statistics, collation and identity.
+        applyObjectBrowserDetails(details);
+        needsDetails = false;
+      } catch (e) {
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        failures.push(translateBackendError(t, e));
+      }
+    }
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: failures.length === 0 });
+    objectDetailsError.value = failures.join(" · ");
+    if (!failures.length) retryObjectDetails = undefined;
+  } finally {
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) loadingObjectDetails.value = false;
+  }
 }
 
 async function loadMongoObjectBrowserRows(connectionId: string, database: string) {
@@ -5886,79 +5963,6 @@ async function loadMongoObjectBrowserRows(connectionId: string, database: string
   return buildMongoObjectBrowserRows({ collections: visibleMongoCollections(collections), database });
 }
 
-interface ObjectBrowserDetailsPass {
-  epoch: number;
-  cacheWriteToken: ObjectBrowserRowsCacheWriteToken;
-  waitFor?: Promise<unknown>;
-}
-
-/**
- * Phase two of the MySQL browser read (#14139 follow-up).
- *
- * The lightweight enumeration ships names immediately and leaves comments,
- * create/update times and row/size statistics for later. Instead of a manual
- * toolbar button, run that detail read in the background as soon as the names
- * are visible: rows are patched in place (never blanked), failures stay silent
- * (names remain usable), and a superseded scope drops its result.
- *
- * The pass is started through a bound starter that defers it onto a timer:
- * calling it inline from `loadObjects()` reaches the pass bookkeeping while the
- * row list is still being applied, and deferring one task keeps the list's own
- * render ahead of the second read.
- */
-function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): () => void {
-  const epoch = request.epoch;
-  return () => {
-    // The pass is decorative and must never surface as a load failure: defer it and
-    // keep any throw inside the pass.
-    window.setTimeout(() => {
-      void scheduleObjectBrowserDetails({ epoch, scope: cacheWriteToken.scope } as ObjectBrowserRowsLoadHandle, cacheWriteToken, waitFor);
-    }, 0);
-  };
-}
-
-function scheduleObjectBrowserDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): Promise<unknown> {
-  const existing = objectBrowserDetailsPasses.get(cacheWriteToken);
-  if (existing) return existing;
-  const pending = startObjectBrowserDetails({ epoch: request.epoch, cacheWriteToken, waitFor });
-  objectBrowserDetailsPasses.set(cacheWriteToken, pending);
-  void pending
-    .finally(() => {
-      if (objectBrowserDetailsPasses.get(cacheWriteToken) === pending) objectBrowserDetailsPasses.delete(cacheWriteToken);
-    })
-    .catch(() => undefined);
-  return pending;
-}
-
-function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unknown> {
-  // `loadSqlObjectBrowserRows()` carries no cache-write-token argument, so this handle
-  // only has to describe the same scope and epoch for the load guard.
-  const request: ObjectBrowserRowsLoadHandle = { epoch: pass.epoch, scope: pass.cacheWriteToken.scope };
-  return (async () => {
-    // Let the background statistics read finish first: both statements hit
-    // information_schema on the same metadata pool.
-    await pass.waitFor?.catch(() => undefined);
-    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-    // A previous full read may have filled the rows while this pass waited on the
-    // statistics; then there is nothing left to fetch.
-    if (rows.value.some((row) => Boolean(row.comment?.trim()))) return;
-    try {
-      const details = await loadSqlObjectBrowserRows(request, true);
-      if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-      applyObjectBrowserDetails(details);
-      cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
-    } catch (e) {
-      // Details are decorative: keep the names already rendered and stay quiet.
-      console.debug("[ObjectBrowser] object details unavailable", e);
-    }
-  })();
-}
-
-/**
- * Merges the details read into the rendered list by object identity: the
- * lightweight pass and the details pass may return different orders, and any
- * other field already on screen must survive untouched.
- */
 function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
   const byId = new Map(details.map((row) => [row.id, row]));
   rows.value = rows.value.map((row) => {
@@ -5971,16 +5975,6 @@ function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
       updated_at: detail.updated_at ?? row.updated_at,
     };
   });
-}
-
-/**
- * Shared-read key for an object enumeration. Built from plain values only: the
- * previous `JSON.stringify([writeToken, ...])` embedded the token's generation and
- * frozen scope, so two equivalent browsers never shared a pending read.
- */
-function objectBrowserReadKey(request: ObjectBrowserRowsLoadHandle, types: (SidebarObjectKind | "EVENT")[] | undefined, readOptions: import("@/types/database").MetadataReadOptions | undefined): string {
-  const { connectionId, database, schema, catalog } = request.scope;
-  return JSON.stringify([connectionId, database, schema, catalog ?? "", types ?? null, readOptions?.lightweight ?? null, readOptions?.identityMode ?? null]);
 }
 
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
@@ -6005,7 +5999,7 @@ async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHa
   await loadObjectStatistics(request, cacheWriteToken, undefined);
 }
 
-function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined, detailsComplete = true) {
   const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
@@ -6020,7 +6014,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });
-  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
+  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt, detailsComplete });
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
@@ -6064,6 +6058,11 @@ useDatabaseBrowserMutation(({ connectionId, database, operation }) => {
 });
 
 function refresh(): boolean {
+  if (usesLightweightMysqlBrowser(props.connection)) {
+    // A user refresh must not join a pre-refresh detail read or accept its result.
+    objectBrowserRowsLoadGuard.invalidate();
+    invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database });
+  }
   void reload({ preserveExistingRows: true });
   void refreshActiveTableInfo();
   return true;
@@ -6184,6 +6183,9 @@ watch(
   () => {
     clearTimeout(objectSearchTimer);
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     schemaListLoadGuard.invalidate();
     closeSidePanel();
     selectedRowId.value = null;
@@ -6198,6 +6200,9 @@ watch(
   [() => props.connection.id, () => props.database, () => props.schema, () => props.catalog],
   async () => {
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
@@ -6480,7 +6485,9 @@ function getEventMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 }
 
 function getPackageMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
+  const sequenceTarget = postgresSequenceTargetForRow(item);
   return [
+    ...(props.connection.db_type === "postgres" && item.type === "SEQUENCE" ? [{ label: t("postgresSequence.title"), action: () => openPostgresSequence(sequenceTarget), icon: PencilLine, disabled: !sequenceTarget }] : []),
     ...((effectiveDatabaseType.value === "oracle" || effectiveDatabaseType.value === "oceanbase-oracle") && (item.type === "PACKAGE" || item.type === "PACKAGE_BODY") ? [{ label: t("objects.packageSaveAsTitle"), action: () => requestPackageSaveAs(item), icon: CopyPlus }] : []),
     ...(effectiveDatabaseType.value === "xugu" && buildXuguCompileSql({ objectType: item.type, schema: item.schema || selectedSchema.value, name: item.name }) ? [{ label: t("contextMenu.compileObject"), action: () => compileXuguObject(item), icon: Wrench }] : []),
     { sidebarActionId: "contextMenu.editObject", label: t("contextMenu.editObject"), action: () => openSource(item), icon: PencilLine },
@@ -6600,6 +6607,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     @confirm="cloneDialog.confirm"
   />
   <FirebirdObjectManager v-if="effectiveDatabaseType === 'firebird'" v-model:open="firebirdManagerOpen" :connection-id="connection.id" :database="database" />
+  <PostgresSequenceDialog v-if="postgresSequenceTarget" v-model:open="postgresSequenceOpen" :connection-id="postgresSequenceTarget.connectionId" :database="postgresSequenceTarget.database" :schema="postgresSequenceTarget.schema" :name="postgresSequenceTarget.name" @saved="refreshPostgresSequence" />
   <ObjectSourceDialog
     v-if="triggerCreateContext"
     :key="JSON.stringify(triggerCreateContext)"
@@ -6638,7 +6646,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   />
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+    <div v-if="!isEventEditor" ref="toolbarRef" data-toolbar-row class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>
       <Button v-if="oracleInvalidObjectsSupported" variant="ghost" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="setOracleInvalidObjectsOpen(true)">{{ t("processList.oracleInvalidObjects.title") }}</Button>
@@ -6735,6 +6743,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
+      <span v-if="loadingObjectDetails" role="status" class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+        {{ t("common.loading") }}
+      </span>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6835,7 +6847,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
     <div v-if="selectedTableCount > 0 && supportsBatchTableActions" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
-        {{ t("objects.selectedTables", { count: selectedTableCount }) }}
+        {{ t(hasSelectedTablesOnly ? "objects.selectedTables" : "objects.selectedObjects", { count: selectedTableCount }) }}
       </div>
       <Button v-if="supportsBatchTableActions && !hasSelectedSchemaIndexes" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
@@ -6859,6 +6871,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </Button>
     </div>
 
+    <div v-if="objectDetailsError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
+      <span class="min-w-0 flex-1 truncate">{{ objectDetailsError }}</span>
+      <Button variant="ghost" size="sm" @click="retryObjectDetails?.()">{{ t("common.retry") }}</Button>
+    </div>
     <div v-if="scaffoldRefreshError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
       <RefreshCw class="h-3 w-3 shrink-0" />
       <span class="min-w-0 truncate">{{ scaffoldRefreshError }}</span>
@@ -7649,12 +7665,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :sql="batchDropDisplaySql"
     :confirm-label="t('objects.dropSelected')"
     :loading="batchDropExecuting && !batchTriggerDropRequested"
-    :confirm-disabled="batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy)"
+    :confirm-disabled="batchDropPreviewPending || !!batchDropPreviewError || (batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy))"
     :close-on-confirm="false"
     @confirm="confirmBatchDropTables"
   >
     <template #options>
       <p v-if="batchDropPreviewError" role="alert" class="mb-3 text-sm text-destructive">{{ batchDropPreviewError }}</p>
+      <p v-if="selectedTableRows.some((row) => row.type === 'PACKAGE')" class="mb-3 text-sm text-muted-foreground">{{ t("objects.dropPackageBodyHint") }}</p>
       <p v-if="batchTriggerDropPreview" class="mb-3 text-sm text-muted-foreground">{{ t("oracleTrigger.executionSchema") }}: {{ batchTriggerDropPreview.plan.target.executionSchema }}</p>
       <div v-if="batchDropExecuting" class="mb-3 rounded-md border bg-muted/20 px-3 py-2.5">
         <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">

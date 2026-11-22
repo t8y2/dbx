@@ -1447,6 +1447,9 @@ export default withEnglishFallback({
   },
   sqlLibrary: {
     title: "SQL 库",
+    displayMode: "展示方式",
+    displayModeFolder: "按文件夹结构",
+    displayModeConnection: "按连接分组",
     storageHelp: "SQL 库内容保存在 DBX 应用数据中，并非磁盘上的独立 .sql 文件。\n如需在文件系统中使用，请导出 SQL 库。",
     unassociated: "未关联",
     deletedConnection: "连接已删除",
@@ -9672,6 +9675,11 @@ export default withEnglishFallback({
     completedWithErrors: "执行完成：成功 {succeeded} 条，失败 {failed} 条",
   },
   sqlFileTree: {
+    displayMode: "展示方式",
+    displayModeFolder: "按文件夹结构",
+    displayModeConnection: "按连接分组",
+    unassociated: "未关联",
+    deletedConnection: "连接已删除",
     searchIncompleteHelp: "本次搜索结果不完整的原因：",
     searchSkippedTooLarge: "超过 32 MiB，已跳过：{count} 个文件。",
     searchSkippedUnreadable: "无法读取（可能已删除或无访问权限）：{count} 个文件或目录。",

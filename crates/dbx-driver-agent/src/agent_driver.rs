@@ -5575,6 +5575,20 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn startup_failure_reports_the_command_that_ran() {
+        let launch = AgentLaunchSpec::new(test_python()).with_args([
+            "-u",
+            "-c",
+            "import sys\nsys.stderr.write('Error: Could not find or load main class com.dbx.agent.iris.IrisAgent\\n')\nsys.exit(1)\n",
+        ]);
+        let error = AgentRuntimeClient::spawn(launch, "test").await.err().expect("startup should fail");
+        let (_, command) = error.split_once("launch command: ").expect("startup error should name the command");
+        assert!(command.starts_with(test_python()), "command should start with the agent program: {command}");
+        assert!(command.contains("-c"), "command should keep the agent arguments: {command}");
+        assert!(error.contains("com.dbx.agent.iris.IrisAgent"), "stderr tail should still be reported: {error}");
+    }
+
+    #[tokio::test]
     async fn dedicated_startup_cleanup_does_not_treat_a_poisoned_reaper_as_exit_confirmation() {
         let (startup, cleanup) = crate::startup_cleanup::StartupCleanup::new_pair();
         let launch = AgentLaunchSpec::new(test_python()).with_args([

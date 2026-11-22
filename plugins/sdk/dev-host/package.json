@@ -14,7 +14,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.13",
-    "@vitejs/plugin-vue": "^5.2.4",
+    "@vitejs/plugin-vue": "^6.0.0",
     "daisyui": "^5.1.10",
     "esbuild": "^0.28.0",
     "jsdom": "^26.1.0",

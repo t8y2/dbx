@@ -11186,6 +11186,8 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Retardo de activación automática del autocompletado (milisegundos)",
     completionAutoActivationDelayDescription:
       "Cuánto tiempo esperar tras la entrada antes de que aparezcan las sugerencias de autocompletado; el valor predeterminado es 500 milisegundos. Aumentarlo evita que las sugerencias aparezcan con demasiada frecuencia mientras se escribe de forma continua e interrumpan la edición; 0 significa que aparecen inmediatamente.",
+    cellDetailPanelEnabled: "Panel de detalles de celda",
+    cellDetailPanelEnabledDescription: "Cuando se desactiva, el panel de detalles de celda deja de mostrarse de forma fija; al hacer clic en el botón de detalles o en el menú contextual, se mostrará en una ventana emergente.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

@@ -208,6 +208,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   navigation: [
     "appLayout",
     "tabLayout",
+    "tabWrapMaxRows",
     "tabPlacement",
     "crossWindowTabDragPreviewEnabled",
     "tabGroupMode",

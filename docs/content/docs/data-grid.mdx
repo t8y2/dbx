@@ -11,7 +11,7 @@ The data grid displays query results and table data. It covers both read-only an
 
 The view options provide independent **Hide NULL** and **Hide NULL / empty-string columns** switches. The latter hides columns whose currently loaded values are all `NULL` or `""`, including mixtures of both. It does not hide zero, `false`, whitespace, or columns based on an empty result. Both switches default to off and preserve manually hidden columns when disabled.
 
-DBX uses virtual scrolling and renders only the visible area. Common browsing operations include:
+DBX uses virtual scrolling and renders only the visible area. The horizontal and vertical scrollbars match the SQL editor: the thumb widens when hovered or dragged without changing the viewport size. Common browsing operations include:
 
 - Dragging column edges to resize, or double-clicking to fit content
 - Dragging headers to reorder columns and saving the layout per table or query

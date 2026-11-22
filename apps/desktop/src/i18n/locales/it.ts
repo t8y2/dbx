@@ -1357,6 +1357,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "Risultati incompleti: impossibile caricare il contenuto di {count} file.",
     matchPreviewLimit: "Le anteprime sono limitate alle prime {limit} righe su {total} righe corrispondenti.",
     sortByDateCreated: "Ordina per data di creazione",
+    displayMode: "Modalità di visualizzazione",
+    displayModeFolder: "Per struttura delle cartelle",
+    displayModeConnection: "Per connessione",
   },
 
   connection: {
@@ -3760,6 +3763,8 @@ export default withEnglishFallback({
     foreignKeyPreviewFailed: "Impossibile caricare le righe di riferimento: {message}",
     sortOptions: "Opzioni di ordinamento",
     queryCanceled: "Query annullata",
+    pasteCellText: "Incolla il testo in questa cella",
+    pasteCellTextFailed: "Impossibile incollare il testo nella cella: {message}",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",
@@ -5451,6 +5456,15 @@ export default withEnglishFallback({
     doltSystemTables: "Tabelle di sistema di Dolt",
   },
   userAdmin: {
+    accountStatus: "Stato di blocco",
+    accountAll: "Tutti gli stati",
+    accountLocked: "Bloccato",
+    accountUnlocked: "Sbloccato",
+    accountUnknown: "Sconosciuto",
+    passwordExpirationFlag: "Indicatore di scadenza password",
+    passwordMarkedExpired: "Contrassegnata come scaduta",
+    passwordNotMarkedExpired: "Non contrassegnata come scaduta",
+    passwordLastChanged: "Ultima modifica della password",
     oldPassword: "Password attuale (facoltativa)",
     oldPasswordHint: "In Vastbase, tranne per l'utente iniziale, per cambiare la propria password serve quella attuale. È possibile ometterla per reimpostazioni autorizzate di altri utenti.",
     passwordChangedReconnect: "Password cambiata. La connessione è stata chiusa e la vecchia password cancellata. Usa Salva e connetti nelle impostazioni della connessione e inserisci la nuova password.",
@@ -10902,6 +10916,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Ritardo attivazione automatica completamento (millisecondi)",
     completionAutoActivationDelayDescription:
       "Ritardo con cui vengono mostrati i candidati di completamento dopo l'input, predefinito 500 millisecondi; aumentando il valore si evita che il completamento compaia frequentemente durante la digitazione continua e interferisca con l'editing; 0 indica comparsa immediata.",
+    tabWrapMaxRows: "Numero massimo di righe per l'affiancamento delle schede",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",
@@ -11869,6 +11884,11 @@ export default withEnglishFallback({
     fileFilterHint: "Usa un carattere jolly come *.sql o *.sh oppure un'espressione regolare come {regex}.",
     openWithDefaultApp: "Apri con l'app predefinita del sistema",
     openWithDefaultAppFailed: "Impossibile aprire con l'app predefinita del sistema: {message}",
+    displayMode: "Modalità di visualizzazione",
+    displayModeFolder: "Per struttura delle cartelle",
+    displayModeConnection: "Per connessione",
+    unassociated: "Non associato",
+    deletedConnection: "Connessione eliminata",
   },
   mqTopics: {
     title: "Gestione topic",
@@ -12554,6 +12574,7 @@ export default withEnglishFallback({
     configuration: "Configurazione del broker",
     noConfigurations: "Nessuna voce di configurazione corrispondente",
     configurationUnsupported: "Questo broker Kafka non supporta la consultazione della configurazione.",
+    configurationDriverUnsupported: "Il driver Kafka installato non supporta la consultazione della configurazione del broker. Controlla gli aggiornamenti nel gestore dei driver, quindi riconnettiti.",
     configName: "Nome",
     configValue: "Valore",
     configSource: "Origine",

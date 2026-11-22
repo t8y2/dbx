@@ -296,7 +296,7 @@ function mongoDocumentGridEscapedString(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_ESCAPED_STRING_PREFIX.length) : undefined;
 }
 
-function mongoDocumentGridJson(value: unknown): string | undefined {
+export function mongoDocumentGridJson(value: unknown): string | undefined {
   return typeof value === "string" && value.startsWith(MONGO_DOCUMENT_GRID_JSON_PREFIX) ? value.slice(MONGO_DOCUMENT_GRID_JSON_PREFIX.length) : undefined;
 }
 

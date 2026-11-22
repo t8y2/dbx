@@ -1358,6 +1358,9 @@ export default withEnglishFallback({
     searchContentIncomplete: "Resultados incompletos: não foi possível carregar o conteúdo de {count} arquivos.",
     matchPreviewLimit: "As prévias são limitadas às primeiras {limit} de {total} linhas correspondentes.",
     sortByDateCreated: "Ordenar por data de criação",
+    displayMode: "Modo de exibição",
+    displayModeFolder: "Por estrutura de pastas",
+    displayModeConnection: "Agrupar por conexão",
   },
 
   connection: {
@@ -3758,6 +3761,8 @@ export default withEnglishFallback({
     foreignKeyPreviewFailed: "Não foi possível carregar as linhas de referência: {message}",
     sortOptions: "Opções de classificação",
     queryCanceled: "Consulta cancelada",
+    pasteCellText: "Colar texto nesta célula",
+    pasteCellTextFailed: "Não foi possível colar o texto na célula: {message}",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",
@@ -5449,6 +5454,15 @@ export default withEnglishFallback({
     doltSystemTables: "Tabelas de sistema do Dolt",
   },
   userAdmin: {
+    accountStatus: "Estado de bloqueio",
+    accountAll: "Todos os estados",
+    accountLocked: "Bloqueada",
+    accountUnlocked: "Desbloqueada",
+    accountUnknown: "Desconhecido",
+    passwordExpirationFlag: "Indicador de expiração da senha",
+    passwordMarkedExpired: "Marcada como expirada",
+    passwordNotMarkedExpired: "Não marcada como expirada",
+    passwordLastChanged: "Última alteração da senha",
     oldPassword: "Senha atual (opcional)",
     oldPasswordHint: "No Vastbase, exceto para o usuário inicial, alterar a própria senha exige a senha atual. Redefinições autorizadas de outro usuário podem omiti-la.",
     passwordChangedReconnect: "Senha alterada. Esta conexão foi desconectada e a senha antiga foi apagada. Use Salvar e conectar nas configurações da conexão e digite a nova senha.",
@@ -10897,6 +10911,7 @@ export default withEnglishFallback({
     completionAutoActivationDelay: "Atraso para ativação automática do autocompletar (milissegundos)",
     completionAutoActivationDelayDescription:
       "Tempo de espera após a digitação para exibir as sugestões de autocompletar, padrão de 500 milissegundos; aumentar esse valor pode evitar que o autocompletar apareça com frequência durante a digitação contínua e interfira na edição; 0 significa exibir imediatamente.",
+    tabWrapMaxRows: "Número máximo de linhas lado a lado das abas",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",
@@ -11862,6 +11877,11 @@ export default withEnglishFallback({
     fileFilterHint: "Use um curinga como *.sql ou *.sh, ou uma expressão regular como {regex}.",
     openWithDefaultApp: "Abrir com o aplicativo padrão do sistema",
     openWithDefaultAppFailed: "Falha ao abrir com o aplicativo padrão do sistema: {message}",
+    displayMode: "Modo de exibição",
+    displayModeFolder: "Por estrutura de pastas",
+    displayModeConnection: "Agrupar por conexão",
+    unassociated: "Não associado",
+    deletedConnection: "Conexão excluída",
   },
   mqTopics: {
     title: "Gerenciamento de tópicos",
@@ -12547,6 +12567,7 @@ export default withEnglishFallback({
     configuration: "Configuração do broker",
     noConfigurations: "Nenhuma configuração correspondente",
     configurationUnsupported: "Este broker Kafka não oferece suporte à consulta de configurações.",
+    configurationDriverUnsupported: "O driver Kafka instalado não permite consultar a configuração do broker. Verifique se há atualizações no gerenciador de drivers e reconecte-se.",
     configName: "Nome",
     configValue: "Valor",
     configSource: "Origem",

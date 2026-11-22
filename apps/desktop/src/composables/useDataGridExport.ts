@@ -3128,7 +3128,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 }
 
 export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {
-  const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
+  const suggestedBaseName = sanitizeExportBaseName(baseName || "").replace(/^[.\s]+/, "");
+  const sanitizedBaseName = suggestedBaseName || sanitizeExportBaseName(fallbackBaseName).replace(/^[.\s]+/, "") || "export";
   const suffix = options.allResults ? "results" : options.page ? "page" : "";
   return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
 }

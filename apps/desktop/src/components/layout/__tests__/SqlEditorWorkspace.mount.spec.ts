@@ -24,6 +24,7 @@ const groupFocusSearchCalls = vi.hoisted(() => [] as Array<Element | null>);
 const resultHandleModRCalls = vi.hoisted(() => [] as Element[]);
 const resultFocusSearchCalls = vi.hoisted(() => [] as boolean[]);
 const groupExecutionCalls = vi.hoisted(() => ({ capture: [] as string[], request: [] as string[] }));
+const resultCopyCalls = vi.hoisted(() => [] as Array<{ tabId: string; isValid?: () => boolean }>);
 const queryFocusCalls = vi.hoisted(() => ({ editor: [] as string[], grid: [] as string[], cancelled: 0 }));
 
 vi.mock("@/components/layout/EditorGroup.vue", () => ({
@@ -91,6 +92,10 @@ vi.mock("@/components/layout/QueryResultSurface.vue", () => ({
     props: ["activeTab"],
     emits: ["previewStatement", "focusStatement"],
     methods: {
+      copyActiveResult(this: { activeTab: { id: string } }, isValid?: () => boolean) {
+        resultCopyCalls.push({ tabId: this.activeTab.id, isValid });
+        return true;
+      },
       focusResultGrid(this: { activeTab: { id: string } }) {
         queryFocusCalls.grid.push(this.activeTab.id);
         return true;
@@ -164,7 +169,7 @@ describe("SqlEditorWorkspace mount contract", () => {
     });
     app.use(pinia);
     app.use(i18n);
-    const vm = app.mount(host) as unknown as { toggleResultsPane: () => boolean; focusResultGrid: () => boolean; focusSqlEditor: () => boolean };
+    const vm = app.mount(host) as unknown as { toggleResultsPane: () => boolean; focusResultGrid: () => boolean; focusSqlEditor: () => boolean; copyActiveResult: () => boolean };
     return {
       store,
       host,
@@ -177,6 +182,7 @@ describe("SqlEditorWorkspace mount contract", () => {
   }
 
   beforeEach(() => {
+    resultCopyCalls.length = 0;
     queryFocusCalls.editor.length = 0;
     queryFocusCalls.grid.length = 0;
     queryFocusCalls.cancelled = 0;
@@ -246,6 +252,48 @@ describe("SqlEditorWorkspace mount contract", () => {
     store.activateTabInGroup("g1", "tab-b");
     await nextTick();
     expect(queryFocusCalls.grid).toEqual([]);
+    cleanup();
+  });
+
+  it("copies the current split's result from a collapsed pane without focusing the grid", async () => {
+    const { vm, store, cleanup } = mountOutputWorkspace([tab("tab-a"), tab("tab-b")]);
+    store.splitTabRight("tab-b");
+    vm.toggleResultsPane();
+    await nextTick();
+    const editor = document.createElement("textarea");
+    editor.value = "SELECT id FROM users";
+    document.body.append(editor);
+    editor.focus();
+    editor.setSelectionRange(7, 9);
+    expect(vm.copyActiveResult()).toBe(true);
+    await nextTick();
+    expect(resultCopyCalls.map((call) => call.tabId)).toEqual(["tab-b"]);
+    expect(resultCopyCalls[0]!.isValid!()).toBe(true);
+    expect(document.activeElement).toBe(editor);
+    expect([editor.selectionStart, editor.selectionEnd]).toEqual([7, 9]);
+    expect(queryFocusCalls.grid).toEqual([]);
+    store.activateTabInGroup("g1", "tab-a");
+    expect(resultCopyCalls[0]!.isValid!()).toBe(false);
+    cleanup();
+    editor.remove();
+  });
+
+  it("cancels a queued copy if the query result changes before rendering", async () => {
+    const { vm, store, cleanup } = mountOutputWorkspace([tab("tab-a")]);
+    vm.toggleResultsPane();
+    await nextTick();
+    expect(vm.copyActiveResult()).toBe(true);
+    store.tabs[0]!.result = { ...store.tabs[0]!.result!, rows: [[2]] };
+    await nextTick();
+    expect(resultCopyCalls).toEqual([]);
+    cleanup();
+  });
+
+  it.each([dataTab("data"), { ...tab("empty"), result: undefined }, { ...tab("update"), result: { columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 } }])("does not route non-query or missing results to a previous result surface", async (active) => {
+    const { vm, cleanup } = mountOutputWorkspace([active]);
+    expect(vm.copyActiveResult()).toBe(false);
+    await nextTick();
+    expect(resultCopyCalls).toEqual([]);
     cleanup();
   });
 

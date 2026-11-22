@@ -14,6 +14,7 @@ function createResizeState(options: {
   columnIndexes?: number[];
   columnTypes?: string[];
   cacheKey?: string;
+  resultKey?: Ref<string>;
   density?: "compact" | "standard" | "comfortable";
   compactColumnHeaderActions?: boolean;
   indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
@@ -39,6 +40,7 @@ function createResizeState(options: {
     compactColumnHeaderActions: computed(() => compact.value),
     columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
     cacheKey: computed(() => options.cacheKey),
+    resultKey: computed(() => options.resultKey?.value),
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
     headerMeasurementKey,
@@ -70,6 +72,36 @@ function createResizeState(options: {
 describe("useDataGridColumnResize", () => {
   beforeEach(() => {
     clearDataGridColumnWidthStates();
+  });
+
+  it("refits sampled widths after refresh while preserving manual widths and append growth", async () => {
+    const resultKey = ref("initial");
+    const state = createResizeState({
+      columns: ["id", "note"],
+      rows: [[1, "x".repeat(120)]],
+      cacheKey: "query-result-width-refresh",
+      resultKey,
+      widthMode: "content",
+    });
+    state.initColumnWidths();
+    state.onResizeStart(0, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 160 }));
+    const [manualWidth, longWidth] = state.columnWidths.value;
+
+    state.rows.value = [[2, "ok"]];
+    resultKey.value = "refreshed";
+    await nextTick();
+    const [, shortWidth] = state.columnWidths.value;
+    expect(shortWidth).toBeLessThan(longWidth!);
+    expect(state.columnWidths.value[0]).toBe(manualWidth);
+
+    state.rows.value = [...state.rows.value, [3, "y".repeat(60)]];
+    await nextTick();
+    const [, appendedWidth] = state.columnWidths.value;
+    expect(appendedWidth).toBeGreaterThan(shortWidth!);
+    state.rows.value = [[4, "tiny"]];
+    await nextTick();
+    expect(state.columnWidths.value).toEqual([manualWidth, appendedWidth]);
   });
 
   it("fits every visible column to its content when auto fitting the whole grid", () => {

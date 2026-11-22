@@ -866,8 +866,15 @@ pub fn build_rename_database_sql(
     old_name: String,
     new_name: String,
     terminate_connections: bool,
+    identifier_quote: Option<String>,
 ) -> Result<String, String> {
-    dbx_core::db_admin_sql::build_rename_database_sql(database_type, &old_name, &new_name, terminate_connections)
+    dbx_core::db_admin_sql::build_rename_database_sql(
+        database_type,
+        &old_name,
+        &new_name,
+        terminate_connections,
+        identifier_quote.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -1011,6 +1018,13 @@ pub fn build_editable_object_source(
     input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
 ) -> Result<String, String> {
     Ok(dbx_core::object_source_sql::build_editable_object_source(input))
+}
+
+#[tauri::command]
+pub fn build_oracle_object_export_sql(
+    input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
+) -> Result<String, String> {
+    dbx_core::object_source_sql::build_oracle_object_export_sql(input)
 }
 
 #[tauri::command]

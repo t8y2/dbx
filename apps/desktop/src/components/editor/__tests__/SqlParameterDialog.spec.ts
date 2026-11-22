@@ -9,11 +9,13 @@ import type { SqlParameterDescriptor, SqlParameterInput } from "@/lib/sql/sqlPar
 const historyMocks = vi.hoisted(() => ({
   load: vi.fn<(key: string) => SqlParameterInput[]>(),
   remember: vi.fn<(values: Record<string, SqlParameterInput>) => Record<string, SqlParameterInput[]>>(),
+  clear: vi.fn<() => void>(),
 }));
 
 vi.mock("@/lib/sql/sqlParameterHistory", () => ({
   loadSqlParameterHistory: historyMocks.load,
   rememberSqlParameterValues: historyMocks.remember,
+  clearSqlParameterHistory: historyMocks.clear,
 }));
 
 vi.mock("@/composables/useSqlHighlighter", () => ({
@@ -317,5 +319,23 @@ describe("SqlParameterDialog clear parameter values action", () => {
     expect(state.open).toBe(true);
     expect(onExecute).not.toHaveBeenCalled();
     expect(historyMocks.remember).not.toHaveBeenCalled();
+  });
+
+  /** #14894: a one-click action that clears every remembered parameter value. */
+  it("clears the stored parameter history without touching the current values", async () => {
+    const { state, onExecute } = await mountDialog(MIXED_VALUES);
+    const beforePreview = document.body.querySelector("pre")?.textContent;
+
+    const button = document.body.querySelector<HTMLButtonElement>('[data-testid="sql-parameters-clear-history"]');
+    expect(button).not.toBeNull();
+    button!.click();
+    await nextTick();
+
+    expect(historyMocks.clear).toHaveBeenCalledTimes(1);
+    // Clearing history is not "clear values": the inputs and preview stay put.
+    expect(parameterInputs().map((input) => input.value)).toEqual(["alpha beta", " 42 ", "NULL", "current_date", ""]);
+    expect(document.body.querySelector("pre")?.textContent).toBe(beforePreview);
+    expect(state.open).toBe(true);
+    expect(onExecute).not.toHaveBeenCalled();
   });
 });

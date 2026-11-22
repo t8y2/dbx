@@ -94,13 +94,32 @@ describe("result-tab click pinning", () => {
     expect(tab.resultRuns![0]!.pinned).toBe(true);
   });
 
-  it("unpins a pinned run on click while the option is enabled (#13306)", async () => {
+  it("unpins the shown pinned run when its tab is clicked again (#13306)", async () => {
     const { host, tab } = await mountResults(true, true);
     expect(tab.resultRuns![1]!.pinned).toBe(true);
     host.querySelectorAll<HTMLButtonElement>("[data-result-run-tab]")[1]!.click();
     await vi.waitFor(() => expect(tab.activeResultRunId).toBe("second"));
     for (let index = 0; index < 10; index++) await nextTick();
-    expect(tab.resultRuns![1]!.pinned).toBeUndefined();
+    expect(tab.resultRuns![1]!.pinned).toBe(true);
+    host.querySelectorAll<HTMLButtonElement>("[data-result-run-tab]")[1]!.click();
+    await vi.waitFor(() => expect(tab.resultRuns![1]!.pinned).toBeUndefined());
+  });
+
+  it("keeps pins while switching back and forth between result tabs (#14599)", async () => {
+    const { host, tab } = await mountResults(true, true);
+    const tabs = () => host.querySelectorAll<HTMLButtonElement>("[data-result-run-tab]");
+    for (const [index, runId] of [
+      [1, "second"],
+      [0, "first"],
+      [1, "second"],
+      [0, "first"],
+    ] as const) {
+      tabs()[index]!.click();
+      await vi.waitFor(() => expect(tab.activeResultRunId).toBe(runId));
+      for (let tick = 0; tick < 10; tick++) await nextTick();
+    }
+    expect(tab.resultRuns![0]!.pinned).toBe(true);
+    expect(tab.resultRuns![1]!.pinned).toBe(true);
   });
 
   it("applies a setting change to already mounted result tabs", async () => {

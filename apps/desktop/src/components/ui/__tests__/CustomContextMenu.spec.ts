@@ -747,4 +747,73 @@ describe("submenu hand-over between rows", () => {
       vi.useRealTimers();
     }
   });
+
+  it("keeps menu open during scroll of unrelated containers, but closes on parent container or document scroll", async () => {
+    const close = vi.fn();
+    const open = vi.fn();
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h("div", { id: "wrapper" }, [
+            h(
+              "div",
+              { id: "parent-container", style: "overflow: auto; height: 100px;" },
+              h(
+                CustomContextMenu,
+                { items: [{ label: "Inspect DDL" }], onOpen: open, onClose: close },
+                {
+                  default: ({ onContextMenu, isOpen }: { onContextMenu: (event: MouseEvent) => void; isOpen: boolean }) => h("div", { id: "tree-item", "data-open": String(isOpen), onContextmenu: onContextMenu }, "Table Item"),
+                },
+              ),
+            ),
+            h("div", { id: "ai-chat-viewport", style: "overflow: auto; height: 100px;" }, "AI Streaming Content"),
+          ]);
+      },
+    });
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    mountedContainers.push(host);
+    const app = createApp(root);
+    app.mount(host);
+
+    const trigger = host.querySelector<HTMLElement>("#tree-item")!;
+    const aiViewport = host.querySelector<HTMLElement>("#ai-chat-viewport")!;
+    const parentContainer = host.querySelector<HTMLElement>("#parent-container")!;
+
+    // Open context menu on tree item
+    trigger.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }));
+    await nextTick();
+    expect(open).toHaveBeenCalledOnce();
+    expect(trigger.getAttribute("data-open")).toBe("true");
+    expect(document.querySelector("[data-dbx-context-menu]")).not.toBeNull();
+
+    // 1. AI viewport scrolls (unrelated container) -> context menu remains open
+    aiViewport.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+    expect(close).not.toHaveBeenCalled();
+    expect(trigger.getAttribute("data-open")).toBe("true");
+    expect(document.querySelector("[data-dbx-context-menu]")).not.toBeNull();
+
+    // 2. Parent container scrolls -> context menu closes
+    parentContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+    expect(close).toHaveBeenCalledOnce();
+    expect(trigger.getAttribute("data-open")).toBe("false");
+    expect(document.querySelector("[data-dbx-context-menu]")).toBeNull();
+
+    // Reopen menu
+    trigger.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 20, clientY: 20 }));
+    await nextTick();
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(trigger.getAttribute("data-open")).toBe("true");
+
+    // 3. Document scroll -> context menu closes
+    document.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await nextTick();
+    expect(close).toHaveBeenCalledTimes(2);
+    expect(trigger.getAttribute("data-open")).toBe("false");
+
+    app.unmount();
+  });
 });

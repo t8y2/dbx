@@ -171,6 +171,7 @@ export interface UseDataGridEditorOptions {
   prepareFullReload?: () => void;
   /** The adopted save (started by a previous grid instance that is gone) finished and the host grid refreshed. */
   onAdoptedSaveCompleted?: () => void;
+  hasPendingEditorDraft?: () => boolean;
   emit: (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => void;
 }
 
@@ -220,6 +221,24 @@ type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "n
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
+const livePendingChanges = new Map<object, { cacheKey: () => string | undefined; state: () => "saving" | "pending" | undefined }>();
+
+/** Check the result being replaced, including drafts cached while its grid is hidden. */
+export function dataGridPendingChangesState(cacheKey: string, tabId: string, revision?: string): "saving" | "pending" | undefined {
+  if (adoptablePendingSave(saveRegistryKey(tabId, revision))) return "saving";
+  let pending = false;
+  for (const editor of livePendingChanges.values()) {
+    if (editor.cacheKey() !== cacheKey) continue;
+    const state = editor.state();
+    if (state === "saving") return state;
+    pending ||= state === "pending";
+  }
+  const cached = pendingChangesCache.get(cacheKey);
+  if (pending) return "pending";
+  if (!cached) return undefined;
+  const hasCachedChanges = cached.dirtyRows.size > 0 || cached.newRows.length > 0 || cached.deletedRows.size > 0 || !!cached.editingCell || cached.quickEntryDraftRow?.some((value) => value !== null && String(value).trim() !== "");
+  return hasCachedChanges ? "pending" : undefined;
+}
 
 /**
  * In-flight saves, keyed by tab and result payload.
@@ -2881,6 +2900,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   if (componentInstance) {
+    const pendingChangesOwner = {};
+    livePendingChanges.set(pendingChangesOwner, {
+      cacheKey: () => cacheKey?.value,
+      state: () => {
+        if (isSaving.value) return "saving";
+        return hasPendingChanges.value || options.hasPendingEditorDraft?.() || draftRowHasValue() ? "pending" : undefined;
+      },
+    });
     onMounted(() => {
       componentActive = true;
       mounted = true;
@@ -2906,6 +2933,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     // restored if a new DataGrid instance is created for the same tab
     // (e.g. after result eviction + reload).
     onBeforeUnmount(() => {
+      livePendingChanges.delete(pendingChangesOwner);
       if (currentRecord) releasePendingSaveRecord(currentRecord);
       // Persist even mid-save: the snapshot is marked `saving`, so a grid that
       // returns after a failure still restores changes it can retry.

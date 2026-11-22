@@ -1158,8 +1158,8 @@ fn parse_collection_prefix(source: &str) -> Result<(String, usize), String> {
         return Err("MongoDB command must start with db.<collection>.".to_string());
     }
     let rest = &source[3..];
-    if rest.starts_with("getCollection") {
-        let open = rest.find('(').ok_or("Invalid db.getCollection() command.")?;
+    if let Some(call) = rest.strip_prefix("getCollection").map(str::trim_start).filter(|s| s.starts_with('(')) {
+        let open = rest.len() - call.len();
         let close = matching_paren(rest, open).ok_or("Invalid db.getCollection() command.")?;
         let args = split_top_level(&rest[open + 1..close]);
         if args.len() != 1 {
@@ -1356,12 +1356,52 @@ fn read_shell_regex_literal(input: &str, index: usize) -> Result<ShellRegexLiter
     Ok(ShellRegexLiteral { end: cursor, pattern, options: options.into_iter().collect() })
 }
 
+fn read_shell_template(input: &str) -> Result<(String, usize), String> {
+    let mut chars = input[1..].char_indices().peekable();
+    let mut value = String::new();
+    while let Some((offset, ch)) = chars.next() {
+        match ch {
+            '`' => return Ok((value, offset + 2)),
+            '$' if chars.peek().is_some_and(|(_, next)| *next == '{') => {
+                return Err("MongoDB shell arguments do not support template substitutions.".to_string());
+            }
+            '\r' => {
+                chars.next_if(|(_, next)| *next == '\n');
+                value.push('\n');
+            }
+            '\\' => match chars.next().map(|(_, c)| c) {
+                Some('\n') => {}
+                Some('\r') => {
+                    chars.next_if(|(_, next)| *next == '\n');
+                }
+                Some(c @ ('\\' | '`' | '$' | '\'' | '"' | '/')) => value.push(c),
+                Some('n') => value.push('\n'),
+                Some('r') => value.push('\r'),
+                Some('t') => value.push('\t'),
+                Some('b') => value.push('\u{8}'),
+                Some('f') => value.push('\u{c}'),
+                Some('v') => value.push('\u{b}'),
+                _ => return Err("Unsupported escape in MongoDB template string.".to_string()),
+            },
+            _ => value.push(ch),
+        }
+    }
+    Err("Unclosed MongoDB template string.".to_string())
+}
+
 fn transform_shell_regex_literals(input: &str) -> Result<String, String> {
     let mut output = String::with_capacity(input.len());
     let mut index = 0;
     while index < input.len() {
         let rest = &input[index..];
         let ch = rest.chars().next().ok_or("Invalid MongoDB argument.")?;
+
+        if ch == '`' {
+            let (value, consumed) = read_shell_template(rest)?;
+            output.push_str(&serde_json::to_string(&value).map_err(|e| e.to_string())?);
+            index += consumed;
+            continue;
+        }
 
         if matches!(ch, '"' | '\'') {
             let start = index;
@@ -1423,7 +1463,7 @@ fn is_shell_regex_value_position(input: &str, index: usize) -> bool {
         let rest = &input[cursor..];
         let current = rest.chars().next().expect("cursor is on a character boundary");
 
-        if matches!(current, '"' | '\'') {
+        if matches!(current, '"' | '\'' | '`') {
             let quote = current;
             cursor += current.len_utf8();
             let mut escaped = false;
@@ -2085,6 +2125,24 @@ mod tests {
 
         for source in [r#"db[].find({})"#, r#"db[""].find({})"#, r#"db["x"]find({})"#, r#"db["x"]"#] {
             assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inserts_multiline_backtick_strings_as_document_data() {
+        let source = "db.issue_demo.insert({text: `line1\r\nline2) // \"ObjectId()\" \\`tick\\` \\${name}`});";
+        let MongoCommand::Insert { documents, .. } = parse(source).unwrap() else { panic!("expected insert") };
+        assert_eq!(parse_json_value(&documents).unwrap()["text"], "line1\nline2) // \"ObjectId()\" `tick` ${name}");
+        assert!(parse("db.issue_demo.insert({text: `value ${name}`})").is_err());
+    }
+
+    #[test]
+    fn parses_collections_named_like_get_collection() {
+        for name in ["getCollection", "getCollectionArchive"] {
+            assert_eq!(
+                parse(&format!("db.{name}.count()")).unwrap(),
+                MongoCommand::Count { collection: name.to_string(), filter: "{}".to_string(), accurate: false }
+            );
         }
     }
 

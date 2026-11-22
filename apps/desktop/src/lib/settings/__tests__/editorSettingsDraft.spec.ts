@@ -71,6 +71,13 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(editorSettingsPatchFromDraft(draft, editorSettingsDraftFromSettings(settings))).toEqual({ globalConnectTimeoutSecs: 300, globalQueryTimeoutSecs: 0 });
   });
 
+  it("tracks enabling and disabling database activation auto-expansion in the draft", () => {
+    const base = editorSettingsDraftFromSettings(makeSettings({ sidebarAutoExpandOnDatabaseActivation: false }));
+    const draft = editorSettingsDraftFromSettings(makeSettings({ sidebarAutoExpandOnDatabaseActivation: true }));
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ sidebarAutoExpandOnDatabaseActivation: true });
+    expect(editorSettingsPatchFromDraft(base, draft)).toEqual({ sidebarAutoExpandOnDatabaseActivation: false });
+  });
+
   it("includes showLineNumbers", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
   });

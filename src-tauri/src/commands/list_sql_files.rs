@@ -4,9 +4,18 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 const MAX_SCAN_DEPTH: usize = 10;
-const DEFAULT_FILE_FILTER: &str = r"(?i)\.(sql|ddl)$";
+/// Database-script extensions shown by default in the SQL file panel (#14204):
+/// `.sql`/`.ddl` plus the per-engine suffixes used in version-controlled repos
+/// (PostgreSQL `.psql`/`.plpgsql`/`.sqlpg`, Oracle `.prc`/`.fnc`/`.pkb`/`.pks`/
+/// `.pck`/`.pls`/`.plsql`/`.tps`/`.tpb`/`.trg`, SQL Server `.tsql`/`.spc`,
+/// MySQL/MariaDB `.trg`/`.rout`). JS/Mongo scripts stay opt-in via the filter
+/// setting. Keep in sync with `isSqlOrScriptFilePath` in the frontend
+/// `sqlFileOpen.ts`, which decides editor vs. system-application open.
+const DEFAULT_FILE_FILTER: &str =
+    r"(?i)\.(sql|ddl|psql|plpgsql|sqlpg|prc|fnc|pkb|pks|pck|pls|plsql|tps|tpb|trg|tsql|spc|rout)$";
 const MAX_SEARCH_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SEARCH_FILE_MATCHES: usize = 100;
 const MAX_SEARCH_MATCHES: usize = 1000;
@@ -39,6 +48,7 @@ pub struct SqlFileEntry {
     pub path: String,
     pub is_dir: bool,
     pub children: Vec<SqlFileEntry>,
+    pub modified_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,6 +253,15 @@ fn scan_sql_files_with_directories(
     scan_sql_files_with_diagnostics(dir, depth, visited, file_filter, include_empty_directories, None)
 }
 
+fn file_modified_at(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
 fn scan_sql_files_with_diagnostics(
     dir: &Path,
     depth: usize,
@@ -332,7 +351,13 @@ fn scan_sql_files_with_diagnostics(
                 skipped_files.as_deref_mut(),
             );
             if include_empty_directories || !children.is_empty() {
-                entries.push(SqlFileEntry { name, path: path.to_string_lossy().to_string(), is_dir: true, children });
+                entries.push(SqlFileEntry {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    is_dir: true,
+                    children,
+                    modified_at: file_modified_at(&path),
+                });
             }
         } else if file_type.is_file() && file_filter.is_match(&name) {
             entries.push(SqlFileEntry {
@@ -340,6 +365,7 @@ fn scan_sql_files_with_diagnostics(
                 path: path.to_string_lossy().to_string(),
                 is_dir: false,
                 children: vec![],
+                modified_at: file_modified_at(&path),
             });
         }
     }
@@ -922,6 +948,16 @@ mod tests {
         }
     }
 
+    fn collect_file_mtimes(entries: &[SqlFileEntry], mtimes: &mut Vec<u64>) {
+        for entry in entries {
+            if entry.is_dir {
+                collect_file_mtimes(&entry.children, mtimes);
+            } else {
+                mtimes.push(entry.modified_at);
+            }
+        }
+    }
+
     #[test]
     fn scan_sql_files_skips_pruned_metadata_directories() {
         let root = std::env::temp_dir().join(format!("dbx-sql-folder-scan-{}", uuid::Uuid::new_v4()));
@@ -933,6 +969,11 @@ mod tests {
         std::fs::write(nested.join("nested.SQL"), "SELECT 2;").unwrap();
         std::fs::write(nested.join("notes.txt"), "ignored").unwrap();
         std::fs::write(idea.join("workspace.sql"), "SELECT 3;").unwrap();
+        // Per-engine script suffixes are part of the default whitelist (#14204).
+        std::fs::write(root.join("add_salary.prc"), "CREATE PROCEDURE ...").unwrap();
+        std::fs::write(root.join("audit_trg.trg"), "CREATE TRIGGER ...").unwrap();
+        std::fs::write(root.join("pkg_body.pkb"), "CREATE OR REPLACE PACKAGE BODY ...").unwrap();
+        std::fs::write(root.join("schema_dump.psql"), "SELECT 4;").unwrap();
 
         let mut visited = HashSet::new();
         let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
@@ -940,8 +981,14 @@ mod tests {
         let mut names = Vec::new();
         collect_file_names(&entries, &mut names);
         names.sort();
+        let mut mtimes = Vec::new();
+        collect_file_mtimes(&entries, &mut mtimes);
+        assert!(mtimes.iter().all(|modified_at| *modified_at > 0));
 
-        assert_eq!(names, vec!["nested.SQL", "root.sql"]);
+        assert_eq!(
+            names,
+            vec!["add_salary.prc", "audit_trg.trg", "nested.SQL", "pkg_body.pkb", "root.sql", "schema_dump.psql"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

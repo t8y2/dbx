@@ -70,6 +70,7 @@ const backupSettingsCategoryLabelKeys: Record<BackupSettingsCategoryId, string> 
 };
 const nonSyncableEditorSettingIds = new Set(["updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins", "updateDownloadSource", "updateChannel", "ignoredUpdateVersion"]);
 const desktopSettingCategories: Record<string, BackupSettingsCategoryId> = {
+  app_theme_mode: "appearance",
   show_tray_icon: "appearance",
   linux_floating_frame_enabled: "appearance",
   icon_theme: "appearance",
@@ -115,6 +116,7 @@ const editorSettingCategoryOverrides: Partial<Record<string, BackupSettingsCateg
   dataGridFreezeFirstColumn: "data",
   dataGridBooleanDisplayMode: "data",
   numericColumnRightAlign: "data",
+  globalNumberGrouping: "data",
   structureEditorDensity: "data",
   tableInfoActiveTab: "data",
   tableInfoDrawerPinned: "data",

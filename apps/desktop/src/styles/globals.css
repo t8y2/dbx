@@ -1534,6 +1534,31 @@ html.disable-transitions *::after {
   animation-duration: 0s !important;
 }
 
+.app-toolbar,
+.app-toolbar *,
+.app-tab-bar,
+.app-tab-bar *,
+[data-tauri-drag-region]:not([data-tauri-drag-region="false"]) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.app-toolbar input:not(:focus),
+.app-tab-bar input:not(:focus),
+.connection-tree-search input:not(:focus) {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+.app-toolbar input:focus,
+.app-toolbar textarea:focus,
+.app-tab-bar input:focus,
+.app-tab-bar textarea:focus,
+.connection-tree-search input:focus {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 body.dbx-table-reference-dragging,
 body.dbx-table-reference-dragging * {
   user-select: none !important;
@@ -1554,6 +1579,18 @@ html.dbx-data-grid-native-selection-blocked [role="textbox"],
 html.dbx-data-grid-native-selection-blocked [role="textbox"] * {
   user-select: text !important;
   -webkit-user-select: text !important;
+}
+
+/* Tab drags cross every content surface, including editable grid exceptions. */
+html:root.dbx-tab-dragging body,
+html:root.dbx-tab-dragging body * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* Embedded workbenches must not swallow the source WebView's pointerup. */
+html:root.dbx-tab-dragging iframe {
+  pointer-events: none !important;
 }
 
 @layer base {
@@ -2839,7 +2876,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
   box-shadow:
     0 5px 0 currentColor,
     0 10px 0 currentColor;
-  color: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+  color: var(--muted-foreground);
   content: "";
   opacity: 0.75;
   pointer-events: none;
@@ -3125,7 +3162,6 @@ html.dbx-bg-active .cm-gutters.cm-gutters-scrolled-x {
   background-color: var(--background-solid, var(--background)) !important;
   box-shadow: 2px 0 8px rgba(0, 0, 0, 0.18);
 }
-
 
 /* Inner workbench panels. One radius step above the old rounded-md (still driven by the
  * Corner style setting) and an opaque border in dark themes: a translucent 1px border on a

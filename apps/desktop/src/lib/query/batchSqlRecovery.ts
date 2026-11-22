@@ -1,4 +1,5 @@
 import type { BatchSqlExecution, QueryResult, QueryTab } from "@/types/database";
+import { mysqlDelimiterPrefixAt } from "@/lib/sql/sqlStatementRanges";
 
 export type BatchSqlRecoveryAction = "retry" | "skip" | "skip-all";
 
@@ -50,7 +51,8 @@ export function batchSqlRecoverySql(batch: BatchSqlExecution, startStatementInde
   if (!item) return undefined;
   const relativeFrom = item.from - batch.sourceOffset;
   if (relativeFrom < 0 || relativeFrom >= batch.submittedSql.length) return undefined;
-  return { sql: batch.submittedSql.slice(relativeFrom), sourceOffset: item.from };
+  const prefix = mysqlDelimiterPrefixAt(batch.mysqlDelimiterCommands, relativeFrom);
+  return { sql: prefix + batch.submittedSql.slice(relativeFrom), sourceOffset: item.from - prefix.length };
 }
 
 export function offsetBatchQueryResultIndexes(results: QueryResult[], statementOffset: number): QueryResult[] {

@@ -2,7 +2,7 @@ import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
 import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
-import { formatMongoShellLiteral, normalizeMongoDateInput } from "@/lib/mongo/mongoDocumentValues";
+import { formatMongoShellLiteral, mongoShellDateToExtendedJson, normalizeMongoDateInput } from "@/lib/mongo/mongoDocumentValues";
 
 export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr" | "couchdb";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "begins-with" | "ends-with" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "in" | "not-in" | "between" | "not-between" | "is-null" | "is-not-null";
@@ -283,6 +283,11 @@ type ElasticsearchFieldPathAccumulatorNode = {
 
 export function documentFieldPathOptionsFromDocuments(documents: readonly Record<string, unknown>[]): string[] {
   return flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents)).map((node) => node.path);
+}
+
+export function mongoFilterDateSamplesByPathFromDocuments(documents: readonly Record<string, unknown>[]): Map<string, unknown> {
+  const fields = flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents));
+  return new Map(fields.filter((field) => inferMongoFilterValueType(field.sampleValue) === "date").map((field) => [field.path, field.sampleValue]));
 }
 
 export function elasticsearchFieldPathTreeFromFieldNames(fieldNames: readonly string[], fieldTypes: ReadonlyMap<string, string> = new Map()): DocumentFieldPathNode[] {
@@ -930,7 +935,8 @@ function parseMongoFilterValueAs(raw: string, valueType: Exclude<DocumentFilterV
       return { $oid: text };
     case "date": {
       if (/^-?\d+$/.test(text)) return { $date: { $numberLong: text } };
-      const normalized = normalizeMongoDateInput(text);
+      const shellDate = mongoShellDateToExtendedJson(text);
+      const normalized = normalizeMongoDateInput(typeof shellDate === "object" && shellDate !== null && "$date" in shellDate && typeof shellDate.$date === "string" ? shellDate.$date : text);
       if (!normalized) throw invalidMongoFilterValue(valueType, raw);
       return { $date: normalized };
     }

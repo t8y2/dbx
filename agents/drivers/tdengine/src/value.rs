@@ -1,12 +1,31 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use chrono::{NaiveDateTime, Timelike};
+use chrono::{FixedOffset, NaiveDateTime, TimeZone, Timelike};
 use chrono_tz::Tz;
 use serde_json::{json, Number, Value};
 use taos::taos_query::common::Timestamp;
 use taos::BorrowedValue;
 
-pub fn borrowed_value_to_json(value: BorrowedValue<'_>, timezone: Option<Tz>) -> Value {
+/// 时间戳渲染时使用的时区。
+///
+/// TDengine 的 `SELECT timezone()` 不一定返回 IANA 名称（例如 `CST (+0800)`），
+/// 这时只能拿到一个 UTC 偏移量，用固定偏移渲染出的墙钟时间同样正确。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimestampZone {
+    Iana(Tz),
+    Fixed(FixedOffset),
+}
+
+impl TimestampZone {
+    fn to_naive_local(self, timestamp: Timestamp) -> NaiveDateTime {
+        match self {
+            TimestampZone::Iana(timezone) => timestamp.to_datetime_with_custom_tz(&timezone).naive_local(),
+            TimestampZone::Fixed(offset) => offset.from_utc_datetime(&timestamp.to_naive_datetime()).naive_local(),
+        }
+    }
+}
+
+pub fn borrowed_value_to_json(value: BorrowedValue<'_>, timezone: Option<TimestampZone>) -> Value {
     match value {
         BorrowedValue::Null(_) => Value::Null,
         BorrowedValue::Bool(value) => Value::Bool(value),
@@ -70,9 +89,9 @@ fn looks_like_wkt(value: &str) -> bool {
         .any(|prefix| upper.starts_with(prefix))
 }
 
-fn format_timestamp(timestamp: Timestamp, timezone: Option<Tz>) -> String {
+fn format_timestamp(timestamp: Timestamp, timezone: Option<TimestampZone>) -> String {
     let datetime = match timezone {
-        Some(timezone) => timestamp.to_datetime_with_custom_tz(&timezone).naive_local(),
+        Some(timezone) => timezone.to_naive_local(timestamp),
         None => timestamp.to_naive_datetime(),
     };
     format_naive_datetime(datetime, timestamp)
@@ -136,21 +155,21 @@ mod tests {
         assert_eq!(
             borrowed_value_to_json(
                 BorrowedValue::Timestamp(Timestamp::Milliseconds(1_704_067_200_123)),
-                Some(chrono_tz::UTC)
+                Some(TimestampZone::Iana(chrono_tz::UTC))
             ),
             Value::String("2024-01-01 00:00:00.123".into())
         );
         assert_eq!(
             borrowed_value_to_json(
                 BorrowedValue::Timestamp(Timestamp::Microseconds(1_704_067_200_123_400)),
-                Some(chrono_tz::UTC)
+                Some(TimestampZone::Iana(chrono_tz::UTC))
             ),
             Value::String("2024-01-01 00:00:00.1234".into())
         );
         assert_eq!(
             borrowed_value_to_json(
                 BorrowedValue::Timestamp(Timestamp::Nanoseconds(1_704_067_200_123_456_789)),
-                Some(chrono_tz::UTC)
+                Some(TimestampZone::Iana(chrono_tz::UTC))
             ),
             Value::String("2024-01-01 00:00:00.123456789".into())
         );
@@ -160,8 +179,26 @@ mod tests {
     fn formats_timestamps_in_the_selected_timezone() {
         let timestamp = BorrowedValue::Timestamp(Timestamp::Milliseconds(1_704_067_200_123));
         assert_eq!(
-            borrowed_value_to_json(timestamp.clone(), Some(chrono_tz::Asia::Shanghai)),
+            borrowed_value_to_json(timestamp.clone(), Some(TimestampZone::Iana(chrono_tz::Asia::Shanghai))),
             Value::String("2024-01-01 08:00:00.123".into())
+        );
+        assert_eq!(
+            borrowed_value_to_json(
+                timestamp.clone(),
+                Some(TimestampZone::Fixed(FixedOffset::east_opt(8 * 3600).unwrap()))
+            ),
+            Value::String("2024-01-01 08:00:00.123".into())
+        );
+        assert_eq!(
+            borrowed_value_to_json(
+                timestamp.clone(),
+                Some(TimestampZone::Fixed(FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()))
+            ),
+            Value::String("2023-12-31 18:30:00.123".into())
+        );
+        assert_eq!(
+            borrowed_value_to_json(timestamp.clone(), Some(TimestampZone::Fixed(FixedOffset::east_opt(0).unwrap()))),
+            Value::String("2024-01-01 00:00:00.123".into())
         );
         assert_eq!(borrowed_value_to_json(timestamp, None), Value::String("2024-01-01 00:00:00.123".into()));
     }

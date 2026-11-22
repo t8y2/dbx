@@ -39,6 +39,7 @@ import {
   type TableImportWizardStep,
   validateImportMappings,
 } from "@/lib/table/tableImport";
+import { applyImportMappingTemplate, readImportMappingTemplates, withImportMappingTemplate, withoutImportMappingTemplate, writeImportMappingTemplates, type ImportMappingTemplate } from "@/lib/table/importMappingTemplates";
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
@@ -167,7 +168,14 @@ const sqlScriptFallbackSource = ref<ImportSource | null>(null);
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const navicatBackupInput = ref<HTMLInputElement | null>(null);
-const delimiter = ref(",");
+const delimitersByFormat = ref<Partial<Record<api.TableImportSourceFormat, string>>>({});
+const delimiter = computed({
+  get: () => delimiterForFormat(sourceFormat.value),
+  set: (value) => {
+    delimitersByFormat.value[sourceFormat.value] = value;
+    schedulePreviewReloadForTextOptions();
+  },
+});
 const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
@@ -538,7 +546,7 @@ function resetState() {
   batchTasks.value = [];
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
-  delimiter.value = ",";
+  delimitersByFormat.value = {};
   decimalSeparator.value = ".";
   textEncoding.value = "auto";
   titleRow.value = 1;
@@ -585,6 +593,10 @@ function isDelimitedFormat(format: api.TableImportSourceFormat) {
   return format === "csv" || format === "tsv" || format === "delimited";
 }
 
+function delimiterForFormat(format: api.TableImportSourceFormat) {
+  return delimitersByFormat.value[format] ?? (format === "tsv" ? "\\t" : ",");
+}
+
 function encodingLabel(encoding: api.TableImportTextEncoding) {
   return t(encodingOptions.find((option) => option.value === encoding)?.labelKey || "tableImport.encodingAuto");
 }
@@ -611,7 +623,7 @@ function uniqueTableName(baseName: string, usedNames: Set<string>): string {
 function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): api.TableImportParseOptions {
   return buildTableImportParseOptions({
     format,
-    delimiter: delimiter.value,
+    delimiter: delimiterForFormat(format),
     decimalSeparator: decimalSeparator.value,
     textEncoding: textEncoding.value,
     titleRow: titleRow.value,
@@ -949,6 +961,8 @@ async function loadPreview(fileOrPath = selectedSource.value) {
     preview.value = null;
     columnMapping.value = {};
     columnDataTypes.value = {};
+    if (await openMultiTableSqlFile(fileOrPath, e, requestId)) return;
+    if (requestId !== previewRequestId) return;
     errorMessage.value = String(e?.message || e);
     if (sourceFormat.value === "sql") sqlScriptFallbackSource.value = fileOrPath;
   } finally {
@@ -980,7 +994,7 @@ function assignSelectedSource(source: string | File) {
   if (!newTableName.value.trim()) {
     newTableName.value = suggestedTableName(name);
   }
-  delimiter.value = sourceFormat.value === "tsv" ? "\\t" : ",";
+  delimitersByFormat.value = {};
   selectedSheet.value = "";
   wizardStep.value = "options";
   void loadPreview(source);
@@ -1013,6 +1027,7 @@ function saveActiveBatchTask() {
 }
 
 async function prepareBatchSources(sources: ImportSource[]) {
+  const requestId = ++previewRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   const tasks: BatchImportTask[] = [];
@@ -1037,6 +1052,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
         parseOptions: taskParseOptions(format),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
       });
+      if (requestId !== previewRequestId) return;
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
         const input = importPreviewInput(uploadedImportSourceFromPreview(initialPreview), source);
@@ -1051,6 +1067,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
               previewLimit: Math.max(1, Number(previewLimit.value) || 50),
             })
           : initialPreview;
+        if (requestId !== previewRequestId) return;
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
@@ -1077,11 +1094,16 @@ async function prepareBatchSources(sources: ImportSource[]) {
       wizardStep.value = "options";
     }
   } catch (e: any) {
+    if (requestId !== previewRequestId) return;
     batchTasks.value = [];
+    // A multi-table dump is one script, rather than one row-import task. Keep
+    // mixed batches here so switching modes never discards the other files.
+    if (sources.length === 1 && previewingSource !== undefined && (await openMultiTableSqlFile(previewingSource, e, requestId))) return;
+    if (requestId !== previewRequestId) return;
     errorMessage.value = String(e?.message || e);
     if (previewingSource !== undefined && detectFormat(sourceName(previewingSource)) === "sql") sqlScriptFallbackSource.value = previewingSource;
   } finally {
-    loadingPreview.value = false;
+    if (requestId === previewRequestId) loadingPreview.value = false;
   }
 }
 
@@ -1146,15 +1168,31 @@ async function handleNavicatBackupInputChange(event: Event) {
   if (file && !running.value) await openSqlFileExecutor(file);
 }
 
+async function openMultiTableSqlFile(source: ImportSource, error: unknown, requestId: number): Promise<boolean> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (detectFormat(sourceName(source)) !== "sql" || !props.prefillConnectionId || !message.startsWith("SQL import supports one table per file; found ")) return false;
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
+  sqlScriptFallbackSource.value = source;
+  // This only opens the existing preview/target window. The script is not run
+  // until the user starts execution there, including its normal write checks.
+  await openSqlFileExecutor(source, requestId);
+  return true;
+}
+
 /**
  * Navicat archives and whole-database SQL dumps hold DDL, rows, routines and triggers rather
  * than rows for one table, so they run through the streaming SQL file executor, prefilled
  * with this dialog's target database.
  */
-async function openSqlFileExecutor(source: ImportSource) {
+async function openSqlFileExecutor(source: ImportSource, requestId = previewRequestId) {
   const connectionId = props.prefillConnectionId;
   if (!connectionId) return;
   const target = { connectionId, database: props.prefillDatabase || "", ...(props.prefillSchema ? { schema: props.prefillSchema } : {}) };
+  const targetIsCurrent = () => open.value && requestId === previewRequestId && props.prefillConnectionId === connectionId && (props.prefillDatabase || "") === target.database && (props.prefillSchema || "") === (target.schema || "");
+  if (!targetIsCurrent()) return;
   if (typeof source === "string") {
     store.sqlFileSource = { ...target, filePath: source };
   } else {
@@ -1163,12 +1201,17 @@ async function openSqlFileExecutor(source: ImportSource) {
     errorMessage.value = "";
     try {
       const { previewSqlFile } = await import("@/lib/backend/http");
-      store.sqlFileSource = { ...target, preview: await previewSqlFile(source) };
+      const sqlPreview = await previewSqlFile(source);
+      if (!targetIsCurrent()) {
+        if (sqlPreview.cleanupToken) await api.releaseSqlFilePreview(sqlPreview.cleanupToken).catch((error) => console.warn("[DBX][table-import:release-sql-preview-failed]", error));
+        return;
+      }
+      store.sqlFileSource = { ...target, preview: sqlPreview };
     } catch (e: any) {
-      errorMessage.value = String(e?.message || e);
+      if (targetIsCurrent()) errorMessage.value = String(e?.message || e);
       return;
     } finally {
-      loadingPreview.value = false;
+      if (open.value && requestId === previewRequestId) loadingPreview.value = false;
     }
   }
   open.value = false;
@@ -1202,6 +1245,49 @@ function mapByName() {
   const currentPreview = preview.value;
   if (!currentPreview) return;
   columnMapping.value = autoMapImportColumns(currentPreview.columns, targetColumnNames.value, "name");
+}
+
+// Saved column mappings (existing-table mode): name the current mapping once, apply it to later files.
+const mappingTemplates = ref<ImportMappingTemplate[]>(readImportMappingTemplates());
+const savingMappingTemplate = ref(false);
+const mappingTemplateNameDraft = ref("");
+const appliedMappingTemplate = ref("");
+const hasMappedSourceColumn = computed(() => (preview.value?.columns ?? []).some((column) => (columnMapping.value[column] ?? "").trim()));
+
+function setMappingTemplates(next: ImportMappingTemplate[]) {
+  mappingTemplates.value = next;
+  writeImportMappingTemplates(next);
+}
+
+function openSaveMappingTemplate() {
+  mappingTemplateNameDraft.value = appliedMappingTemplate.value;
+  savingMappingTemplate.value = true;
+}
+
+function saveMappingTemplate() {
+  const currentPreview = preview.value;
+  const name = mappingTemplateNameDraft.value.trim();
+  if (!currentPreview || !name) return;
+  const mapping = Object.fromEntries(currentPreview.columns.map((column) => [column, columnMapping.value[column] ?? ""]));
+  setMappingTemplates(withImportMappingTemplate(mappingTemplates.value, name, mapping));
+  appliedMappingTemplate.value = name;
+  savingMappingTemplate.value = false;
+  toast(t("tableImport.templateSaved", { name }), 3000);
+}
+
+function applyMappingTemplate(name: string) {
+  const currentPreview = preview.value;
+  const template = mappingTemplates.value.find((item) => item.name === name);
+  if (!currentPreview || !template) return;
+  const { mapping, matched } = applyImportMappingTemplate(template, currentPreview.columns, targetColumnNames.value);
+  columnMapping.value = mapping;
+  appliedMappingTemplate.value = template.name;
+  toast(t("tableImport.templateApplied", { name: template.name, matched, total: currentPreview.columns.length }), 3000);
+}
+
+function deleteMappingTemplate(name: string) {
+  setMappingTemplates(withoutImportMappingTemplate(mappingTemplates.value, name));
+  if (appliedMappingTemplate.value === name) appliedMappingTemplate.value = "";
 }
 
 function skipAllColumns() {
@@ -1831,9 +1917,9 @@ function schedulePreviewReload() {
   }, 250);
 }
 
-function schedulePreviewReloadAfterEncodingChange() {
+function schedulePreviewReloadForTextOptions() {
   if (isBatchImport.value) {
-    void reloadBatchPreviewsForEncoding();
+    void reloadBatchTextPreviews();
     return;
   }
   if (!selectedSource.value || running.value) return;
@@ -1844,14 +1930,14 @@ function schedulePreviewReloadAfterEncodingChange() {
   }, 250);
 }
 
-async function reloadBatchPreviewsForEncoding() {
+async function reloadBatchTextPreviews() {
   if (!isBatchImport.value || running.value) return;
   const requestId = ++batchEncodingRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   try {
     for (const task of batchTasks.value) {
-      // SQL 脚本同样是文本源，编码变化时需要重新预览
+      // SQL scripts also need a fresh preview after an encoding change.
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
       const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
@@ -1887,6 +1973,7 @@ watch(
       void loadTargetColumns();
       void loadDataTypeOptions();
     } else {
+      previewRequestId++;
       minimized.value = false;
       backgroundMode.value = false;
       dialogDragOffset.value = { x: 0, y: 0 };
@@ -1903,6 +1990,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  previewRequestId++;
   closeDataTypePicker();
   closeGeneratorPicker();
   stopDialogDrag();
@@ -1912,8 +2000,8 @@ onBeforeUnmount(() => {
   }
 });
 
-watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
-watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
+watch([sourceFormat, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
+watch([textEncoding, decimalSeparator], schedulePreviewReloadForTextOptions);
 watch([newTableName, columnMapping, columnGenerators, generatedColumns, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") {
@@ -2172,7 +2260,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
+          <div v-if="isDelimitedFormat(sourceFormat)" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
@@ -2191,7 +2279,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
-              <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />
+              <Input v-model="delimiter" class="h-8 text-xs font-mono" :aria-label="t('tableImport.delimiter')" />
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.decimalSeparator") }}</Label>
@@ -2371,8 +2459,40 @@ watch(rawProgressPercent, (percent) => {
                     <button type="button" data-action="skip-all" class="text-xs text-muted-foreground hover:text-foreground hover:underline" @click="skipAllColumns">
                       {{ t("tableImport.skipAll") }}
                     </button>
+                    <span class="text-muted-foreground/40">·</span>
+                    <button type="button" data-action="save-template" class="text-xs text-muted-foreground hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline" :disabled="!hasMappedSourceColumn" @click="openSaveMappingTemplate">
+                      {{ t("tableImport.saveTemplate") }}
+                    </button>
+                    <template v-if="mappingTemplates.length">
+                      <span class="text-muted-foreground/40">·</span>
+                      <select
+                        data-action="apply-template"
+                        class="h-6 max-w-32 rounded-md border bg-background px-1 text-xs text-muted-foreground"
+                        :value="''"
+                        :aria-label="t('tableImport.applyTemplate')"
+                        @change="
+                          (e) => {
+                            const select = e.target as HTMLSelectElement;
+                            if (select.value) applyMappingTemplate(select.value);
+                            select.value = '';
+                          }
+                        "
+                      >
+                        <option value="">{{ t("tableImport.applyTemplate") }}</option>
+                        <option v-for="template in mappingTemplates" :key="template.name" :value="template.name">{{ template.name }}</option>
+                      </select>
+                    </template>
                   </template>
                 </div>
+              </div>
+              <div v-if="targetMode === 'existing' && savingMappingTemplate" class="flex items-center gap-1.5 border-b px-3 py-1.5" data-template-save-form>
+                <Input v-model="mappingTemplateNameDraft" class="h-7 min-w-0 flex-1 text-xs" :placeholder="t('tableImport.templateNamePlaceholder')" @keydown.enter.prevent="saveMappingTemplate" />
+                <Button size="sm" class="h-7 text-xs" :disabled="!mappingTemplateNameDraft.trim()" @click="saveMappingTemplate">{{ t("tableImport.templateSave") }}</Button>
+                <Button variant="outline" size="sm" class="h-7 text-xs" @click="savingMappingTemplate = false">{{ t("common.cancel") }}</Button>
+              </div>
+              <div v-if="targetMode === 'existing' && appliedMappingTemplate && mappingTemplates.some((template) => template.name === appliedMappingTemplate)" class="flex items-center justify-between gap-2 border-b px-3 py-1 text-[11px] text-muted-foreground" data-template-applied>
+                <span class="truncate">{{ t("tableImport.templateInUse", { name: appliedMappingTemplate }) }}</span>
+                <button type="button" data-action="delete-template" class="shrink-0 hover:text-destructive hover:underline" @click="deleteMappingTemplate(appliedMappingTemplate)">{{ t("tableImport.templateDelete") }}</button>
               </div>
               <div class="max-h-[320px] overflow-auto p-2">
                 <div class="grid items-center gap-2 border-b px-1 pb-1 text-[11px] font-medium text-muted-foreground" :class="targetMode === 'create' ? 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)_minmax(92px,120px)]' : 'grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(110px,130px)]'">

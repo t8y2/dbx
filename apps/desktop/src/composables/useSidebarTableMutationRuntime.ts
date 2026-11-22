@@ -10,11 +10,15 @@ import {
   buildEmptyTableSql,
   buildMysqlAutoIncrementSql,
   buildTruncateTableSql,
+  buildMysqlTableMaintenanceSql,
   buildVacuumTableSql,
+  summarizeMysqlTableMaintenanceResult,
   supportsDropTableCascade,
   supportsMysqlAutoIncrement,
+  supportsMysqlTableMaintenance,
   supportsTruncateTableCascade,
   type MysqlAutoIncrementSqlOptions,
+  type MysqlTableMaintenanceOperation,
   type TableAdminSqlOptions,
   type VacuumTableSqlOptions,
 } from "@/lib/database/dbAdminSql";
@@ -72,6 +76,10 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
     return activeNode.value.type === "table" && !connectionIsEffectivelyReadOnly(config) && supportsTableVacuum(currentDatabaseType());
   });
+  const supportsMysqlTableMaintenanceAction = computed(() => {
+    const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+    return isTableNotView.value && !connectionIsEffectivelyReadOnly(config) && supportsMysqlTableMaintenance(config);
+  });
   const canDropTableCascade = computed(() => activeNode.value.type === "table" && supportsDropTableCascade(currentDatabaseType()));
   const canTruncateTableCascade = computed(() => activeNode.value.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));
   const supportsMysqlAutoIncrementAction = computed(() => activeNode.value.type === "table" && supportsMysqlAutoIncrement(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined));
@@ -87,6 +95,8 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       identifierQuote: connectionStore.connectionIdentifierQuote?.(activeNode.value.connectionId),
     };
     if (optionsOverride?.cascade) result.cascade = true;
+    // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
+    if (activeNode.value.tableType?.toUpperCase() === "FOREIGN TABLE") result.foreignTable = true;
     return result;
   }
 
@@ -99,6 +109,8 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
     if (optionsOverride?.cascade) result.cascade = true;
+    // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
+    if (node.tableType?.toUpperCase() === "FOREIGN TABLE") result.foreignTable = true;
     return result;
   }
 
@@ -178,6 +190,26 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     }
   }
 
+  async function mysqlTableMaintenance(operation: MysqlTableMaintenanceOperation) {
+    if (!supportsMysqlTableMaintenanceAction.value) return;
+    const node = activeNode.value;
+    if (!node.connectionId || !node.database) return;
+    try {
+      await connectionStore.ensureConnected(node.connectionId);
+      const sql = buildMysqlTableMaintenanceSql(operation, node.label);
+      const result = await options.executeWithProductionGuard(node, sql, { database: node.database, schema: node.schema });
+      if (result === undefined) return;
+      const summary = summarizeMysqlTableMaintenanceResult(result as Parameters<typeof summarizeMysqlTableMaintenanceResult>[0]);
+      if (!summary.ok) {
+        toast(t("contextMenu.tableOperationFailed", { message: summary.message }), { persistent: true });
+        return;
+      }
+      toast(t(`contextMenu.mysqlTableMaintenance.${operation}Success`, { name: node.label, message: summary.message }), 3000);
+    } catch (error: any) {
+      toast(t("contextMenu.tableOperationFailed", { message: error?.message || String(error) }), { persistent: true });
+    }
+  }
+
   function vacuumTableSqlOptions(node: TreeNode, full = vacuumTableFull.value, analyze = vacuumTableAnalyze.value): VacuumTableSqlOptions {
     return {
       databaseType: databaseTypeForNode(node),
@@ -185,6 +217,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       tableName: node.label,
       full,
       analyze,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
   }
 
@@ -572,6 +605,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     canDropTableCascade,
     canTruncateTableCascade,
     supportsMysqlAutoIncrement: supportsMysqlAutoIncrementAction,
+    supportsMysqlTableMaintenance: supportsMysqlTableMaintenanceAction,
     refreshDropTablePreviewSql,
     refreshTruncateTablePreviewSql,
     dropTable,
@@ -587,5 +621,6 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
     mysqlAutoIncrement,
     refreshMysqlAutoIncrementPreviewSql,
     confirmMysqlAutoIncrement,
+    mysqlTableMaintenance,
   };
 }

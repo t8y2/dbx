@@ -1,4 +1,5 @@
 import type { DatabaseType, TreeNode } from "@/types/database";
+import { hasExplicitTreeLayoutOrder } from "@/lib/app/pinnedItems";
 
 const sidebarTreeCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -31,6 +32,9 @@ function hoistTableVGroupChildren(nodes: TreeNode[]): TreeNode[] {
 }
 
 export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
+  if (hasExplicitTreeLayoutOrder(children) || children.some((node) => node.type === "table-vgroup" && node.vgroupKind === "databases")) {
+    return children.map((node) => sortRecursive(node, databaseType));
+  }
   return hoistTableVGroupChildren(orderSidebarTreeChildrenForParent(parent, children, databaseType));
 }
 
@@ -42,6 +46,7 @@ export function sortSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">,
  * (issues #9644 / #9653).
  */
 export function sortSidebarTreeChildrenByNameKeepingTableVGroups(parent: Pick<TreeNode, "type">, children: readonly TreeNode[], databaseType?: DatabaseType): TreeNode[] {
+  if (hasExplicitTreeLayoutOrder(children)) return sortSidebarTreeChildrenForParent(parent, children, databaseType);
   const groups = children.filter((node) => node.type === "table-vgroup");
   const flat = children.filter((node) => node.type !== "table-vgroup");
   const orderedFlat = [...flat].sort((left, right) => sidebarTreeCollator.compare(left.label, right.label));

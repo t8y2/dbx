@@ -376,3 +376,104 @@ func (s *blockingIoTDBSession) Close() error {
 	}
 	return nil
 }
+
+func TestTimeoutMillisecondsMapsNoLimitToABoundedHugeBudget(t *testing.T) {
+	// dbx's "no limit" setting is 0. Probing 1.3.7 shows IoTDB's per-query
+	// timeout has no wire-level "disable": 0 and negatives fall back to the
+	// server's query_timeout_threshold (60 s default), so the no-limit setting
+	// maps to a 100-year budget that can never fire within int64 deadline
+	// arithmetic (#13935).
+	noLimit := timeoutMilliseconds(0)
+	if noLimit == nil || *noLimit != hundredYearsMs {
+		t.Fatalf("timeoutMilliseconds(0) = %v, want pointer to %d", noLimit, hundredYearsMs)
+	}
+	positive := timeoutMilliseconds(90)
+	if positive == nil || *positive != 90000 {
+		t.Fatalf("timeoutMilliseconds(90) = %v, want pointer to 90000", positive)
+	}
+	if negative := timeoutMilliseconds(-1); negative != nil {
+		t.Fatalf("timeoutMilliseconds(-1) = %v, want nil", *negative)
+	}
+}
+
+const hundredYearsMs = 100 * 365 * 24 * int64(time.Hour) / int64(time.Millisecond)
+
+type timeoutRecordingSession struct {
+	received []*int64
+}
+
+func (s *timeoutRecordingSession) ExecuteQueryStatement(_ context.Context, _ string, timeoutMs *int64) (*client.SessionDataSet, error) {
+	s.received = append(s.received, timeoutMs)
+	return nil, errors.New("recorded")
+}
+
+func (s *timeoutRecordingSession) ExecuteNonQueryStatement(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (s *timeoutRecordingSession) Close() error { return nil }
+
+func TestQueryValuesSendsHugeBudgetForNoLimit(t *testing.T) {
+	recording := &timeoutRecordingSession{}
+	connected := &sessionClient{session: recording, dialect: client.TreeSqlDialect}
+	server := &server{client: connected}
+
+	_, _ = server.queryValues("SELECT value FROM root.dbx_13935.d", "", 10, 0)
+
+	if len(recording.received) != 1 {
+		t.Fatalf("ExecuteQueryStatement calls = %d, want 1", len(recording.received))
+	}
+	timeout := recording.received[0]
+	if timeout == nil || *timeout != hundredYearsMs {
+		t.Fatalf("query timeout = %v, want the 100-year no-limit budget", timeout)
+	}
+}
+
+type timeoutCaptureSession struct {
+	capturedTimeout []*int64
+	capturedContext []context.Context
+}
+
+func (s *timeoutCaptureSession) ExecuteQueryStatementWithContext(ctx context.Context, _ string, timeoutMs *int64) (*client.SessionDataSet, error) {
+	s.capturedTimeout = append(s.capturedTimeout, timeoutMs)
+	s.capturedContext = append(s.capturedContext, ctx)
+	return nil, errors.New("recorded")
+}
+
+func (s *timeoutCaptureSession) ExecuteStatementWithContext(context.Context, string) (*client.SessionDataSet, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *timeoutCaptureSession) Close() error { return nil }
+
+// The production adapter must forward the per-query timeout to the session
+// layer instead of dropping it: whatever timeoutMilliseconds produced (a
+// positive budget, or the 100-year no-limit budget) has to reach the session
+// call untouched, together with the caller's context (#13935).
+func TestNativeSessionForwardsQueryTimeoutToClient(t *testing.T) {
+	recording := &timeoutCaptureSession{}
+	session := &nativeIoTDBSession{session: recording}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	zero := int64(0)
+	for _, timeout := range []*int64{nil, &zero} {
+		if _, err := session.ExecuteQueryStatement(ctx, "SELECT value FROM root.dbx.d", timeout); err == nil {
+			t.Fatal("expected the recorded error to surface")
+		}
+	}
+	if len(recording.capturedTimeout) != 2 {
+		t.Fatalf("ExecuteQueryStatementWithContext calls = %d, want 2", len(recording.capturedTimeout))
+	}
+	if recording.capturedTimeout[0] != nil {
+		t.Fatalf("first call timeout = %v, want nil passthrough", *recording.capturedTimeout[0])
+	}
+	if recording.capturedTimeout[1] == nil || *recording.capturedTimeout[1] != 0 {
+		t.Fatalf("second call timeout = %v, want pointer to 0 (no limit)", recording.capturedTimeout[1])
+	}
+	for _, captured := range recording.capturedContext {
+		if captured != ctx {
+			t.Fatal("the caller's context must reach the session layer for cancellation")
+		}
+	}
+}

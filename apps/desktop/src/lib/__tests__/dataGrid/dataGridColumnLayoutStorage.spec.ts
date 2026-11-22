@@ -4,6 +4,7 @@ import {
   loadDataGridColumnLayout,
   loadDataGridColumnOrder,
   loadTableDataGridColumnOrder,
+  loadTableDataGridColumnOrderEntry,
   notifyTableDataGridColumnOrderChanged,
   removeDataGridColumnOrder,
   removeTableDataGridColumnOrder,
@@ -55,6 +56,35 @@ describe("table data grid column order storage", () => {
     const explicitMainSchema = tableDataGridColumnOrderScopeKey({ connectionId: "sqlite-1", database: "main", schema: "main", tableName: "products" });
 
     expect(withoutSchema).toBe(explicitMainSchema);
+  });
+
+  it("drops an order saved against a database column order the table no longer has", () => {
+    const scopeKey = tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "REPORT" });
+    saveTableDataGridColumnOrder(scopeKey, ["ID\u00000", "LIAGRO\u00000", "NETINC\u00000", "CF_INFO\u00000"], ["ID\u00000", "NETINC\u00000", "CF_INFO\u00000", "LIAGRO\u00000"]);
+
+    // The table was dropped and recreated with CF_INFO ahead of NETINC.
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "CF_INFO\u00000", "NETINC\u00000", "LIAGRO\u00000"])).toEqual([]);
+    expect(loadTableDataGridColumnOrder(scopeKey)).toEqual([]);
+    // An empty entry stays behind so views that keep their own copy of the order can tell it was discarded.
+    expect(loadTableDataGridColumnOrderEntry(scopeKey)).toEqual([]);
+    expect(loadTableDataGridColumnOrderEntry(tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "OTHER" }))).toBeNull();
+  });
+
+  it("keeps an order while the database only adds or drops columns", () => {
+    const scopeKey = tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "REPORT" });
+    const order = ["ID\u00000", "LIAGRO\u00000", "NETINC\u00000", "CF_INFO\u00000"];
+    saveTableDataGridColumnOrder(scopeKey, order, ["ID\u00000", "NETINC\u00000", "CF_INFO\u00000", "LIAGRO\u00000"]);
+
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "CF_INFO\u00000", "LIAGRO\u00000", "NOTE\u00000"])).toEqual(order);
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "NETINC\u00000", "CF_INFO\u00000", "LIAGRO\u00000", "NOTE\u00000"])).toEqual(order);
+  });
+
+  it("applies an order saved without a database column order", () => {
+    const scopeKey = tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "REPORT" });
+    const order = ["LIAGRO\u00000", "ID\u00000"];
+    saveTableDataGridColumnOrder(scopeKey, order);
+
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "LIAGRO\u00000"])).toEqual(order);
   });
 
   it("notifies other open views when a table order changes", () => {

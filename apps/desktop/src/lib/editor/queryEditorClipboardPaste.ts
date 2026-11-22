@@ -1,3 +1,4 @@
+import type { Transaction, TransactionSpec } from "@codemirror/state";
 import { normalizeQueryEditorPasteText } from "./queryEditorLargePaste";
 
 export interface QueryEditorPasteChange {
@@ -19,4 +20,25 @@ export function queryEditorClipboardPasteChange(rawText: string, from: number, t
   const insert = normalizeQueryEditorPasteText(rawText);
   const caret = from + insert.length;
   return { changes: { from, to, insert }, selection: { anchor: caret, head: caret } };
+}
+
+// Keep a pasted query runnable when the clipboard ends in blank lines, without
+// removing whitespace that may be meaningful to the user's next edit.
+export function keepQueryEditorPasteCaretOnLastContentLine(transaction: Transaction): TransactionSpec | readonly TransactionSpec[] {
+  if (!transaction.docChanged || !transaction.isUserEvent("input.paste")) return transaction;
+  if (transaction.startState.selection.ranges.length !== 1 || transaction.newSelection.ranges.length !== 1) return transaction;
+  const selection = transaction.newSelection.main;
+  if (!selection.empty || selection.head !== transaction.changes.newLength) return transaction;
+
+  const previousDoc = transaction.startState.doc;
+  let anchor: number | undefined;
+  transaction.changes.iterChanges((from, to, insertedFrom, insertedTo, inserted) => {
+    if (to !== previousDoc.length || insertedTo !== selection.head || inserted.lines < 2) return;
+    if (previousDoc.sliceString(previousDoc.lineAt(from).from, from).trim()) return;
+    const text = inserted.toString();
+    const trimmedLength = text.trimEnd().length;
+    if (trimmedLength && text.indexOf("\n", trimmedLength) >= 0) anchor = insertedFrom + trimmedLength;
+  });
+
+  return anchor === undefined ? transaction : [transaction, { selection: { anchor }, sequential: true }];
 }

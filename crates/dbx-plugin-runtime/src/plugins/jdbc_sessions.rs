@@ -64,10 +64,10 @@ impl PluginRegistry {
                     startup.0 = None;
                     return Err(match shutdown {
                         Ok(()) => {
-                            "Update the JDBC plugin to a version supporting embedded H2 logical sessions".to_string()
+                            "Update the JDBC plugin to a version supporting embedded file JDBC logical sessions".to_string()
                         }
                         Err(error) => format!(
-                            "Update the JDBC plugin to a version supporting embedded H2 logical sessions; additionally \
+                            "Update the JDBC plugin to a version supporting embedded file JDBC logical sessions; additionally \
                              failed to stop its runtime: {error}"
                         ),
                     });
@@ -104,6 +104,10 @@ impl JdbcLogicalSession {
     pub(super) fn is_available(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
             && self.runtime.process.sidecar.status().state == super::PluginSessionState::Running
+    }
+
+    pub(super) fn has_in_flight_request(&self) -> bool {
+        self.operation.try_lock().is_err()
     }
 
     pub(super) async fn invoke<T: serde::de::DeserializeOwned>(

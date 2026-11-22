@@ -8,6 +8,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "event",
   "procedure",
   "function",
+  "postgres-aggregate-functions",
   "synonym",
   "oracle-db-link",
   "package",
@@ -17,7 +18,6 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "type-attribute",
   "type-method",
   "object-browser",
-  "redis-db",
   "mqtt-topic",
   "mq-tenant",
   "etcd-root",
@@ -48,7 +48,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
 // contribute their natural width when the user allows horizontal scrolling.
 const nonNaturalWidthTypes: Set<TreeNodeType> = new Set(["table-search-control", "load-more"]);
 
-const emptyContainerTypes: Set<TreeNodeType> = new Set(["saved-sql-root", "saved-sql-folder", "type"]);
+const emptyContainerTypes: Set<TreeNodeType> = new Set(["redis-db", "saved-sql-root", "saved-sql-folder", "type"]);
 
 const pinnableTypes: Set<TreeNodeType> = new Set([
   "connection-group",

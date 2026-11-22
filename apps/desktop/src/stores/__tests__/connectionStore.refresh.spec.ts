@@ -68,14 +68,16 @@ function column(name: string) {
   };
 }
 
-function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn>; listTriggers?: ReturnType<typeof vi.fn> }) {
+function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listDatabases?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn>; listSchemaInfos?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listTriggers?: ReturnType<typeof vi.fn> }) {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
     getColumns: options?.getColumns ?? vi.fn().mockResolvedValue([]),
+    listDatabases: options?.listDatabases ?? vi.fn().mockResolvedValue([{ name: "app", comment: null }]),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     listObjects: options?.listObjects ?? vi.fn().mockResolvedValue([]),
+    listSchemaInfos: options?.listSchemaInfos ?? vi.fn().mockResolvedValue([{ name: "public", comment: null }]),
     listTables: options?.listTables ?? vi.fn().mockResolvedValue([]),
     listTriggers: options?.listTriggers ?? vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -537,5 +539,132 @@ describe("connection node refresh awaits object cache invalidation", () => {
 
     await expect(store.refreshConnectionTreeNode(database)).resolves.toBeUndefined();
     expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).sort()).toEqual(["object-ddl:v1:pg-1:app:", "object-meta:v1:pg-1:app:"]);
+  });
+});
+
+describe("connectionStore refresh keeps the node expansion state (#14919, #15079)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+  });
+
+  function tableNode(expanded: boolean): TreeNode {
+    return { id: "pg-1:app:public:users", label: "users", type: "table", connectionId: "pg-1", database: "app", schema: "public", isExpanded: expanded, children: [] };
+  }
+
+  function schemaNodeWithState(expanded: boolean, children: TreeNode[] = []): TreeNode {
+    return { id: "pg-1:app:public", label: "public", type: "schema", connectionId: "pg-1", database: "app", schema: "public", isExpanded: expanded, children };
+  }
+
+  function databaseNodeWithState(expanded: boolean, children: TreeNode[] = []): TreeNode {
+    return { id: "pg-1:app", label: "app", type: "database", connectionId: "pg-1", database: "app", isExpanded: expanded, children };
+  }
+
+  it("reloads a collapsed table's groups without expanding it", async () => {
+    installApiMocks();
+    const table = tableNode(false);
+    const store = await createStore(schemaNode([table]));
+
+    await store.refreshTreeNode(table);
+
+    expect(table.isExpanded).toBe(false);
+    expect(table.children?.map((child) => child.type)).toContain("group-columns");
+  });
+
+  it("keeps an expanded table expanded", async () => {
+    installApiMocks();
+    const table = tableNode(true);
+    const store = await createStore(schemaNode([table]));
+
+    await store.refreshTreeNode(table);
+
+    expect(table.isExpanded).toBe(true);
+    expect(table.children?.map((child) => child.type)).toContain("group-columns");
+  });
+
+  it("reloads a collapsed schema node without expanding it (#15079)", async () => {
+    installApiMocks();
+    const schema = schemaNodeWithState(false);
+    const store = await createStore(schema);
+
+    await store.refreshTreeNode(schema);
+
+    expect(schema.isExpanded).toBe(false);
+    expect(schema.children?.map((child) => child.type)).toContain("group-tables");
+  });
+
+  it("keeps an expanded schema node expanded on refresh (#15079)", async () => {
+    installApiMocks();
+    const schema = schemaNodeWithState(true);
+    const store = await createStore(schema);
+
+    await store.refreshTreeNode(schema);
+
+    expect(schema.isExpanded).toBe(true);
+    expect(schema.children?.map((child) => child.type)).toContain("group-tables");
+  });
+
+  it("reloads a collapsed database node without expanding it (#15079)", async () => {
+    installApiMocks();
+    const database = databaseNodeWithState(false);
+    const store = await createStore(database);
+
+    await store.refreshTreeNode(database);
+
+    expect(database.isExpanded).toBe(false);
+    expect(database.children?.map((child) => child.label)).toContain("public");
+  });
+
+  it("keeps an expanded database node expanded on refresh (#15079)", async () => {
+    installApiMocks();
+    const database = databaseNodeWithState(true);
+    const store = await createStore(database);
+
+    await store.refreshTreeNode(database);
+
+    expect(database.isExpanded).toBe(true);
+    expect(database.children?.map((child) => child.label)).toContain("public");
+  });
+
+  it("keeps a collapsed database node collapsed when DDL triggers refreshObjectListTreeNode (#15079)", async () => {
+    const listTables = vi.fn().mockResolvedValue([{ name: "customers", table_type: "BASE TABLE", comment: null }]);
+    installApiMocks({ listTables });
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "grouped";
+
+    const mysqlConfig: ConnectionConfig = {
+      id: "mysql-1",
+      name: "MySQL",
+      db_type: "mysql",
+      host: "127.0.0.1",
+      port: 3306,
+      username: "root",
+      password: "",
+      database: "shop_db",
+    } as ConnectionConfig;
+
+    const dbNode: TreeNode = {
+      id: "mysql-1:shop_db",
+      label: "shop_db",
+      type: "database",
+      connectionId: "mysql-1",
+      database: "shop_db",
+      isExpanded: false,
+      children: [],
+    };
+
+    store.connections = [mysqlConfig];
+    store.connectedIds.add(mysqlConfig.id);
+    store.treeNodes = [{ id: mysqlConfig.id, label: mysqlConfig.name, type: "connection", connectionId: mysqlConfig.id, isExpanded: true, children: [dbNode] }];
+
+    await store.refreshObjectListTreeNode("mysql-1", "shop_db");
+
+    expect(dbNode.isExpanded).toBe(false);
+    expect(dbNode.children?.map((child) => child.type)).toContain("group-tables");
   });
 });

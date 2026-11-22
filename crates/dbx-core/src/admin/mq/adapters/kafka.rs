@@ -584,6 +584,10 @@ impl MessageQueueAdmin for KafkaAdmin {
         Ok(backlog_stats_from_consumer_lag(&result))
     }
 
+    async fn get_broker_config(&self, broker_id: i32) -> Result<serde_json::Value, String> {
+        self.call("mq_get_broker_config", serde_json::json!({ "brokerId": broker_id })).await
+    }
+
     async fn get_cluster_info(&self) -> Result<ClusterInfo, String> {
         let result: serde_json::Value = self.call("mq_describe_cluster", serde_json::json!({})).await?;
 

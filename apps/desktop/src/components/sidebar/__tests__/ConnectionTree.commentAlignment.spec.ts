@@ -14,6 +14,7 @@ import zhTW from "@/i18n/locales/zh-TW";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
 import { showSidebarRowProductionBadge, isSidebarProductionContainer } from "@/lib/sidebar/sidebarProductionBadge";
+import { sidebarTreeIconSize } from "@/lib/sidebar/connectionBadge";
 import type { ColumnInfo, TreeNode } from "@/types/database";
 
 const source = parse(readFileSync(new URL("../ConnectionTree.vue", import.meta.url), "utf8")).descriptor.scriptSetup!.content;
@@ -53,6 +54,7 @@ function fixture(nodes: TreeNode[], initialLocale: Locale = "en", mode = "commen
   const canvas = { getContext: vi.fn((): typeof context | null => context) };
   const bindings = {
     computed,
+    sidebarTreeIconSize,
     store: { getConfig: () => undefined, isDefaultDatabase: () => false, isDefaultSchema: () => false },
     sidebarTreeSecondaryValue,
     showSidebarRowProductionBadge,

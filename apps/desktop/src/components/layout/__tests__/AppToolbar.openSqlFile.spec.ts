@@ -153,11 +153,13 @@ describe("AppToolbar opens SQL files in the editor", () => {
     const host = mount({ onOpenSqlEditorFile: openEditor });
     await flushLayout();
     expect(buttonWithText(host, "Open SQL file")).toBeUndefined();
+    const moreTrigger = buttonWithText(host, "More");
 
     toolbarWidth = 400;
     window.dispatchEvent(new Event("resize"));
     await flushLayout();
     expect(buttonWithText(host, "Open SQL file")).toBeUndefined();
+    expect(buttonWithText(host, "More")).toBe(moreTrigger);
     buttonWithText(host, "More")!.click();
     await nextTick();
 

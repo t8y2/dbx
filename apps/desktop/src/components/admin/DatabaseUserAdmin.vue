@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
+import { generateDatabaseUserPassword } from "@/lib/security/databaseUserPassword";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import AuthorizationScopeEditor from "@/components/admin/AuthorizationScopeEditor.vue";
 import OracleSecurityDetails from "@/components/admin/OracleSecurityDetails.vue";
@@ -178,7 +179,7 @@ const canDropUser = computed(() => !!provider.value?.dropUserSql);
 const canGrantPrivileges = computed(() => !!actions.value?.grantPrivilegesSql);
 const canRevokePrivileges = computed(() => !!actions.value?.revokePrivilegesSql);
 const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
-const supportsCreateTableGrants = computed(() => !!provider.value?.supportsTableGrantsOnCreate);
+const supportsEditTableGrants = computed(() => provider.value?.supportsTableGrantsOnEdit ?? !!provider.value?.supportsTableGrantsOnCreate);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -199,7 +200,7 @@ const selectedDetail = computed(() => {
 const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noGrants"));
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const createDatabaseAuthorizationsValid = computed(() => authorizationSelectionsValid(createDatabaseAuthorizations.value));
-const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && (isOracle.value ? privilegeScope.value === "table" : supportsCreateTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table")));
+const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && (isOracle.value ? privilegeScope.value === "table" : supportsEditTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table")));
 const oracleObjectScope = computed(() => {
   if (!isOracle.value) return undefined;
   const connectionId = props.connection.id;
@@ -513,8 +514,8 @@ function authorizationSelectionsValid(selections: DatabaseAuthorizationSelection
   return selections.every((selection) => {
     if (selection.tables !== undefined && selection.tables.length === 0) return false;
     const targetScope = selection.tables === undefined && userProvider.authorizationModel !== "starrocks" ? "database" : "table";
-    const available = authorizationPrivileges(userProvider, targetScope);
-    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope).length > 0;
+    const available = authorizationPrivileges(userProvider, targetScope, selection.tables);
+    if (selection.preset !== "custom") return authorizationPresetPrivileges(userProvider, selection.preset, selection.privileges, targetScope, selection.tables).length > 0;
     return available.some((privilege) => selection.privileges?.includes(privilege));
   });
 }
@@ -1423,8 +1424,11 @@ onBeforeUnmount(() => {
             <input v-model="createCanLogin" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
             {{ t("userAdmin.allowLogin") }}
           </label>
-          <label class="block text-xs font-medium">{{ t("connection.password") }}</label>
-          <PasswordInput v-model="createPassword" />
+          <label for="new-database-user-password" class="block text-xs font-medium">{{ t("connection.password") }}</label>
+          <div class="flex flex-wrap items-center gap-2">
+            <PasswordInput id="new-database-user-password" v-model="createPassword" autocomplete="new-password" class="min-w-32 flex-1" />
+            <Button type="button" variant="outline" @click="createPassword = generateDatabaseUserPassword()">{{ t("userAdmin.generatePassword") }}</Button>
+          </div>
 
           <div v-if="createAccountType === 'admin'" class="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
             {{ t("userAdmin.adminUserWarning") }}

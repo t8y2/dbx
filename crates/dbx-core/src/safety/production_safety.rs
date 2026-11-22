@@ -1,14 +1,27 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
-use sqlparser::ast::{Expr, Function, Select, Statement, TableFactor, Visit, Visitor};
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::ast::{Expr, Function, Query, Select, SetExpr, Statement, TableFactor, Visit, Visitor};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
-const MAX_SCOPE_QUERY_TOKENS: usize = 2048;
+/// Upper bound on the tokens the PostgreSQL scope proof will hand to the parser.
+///
+/// The bound exists because the parser and the AST visitor recurse, and this runs on
+/// MCP worker stacks. It is deliberately below the measured crash point for an
+/// unoptimised 2 MiB stack (roughly 28.5k tokens on a long additive expression,
+/// #14586), and pathological nesting is refused separately by
+/// `MAX_SCOPE_QUERY_NESTING_DEPTH` before anything is parsed.
+const MAX_SCOPE_QUERY_TOKENS: usize = 16_384;
+
+/// Deepest bracket nesting the scope proof attempts. Bracket depth is what a
+/// recursive-descent parser turns into stack frames, so bounding it keeps a
+/// long-but-flat query provable while still refusing adversarial input whose token
+/// count alone stays under the cap.
+const MAX_SCOPE_QUERY_NESTING_DEPTH: usize = 128;
 
 /// Function-call syntax supported by PostgreSQL scope recognition. This policy
 /// is independent of the manual-transaction read proof.
@@ -352,7 +365,20 @@ fn sql_database_scope_is_disallowed(
         .map(|database| normalize_database_name(database))
         .filter(|database| !database.is_empty())
         .collect::<HashSet<_>>();
-    let assessment = referenced_databases(sql, db_type, active_database, true, static_postgres_query);
+    let mysql_cte_qualifiers = static_mysql_cte_qualifiers(sql, db_type);
+    if mysql_cte_qualifiers
+        .as_ref()
+        .is_some_and(|qualifiers| qualifiers.iter().any(|qualifier| !allowed_databases.contains(qualifier)))
+    {
+        return true;
+    }
+    let assessment = referenced_databases(
+        sql,
+        db_type,
+        active_database,
+        true,
+        static_postgres_query || mysql_cte_qualifiers.is_some(),
+    );
     assessment.uncertain || assessment.databases.into_iter().any(|database| !allowed.contains(&database))
 }
 
@@ -504,14 +530,9 @@ fn collect_qualified_target_databases(
 /// Unsupported statements, call syntax and FROM factors keep the existing scan.
 fn has_static_postgres_query_structure(sql: &str) -> bool {
     let dialect = PostgreSqlDialect {};
-    let Ok(tokens) = Tokenizer::new(&dialect, sql).with_unescape(false).tokenize() else {
+    let Some(tokens) = tokenize_scope_query(&dialect, sql) else {
         return false;
     };
-    // Bound AST traversal and drop on worker stacks; larger queries keep the
-    // original scan even when parsing itself would not exceed its depth limit.
-    if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS {
-        return false;
-    }
     // Ordinary backslash strings depend on standard_conforming_strings, which
     // is not available here. E strings and dollar quotes have explicit semantics.
     if tokens.iter().any(|token| {
@@ -523,6 +544,124 @@ fn has_static_postgres_query_structure(sql: &str) -> bool {
         return false;
     };
     !statements.is_empty() && matches!(statements.visit(&mut StaticPostgresQuery), ControlFlow::Continue(()))
+}
+
+fn tokenize_scope_query(dialect: &dyn Dialect, sql: &str) -> Option<Vec<Token>> {
+    let tokens = Tokenizer::new(dialect, sql).with_unescape(false).tokenize().ok()?;
+    // Bound AST traversal and drop on worker stacks before parsing.
+    if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS
+        || bracket_nesting_exceeds(&tokens, MAX_SCOPE_QUERY_NESTING_DEPTH)
+    {
+        return None;
+    }
+    Some(tokens)
+}
+
+/// The legacy FROM scan can cross a CTE's closing parenthesis and mistake a
+/// comma in the outer projection for another table. For a proven static CTE,
+/// collect the tables directly, including comma joins inside any query block.
+fn static_mysql_cte_qualifiers(sql: &str, db_type: &DatabaseType) -> Option<HashSet<String>> {
+    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris)
+        || sql.contains(['\\', '"', '#', '$'])
+        || sql.contains("/*")
+        || sql.contains("--")
+    {
+        return None;
+    }
+    // Quotes, escapes and comments above can depend on engine or session modes.
+    // Those inputs keep the existing conservative scan.
+    let dialect = MySqlDialect {};
+    let statements = Parser::new(&dialect).with_tokens(tokenize_scope_query(&dialect, sql)?).parse_statements().ok()?;
+    let query = static_mysql_cte_query(statements.as_slice())?;
+    query.with.as_ref()?;
+    let mut scope = StaticMysqlCteScope::default();
+    match query.visit(&mut scope) {
+        ControlFlow::Continue(()) => Some(scope.qualifiers),
+        ControlFlow::Break(()) => None,
+    }
+}
+
+/// Returns the query whose CTE definitions can be trusted for a static scope
+/// proof.
+///
+/// Besides a plain `WITH … SELECT`, MCP callers send `EXPLAIN WITH …` and
+/// `INSERT INTO … WITH … SELECT`. Both keep the same `Query` node, so the
+/// visitor can prove their CTE names instead of falling back to the legacy
+/// FROM scan, which crossed the CTE boundary and rejected these statements
+/// as out of scope (#15288).
+fn static_mysql_cte_query(statements: &[Statement]) -> Option<&Query> {
+    match statements {
+        [Statement::Query(query)] => Some(query),
+        [Statement::Explain { statement, .. }] => match statement.as_ref() {
+            Statement::Query(query) => Some(query),
+            Statement::Insert(insert) => insert.source.as_deref(),
+            _ => None,
+        },
+        [Statement::Insert(insert)] => insert.source.as_deref(),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct StaticMysqlCteScope {
+    qualifiers: HashSet<String>,
+}
+
+impl Visitor for StaticMysqlCteScope {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        match query.body.as_ref() {
+            SetExpr::Select(select) if select.into.is_none() && query.locks.is_empty() => ControlFlow::Continue(()),
+            _ => ControlFlow::Break(()),
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Function(_) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, table: &TableFactor) -> ControlFlow<Self::Break> {
+        match table {
+            TableFactor::Table { name, args: None, .. } => match name.0.as_slice() {
+                [table] if table.as_ident().is_some() => {}
+                [database, table] if table.as_ident().is_some() => {
+                    let Some(database) = database.as_ident() else { return ControlFlow::Break(()) };
+                    // MySQL database names may be case-sensitive. Require an exact
+                    // allowlist match for qualifiers found by this proof.
+                    self.qualifiers.insert(database.value.clone());
+                }
+                _ => return ControlFlow::Break(()),
+            },
+            TableFactor::Derived { .. } | TableFactor::NestedJoin { .. } => {}
+            _ => return ControlFlow::Break(()),
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Whether bracket nesting goes deeper than `limit`.
+///
+/// Only `(` counts: it is the only token that makes the parser and the visitor
+/// recurse without bound. Brackets and braces appear in fixed-shape syntax.
+fn bracket_nesting_exceeds(tokens: &[Token], limit: usize) -> bool {
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            Token::LParen => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Matches supported scope-call syntax, without resolving runtime function identity.
@@ -1446,6 +1585,60 @@ mod tests {
     }
 
     #[test]
+    fn long_read_only_postgres_queries_keep_the_static_scope_proof() {
+        // #14586: the token bound only exists to keep the parser off a blown stack, so
+        // it must sit far above ordinary long reports. A read-only CTE with thousands
+        // of tokens used to fall back to the comma-FROM scan and be denied as
+        // DATABASE_OUT_OF_SCOPE even though every reference was inside the allowlist.
+        let allowed = vec!["reporting".to_string()];
+        let mut sql = String::from("WITH c AS (SELECT id FROM reporting.users) SELECT c.id");
+        for _ in 0..1200 {
+            sql.push_str(" + 1");
+        }
+        sql.push_str(" AS total FROM c");
+        assert!(
+            sql.split_whitespace().count() > 2048,
+            "the regression needs more tokens than the old bound: {}",
+            sql.split_whitespace().count()
+        );
+        assert!(
+            !connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed),
+            "a long read-only query must keep the static scope proof"
+        );
+    }
+
+    #[test]
+    fn deep_bracket_nesting_is_refused_before_parsing() {
+        // The token bound alone cannot bound recursion: a short query can nest far
+        // deeper than a long flat one, so depth is refused separately.
+        let nested = |depth: usize| format!("SELECT {}1{}", "(".repeat(depth), ")".repeat(depth));
+        let tokenize = |sql: &str| {
+            sqlparser::tokenizer::Tokenizer::new(&sqlparser::dialect::PostgreSqlDialect {}, sql)
+                .with_unescape(false)
+                .tokenize()
+                .expect("valid tokens")
+        };
+        let limit = super::MAX_SCOPE_QUERY_NESTING_DEPTH;
+        assert!(!super::bracket_nesting_exceeds(&tokenize(&nested(limit)), limit));
+        assert!(super::bracket_nesting_exceeds(&tokenize(&nested(limit + 2)), limit));
+        // A long, flat query adds tokens but no depth.
+        assert!(!super::bracket_nesting_exceeds(&tokenize(&format!("SELECT {}1", "1 + ".repeat(3000))), limit));
+
+        // And the refusal is fail-closed: the query loses the static proof and the
+        // comma-FROM scan sees the disallowed database again.
+        let allowed = vec!["reporting".to_string()];
+        let deep = format!(
+            "WITH c AS (SELECT id FROM reporting.users) SELECT {}c.id{} FROM c, production.secrets s",
+            "(".repeat(limit + 2),
+            ")".repeat(limit + 2)
+        );
+        assert!(
+            connection_scope_rejects(&deep, &DatabaseType::Postgres, "reporting", &allowed),
+            "a pathologically nested query must not be relaxed"
+        );
+    }
+
+    #[test]
     fn postgres_query_structure_preserves_scope_and_literal_semantics() {
         // Schema names, quoted identifiers and unused allowlist entries do not
         // change whether an otherwise static PostgreSQL query can be resolved.
@@ -1585,6 +1778,42 @@ mod tests {
                 connection_scope_rejects(sql, &db_type, "reporting", &allowed),
                 "non-PostgreSQL query changed behavior ({db_type:?}): {sql}"
             );
+        }
+    }
+
+    #[test]
+    fn mysql_cte_scope_proof_covers_explain_and_insert_forms() {
+        // Doris MCP callers send `EXPLAIN WITH …` and `INSERT INTO … WITH …`.
+        // Both wrap the same query block, so the static CTE proof must reach
+        // them instead of falling back to the legacy FROM scan (#15288).
+        let allowed = vec!["reporting".to_string()];
+        for sql in [
+            "EXPLAIN WITH a AS (SELECT 1 AS id), b AS (SELECT id FROM a), c AS (SELECT id FROM b) SELECT id FROM c LIMIT 1",
+            "EXPLAIN ANALYZE WITH a AS (SELECT 1 AS id) SELECT id FROM a",
+            "INSERT INTO logs (id) WITH a AS (SELECT 1 AS id), b AS (SELECT id FROM a) SELECT id FROM b",
+            "EXPLAIN INSERT INTO logs (id) WITH a AS (SELECT 1 AS id) SELECT id FROM a",
+        ] {
+            for db_type in [DatabaseType::Doris, DatabaseType::Mysql] {
+                assert!(
+                    !connection_scope_rejects(sql, &db_type, "reporting", &allowed),
+                    "static CTE proof missed a supported form ({db_type:?}): {sql}"
+                );
+            }
+        }
+        for sql in [
+            "EXPLAIN WITH a AS (SELECT id FROM production.users) SELECT id FROM a",
+            "INSERT INTO logs (id) WITH a AS (SELECT id FROM production.users) SELECT id FROM a",
+            "WITH a AS (SELECT id FROM production.users) SELECT id FROM a",
+            // A UNION body is not part of the static proof; the legacy scan
+            // must keep rejecting the cross-database branch.
+            "INSERT INTO logs (id) WITH a AS (SELECT 1 AS id) SELECT id FROM a UNION SELECT id FROM production.users",
+        ] {
+            for db_type in [DatabaseType::Doris, DatabaseType::Mysql] {
+                assert!(
+                    connection_scope_rejects(sql, &db_type, "reporting", &allowed),
+                    "cross-database CTE reference was accepted ({db_type:?}): {sql}"
+                );
+            }
         }
     }
 

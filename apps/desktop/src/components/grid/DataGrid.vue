@@ -222,6 +222,7 @@ import {
   dataGridRowDetailTsv,
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
+import { parseDataGridWhereCondition } from "@/lib/dataGrid/dataGridWhereConditionParser";
 import { adjacentDataGridDetailIndex, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
 import { applyColumnFormatter, DataGridDateTimePatterns, displayTimeZoneOption, formatIoTDBTimestampEditorValue, iotdbTimestampFractionDigits, iotdbTimestampPrecision, parseIoTDBTimestampEditorValue, resolveColumnFormatter, type ColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
@@ -1495,6 +1496,9 @@ const filterBuilder = useDataGridFilterBuilder({
   createId: uuid,
   isComplete: isStructuredFilterRuleComplete,
   buildCondition: buildStructuredFilterCondition,
+  // #15320: 手输的 WHERE 条件在打开筛选器时反解析进规则行，解析失败维持原状。
+  currentWhere: () => whereFilterInput.value,
+  importFromWhere: (where, columns) => parseDataGridWhereCondition(where, columns, uuid),
 });
 const conditionalBulkEditFilterBuilder = useDataGridFilterBuilder({
   columns: filterBuilderColumnOptions,

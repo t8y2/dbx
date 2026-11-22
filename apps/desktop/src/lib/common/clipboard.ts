@@ -206,6 +206,20 @@ export async function readTextFromClipboard(env: ClipboardEnvironment = globalTh
   throw new Error("Clipboard API is not available");
 }
 
+/**
+ * Whether this runtime can read the clipboard on demand.
+ *
+ * The Web Clipboard API is only exposed in secure contexts (HTTPS or
+ * localhost). A DBX web build served over plain HTTP — for example a Docker
+ * deployment opened by LAN IP — has no `navigator.clipboard`, so callers that
+ * need clipboard text must fall back to a user-initiated paste event instead of
+ * failing outright (issue #15158).
+ */
+export function canReadClipboardText(env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): boolean {
+  if (isTauriRuntime(env as unknown as Record<string, unknown>)) return true;
+  return typeof env.navigator?.clipboard?.readText === "function";
+}
+
 export interface ClipboardImagePayload {
   contentType: "image/png";
   dataBase64: string;

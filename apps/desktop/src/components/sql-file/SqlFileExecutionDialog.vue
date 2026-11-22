@@ -20,7 +20,9 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
-import { supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsDatabaseCreation, supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { buildCreateDatabaseSql } from "@/lib/database/createDatabaseSql";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { fetchSqlFileTargetOptions, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
@@ -29,9 +31,11 @@ import {
   commitManualTransaction,
   rollbackManualTransaction,
   cancelSqlFileExecution,
+  executeQuery,
   executeSqlFiles,
   refreshSqlFilePreview,
   inspectSqlFileTables,
+  listSchemas,
   listenSqlFileProgress,
   previewSqlFile,
   type SqlFilePreview,
@@ -147,7 +151,17 @@ const loadingPreview = ref(false);
 const connectionId = ref("");
 const targetNamespace = ref("");
 const databaseOptions = ref<string[]>([]);
+const newDatabaseOpen = ref(false);
+const newDatabaseName = ref("");
+const creatingDatabase = ref(false);
 const loadingDatabases = ref(false);
+// Second-level namespace for engines that layer schemas under a database (PostgreSQL,
+// SQL Server, ...). Empty means "whatever the connection's search_path/default is", so
+// the dialog's behaviour is unchanged until a schema is picked (#14584).
+const DEFAULT_SCHEMA_OPTION = "__dbx_default_schema__";
+const schemaOptions = ref<string[]>([]);
+const loadingSchemas = ref(false);
+const targetSchema = ref("");
 const preferredTarget = ref<ExternalSqlFileTarget>();
 const continueOnError = ref(false);
 const skipRelationalConstraints = ref(false);
@@ -511,6 +525,10 @@ function applyTarget(target: ExternalSqlFileTarget) {
   preferredTarget.value = normalizedTarget;
   connectionId.value = normalizedTarget.connectionId;
   targetNamespace.value = namespaceOptionsAreSchemas(store.getConfig(normalizedTarget.connectionId)) ? (normalizedTarget.schema ?? "") : normalizedTarget.database;
+  // The schema list itself is loaded once the database is known; remember the
+  // caller's schema (sidebar context, prefill) so that load can preselect it.
+  pendingPreferredSchema = schemaPickerApplies.value ? (normalizedTarget.schema ?? "") : "";
+  targetSchema.value = pendingPreferredSchema;
 }
 
 function chooseNamespace(names: string[], id: string) {
@@ -538,6 +556,11 @@ watch(targetNamespace, (namespace) => {
     database: optionsAreSchemas ? connection?.database?.trim() || "" : namespace.trim(),
     ...(optionsAreSchemas ? { schema: namespace.trim() } : {}),
   };
+  const database = namespace.trim();
+  if (!schemaPickerApplies.value || `${connectionId.value}\0${database}` === loadedSchemaKey) return;
+  const preferred = pendingPreferredSchema;
+  pendingPreferredSchema = "";
+  void loadSchemasForDatabase(connectionId.value, database, preferred);
 });
 
 function sqlFileExecutionTarget(): SqlFileExecutionTarget {
@@ -549,7 +572,57 @@ function sqlFileExecutionTarget(): SqlFileExecutionTarget {
       ...(namespace ? { schema: namespace } : {}),
     };
   }
-  return { database: namespace };
+  const schema = schemaPickerApplies.value ? targetSchema.value.trim() : "";
+  return schema ? { database: namespace, schema } : { database: namespace };
+}
+
+/**
+ * PostgreSQL-family (and SQL Server) engines nest schemas under a database, so the
+ * dialog needs a second namespace level there. Engines whose picker already lists
+ * schemas (Oracle, Dameng) or where schema == database (MySQL) stay single-level.
+ */
+const schemaPickerApplies = computed(() => {
+  const connection = store.getConfig(connectionId.value);
+  if (!connection || namespaceOptionsAreSchemas(connection)) return false;
+  return isSchemaAware(connection.db_type);
+});
+
+/**
+ * Oracle, Dameng and OceanBase-Oracle expose schemas directly under the connection,
+ * so their single picker *is* the schema picker. Naming it "Database" made the dialog
+ * look like it could not target a schema at all (#14584).
+ */
+const namespacePickerListsSchemas = computed(() => namespaceOptionsAreSchemas(store.getConfig(connectionId.value)));
+
+let schemaLoadToken = 0;
+// "connection\0database" whose schema list is already on screen, so re-emitting the
+// same namespace does not clear a schema the user just picked.
+let loadedSchemaKey = "";
+let pendingPreferredSchema = "";
+
+async function loadSchemasForDatabase(id: string, database: string, preferredSchema = "") {
+  const token = ++schemaLoadToken;
+  const key = `${id}\0${database}`;
+  loadedSchemaKey = key;
+  schemaOptions.value = [];
+  targetSchema.value = "";
+  if (!schemaPickerApplies.value || !database) return;
+  loadingSchemas.value = true;
+  try {
+    const names = await listSchemas(id, database, true);
+    if (token !== schemaLoadToken) return;
+    schemaOptions.value = [...names].sort((a, b) => a.localeCompare(b));
+    const wanted = preferredSchema.trim();
+    // Stay on the connection's default search_path when the preferred schema is not
+    // available, rather than silently picking an unrelated one.
+    targetSchema.value = wanted && names.includes(wanted) ? wanted : "";
+  } catch {
+    if (token !== schemaLoadToken) return;
+    schemaOptions.value = [];
+    targetSchema.value = "";
+  } finally {
+    if (token === schemaLoadToken) loadingSchemas.value = false;
+  }
 }
 
 function resetExecution() {
@@ -577,6 +650,11 @@ function resetState() {
   resolveIncludes.value = false;
   selectingFile.value = false;
   loadingPreview.value = false;
+  // Clear the schema state before applyTarget so the target's own schema survives.
+  schemaOptions.value = [];
+  loadingSchemas.value = false;
+  loadedSchemaKey = "";
+  pendingPreferredSchema = "";
   applyTarget(initialTarget);
   databaseOptions.value = [];
   loadingDatabases.value = false;
@@ -589,6 +667,57 @@ function resetState() {
 }
 
 let databaseLoadToken = 0;
+
+// Offered where the picker lists databases (not schemas) and the engine can create one with plain SQL.
+const canCreateTargetDatabase = computed(() => {
+  const connection = selectedConnection.value;
+  return !!connection && !namespacePickerListsSchemas.value && connection.db_type !== "mongodb" && supportsDatabaseCreation(connection.db_type);
+});
+
+function openNewDatabase() {
+  newDatabaseName.value = "";
+  newDatabaseOpen.value = true;
+}
+
+/** Create the database on the target connection, then select it so the file restores into it. */
+async function createTargetDatabase() {
+  const id = connectionId.value;
+  const connection = selectedConnection.value;
+  const name = newDatabaseName.value.trim();
+  if (!id || !connection || !name || creatingDatabase.value) return;
+  creatingDatabase.value = true;
+  try {
+    await store.ensureConnected(id);
+    const sql = await buildCreateDatabaseSql({
+      databaseType: connection.db_type,
+      driverProfile: connection.driver_profile,
+      target: "database",
+      name,
+      identifierQuote: store.connectionIdentifierQuote?.(id),
+    });
+    const result = await executeWithProductionSqlGuard({
+      connection,
+      database: "",
+      sql,
+      source: t("sqlFile.title"),
+      execute: () => executeQuery(id, "", sql),
+    });
+    if (result === undefined) return;
+    await store.ensureVisibleDatabase(id, name);
+    await store.loadDatabases(id, { force: true });
+    if (!open.value || connectionId.value !== id) return;
+    newDatabaseOpen.value = false;
+    newDatabaseName.value = "";
+    // The reload keeps the current namespace when the list contains it, so select the new database first.
+    targetNamespace.value = name;
+    await loadDatabasesForConnection(id);
+    toast(t("sqlFile.newDatabaseCreated", { name }), 3000);
+  } catch (error) {
+    toast(t("sqlFile.newDatabaseFailed", { message: formatError(error) }), { persistent: true });
+  } finally {
+    creatingDatabase.value = false;
+  }
+}
 
 async function loadDatabasesForConnection(id: string) {
   const token = databaseLoadToken + 1;
@@ -609,6 +738,14 @@ async function loadDatabasesForConnection(id: string) {
     if (token !== databaseLoadToken) return;
     databaseOptions.value = names;
     targetNamespace.value = chooseNamespace(names, id);
+    // The namespace watcher skips an unchanged value, so seed the schema list here
+    // too: opening the dialog on a prefilled target would otherwise never load it.
+    const database = targetNamespace.value.trim();
+    if (database && `${id}\0${database}` !== loadedSchemaKey) {
+      const preferred = pendingPreferredSchema;
+      pendingPreferredSchema = "";
+      void loadSchemasForDatabase(id, database, preferred);
+    }
   } catch {
     if (token !== databaseLoadToken) return;
     databaseOptions.value = [];
@@ -1165,18 +1302,48 @@ watch(
             </div>
 
             <div class="space-y-1.5">
-              <Label class="text-xs">{{ t("sqlFile.database") }}</Label>
+              <div class="flex items-center justify-between gap-2">
+                <Label class="text-xs">{{ t(namespacePickerListsSchemas ? "sqlFile.schema" : "sqlFile.database") }}</Label>
+                <Button v-if="canCreateTargetDatabase && !newDatabaseOpen" variant="ghost" size="sm" class="h-5 px-1.5 text-[11px]" data-sql-file-new-database :disabled="executionLocked || loadingDatabases" @click="openNewDatabase">
+                  {{ t("sqlFile.newDatabase") }}
+                </Button>
+              </div>
               <Select v-if="databaseOptions.length" v-model="targetNamespace" :disabled="executionLocked || loadingDatabases">
                 <SelectTrigger class="h-8 text-xs">
-                  <SelectValue :placeholder="t('sqlFile.selectDatabase')" />
+                  <SelectValue :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
                 </SelectContent>
               </Select>
               <div v-else class="relative">
-                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
+                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
+              </div>
+            </div>
+
+            <div v-if="canCreateTargetDatabase && newDatabaseOpen" class="flex items-center gap-1.5" data-sql-file-new-database-form>
+              <Input v-model="newDatabaseName" class="h-8 min-w-0 flex-1 text-xs" :disabled="creatingDatabase" :placeholder="t('sqlFile.newDatabasePlaceholder')" @keydown.enter.prevent="createTargetDatabase" />
+              <Button size="sm" class="h-8 shrink-0 text-xs" :disabled="creatingDatabase || !newDatabaseName.trim()" @click="createTargetDatabase">
+                <Loader2 v-if="creatingDatabase" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                {{ t("sqlFile.newDatabaseCreate") }}
+              </Button>
+              <Button variant="outline" size="sm" class="h-8 shrink-0 text-xs" :disabled="creatingDatabase" @click="newDatabaseOpen = false">{{ t("common.cancel") }}</Button>
+            </div>
+
+            <div v-if="schemaPickerApplies" class="space-y-1.5" data-sql-file-schema>
+              <Label class="text-xs">{{ t("sqlFile.schema") }}</Label>
+              <div class="relative">
+                <Select :model-value="targetSchema || DEFAULT_SCHEMA_OPTION" :disabled="executionLocked || loadingSchemas || !targetNamespace.trim()" @update:model-value="targetSchema = String($event) === DEFAULT_SCHEMA_OPTION ? '' : String($event)">
+                  <SelectTrigger class="h-8 text-xs">
+                    <SelectValue :placeholder="t('sqlFile.schemaPlaceholder')" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem :value="DEFAULT_SCHEMA_OPTION">{{ t("sqlFile.schemaDefault") }}</SelectItem>
+                    <SelectItem v-for="schema in schemaOptions" :key="schema" :value="schema">{{ schema }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Loader2 v-if="loadingSchemas" class="pointer-events-none absolute right-7 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
               </div>
             </div>
           </div>

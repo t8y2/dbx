@@ -45,6 +45,13 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
 const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
 const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+/// ClickHouse has no unique constraints: `system.tables.primary_key` is only the
+/// sorting key the mutation reads, and many rows can share it (a MergeTree with
+/// `ORDER BY tuple()` has none at all). A key-based predicate can therefore
+/// address a whole block of rows — the exact "delete one row, lose the filtered
+/// set" report behind #15206 — so every ClickHouse predicate is verified to
+/// match a single row before the mutation runs.
+const CLICKHOUSE_NON_UNIQUE_KEY_ERROR: &str = "Cannot safely update or delete this row: ClickHouse identifies rows by its sorting key, which is not unique, and more than one row matches the condition Dbx generated. Narrow the result set, or run your own ALTER TABLE ... DELETE/UPDATE statement, before editing.";
 const POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row because its hidden row identifier is missing or invalid. Refresh the table data before saving.";
 const POSTGRES_CTID_STALE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded. Another session may have changed or deleted it. Refresh the table data and try again.";
 /// Dameng rejects every comparison against its binary LOB types with
@@ -237,6 +244,8 @@ pub enum DataGridContextFilterMode {
     NotLike,
     BeginsWith,
     EndsWith,
+    NotBeginsWith,
+    NotEndsWith,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
@@ -900,37 +909,41 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         DataGridContextFilterMode::IsNotBlank => Some(format!("({column} IS NOT NULL AND {column} <> '')")),
         DataGridContextFilterMode::Equals if value.is_null() => Some(format!("{column} IS NULL")),
         DataGridContextFilterMode::NotEquals if value.is_null() => Some(format!("{column} IS NOT NULL")),
-        DataGridContextFilterMode::Like => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::Like => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::NotLike => Some(format!(
-            "{like_column} NOT LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::NotLike => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::BeginsWith => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::BeginsWith => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::StartsWith, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::EndsWith => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::EndsWith => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::EndsWith, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotBeginsWith => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::StartsWith, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotEndsWith => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::EndsWith, options.database_type),
+            options.database_type,
         )),
         DataGridContextFilterMode::LessThan => Some(format!(
             "{column} < {}",
@@ -1250,6 +1263,14 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
         TablePaginationStrategy::SqlServerTop if is_sqlserver_legacy_profile(options.driver_profile.as_deref()) => {
             format!("SELECT {select_list}{from_clause}")
         }
+        // Teradata takes `TOP n` after SELECT and rejects `LIMIT` (#14604). This
+        // statement never pages, so the limit is exact.
+        _ if options.database_type == Some(DatabaseType::Teradata) => {
+            format!("SELECT TOP {limit} {select_list}{from_clause}")
+        }
+        // Totality arm: the guard above already handled Teradata (`TeradataTop` is
+        // mapped only from Teradata), so this shape can never be selected at runtime.
+        TablePaginationStrategy::TeradataTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
@@ -1429,6 +1450,10 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
     }
 }
 
+fn allows_before_insert_trigger_populated_not_null(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Firebird))
+}
+
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
     if let Some(error) = validate_oceanbase_blob_save(options) {
         return Some(error);
@@ -1500,9 +1525,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         }
     }
 
-    // MySQL BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
-    // omitted from the generated INSERT, so let MySQL apply triggers or report missing required fields.
-    if options.database_type != Some(DatabaseType::Mysql) {
+    // MySQL and Firebird BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
+    // omitted from the generated INSERT, so let MySQL or Firebird apply triggers or report missing required fields.
+    if !allows_before_insert_trigger_populated_not_null(options.database_type) {
         for row in &options.new_rows {
             for column_index in 0..options.columns.len() {
                 let source_column = save_columns.get(column_index).and_then(|column| column.as_deref());
@@ -1860,8 +1885,12 @@ fn build_data_grid_save_statements(
     // physical row, so its guard must match exactly one row rather than "at most one".
     let postgres_ctid_locator = is_postgres_ctid_primary_keys(options.database_type, &options.table_meta.primary_keys)
         && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
-    let guards_keyless_predicates =
-        (primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type)) || postgres_ctid_locator;
+    // ClickHouse is guarded even when it reports a "primary key": that metadata
+    // is the non-unique sorting key, so a key-based predicate can still match a
+    // whole block of rows.
+    let guards_keyless_predicates = (primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type))
+        || postgres_ctid_locator
+        || options.database_type == Some(DatabaseType::ClickHouse);
     let mut guarded_predicates: Vec<GuardedPredicate> = Vec::new();
     let guard_predicate = |predicate: &str, guarded: &mut Vec<GuardedPredicate>| {
         if !guards_keyless_predicates || predicate.trim().is_empty() {
@@ -2012,6 +2041,9 @@ fn build_data_grid_save_statements(
             if options.database_type == Some(DatabaseType::Mysql) {
                 statements
                     .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} () VALUES ()")));
+            } else if options.database_type == Some(DatabaseType::Firebird) {
+                statements
+                    .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} DEFAULT VALUES")));
             }
             continue;
         }
@@ -2075,7 +2107,11 @@ fn build_data_grid_save_statements(
         sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({})", predicate.sql),
         max_matched_rows: 1,
         min_matched_rows: u32::from(predicate.requires_match),
-        message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+        message: if options.database_type == Some(DatabaseType::ClickHouse) {
+            CLICKHOUSE_NON_UNIQUE_KEY_ERROR.to_string()
+        } else {
+            KEYLESS_AMBIGUOUS_ROW_ERROR.to_string()
+        },
         min_message: predicate.requires_match.then(|| POSTGRES_CTID_STALE_ROW_ERROR.to_string()),
     }));
 
@@ -2114,7 +2150,10 @@ fn build_data_grid_rollback_statements(
     for row in &options.new_rows {
         // Server-generated keys are unknown; never invent an undo predicate from
         // the unset draft values. Reuse the existing key-based rollback guard.
-        let where_clause = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::StarRocks)) {
+        let where_clause = if matches!(
+            options.database_type,
+            Some(DatabaseType::Mysql | DatabaseType::StarRocks | DatabaseType::Firebird)
+        ) {
             build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
         } else {
             let where_clause = build_save_row_where(
@@ -2503,7 +2542,7 @@ fn build_mysql_insert_rollback_where(
     }
 
     for primary_key in &options.table_meta.primary_keys {
-        let index = columns.iter().position(|column| column.as_deref() == Some(primary_key.as_str()))?;
+        let index = find_column_index(options.database_type, columns, primary_key)?;
         let value = row.get(index).unwrap_or(&Value::Null);
         let info = column_info_for(column_info, primary_key);
         if value.is_null()
@@ -2914,7 +2953,8 @@ pub fn format_grid_sql_literal_with_spatial(
         if let Some(number) = value.as_number() {
             return number.to_string();
         }
-        if let Some(text) = value.as_str().and_then(format_mysql_bit_literal_text) {
+        let bit_width = column_info.and_then(|column| mysql_bit_width(&column.data_type));
+        if let Some(text) = value.as_str().and_then(|text| format_mysql_bit_literal_text(text, bit_width)) {
             return text;
         }
     }
@@ -3615,7 +3655,7 @@ fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColu
     None
 }
 
-fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
+fn format_mysql_bit_literal_text(text: &str, bit_width: Option<usize>) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("true") {
         return Some("1".to_string());
@@ -3627,7 +3667,7 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
         return Some(if trimmed.len() == 1 {
             trimmed.to_string()
         } else if trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
-            format!("b'{trimmed}'")
+            format!("b'{}'", fit_mysql_bit_text(trimmed, bit_width))
         } else {
             trimmed.to_string()
         });
@@ -3636,10 +3676,46 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
     if lower.starts_with("b'") && trimmed.ends_with('\'') {
         let bits = &trimmed[2..trimmed.len() - 1];
         if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
-            return Some(format!("b'{bits}'"));
+            return Some(format!("b'{}'", fit_mysql_bit_text(bits, bit_width)));
         }
     }
     None
+}
+
+/// Fit a run of `0`/`1` characters to the column's declared `BIT(n)` width.
+/// MySQL rejects `b'...'` literals whose length differs from the column width
+/// (`bit string length 8 does not match type bit(1)`), and drivers commonly
+/// hand a `BIT(1)` value up as a whole byte (`"00000001"`). Keep the low-order
+/// `width` bits and zero-pad when the text is shorter, so the literal always
+/// matches the declaration. Truncating the high-order bits mirrors how MySQL
+/// itself assigns an over-long bit string, so we follow the server rather than
+/// rejecting the value here.
+fn fit_mysql_bit_text(bits: &str, bit_width: Option<usize>) -> String {
+    let Some(width) = bit_width.filter(|width| *width > 0) else {
+        return bits.to_string();
+    };
+    if bits.len() == width {
+        return bits.to_string();
+    }
+    if bits.len() > width {
+        return bits[bits.len() - width..].to_string();
+    }
+    format!("{}{}", "0".repeat(width - bits.len()), bits)
+}
+
+/// Width of a MySQL-family `BIT(n)` declaration; a bare `bit` means `bit(1)`.
+fn mysql_bit_width(data_type: &str) -> Option<usize> {
+    let lower = data_type.to_ascii_lowercase();
+    let index = lower.find("bit")?;
+    let rest = lower[index + 3..].trim_start();
+    let Some(rest) = rest.strip_prefix('(') else {
+        return Some(1);
+    };
+    let digits: String = rest.trim_start().chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    // A parenthesised declaration without a readable width is unknown, and an
+    // unknown width must leave the literal alone instead of guessing `bit(1)`.
+    let width = digits.parse::<usize>().ok()?;
+    (width > 0).then_some(width)
 }
 
 fn format_kingbase_bit_literal_text(text: &str) -> Option<String> {
@@ -4931,6 +5007,79 @@ fn value_to_filter_text(value: &Value) -> String {
     }
 }
 
+/// Wildcard shape a textual filter wraps around the user's value.
+#[derive(Clone, Copy)]
+enum DataGridLikeTemplate {
+    Contains,
+    StartsWith,
+    EndsWith,
+}
+
+/// Escape character used for literal LIKE patterns. `~` is what the metadata
+/// searches in this workspace already emit for `LIKE ... ESCAPE`, so a grid
+/// filter keeps the same meaning as those patterns.
+const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
+
+/// Doris 2.1 uses backslash as the default LIKE escape and cannot parse an
+/// explicit ESCAPE clause. TDengine and ClickHouse keep their raw patterns
+/// because the clause is also unsupported by their older parsers.
+fn data_grid_like_escape_char(database_type: Option<DatabaseType>) -> Option<char> {
+    match database_type {
+        Some(DatabaseType::Doris) => Some('\\'),
+        Some(DatabaseType::Tdengine | DatabaseType::ClickHouse) => None,
+        _ => Some(DATA_GRID_LIKE_ESCAPE_CHAR),
+    }
+}
+
+/// Build the LIKE pattern for a user-typed filter value.
+///
+/// The value matches literally, so `%`, `_` and the escape character itself are
+/// escaped before the wildcard template is applied (#14365 review): typing `a_`
+/// must not match `abc`. Only the wrapper wildcards stay unescaped.
+fn data_grid_like_pattern(
+    value: &Value,
+    template: DataGridLikeTemplate,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let raw = value_to_filter_text(value);
+    let body = match data_grid_like_escape_char(database_type) {
+        Some(escape_char) => escape_data_grid_like_literal(&raw, escape_char),
+        None => raw,
+    };
+    match template {
+        DataGridLikeTemplate::Contains => format!("%{body}%"),
+        DataGridLikeTemplate::StartsWith => format!("{body}%"),
+        DataGridLikeTemplate::EndsWith => format!("%{body}"),
+    }
+}
+
+fn escape_data_grid_like_literal(value: &str, escape_char: char) -> String {
+    let mut escaped = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        if ch == escape_char || ch == '%' || ch == '_' {
+            escaped.push(escape_char);
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Render `column LIKE|NOT LIKE <pattern>`, declaring the escape character where
+/// the dialect understands it.
+fn data_grid_like_condition(
+    like_column: &str,
+    operator: &str,
+    pattern: String,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let literal = format_grid_sql_literal(&Value::String(pattern), database_type, None);
+    if data_grid_like_escape_char(database_type) == Some(DATA_GRID_LIKE_ESCAPE_CHAR) {
+        format!("{like_column} {operator} {literal} ESCAPE '{DATA_GRID_LIKE_ESCAPE_CHAR}'")
+    } else {
+        format!("{like_column} {operator} {literal}")
+    }
+}
+
 fn parse_typed_filter_value(
     text: &str,
     database_type: Option<DatabaseType>,
@@ -5072,6 +5221,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Sundb
                 | DatabaseType::Databend
                 | DatabaseType::Hive
+                | DatabaseType::ClickHouse
                 | DatabaseType::Iris
         )
     )
@@ -7295,7 +7445,7 @@ mod tests {
                 column_info: Some(column("status", "varchar", true, None)),
             })
             .as_deref(),
-            Some("\"status\" LIKE '%active%'")
+            Some("\"status\" LIKE '%active%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7309,7 +7459,7 @@ mod tests {
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
-            Some("\"update_date\"::text LIKE '%128%'")
+            Some("\"update_date\"::text LIKE '%128%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7323,7 +7473,7 @@ mod tests {
                 column_info: Some(column("created_at", "timestamp without time zone", false, None)),
             })
             .as_deref(),
-            Some("\"created_at\"::text NOT LIKE '%2026%'")
+            Some("\"created_at\"::text NOT LIKE '%2026%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7337,7 +7487,7 @@ mod tests {
                 column_info: Some(column("file_name", "varchar", false, None)),
             })
             .as_deref(),
-            Some("`file_name` LIKE 'FN%'")
+            Some("`file_name` LIKE 'FN%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7351,7 +7501,35 @@ mod tests {
                 column_info: Some(column("file_name", "varchar", false, None)),
             })
             .as_deref(),
-            Some("`file_name` LIKE '%.sql'")
+            Some("`file_name` LIKE '%.sql' ESCAPE '~'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("tmp"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE 'tmp%' ESCAPE '~'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotEndsWith,
+                value: json!(".log"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE '%.log' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7365,7 +7543,7 @@ mod tests {
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
-            Some("\"update_date\"::text LIKE '128%'")
+            Some("\"update_date\"::text LIKE '128%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
@@ -7378,6 +7556,101 @@ mod tests {
             .as_deref(),
             Some("[active] = 0")
         );
+    }
+
+    /// #14365 review: a typed value has to match literally, so a LIKE metacharacter
+    /// inside it must not act as a wildcard. `not-begins-with` on `a_` used to emit
+    /// `NOT LIKE 'a_%'`, which wrongly excluded `abc` as well.
+    #[test]
+    fn escapes_like_metacharacters_in_context_filter_values() {
+        let condition = |mode: DataGridContextFilterMode, value: &str, database_type: DatabaseType| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+        };
+
+        // `_` is a single-character wildcard: it has to be escaped so `a_` only
+        // matches the literal text `a_`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotBeginsWith, "a_", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` NOT LIKE 'a~_%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotEndsWith, "a_", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` NOT LIKE '%a~_' ESCAPE '~'")
+        );
+        // `%` is a multi-character wildcard.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "50%", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE '50~%%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::EndsWith, "50%", DatabaseType::Postgres).as_deref(),
+            Some("\"file_name\" LIKE '%50~%' ESCAPE '~'")
+        );
+        // The pre-existing contains operators had the same hole, so they escape too.
+        assert_eq!(
+            condition(DataGridContextFilterMode::Like, "a_b", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE '%a~_b%' ESCAPE '~'")
+        );
+        // The escape character itself is doubled, or `~_` would read as an escaped `_`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "a~b", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE 'a~~b%' ESCAPE '~'")
+        );
+        // The casted PostgreSQL reference keeps its prefix.
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "update_date".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("12_8"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("update_date", "bigint", false, None)),
+            })
+            .as_deref(),
+            Some("\"update_date\"::text NOT LIKE '12~_8%' ESCAPE '~'")
+        );
+    }
+
+    /// TDengine rejects `LIKE ... ESCAPE`, and ClickHouse only added the clause in
+    /// 26.6, so those targets keep raw patterns instead of emitting a clause
+    /// older servers cannot parse.
+    #[test]
+    fn omits_like_escape_clause_on_unsupported_targets() {
+        let condition = |database_type: DatabaseType, mode: DataGridContextFilterMode, value: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .unwrap_or_default()
+        };
+
+        for database_type in [DatabaseType::Tdengine, DatabaseType::ClickHouse] {
+            for mode in [DataGridContextFilterMode::BeginsWith, DataGridContextFilterMode::NotEndsWith] {
+                let sql = condition(database_type, mode, "a_");
+                assert!(!sql.contains("ESCAPE"), "{database_type:?} has no ESCAPE clause: {sql}");
+                // Doris/StarRocks MySQL-literal escaping may backslash the
+                // underscore inside the literal; the ESCAPE-absence above is
+                // the contract, not the in-literal escaping shape.
+                assert!(sql.contains("a") && sql.contains("%"), "{sql}");
+            }
+        }
     }
 
     #[test]
@@ -8092,6 +8365,31 @@ mod tests {
             }),
             "MATCH (n:`User`) WHERE n.active = true AND n.`status` IS NOT NULL RETURN n.`status` AS dbx_value, count(*) AS dbx_count ORDER BY dbx_count DESC, dbx_value LIMIT 10"
         );
+    }
+
+    /// #14604: Teradata rejects `LIMIT`; the distinct-value statement caps with
+    /// `TOP n`. This query has no offset, so the limit is exact.
+    #[test]
+    fn teradata_distinct_values_use_top_instead_of_limit() {
+        let sql = build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+            database_type: Some(DatabaseType::Teradata),
+            driver_profile: None,
+            identifier_quote: None,
+            catalog: None,
+            database: None,
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            column_name: "status".to_string(),
+            column_info: Some(column("status", "varchar", true, None)),
+            where_input: None,
+            search_value: None,
+            limit: Some(10),
+            include_counts: false,
+            exclude_nulls: false,
+        });
+
+        assert!(sql.starts_with("SELECT TOP 10 "), "{sql}");
+        assert!(!sql.to_uppercase().contains("LIMIT"), "{sql}");
     }
 
     #[test]
@@ -11229,6 +11527,36 @@ mod tests {
     }
 
     #[test]
+    fn fits_mysql_bit_literals_to_the_declared_width() {
+        let bit = column("flag", "bit(1)", true, None);
+        let bit8 = column("flags", "bit(8)", true, None);
+        let bit32 = column("flags32", "bit(32)", true, None);
+
+        // MySQL drivers report a BIT(1) column as a whole byte, so the raw
+        // value is "00000001"; emitting it verbatim fails with
+        // "bit string length 8 does not match type bit(1)".
+        assert_eq!(format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Mysql), Some(&bit)), "b'1'");
+        assert_eq!(format_grid_sql_literal(&json!("00000000"), Some(DatabaseType::Mysql), Some(&bit)), "b'0'");
+        assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Mysql), Some(&bit)), "0");
+        assert_eq!(format_grid_sql_literal(&json!("1"), Some(DatabaseType::Mysql), Some(&bit)), "1");
+        assert_eq!(format_grid_sql_literal(&json!("b'1'"), Some(DatabaseType::Mysql), Some(&bit)), "b'1'");
+        assert_eq!(format_grid_sql_literal(&json!(null), Some(DatabaseType::Mysql), Some(&bit)), "NULL");
+        // A value that already matches the declared width is untouched.
+        assert_eq!(format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Mysql), Some(&bit8)), "b'10101010'");
+        // Shorter bit strings are zero-padded to the width.
+        assert_eq!(format_grid_sql_literal(&json!("101"), Some(DatabaseType::Mysql), Some(&bit8)), "b'00000101'");
+        // Wider declarations keep the low-order `width` bits across u64 widths.
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("00000000000000000000000000001010"),
+                Some(DatabaseType::Mysql),
+                Some(&bit32)
+            ),
+            "b'00000000000000000000000000001010'"
+        );
+    }
+
+    #[test]
     fn formats_kingbase_bit_literals_for_both_compatibility_modes() {
         let bit = column("flag", "pg_catalog.bit(1)", true, None);
 
@@ -12614,6 +12942,51 @@ mod tests {
             ]
         );
         assert!(result.rollback_statements.is_empty());
+        // The sorting key is not unique, so the same key predicate is verified
+        // to match a single row before the mutation runs (#15206).
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert_eq!(
+            result.keyless_guards[0].sql,
+            "SELECT COUNT(*) AS dbx_keyless_row_matches FROM `people` WHERE (`id` = 1)"
+        );
+        assert_eq!(result.keyless_guards[0].max_matched_rows, 1);
+        assert_eq!(result.keyless_guards[0].message, CLICKHOUSE_NON_UNIQUE_KEY_ERROR);
+    }
+
+    #[test]
+    fn clickhouse_keyless_delete_matches_every_column_and_is_guarded() {
+        // Regression test for https://github.com/t8y2/dbx/issues/15206: without
+        // primary-key metadata the old code produced `DELETE WHERE ;`, and with
+        // a non-unique sorting key it could delete a whole block of rows.
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "UInt64", false, None), column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["ALTER TABLE `people` DELETE WHERE `id` = 1 AND `name` = 'Ada';"]);
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert_eq!(
+            result.keyless_guards[0].sql,
+            "SELECT COUNT(*) AS dbx_keyless_row_matches FROM `people` WHERE (`id` = 1 AND `name` = 'Ada')"
+        );
+        assert_eq!(result.keyless_guards[0].message, CLICKHOUSE_NON_UNIQUE_KEY_ERROR);
     }
 
     #[test]
@@ -13401,6 +13774,133 @@ mod tests {
         });
 
         assert_eq!(result.validation_error, Some(r#"Column "trigger_value" does not allow NULL."#.to_string()));
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_allows_firebird_trigger_populated_primary_key_insert() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TITLE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TITLE".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("Daily")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "REPORTS" ("TITLE") VALUES ('Daily');"#]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_firebird_default_values_for_trigger_only_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TITLE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TITLE".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "REPORTS" DEFAULT VALUES;"#]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_known_firebird_primary_key_for_trigger_rollback() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TRIGGER_VALUE", "VARCHAR(64)", false, None),
+                    column("PAYLOAD", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TRIGGER_VALUE".to_string(), "PAYLOAD".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(7), Value::Null, json!("created")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "REPORTS" ("REPORT_DID", "PAYLOAD") VALUES (7, 'created');"#]
+        );
+        assert_eq!(result.rollback_statements, vec![r#"DELETE FROM "REPORTS" WHERE "REPORT_DID" = 7;"#]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_rejects_firebird_null_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TRIGGER_VALUE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TRIGGER_VALUE".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("existing")]],
+            dirty_rows: vec![(0, vec![(1, Value::Null)])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "TRIGGER_VALUE" does not allow NULL."#.to_string()));
         assert!(result.statements.is_empty());
     }
 

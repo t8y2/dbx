@@ -34,7 +34,9 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
-use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence};
+use crate::sql::{
+    contains_ascii_case_insensitive, starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence,
+};
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
@@ -1235,6 +1237,26 @@ fn pg_text_fallback_value(value: &str, col_type: Option<PgColType>) -> (serde_js
     (value, srid)
 }
 
+/// The binary numeric decoder emits a leading zero for values below one, but
+/// PostgreSQL's text protocol prints them as `.7`. Servers that only answer
+/// with text results (TBase/GaussDB) and queries forced onto the text protocol
+/// by another column would otherwise show a different string for the same
+/// value. Only add the missing zero; never touch signs, exponents or other
+/// numeric spellings.
+fn normalize_pg_numeric_text(value: &str) -> String {
+    let unsigned = value.strip_prefix('-').or_else(|| value.strip_prefix('+')).unwrap_or(value);
+    if unsigned.starts_with('.') && unsigned.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        let sign_len = value.len() - unsigned.len();
+        let mut normalized = String::with_capacity(value.len() + 1);
+        normalized.push_str(&value[..sign_len]);
+        normalized.push('0');
+        normalized.push_str(unsigned);
+        normalized
+    } else {
+        value.to_string()
+    }
+}
+
 fn pg_text_fallback_value_with_spatial(
     value: &str,
     col_type: Option<PgColType>,
@@ -1254,6 +1276,7 @@ fn pg_text_fallback_value_with_spatial(
             Some(parsed) => (serde_json::Value::Bool(parsed), None, false),
             None => (serde_json::Value::String(value.to_string()), None, false),
         },
+        Some(PgColType::Numeric) => (serde_json::Value::String(normalize_pg_numeric_text(value)), None, false),
         Some(_) => (serde_json::Value::String(value.to_string()), None, false),
         None => decode_pg_text_wkb(value)
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
@@ -1443,19 +1466,15 @@ fn is_recognizable_wkt(value: &str) -> bool {
     })
 }
 
-/// Serialize a pgvector `vector` component with f32 shortest round-trip decimal text.
-///
-/// Casting through `f64` (or fixed fractional rounding) either expands binary noise or
-/// truncates remaining single-precision digits; formatting via `f32` display keeps the
-/// full float4 value that pgvector stores.
-fn pg_vector_element_number(v: f32) -> serde_json::Value {
+/// Preserve the shortest decimal representation that round-trips to the stored float4.
+fn pg_float4_number(v: f32) -> serde_json::Value {
     v.to_string().parse().map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
 }
 
 fn pg_vector_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Value {
     if let Ok(PgRawBytes(raw)) = row.try_get::<_, PgRawBytes>(idx) {
         if let Some(floats) = decode_pgvector_bytes(&raw) {
-            return serde_json::Value::Array(floats.into_iter().map(pg_vector_element_number).collect());
+            return serde_json::Value::Array(floats.into_iter().map(pg_float4_number).collect());
         }
     }
     serde_json::Value::Null
@@ -1475,13 +1494,7 @@ fn pg_fallback_value_to_json(row: &impl ValueRow, idx: usize) -> serde_json::Val
                 serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
             })
         })
-        .or_else(|_| {
-            row.try_get::<_, f32>(idx).map(|v| {
-                serde_json::Number::from_f64((v as f64 * 1_000_000.0).round() / 1_000_000.0)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::Null)
-            })
-        })
+        .or_else(|_| row.try_get::<_, f32>(idx).map(pg_float4_number))
         .or_else(|_| row.try_get::<_, bool>(idx).map(serde_json::Value::Bool))
         .or_else(|_| row.try_get::<_, uuid::Uuid>(idx).map(|v| serde_json::Value::String(v.to_string())))
         .or_else(|e| pg_temporal_to_json_value(row, idx).ok_or(e))
@@ -4193,7 +4206,7 @@ async fn completion_assistant_search_inner(
         let rows = postgres_query_cached(
             client,
             postgres_completion_tables_sql(),
-            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64)],
+            &[&schema, &pattern, &relkinds, &((limit - candidates.len()) as i64), &request.global_search],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -4201,11 +4214,7 @@ async fn completion_assistant_search_inner(
             let table_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
                 name: pg_row_try_string(&row, 0),
-                kind: if table_type.contains("VIEW") {
-                    CompletionAssistantCandidateKind::View
-                } else {
-                    CompletionAssistantCandidateKind::Table
-                },
+                kind: postgres_completion_candidate_kind(&table_type),
                 database: Some(request.database.clone()),
                 schema: Some(pg_row_try_string(&row, 1)),
                 parent_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
@@ -4370,7 +4379,7 @@ async fn completion_assistant_search_inner(
 
 fn postgres_completion_tables_sql() -> &'static str {
     "SELECT c.relname, n.nspname, \
-            CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'VIEW' ELSE 'TABLE' END AS table_type, \
+            CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED_VIEW' ELSE 'TABLE' END AS table_type, \
             obj_description(c.oid) AS table_comment, \
             CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
             CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name \
@@ -4380,7 +4389,9 @@ fn postgres_completion_tables_sql() -> &'static str {
      LEFT JOIN pg_catalog.pg_class pc ON pc.oid = i.inhparent \
      LEFT JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace \
      WHERE ($1::text IS NOT NULL AND n.nspname = $1 \
-            OR $1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)) \
+            OR $1::text IS NULL AND (pg_catalog.pg_table_is_visible(c.oid) \
+                OR $5::bool AND left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema' \
+                   AND pg_catalog.has_schema_privilege(n.oid, 'USAGE'))) \
        AND c.relkind::text = ANY($3::text[]) \
        AND ($2 = '%%' OR c.relname ILIKE $2 ESCAPE '~') \
      ORDER BY c.relname LIMIT $4"
@@ -4463,6 +4474,14 @@ fn postgres_visible_table_schema_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE c.relname = $1 AND pg_catalog.pg_table_is_visible(c.oid) \
      LIMIT 1"
+}
+
+fn postgres_completion_candidate_kind(table_type: &str) -> CompletionAssistantCandidateKind {
+    match table_type {
+        "MATERIALIZED_VIEW" => CompletionAssistantCandidateKind::MaterializedView,
+        "VIEW" => CompletionAssistantCandidateKind::View,
+        _ => CompletionAssistantCandidateKind::Table,
+    }
 }
 
 fn postgres_completion_relkinds(kinds: &[CompletionAssistantObjectKind]) -> Vec<String> {
@@ -5401,9 +5420,20 @@ fn postgres_columns_for_relations_compat_sql() -> &'static str {
 // Keep `relid` first and every field in the same order as the two
 // `pg_attribute` tiers — `column_info_from_row_offset` decodes the row by
 // position.
+//
+// The precision/scale/length casts use the `::int` shorthand instead of
+// `CAST(... AS int)`: GaussDB parses the shorthand but rejects the ANSI form
+// with `syntax error at or near "int"`, which made `getColumns` fail outright
+// there (#14613).
+//
+// `full_type` is a plain `data_type` here: GaussDB's `information_schema.columns`
+// has no `udt_name` column at all (`Column c.udt_name does not exist`, SQLSTATE
+// 42703), and referencing it failed the whole tier (#15130). Enumerated types
+// therefore degrade to the generic `USER-DEFINED` label in this last-resort
+// tier instead of aborting the column listing.
 fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
     "SELECT c.oid::bigint AS relid, ic.column_name AS column_name, \
-             CASE WHEN ic.data_type = 'USER-DEFINED' THEN ic.udt_name ELSE ic.data_type END AS full_type, \
+             ic.data_type AS full_type, \
              ic.is_nullable = 'YES' AS is_nullable, \
              ic.column_default AS column_default, \
              EXISTS ( \
@@ -5421,9 +5451,9 @@ fn postgres_columns_for_relations_information_schema_sql() -> &'static str {
              ) AS is_pk, \
              NULL::text AS column_comment, \
              NULL::text AS column_extra, \
-             CAST(ic.numeric_precision AS int) AS numeric_precision, \
-             CAST(ic.numeric_scale AS int) AS numeric_scale, \
-             CAST(ic.character_maximum_length AS int) AS character_maximum_length, \
+             ic.numeric_precision::int AS numeric_precision, \
+             ic.numeric_scale::int AS numeric_scale, \
+             ic.character_maximum_length::int AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns ic \
              JOIN pg_catalog.pg_namespace n ON n.nspname = ic.table_schema \
@@ -6811,6 +6841,17 @@ pub fn redshift_procedure_source_sql(schema: &str, name: &str, signature: Option
 /// and array companion types are excluded via `typelem = 0`. The type branch
 /// has no usable timestamp/stat columns, so created_at/updated_at are always
 /// NULL. Column order must match the relation and routine branches.
+///
+/// `signature` is built with `concat()` rather than the `||` operator, for the
+/// same reason as the relation/index name probes (#13873): PostgreSQL-compatible
+/// kernels running with `pipes_as_concat` off (openGauss B/MySQL mode, and this
+/// KingbaseES V8R6 instance) do not treat `||` as text concatenation, so the
+/// `x || CASE ... END` expression was inferred as `boolean` and the `UNION ALL`
+/// with the `NULL::text` branches failed with
+/// `UNION types text and boolean cannot be matched` (#15128). The call stays
+/// the nested two-argument form rather than variadic `concat(a, b, c)` for the
+/// same reason as #13873/#14875: an Oracle-compatible GaussDB A mode exposes
+/// only the two-argument Oracle CONCAT. `concat()` always returns `text`.
 fn list_object_custom_types_sql() -> &'static str {
     "SELECT t.typname AS object_name, \
        'TYPE' AS object_type, \
@@ -6819,7 +6860,7 @@ fn list_object_custom_types_sql() -> &'static str {
        NULL::text AS updated_at, \
        NULL::text AS parent_schema, \
        NULL::text AS parent_name, \
-       (t.typtype::text || ':' || CASE \
+       concat(concat(t.typtype::text, ':'), CASE \
          WHEN t.typtype = 'c' THEN CASE WHEN EXISTS ( \
            SELECT 1 FROM pg_catalog.pg_attribute a \
            WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped \
@@ -6828,7 +6869,7 @@ fn list_object_custom_types_sql() -> &'static str {
            SELECT 1 FROM pg_catalog.pg_enum e WHERE e.enumtypid = t.oid \
          ) THEN '1' ELSE '0' END \
          ELSE '0' \
-       END) AS signature, \
+       END)::text AS signature, \
        5 AS sort_order \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
@@ -7000,7 +7041,12 @@ async fn list_objects_rows(
         // cannot serve); skip the round-trip instead of executing empty SQL.
         return Ok(Vec::new());
     }
-    postgres_query_cached(client, &sql, &[&schema]).await.map_err(|e| e.to_string())
+    // Keep the server's own message (and SQLSTATE) in the error we surface:
+    // `tokio_postgres::Error`'s Display is the bare "db error" for DbError, which
+    // left the object page showing only `db error; timestamp fallback failed: db
+    // error` instead of e.g. `UNION types text and boolean cannot be matched`
+    // (#15128). No cursor marker here — this SQL is not the user's statement.
+    postgres_query_cached(client, &sql, &[&schema]).await.map_err(pg_error_to_string_plain)
 }
 
 pub async fn list_objects(
@@ -8335,32 +8381,40 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
         .collect())
 }
 
-/// Distinct user-defined type names for the structure editor's type dropdown.
-/// Same predicate as the object browser's TYPE branch (base/composite/domain/
+/// A user-defined type reference for the structure editor's type dropdown:
+/// same predicate as the object browser's TYPE branch (base/composite/domain/
 /// enum/range/multirange types outside the system schemas), so types provided
-/// by installed extensions — `vector`, `hstore`, `ltree`, … — become
-/// selectable in the create/edit column type picker (#14525).
-///
-/// Types visible through `search_path` are returned bare so they stay
-/// interchangeable with the static list; everything else comes back
-/// schema-qualified (quoted only when the identifier requires it) so the
-/// generated `CREATE TABLE` / `ALTER TABLE ... TYPE` still resolves outside
-/// the search path instead of failing with `type "..." does not exist`
-/// (#14525 review).
-pub async fn list_data_types(pool: &Pool) -> Result<Vec<String>, String> {
+/// by installed extensions — `vector`, `hstore`, `ltree`, … — reach the
+/// picker (#14525). `visible` reports whether the owning schema is in the
+/// session's `search_path`; the caller decides between the bare name and a
+/// schema-qualified one.
+#[derive(Debug)]
+pub struct PostgresUserTypeName {
+    pub schema: String,
+    pub name: String,
+    pub visible: bool,
+}
+
+pub async fn list_data_types(pool: &Pool) -> Result<Vec<PostgresUserTypeName>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(client, list_data_types_sql(), &[]).await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|name| !name.is_empty()).collect())
+    Ok(rows
+        .iter()
+        .map(|row| PostgresUserTypeName {
+            schema: pg_row_try_string(row, 0),
+            name: pg_row_try_string(row, 1),
+            visible: pg_row_try_bool(row, 2).unwrap_or(false),
+        })
+        .filter(|entry| !entry.name.is_empty())
+        .collect())
 }
 
 fn list_data_types_sql() -> &'static str {
-    "SELECT DISTINCT CASE \
-       WHEN t.typname ~ '^[a-z_][a-z0-9_$]*$' AND n.nspname = ANY (current_schemas(true)) \
-         THEN t.typname \
-       ELSE format('%I.%I', n.nspname, t.typname) \
-     END AS type_name \
+    "SELECT n.nspname AS schema_name, \
+       t.typname AS type_name, \
+       (n.nspname = ANY (current_schemas(true))) AS visible \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
      LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
@@ -8372,7 +8426,7 @@ fn list_data_types_sql() -> &'static str {
        AND n.nspname <> 'information_schema' \
        AND n.nspname NOT LIKE 'pg_toast%' \
        AND n.nspname NOT LIKE 'pg_temp%' \
-     ORDER BY type_name"
+     ORDER BY n.nspname, t.typname"
 }
 
 // Sibling of `postgres_columns_for_relations_sql`/`_compat_sql` above (~line
@@ -8440,7 +8494,7 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -8494,12 +8548,21 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                ORDER BY sequence_dep.objid \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
+// Last-resort single-relation tier: only `information_schema` columns, for
+// servers where the `pg_attribute` tiers yield nothing. Casts the precision,
+// scale and length with `::int` because GaussDB rejects `CAST(... AS int)`
+// with `syntax error at or near "int"` (#14613).
+//
+// `full_type` is a plain `data_type` because GaussDB's `information_schema.columns`
+// has no `udt_name` column (`Column c.udt_name does not exist`, SQLSTATE 42703),
+// which used to fail this tier outright (#15130); user-defined types fall back to
+// the generic `USER-DEFINED` label rather than taking the listing down with them.
 const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
-             CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+             c.data_type AS full_type, \
              c.is_nullable = 'YES' AS is_nullable, \
              c.column_default, \
              EXISTS ( \
@@ -8517,9 +8580,9 @@ const POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL: &str = "SELECT c.column_name, \
              ) AS is_pk, \
              NULL::text AS column_comment, \
              NULL::text AS column_extra, \
-             CAST(c.numeric_precision AS int) AS numeric_precision, \
-             CAST(c.numeric_scale AS int) AS numeric_scale, \
-             CAST(c.character_maximum_length AS int) AS character_maximum_length, \
+             c.numeric_precision::int AS numeric_precision, \
+             c.numeric_scale::int AS numeric_scale, \
+             c.character_maximum_length::int AS character_maximum_length, \
              NULL::text AS enum_values \
              FROM information_schema.columns c \
              WHERE c.table_schema = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN current_schema() ELSE $1 END) \
@@ -8657,6 +8720,49 @@ pub async fn get_columns_compat_first(pool: &Pool, schema: &str, table: &str) ->
     get_columns_with_tiers(pool, schema, table, false).await
 }
 
+/// Resolves the stored spelling of a relation when the requested name only
+/// matches case-insensitively.
+///
+/// PostgreSQL-compatible engines do not all fold unquoted identifiers the same
+/// way: TDSQL-PG / OpenTenBase fold them to upper case while stock PostgreSQL
+/// folds to lower. DBX resolves a query's table reference through the stock rule,
+/// so on an upper-folding engine the catalog lookup misses, the grid falls back to
+/// the result set's own columns, and the generated UPDATE quotes the lower-case
+/// guess (`"etl"."t_df_batch"`) and fails with 42P01 (#14330). The frontend always
+/// prefers `resolved_schema` / `resolved_table` when a driver reports them, so
+/// finding the real spelling here is enough to fix the write path.
+///
+/// Only an unambiguous match is returned: `"Foo"` and `foo` may coexist, and this
+/// must never silently retarget a write.
+fn postgres_relation_case_insensitive_sql() -> &'static str {
+    "SELECT n.nspname, c.relname \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r','p','f','v','m') \
+       AND lower(c.relname) = lower($2) \
+       AND (CASE WHEN coalesce(length($1::text), 0) = 0 THEN pg_catalog.pg_table_is_visible(c.oid) \
+                 ELSE lower(n.nspname) = lower($1) END) \
+       AND 1 = (SELECT count(*) FROM pg_catalog.pg_class c2 \
+                JOIN pg_catalog.pg_namespace n2 ON n2.oid = c2.relnamespace \
+                WHERE n2.nspname = n.nspname AND lower(c2.relname) = lower(c.relname) \
+                  AND c2.relkind IN ('r','p','f','v','m')) \
+     LIMIT 1"
+}
+
+async fn resolve_relation_case_insensitive(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    table: &str,
+) -> Result<Option<(String, String)>, PgError> {
+    let client = &EncodingClient::new(client);
+    let rows = postgres_query_cached(client, postgres_relation_case_insensitive_sql(), &[&schema, &table]).await?;
+    Ok(rows.first().and_then(|row| {
+        let schema = row.try_get::<_, Option<String>>(0).ok().flatten()?;
+        let table = row.try_get::<_, Option<String>>(1).ok().flatten()?;
+        Some((schema, table))
+    }))
+}
+
 async fn get_columns_with_tiers(
     pool: &Pool,
     schema: &str,
@@ -8679,7 +8785,7 @@ async fn get_columns_with_tiers(
         }
     };
     let tiers = column_metadata_tiers(modern_tier_supported);
-    query_with_column_metadata_fallback(
+    let columns = query_with_column_metadata_fallback(
         &tiers,
         |sql| get_columns_with_sql(&client, sql, schema, table),
         total_started,
@@ -8687,7 +8793,34 @@ async fn get_columns_with_tiers(
         |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
         log_get_columns_tier_diagnostic,
     )
-    .await
+    .await;
+    // A tier that matched nothing means the requested spelling is not addressable
+    // on this engine. Retry once with the stored spelling and report it back so the
+    // caller writes to the real relation instead of the folded guess (#14330).
+    if columns.as_ref().is_ok_and(|columns| !columns.is_empty()) {
+        return columns;
+    }
+    let Ok(Some((resolved_schema, resolved_table))) = resolve_relation_case_insensitive(&client, schema, table).await
+    else {
+        return columns;
+    };
+    if resolved_schema == schema && resolved_table == table {
+        return columns;
+    }
+    let mut resolved = query_with_column_metadata_fallback(
+        &tiers,
+        |sql| get_columns_with_sql(&client, sql, &resolved_schema, &resolved_table),
+        total_started,
+        pg_error_to_string,
+        |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
+        log_get_columns_tier_diagnostic,
+    )
+    .await?;
+    for column in &mut resolved {
+        column.resolved_schema = Some(resolved_schema.clone());
+        column.resolved_table = Some(resolved_table.clone());
+    }
+    Ok(resolved)
 }
 
 pub fn pg_quote_literal(value: &str) -> String {
@@ -9108,6 +9241,14 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
     // rows with `RETURNING`. The prefix alone cannot decide, so parse it and
     // keep the row-returning assumption whenever parsing does not say otherwise.
     let leads_with_cte = starts_with_executable_sql_keyword(sql, &["WITH"]);
+
+    // INSERT/UPDATE/DELETE only return rows through RETURNING. Skip the full
+    // parse of statements without it, such as large multi-row INSERT batches.
+    if starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"])
+        && !contains_ascii_case_insensitive(sql, "returning")
+    {
+        return false;
+    }
 
     let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
         return leads_with_cte;
@@ -9994,8 +10135,14 @@ async fn execute_query_with_max_rows_inner(
                 .await
         }
     } else {
-        let affected =
-            if force_unnamed { client.execute_typed(sql, &[]).await } else { client.execute(sql, &[]).await };
+        // Grid writes have no bind parameters. Sending Parse and Bind together
+        // keeps the statement on one backend when a transaction pool releases
+        // its server connection between protocol round trips.
+        let affected = if force_unnamed || starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE"]) {
+            client.execute_typed(sql, &[]).await
+        } else {
+            client.execute(sql, &[]).await
+        };
         affected.map_err(pg_error_to_string).map(|affected| QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -10049,9 +10196,15 @@ pub async fn execute_query_on_client_unnamed(
 // relation: a FOREIGN KEY stores the referenced table's unique index in
 // `conindid`, so matching on `conindid` alone marked that standalone index as
 // constraint-backed and dropped it from generated DDL (#10484).
-// The qualified name is joined with `pg_catalog.textcat` rather than `||`:
-// openGauss B mode without `pipes_as_concat` reads `||` as logical OR, and
-// indexes have no information_schema fallback to recover from it (#13873).
+// The qualified name is built with `concat()` rather than `||`: openGauss B
+// mode without `pipes_as_concat` reads `||` as logical OR, and indexes have no
+// information_schema fallback to recover from it (#13873). `concat` is also the
+// spelling every target kernel shares: CockroachDB's `pg_catalog` has no
+// `textcat`, so the earlier `pg_catalog.textcat(...)` form failed every index
+// listing there with `unknown function: pg_catalog.textcat()` (42883).
+// The calls stay nested two-argument instead of variadic `concat(a, b, c)`:
+// an Oracle-compatible GaussDB A mode can expose the two-argument Oracle
+// CONCAT, so the flat form would break exactly there.
 //
 // `AND k.attnum >= 0` skips system attributes (negative `indkey` entries such as
 // `tableoid`) that openGauss / GaussDB can carry in `pg_index.indkey`: because the
@@ -10081,7 +10234,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
              LEFT JOIN pg_opclass oc ON oc.oid = k.class_oid \
              LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace \
-             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND k.attnum >= 0 \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisvalid, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
@@ -10142,7 +10295,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -12868,6 +13021,8 @@ mod tests {
             "INSERT INTO users (id) VALUES (1) RETURNING id",
             "UPDATE users SET name = 'Ada' RETURNING id, name",
             "DELETE FROM users WHERE id = 1 RETURNING id",
+            "insert into users (id) values (1) returning id",
+            "-- audit\nUpdate users SET name = 'Ada' Returning id",
             "MERGE INTO users AS target USING updates AS source ON target.id = source.id WHEN MATCHED THEN UPDATE SET name = source.name RETURNING target.id",
             "WITH removed AS (DELETE FROM users WHERE id = 1 RETURNING id) SELECT * FROM removed",
         ] {
@@ -13067,6 +13222,40 @@ mod tests {
     }
 
     #[test]
+    fn postgres_text_fallback_adds_leading_zero_to_fractional_numeric() {
+        // The binary decoder already emits these with a leading zero; text
+        // results from TBase/GaussDB must agree (issue #15198).
+        for (text, expected) in [(".70000000", "0.70000000"), ("-.7", "-0.7"), ("+.7", "+0.7"), (".0", "0.0")] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(expected), None));
+        }
+    }
+
+    #[test]
+    fn postgres_text_fallback_preserves_other_numeric_text() {
+        // Values that already carry an integer digit, special values, and
+        // exponent notation must pass through byte-for-byte.
+        for text in [
+            "0.00",
+            "-0.0012300",
+            "12345.6789",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "1e-3",
+            ".",
+            "-.",
+            "",
+            "not a number",
+            ".中",
+        ] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Numeric)), (serde_json::json!(text), None));
+        }
+        // Without a classified type nothing is reinterpreted, so an ordinary
+        // text column containing ".7" is left alone.
+        assert_eq!(pg_text_fallback_value(".7", None), (serde_json::json!(".7"), None));
+    }
+
+    #[test]
     fn postgres_text_fallback_does_not_panic_on_multibyte_text() {
         // Redshift reads decode every simple-query value through the hex-WKB
         // probe with an unknown column type, so ordinary multibyte text must
@@ -13245,6 +13434,34 @@ mod tests {
                 Err(error) => panic!("docker postgres did not become ready: {error}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn postgres_columns_report_the_stored_spelling_of_an_upper_case_relation() {
+        // TDSQL-PG / OpenTenBase fold unquoted names to upper case while DBX
+        // resolves a query's table reference through the stock lower-case rule, so
+        // the grid used to write `"etl"."t_df_batch"` and fail with 42P01 (#14330).
+        // The lookup must recover the stored spelling and report it, because the
+        // frontend then targets it for every generated UPDATE/DELETE.
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        execute_query(&pool, "CREATE SCHEMA \"ETL\"").await.expect("create schema");
+        execute_query(
+            &pool,
+            "CREATE TABLE \"ETL\".\"T_DF_BATCH\" (\"BATCH_ID\" text PRIMARY KEY, \"BATCH_NAME\" text)",
+        )
+        .await
+        .expect("create upper-case table");
+
+        let columns = get_columns(&pool, "etl", "t_df_batch").await.expect("read columns through the folded name");
+
+        assert_eq!(columns.len(), 2, "{columns:?}");
+        assert_eq!(columns[0].name, "BATCH_ID");
+        assert!(columns[0].is_primary_key);
+        assert_eq!(columns[0].resolved_schema.as_deref(), Some("ETL"));
+        assert_eq!(columns[0].resolved_table.as_deref(), Some("T_DF_BATCH"));
     }
 
     #[tokio::test]
@@ -13538,11 +13755,11 @@ mod tests {
     #[test]
     fn list_data_types_sql_targets_user_defined_types() {
         let sql = list_data_types_sql();
-        assert!(sql.contains("DISTINCT"), "{sql}");
-        // Types visible through search_path stay bare; everything else comes back
-        // schema-qualified so generated DDL resolves outside the search path.
-        assert!(sql.contains("n.nspname = ANY (current_schemas(true))"), "{sql}");
-        assert!(sql.contains("format('%I.%I', n.nspname, t.typname)"), "{sql}");
+        // Visibility is decided per row in Rust (bare for search_path-visible
+        // simple names, schema-qualified otherwise) so reserved words keep their
+        // quotes.
+        assert!(sql.contains("(n.nspname = ANY (current_schemas(true))) AS visible"), "{sql}");
+        assert!(sql.contains("t.typname AS type_name"), "{sql}");
         assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"), "{sql}");
         assert!(sql.contains("t.typisdefined"), "{sql}");
         assert!(sql.contains("t.typelem = 0"), "{sql}");
@@ -13569,12 +13786,16 @@ mod tests {
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.mood AS ENUM ('sad', 'ok')")).await?;
             // Mixed-case identifiers need the %I quoting.
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.\"Mood\" AS ENUM ('sad', 'ok')")).await?;
+            // A lowercase reserved word must come back quoted — bare `order`
+            // would break generated DDL (#14536 review follow-up).
+            execute_query(&pool, "CREATE TYPE public.\"order\" AS ENUM ('asc', 'desc')").await?;
             let qualified_mood = format!("{schema}.mood");
 
             // The returned names must be directly usable in DDL: create a column
             // from the qualified name, then ALTER it to the same-name public type.
             let probe = format!("{schema_ident}.usage_probe");
-            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood})")).await?;
+            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood}, r public.\"order\")"))
+                .await?;
             execute_query(
                 &pool,
                 &format!("ALTER TABLE {probe} ALTER COLUMN m TYPE public.mood USING m::text::public.mood"),
@@ -13589,14 +13810,27 @@ mod tests {
         let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
         cleanup.expect("drop schema");
         execute_query(&pool, "DROP TYPE IF EXISTS public.mood").await.expect("drop public.mood");
+        execute_query(&pool, "DROP TYPE IF EXISTS public.\"order\"").await.expect("drop public.order");
         let types = exercise.expect("list data types");
 
-        assert!(types.iter().any(|name| name == "hstore"), "search_path extension type stays bare: {types:?}");
-        assert!(types.iter().any(|name| name == "mood"), "public enum stays bare: {types:?}");
-        let qualified_mood = format!("{schema}.mood");
-        assert!(types.iter().any(|name| name == &qualified_mood), "off-search_path enum must be qualified: {types:?}");
-        let qualified_mixed = format!("{schema}.\"Mood\"");
-        assert!(types.iter().any(|name| name == &qualified_mixed), "mixed-case type must keep quoting: {types:?}");
+        // Raw rows drive the caller-side rendering: visible rows keep the bare
+        // name, off-search_path ones carry the schema, and reserved words stay
+        // distinct entries.
+        let find = |schema_name: &str, type_name: &str| {
+            types
+                .iter()
+                .find(|entry| entry.schema == schema_name && entry.name == type_name)
+                .unwrap_or_else(|| panic!("missing {schema_name}.{type_name} in {types:?}"))
+        };
+        let hstore = find("public", "hstore");
+        assert!(hstore.visible, "public is on the search path: {types:?}");
+        let mood = find("public", "mood");
+        assert!(mood.visible, "{types:?}");
+        let custom_mood = find(&schema, "mood");
+        assert!(!custom_mood.visible, "off-search_path schema must be flagged: {types:?}");
+        assert!(find(&schema, "Mood").name == "Mood", "mixed-case name must not be folded: {types:?}");
+        let order = find("public", "order");
+        assert!(order.visible, "{types:?}");
     }
 
     #[tokio::test]
@@ -14064,6 +14298,17 @@ mod tests {
         assert_eq!(decode_tsvector_bytes(&raw).as_deref(), Some("'back\\\\slash':3B 'o''clock':1,2A"));
     }
 
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a PostgreSQL database"]
+    async fn scalar_real_query_preserves_precision() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect PostgreSQL");
+        let result = execute_query(&pool, "SELECT 0.0000001::real, 1.2345678::real, 0.1::real").await.unwrap();
+
+        let values: Vec<_> = result.rows[0].iter().map(serde_json::Value::as_f64).collect();
+        assert_eq!(values, [Some(0.0000001), Some(1.2345678), Some(0.1)]);
+    }
+
     fn encode_pgvector_bytes(values: &[f32]) -> Vec<u8> {
         let dims = u16::try_from(values.len()).expect("dim fits u16");
         let mut raw = Vec::with_capacity(4 + values.len() * 4);
@@ -14083,11 +14328,11 @@ mod tests {
     }
 
     #[test]
-    fn pgvector_element_number_round_trips_full_f32_precision() {
+    fn pg_float4_number_round_trips_full_f32_precision() {
         let values = [0.1f32, 0.12345679f32, 1.2345679e-5f32, -0.00012345679f32, 1.2345678f32, 1e20f32];
 
         for value in values {
-            let json = pg_vector_element_number(value);
+            let json = pg_float4_number(value);
             let text = json.to_string();
             let restored: f32 = text.parse().expect("json number parses as f32");
             let rounded_six = ((value as f64 * 1_000_000.0).round() / 1_000_000.0) as f32;
@@ -14105,7 +14350,7 @@ mod tests {
     fn pgvector_binary_to_json_preserves_component_precision() {
         let values = [0.12345679f32, 1.2345679e-5f32, -2.5f32];
         let decoded = decode_pgvector_bytes(&encode_pgvector_bytes(&values)).expect("decode vector");
-        let json = serde_json::Value::Array(decoded.into_iter().map(pg_vector_element_number).collect());
+        let json = serde_json::Value::Array(decoded.into_iter().map(pg_float4_number).collect());
         let arr = json.as_array().expect("vector json array");
 
         assert_eq!(arr.len(), values.len());
@@ -15084,6 +15329,20 @@ mod tests {
     }
 
     #[test]
+    fn postgres_relation_case_insensitive_lookup_only_returns_an_unambiguous_match() {
+        // Upper-folding engines (TDSQL-PG / OpenTenBase) store `T_DF_BATCH` while a
+        // stock-PostgreSQL folding turns the query's reference into `t_df_batch`
+        // (#14330). The recovery lookup must never pick between `Foo` and `foo`.
+        let sql = postgres_relation_case_insensitive_sql();
+
+        assert!(sql.contains("lower(c.relname) = lower($2)"), "{sql}");
+        assert!(sql.contains("AND 1 = (SELECT count(*)"), "{sql}");
+        assert!(sql.contains("n2.nspname = n.nspname"), "{sql}");
+        assert!(sql.contains("pg_table_is_visible(c.oid)"), "{sql}");
+        assert!(sql.contains("c.relkind IN ('r','p','f','v','m')"), "{sql}");
+    }
+
+    #[test]
     fn postgres_single_relation_metadata_can_resolve_through_search_path() {
         // GaussDB A mode folds `''` to NULL, so `$1 = ''` is never true there and the
         // unqualified branch was skipped (issue #12198). `coalesce(length($1::text), 0) = 0`
@@ -15107,16 +15366,15 @@ mod tests {
         // openGauss B (MySQL) mode without `pipes_as_concat` reads `||` as logical OR, so
         // `quote_ident($1) || '.' || quote_ident($2)` became a boolean and the regclass
         // lookup failed with `relation "0" does not exist` (#13873).
+        // `concat()` is the spelling every target kernel has: CockroachDB's `pg_catalog`
+        // carries no `textcat`, which broke index listings with
+        // `unknown function: pg_catalog.textcat()` (42883).
         for sql in
             [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL]
         {
-            assert!(
-                sql.contains(
-                    "pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass"
-                ),
-                "{sql}"
-            );
+            assert!(sql.contains("concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass"), "{sql}");
             assert!(!sql.contains("quote_ident($1) || '.' || quote_ident($2)"), "{sql}");
+            assert!(!sql.contains("textcat"), "{sql}");
         }
     }
 
@@ -16664,7 +16922,7 @@ mod tests {
         assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
         assert!(sql.contains("FROM pg_catalog.pg_attribute a"));
         assert!(sql.contains("FROM pg_catalog.pg_enum e"));
-        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("END)::text AS signature"));
         assert!(sql.contains("'TYPE' AS object_type"));
         assert!(sql.contains("5 AS sort_order"));
         assert!(sql.contains("n.nspname = $1"));
@@ -16754,8 +17012,21 @@ mod tests {
         assert!(sql.contains("NULL::text AS updated_at"));
         assert!(sql.contains("NULL::text AS parent_schema"));
         assert!(sql.contains("NULL::text AS parent_name"));
-        assert!(sql.contains("t.typtype::text || ':'"));
-        assert!(sql.contains("END) AS signature"));
+        assert!(sql.contains("concat(concat(t.typtype::text, ':'), CASE"));
+        assert!(sql.contains("END)::text AS signature"));
+    }
+
+    /// KingbaseES V8R6 resolves `x || CASE ... END` as a logical OR over boolean
+    /// operands, so `signature` was inferred as `boolean` and the `UNION ALL`
+    /// against the `NULL::text` branches failed with
+    /// `UNION types text and boolean cannot be matched` (#15128). The signature
+    /// must be built with `concat()` and explicitly cast back to `text`.
+    #[test]
+    fn list_objects_sql_custom_types_signature_avoids_the_boolean_or_reading() {
+        let sql = list_objects_sql(true, true, false, true, false, false, true, false);
+        assert!(!sql.contains("|| ':'"), "the `||` concatenation is read as boolean OR on Kingbase: {sql}");
+        assert!(sql.contains("concat(concat(t.typtype::text, ':'), CASE"), "{sql}");
+        assert!(sql.contains("END)::text AS signature"), "{sql}");
     }
 
     #[test]
@@ -16850,6 +17121,37 @@ mod tests {
         assert!(!sql.contains("pg_attribute"));
         assert!(!sql.contains("pg_index"));
         assert!(!sql.contains('$'));
+    }
+
+    /// GaussDB rejects `CAST(x AS int)` with `syntax error at or near "int"`
+    /// (#14613), while the `::int` shorthand is accepted. Keep both
+    /// information-schema column tiers on the shorthand so a server that only
+    /// has `information_schema` left can still list columns.
+    ///
+    /// The assertions below run on the SQL text itself (not the source file),
+    /// so the explanatory comments above the definitions are irrelevant here.
+    /// Column order is asserted as well: `column_info_from_row_offset` decodes
+    /// these rows positionally, so the cast spelling may change but the order
+    /// and count must not.
+    ///
+    /// `udt_name` is also asserted absent: GaussDB's `information_schema.columns`
+    /// omits it, and selecting it failed the tier with SQLSTATE 42703 (#15130).
+    #[test]
+    fn information_schema_columns_sql_avoids_cast_to_int_for_gaussdb() {
+        for sql in [POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL, postgres_columns_for_relations_information_schema_sql()] {
+            let lowered = sql.to_lowercase();
+            assert!(!lowered.contains("cast("), "ANSI CAST is a syntax error on GaussDB here: {sql}");
+            assert!(!lowered.contains(" as int"), "CAST(... AS int) is a syntax error on GaussDB: {sql}");
+            assert!(!lowered.contains("udt_name"), "udt_name is missing on GaussDB (SQLSTATE 42703): {sql}");
+            assert!(lowered.contains("as full_type"), "full_type column must stay in place: {sql}");
+            let precision = sql.find("AS numeric_precision").expect("numeric_precision column");
+            let scale = sql.find("AS numeric_scale").expect("numeric_scale column");
+            let length = sql.find("AS character_maximum_length").expect("character_maximum_length column");
+            assert!(precision < scale && scale < length, "column order changed: {sql}");
+            assert!(sql.contains("numeric_precision::int"), "{sql}");
+            assert!(sql.contains("numeric_scale::int"), "{sql}");
+            assert!(sql.contains("character_maximum_length::int"), "{sql}");
+        }
     }
 
     #[test]
@@ -17590,9 +17892,16 @@ mod tests {
 
     #[test]
     fn postgres_completion_sql_filters_before_limit() {
+        assert_eq!(postgres_completion_candidate_kind("TABLE"), CompletionAssistantCandidateKind::Table);
+        assert_eq!(postgres_completion_candidate_kind("VIEW"), CompletionAssistantCandidateKind::View);
+        assert_eq!(
+            postgres_completion_candidate_kind("MATERIALIZED_VIEW"),
+            CompletionAssistantCandidateKind::MaterializedView
+        );
         assert!(postgres_completion_tables_sql().contains("c.relname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_tables_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
         assert!(postgres_completion_tables_sql().contains("c.relkind::text = ANY($3::text[])"));
+        assert!(postgres_completion_tables_sql().contains("WHEN 'm' THEN 'MATERIALIZED_VIEW'"));
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql(true).contains("p.proname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_routines_sql(true).contains("p.prokind::text = ANY($3::text[])"));

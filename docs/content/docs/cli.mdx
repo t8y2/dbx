@@ -265,6 +265,21 @@ Kafka uses the existing **Apache Kafka** connection form. Use either `host` / `p
 - Conflicting TLS/protocol settings, duplicate parameters and unsupported Kafka fields are rejected. Kafka `url`, ZooKeeper, Kerberos and arbitrary agent properties are not supported by this prefill route.
 
 Normal links open the form for review under the default confirmation setting. Existing automatic-confirmation settings and `one_time` behavior still apply. This addition does not send Kafka messages. Kafka-specific fields are for new connections; the saved-connection update route below retains its existing parameter whitelist.
+### Connection types contributed by plugins
+
+Connection types registered by a plugin's `connection-provider` contribution can be opened with `type` as well. With the SSH plugin installed:
+
+```bash
+open 'dbx://connection/new?type=ssh&host=10.0.0.9&port=22&user=root&name=prod-ssh'
+```
+
+Built-in database types win first. When nothing matches, DBX falls back to the `database_type` a plugin registered (for example `ssh`). If several plugins register the same type, qualify it with `<plugin ID>/<provider ID>`:
+
+```bash
+open 'dbx://connection/new?type=io.dbx.ssh/io.dbx.ssh.connection&host=10.0.0.9&user=root'
+```
+
+Plugin connections accept only the generic fields (`name`, `host`, `port`, `user`, `password`, `one_time`); provider-specific fields such as a private key path or SSH agent live in DBX's saved connection. `url` applies to built-in database types only and is rejected for plugin connections. Without the plugin installed, the link fails as an unsupported connection type.
 
 ### Update a saved connection by ID
 

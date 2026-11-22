@@ -6,6 +6,7 @@ const STORAGE_PREFIX = "dbx-data-grid-column-widths:";
 const STORAGE_INDEX_KEY = "dbx-data-grid-column-widths-index";
 
 interface DataGridColumnWidthState {
+  resultKey?: string;
   structureSignature: string;
   measurementSignature: string;
   widthsByColumnIndex: Map<number, number>;
@@ -24,6 +25,8 @@ interface StoredDataGridColumnWidthState {
 
 interface DataGridColumnWidthStateIdentity {
   cacheKey?: string;
+  // Query runs share user sizing preferences. Only reuse sampled widths within a run.
+  resultKey?: string;
   structureSignature: string;
   measurementSignature: string;
 }
@@ -246,9 +249,15 @@ export function loadDataGridColumnWidthState(identity: DataGridColumnWidthStateI
       autoFittedColumnIndexes: new Set(),
     };
   }
+  const sameResult = state.resultKey === identity.resultKey;
   touchColumnWidthState(cacheKey, state);
   return {
-    widths: columnIndexes.map((columnIndex) => state.widthsByColumnIndex.get(columnIndex)),
+    widths: columnIndexes.map((columnIndex) => {
+      if (sameResult || state.userSizedColumnIndexes.has(columnIndex) || state.autoFittedColumnIndexes?.has(columnIndex)) {
+        return state.widthsByColumnIndex.get(columnIndex);
+      }
+      return undefined;
+    }),
     userSizedColumnIndexes: new Set(state.userSizedColumnIndexes),
     autoFittedColumnIndexes: new Set(state.autoFittedColumnIndexes ?? []),
   };
@@ -260,13 +269,14 @@ export function saveDataGridColumnWidthState(identity: DataGridColumnWidthStateI
   const existing = columnWidthStates.get(cacheKey) ?? loadPersistentDataGridColumnWidthState(cacheKey);
   const sameStructure = existing?.structureSignature === identity.structureSignature;
   const sameMeasurement = existing?.measurementSignature === identity.measurementSignature;
+  const sameResult = existing?.resultKey === identity.resultKey;
   const widthsByColumnIndex = new Map<number, number>();
   const nextUserSizedColumnIndexes = new Set<number>();
   const nextAutoFittedColumnIndexes = new Set<number>();
 
   if (sameStructure && existing) {
     for (const [columnIndex, width] of existing.widthsByColumnIndex) {
-      if (sameMeasurement || existing.userSizedColumnIndexes.has(columnIndex)) {
+      if (existing.userSizedColumnIndexes.has(columnIndex) || (sameMeasurement && (sameResult || existing.autoFittedColumnIndexes?.has(columnIndex)))) {
         widthsByColumnIndex.set(columnIndex, width);
       }
     }
@@ -296,6 +306,7 @@ export function saveDataGridColumnWidthState(identity: DataGridColumnWidthStateI
     }
   });
   const nextState: DataGridColumnWidthState = {
+    resultKey: identity.resultKey,
     structureSignature: identity.structureSignature,
     measurementSignature: identity.measurementSignature,
     widthsByColumnIndex,

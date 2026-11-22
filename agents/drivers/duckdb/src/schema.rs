@@ -901,6 +901,7 @@ mod tests {
                 schema: Some("main".to_string()),
                 name: "active_orders".to_string(),
                 source: edited_source,
+                identifier_quote: None,
             },
         )
         .unwrap();

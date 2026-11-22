@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -46,7 +46,8 @@ pub struct ExplainSqlBuildResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EstimatedPlanFormat {
-    /// A JSON document returned as a single cell (PostgreSQL, MySQL, OceanBase Oracle).
+    /// A JSON value: a native document for PostgreSQL/MySQL/OceanBase Oracle,
+    /// or structured plan rows for SQLite.
     Json,
     /// A `ShowPlanXML` document returned as text (SQL Server `SET SHOWPLAN_XML`).
     Xml,
@@ -83,6 +84,7 @@ enum EstimatedPlanSqlGeneration {
     Postgres,
     Mysql,
     Plain,
+    SqliteQueryPlan,
     Xugu,
     Oracle,
     Db2,
@@ -108,6 +110,12 @@ impl EstimatedPlanStrategy {
 
     pub const fn format(self) -> EstimatedPlanFormat {
         self.format
+    }
+
+    /// SQLite's EXPLAIN QUERY PLAN returns a typed table of plan nodes rather
+    /// than one document cell; preserve those columns as structured JSON rows.
+    pub const fn returns_structured_rows(self) -> bool {
+        matches!(self.sql_generation, EstimatedPlanSqlGeneration::SqliteQueryPlan)
     }
 }
 
@@ -180,6 +188,7 @@ fn build_explain_sql_with_strategy(
         }
         EstimatedPlanSqlGeneration::Postgres => format!("EXPLAIN (FORMAT JSON) {source}"),
         EstimatedPlanSqlGeneration::Plain => format!("EXPLAIN {source}"),
+        EstimatedPlanSqlGeneration::SqliteQueryPlan => format!("EXPLAIN QUERY PLAN {source}"),
         EstimatedPlanSqlGeneration::Xugu => format!("EXPLAIN VERBOSE {source}"),
         EstimatedPlanSqlGeneration::Oracle | EstimatedPlanSqlGeneration::Db2 => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
@@ -224,12 +233,18 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
 pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<EstimatedPlanStrategy> {
     use EstimatedPlanAcquisition::{DriverNative, GeneratedSql, SqlServerShowPlanSession};
     use EstimatedPlanFormat::{Json, Text, Xml};
-    use EstimatedPlanSqlGeneration::{Db2, Mysql, Oracle, Plain, Postgres, SqlServer, Xugu};
+    use EstimatedPlanSqlGeneration::{Db2, Mysql, Oracle, Plain, Postgres, SqlServer, SqliteQueryPlan, Xugu};
 
     let strategy = match database_type? {
         DatabaseType::Db2 => EstimatedPlanStrategy { sql_generation: Db2, acquisition: DriverNative, format: Json },
         DatabaseType::Mysql => EstimatedPlanStrategy { sql_generation: Mysql, acquisition: GeneratedSql, format: Json },
+        DatabaseType::Sqlite => {
+            EstimatedPlanStrategy { sql_generation: SqliteQueryPlan, acquisition: GeneratedSql, format: Json }
+        }
         DatabaseType::Doris => EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text },
+        DatabaseType::DuckDb => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Xugu => EstimatedPlanStrategy { sql_generation: Xugu, acquisition: GeneratedSql, format: Text },
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
@@ -1206,21 +1221,25 @@ pub(crate) fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
 /// is reported as "not an opener" so the caller falls back to the historical
 /// cleanup instead of keeping a transaction open by accident.
 pub fn mysql_statement_opens_explicit_transaction(sql: &str) -> bool {
-    let cleaned = strip_sql_comments(sql);
-    let mut parts = cleaned.split(';');
-    let statement = parts.next().unwrap_or_default().trim();
-    if statement.is_empty() || parts.any(|part| !part.trim().is_empty()) {
+    if !crate::sql::starts_with_executable_sql_keyword_for_database(sql, &["BEGIN", "START"], DatabaseType::Mysql) {
         return false;
     }
-    let upper = statement.to_ascii_uppercase();
-    let mut tokens = upper.split_whitespace();
-    match tokens.next() {
-        Some("BEGIN") => matches!(tokens.next(), None | Some("WORK")),
+    let Ok(tokens) = Tokenizer::new(&MySqlDialect {}, sql).tokenize() else { return false };
+    let mut tokens: Vec<_> = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect();
+    while tokens.last() == Some(&Token::SemiColon) {
+        tokens.pop();
+    }
+    if tokens.iter().any(|token| matches!(token, Token::SemiColon)) {
+        return false;
+    }
+    let word_is = |index: usize, expected: &str| matches!(tokens.get(index), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected));
+    if word_is(0, "BEGIN") {
+        tokens.len() == 1 || (tokens.len() == 2 && word_is(1, "WORK"))
+    } else {
         // Modifiers (`READ ONLY`, `READ WRITE`, `WITH CONSISTENT SNAPSHOT`) are
         // optional and are verified by the server; a malformed one fails the
         // statement, so no transaction is left open for this execution.
-        Some("START") => tokens.next() == Some("TRANSACTION"),
-        _ => false,
+        word_is(0, "START") && word_is(1, "TRANSACTION")
     }
 }
 
@@ -1993,6 +2012,32 @@ mod tests {
     }
 
     #[test]
+    fn builds_sqlite_eqp_and_rejects_unsafe_sql() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            format: None,
+            analyze: Some(true),
+            sql: "SELECT id FROM example".to_string(),
+        });
+        assert!(result.ok);
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN QUERY PLAN SELECT id FROM example"));
+        let strategy = estimated_plan_strategy(Some(DatabaseType::Sqlite)).unwrap();
+        assert_eq!(strategy.format(), EstimatedPlanFormat::Json);
+        assert_eq!(strategy.acquisition(), EstimatedPlanAcquisition::GeneratedSql);
+        assert!(strategy.returns_structured_rows());
+
+        for sql in ["DELETE FROM example", "SELECT 1; DROP TABLE example"] {
+            let rejected = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Sqlite),
+                format: None,
+                analyze: None,
+                sql: sql.to_string(),
+            });
+            assert!(!rejected.ok, "{sql} must fail closed");
+        }
+    }
+
+    #[test]
     fn builds_postgres_json_explain_sql() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -2143,6 +2188,7 @@ mod tests {
             (DatabaseType::MongoDb, "EXPLAIN (FORMAT JSON) SELECT 1"),
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1"),
             (DatabaseType::Doris, "EXPLAIN SELECT 1"),
+            (DatabaseType::DuckDb, "EXPLAIN SELECT 1"),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1"),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1"),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1"),
@@ -2372,7 +2418,9 @@ mod tests {
 
         let cases = [
             (DatabaseType::Mysql, "EXPLAIN FORMAT=JSON SELECT 1", Json, GeneratedSql),
+            (DatabaseType::Sqlite, "EXPLAIN QUERY PLAN SELECT 1", Json, GeneratedSql),
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
+            (DatabaseType::DuckDb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
             (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
@@ -2413,6 +2461,7 @@ mod tests {
             Some(DatabaseType::MongoDb),
             Some(DatabaseType::Gaussdb),
             Some(DatabaseType::StarRocks),
+            Some(DatabaseType::CloudflareD1),
         ] {
             assert!(estimated_plan_strategy(database_type).is_none(), "{database_type:?}");
             assert!(!supports_explain_plan(database_type), "{database_type:?}");
@@ -3499,6 +3548,8 @@ mod tests {
             "BEGIN WORK",
             "BEGIN WORK;",
             "-- open a transaction\nBEGIN",
+            "# open a transaction\nBEGIN WORK;",
+            "START/* start */TRANSACTION;",
             "/* keep */ START TRANSACTION",
             "START TRANSACTION",
             "start transaction;",
@@ -3522,6 +3573,11 @@ mod tests {
             "BEGIN;\nUPDATE t SET a = 1;",
             "BEGIN\nDECLARE x INT;\nEND",
             "BEGIN END",
+            "BEGIN WORK SELECT 1",
+            "CREATE PROCEDURE p() BEGIN SELECT 'START TRANSACTION'; END",
+            "SELECT 'COMMIT; BEGIN'",
+            "/* START TRANSACTION */ SELECT 1",
+            "ROLLBACK TO SAVEPOINT s",
             "START REPLICA",
             "SET autocommit = 0",
             "SELECT 'BEGIN' FROM t",

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   listDatabases: vi.fn(),
   listDatabaseMetadata: vi.fn(),
   editorSettings: {
+    shortcuts: { newQuery: "Mod+T" },
     objectBrowserViewMode: "list" as "list" | "grid" | "compact",
     objectBrowserCompactWidth: 160,
   },

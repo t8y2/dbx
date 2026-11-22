@@ -1,3 +1,4 @@
+import { readSnippetRemoteContentHash } from "@/lib/cloudSync/snippetAutoUploadConfig";
 import type { SqlFileEncoding } from "./tauri";
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
@@ -275,7 +276,7 @@ import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pl
 import type { PluginDataGrant, PluginDataQueryRequest, PluginDataQueryResult } from "@/types/pluginData";
 import type { PluginToolPreview } from "@/types/pluginAiTools";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
-import type { MigrationPreflight, MigrationReport } from "./migration";
+import type { MigrationPreflight, MigrationReport, CredentialResetPreparation, CredentialResetReport } from "./migration";
 export type { MigrationPreflight, MigrationReport } from "./migration";
 export const migrationStatus = (retry = false): Promise<MigrationPreflight> => get(`/api/migration/status${retry ? "?retry=true" : ""}`);
 export const migrationStart = (): Promise<MigrationReport> => post("/api/migration/start", {});
@@ -2116,7 +2117,7 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return post("/api/query/build-rename-object-sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return post("/api/query/build-rename-database-sql", options);
 }
 
@@ -2216,6 +2217,10 @@ export async function buildExecutableObjectSourceSql(input: BuildEditableObjectS
 
 export async function buildEditableObjectSource(input: BuildEditableObjectSourceSqlInput): Promise<string> {
   return post("/api/query/build-editable-object-source", { input });
+}
+
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return post("/api/query/build-oracle-object-export-sql", { input });
 }
 
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
@@ -2789,7 +2794,7 @@ export async function loadEditorSettings(): Promise<unknown | null> {
   return loadBrowserAppState("editor_settings");
 }
 
-export async function saveEditorSettings(settings: unknown): Promise<void> {
+export async function saveEditorSettings(settings: unknown, _patch?: unknown): Promise<void> {
   await saveBrowserAppState("editor_settings", settings);
 }
 
@@ -2866,7 +2871,11 @@ export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
   await saveBrowserAppState("transfer_task_library", library);
 }
 
-export async function completeAppClose(_action: "quit" | "hide"): Promise<void> {
+export async function completeAppClose(_action: "quit" | "hide", _quitRequestId?: string): Promise<void> {
+  return undefined;
+}
+
+export async function completeWindowClose(): Promise<void> {
   return undefined;
 }
 
@@ -3099,7 +3108,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return post("/api/cloud-sync/snippet/inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string, automatic = false): Promise<SnippetSyncSummary> {
   return post("/api/cloud-sync/snippet/upload", {
     config,
     editorSettings,
@@ -3107,7 +3116,8 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
+    expectedRemoteContentHash: expectedRemoteContentHash ?? (config.snippetId?.trim() ? readSnippetRemoteContentHash(config.provider, config.instanceUrl, config.snippetId) : undefined),
+    automatic,
   });
 }
 
@@ -3306,6 +3316,8 @@ export interface SqlFileEntry {
   path: string;
   is_dir: boolean;
   children: SqlFileEntry[];
+  /** Last filesystem modification time in Unix milliseconds. */
+  modified_at?: number;
 }
 
 export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string, _includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
@@ -3326,6 +3338,14 @@ export async function renameSqlFileInFolder(_rootPath: string, _filePath: string
 
 export async function deleteSqlFileInFolder(_rootPath: string, _filePath: string): Promise<void> {
   throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function moveSqlFileInFolder(_rootPath: string, _filePath: string, _targetRootPath: string, _directoryPath: string): Promise<string> {
+  throw new Error("Managing SQL files in folders is only available in the desktop app");
+}
+
+export async function watchSqlFileFolder(_folderPath: string, _recursive: boolean, _onChange: () => void): Promise<() => Promise<void>> {
+  throw new Error("Watching SQL folders is only available in the desktop app");
 }
 
 export async function createSqlFolderInFolder(_rootPath: string, _directoryPath: string, _folderName: string): Promise<string> {
@@ -3351,6 +3371,8 @@ export interface GlobalSearchRequest {
   respectIgnoreRules?: boolean;
   /** Max traversal depth (`WalkBuilder` semantics: root = 0, its entries = 1). */
   maxDepth?: number;
+  /** Client generated identifier used to cancel an in-flight scan. */
+  searchId?: string;
 }
 
 export interface GlobalSearchMatch {
@@ -3362,7 +3384,21 @@ export interface GlobalSearchMatch {
   lineText: string;
 }
 
-export async function globalSearch(_request: GlobalSearchRequest): Promise<GlobalSearchMatch[]> {
+export interface GlobalSearchError {
+  path: string;
+  message: string;
+}
+
+export interface GlobalSearchResponse {
+  matches: GlobalSearchMatch[];
+  errors: GlobalSearchError[];
+}
+
+export async function globalSearch(_request: GlobalSearchRequest): Promise<GlobalSearchResponse> {
+  throw new Error("Global content search is only available in the desktop app");
+}
+
+export async function cancelGlobalSearch(_searchId: string): Promise<void> {
   throw new Error("Global content search is only available in the desktop app");
 }
 
@@ -6083,3 +6119,6 @@ export async function deletePluginUiStorage(_pluginId: string, _key: string): Pr
 export async function openQueryResultTempFile(_path: string): Promise<void> {
   throw new Error("Opening query results requires the desktop app");
 }
+
+export const migrationPrepareCredentialReset = (): Promise<CredentialResetPreparation> => Promise.reject(new Error("Credential reset is only available in the Windows desktop app"));
+export const migrationResetCredentials = (_confirmationToken: string, _confirmed: boolean): Promise<CredentialResetReport> => Promise.reject(new Error("Credential reset is only available in the Windows desktop app"));

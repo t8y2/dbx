@@ -28,6 +28,16 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("postgres", "postgres").alterStrategy).toBe("direct");
   });
 
+  it("narrows the Doris index features to what the backend can build", () => {
+    expect(getTableStructureCapabilities("doris", "mysql")).toMatchObject({
+      createIndex: true,
+      dropIndex: true,
+      rebuildIndex: false,
+      indexType: false,
+      indexComment: false,
+    });
+  });
+
   it("enables PostgreSQL index INCLUDE only for known supported versions", () => {
     expect(getTableStructureCapabilities("postgres", "postgres", "PostgreSQL 10.15 (Transwarp) on x86_64-pc-linux-gnu").indexInclude).toBe(false);
     expect(getTableStructureCapabilities("postgres", "postgres", "9.6.24").indexInclude).toBe(false);

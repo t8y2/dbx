@@ -10,6 +10,7 @@ const calls = vi.hoisted(() => ({
   load: vi.fn(),
   copy: vi.fn(),
   format: vi.fn(),
+  loadTheme: vi.fn(async () => []),
   queryStore: { tabs: [] as any[], createTab: vi.fn(), loadDdlViewerTab: vi.fn() },
   realQueryStore: undefined as ReturnType<(typeof import("@/stores/queryStore"))["useQueryStore"]> | undefined,
   settings: { ddlOpenMode: "dialog", refreshDdlOnOpen: false, includeDdlStorage: true, compactDdlSql: false, separateDdlIndexes: false },
@@ -24,11 +25,11 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   executeQuery: vi.fn(),
 }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: undefined } }) }));
+vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: true }, themePalette: { value: "custom" }, activeCustomUiColors: { value: { background: "#ffffff" } } }) }));
 vi.mock("@/lib/metadata/objectDdlCache", () => ({ loadObjectDdl: calls.load }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: calls.copy }));
 vi.mock("@/lib/sql/ddlDisplay", () => ({ ddlFormatDialectFor: () => "plsql", formatDdlForDisplay: calls.format }));
-vi.mock("@/lib/editor/editorThemes", () => ({ loadEditorTheme: async () => [], editorFontTheme: () => [] }));
+vi.mock("@/lib/editor/editorThemes", () => ({ loadEditorTheme: calls.loadTheme, editorFontTheme: () => [] }));
 vi.mock("@/lib/editor/codemirrorSqlDialect", () => ({ createDbxCodeMirrorSqlDialect: () => undefined }));
 vi.mock("@/lib/editor/editorClipboardLineEndings", () => ({ editorClipboardLineEndingsExtension: () => [] }));
 vi.mock("@/components/editor/EditorSearchPanel.vue", () => ({ default: { render: () => null } }));
@@ -78,6 +79,7 @@ vi.mock("@codemirror/lang-sql", () => ({ sql: () => [] }));
 vi.mock("@codemirror/search", () => ({ search: () => [] }));
 vi.mock("codemirror", () => ({ basicSetup: [] }));
 
+const defaultSettings = { ...calls.settings };
 let app: App | undefined;
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -104,7 +106,7 @@ async function copyDdl() {
 }
 beforeEach(() => {
   vi.clearAllMocks();
-  Object.assign(reactive(calls.settings), { ddlOpenMode: "dialog", separateDdlIndexes: false, includeDdlStorage: true, compactDdlSql: false });
+  calls.settings = { ...defaultSettings };
   calls.queryStore.tabs.length = 0;
   calls.realQueryStore = undefined;
   calls.format.mockImplementation(async (sql: string) => sql);
@@ -114,6 +116,24 @@ afterEach(() => {
   app = undefined;
   calls.realQueryStore?.$dispose();
   document.body.innerHTML = "";
+});
+
+it("opens the DDL editor with the selected custom palette's gutter and active-line colors", async () => {
+  const dark = { gutterBackground: "#181825", activeLine: "#313244" };
+  const paper = { gutterBackground: "#f7f3ea", activeLine: "#e9f2ff" };
+  Object.assign(calls.settings, {
+    theme: "custom",
+    activeCustomThemeId: "paper",
+    customThemeColors: dark,
+    customThemes: [
+      { id: "dark", colors: dark },
+      { id: "paper", colors: paper },
+    ],
+  });
+  calls.load.mockResolvedValueOnce({ ddl: "CREATE TABLE First (id NUMBER);" });
+  mountDialog();
+  await vi.waitFor(() => expect(document.querySelector("textarea")?.value).toContain("CREATE TABLE"));
+  expect(calls.loadTheme).toHaveBeenLastCalledWith("custom", "light", paper, "custom");
 });
 
 it("loads independent indexes only when selected, and copies the selected result", async () => {

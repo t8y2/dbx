@@ -656,9 +656,9 @@ type customTypeCatalogQueries struct {
 func qualifiedCatalogTypeExpression(typeAlias, namespaceAlias, elementAlias, elementNamespaceAlias, oidExpression, typmodExpression string) string {
 	return fmt.Sprintf(`CASE
   WHEN %s.typelem <> 0 AND %s.nspname NOT IN ('pg_catalog', 'sys_catalog')
-    THEN quote_ident(%s.nspname) || '.' || quote_ident(%s.typname) || '[]'
+    THEN concat(quote_ident(%s.nspname), '.', quote_ident(%s.typname), '[]')
   WHEN %s.nspname NOT IN ('pg_catalog', 'sys_catalog')
-    THEN quote_ident(%s.nspname) || '.' || quote_ident(%s.typname)
+    THEN concat(quote_ident(%s.nspname), '.', quote_ident(%s.typname))
   WHEN %s.typname = 'json'
     THEN 'json'
   WHEN %s.typname = '_json'
@@ -695,7 +695,7 @@ t.typalign::text, t.typstorage::text, t.typtypmod,
 pi.proname, po.proname, pr.proname, ps.proname, pa.proname,
 d.description,
 CASE WHEN t.typrelid != 0 THEN (SELECT c.relkind::text FROM %s c WHERE c.oid = t.typrelid) END,
-CASE WHEN cl.oid IS NULL THEN NULL ELSE quote_ident(ncl.nspname) || '.' || quote_ident(cl.collname) END
+CASE WHEN cl.oid IS NULL THEN NULL ELSE concat(quote_ident(ncl.nspname), '.', quote_ident(cl.collname)) END
 FROM %s t
 JOIN %s n ON n.oid = t.typnamespace
 LEFT JOIN %s d ON d.objoid = t.oid AND d.classoid = 'pg_catalog.pg_type'::regclass AND d.objsubid = 0
@@ -728,7 +728,7 @@ WHERE t.oid = %%[1]d`, domainBaseType, typeTable, namespaceTable, typeTable, nam
 		domainRenderedDefault: fmt.Sprintf(`SELECT %s(t.typdefaultbin, 0)
 FROM %s t WHERE t.oid = %%d`, getExpr, typeTable),
 		domainConstraints: fmt.Sprintf(`SELECT c.conname, %s(c.oid, true) FROM %s c WHERE c.contypid = %%d ORDER BY c.conname`, getConstraintDef, constraintTable),
-		rangeAttributes: fmt.Sprintf(`SELECT %s, quote_ident(ncan.nspname) || '.' || quote_ident(pcan.proname), quote_ident(ndiff.nspname) || '.' || quote_ident(pdiff.proname), quote_ident(nopc.nspname) || '.' || quote_ident(opc.opcname)
+		rangeAttributes: fmt.Sprintf(`SELECT %s, CASE WHEN pcan.oid IS NULL THEN NULL ELSE concat(quote_ident(ncan.nspname), '.', quote_ident(pcan.proname)) END, CASE WHEN pdiff.oid IS NULL THEN NULL ELSE concat(quote_ident(ndiff.nspname), '.', quote_ident(pdiff.proname)) END, CASE WHEN opc.oid IS NULL THEN NULL ELSE concat(quote_ident(nopc.nspname), '.', quote_ident(opc.opcname)) END
 FROM %s r
 JOIN %s st ON st.oid = r.rngsubtype
 JOIN %s stn ON stn.oid = st.typnamespace
@@ -741,7 +741,7 @@ LEFT JOIN %s ncan ON ncan.oid = pcan.pronamespace
 LEFT JOIN %s ndiff ON ndiff.oid = pdiff.pronamespace
 LEFT JOIN %s nopc ON nopc.oid = opc.opcnamespace
 WHERE r.rngtypid = %%d`, rangeSubtype, rangeTable, typeTable, namespaceTable, typeTable, namespaceTable, procTable, procTable, opclassTable, namespaceTable, namespaceTable, namespaceTable),
-		rangeAttributesForMultirange: fmt.Sprintf(`SELECT %s, quote_ident(ncan.nspname) || '.' || quote_ident(pcan.proname), quote_ident(ndiff.nspname) || '.' || quote_ident(pdiff.proname), quote_ident(nopc.nspname) || '.' || quote_ident(opc.opcname)
+		rangeAttributesForMultirange: fmt.Sprintf(`SELECT %s, CASE WHEN pcan.oid IS NULL THEN NULL ELSE concat(quote_ident(ncan.nspname), '.', quote_ident(pcan.proname)) END, CASE WHEN pdiff.oid IS NULL THEN NULL ELSE concat(quote_ident(ndiff.nspname), '.', quote_ident(pdiff.proname)) END, CASE WHEN opc.oid IS NULL THEN NULL ELSE concat(quote_ident(nopc.nspname), '.', quote_ident(opc.opcname)) END
 FROM %s r
 JOIN %s st ON st.oid = r.rngsubtype
 JOIN %s stn ON stn.oid = st.typnamespace
@@ -758,7 +758,7 @@ WHERE r.rngmultitypid = %%d`, rangeSubtype, rangeTable, typeTable, namespaceTabl
 FROM %s r
 JOIN %s mt ON mt.oid = r.rngmultitypid
 WHERE r.rngtypid = %%d`, rangeTable, typeTable),
-		collationName: fmt.Sprintf(`SELECT quote_ident(ncl.nspname) || '.' || quote_ident(cl.collname) FROM %s cl JOIN %s ncl ON ncl.oid = cl.collnamespace WHERE cl.oid = %%d`, collationTable, namespaceTable),
+		collationName: fmt.Sprintf(`SELECT concat(quote_ident(ncl.nspname), '.', quote_ident(cl.collname)) FROM %s cl JOIN %s ncl ON ncl.oid = cl.collnamespace WHERE cl.oid = %%d`, collationTable, namespaceTable),
 	}
 }
 
@@ -2745,8 +2745,7 @@ func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
 		if s.triggerInternalUnsupported {
 			internalPredicate = "tg.tgkind <> 'c'"
 		}
-		return fmt.Sprintf(`SELECT tg.tgname,
-trim(trailing ',' FROM (CASE WHEN (tg.tgtype & 4) <> 0 THEN 'INSERT,' ELSE '' END || CASE WHEN (tg.tgtype & 8) <> 0 THEN 'DELETE,' ELSE '' END || CASE WHEN (tg.tgtype & 16) <> 0 THEN 'UPDATE,' ELSE '' END || CASE WHEN (tg.tgtype & 32) <> 0 THEN 'TRUNCATE,' ELSE '' END)), tg.tgtype
+		return fmt.Sprintf(`SELECT tg.tgname, tg.tgtype
 FROM %s.%s_trigger tg JOIN %s.%s_class c ON c.oid = tg.tgrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = %s AND c.relname = %s AND %s ORDER BY tg.tgname`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(table), internalPredicate)
 	}
@@ -2761,12 +2760,16 @@ WHERE n.nspname = %s AND c.relname = %s AND %s ORDER BY tg.tgname`, catalog, pre
 	defer rows.Close()
 	result := []triggerInfo{}
 	for rows.Next() {
-		var name, event string
+		var name string
 		var triggerType int
-		if err := rows.Scan(&name, &event, &triggerType); err != nil {
+		if err := rows.Scan(&name, &triggerType); err != nil {
 			return nil, err
 		}
-		result = append(result, triggerInfo{Name: name, Event: event, Timing: decodeTriggerTiming(triggerType)})
+		result = append(result, triggerInfo{
+			Name:   name,
+			Event:  decodeTriggerEvent(triggerType),
+			Timing: decodeTriggerTiming(triggerType),
+		})
 	}
 	return result, rows.Err()
 }
@@ -3385,6 +3388,23 @@ func normalizeTableType(value string) string {
 	default:
 		return "TABLE"
 	}
+}
+
+func decodeTriggerEvent(triggerType int) string {
+	events := make([]string, 0, 4)
+	if triggerType&4 != 0 {
+		events = append(events, "INSERT")
+	}
+	if triggerType&8 != 0 {
+		events = append(events, "DELETE")
+	}
+	if triggerType&16 != 0 {
+		events = append(events, "UPDATE")
+	}
+	if triggerType&32 != 0 {
+		events = append(events, "TRUNCATE")
+	}
+	return strings.Join(events, ",")
 }
 
 func decodeTriggerTiming(triggerType int) string {

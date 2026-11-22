@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { SqlFileEntry } from "@/lib/backend/api";
+import { saveSqlFileDisplayMode } from "@/lib/sqlFile/sqlFileUiState";
 
 const entries: SqlFileEntry[] = [
   {
@@ -54,7 +55,7 @@ import SqlFilePanel from "../SqlFilePanel.vue";
 
 const mounted: Array<{ app: App; host: HTMLElement }> = [];
 
-async function mountSqlFilePanel() {
+async function mountSqlFilePanel(readySelector = '[data-sql-file-path="/sql/dir1"]') {
   const pinia = createPinia();
   setActivePinia(pinia);
   const host = document.createElement("div");
@@ -66,7 +67,7 @@ async function mountSqlFilePanel() {
   mounted.push({ app, host });
 
   // Wait for initial folder load
-  await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/dir1"]')).not.toBeNull());
+  await vi.waitFor(() => expect(host.querySelector(readySelector)).not.toBeNull());
   return { host, app };
 }
 
@@ -128,4 +129,16 @@ describe("SqlFilePanel expanded directory state persistence (issue #13593)", () 
     expect(third.host.querySelector('[data-sql-file-path="/sql/dir1/sub1.sql"]')).not.toBeNull();
     expect(third.host.querySelector('[data-sql-file-path="/sql/dir2/sub2.sql"]')).not.toBeNull();
   });
+});
+
+it("exposes a native disclosure button for a connection group", async () => {
+  saveSqlFileDisplayMode("connection");
+  const selector = '[data-sql-file-connection="unassociated"]';
+  const { host } = await mountSqlFilePanel(selector);
+  const button = host.querySelector<HTMLButtonElement>(`button${selector}`)!;
+  expect(button.getAttribute("aria-expanded")).toBe("false");
+  button.click();
+  await nextTick();
+  expect(button.getAttribute("aria-expanded")).toBe("true");
+  expect(host.querySelector('[data-sql-file-path="/sql/dir1/sub1.sql"]')).not.toBeNull();
 });

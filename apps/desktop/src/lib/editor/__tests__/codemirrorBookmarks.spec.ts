@@ -38,6 +38,25 @@ function visibleBookmarkMarkerCount(host: HTMLElement): number {
 }
 
 describe("createQueryEditorBookmarks", () => {
+  it("lists bookmarks in document order with current line numbers and text", () => {
+    const { view, bookmarks } = createEditor("one\ntwo\nthree\nfour");
+    placeCursor(view, 4);
+    bookmarks.toggle(view);
+    placeCursor(view, 2);
+    bookmarks.toggle(view);
+    expect(bookmarks.list(view)).toEqual([
+      { from: 4, line: 2, text: "two" },
+      { from: 14, line: 4, text: "four" },
+    ]);
+    view.dispatch({ changes: { from: 0, insert: "new\n" } });
+    expect(bookmarks.list(view)).toEqual([
+      { from: 8, line: 3, text: "two" },
+      { from: 18, line: 5, text: "four" },
+    ]);
+    bookmarks.reset(view);
+    expect(bookmarks.list(view)).toEqual([]);
+  });
+
   it("renders and removes gutter markers when the current line is toggled", () => {
     const { view, host, bookmarks } = createEditor("one\ntwo\nthree\nfour");
     expect(visibleBookmarkMarkerCount(host)).toBe(0);

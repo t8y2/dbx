@@ -3753,6 +3753,11 @@ export default withEnglishFallback({
       "binary-uuid": "Binario in UUID",
       "binary-uuid-swapped": "Binario in UUID (bit temporali scambiati)",
     },
+    foreignKeyPreview: "Righe di riferimento",
+    foreignKeyPreviewOpen: "Apri tabella",
+    foreignKeyPreviewLoading: "Caricamento delle righe di riferimento…",
+    foreignKeyPreviewEmpty: "Nessuna riga in «{table}» corrisponde a questo valore.",
+    foreignKeyPreviewFailed: "Impossibile caricare le righe di riferimento: {message}",
     sortOptions: "Opzioni di ordinamento",
   },
   exportProgress: {

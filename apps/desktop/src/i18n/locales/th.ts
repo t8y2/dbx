@@ -4015,6 +4015,11 @@ export default withEnglishFallback({
       "binary-uuid": "ไบนารีเป็น UUID",
       "binary-uuid-swapped": "ไบนารีเป็น UUID (สลับบิตเวลา)",
     },
+    foreignKeyPreview: "แถวที่อ้างอิง",
+    foreignKeyPreviewOpen: "เปิดตาราง",
+    foreignKeyPreviewLoading: "กำลังโหลดแถวที่อ้างอิง…",
+    foreignKeyPreviewEmpty: "ไม่มีแถวใน «{table}» ที่ตรงกับค่านี้",
+    foreignKeyPreviewFailed: "ไม่สามารถโหลดแถวที่อ้างอิง: {message}",
     sortOptions: "ตัวเลือกการเรียงลำดับ",
   },
   exportProgress: {

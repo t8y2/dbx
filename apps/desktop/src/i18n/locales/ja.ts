@@ -3775,6 +3775,11 @@ export default withEnglishFallback({
       "binary-uuid": "バイナリ→UUID",
       "binary-uuid-swapped": "バイナリ→UUID（時間ビット交換）",
     },
+    foreignKeyPreview: "参照行",
+    foreignKeyPreviewOpen: "テーブルを開く",
+    foreignKeyPreviewLoading: "参照行を読み込み中…",
+    foreignKeyPreviewEmpty: "「{table}」にこの値と一致する行はありません。",
+    foreignKeyPreviewFailed: "参照行を読み込めませんでした：{message}",
     sortOptions: "並べ替えオプション",
   },
   exportProgress: {

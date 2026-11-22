@@ -3891,6 +3891,11 @@ export default withEnglishFallback({
       "binary-uuid": "Binario a UUID",
       "binary-uuid-swapped": "Binario a UUID (intercambio de bits de tiempo)",
     },
+    foreignKeyPreview: "Filas de referencia",
+    foreignKeyPreviewOpen: "Abrir tabla",
+    foreignKeyPreviewLoading: "Cargando filas de referencia…",
+    foreignKeyPreviewEmpty: "No hay filas en «{table}» que coincidan con este valor.",
+    foreignKeyPreviewFailed: "No se pudieron cargar las filas de referencia: {message}",
     sortOptions: "Opciones de ordenación",
   },
   exportProgress: {
